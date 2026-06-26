@@ -1,0 +1,64 @@
+#pragma once
+
+#include "engine/graphics/Mesh.h"
+
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
+
+namespace engine {
+namespace ecs{
+
+// Position / rotation / scale, with the model matrix derived on demand. The
+// engine's common spatial component — most renderable or moving entities have one.
+struct Transform {
+    glm::vec3 position{0.0f};
+    glm::vec3 scale{1.0f};
+    glm::quat rotation{1.0f, 0.0f, 0.0f, 0.0f};  // identity (w, x, y, z)
+
+    glm::mat4 Model() const {
+        return glm::translate(glm::mat4(1.0f), position)
+             * glm::mat4_cast(rotation)
+             * glm::scale(glm::mat4(1.0f), scale);
+    }
+};
+
+// Marks an entity as drawable: which mesh to draw and in what colour. The mesh is
+// referenced, not owned — it lives in the game (e.g. a shared cube) so many
+// entities can point at the same geometry.
+struct MeshRenderer {
+    const Mesh* mesh = nullptr;
+    glm::vec3   color{1.0f};
+};
+
+// A physically-based surface description (metallic / roughness workflow). These
+// are the parameters a Cook-Torrance shader needs; the scene demo sets them
+// directly (a sphere grid sweeping metallic x roughness), and they could equally
+// be filled from a loaded model's maps.
+struct PbrMaterial {
+    glm::vec3 albedo{0.8f, 0.8f, 0.8f}; // base colour
+    float     metallic  = 0.0f;         // 0 = dielectric, 1 = metal
+    float     roughness = 0.5f;         // 0 = mirror, 1 = fully rough
+    float     ao        = 1.0f;         // ambient-occlusion factor
+    glm::vec3 emissive{0.0f};           // self-illumination
+};
+
+// Drawable entity rendered through the PBR pipeline: geometry (referenced, not
+// owned) plus its material.
+struct MeshPBR {
+    const Mesh* mesh = nullptr;
+    PbrMaterial material;
+};
+
+// A light source. Point lights take their position from the entity's Transform;
+// directional lights use `direction`. `intensity` scales `color`.
+struct Light {
+    enum class Type { Directional, Point };
+    Type      type     = Type::Point;
+    glm::vec3 color{1.0f, 1.0f, 1.0f};
+    float     intensity = 1.0f;
+    glm::vec3 direction{0.0f, -1.0f, 0.0f} ;    // used by Directional
+};
+
+} // namespace ecs
+} // namespace engine

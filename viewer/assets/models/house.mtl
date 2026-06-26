@@ -1,0 +1,11 @@
+# Sample material library (procedurally generated)
+newmtl brick
+Kd 0.78 0.30 0.24
+Ks 0.15 0.15 0.15
+Ns 24.0
+map_Kd brick.tga
+
+newmtl roof
+Kd 0.25 0.28 0.55
+Ks 0.40 0.40 0.40
+Ns 48.0
