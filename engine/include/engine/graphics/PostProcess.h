@@ -23,7 +23,12 @@ public:
         bool  bloom          = true;
         float bloomThreshold = 1.0f;  // HDR luminance above which a pixel blooms
         float bloomStrength  = 0.6f;
-        float exposure       = 1.0f; 
+        float exposure       = 1.0f;  // used when autoExposure is off
+        bool  autoExposure    = true;
+        float exposureKey     = 0.4f;   // target middle-grey
+        float adaptationSpeed = 1.5f;   // eye-adaptation rate (per second)
+        float minExposure     = 0.08f;
+        float maxExposure     = 6.0f;
     };
     Settings settings;
 
@@ -33,15 +38,21 @@ public:
     PostProcess& operator=(const PostProcess&) = delete;
 
     void BeginScene();                                  // bind + clear HDR target
-    void RenderToScreen(int screenWidth, int screenHeight);
+    void RenderToScreen(int screenWidth, int screenHeight, float dt = 0.0f);
+    float Exposure() const { return m_exposure; }   // current adapted exposure
     void Resize(int width, int height);
+    unsigned int HdrFbo()   const { return m_hdr.FboId(); }
+    unsigned int HdrColor() const { return m_hdr.ColorTexture(); }
 
 private:
     int m_width, m_height;
     Framebuffer m_hdr;               // full-res HDR scene
     Framebuffer m_bloomA, m_bloomB;  // half-res bloom ping-pong
-    Shader m_bright, m_blur, m_composite;
+    Shader m_bright, m_blur, m_composite, m_luminance;
     Mesh   m_quad;
+    unsigned int m_lumFbo = 0, m_lumTex = 0;
+    int   m_lumSize  = 256;
+    float m_exposure = 1.0f;   // adapted over time
 };
 
 } // namespace engine

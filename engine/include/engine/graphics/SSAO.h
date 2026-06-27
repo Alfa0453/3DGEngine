@@ -28,6 +28,8 @@ public:
     void Generate(ecs::Registry& registry, const Camera& camera, float aspect, int width, int height);
     void Resize(int width, int height);
     void BindAO(unsigned int unit) const;   // the blurred AO texture
+    unsigned int PositionTexture() const { return m_gPos; }    // view-space position
+    unsigned int NormalTexture()   const { return m_gNormal; }  // view-space normal
 
     float radius = 0.5f;
     float bias   = 0.025f;

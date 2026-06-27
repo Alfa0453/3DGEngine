@@ -12,6 +12,7 @@
 #include <engine/graphics/PostProcess.h>
 #include <engine/graphics/IBL.h>
 #include <engine/graphics/SSAO.h>
+#include <engine/graphics/SSR.h>
 #include <engine/graphics/DayNightCycle.h>
 #include <engine/ecs/Registry.h>
 #include <engine/ecs/Components.h>
@@ -49,6 +50,7 @@ private:
     std::optional<engine::PostProcess>   m_post;
     std::optional<engine::IBL>           m_ibl;
     std::optional<engine::SSAO>          m_ssao;
+    std::optional<engine::SSR>           m_ssr;
     std::optional<engine::TextRenderer>  m_text;
 
     engine::ecs::Registry m_reg;
@@ -62,11 +64,13 @@ private:
     bool  m_fog        = true;
     bool  m_ssaoOn     = true;
     bool  m_pointShadows = true;
+    bool  m_ssrOn      = true;
     float m_lastIblDay = -1.0f;
 
     bool  m_mouseCaptured = true;
     bool  m_animateLights = true;
     float m_time = 0.0f;
     float m_fps = 60.0f;
+    float m_dt  = 0.016f;
     std::unordered_map<int, bool> m_keyPrev;
 };

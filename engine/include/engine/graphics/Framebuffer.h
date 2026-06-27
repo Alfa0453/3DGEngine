@@ -26,6 +26,7 @@ public:
     int Width()  const { return m_width; }
     int Height() const { return m_height; }
     unsigned int ColorTexture() const { return m_colorTex; }
+    unsigned int FboId()        const { return m_fbo; }
 
 private:
     void Create();

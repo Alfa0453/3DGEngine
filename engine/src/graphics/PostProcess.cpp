@@ -5,6 +5,7 @@
 #include <glad/glad.h>
 
 #include <cstdint>
+#include <cmath>
 #include <utility>
 #include <vector>
 
@@ -73,6 +74,17 @@ void main() {
 }
 )GLSL";
 
+const char* kLuminanceFrag = R"GLSL(
+#version 330 core
+in vec2 vUV; out float FragColor;
+uniform sampler2D uScene;
+void main() {
+    vec3 c = texture(uScene, vUV).rgb;
+    float lum = dot(c, vec3(0.2126, 0.7152, 0.0722));
+    FragColor = log(max(lum, 1e-4));     // log space averages perceptually
+}
+)GLSL";
+
 Mesh MakeFullscreenQuad() {
     const std::vector<float> verts = {
     // x,    y,    u,   v
@@ -95,7 +107,22 @@ PostProcess::PostProcess(int width, int height)
       m_bright(kFullscreenVert, kBrightFrag),
       m_blur(kFullscreenVert, kBlurFrag),
       m_composite(kFullscreenVert, kCompositeFrag),
-      m_quad(MakeFullscreenQuad()) {}
+      m_luminance(kFullscreenVert, kLuminanceFrag),
+      m_quad(MakeFullscreenQuad()) {
+    glGenFramebuffers(1, &m_lumFbo);
+    glGenTextures(1, &m_lumTex);
+    glBindTexture(GL_TEXTURE_2D, m_lumTex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R16F, m_lumSize, m_lumSize, 0, GL_RED, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glGenerateMipmap(GL_TEXTURE_2D);
+    glBindFramebuffer(GL_FRAMEBUFFER, m_lumFbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_lumTex, 0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+}
 
 void PostProcess::BeginScene() {
     m_hdr.Bind();
@@ -111,8 +138,30 @@ void PostProcess::Resize(int width, int height) {
     m_bloomB.Resize(width / 2, height / 2);
 }
 
-void PostProcess::RenderToScreen(int screenWidth, int screenHeight) {
+void PostProcess::RenderToScreen(int screenWidth, int screenHeight, float dt) {
     glDisable(GL_DEPTH_TEST);
+
+    // --- Auto-exposure: average scene luminance, then adapt toward it. ---
+    float exposure = settings.exposure;
+    if (settings.autoExposure) {
+        glBindFramebuffer(GL_FRAMEBUFFER, m_lumFbo);
+        glViewport(0, 0, m_lumSize, m_lumSize);
+        m_luminance.Bind();
+        m_hdr.BindColorTexture(0);
+        m_luminance.SetInt("uScene", 0);
+        m_quad.Draw();
+        glBindTexture(GL_TEXTURE_2D, m_lumTex);
+        glGenerateMipmap(GL_TEXTURE_2D);
+        const int topMip = static_cast<int>(std::log2(static_cast<float>(m_lumSize)));
+        float avgLog = 0.0f;
+        glGetTexImage(GL_TEXTURE_2D, topMip, GL_RED, GL_FLOAT, &avgLog);
+        const float avgLum = std::exp(avgLog);
+        float target = settings.exposureKey / std::max(avgLum, 1e-4f);
+        target = std::min(std::max(target, settings.minExposure), settings.maxExposure);
+        if (dt > 0.0f) m_exposure += (target - m_exposure) * (1.0f - std::exp(-dt * settings.adaptationSpeed));
+        else m_exposure = target;
+        exposure = m_exposure;
+    }
 
     // Bright-pass into the half-res bloom buffer.
     m_bloomA.Bind();

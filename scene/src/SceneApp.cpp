@@ -43,6 +43,7 @@ void SceneApp::OnInit()
     m_post.emplace(GetWindow().Width(), GetWindow().Height());
     m_ibl.emplace(256);
     m_ssao.emplace(GetWindow().Width(), GetWindow().Height());
+    m_ssr.emplace(GetWindow().Width(), GetWindow().Height());
     m_text.emplace();
 
     {   // Procedural floor textures: a subtle tile albedo + a bumpy normal map.
@@ -89,15 +90,18 @@ void SceneApp::OnUpdate(float dt)
     engine::Window& w = GetWindow();
     m_time += dt;
     if (dt > 0.0f) m_fps = m_fps * 0.92f + (1.0f / dt) * 0.08f;
+    m_dt = dt;
 
     if (Pressed(GLFW_KEY_Q)) w.SetShouldClose(true);
     if (Pressed(GLFW_KEY_F11)) w.ToggleFullscreen();
     if (Pressed(GLFW_KEY_L)) m_animateLights = !m_animateLights;
     if (Pressed(GLFW_KEY_B)) m_post->settings.bloom = !m_post->settings.bloom;
+    if (Pressed(GLFW_KEY_E)) m_post->settings.autoExposure = !m_post->settings.autoExposure;
     if (Pressed(GLFW_KEY_I)) m_useIbl = !m_useIbl;
     if (Pressed(GLFW_KEY_G)) m_fog = !m_fog;
     if (Pressed(GLFW_KEY_O)) m_ssaoOn = !m_ssaoOn;
     if (Pressed(GLFW_KEY_P)) m_pointShadows = !m_pointShadows;
+    if (Pressed(GLFW_KEY_K)) m_ssrOn = !m_ssrOn;
     if (Pressed(GLFW_KEY_ESCAPE)) {
         m_mouseCaptured = !m_mouseCaptured;
         w.SetCursorCaptured(m_mouseCaptured);
@@ -176,7 +180,7 @@ void SceneApp::OnRender()
         m_lastIblDay = m_sample.dayFactor;
     }
 
-    if (m_ssaoOn) m_ssao->Generate(m_reg, m_camera, aspect, w.Width(), w.Height());
+    if (m_ssaoOn || m_ssrOn) m_ssao->Generate(m_reg, m_camera, aspect, w.Width(), w.Height());
 
     m_post->BeginScene();                                  // render into HDR target
     engine::PbrRenderer::Options opt;
@@ -189,7 +193,10 @@ void SceneApp::OnRender()
     opt.fogColor = m_sample.horizon;   // fog matches the sky at the horizon  
     m_pbr->Render(m_reg, m_camera, aspect, w.Width(), w.Height(), opt);
     m_sky->Draw(m_camera.ViewMatrix(), m_camera.ProjectionMatrix(aspect), m_sample, false);
-    m_post->RenderToScreen(w.Width(), w.Height());   
+    if (m_ssrOn)
+        m_ssr->Apply(m_post->HdrColor(), m_ssao->PositionTexture(), m_ssao->NormalTexture(),
+                     m_camera.ProjectionMatrix(aspect), m_post->HdrFbo(), w.Width(), w.Height());
+    m_post->RenderToScreen(w.Width(), w.Height(), m_dt);   
 
     DrawHud();
 }
@@ -294,7 +301,7 @@ void SceneApp::DrawHud()
     m_text->Text("rows = metallic  cols = roughness", 24.0f, 50.0f, 1.3f, grey);
     m_text->Text("WASD fly   SHIFT fast   T day/night   C cycle   [ ] scrub",
                  24.0f, hh - 60.0f, 1.4f, grey);
-    m_text->Text("L lights   B bloom  I ibl   O ssao   P pshadow    G fog   Q quit",
+    m_text->Text("L lights   B bloom   E expo   I ibl   O ssao   P pshadow    K ssr   G fog   Q quit",
                  24.0f, hh - 32.0f, 1.4f, grey);
     m_text->End();
 }

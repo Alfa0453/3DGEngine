@@ -31,6 +31,7 @@ add_library(engine STATIC
     src/graphics/SpotShadow.cpp
     src/graphics/IBL.cpp
     src/graphics/SSAO.cpp
+    src/graphics/SSR.cpp
     src/ecs/Ecs.cpp
     src/audio/AudioEngine.cpp
     src/audio/miniaudio_impl.c
