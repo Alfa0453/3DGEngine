@@ -38,6 +38,7 @@ public:
     // setters (requiring GLM) arrive in Milestone 3.
     void SetInt(const std::string& name, int value);
     void SetFloat(const std::string& name, float value);
+    void SetVec2(const std::string& name, const glm::vec2& value);
     void SetVec3(const std::string& name, const glm::vec3& value);
     void SetMat3(const std::string& name, const glm::mat3& value);
     void SetMat4(const std::string& name, const glm::mat4& value);

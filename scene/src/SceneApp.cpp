@@ -20,7 +20,7 @@ namespace {
 
 engine::WindowProps MakeProps(const engine::Config& cfg) {
     engine::WindowProps p;
-    p.title  = "Lighting & Scene (PBR)";
+    p.title  = "Lighting & Scene (PBR, day/night)";
     p.width  = cfg.GetInt("window.width", 1280);
     p.height = cfg.GetInt("window.height", 720);
     p.vsync  = cfg.GetBool("window.vsync", true);
@@ -37,11 +37,40 @@ void SceneApp::OnInit()
 {
     m_renderer.Init();
     m_sphere.emplace(engine::primitives::Sphere(48));
-    m_plane.emplace(engine::primitives::Plane(1.0f));
+    m_plane.emplace(engine::primitives::Plane(1.0f, 14.0f));    // tiled UVs for the floor textures
     m_pbr.emplace(2048);
     m_sky.emplace();
     m_post.emplace(GetWindow().Width(), GetWindow().Height());
+    m_ibl.emplace(256);
+    m_ssao.emplace(GetWindow().Width(), GetWindow().Height());
     m_text.emplace();
+
+    {   // Procedural floor textures: a subtle tile albedo + a bumpy normal map.
+        const int TS = 256;
+        std::vector<unsigned char> alb(static_cast<std::size_t>(TS) * TS * 4);
+        std::vector<unsigned char> nrm(static_cast<std::size_t>(TS) * TS * 4);
+        const float TWO_PI = 6.2831853f;
+        for (int y = 0; y < TS; ++y)
+            for (int x = 0; x < TS; ++x) {
+                const float u = (x + 0.5f) / TS, v = (y + 0.5f) / TS;
+                const std::size_t o = (static_cast<std::size_t>(y) * TS + x) * 4;
+                const bool c = (((x / 64) + (y / 64)) & 1) != 0;
+                const float base = c ? 0.32f : 0.22f;
+                alb[o + 0] = static_cast<unsigned char>(base * 255.0f);
+                alb[o + 1] = static_cast<unsigned char>(base * 1.03f * 255.0f);
+                alb[o + 2] = static_cast<unsigned char>(base * 1.12f * 255.0f);
+                alb[o + 3] = 255;
+                const float dhdu = std::cos(u * TWO_PI) * std::sin(v * TWO_PI);
+                const float dhdv = std::sin(u * TWO_PI) * std::cos(v * TWO_PI);
+                glm::vec3 n = glm::normalize(glm::vec3(-dhdu * 0.6f, -dhdv * 0.6f, 1.0f)) * 0.5f + 0.5f;
+                nrm[o + 0] = static_cast<unsigned char>(n.x * 255.0f);
+                nrm[o + 1] = static_cast<unsigned char>(n.y * 255.0f);
+                nrm[o + 2] = static_cast<unsigned char>(n.z * 255.0f);
+                nrm[o + 3] = 255;
+            }
+        m_groundAlbedo.emplace(alb.data(), TS, TS);
+        m_groundNormal.emplace(nrm.data(), TS, TS);
+    }
 
     BuildScene();
     m_sample = engine::DayNightCycle::At(m_timeOfDay);
@@ -59,11 +88,16 @@ void SceneApp::OnUpdate(float dt)
 {
     engine::Window& w = GetWindow();
     m_time += dt;
+    if (dt > 0.0f) m_fps = m_fps * 0.92f + (1.0f / dt) * 0.08f;
 
     if (Pressed(GLFW_KEY_Q)) w.SetShouldClose(true);
     if (Pressed(GLFW_KEY_F11)) w.ToggleFullscreen();
     if (Pressed(GLFW_KEY_L)) m_animateLights = !m_animateLights;
     if (Pressed(GLFW_KEY_B)) m_post->settings.bloom = !m_post->settings.bloom;
+    if (Pressed(GLFW_KEY_I)) m_useIbl = !m_useIbl;
+    if (Pressed(GLFW_KEY_G)) m_fog = !m_fog;
+    if (Pressed(GLFW_KEY_O)) m_ssaoOn = !m_ssaoOn;
+    if (Pressed(GLFW_KEY_P)) m_pointShadows = !m_pointShadows;
     if (Pressed(GLFW_KEY_ESCAPE)) {
         m_mouseCaptured = !m_mouseCaptured;
         w.SetCursorCaptured(m_mouseCaptured);
@@ -134,10 +168,25 @@ void SceneApp::OnRender()
     const float aspect = w.AspectRatio();
     m_post->Resize(w.Width(), w.Height());
 
+    // Regenerate image-based lighting from the sky when the time of day shifts.
+    if (std::abs(m_sample.dayFactor - m_lastIblDay) > 0.04f) {
+        m_ibl->Generate([&](const glm::mat4& v, const glm::mat4& p) {
+            m_sky->Draw(v, p, m_sample, false);
+        });
+        m_lastIblDay = m_sample.dayFactor;
+    }
+
+    if (m_ssaoOn) m_ssao->Generate(m_reg, m_camera, aspect, w.Width(), w.Height());
+
     m_post->BeginScene();                                  // render into HDR target
     engine::PbrRenderer::Options opt;
     opt.ambient = m_sample.ambient;
-    opt.tonemap = false; // post does tone mapping
+    opt.tonemap = false;                                   // post does tone mapping
+    opt.ibl     = m_useIbl ? &*m_ibl : nullptr;
+    opt.fog     = m_fog;
+    opt.ssao    = m_ssaoOn ? &*m_ssao : nullptr;
+    opt.pointShadows = m_pointShadows;
+    opt.fogColor = m_sample.horizon;   // fog matches the sky at the horizon  
     m_pbr->Render(m_reg, m_camera, aspect, w.Width(), w.Height(), opt);
     m_sky->Draw(m_camera.ViewMatrix(), m_camera.ProjectionMatrix(aspect), m_sample, false);
     m_post->RenderToScreen(w.Width(), w.Height());   
@@ -147,16 +196,19 @@ void SceneApp::OnRender()
 
 void SceneApp::BuildScene()
 {
-    // Ground plane (large, rough dielectric).
+    // Ground.
     {
         Entity e = m_reg.Create();
         Transform t; t.scale = glm::vec3(40.0f, 1.0f, 40.0f);
         m_reg.Add<Transform>(e, t);
-        PbrMaterial m; m.albedo = glm::vec3(0.12f, 0.13f, 0.15f); m.roughness = 0.85f;
+        PbrMaterial m;
+        m.albedo = glm::vec3(1.0f); m.roughness = 0.75f;
+        m.albedoMap = &*m_groundAlbedo;
+        m.normalMap = &*m_groundNormal;
         m_reg.Add<MeshPBR>(e, MeshPBR{&*m_plane, m});
     }
 
-    // Sphere grid: rows sweep metallic (0..1), columns sweep roughness.
+    // Metallic x roughness sphere grid.
     const int rows = 5, cols = 7;
     const float spacing = 2.6f, r = 0.95f;
     const glm::vec3 albedo(0.95f, 0.64f, 0.54f);    // copper-ish base
@@ -204,6 +256,26 @@ void SceneApp::BuildScene()
         m_reg.Add<Transform>(g, gt);
         m_reg.Add<MeshPBR>(g, MeshPBR{&*m_sphere, gm});
     }
+
+    // Two static spotlights aimed at the grid (cones + crisp shadows). No
+    // emissive gizmos here, so the point-light gizmo animation stays simple.
+    const glm::vec3 spos[2] = {{-6.0f, 9.0f, 6.0f}, {6.0f, 9.0f, -4.0f}};
+    const glm::vec3 scol[2] = {{1.0f, 0.85f, 0.6f}, {0.55f, 0.7f, 1.0f}};
+    const glm::vec3 target(0.0f, 1.0f, 0.0f);
+    for (int i = 0; i < 2; ++i) {
+        Entity e = m_reg.Create();
+        Transform t; t.position = spos[i];
+        Light l;
+        l.type = Light::Type::Spot;
+        l.direction = glm::normalize(target - spos[i]);
+        l.color = scol[i];
+        l.intensity = 110.0f;
+        l.innerAngle = 13.0f;
+        l.outerAngle = 22.0f;
+        l.range = 40.0f;
+        m_reg.Add<Transform>(e, t);
+        m_reg.Add<Light>(e, l);
+    }
 }
 
 void SceneApp::DrawHud()
@@ -215,15 +287,15 @@ void SceneApp::DrawHud()
 
     const int totalMin = static_cast<int>(m_timeOfDay * 24.0f * 60.0f) % (24 * 60);
     char buf[96];
-    std::snprintf(buf, sizeof(buf), "PBR SCENE   %02d:%02d   day %.2f%s",
-                  totalMin / 60, totalMin % 60, m_sample.dayFactor,
-                 m_autoCycle ? "    [auto]" : "");
+    std::snprintf(buf, sizeof(buf), "PBR SCENE   %02d:%02d   day %.2f   %.0f fps%s",
+                  totalMin / 60, totalMin % 60, m_sample.dayFactor, m_fps,
+                  m_autoCycle ? "    [auto]" : "");
     m_text->Text(buf, 24.0f, 22.0f, 2.0f, white);
     m_text->Text("rows = metallic  cols = roughness", 24.0f, 50.0f, 1.3f, grey);
-    m_text->Text("T day/night   C auto-cycle    1/2/3 noon/night/sunset   [ ] scrub time",
-                 24.0f, hh - 52.0f, 1.3f, grey);
-    m_text->Text("WASD+mouse fly   SPACE/CTRL up/down   SHIFT fast  L lights    B bloom    Q quit",
-                 24.0f, hh - 52.0f, 1.3f, grey);
+    m_text->Text("WASD fly   SHIFT fast   T day/night   C cycle   [ ] scrub",
+                 24.0f, hh - 60.0f, 1.4f, grey);
+    m_text->Text("L lights   B bloom  I ibl   O ssao   P pshadow    G fog   Q quit",
+                 24.0f, hh - 32.0f, 1.4f, grey);
     m_text->End();
 }
 

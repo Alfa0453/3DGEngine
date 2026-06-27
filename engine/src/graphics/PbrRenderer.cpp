@@ -5,6 +5,10 @@
 #include "engine/graphics/Camera.h"
 #include "engine/ecs/Registry.h"
 #include "engine/ecs/Components.h"
+#include "engine/graphics/IBL.h"
+#include "engine/graphics/SSAO.h"
+#include "engine/graphics/CascadedShadow.h"
+#include "engine/graphics/Texture.h"
 
 #include <glad/glad.h>
 #include <glm/gtc/matrix_transform.hpp>
@@ -28,16 +32,15 @@ layout (location = 2) in vec2 aTexCoord;
 uniform mat4 uModel;
 uniform mat4 uViewProj;
 uniform mat3 uNormalMat;
-uniform mat4 uLightSpace;
 out vec3 vWorldPos;
 out vec3 vNormal;
-out vec4 vLightSpacePos;
+out vec2 vUV;
 void main() {
-    vec4 world     = uModel * vec4(aPos, 1.0);
-    vWorldPos      = world.xyz;
-    vNormal        = normalize(uNormalMat * aNormal);
-    vLightSpacePos = uLightSpace * world;
-    gl_Position    = uViewProj * world;
+    vec4 world  = uModel * vec4(aPos, 1.0);
+    vWorldPos   = world.xyz;
+    vNormal     = normalize(uNormalMat * aNormal);
+    vUV         = aTexCoord;
+    gl_Position = uViewProj * world;
 }
 )GLSL";
 
@@ -45,9 +48,10 @@ const char* kPbrFrag = R"GLSL(
 #version 330 core
 const float PI = 3.14159265359;
 const int   MAX_POINTS = 16;
+const int   MAX_SPOTS  = 4;
 in vec3 vWorldPos;
 in vec3 vNormal;
-in vec4 vLightSpacePos;
+in vec2 vUV;
 out vec4 FragColor;
 uniform vec3  uViewPos;
 uniform vec3  uAlbedo;
@@ -55,14 +59,48 @@ uniform float uMetallic;
 uniform float uRoughness;
 uniform float uAO;
 uniform vec3  uEmissive;
+uniform int uHasAlbedoMap;
+uniform int uHasNormalMap;
+uniform int uHasMetalRoughMap;
+uniform sampler2D uAlbedoMap;
+uniform sampler2D uNormalMap;
+uniform sampler2D uMetalRoughMap;
 uniform vec3  uSunDir;
 uniform vec3  uSunColor;
 uniform vec3  uAmbient;
 uniform int   uNumPoints;
 uniform vec3  uPointPos[MAX_POINTS];
 uniform vec3  uPointColor[MAX_POINTS];
-uniform sampler2D uShadowMap;
+uniform int   uNumSpots;
+uniform int   uNumSpotShadows;
+uniform vec3  uSpotPos[MAX_SPOTS];
+uniform vec3  uSpotDir[MAX_SPOTS];
+uniform vec3  uSpotColor[MAX_SPOTS];
+uniform float uSpotCosInner[MAX_SPOTS];
+uniform float uSpotCosOuter[MAX_SPOTS];
+uniform mat4  uSpotVP[MAX_SPOTS];
+uniform sampler2D uSpotMap[MAX_SPOTS];
+uniform sampler2DArray uCascadeMaps;
+uniform mat4  uCascadeVP[4];
+uniform float uCascadeSplits[4];
+uniform mat4  uView;
+uniform float uShadowSoftness;
+uniform samplerCube uPointCube[4];
+uniform int uNumPointShadows;
 uniform int uApplyTonemap;
+uniform int uUseIBL;
+uniform samplerCube uIrradiance;
+uniform samplerCube uPrefilter;
+uniform sampler2D uBrdfLUT;
+uniform float uMaxReflectionLod;
+uniform int   uUseSSAO;
+uniform sampler2D uSsaoMap;
+uniform vec2  uScreenSize;
+uniform int   uFogEnabled;
+uniform vec3  uFogColor;
+uniform float uFogDensity;
+uniform float uFogHeight;
+uniform float uFogHeightFalloff;
 float DistributionGGX(vec3 N, vec3 H, float r) {
     float a = r*r; float a2 = a*a; float NdotH = max(dot(N,H),0.0);
     float d = (NdotH*NdotH)*(a2-1.0)+1.0; return a2/(PI*d*d);
@@ -74,16 +112,60 @@ float GeometrySmith(vec3 N, vec3 V, vec3 L, float r) {
     return GeometrySchlickGGX(max(dot(N,V),0.0),r)*GeometrySchlickGGX(max(dot(N,L),0.0),r);
 }
 vec3 FresnelSchlick(float c, vec3 F0) { return F0+(1.0-F0)*pow(clamp(1.0-c,0.0,1.0),5.0); }
-float ShadowFactor(vec4 lp, float NdotL) {
-    vec3 p = lp.xyz/lp.w*0.5+0.5;
+vec3 FresnelSchlickRough(float c, vec3 F0, float r) {
+    return F0 + (max(vec3(1.0-r), F0) - F0) * pow(clamp(1.0-c,0.0,1.0),5.0);
+}
+float PointShadowFactor(int idx, vec3 fragToLight) {
+    float closest;
+    if (idx == 0)      closest = texture(uPointCube[0], fragToLight).r;
+    else if (idx == 1) closest = texture(uPointCube[1], fragToLight).r;
+    else if (idx == 2) closest = texture(uPointCube[2], fragToLight).r;
+    else               closest = texture(uPointCube[3], fragToLight).r;
+    return (length(fragToLight) - 0.15 > closest) ? 1.0 : 0.0;
+}
+float SpotShadowFactor(int idx, vec3 worldPos) {
+    vec4 lp = uSpotVP[idx] * vec4(worldPos, 1.0);
+    vec3 p = lp.xyz / lp.w * 0.5 + 0.5;
     if (p.z > 1.0) return 0.0;
-    float bias = max(0.0025*(1.0-NdotL),0.0008);
-    float s = 0.0; vec2 texel = 1.0/vec2(textureSize(uShadowMap,0));
-    for (int x=-1;x<=1;++x) for (int y=-1;y<=1;++y) {
-        float c = texture(uShadowMap, p.xy+vec2(x,y)*texel).r;
-        s += (p.z-bias > c) ? 1.0 : 0.0;
+    float bias = 0.0015;
+    float closest;
+    if (idx == 0)      closest = texture(uSpotMap[0], p.xy).r;
+    else if (idx == 1) closest = texture(uSpotMap[1], p.xy).r;
+    else if (idx == 2) closest = texture(uSpotMap[2], p.xy).r;
+    else               closest = texture(uSpotMap[3], p.xy).r;
+    return (p.z - bias > closest) ? 1.0 : 0.0;
+}
+float ShadowFactor(float NdotL) {
+    float depth = abs((uView * vec4(vWorldPos, 1.0)).z);
+    int layer = 3;
+    for (int i = 0; i < 4; ++i) { if (depth < uCascadeSplits[i]) { layer = i; break; } }
+    vec4 lp = uCascadeVP[layer] * vec4(vWorldPos, 1.0);
+    vec3 p = lp.xyz / lp.w * 0.5 + 0.5;
+    if (p.z > 1.0) return 0.0;
+    float cur = p.z;
+    float bias = max(0.0025 * (1.0 - NdotL), 0.0008);
+    vec2 texel = 1.0 / vec2(textureSize(uCascadeMaps, 0).xy);
+
+    // PCSS step 1: blocker search -> average depth of occluders nearer the light.
+    float blockerSum = 0.0; int blockers = 0;
+    for (int x = -2; x <= 2; ++x) for (int y = -2; y <= 2; ++y) {
+        float d = texture(uCascadeMaps, vec3(p.xy + vec2(x, y) * texel * uShadowSoftness, float(layer))).r;
+        if (d < cur - bias) { blockerSum += d; ++blockers; }
     }
-    return s/9.0;
+    if (blockers == 0) return 0.0;                       // no occluder -> lit
+    float avgBlocker = blockerSum / float(blockers);
+
+    // PCSS step 2: penumbra grows with receiver-to-blocker distance.
+    float penumbra = (cur - avgBlocker) * uShadowSoftness * 300.0;
+    float radius = clamp(penumbra, 1.0, 16.0);
+
+    // PCSS step 3: PCF over a kernel sized by the penumbra.
+    float s = 0.0;
+    for (int x = -2; x <= 2; ++x) for (int y = -2; y <= 2; ++y) {
+        float d = texture(uCascadeMaps, vec3(p.xy + vec2(x, y) * texel * radius, float(layer))).r;
+        s += (cur - bias > d) ? 1.0 : 0.0;
+    }
+    return s / 25.0;
 }
 vec3 Lighting(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 albedo, vec3 F0, float m, float r) {
     vec3 H = normalize(V+L);
@@ -94,23 +176,85 @@ vec3 Lighting(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 albedo, vec3 F0, float
     vec3 kD = (vec3(1.0)-F)*(1.0-m);
     return (kD*albedo/PI+spec)*radiance*max(dot(N,L),0.0);
 }
+mat3 CotangentFrame(vec3 N, vec3 p, vec2 uv) {
+    vec3 dp1 = dFdx(p);  vec3 dp2 = dFdy(p);
+    vec2 du1 = dFdx(uv); vec2 du2 = dFdy(uv);
+    vec3 dp2perp = cross(dp2, N);
+    vec3 dp1perp = cross(N, dp1);
+    vec3 T = dp2perp * du1.x + dp1perp * du2.x;
+    vec3 B = dp2perp * du1.y + dp1perp * du2.y;
+    float invmax = inversesqrt(max(dot(T, T), dot(B, B)));
+    return mat3(T * invmax, B * invmax, N);
+}
 void main() {
+    vec3 albedo = uAlbedo;
+    if (uHasAlbedoMap == 1) albedo *= texture(uAlbedoMap, vUV).rgb;
+    float metallic = uMetallic;
+    float roughness = uRoughness;
+    float ao = uAO;
+    if (uHasMetalRoughMap == 1) {
+        vec3 mr = texture(uMetalRoughMap, vUV).rgb;
+        roughness *= mr.g;
+        metallic  *= mr.b;
+    }
     vec3 N = normalize(vNormal);
+    if (uHasNormalMap == 1) {
+        vec3 tn = texture(uNormalMap, vUV).rgb * 2.0 - 1.0;
+        N = normalize(CotangentFrame(normalize(vNormal), vWorldPos, vUV) * tn);
+    }
     vec3 V = normalize(uViewPos-vWorldPos);
-    vec3 F0 = mix(vec3(0.04), uAlbedo, uMetallic);
+    vec3 F0 = mix(vec3(0.04), albedo, metallic);
     vec3 Lo = vec3(0.0);
     vec3 Ls = normalize(-uSunDir);
     float sunNdotL = max(dot(N,Ls),0.0);
-    float shadow = ShadowFactor(vLightSpacePos, sunNdotL);
-    Lo += (1.0-shadow)*Lighting(N,V,Ls,uSunColor,uAlbedo,F0,uMetallic,uRoughness);
+    float shadow = ShadowFactor(sunNdotL);
+    Lo += (1.0-shadow)*Lighting(N,V,Ls,uSunColor,albedo,F0,metallic,roughness);
     for (int i=0;i<uNumPoints && i<MAX_POINTS;++i) {
         vec3 d = uPointPos[i]-vWorldPos;
         float dist2 = dot(d,d);
         vec3 L = d/sqrt(dist2);
         vec3 radiance = uPointColor[i]/max(dist2,0.0001);
-        Lo += Lighting(N,V,L,radiance,uAlbedo,F0,uMetallic,uRoughness);
+        vec3 contrib = Lighting(N,V,L,radiance,albedo,F0,metallic,roughness);
+        if (i < uNumPointShadows) contrib *= (1.0 - PointShadowFactor(i, -d));
+        Lo += contrib;
     }
-    vec3 color = uAmbient*uAlbedo*uAO + Lo + uEmissive;
+    for (int i=0;i<uNumSpots && i<MAX_SPOTS;++i) {
+        vec3 d = uSpotPos[i]-vWorldPos;
+        float dist2 = dot(d,d);
+        vec3 L = normalize(d);
+        float cosA = dot(L, -uSpotDir[i]);
+        float t = clamp((cosA - uSpotCosOuter[i]) / (uSpotCosInner[i] - uSpotCosOuter[i] + 0.0001), 0.0, 1.0);
+        if (t <= 0.0) continue;
+        vec3 radiance = uSpotColor[i] * t / max(dist2, 0.0001);
+        vec3 contrib = Lighting(N,V,L,radiance,albedo,F0,metallic,roughness);
+        if (i < uNumSpotShadows) contrib *= (1.0 - SpotShadowFactor(i, vWorldPos));
+        Lo += contrib;
+    }
+    vec3 ambient;
+    if (uUseIBL == 1) {
+        vec3 F = FresnelSchlickRough(max(dot(N,V),0.0), F0, roughness);
+        vec3 kD = (vec3(1.0)-F)*(1.0-metallic);
+        vec3 irradiance = texture(uIrradiance, N).rgb;
+        vec3 diffuse = irradiance * albedo;
+        vec3 R = reflect(-V, N);
+        vec3 prefiltered = textureLod(uPrefilter, R, roughness*uMaxReflectionLod).rgb;
+        vec2 brdf = texture(uBrdfLUT, vec2(max(dot(N,V),0.0), roughness)).rg;
+        vec3 specular = prefiltered * (F*brdf.x + brdf.y);
+        ambient = (kD*diffuse + specular) * ao;
+    } else {
+        ambient = uAmbient*albedo*ao;
+    }
+    if (uUseSSAO == 1) ambient *= texture(uSsaoMap, gl_FragCoord.xy / uScreenSize).r;
+    vec3 color = ambient + Lo + uEmissive;
+
+    if (uFogEnabled == 1) {
+        float dist = length(uViewPos - vWorldPos);
+        float distFog = 1.0 - exp(-dist * uFogDensity);
+        float heightF = clamp(exp(-(vWorldPos.y - uFogHeight) * uFogHeightFalloff), 0.0, 1.0);
+        float fog = clamp(distFog * heightF, 0.0, 1.0);
+        color = mix(color, uFogColor, fog);
+    }
+
     if (uApplyTonemap == 1) {
         color = color/(color+vec3(1.0));
         color = pow(color, vec3(1.0/2.2));
@@ -119,25 +263,13 @@ void main() {
 }
 )GLSL";
 
-const char* kDepthVert = R"GLSL(
-#version 330 core
-layout (location = 0) in vec3 aPos;
-uniform mat4 uModel;
-uniform mat4 uLightSpace;
-void main() { gl_Position = uLightSpace*uModel*vec4(aPos,1.0); }
-)GLSL";
-
-const char* kDepthFrag = R"GLSL(
-#version 330 core
-void main() { }
-)GLSL";
-
 } // namespace
 
 PbrRenderer::PbrRenderer(int shadowSize)
-    : m_shadow(shadowSize),
-      m_pbr(std::make_unique<Shader>(kPbrVert, kPbrFrag)),
-      m_depth(std::make_unique<Shader>(kDepthVert, kDepthFrag)) {}
+    : m_cascade(shadowSize),
+      m_pointShadow(512),
+      m_spotShadow(1024),
+      m_pbr(std::make_unique<Shader>(kPbrVert, kPbrFrag)) {}
 
 PbrRenderer::~PbrRenderer() = default;
 
@@ -151,36 +283,40 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
     // Gather lights.
     glm::vec3 sunDir(0.0f, -1.0f, 0.0f), sunColor(0.0f);
     std::vector<glm::vec3> ppos, pcol;
+    std::vector<glm::vec3> spotPos, spotDir, spotCol;
+    std::vector<float> spotCosIn, spotCosOut;
+    std::vector<SpotShadow::Spot> spotList;
     reg.view<Transform, Light>().each([&](Entity, Transform& t, Light& l) {
         const glm::vec3 c = l.color * l.intensity;
         if (l.type == Light::Type::Directional) { sunDir = glm::normalize(l.direction); sunColor = c; }
-        else { ppos.push_back(t.position); pcol.push_back(c); }
+        else if (l.type == Light::Type::Point) { ppos.push_back(t.position); pcol.push_back(c); }
+        else {  // Spot
+            const glm::vec3 dir = glm::normalize(l.direction);
+            spotPos.push_back(t.position);
+            spotDir.push_back(dir);
+            spotCol.push_back(c);
+            spotCosIn.push_back(glm::cos(glm::radians(l.innerAngle)));
+            spotCosOut.push_back(glm::cos(glm::radians(l.outerAngle)));
+            spotList.push_back(SpotShadow::Spot{t.position, dir, l.outerAngle, l.range});
+        }
     });
 
-    // Shadow frustum: explicit, or auto-fitted to the MeshPBR entities.
-    glm::vec3 center = opt.shadowCenter;
-    float radius = opt.shadowRadius;
-    if (radius <= 0.0f) {
-        glm::vec3 lo(1e30f), hi(-1e30f);
-        bool any = false;
-        reg.view<Transform, MeshPBR>().each([&](Entity, Transform& t, MeshPBR&) {
-            lo = glm::min(lo, t.position); hi = glm::max(hi, t.position); any = true;
-        });
-        if (any) { center = (lo + hi) * 0.5f; radius = glm::length(hi - lo) * 0.5f + 3.0f; }
-        else { center = glm::vec3(0.0f); radius = 16.0f; }
+    // Cascaded directional (sun) shadow pass.
+    m_cascade.Generate(reg, camera, aspect, sunDir, 60.0f);
+    glViewport(0, 0, screenWidth, screenHeight);
+
+    int numPointShadows = 0;
+    if (opt.pointShadows && !ppos.empty()) {
+        m_pointShadow.Generate(reg, ppos, 50.0f);
+        glViewport(0, 0, screenWidth, screenHeight);
+        numPointShadows = m_pointShadow.Count();
     }
-    const glm::mat4 lightSpace = ShadowMap::LightSpaceMatrix(sunDir, center, radius);
-
-    // Shadow depth pass.
-    m_depth->Bind();
-    m_depth->SetMat4("uLightSpace", lightSpace);
-    m_shadow.BeginDepthPass();
-    reg.view<Transform, MeshPBR>().each([&](Entity, Transform& t, MeshPBR& m) {
-        if (!m.mesh) return;
-        m_depth->SetMat4("uModel", t.Model());
-        m.mesh->Draw();
-    });
-    m_shadow.EndDepthPass(screenWidth, screenHeight);
+    int numSpotShadows = 0;
+    if (opt.spotShadows && !spotList.empty()) {
+        m_spotShadow.Generate(reg, spotList);
+        glViewport(0, 0, screenWidth, screenHeight);
+        numSpotShadows = m_spotShadow.Count();
+    }
 
     // Lit pass.
     const glm::mat4 view = camera.ViewMatrix();
@@ -192,15 +328,66 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
     m_pbr->SetVec3("uSunColor", sunColor);
     m_pbr->SetVec3("uAmbient", opt.ambient);
     m_pbr->SetInt("uApplyTonemap", opt.tonemap ? 1 : 0);
-    m_pbr->SetMat4("uLightSpace", lightSpace);
     m_pbr->SetInt("uNumPoints", static_cast<int>(ppos.size()));
     for (std::size_t i = 0; i < ppos.size(); ++i) {
         const std::string idx = "[" + std::to_string(i) + "]";
         m_pbr->SetVec3("uPointPos" + idx, ppos[i]);
         m_pbr->SetVec3("uPointColor" + idx, pcol[i]);
     }
-    m_shadow.BindDepthTexture(4);
-    m_pbr->SetInt("uShadowMap", 4);
+    m_cascade.BindArray(4);
+    m_pbr->SetInt("uCascadeMaps", 4);
+    m_pbr->SetMat4("uView", view);
+    m_pbr->SetFloat("uShadowSoftness", opt.shadowSoftness);
+    for (int i = 0; i < CascadedShadow::kCascades; ++i) {
+        const std::string ix = "[" + std::to_string(i) + "]";
+        m_pbr->SetMat4("uCascadeVP" + ix, m_cascade.CascadeVP(i));
+        m_pbr->SetFloat("uCascadeSplits" + ix, m_cascade.SplitDepth(i));
+    }
+    if (opt.ibl) {
+        opt.ibl->Bind(5, 6, 7);
+        m_pbr->SetInt("uUseIBL", 1);
+        m_pbr->SetInt("uIrradiance", 5);
+        m_pbr->SetInt("uPrefilter", 6);
+        m_pbr->SetInt("uBrdfLUT", 7);
+        m_pbr->SetFloat("uMaxReflectionLod", opt.ibl->MaxReflectionLod());
+    } else {
+        m_pbr->SetInt("uUseIBL", 0);
+    }
+    if (opt.ssao) {
+        opt.ssao->BindAO(8);
+        m_pbr->SetInt("uUseSSAO", 1);
+        m_pbr->SetInt("uSsaoMap", 8);
+        m_pbr->SetVec2("uScreenSize", glm::vec2(screenWidth, screenHeight));
+    } else {
+        m_pbr->SetInt("uUseSSAO", 0);
+    }
+    m_pointShadow.BindCubes(9);
+    m_pbr->SetInt("uNumPointShadows", numPointShadows);
+    m_pbr->SetInt("uPointCube[0]", 9);
+    m_pbr->SetInt("uPointCube[1]", 10);
+    m_pbr->SetInt("uPointCube[2]", 11);
+    m_pbr->SetInt("uPointCube[3]", 12);
+    m_spotShadow.BindMaps(13);
+    m_pbr->SetInt("uNumSpots", static_cast<int>(spotPos.size()));
+    m_pbr->SetInt("uNumSpotShadows", numSpotShadows);
+    for (std::size_t i = 0; i < spotPos.size() && i < static_cast<std::size_t>(SpotShadow::kMax); ++i) {
+        const std::string ix = "[" + std::to_string(i) + "]";
+        m_pbr->SetVec3("uSpotPos" + ix, spotPos[i]);
+        m_pbr->SetVec3("uSpotDir" + ix, spotDir[i]);
+        m_pbr->SetVec3("uSpotColor" + ix, spotCol[i]);
+        m_pbr->SetFloat("uSpotCosInner" + ix, spotCosIn[i]);
+        m_pbr->SetFloat("uSpotCosOuter" + ix, spotCosOut[i]);
+        m_pbr->SetMat4("uSpotVP" + ix, m_spotShadow.LightVP(static_cast<int>(i)));
+    }
+    m_pbr->SetInt("uSpotMap[0]", 13);
+    m_pbr->SetInt("uSpotMap[1]", 14);
+    m_pbr->SetInt("uSpotMap[2]", 15);
+    m_pbr->SetInt("uSpotMap[3]", 16);
+    m_pbr->SetInt("uFogEnabled", opt.fog ? 1 : 0);
+    m_pbr->SetVec3("uFogColor", opt.fogColor);
+    m_pbr->SetFloat("uFogDensity", opt.fogDensity);
+    m_pbr->SetFloat("uFogHeight", opt.fogHeight);
+    m_pbr->SetFloat("uFogHeightFalloff", opt.fogHeightFalloff);
 
     reg.view<Transform, MeshPBR>().each([&](Entity, Transform& t, MeshPBR& m) {
         if (!m.mesh) return;
@@ -212,8 +399,15 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
         m_pbr->SetFloat("uRoughness", m.material.roughness);
         m_pbr->SetFloat("uAO", m.material.ao);
         m_pbr->SetVec3("uEmissive", m.material.emissive);
+        auto bindMap = [&](const Texture* tex, int unit, const char* flag, const char* samp) {
+            if (tex) { tex->Bind(static_cast<unsigned int>(unit)); m_pbr->SetInt(samp, unit); m_pbr->SetInt(flag, 1); }
+            else m_pbr->SetInt(flag, 0);
+        };
+        bindMap(m.material.albedoMap,     0, "uHasAlbedoMap",     "uAlbedoMap");
+        bindMap(m.material.normalMap,     1, "uHasNormalMap",     "uNormalMap");
+        bindMap(m.material.metalRoughMap, 2, "uHasMetalRoughMap", "uMetalRoughMap");
         m.mesh->Draw();
-    });
+    }); 
 }
 
 } // namespace engine

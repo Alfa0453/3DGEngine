@@ -1,6 +1,8 @@
 #pragma once
 
-#include "engine/graphics/ShadowMap.h"
+#include "engine/graphics/CascadedShadow.h"
+#include "engine/graphics/PointShadow.h"
+#include "engine/graphics/SpotShadow.h"
 
 #include <glm/glm.hpp>
 
@@ -10,6 +12,8 @@ namespace engine {
 
 class Shader;
 class Camera;
+class IBL;
+class SSAO;
 namespace ecs { class Registry; }
 
 // A drop-in physically-based scene renderer. Give it an ECS registry and a
@@ -32,6 +36,18 @@ public:
         glm::vec3 shadowCenter{0.0f};
         float     shadowRadius = -1.0f;
         bool      tonemap = true;   // false = output linear HDR (for post-processing)
+        const IBL*  ibl   = nullptr;   // image-based ambient lighting (optional)
+        const SSAO* ssao = nullptr;    // screen-space ambient occlusion (optional)
+        bool        pointShadows = true;    // omnidirectional shadows for point lights
+        bool        spotShadows  = true;  // perspective shadows for spotlights
+        float       shadowSoftness = 2.5f; // PCSS sun-shadow softness (light size)
+
+        // Distance + height fog (applied to lit geometry in linear HDR).
+        bool      fog = false;
+        glm::vec3 fogColor{0.6f, 0.7f, 0.8f};
+        float     fogDensity       = 0.02f;   // distance falloff  
+        float     fogHeight        = 0.0f;    // height where fog is densest
+        float     fogHeightFalloff = 0.12f;   // how fast fog thins with height
     };
 
     explicit PbrRenderer(int shadowSize = 2048);
@@ -49,9 +65,10 @@ public:
                 int screenWidth, int screenHeight);
 
 private:
-    ShadowMap               m_shadow;
+    CascadedShadow          m_cascade;
+    PointShadow             m_pointShadow;
+    SpotShadow              m_spotShadow;
     std::unique_ptr<Shader> m_pbr;
-    std::unique_ptr<Shader> m_depth;
 };
 
 } // namespace engine

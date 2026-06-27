@@ -7,6 +7,9 @@
 #include <glm/gtc/quaternion.hpp>
 
 namespace engine {
+
+class Texture;   // non-owning material map pointers
+
 namespace ecs{
 
 // Position / rotation / scale, with the model matrix derived on demand. The
@@ -41,6 +44,11 @@ struct PbrMaterial {
     float     roughness = 0.5f;         // 0 = mirror, 1 = fully rough
     float     ao        = 1.0f;         // ambient-occlusion factor
     glm::vec3 emissive{0.0f};           // self-illumination
+
+    // Optional, non-owning texture maps. When set they modulate the values above.
+    const Texture* albedoMap     = nullptr;   // RGB base colour
+    const Texture* normalMap     = nullptr;   // tangent-space normals
+    const Texture* metalRoughMap = nullptr;   // glTF ORM: G = roughness, B = metallic
 };
 
 // Drawable entity rendered through the PBR pipeline: geometry (referenced, not
@@ -53,11 +61,14 @@ struct MeshPBR {
 // A light source. Point lights take their position from the entity's Transform;
 // directional lights use `direction`. `intensity` scales `color`.
 struct Light {
-    enum class Type { Directional, Point };
+    enum class Type { Directional, Point, Spot };
     Type      type     = Type::Point;
     glm::vec3 color{1.0f, 1.0f, 1.0f};
     float     intensity = 1.0f;
-    glm::vec3 direction{0.0f, -1.0f, 0.0f} ;    // used by Directional
+    glm::vec3 direction{0.0f, -1.0f, 0.0f} ;   // Directional + Spot
+    float     innerAngle = 20.0f;             // Spot: degrees, full intensity inside
+    float     outerAngle = 30.0f;             // Spot: degrees, fades to zero at the edge
+    float     range      = 40.0f;             // Spot: shadow far plane
 };
 
 } // namespace ecs

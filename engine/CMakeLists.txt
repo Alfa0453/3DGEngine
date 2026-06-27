@@ -21,11 +21,16 @@ add_library(engine STATIC
     src/graphics/ObjData.cpp
     src/graphics/Cubemap.cpp
     src/graphics/ShadowMap.cpp
+    src/graphics/CascadedShadow.cpp
     src/graphics/Skybox.cpp
     src/graphics/PbrRenderer.cpp
     src/graphics/Framebuffer.cpp
     src/graphics/PostProcess.cpp
     src/graphics/ProceduralSky.cpp
+    src/graphics/PointShadow.cpp
+    src/graphics/SpotShadow.cpp
+    src/graphics/IBL.cpp
+    src/graphics/SSAO.cpp
     src/ecs/Ecs.cpp
     src/audio/AudioEngine.cpp
     src/audio/miniaudio_impl.c

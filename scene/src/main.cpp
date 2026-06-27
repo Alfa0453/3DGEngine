@@ -1,4 +1,5 @@
 #include "SceneApp.h"
+#include <engine/core/HighPerformanceGPU.h>
 #include <engine/core/Config.h>
 #include <cstdio>
 #include <exception>
