@@ -1,6 +1,5 @@
 #include "SceneApp.h"
 
-#include <engine/core/Paths.h>
 #include <engine/graphics/Primitives.h>
 
 #include <GLFW/glfw3.h>
@@ -8,6 +7,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <random>
 #include <vector>
 
 using engine::ecs::Entity;
@@ -17,7 +17,6 @@ using engine::ecs::PbrMaterial;
 using engine::ecs::Light;
 
 namespace {
-
 engine::WindowProps MakeProps(const engine::Config& cfg) {
     engine::WindowProps p;
     p.title  = "Lighting & Scene (PBR, day/night)";
@@ -28,16 +27,13 @@ engine::WindowProps MakeProps(const engine::Config& cfg) {
 }
 } // namespace
 
-SceneApp::SceneApp(engine::Config &config)
-    : engine::Application(MakeProps(config)), m_config(config)
-{
-}
+SceneApp::SceneApp(engine::Config& config)
+    : engine::Application(MakeProps(config)), m_config(config) {}
 
-void SceneApp::OnInit()
-{
+void SceneApp::OnInit() {
     m_renderer.Init();
     m_sphere.emplace(engine::primitives::Sphere(48));
-    m_plane.emplace(engine::primitives::Plane(1.0f, 14.0f));    // tiled UVs for the floor textures
+    m_plane.emplace(engine::primitives::Plane(1.0f, 14.0f));   // tiled UVs for the floor textures
     m_pbr.emplace(2048);
     m_sky.emplace();
     m_post.emplace(GetWindow().Width(), GetWindow().Height());
@@ -78,15 +74,126 @@ void SceneApp::OnInit()
     GetWindow().SetCursorCaptured(true);
 }
 
-void SceneApp::OnShutdown()
-{
-    m_config.Set("window.vsync", GetWindow().IsVSync());
-    m_config.Set("window.fullscreen", GetWindow().IsFullscreen());
-    m_config.Save();
+void SceneApp::BuildScene() {
+    // Ground.
+    {
+        Entity e = m_reg.Create();
+        Transform t; t.scale = glm::vec3(40.0f, 1.0f, 40.0f);
+        m_reg.Add<Transform>(e, t);
+        PbrMaterial m;
+        m.albedo = glm::vec3(1.0f); m.roughness = 0.75f;
+        m.albedoMap = &*m_groundAlbedo;
+        m.normalMap = &*m_groundNormal;
+        m_reg.Add<MeshPBR>(e, MeshPBR{&*m_plane, m});
+    }
+
+    // Metallic x roughness sphere grid.
+    const int rows = 5, cols = 7;
+    const float spacing = 2.6f, r = 0.95f;
+    const glm::vec3 albedo(0.95f, 0.64f, 0.54f);
+    const float startX = -((cols - 1) * spacing) * 0.5f;
+    const float startZ = -((rows - 1) * spacing) * 0.5f;
+    for (int row = 0; row < rows; ++row)
+        for (int col = 0; col < cols; ++col) {
+            Entity e = m_reg.Create();
+            Transform t;
+            t.position = glm::vec3(startX + col * spacing, r + 0.6f, startZ + row * spacing);
+            t.scale    = glm::vec3(r * 2.0f);
+            m_reg.Add<Transform>(e, t);
+            PbrMaterial m;
+            m.albedo    = albedo;
+            m.metallic  = static_cast<float>(row) / static_cast<float>(rows - 1);
+            m.roughness = glm::clamp(static_cast<float>(col) / static_cast<float>(cols - 1), 0.05f, 1.0f);
+            m_reg.Add<MeshPBR>(e, MeshPBR{&*m_sphere, m});
+        }
+
+    // The sun/moon key light — updated every frame from the day/night cycle.
+    m_sun = m_reg.Create();
+    m_reg.Add<Transform>(m_sun, Transform{});
+    {
+        Light l;
+        l.type = Light::Type::Directional;
+        l.direction = glm::vec3(-0.5f, -1.0f, -0.35f);
+        l.color = glm::vec3(1.0f);
+        l.intensity = 3.0f;
+        m_reg.Add<Light>(m_sun, l);
+    }
+
+    // Coloured point lights + emissive gizmos (these carry the night).
+    const glm::vec3 pcolors[3] = {{1.0f, 0.3f, 0.15f}, {0.3f, 1.0f, 0.5f}, {0.4f, 0.55f, 1.0f}};
+    const glm::vec3 ppos[3]    = {{-7.0f, 4.0f, 6.0f}, {0.0f, 5.0f, -7.0f}, {7.0f, 4.0f, 6.0f}};
+    for (int i = 0; i < 3; ++i) {
+        Entity e = m_reg.Create();
+        Transform t; t.position = ppos[i];
+        Light l; l.type = Light::Type::Point; l.color = pcolors[i]; l.intensity = 18.0f;
+        m_reg.Add<Transform>(e, t);
+        m_reg.Add<Light>(e, l);
+
+        Entity g = m_reg.Create();
+        Transform gt; gt.position = ppos[i]; gt.scale = glm::vec3(0.35f);
+        PbrMaterial gm; gm.albedo = glm::vec3(0.0f); gm.emissive = pcolors[i] * 3.0f; gm.roughness = 1.0f;
+        m_reg.Add<Transform>(g, gt);
+        m_reg.Add<MeshPBR>(g, MeshPBR{&*m_sphere, gm});
+        m_mainLight[i] = e;
+        m_mainGizmo[i] = g;
+    }
+
+    // Many small static point lights — exercises the clustered (tiled) culling.
+    {
+        std::mt19937 rng(99u);
+        std::uniform_real_distribution<float> ux(-9.0f, 9.0f), uz(-7.0f, 7.0f),
+                                              uy(0.8f, 3.2f), uc(0.25f, 1.0f);
+        for (int i = 0; i < 40; ++i) {
+            Entity e = m_reg.Create();
+            Transform t; t.position = glm::vec3(ux(rng), uy(rng), uz(rng));
+            Light l; l.type = Light::Type::Point;
+            l.color = glm::vec3(uc(rng), uc(rng), uc(rng));
+            l.intensity = 3.0f;
+            m_reg.Add<Transform>(e, t);
+            m_reg.Add<Light>(e, l);
+        }
+    }
+
+    // Two static spotlights aimed at the grid (cones + crisp shadows). No
+    // emissive gizmos here, so the point-light gizmo animation stays simple.
+    const glm::vec3 spos[2] = {{-6.0f, 9.0f, 6.0f}, {6.0f, 9.0f, -4.0f}};
+    const glm::vec3 scol[2] = {{1.0f, 0.85f, 0.6f}, {0.55f, 0.7f, 1.0f}};
+    const glm::vec3 target(0.0f, 1.0f, 0.0f);
+    for (int i = 0; i < 2; ++i) {
+        Entity e = m_reg.Create();
+        Transform t; t.position = spos[i];
+        Light l;
+        l.type = Light::Type::Spot;
+        l.direction = glm::normalize(target - spos[i]);
+        l.color = scol[i];
+        l.intensity = 110.0f;
+        l.innerAngle = 13.0f;
+        l.outerAngle = 22.0f;
+        l.range = 40.0f;
+        m_reg.Add<Transform>(e, t);
+        m_reg.Add<Light>(e, l);
+    }
+
+    // Two sphere AREA lights: soft, stretched specular highlights. The glowing
+    // sphere gizmo is sized to the light's physical radius.
+    const glm::vec3 apos[2] = {{-5.0f, 5.0f, 1.0f}, {5.0f, 5.0f, 1.0f}};
+    const glm::vec3 acol[2] = {{1.0f, 0.7f, 0.4f}, {0.4f, 0.6f, 1.0f}};
+    const float arad = 1.6f;
+    for (int i = 0; i < 2; ++i) {
+        Entity e = m_reg.Create();
+        Transform t; t.position = apos[i];
+        Light l; l.type = Light::Type::Area; l.color = acol[i]; l.intensity = 45.0f; l.sourceRadius = arad;
+        m_reg.Add<Transform>(e, t);
+        m_reg.Add<Light>(e, l);
+        Entity g = m_reg.Create();
+        Transform gt; gt.position = apos[i]; gt.scale = glm::vec3(arad * 2.0f);
+        PbrMaterial gm; gm.albedo = glm::vec3(0.0f); gm.emissive = acol[i] * 2.5f; gm.roughness = 1.0f;
+        m_reg.Add<Transform>(g, gt);
+        m_reg.Add<MeshPBR>(g, MeshPBR{&*m_sphere, gm});
+    }
 }
 
-void SceneApp::OnUpdate(float dt)
-{
+void SceneApp::OnUpdate(float dt) {
     engine::Window& w = GetWindow();
     m_time += dt;
     if (dt > 0.0f) m_fps = m_fps * 0.92f + (1.0f / dt) * 0.08f;
@@ -110,14 +217,14 @@ void SceneApp::OnUpdate(float dt)
     // --- Time of day ---
     if (Pressed(GLFW_KEY_T)) m_targetTime = (m_targetTime < 0.25f) ? 0.5f : 0.0f;   // toggle day/night
     if (Pressed(GLFW_KEY_C)) m_autoCycle = !m_autoCycle;
-    if (Pressed(GLFW_KEY_1)) m_targetTime = 0.5f;   // noon
-    if (Pressed(GLFW_KEY_2)) m_targetTime = 0.0f;   // midnight
-    if (Pressed(GLFW_KEY_3)) m_targetTime = 0.75f;  // sunset
+    if (Pressed(GLFW_KEY_1)) m_targetTime = 0.5f;    // noon
+    if (Pressed(GLFW_KEY_2)) m_targetTime = 0.0f;    // midnight
+    if (Pressed(GLFW_KEY_3)) m_targetTime = 0.75f;   // sunset
     if (w.IsKeyPressed(GLFW_KEY_LEFT_BRACKET))  m_targetTime -= dt * 0.15f;
     if (w.IsKeyPressed(GLFW_KEY_RIGHT_BRACKET)) m_targetTime += dt * 0.15f;
     m_targetTime -= std::floor(m_targetTime);
-    
-    if (m_autoCycle) m_timeOfDay += dt * 0.05f;     // ~20s per day
+
+    if (m_autoCycle) m_timeOfDay += dt * 0.05f;       // ~20s per day
     else             m_timeOfDay += (m_targetTime - m_timeOfDay) * glm::clamp(dt * 2.0f, 0.0f, 1.0f);
     m_timeOfDay -= std::floor(m_timeOfDay);
 
@@ -143,31 +250,19 @@ void SceneApp::OnUpdate(float dt)
 
     // --- Orbiting point lights ---
     if (m_animateLights) {
-        int i = 0;
-        m_reg.view<Transform, Light>().each([&](Entity, Transform& t, Light& l) {
-            if (l.type != Light::Type::Point) return;
+        for (int i = 0; i < 3; ++i) {
+            if (!m_reg.Valid(m_mainLight[i])) continue;
             const float a = m_time * 0.5f + static_cast<float>(i) * 2.094f;
-            const float rad = 7.0f;
-            t.position.x = std::cos(a) * rad;
-            t.position.z = std::sin(a) * rad;
-            ++i;
-        });
-        // move the matching gizmos: re-point them at the light positions
-        std::vector<glm::vec3> lightPos;
-        m_reg.view<Transform, Light>().each([&](Entity, Transform& t, Light& l) {
-            if (l.type == Light::Type::Point) lightPos.push_back(t.position);
-        });
-        std::size_t gi = 0;
-        m_reg.view<Transform, MeshPBR>().each([&](Entity, Transform& t, MeshPBR& m) {
-            const glm::vec3& e = m.material.emissive;
-            if ((e.x > 0.0f || e.y > 0.0f || e.z > 0.0f) && gi < lightPos.size())
-                t.position = lightPos[gi++];
-        });
+            Transform& lt = m_reg.Get<Transform>(m_mainLight[i]);
+            lt.position.x = std::cos(a) * 7.0f;
+            lt.position.z = std::sin(a) * 7.0f;
+            if (m_reg.Valid(m_mainGizmo[i]))
+                m_reg.Get<Transform>(m_mainGizmo[i]).position = lt.position;
+        }
     }
 }
 
-void SceneApp::OnRender()
-{
+void SceneApp::OnRender() {
     engine::Window& w = GetWindow();
     const float aspect = w.AspectRatio();
     m_post->Resize(w.Width(), w.Height());
@@ -182,111 +277,26 @@ void SceneApp::OnRender()
 
     if (m_ssaoOn || m_ssrOn) m_ssao->Generate(m_reg, m_camera, aspect, w.Width(), w.Height());
 
-    m_post->BeginScene();                                  // render into HDR target
+    m_post->BeginScene();
     engine::PbrRenderer::Options opt;
     opt.ambient = m_sample.ambient;
-    opt.tonemap = false;                                   // post does tone mapping
-    opt.ibl     = m_useIbl ? &*m_ibl : nullptr;
-    opt.fog     = m_fog;
-    opt.ssao    = m_ssaoOn ? &*m_ssao : nullptr;
+    opt.tonemap = false;
+    opt.ibl      = m_useIbl ? &*m_ibl : nullptr;
+    opt.fog      = m_fog;
+    opt.ssao     = m_ssaoOn ? &*m_ssao : nullptr;
     opt.pointShadows = m_pointShadows;
-    opt.fogColor = m_sample.horizon;   // fog matches the sky at the horizon  
+    opt.fogColor = m_sample.horizon;   // fog matches the sky at the horizon
     m_pbr->Render(m_reg, m_camera, aspect, w.Width(), w.Height(), opt);
     m_sky->Draw(m_camera.ViewMatrix(), m_camera.ProjectionMatrix(aspect), m_sample, false);
     if (m_ssrOn)
         m_ssr->Apply(m_post->HdrColor(), m_ssao->PositionTexture(), m_ssao->NormalTexture(),
                      m_camera.ProjectionMatrix(aspect), m_post->HdrFbo(), w.Width(), w.Height());
-    m_post->RenderToScreen(w.Width(), w.Height(), m_dt);   
+    m_post->RenderToScreen(w.Width(), w.Height(), m_dt);
 
     DrawHud();
 }
 
-void SceneApp::BuildScene()
-{
-    // Ground.
-    {
-        Entity e = m_reg.Create();
-        Transform t; t.scale = glm::vec3(40.0f, 1.0f, 40.0f);
-        m_reg.Add<Transform>(e, t);
-        PbrMaterial m;
-        m.albedo = glm::vec3(1.0f); m.roughness = 0.75f;
-        m.albedoMap = &*m_groundAlbedo;
-        m.normalMap = &*m_groundNormal;
-        m_reg.Add<MeshPBR>(e, MeshPBR{&*m_plane, m});
-    }
-
-    // Metallic x roughness sphere grid.
-    const int rows = 5, cols = 7;
-    const float spacing = 2.6f, r = 0.95f;
-    const glm::vec3 albedo(0.95f, 0.64f, 0.54f);    // copper-ish base
-    const float startX = -((cols - 1) * spacing) * 0.5f;
-    const float startZ = -((rows - 1) * spacing) * 0.5f;
-    for (int row = 0; row < rows; ++row)
-        for (int col = 0; col < cols; ++col) {
-            Entity e = m_reg.Create();
-            Transform t;
-            t.position = glm::vec3(startX + col * spacing, r + 0.6f, startZ + row * spacing);
-            t.scale    = glm::vec3(r * 2.0f);    // sphere primitive radius 0.5 -> diameter r*... 
-            m_reg.Add<Transform>(e, t);
-            PbrMaterial m;
-            m.albedo    = albedo;
-            m.metallic  = static_cast<float>(row) / static_cast<float>(rows - 1);
-            m.roughness = glm::clamp(static_cast<float>(col) / static_cast<float>(cols - 1), 0.05f, 1.0f);
-            m_reg.Add<MeshPBR>(e, MeshPBR{&*m_sphere, m});
-        }
-
-    // The sun/moon key light — updated every frame from the day/night cycle.
-    m_sun = m_reg.Create();
-    m_reg.Add<Transform>(m_sun, Transform{});
-    {
-        Light l;
-        l.type = Light::Type::Directional;
-        l.direction = glm::vec3(-0.5f, -1.0f, -0.35f);
-        l.color = glm::vec3(1.0f);
-        l.intensity = 3.0f;
-        m_reg.Add<Light>(m_sun, l);
-    }
-
-    // Coloured point lights + gizmos (small emissive spheres at each).
-    const glm::vec3 pcolors[3] = {{1.0f, 0.2f, 0.2f}, {0.2f, 1.0f, 0.4f}, {0.3f, 0.5f, 1.0f}};
-    const glm::vec3 ppos[3]    = {{-7.0f, 4.0f, 6.0f}, {0.0f, 5.0f, -7.0f}, {7.0f, 4.0f, 6.0f}};
-    for (int i = 0; i < 3; ++i) {
-        Entity e = m_reg.Create();
-        Transform t; t.position = ppos[i];
-        Light l; l.type = Light::Type::Point; l.color = pcolors[i]; l.intensity = 18.0f;
-        m_reg.Add<Transform>(e, t);
-        m_reg.Add<Light>(e, l);
-
-        Entity g = m_reg.Create();
-        Transform gt; gt.position = ppos[i]; gt.scale = glm::vec3(0.35f);
-        PbrMaterial gm; gm.albedo = glm::vec3(0.0f); gm.emissive = pcolors[i] * 3.0f; gm.roughness = 1.0f;
-        m_reg.Add<Transform>(g, gt);
-        m_reg.Add<MeshPBR>(g, MeshPBR{&*m_sphere, gm});
-    }
-
-    // Two static spotlights aimed at the grid (cones + crisp shadows). No
-    // emissive gizmos here, so the point-light gizmo animation stays simple.
-    const glm::vec3 spos[2] = {{-6.0f, 9.0f, 6.0f}, {6.0f, 9.0f, -4.0f}};
-    const glm::vec3 scol[2] = {{1.0f, 0.85f, 0.6f}, {0.55f, 0.7f, 1.0f}};
-    const glm::vec3 target(0.0f, 1.0f, 0.0f);
-    for (int i = 0; i < 2; ++i) {
-        Entity e = m_reg.Create();
-        Transform t; t.position = spos[i];
-        Light l;
-        l.type = Light::Type::Spot;
-        l.direction = glm::normalize(target - spos[i]);
-        l.color = scol[i];
-        l.intensity = 110.0f;
-        l.innerAngle = 13.0f;
-        l.outerAngle = 22.0f;
-        l.range = 40.0f;
-        m_reg.Add<Transform>(e, t);
-        m_reg.Add<Light>(e, l);
-    }
-}
-
-void SceneApp::DrawHud()
-{
+void SceneApp::DrawHud() {
     engine::Window& w = GetWindow();
     const int ww = w.Width(), hh = w.Height();
     m_text->Begin(ww, hh);
@@ -296,18 +306,23 @@ void SceneApp::DrawHud()
     char buf[96];
     std::snprintf(buf, sizeof(buf), "PBR SCENE   %02d:%02d   day %.2f   %.0f fps%s",
                   totalMin / 60, totalMin % 60, m_sample.dayFactor, m_fps,
-                  m_autoCycle ? "    [auto]" : "");
+                  m_autoCycle ? "   [auto]" : "");
     m_text->Text(buf, 24.0f, 22.0f, 2.0f, white);
-    m_text->Text("rows = metallic  cols = roughness", 24.0f, 50.0f, 1.3f, grey);
+    m_text->Text("rows = metallic   cols = roughness", 24.0f, 50.0f, 1.3f, grey);
     m_text->Text("WASD fly   SHIFT fast   T day/night   C cycle   [ ] scrub",
                  24.0f, hh - 60.0f, 1.4f, grey);
-    m_text->Text("L lights   B bloom   E expo   I ibl   O ssao   P pshadow    K ssr   G fog   Q quit",
+    m_text->Text("L lights   B bloom   E expo   I ibl   O ssao   P pshadow   K ssr   G fog   Q quit",
                  24.0f, hh - 32.0f, 1.4f, grey);
     m_text->End();
 }
 
-bool SceneApp::Pressed(int key)
-{
+void SceneApp::OnShutdown() {
+    m_config.Set("window.vsync", GetWindow().IsVSync());
+    m_config.Set("window.fullscreen", GetWindow().IsFullscreen());
+    m_config.Save();
+}
+
+bool SceneApp::Pressed(int key) {
     const bool down = GetWindow().IsKeyPressed(key);
     const bool was = m_keyPrev[key];
     m_keyPrev[key] = down;

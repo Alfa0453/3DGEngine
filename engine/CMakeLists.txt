@@ -22,6 +22,7 @@ add_library(engine STATIC
     src/graphics/Cubemap.cpp
     src/graphics/ShadowMap.cpp
     src/graphics/CascadedShadow.cpp
+    src/graphics/ClusteredLights.cpp
     src/graphics/Skybox.cpp
     src/graphics/PbrRenderer.cpp
     src/graphics/Framebuffer.cpp

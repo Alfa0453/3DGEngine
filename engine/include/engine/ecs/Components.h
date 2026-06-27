@@ -61,7 +61,7 @@ struct MeshPBR {
 // A light source. Point lights take their position from the entity's Transform;
 // directional lights use `direction`. `intensity` scales `color`.
 struct Light {
-    enum class Type { Directional, Point, Spot };
+    enum class Type { Directional, Point, Spot, Area };
     Type      type     = Type::Point;
     glm::vec3 color{1.0f, 1.0f, 1.0f};
     float     intensity = 1.0f;
@@ -69,6 +69,7 @@ struct Light {
     float     innerAngle = 20.0f;             // Spot: degrees, full intensity inside
     float     outerAngle = 30.0f;             // Spot: degrees, fades to zero at the edge
     float     range      = 40.0f;             // Spot: shadow far plane
+    float     sourceRadius = 1.0f;            // Area: physical sphere radius
 };
 
 } // namespace ecs

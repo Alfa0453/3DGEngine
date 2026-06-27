@@ -3,6 +3,7 @@
 #include "engine/graphics/CascadedShadow.h"
 #include "engine/graphics/PointShadow.h"
 #include "engine/graphics/SpotShadow.h"
+#include "engine/graphics/ClusteredLight.h"
 
 #include <glm/glm.hpp>
 
@@ -68,6 +69,7 @@ private:
     CascadedShadow          m_cascade;
     PointShadow             m_pointShadow;
     SpotShadow              m_spotShadow;
+    ClusteredLights         m_clustered;
     std::unique_ptr<Shader> m_pbr;
 };
 

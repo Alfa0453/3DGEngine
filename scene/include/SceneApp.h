@@ -55,6 +55,8 @@ private:
 
     engine::ecs::Registry m_reg;
     engine::ecs::Entity   m_sun = engine::ecs::kNull;
+    engine::ecs::Entity   m_mainLight[3] = {engine::ecs::kNull, engine::ecs::kNull, engine::ecs::kNull};
+    engine::ecs::Entity   m_mainGizmo[3] = {engine::ecs::kNull, engine::ecs::kNull, engine::ecs::kNull};
 
     engine::DayNightCycle::Sample m_sample{};
     float m_timeOfDay  = 0.5f;      // 0 midnight .. 0.5 noon
