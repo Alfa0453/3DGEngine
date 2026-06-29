@@ -144,6 +144,10 @@ void EditorApp::OnUpdate(float dt)
         && Pressed(GLFW_KEY_Y)) {
         Redo();
     }
+    if ((window.IsKeyPressed(GLFW_KEY_LEFT_CONTROL) || window.IsKeyPressed(GLFW_KEY_RIGHT_CONTROL))
+        && Pressed(GLFW_KEY_L)) {
+        m_log.Clear();
+    }
     if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_N)) {
         AddCube();
     }
@@ -167,7 +171,7 @@ void EditorApp::OnUpdate(float dt)
     }
     if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_R)) {
         m_scene.ResetSelectedTransform();
-        m_status = "Reset selected transform";
+        m_log.Info("Reset selected transform");
     }
 
     const float cameraSpeed = (window.IsKeyPressed(GLFW_KEY_LEFT_SHIFT) ? 12.0f : 5.0f) * dt;
@@ -317,9 +321,11 @@ void EditorApp::DrawEditorOverlay()
         }
     }
 
-    std::snprintf(line, sizeof(line), "Status: %s", m_status.c_str());
+    DrawLogOverlay(static_cast<float>(width) - 330.0f, 292.0f, text, muted);
+
+    std::snprintf(line, sizeof(line), "Status: %s", m_log.LatestMessage().c_str());
     m_text->Text(line, 24.0f, static_cast<float>(height) - 62.0f, 1.2f, accent);
-    m_text->Text("N cube   B plane   C color   [/] assets   Enter use asset   Ctrl+Z/Y undo/redo   F5 save   F6 assets",
+    m_text->Text("P play/edit   N cube   B plane   C color   [/] assets   Enter use asset   Ctrl+Z/Y undo/redo   F5 save   F6 assets",
         24.0f, static_cast<float>(height) - 34.0f, 1.2f, muted);
 
     m_text->End();
@@ -351,13 +357,34 @@ void EditorApp::DrawAssetOverlay(float x, float y, const glm::vec3 & text, const
     }
 }
 
+void EditorApp::DrawLogOverlay(float x, float y, const glm::vec3 & text, const glm::vec3 & muted)
+{
+    m_text->Text("Console", x, y, 1.45f, text);
+
+    const std::vector<EditorLog::Entry>& entries = m_log.Entries();
+    const int maxVisible = 7;
+    const int first = static_cast<int>(entries.size()) > maxVisible
+        ? static_cast<int>(entries.size()) - maxVisible
+        : 0;
+
+    char line[180];
+    float rowY = y + 32.0f;
+    for (int i = first; i < static_cast<int>(entries.size()); ++i) {
+        const EditorLog::Entry& entry = entries[static_cast<std::size_t>(i)];
+        std::snprintf(line, sizeof(line), "%s  %s",
+            EditorLog::LevelName(entry.level), entry.message.c_str());
+        m_text->Text(line, x + 6.0f, rowY, 1.05f, muted);
+        rowY += 22.0f;
+    }
+}
+
 void EditorApp::RefreshAssets()
 {
     std::string error;
     if (m_assets.Refresh(m_project.AssetRoot(), &error)) {
-        m_status = "Scanned assets: " + std::to_string(m_assets.Assets().size()) + "files";
+        m_log.Info("Scanned assets: " + std::to_string(m_assets.Assets().size()) + "files");
     } else {
-        m_status = error;
+        m_log.Error(error);
     }
 }
 
@@ -365,12 +392,12 @@ void EditorApp::UseSelectedAsset()
 {
     const EditorAssets::Asset* asset = m_assets.SelectedAsset();
     if (!asset) {
-        m_status = "No asset selected";
+        m_log.Warning("No asset selected");
         return;
     }
 
     if (asset->type != EditorAssets::Type::Scene) {
-        m_status = "Selected asset is not a scene";
+        m_log.Warning("Selected asset is not a scene");
         return;
     }
 
@@ -386,99 +413,99 @@ std::string EditorApp::AssetFullPath(const EditorAssets::Asset & asset) const
 void EditorApp::AddCube()
 {
     if (!m_cube) {
-        m_status = "Add failed: cube mesh is not ready";
+        m_log.Error("Add failed: cube mesh is not ready");
         return;
     }
 
     m_scene.AddCube(*m_cube);
-    m_status = "Added cube";
+    m_log.Info("Added cube");
 }
 
 void EditorApp::AddPlane()
 {
     if (!m_plane) {
-        m_status = "Add failed: plane mesh is not ready";
+        m_log.Error("Add failed: plane mesh is not ready");
         return;
     }
 
     m_scene.AddPlane(*m_plane);
-    m_status = "Added plane";
+    m_log.Info("Added plane");
 }
 
 void EditorApp::CycleSelectedColor()
 {
     if (m_scene.CycleSelectedColor()) {
-        m_status = "Changed selected color";
+        m_log.Info("Changed selected color");
     } else {
-        m_status = "Color change failed: no selected object";
+        m_log.Warning("Color change failed: no selected object");
     }
 }
 
 void EditorApp::SetSelectedPrimitive(EditorScene::Primitive primitive)
 {
     if (!m_cube || !m_plane) {
-        m_status = "Type change failed: editor meshes are not ready";
+        m_log.Error("Type change failed: editor meshes are not ready");
         return;
     }
 
     const engine::Mesh& mesh = primitive == EditorScene::Primitive::Cube ? *m_cube : *m_plane;
     if (m_scene.SetSelectedPrimitive(primitive, mesh)) {
-        m_status = primitive == EditorScene::Primitive::Cube
+        m_log.Info(primitive == EditorScene::Primitive::Cube
             ? "Changed selected type to cube"
-            : "Changed selected type to plane";
+            : "Changed selected type to plane");
     } else {
-        m_status = "Type change skipped";
+        m_log.Warning("Type change skipped");
     }
 }
 
 void EditorApp::DuplicateSelected()
 {
     if (!m_cube || !m_plane) {
-        m_status = "Duplicate failed: editor meshes are not ready";
+        m_log.Error("Duplicate failed: editor meshes are not ready");
         return;
     }
 
     if (m_scene.DuplicateSelected(*m_cube, *m_plane)) {
-        m_status = "Duplicated selected object";
+        m_log.Info("Duplicated selected object");
     } else {
-        m_status = "Duplicate failed: no selected object";
+        m_log.Warning("Duplicate failed: no selected object");
     }
 }
 
 void EditorApp::DeleteSelected()
 {
     if (m_scene.DeleteSelected()) {
-        m_status = "Deleted selected object";
+        m_log.Info("Deleted selected object");
     } else {
-        m_status = "Delete failed: no selected object";
+        m_log.Warning("Delete failed: no selected object");
     }
 }
 
 void EditorApp::Undo()
 {
     if (!m_cube || !m_plane) {
-        m_status = "Undo failed: editor meshes are not ready";
+        m_log.Error("Undo failed: editor meshes are not ready");
         return;
     }
 
     if (m_scene.Undo(*m_cube, *m_plane)) {
-        m_status = "Undo";
+        m_log.Info("Undo");
     } else {
-        m_status = "Nothing to undo";
+        m_log.Warning("Nothing to undo");
     }
 }
 
 void EditorApp::Redo()
 {
     if (!m_cube || !m_plane) {
-    m_status = "Redo failed: editor meshes are not ready";
+    m_log.Error("Redo failed: editor meshes are not ready");
     return;
     }
 
     if (m_scene.Redo(*m_cube, *m_plane)) {
-        m_status = "Redo";
+        m_log.Info("Redo");
     } else {
-        m_status = "Nothing to redo";
+        m_log.Warning("Nothing to redo");
     }
 }
 
@@ -486,24 +513,24 @@ void EditorApp::SaveScene()
 {
     std::string error;
     if (m_scene.Save(m_project.ScenePath(), &error)) {
-        m_status = "Saved " + m_project.ScenePath();
+        m_log.Info("Saved " + m_project.ScenePath());
     } else {
-        m_status = "Save failed: " + error;
+        m_log.Error("Save failed: " + error);
     }
 }
 
 void EditorApp::LoadScene()
 {
     if (!m_cube || !m_plane) {
-        m_status = "Load failed: editor meshes are not ready";
+        m_log.Error("Load failed: editor meshes are not ready");
         return;
     }
 
     std::string error;
     if (m_scene.Load(m_project.ScenePath(), *m_cube, *m_plane, &error)) {
-        m_status = "Loaded " + m_project.ScenePath(); 
+        m_log.Info("Loaded " + m_project.ScenePath()); 
     } else {
-        m_status = "Load failed: " + error;
+        m_log.Error("Load failed: " + error);
     }
 }
 
@@ -511,13 +538,13 @@ void EditorApp::EnterPlayMode()
 {
     m_editSnapshot = m_scene.CreateSnapshot();
     m_mode = EditorMode::Play;
-    m_status = "Play mode: edit scene snapshot captured";
+    m_log.Info("Play mode: edit scene snapshot captured");
 }
 
 void EditorApp::ExitPlayMode()
 {
     if (!m_cube || !m_plane) {
-        m_status = "Could not restore edit scene";
+        m_log.Error("Could not restore edit scene");
         m_mode = EditorMode::Edit;
         m_editSnapshot.reset();
         return;
@@ -528,7 +555,7 @@ void EditorApp::ExitPlayMode()
     }
     m_editSnapshot.reset();
     m_mode = EditorMode::Edit;
-    m_status = "Edit mode: restored scene from before Play";
+    m_log.Info("Edit mode: restored scene from before Play");
 }
 
 bool EditorApp::IsTransformEditActive(const engine::Window &window) const

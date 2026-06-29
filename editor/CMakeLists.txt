@@ -10,6 +10,7 @@
 add_executable(3DGEditor
     src/main.cpp
     src/EditorApp.cpp
+    src/EditorLog.cpp
     src/EditorAssets.cpp
     src/EditorProject.cpp
     src/EditorScene.cpp

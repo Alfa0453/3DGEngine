@@ -10,6 +10,7 @@
 #include <engine/graphics/TextRenderer.h>
 
 #include "EditorAssets.h"
+#include "EditorLog.h"
 #include "EditorProject.h"
 #include "EditorScene.h"
 
@@ -36,6 +37,7 @@ private:
                          const engine::ecs::MeshRenderer& renderer);
     void DrawEditorOverlay();
     void DrawAssetOverlay(float x, float y, const glm::vec3& text, const glm::vec3& muted);
+    void DrawLogOverlay(float x, float y, const glm::vec3& text, const glm::vec3& muted);
     void RefreshAssets();
     void UseSelectedAsset();
     std::string AssetFullPath(const EditorAssets::Asset& asset) const;
@@ -58,6 +60,7 @@ private:
     engine::Renderer      m_renderer;
     engine::Camera        m_camera{ glm::vec3(0.0f, 3.0f, 8.0f) };
     EditorAssets m_assets;
+    EditorLog m_log;
     EditorProject m_project;
     EditorScene m_scene;
 
@@ -66,7 +69,6 @@ private:
     std::optional<engine::Shader>       m_shader;
     std::optional<engine::TextRenderer> m_text;
 
-    std::string m_status    = "Ready";
     EditorMode       m_mode = EditorMode::Edit;
     std::optional<EditorScene::Snapshot> m_editSnapshot;
 
