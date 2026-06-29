@@ -272,6 +272,18 @@ bool EditorScene::Redo(const engine::Mesh & cube, const engine::Mesh & plane)
     return true;
 }
 
+EditorScene::Snapshot EditorScene::CreateSnapshot()
+{
+    return CaptureSnapshot();
+}
+
+void EditorScene::RestoreFromSnapshot(const Snapshot &snapshot, const engine::Mesh &cube, const engine::Mesh &plane)
+{
+    RestoreSnapshot(snapshot, cube, plane);
+    ClearHistory();
+    m_dirty = false;
+}
+
 void EditorScene::AddCube(const engine::Mesh & cube)
 {
     PushUndoSnapshot();

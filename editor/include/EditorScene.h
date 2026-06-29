@@ -58,6 +58,8 @@ public:
     void EndTransformEdit();
     bool Undo(const engine::Mesh& cube, const engine::Mesh& plane);
     bool Redo(const engine::Mesh& cube, const engine::Mesh& plane);
+    Snapshot CreateSnapshot();
+    void RestoreFromSnapshot(const Snapshot& snapshot, const engine::Mesh& cube, const engine::Mesh& plane);
     void AddCube(const engine::Mesh& cube);
     void AddPlane(const engine::Mesh& plane);
     bool CycleSelectedColor();

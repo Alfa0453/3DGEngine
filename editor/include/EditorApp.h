@@ -49,6 +49,8 @@ private:
     void Redo();
     void SaveScene();
     void LoadScene();
+    void EnterPlayMode();
+    void ExitPlayMode();
     bool Pressed(int key);
     bool IsTransformEditActive(const engine::Window& window) const;
 
@@ -66,6 +68,7 @@ private:
 
     std::string m_status    = "Ready";
     EditorMode       m_mode = EditorMode::Edit;
+    std::optional<EditorScene::Snapshot> m_editSnapshot;
 
     bool m_mouseLook = false;
     float m_fps = 60.0f;

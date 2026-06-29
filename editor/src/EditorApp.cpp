@@ -108,7 +108,11 @@ void EditorApp::OnUpdate(float dt)
         m_scene.SelectPrevious();
     }
     if (Pressed(GLFW_KEY_P)) {
-        m_mode = (m_mode == EditorMode::Edit) ? EditorMode::Play : EditorMode::Edit;
+        if (m_mode == EditorMode::Edit) {
+            EnterPlayMode();
+        } else {
+            ExitPlayMode();
+        }
     }
     if (Pressed(GLFW_KEY_M)) {
         m_mouseLook = !m_mouseLook;
@@ -501,6 +505,30 @@ void EditorApp::LoadScene()
     } else {
         m_status = "Load failed: " + error;
     }
+}
+
+void EditorApp::EnterPlayMode()
+{
+    m_editSnapshot = m_scene.CreateSnapshot();
+    m_mode = EditorMode::Play;
+    m_status = "Play mode: edit scene snapshot captured";
+}
+
+void EditorApp::ExitPlayMode()
+{
+    if (!m_cube || !m_plane) {
+        m_status = "Could not restore edit scene";
+        m_mode = EditorMode::Edit;
+        m_editSnapshot.reset();
+        return;
+    }
+
+    if (m_editSnapshot) {
+        m_scene.RestoreFromSnapshot(*m_editSnapshot, *m_cube, *m_plane);
+    }
+    m_editSnapshot.reset();
+    m_mode = EditorMode::Edit;
+    m_status = "Edit mode: restored scene from before Play";
 }
 
 bool EditorApp::IsTransformEditActive(const engine::Window &window) const
