@@ -9,6 +9,8 @@
 #include <engine/graphics/Shader.h>
 #include <engine/graphics/TextRenderer.h>
 
+#include "EditorAssets.h"
+#include "EditorProject.h"
 #include "EditorScene.h"
 
 #include <glm/glm.hpp>
@@ -33,6 +35,10 @@ private:
     void DrawSceneObject(const engine::ecs::Transform& transform, 
                          const engine::ecs::MeshRenderer& renderer);
     void DrawEditorOverlay();
+    void DrawAssetOverlay(float x, float y, const glm::vec3& text, const glm::vec3& muted);
+    void RefreshAssets();
+    void UseSelectedAsset();
+    std::string AssetFullPath(const EditorAssets::Asset& asset) const;
     void AddCube();
     void AddPlane();
     void CycleSelectedColor();
@@ -49,6 +55,8 @@ private:
     engine::Config&       m_config;
     engine::Renderer      m_renderer;
     engine::Camera        m_camera{ glm::vec3(0.0f, 3.0f, 8.0f) };
+    EditorAssets m_assets;
+    EditorProject m_project;
     EditorScene m_scene;
 
     std::optional<engine::Mesh>         m_cube;
@@ -57,7 +65,6 @@ private:
     std::optional<engine::TextRenderer> m_text;
 
     std::string m_status    = "Ready";
-    std::string m_scenePath = "editor.scene";
     EditorMode       m_mode = EditorMode::Edit;
 
     bool m_mouseLook = false;

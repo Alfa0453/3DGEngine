@@ -10,11 +10,18 @@
 add_executable(3DGEditor
     src/main.cpp
     src/EditorApp.cpp
+    src/EditorAssets.cpp
+    src/EditorProject.cpp
     src/EditorScene.cpp
 )
 
 target_include_directories(3DGEditor PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(3DGEditor PRIVATE engine)
+
+add_custom_command(TARGET 3DGEditor POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_CURRENT_SOURCE_DIR}/assets" "$<TARGET_FILE_DIR:3DGEditor>/assets"
+    COMMENT "Copying editor assets next to the executable")
 
 if(MSVC)
     target_compile_options(3DGEditor PRIVATE /W4)

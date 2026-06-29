@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <filesystem>
 
 using engine::ecs::Entity;
 using engine::ecs::MeshRenderer;
@@ -81,6 +82,8 @@ void EditorApp::OnInit()
     );
     m_text.emplace();
 
+    m_project.Load(m_config);
+    RefreshAssets();
     m_scene.BuildDefault(*m_cube, *m_plane);
 }
 
@@ -116,6 +119,18 @@ void EditorApp::OnUpdate(float dt)
     }
     if (Pressed(GLFW_KEY_F9)) {
         LoadScene();
+    }
+    if (Pressed(GLFW_KEY_F6)) {
+        RefreshAssets();
+    }
+    if (Pressed(GLFW_KEY_LEFT_BRACKET)) {
+    m_assets.SelectPrevious();
+    }
+    if (Pressed(GLFW_KEY_RIGHT_BRACKET)) {
+        m_assets.SelectNext();
+    }
+    if (Pressed(GLFW_KEY_ENTER)) {
+        UseSelectedAsset();
     }
     if ((window.IsKeyPressed(GLFW_KEY_LEFT_CONTROL) || window.IsKeyPressed(GLFW_KEY_RIGHT_CONTROL))
     && Pressed(GLFW_KEY_Z)) {
@@ -220,6 +235,7 @@ void EditorApp::OnRender()
 
 void EditorApp::OnShutdown()
 {
+    m_project.Save(m_config);
     m_config.Set("window.vsync", GetWindow().IsVSync());
     m_config.Set("window.fullscreen", GetWindow().IsFullscreen());
     m_config.Save();
@@ -254,6 +270,9 @@ void EditorApp::DrawEditorOverlay()
         m_scene.IsDirty() ? " *" : "",
         m_fps);
     m_text->Text(line, 24.0f, 22.0f, 1.8f, text);
+    std::snprintf(line, sizeof(line), "%s  scene: %s",
+        m_project.ProjectName().c_str(), m_project.ScenePath().c_str());
+    m_text->Text(line, 24.0f, 52.0f, 1.15f, muted);
 
     m_text->Text("Hierarchy", 24.0f, 70.0f, 1.45f, text);
     float y = 102.0f;
@@ -265,6 +284,7 @@ void EditorApp::DrawEditorOverlay()
         m_text->Text(line, 30.0f, y, 1.25f, i == m_scene.SelectedIndex() ? accent : muted);
         y += 26.0f;
     }
+    DrawAssetOverlay(24.0f, y + 28.0f, text, muted);
 
     m_text->Text("Inspector", static_cast<float>(width) - 330.0f, 70.0f, 1.45f, text);
     if (const EditorScene::Object* selected = m_scene.SelectedObject()) {
@@ -295,10 +315,68 @@ void EditorApp::DrawEditorOverlay()
 
     std::snprintf(line, sizeof(line), "Status: %s", m_status.c_str());
     m_text->Text(line, 24.0f, static_cast<float>(height) - 62.0f, 1.2f, accent);
-    m_text->Text("N cube   B plane   C color   1/2 type   D copy   DEL delete   Ctrl+Z/Y undo/redo   F5 save",
+    m_text->Text("N cube   B plane   C color   [/] assets   Enter use asset   Ctrl+Z/Y undo/redo   F5 save   F6 assets",
         24.0f, static_cast<float>(height) - 34.0f, 1.2f, muted);
 
     m_text->End();
+}
+
+void EditorApp::DrawAssetOverlay(float x, float y, const glm::vec3 & text, const glm::vec3 & muted)
+{
+    m_text->Text("Assets", x, y, 1.45f, text);
+
+    char line [180];
+    std::snprintf(line, sizeof(line), "%s   (%zu files)",
+        m_assets.RootPath().c_str(), m_assets.Assets().size());
+    m_text->Text(line, x + 6.0f, y + 32.0f, 1.05f, muted);
+
+    const std::vector<EditorAssets::Asset>& assets = m_assets.Assets();
+    const int maxVisible = 8;
+    for (int i = 0; i < static_cast<int>(assets.size()) && i < maxVisible; ++i) {
+        const EditorAssets::Asset& asset = assets[static_cast<std::size_t>(i)];
+        std::snprintf(line, sizeof(line), "%s  %s",
+            EditorAssets::TypeName(asset.type), asset.relativePath.c_str());
+        m_text->Text(line, x + 6.0f, y + 60.0f + static_cast<float>(i) * 22.0f, 1.05f, muted);
+    }
+
+    if (const EditorAssets::Asset* selected = m_assets.SelectedAsset()) {
+        std::snprintf(line, sizeof(line), "Selected: %s", selected->displayName.c_str());
+        m_text->Text(line, x + 6.0f, y + 248.0f, 1.05f, text);
+        std::snprintf(line, sizeof(line), "Type: %s", EditorAssets::TypeName(selected->type));
+        m_text->Text(line, x + 6.0f, y + 272.0f, 1.05f, muted);
+    }
+}
+
+void EditorApp::RefreshAssets()
+{
+    std::string error;
+    if (m_assets.Refresh(m_project.AssetRoot(), &error)) {
+        m_status = "Scanned assets: " + std::to_string(m_assets.Assets().size()) + "files";
+    } else {
+        m_status = error;
+    }
+}
+
+void EditorApp::UseSelectedAsset()
+{
+    const EditorAssets::Asset* asset = m_assets.SelectedAsset();
+    if (!asset) {
+        m_status = "No asset selected";
+        return;
+    }
+
+    if (asset->type != EditorAssets::Type::Scene) {
+        m_status = "Selected asset is not a scene";
+        return;
+    }
+
+    m_project.SetScenePath(AssetFullPath(*asset));
+    LoadScene();
+}
+
+std::string EditorApp::AssetFullPath(const EditorAssets::Asset & asset) const
+{
+    return (std::filesystem::path(m_assets.RootPath()) / asset.relativePath).string();
 }
 
 void EditorApp::AddCube()
@@ -403,8 +481,8 @@ void EditorApp::Redo()
 void EditorApp::SaveScene()
 {
     std::string error;
-    if (m_scene.Save(m_scenePath, &error)) {
-        m_status = "Saved " + m_scenePath;
+    if (m_scene.Save(m_project.ScenePath(), &error)) {
+        m_status = "Saved " + m_project.ScenePath();
     } else {
         m_status = "Save failed: " + error;
     }
@@ -418,8 +496,8 @@ void EditorApp::LoadScene()
     }
 
     std::string error;
-    if (m_scene.Load(m_scenePath, *m_cube, *m_plane, &error)) {
-        m_status = "Loaded " + m_scenePath; 
+    if (m_scene.Load(m_project.ScenePath(), *m_cube, *m_plane, &error)) {
+        m_status = "Loaded " + m_project.ScenePath(); 
     } else {
         m_status = "Load failed: " + error;
     }
