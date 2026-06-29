@@ -29,6 +29,7 @@ public:
 
     void SelectNext();
     void SelectPrevious();
+    void SelectIndex(int index);
 
     static const char* TypeName(Type type);
 

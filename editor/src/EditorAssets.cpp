@@ -98,6 +98,14 @@ void EditorAssets::SelectPrevious()
         : m_selectedIndex - 1;
 }
 
+void EditorAssets::SelectIndex(int index)
+{
+    if (index < 0 || index >= static_cast<int>(m_assets.size())) {
+        return;
+    }
+    m_selectedIndex = index;
+}
+
 const char *EditorAssets::TypeName(Type type)
 {
     switch (type) {

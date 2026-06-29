@@ -101,6 +101,18 @@ void EditorApp::OnUpdate(float dt)
     if (Pressed(GLFW_KEY_F11)) {
     window.ToggleFullscreen();
     }
+    if (Pressed(GLFW_KEY_F1)) {
+        TogglePanel(EditorPanels::Panel::Hierarchy);
+    }
+    if (Pressed(GLFW_KEY_F2)) {
+        TogglePanel(EditorPanels::Panel::Inspector);
+    }
+    if (Pressed(GLFW_KEY_F3)) {
+        TogglePanel(EditorPanels::Panel::Assets);
+    }
+    if (Pressed(GLFW_KEY_F4)) {
+        TogglePanel(EditorPanels::Panel::Console);
+    }
     if (Pressed(GLFW_KEY_TAB)) {
         m_scene.SelectNext();
     }
@@ -124,6 +136,9 @@ void EditorApp::OnUpdate(float dt)
     if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_F7)) {
         ExportRuntimeScene();
     }
+    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_F8)) {
+        ValidateRuntimeScene();
+    }
     if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_F9)) {
         LoadScene();
     }
@@ -136,6 +151,8 @@ void EditorApp::OnUpdate(float dt)
     if (Pressed(GLFW_KEY_RIGHT_BRACKET)) {
         m_assets.SelectNext();
     }
+    HandleMouseAssetDrag();
+    HandleMouseVIewportGizmo();
     if ((window.IsKeyPressed(GLFW_KEY_LEFT_CONTROL) || window.IsKeyPressed(GLFW_KEY_RIGHT_CONTROL))
         && Pressed(GLFW_KEY_ENTER)) {
         BeginAssetDrag();
@@ -327,49 +344,55 @@ void EditorApp::DrawEditorOverlay()
         m_project.ProjectName().c_str(), m_project.ScenePath().c_str());
     m_text->Text(line, 24.0f, 52.0f, 1.15f, muted);
 
-    m_text->Text("Hierarchy", 24.0f, 70.0f, 1.45f, text);
-    float y = 102.0f;
-    const std::vector<EditorScene::Object>& objects = m_scene.Objects();
-    for (int i = 0; i < static_cast<int>(objects.size()); ++i) {
-        const EditorScene::Object& object = objects[static_cast<std::size_t>(i)];
-        std::snprintf(line, sizeof(line), "%s%s%s %s",
-            i == m_scene.SelectedIndex() ? ">" : " ",
-            object.visible ? " " : "H",
-            object.locked ? "L" : " ",
-            object.name.c_str());
-        m_text->Text(line, 30.0f, y, 1.25f, i == m_scene.SelectedIndex() ? accent : muted);
-        y += 26.0f;
-    }
-    DrawAssetOverlay(24.0f, y + 28.0f, text, muted);
-
-    m_text->Text("Inspector", static_cast<float>(width) - 330.0f, 70.0f, 1.45f, text);
-    if (const EditorScene::Object* selected = m_scene.SelectedObject()) {
-        const Transform* transform = m_scene.Registry().TryGet<Transform>(selected->entity);
-        const MeshRenderer* renderer = m_scene.Registry().TryGet<MeshRenderer>(selected->entity);
-        std::snprintf(line, sizeof(line), "Name: %s", selected->name.c_str());
-        m_text->Text(line, static_cast<float>(width) - 330.0f, 106.0f, 1.2f, muted);
-        std::snprintf(line, sizeof(line), "Type: %s",
-            selected->primitive == EditorScene::Primitive::Plane ? "Plane" : "Cube");
-        m_text->Text(line, static_cast<float>(width) - 330.0f, 134.0f, 1.2f, muted);
-        std::snprintf(line, sizeof(line), "Visible: %s", selected->visible ? "yes" : "no");
-        m_text->Text(line, static_cast<float>(width) - 330.0f, 162.0f, 1.2f, muted);
-        std::snprintf(line, sizeof(line), "Locked: %s", selected->locked ? "yes" : "no");
-        m_text->Text(line, static_cast<float>(width) - 330.0f, 190.0f, 1.2f, muted);
-        if (transform) {
-            std::snprintf(line, sizeof(line), "Position: %.2f, %.2f, %.2f",
-                transform->position.x, transform->position.y, transform->position.z);
-            m_text->Text(line, static_cast<float>(width) - 330.0f, 162.0f, 1.2f, muted);
-            std::snprintf(line, sizeof(line), "Scale: %.2f, %.2f, %.2f",
-                transform->scale.x, transform->scale.y, transform->scale.z);
-            m_text->Text(line, static_cast<float>(width) - 330.0f, 190.0f, 1.2f, muted);
-            std::snprintf(line, sizeof(line), "Rotation: %.2f, %.2f, %.2f, %.2f",
-                transform->rotation.w, transform->rotation.x, transform->rotation.y, transform->rotation.z);
-            m_text->Text(line, static_cast<float>(width) - 330.0f, 218.0f, 1.2f, muted);
+    float y = 120.0f;
+    if (m_panels.IsOpen(EditorPanels::Panel::Hierarchy)) {
+        m_text->Text("Hierarchy", 24.0f, 70.0f, 1.45f, text);
+        const std::vector<EditorScene::Object>& objects = m_scene.Objects();
+        for (int i = 0; i < static_cast<int>(objects.size()); ++i) {
+            const EditorScene::Object& object = objects[static_cast<std::size_t>(i)];
+            std::snprintf(line, sizeof(line), "%s%s%s %s",
+                i == m_scene.SelectedIndex() ? ">" : " ",
+                object.visible ? " " : "H",
+                object.locked ? "L" : " ",
+                object.name.c_str());
+            m_text->Text(line, 30.0f, y, 1.25f, i == m_scene.SelectedIndex() ? accent : muted);
+            y += 26.0f;
         }
-        if (renderer) {
-            std::snprintf(line, sizeof(line), "Color: %.2f, %.2f, %.2f",
-                renderer->color.r, renderer->color.g, renderer->color.b);
-            m_text->Text(line, static_cast<float>(width) - 330.0f, 246.0f, 1.2f, muted);
+    }
+    if (m_panels.IsOpen(EditorPanels::Panel::Assets)) {
+        DrawAssetOverlay(24.0f, y + 28.0f, text, muted);
+    }
+
+    if (m_panels.IsOpen(EditorPanels::Panel::Inspector)) {
+        m_text->Text("Inspector", static_cast<float>(width) - 330.0f, 70.0f, 1.45f, text);
+        if (const EditorScene::Object* selected = m_scene.SelectedObject()) {
+            const Transform* transform = m_scene.Registry().TryGet<Transform>(selected->entity);
+            const MeshRenderer* renderer = m_scene.Registry().TryGet<MeshRenderer>(selected->entity);
+            std::snprintf(line, sizeof(line), "Name: %s", selected->name.c_str());
+            m_text->Text(line, static_cast<float>(width) - 330.0f, 106.0f, 1.2f, muted);
+            std::snprintf(line, sizeof(line), "Type: %s",
+                selected->primitive == EditorScene::Primitive::Plane ? "Plane" : "Cube");
+            m_text->Text(line, static_cast<float>(width) - 330.0f, 134.0f, 1.2f, muted);
+            std::snprintf(line, sizeof(line), "Visible: %s", selected->visible ? "yes" : "no");
+            m_text->Text(line, static_cast<float>(width) - 330.0f, 162.0f, 1.2f, muted);
+            std::snprintf(line, sizeof(line), "Locked: %s", selected->locked ? "yes" : "no");
+            m_text->Text(line, static_cast<float>(width) - 330.0f, 190.0f, 1.2f, muted);
+            if (transform) {
+                std::snprintf(line, sizeof(line), "Position: %.2f, %.2f, %.2f",
+                    transform->position.x, transform->position.y, transform->position.z);
+                m_text->Text(line, static_cast<float>(width) - 330.0f, 162.0f, 1.2f, muted);
+                std::snprintf(line, sizeof(line), "Scale: %.2f, %.2f, %.2f",
+                    transform->scale.x, transform->scale.y, transform->scale.z);
+                m_text->Text(line, static_cast<float>(width) - 330.0f, 190.0f, 1.2f, muted);
+                std::snprintf(line, sizeof(line), "Rotation: %.2f, %.2f, %.2f, %.2f",
+                    transform->rotation.w, transform->rotation.x, transform->rotation.y, transform->rotation.z);
+                m_text->Text(line, static_cast<float>(width) - 330.0f, 218.0f, 1.2f, muted);
+            }
+            if (renderer) {
+                std::snprintf(line, sizeof(line), "Color: %.2f, %.2f, %.2f",
+                    renderer->color.r, renderer->color.g, renderer->color.b);
+                m_text->Text(line, static_cast<float>(width) - 330.0f, 246.0f, 1.2f, muted);
+            }
         }
     }
 
@@ -377,11 +400,13 @@ void EditorApp::DrawEditorOverlay()
         m_gizmo.ModeName(), m_gizmo.AxisName());
     m_text->Text(line, static_cast<float>(width) - 330.0f, 40.0f, 1.15f, accent);
 
-    DrawLogOverlay(static_cast<float>(width) - 330.0f, 292.0f, text, muted);
+    if (m_panels.IsOpen(EditorPanels::Panel::Console)) {
+        DrawLogOverlay(static_cast<float>(width) - 330.0f, 292.0f, text, muted);
+    }
 
     std::snprintf(line, sizeof(line), "Status: %s", m_log.LatestMessage().c_str());
     m_text->Text(line, 24.0f, static_cast<float>(height) - 62.0f, 1.2f, accent);
-    m_text->Text("Ctrl+Enter drag asset   V drop   \\ cancel drag   G gizmo   P play/edit   F5 save   F7 export",
+    m_text->Text("F1-F4 panels   mouse/keyboard drag   G gizmo   F5 save   F7 export   F8 validate",
         24.0f, static_cast<float>(height) - 34.0f, 1.2f, muted);
 
     m_text->End();
@@ -462,6 +487,146 @@ void EditorApp::ApplyGizmoNudge(float direction, float dt)
     }
 }
 
+void EditorApp::ApplyGizmoDrag(float pixels)
+{
+    const float amount = pixels * 0.01f;
+    const glm::vec3 axis = m_gizmo.AxisVector();
+
+    switch (m_gizmo.CurrentMode()) {
+    case EditorGizmo::Mode::Translate:
+        m_scene.MoveSelected(axis * amount);
+        break;
+    case EditorGizmo::Mode::Rotate:
+        if (m_gizmo.CurrentAxis() == EditorGizmo::Axis::Y) {
+            m_scene.RotateSelectedYaw(pixels * 0.35f);
+        } else {
+            m_log.Warning("Only Y rotation is implemented");
+        }
+        break;
+    case EditorGizmo::Mode::Scale:
+        {
+            float factor = 1.0f + amount * 0.25f;
+            if (factor < 0.05f) {
+                factor = 0.05f;
+            }
+            m_scene.ScaleSelected(factor);
+        }
+        break;
+    }
+}
+
+void EditorApp::TogglePanel(EditorPanels::Panel panel)
+{
+    m_panels.Toggle(panel);
+    m_log.Info(std::string(EditorPanels::Name(panel)) +
+        (m_panels.IsOpen(panel) ? " panel shown" : " panel hidden"));
+}
+
+void EditorApp::HandleMouseAssetDrag()
+{
+    engine::Window& window = GetWindow();
+    if (m_mouseLook || m_mode != EditorMode::Edit || !window.Native()) {
+        m_leftMousePrev = false;
+        return;
+    }
+
+    double cursorX = 0.0;
+    double cursorY = 0.0;
+    glfwGetCursorPos(window.Native(), &cursorX, &cursorY);
+
+    const bool leftDown = glfwGetMouseButton(window.Native(), GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+    const bool leftPressed = leftDown && !m_leftMousePrev;
+    const bool leftReleased = !leftDown && m_leftMousePrev;
+    const float x = static_cast<float>(cursorX);
+    const float y = static_cast<float>(cursorY);
+
+    if (leftPressed && m_panels.IsOpen(EditorPanels::Panel::Assets)) {
+        const int assetIndex = AssetIndexAtPosition(x, y);
+        if (assetIndex >= 0) {
+            m_assets.SelectIndex(assetIndex);
+            if (const EditorAssets::Asset* asset = m_assets.SelectedAsset()) {
+                m_dragDrop.BeginAssetDragAt(AssetFullPath(*asset), EditorAssets::TypeName(asset->type), x, y);
+                m_log.Info("Mouse dragging asset " + asset->relativePath);
+            }
+        }
+    }
+
+    if (leftDown && m_dragDrop.IsMouseDriven()) {
+        m_dragDrop.UpdateCursor(x, y);
+    }
+
+    if (leftReleased && m_dragDrop.IsMouseDriven()) {
+        m_dragDrop.UpdateCursor(x, y);
+        if (IsViewpoertDropPosition(x, y)) {
+            DropPayloadOnScene();
+        } else {
+            m_dragDrop.Clear();
+            m_log.Info("Mouse drag cancelled");
+        }
+    }
+
+    m_leftMousePrev = leftDown;
+}
+
+void EditorApp::HandleMouseVIewportGizmo()
+{
+    engine::Window& window = GetWindow();
+    if (m_mouseLook || m_mode != EditorMode::Edit || !window.Native()) {
+        if (m_mouseGizmoActive) {
+            m_scene.EndTransformEdit();
+        }
+        m_mouseGizmoActive = false;
+        m_rightMousePrev = false;
+        return;
+    }
+
+    double cursorX = 0.0;
+    double cursorY = 0.0;
+    glfwGetCursorPos(window.Native(), &cursorX, &cursorY);
+
+    const bool rightDown = glfwGetMouseButton(window.Native(), GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
+    const bool rightPressed = rightDown && !m_rightMousePrev;
+    const bool rightReleased = !rightDown && m_rightMousePrev;
+    const float x = static_cast<float>(cursorX);
+    const float y = static_cast<float>(cursorY);
+
+    if (rightPressed
+        && !m_dragDrop.HasPayload()
+        && m_scene.SelectedObject()
+        && !m_scene.SelectedLocked()
+        && IsViewpoertDropPosition(x, y)) {
+        m_mouseGizmoActive = true;
+        m_mouseGizmoLastX = x;
+        m_mouseGizmoLastY = y;
+        m_scene.BeginTransformEdit();
+        m_log.Info(std::string("Mouse gizmo: ") + m_gizmo.ModeName() + " " + m_gizmo.AxisName());
+    }
+
+    if (rightDown && m_mouseGizmoActive) {
+        const float dx = x - m_mouseGizmoLastX;
+        const float dy = y - m_mouseGizmoLastY;
+        const float pixels = m_gizmo.CurrentAxis() == EditorGizmo::Axis::Y ? -dy : dx;
+
+        if (pixels != 0.0f) {
+            ApplyGizmoDrag(pixels);
+        }
+
+        m_mouseGizmoLastX = x;
+        m_mouseGizmoLastY = y;
+    }
+
+
+
+
+    if (rightReleased && m_mouseGizmoActive) {
+        m_scene.EndTransformEdit();
+        m_mouseGizmoActive = false;
+        m_log.Info("Mouse gizmo edit complete");
+    }
+
+    m_rightMousePrev = rightDown;
+}
+
 void EditorApp::BeginAssetDrag()
 {
     const EditorAssets::Asset* asset = m_assets.SelectedAsset();
@@ -535,6 +700,45 @@ void EditorApp::UseSelectedAsset()
 std::string EditorApp::AssetFullPath(const EditorAssets::Asset & asset) const
 {
     return (std::filesystem::path(m_assets.RootPath()) / asset.relativePath).string();
+}
+
+float EditorApp::AssetPanelTop() const
+{
+    float y = 120.0f;
+    if (m_panels.IsOpen(EditorPanels::Panel::Hierarchy)) {
+        y += static_cast<float>(m_scene.Objects().size()) * 26.0f;
+    }
+    return y + 28.0f;
+}
+
+int EditorApp::AssetIndexAtPosition(float x, float y) const
+{
+    if (x < 30.0f || x > 430.0f) {
+        return -1;
+    }
+
+    const float rowTop = AssetPanelTop() + 56.0f;
+    const float rowHeight = 22.0f;
+    if (y < rowTop) {
+        return -1;
+    }
+
+    const int index = static_cast<int>((y - rowTop) / rowHeight);
+    const int maxVisible = 8;
+    if (index < 0 || index >= maxVisible || index >= static_cast<int>(m_assets.Assets().size())) {
+        return -1;
+    }
+
+    return index;
+}
+
+bool EditorApp::IsViewpoertDropPosition(float x, float y)
+{
+    const engine::Window& window = GetWindow();
+    return x > 380.0f
+        && x < static_cast<float>(window.Width()) - 360.0f
+        && y > 70.0f
+        && y < static_cast<float>(window.Height()) - 90.0f;
 }
 
 void EditorApp::AddCube()
@@ -691,6 +895,20 @@ void EditorApp::ExportRuntimeScene()
         m_log.Info("Exported runtime scene " + exportPath.string());
     } else {
         m_log.Error("Runtime export failed: " + error);
+    }
+}
+
+void EditorApp::ValidateRuntimeScene()
+{
+    std::filesystem::path runtimePath(m_project.ScenePath());
+    runtimePath.replace_extension(".runtime.scene");
+
+    RuntimeSceneLoader::Scene runtimeScene;
+    std::string error;
+    if (RuntimeSceneLoader::Load(runtimePath.string(), &runtimeScene, &error)) {
+        m_log.Info("Validated runtime scene: " + std::to_string(runtimeScene.entities.size()) + " entities");
+    } else {
+        m_log.Error("Runtime scene validation failed: " + error);
     }
 }
 
