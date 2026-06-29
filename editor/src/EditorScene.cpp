@@ -176,6 +176,32 @@ engine::ecs::Transform * EditorScene::SelectedTransform()
     return selected ? m_registry.TryGet<Transform>(selected->entity) : nullptr;
 }
 
+const engine::ecs::Transform *EditorScene::TryGetTransform(engine::ecs::Entity entity) const
+{
+    return const_cast<engine::ecs::Registry&>(m_registry).TryGet<Transform>(entity);
+}
+
+const engine::ecs::MeshRenderer *EditorScene::TryGetMeshRenderer(engine::ecs::Entity entity) const
+{
+    return const_cast<engine::ecs::Registry&>(m_registry).TryGet<MeshRenderer>(entity);
+}
+
+bool EditorScene::IsVisible(engine::ecs::Entity entity) const
+{
+    for (const Object& object : m_objects) {
+        if (object.entity == entity) {
+            return object.visible;
+        }
+    }
+    return true;
+}
+
+bool EditorScene::SelectedLocked() const
+{
+    const Object* selected = SelectedObject();
+    return selected ? m_registry.TryGet<Transform>(selected->entity) : nullptr;
+}
+
 void EditorScene::SelectNext()
 {
     if (m_objects.empty()) {
@@ -358,6 +384,32 @@ bool EditorScene::SetSelectedPrimitive(Primitive primitive, const engine::Mesh &
 
     selected.primitive = primitive;
     renderer->mesh = &mesh;
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::ToggleSelectVisible()
+{
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+
+    PushUndoSnapshot();
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    selected.visible = !selected.visible;
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::ToggleSelectedLocked()
+{
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+
+    PushUndoSnapshot();
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    selected.locked = !selected.locked;
     m_dirty = true;
     return true;
 }

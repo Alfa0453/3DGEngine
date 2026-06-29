@@ -14,6 +14,9 @@ add_executable(3DGEditor
     src/EditorAssets.cpp
     src/EditorProject.cpp
     src/EditorScene.cpp
+    src/RuntimeSceneExporter.cpp
+    src/EditorGizmo.cpp
+    src/EditorDragDrop.cpp
 )
 
 target_include_directories(3DGEditor PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)

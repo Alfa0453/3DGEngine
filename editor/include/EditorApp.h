@@ -10,9 +10,12 @@
 #include <engine/graphics/TextRenderer.h>
 
 #include "EditorAssets.h"
+#include "EditorDragDrop.h"
+#include "EditorGizmo.h"
 #include "EditorLog.h"
 #include "EditorProject.h"
 #include "EditorScene.h"
+#include "RuntimeSceneExporter.h"
 
 #include <glm/glm.hpp>
 
@@ -38,6 +41,9 @@ private:
     void DrawEditorOverlay();
     void DrawAssetOverlay(float x, float y, const glm::vec3& text, const glm::vec3& muted);
     void DrawLogOverlay(float x, float y, const glm::vec3& text, const glm::vec3& muted);
+    void ApplyGizmoNudge(float direction, float dt);
+    void BeginAssetDrag();
+    void DropPayloadOnScene();
     void RefreshAssets();
     void UseSelectedAsset();
     std::string AssetFullPath(const EditorAssets::Asset& asset) const;
@@ -45,12 +51,15 @@ private:
     void AddPlane();
     void CycleSelectedColor();
     void SetSelectedPrimitive(EditorScene::Primitive primitive);
+    void ToggleSelectedVisible();
+    void ToggleSelectedLocked();
     void DuplicateSelected();
     void DeleteSelected();
     void Undo();
     void Redo();
     void SaveScene();
     void LoadScene();
+    void ExportRuntimeScene();
     void EnterPlayMode();
     void ExitPlayMode();
     bool Pressed(int key);
@@ -60,6 +69,8 @@ private:
     engine::Renderer      m_renderer;
     engine::Camera        m_camera{ glm::vec3(0.0f, 3.0f, 8.0f) };
     EditorAssets m_assets;
+    EditorDragDrop m_dragDrop;
+    EditorGizmo m_gizmo;
     EditorLog m_log;
     EditorProject m_project;
     EditorScene m_scene;

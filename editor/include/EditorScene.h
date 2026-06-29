@@ -21,6 +21,8 @@ public:
         engine::ecs::Entity entity = engine::ecs::kNull;
         std::string name;
         Primitive primitive = Primitive::Cube;
+        bool visible = true;
+        bool locked = false;
     };
 
     struct ObjectSnapshot {
@@ -47,6 +49,10 @@ public:
     int SelectedIndex() const { return m_selectedIndex; }
     const Object* SelectedObject() const;
     engine::ecs::Transform* SelectedTransform();
+    const engine::ecs::Transform* TryGetTransform(engine::ecs::Entity entity) const;
+    const engine::ecs::MeshRenderer* TryGetMeshRenderer(engine::ecs::Entity entity) const;
+    bool IsVisible(engine::ecs::Entity entity) const;
+    bool SelectedLocked() const;
 
     void SelectNext();
     void SelectPrevious();
@@ -64,6 +70,8 @@ public:
     void AddPlane(const engine::Mesh& plane);
     bool CycleSelectedColor();
     bool SetSelectedPrimitive(Primitive primitive, const engine::Mesh& mesh);
+    bool ToggleSelectVisible();
+    bool ToggleSelectedLocked();
     bool DuplicateSelected(const engine::Mesh& cube, const engine::Mesh& plane);
     bool DeleteSelected();
 

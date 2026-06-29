@@ -118,10 +118,13 @@ void EditorApp::OnUpdate(float dt)
         m_mouseLook = !m_mouseLook;
         window.SetCursorCaptured(m_mouseLook);
     }
-    if (Pressed(GLFW_KEY_F5)) {
+    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_F5)) {
         SaveScene();
     }
-    if (Pressed(GLFW_KEY_F9)) {
+    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_F7)) {
+        ExportRuntimeScene();
+    }
+    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_F9)) {
         LoadScene();
     }
     if (Pressed(GLFW_KEY_F6)) {
@@ -133,8 +136,19 @@ void EditorApp::OnUpdate(float dt)
     if (Pressed(GLFW_KEY_RIGHT_BRACKET)) {
         m_assets.SelectNext();
     }
-    if (Pressed(GLFW_KEY_ENTER)) {
+    if ((window.IsKeyPressed(GLFW_KEY_LEFT_CONTROL) || window.IsKeyPressed(GLFW_KEY_RIGHT_CONTROL))
+        && Pressed(GLFW_KEY_ENTER)) {
+        BeginAssetDrag();
+    } else
+    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_ENTER)) {
         UseSelectedAsset();
+    }
+    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_V)) {
+        DropPayloadOnScene();
+    }
+    if (Pressed(GLFW_KEY_BACKSLASH)) {
+        m_dragDrop.Clear();
+        m_log.Info("Drag/drop payload cleared");
     }
     if ((window.IsKeyPressed(GLFW_KEY_LEFT_CONTROL) || window.IsKeyPressed(GLFW_KEY_RIGHT_CONTROL))
     && Pressed(GLFW_KEY_Z)) {
@@ -157,6 +171,12 @@ void EditorApp::OnUpdate(float dt)
     if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_C)) {
         CycleSelectedColor();
     }
+    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_H)) {
+        ToggleSelectedVisible();
+    }
+    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_O)) {
+        ToggleSelectedLocked();
+    }
     if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_1)) {
         SetSelectedPrimitive(EditorScene::Primitive::Cube);
     }
@@ -172,6 +192,22 @@ void EditorApp::OnUpdate(float dt)
     if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_R)) {
         m_scene.ResetSelectedTransform();
         m_log.Info("Reset selected transform");
+    }
+    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_G)) {
+        m_gizmo.CycleMode();
+        m_log.Info(std::string("Gizmo mode: ") + m_gizmo.ModeName());
+    }
+    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_X)) {
+        m_gizmo.SetAxis(EditorGizmo::Axis::X);
+        m_log.Info("Gizmo axis: X");
+    }
+    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_Y)) {
+        m_gizmo.SetAxis(EditorGizmo::Axis::Y);
+        m_log.Info("Gizmo axis: Y");
+    }
+    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_Z)) {
+        m_gizmo.SetAxis(EditorGizmo::Axis::Z);
+        m_log.Info("Gizmo axis: Z");
     }
 
     const float cameraSpeed = (window.IsKeyPressed(GLFW_KEY_LEFT_SHIFT) ? 12.0f : 5.0f) * dt;
@@ -206,6 +242,12 @@ void EditorApp::OnUpdate(float dt)
         if (window.IsKeyPressed(GLFW_KEY_MINUS) || window.IsKeyPressed(GLFW_KEY_KP_SUBTRACT)) {
             m_scene.ScaleSelected(1.0f - dt);
         }
+        if (window.IsKeyPressed(GLFW_KEY_COMMA)) {
+            ApplyGizmoNudge(-1.0f, dt);
+        }
+        if (window.IsKeyPressed(GLFW_KEY_PERIOD)) {
+            ApplyGizmoNudge(1.0f, dt);
+        }
 
         if (!transformEditing && m_wasTransformEditing) {
             m_scene.EndTransformEdit();
@@ -229,9 +271,12 @@ void EditorApp::OnRender()
     m_shader->SetVec3("uLightDir", glm::normalize(glm::vec3(-0.4f, -1.0f, -0.3f)));
 
     m_scene.Registry().view<Transform, MeshRenderer>().each(
-        [&](Entity etity, Transform& transform, MeshRenderer& renderer) {
+        [&](Entity entity, Transform& transform, MeshRenderer& renderer) {
+            if (!m_scene.IsVisible(entity)) {
+                return;
+            }
             const EditorScene::Object* selectedObject = m_scene.SelectedObject();
-            const bool selected = selectedObject && selectedObject->entity == etity;
+            const bool selected = selectedObject && selectedObject->entity == entity;
             MeshRenderer drawRenderer = renderer;
             drawRenderer.color = SelectedColor(selected, renderer.color);
             DrawSceneObject(transform, drawRenderer);
@@ -287,8 +332,11 @@ void EditorApp::DrawEditorOverlay()
     const std::vector<EditorScene::Object>& objects = m_scene.Objects();
     for (int i = 0; i < static_cast<int>(objects.size()); ++i) {
         const EditorScene::Object& object = objects[static_cast<std::size_t>(i)];
-        std::snprintf(line, sizeof(line), "%s %s",
-            i == m_scene.SelectedIndex() ? ">" : " ", object.name.c_str());
+        std::snprintf(line, sizeof(line), "%s%s%s %s",
+            i == m_scene.SelectedIndex() ? ">" : " ",
+            object.visible ? " " : "H",
+            object.locked ? "L" : " ",
+            object.name.c_str());
         m_text->Text(line, 30.0f, y, 1.25f, i == m_scene.SelectedIndex() ? accent : muted);
         y += 26.0f;
     }
@@ -303,6 +351,10 @@ void EditorApp::DrawEditorOverlay()
         std::snprintf(line, sizeof(line), "Type: %s",
             selected->primitive == EditorScene::Primitive::Plane ? "Plane" : "Cube");
         m_text->Text(line, static_cast<float>(width) - 330.0f, 134.0f, 1.2f, muted);
+        std::snprintf(line, sizeof(line), "Visible: %s", selected->visible ? "yes" : "no");
+        m_text->Text(line, static_cast<float>(width) - 330.0f, 162.0f, 1.2f, muted);
+        std::snprintf(line, sizeof(line), "Locked: %s", selected->locked ? "yes" : "no");
+        m_text->Text(line, static_cast<float>(width) - 330.0f, 190.0f, 1.2f, muted);
         if (transform) {
             std::snprintf(line, sizeof(line), "Position: %.2f, %.2f, %.2f",
                 transform->position.x, transform->position.y, transform->position.z);
@@ -321,11 +373,15 @@ void EditorApp::DrawEditorOverlay()
         }
     }
 
+    std::snprintf(line, sizeof(line), "Gizmo: %s %s   < / > nudge",
+        m_gizmo.ModeName(), m_gizmo.AxisName());
+    m_text->Text(line, static_cast<float>(width) - 330.0f, 40.0f, 1.15f, accent);
+
     DrawLogOverlay(static_cast<float>(width) - 330.0f, 292.0f, text, muted);
 
     std::snprintf(line, sizeof(line), "Status: %s", m_log.LatestMessage().c_str());
     m_text->Text(line, 24.0f, static_cast<float>(height) - 62.0f, 1.2f, accent);
-    m_text->Text("P play/edit   N cube   B plane   C color   [/] assets   Enter use asset   Ctrl+Z/Y undo/redo   F5 save   F6 assets",
+    m_text->Text("Ctrl+Enter drag asset   V drop   \\ cancel drag   G gizmo   P play/edit   F5 save   F7 export",
         24.0f, static_cast<float>(height) - 34.0f, 1.2f, muted);
 
     m_text->End();
@@ -355,6 +411,12 @@ void EditorApp::DrawAssetOverlay(float x, float y, const glm::vec3 & text, const
         std::snprintf(line, sizeof(line), "Type: %s", EditorAssets::TypeName(selected->type));
         m_text->Text(line, x + 6.0f, y + 272.0f, 1.05f, muted);
     }
+
+    if (m_dragDrop.HasPayload()) {
+        const EditorDragDrop::Payload& payload = m_dragDrop.CurrentPayload();
+        std::snprintf(line, sizeof(line), "Dragging: %s", payload.path.c_str());
+        m_text->Text(line, x + 6.0f, y + 302.0f, 1.05f, text);
+    }
 }
 
 void EditorApp::DrawLogOverlay(float x, float y, const glm::vec3 & text, const glm::vec3 & muted)
@@ -376,6 +438,71 @@ void EditorApp::DrawLogOverlay(float x, float y, const glm::vec3 & text, const g
         m_text->Text(line, x + 6.0f, rowY, 1.05f, muted);
         rowY += 22.0f;
     }
+}
+
+void EditorApp::ApplyGizmoNudge(float direction, float dt)
+{
+    const float amount = direction * dt;
+    const glm::vec3 axis = m_gizmo.AxisVector();
+
+    switch (m_gizmo.CurrentMode()) {
+    case EditorGizmo::Mode::Translate:
+        m_scene.MoveSelected(axis * (amount * 2.0f));
+        break;
+    case EditorGizmo::Mode::Rotate:
+        if (m_gizmo.CurrentAxis() == EditorGizmo::Axis::Y) {
+            m_scene.RotateSelectedYaw(amount * 90.0f);
+        } else {
+            m_log.Warning("Only Y rotation is implemented");
+        }
+        break;
+    case EditorGizmo::Mode::Scale:
+        m_scene.ScaleSelected(1.0f + amount);
+        break;
+    }
+}
+
+void EditorApp::BeginAssetDrag()
+{
+    const EditorAssets::Asset* asset = m_assets.SelectedAsset();
+    if (!asset) {
+        m_log.Warning("No asset selected for drag");
+        return;
+    }
+
+    m_dragDrop.BeginAssetDrag(AssetFullPath(*asset), EditorAssets::TypeName(asset->type));
+    m_log.Info("Dragging asset " + asset->relativePath);
+}
+
+void EditorApp::DropPayloadOnScene()
+{
+    if (!m_dragDrop.HasPayload()) {
+        m_log.Warning("No drag/drop payload to drop");
+        return;
+    }
+
+    const EditorDragDrop::Payload payload = m_dragDrop.CurrentPayload();
+    if (payload.type != EditorDragDrop::PayloadType::Asset) {
+        m_log.Warning("Unsurpported drag/drop payload");
+        m_dragDrop.Clear();
+        return;
+    }
+
+    if (payload.typeName == "Scene") {
+        m_project.SetScenePath(payload.path);
+        LoadScene();
+        m_dragDrop.Clear();
+        return;
+    }
+
+    if (payload.typeName == "Model") {
+        m_log.Warning("Model drop needs runtime model component surport");
+    } else if (payload.typeName == "Texture") {
+        m_log.Warning("Texture drop needs material editing surport");
+    } else {
+        m_log.Warning("Asset type cannot be dropped on the scene yet");
+    }
+    m_dragDrop.Clear();
 }
 
 void EditorApp::RefreshAssets()
@@ -458,6 +585,26 @@ void EditorApp::SetSelectedPrimitive(EditorScene::Primitive primitive)
     }
 }
 
+void EditorApp::ToggleSelectedVisible()
+{
+    if (m_scene.ToggleSelectVisible()) {
+        const EditorScene::Object* selected = m_scene.SelectedObject();
+        m_log.Info(selected && selected->visible ? "Selected object shown" : "Selected object hidden");
+    } else {
+        m_log.Warning("Visibility change failed: no selected object");
+    }
+}
+
+void EditorApp::ToggleSelectedLocked()
+{
+    if (m_scene.ToggleSelectedLocked()) {
+        const EditorScene::Object* selected = m_scene.SelectedObject();
+        m_log.Info(selected && selected->locked ? "Selected object locked" : "Selected object unlocked");
+    } else {
+        m_log.Warning("Lock change failed: no selected object");
+    }
+}
+
 void EditorApp::DuplicateSelected()
 {
     if (!m_cube || !m_plane) {
@@ -531,6 +678,19 @@ void EditorApp::LoadScene()
         m_log.Info("Loaded " + m_project.ScenePath()); 
     } else {
         m_log.Error("Load failed: " + error);
+    }
+}
+
+void EditorApp::ExportRuntimeScene()
+{
+    std::filesystem::path exportPath(m_project.ScenePath());
+    exportPath.replace_extension(".runtime.scene");
+
+    std::string error;
+    if (RuntimeSceneExporter::Export(m_scene, exportPath.string(), &error)) {
+        m_log.Info("Exported runtime scene " + exportPath.string());
+    } else {
+        m_log.Error("Runtime export failed: " + error);
     }
 }
 
