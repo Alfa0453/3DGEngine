@@ -99,6 +99,7 @@ add_subdirectory(game)     # the game that links against the engine
 add_subdirectory(breakout) # a second game (Breakout) on the same engine + ECS
 add_subdirectory(viewer)   # a model-viewer tool (loads + renders OBJ models)
 add_subdirectory(scene)    # a PBR lighting + ECS scene demo (shadows, skybox)
+add_subdirectory(editor)
 
 # ---------------------------------------------------------------------------
 # Packaging: `cmake --install build --prefix dist` stages a runnable folder,

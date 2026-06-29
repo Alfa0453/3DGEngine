@@ -60,6 +60,7 @@ public:
     }
 
     T& Get(Entity e) { return comps[sparse[EntityIndex(e)]]; }
+    const T& Get(Entity e) const { return comps[sparse[EntityIndex(e)]]; }
 
     void Remove(Entity e) override {
         const std::uint32_t i = EntityIndex(e);
@@ -116,8 +117,13 @@ public:
         return Assure<T>().Add(e, T{std::forward<Args>(args)...});
     }
     template <class T> bool Has(Entity e) { auto* p = TryPool<T>(); return p && p->Has(e); }
+    template <class T> bool Has(Entity e) const { auto* p = TryPool<T>(); return p && p->Has(e); }
     template <class T> T&   Get(Entity e) { return Assure<T>().Get(e); }
     template <class T> T*   TryGet(Entity e) {
+        auto* p = TryPool<T>();
+        return (p && p->Has(e)) ? &p->Get(e) : nullptr;
+    }
+    template <class T> const T* TryGet(Entity e) const {
         auto* p = TryPool<T>();
         return (p && p->Has(e)) ? &p->Get(e) : nullptr;
     }
@@ -131,6 +137,10 @@ public:
     template <class T> Pool<T>* TryPool() {
         auto it = m_pools.find(std::type_index(typeid(T)));
         return it == m_pools.end() ? nullptr : static_cast<Pool<T>*>(it->second.get());
+    }
+    template <class T> const Pool<T>* TryPool() const {
+        auto it = m_pools.find(std::type_index(typeid(T)));
+        return it == m_pools.end() ? nullptr : static_cast<const Pool<T>*>(it->second.get());
     }
 private:
     template <class T> Pool<T>& Assure() {
