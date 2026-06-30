@@ -23,6 +23,8 @@ public:
         Primitive primitive = Primitive::Cube;
         bool visible = true;
         bool locked = false;
+        std::string modelAssetPath;
+        std::string materialAssetPath;
     };
 
     struct ObjectSnapshot {
@@ -56,6 +58,7 @@ public:
 
     void SelectNext();
     void SelectPrevious();
+    void SelectIndex(int index);
     void MoveSelected(const glm::vec3& delta);
     void RotateSelectedYaw(float degrees);
     void ScaleSelected(float factor);
@@ -70,6 +73,8 @@ public:
     void AddPlane(const engine::Mesh& plane);
     bool CycleSelectedColor();
     bool SetSelectedPrimitive(Primitive primitive, const engine::Mesh& mesh);
+    bool SetSelectedModelAsset(const std::string& path);
+    bool SetSelectedMaterialAsset(const std::string& path);
     bool ToggleSelectVisible();
     bool ToggleSelectedLocked();
     bool DuplicateSelected(const engine::Mesh& cube, const engine::Mesh& plane);

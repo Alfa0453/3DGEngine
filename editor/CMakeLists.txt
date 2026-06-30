@@ -15,13 +15,15 @@ add_executable(3DGEditor
     src/EditorProject.cpp
     src/EditorScene.cpp
     src/RuntimeSceneExporter.cpp
-    src/RuntimeSceneLoader.cpp
     src/EditorGizmo.cpp
     src/EditorDragDrop.cpp
     src/EditorPanels.cpp
+    src/EditorDockspace.cpp
 )
 
-target_include_directories(3DGEditor PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_include_directories(3DGEditor PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/engine/include)
 target_link_libraries(3DGEditor PRIVATE engine)
 
 add_custom_command(TARGET 3DGEditor POST_BUILD

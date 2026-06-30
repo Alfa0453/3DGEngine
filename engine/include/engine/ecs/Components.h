@@ -6,8 +6,11 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
 
+#include <string>
+
 namespace engine {
 
+class Model;     // non-owning loaded model pointers
 class Texture;   // non-owning material map pointers
 
 namespace ecs{
@@ -56,6 +59,25 @@ struct PbrMaterial {
 struct MeshPBR {
     const Mesh* mesh = nullptr;
     PbrMaterial material;
+};
+
+// Runtime asset references imported from editor-authored scene files. These are
+// path handles, not loaded GPU resources; a runtime asset system can resolve
+// them into Model/Texture objects later.
+struct ModelAsset {
+    std::string path;
+};
+
+struct MaterialAsset {
+    std::string albedoPath;
+};
+
+struct LoadedModelAsset {
+    const Model* model = nullptr;
+};
+
+struct LoadedMaterialAsset {
+    const Texture* albedoMap = nullptr;
 };
 
 // A light source. Point lights take their position from the entity's Transform;

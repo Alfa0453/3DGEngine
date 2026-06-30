@@ -8,8 +8,10 @@
 #include <engine/graphics/Renderer.h>
 #include <engine/graphics/Shader.h>
 #include <engine/graphics/TextRenderer.h>
+#include <engine/ui/ImGuiLayer.h>
 
 #include "EditorAssets.h"
+#include "EditorDockspace.h"
 #include "EditorDragDrop.h"
 #include "EditorGizmo.h"
 #include "EditorLog.h"
@@ -17,7 +19,7 @@
 #include "EditorProject.h"
 #include "EditorScene.h"
 #include "RuntimeSceneExporter.h"
-#include "RuntimeSceneLoader.h"
+#include <engine/scene/RuntimeSceneLoader.h>
 
 #include <glm/glm.hpp>
 
@@ -79,6 +81,7 @@ private:
     engine::Renderer      m_renderer;
     engine::Camera        m_camera{ glm::vec3(0.0f, 3.0f, 8.0f) };
     EditorAssets          m_assets;
+    EditorDockspace       m_dockspace;
     EditorDragDrop        m_dragDrop;
     EditorGizmo           m_gizmo;
     EditorLog             m_log;
@@ -90,6 +93,7 @@ private:
     std::optional<engine::Mesh>         m_plane;
     std::optional<engine::Shader>       m_shader;
     std::optional<engine::TextRenderer> m_text;
+    engine::ImGuiLayer                  m_imgui;
 
     EditorMode       m_mode = EditorMode::Edit;
     std::optional<EditorScene::Snapshot> m_editSnapshot;

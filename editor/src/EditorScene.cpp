@@ -47,6 +47,10 @@ const glm::vec3 kPalette[] = {
     {0.34f, 0.37f, 0.41f}
 };
 
+const char* StoredPath(const std::string& path) {
+    return path.empty() ? "-" : path.c_str();
+}
+
 } // namespace
 
 void EditorScene::BuildDefault(const engine::Mesh & cube, const engine::Mesh & plane)
@@ -102,7 +106,13 @@ bool EditorScene::Save(const std::string & path, std::string * error)
             << object.name << ' '
             << transform->position.x << ' ' << transform->position.y << ' ' << transform->position.z << ' '
             << transform->scale.x << ' ' << transform->scale.y << ' ' << transform->scale.z << ' '
-            << renderer->color.r << ' ' << renderer->color.g << ' ' << renderer->color.b << '\n';
+            << transform->rotation.w << ' ' << transform->rotation.x << ' '
+            << transform->rotation.y << ' ' << transform->rotation.z << ' '
+            << renderer->color.r << ' ' << renderer->color.g << ' ' << renderer->color.b << ' '
+            << (object.visible ? 1 : 0) << ' '
+            << (object.locked ? 1 : 0) << ' '
+            << StoredPath(object.modelAssetPath) << ' '
+            << StoredPath(object.materialAssetPath) << '\n';
     }
 
     m_dirty = false;
@@ -141,11 +151,37 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         Primitive primitive = Primitive::Cube;
         Transform transform;
         glm::vec3 color;
+        int visible = 1;
+        int locked = 0;
+        std::string modelAssetPath;
+        std::string materialAssetPath;
 
         in >> primitiveName >> name
            >> transform.position.x >> transform.position.y >> transform.position.z
-           >> transform.scale.x >> transform.scale.y >> transform.scale.z
-           >> color.r >> color.g >> color.b;
+           >> transform.scale.x >> transform.scale.y >> transform.scale.z;
+
+        if (version >= 2) {
+            in >> transform.rotation.w >> transform.rotation.x
+               >> transform.rotation.y >> transform.rotation.z;
+        }
+
+        in >> color.r >> color.g >> color.b;
+
+        if (version >= 3) {
+            in >> visible;
+        }
+        if (version >= 4) {
+            in >> locked;
+        }
+        if (version >= 5) {
+            in >> modelAssetPath >> materialAssetPath;
+            if (modelAssetPath == "-") {
+                modelAssetPath.clear();
+            }
+            if (materialAssetPath == "-") {
+                materialAssetPath.clear();
+            }
+        }
 
         if (!in || !ParsePrimitive(primitiveName, &primitive)) {
             if (error) *error = "Scene file contains an invalid object record.";
@@ -154,6 +190,10 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         }
 
         CreateObject(name, primitive, MeshFor(primitive, cube, plane), transform, color);
+        m_objects.back().visible = visible != 0;
+        m_objects.back().locked = locked != 0;
+        m_objects.back().modelAssetPath = modelAssetPath;
+        m_objects.back().materialAssetPath = materialAssetPath;
     }
 
     m_selectedIndex = m_objects.empty() ? -1 : 0;
@@ -199,7 +239,7 @@ bool EditorScene::IsVisible(engine::ecs::Entity entity) const
 bool EditorScene::SelectedLocked() const
 {
     const Object* selected = SelectedObject();
-    return selected ? m_registry.TryGet<Transform>(selected->entity) : nullptr;
+    return selected ? selected->locked : false;
 }
 
 void EditorScene::SelectNext()
@@ -222,8 +262,20 @@ void EditorScene::SelectPrevious()
         : m_selectedIndex - 1;
 }
 
+void EditorScene::SelectIndex(int index)
+{
+    if (index < 0 || index >= static_cast<int>(m_objects.size())) {
+        return;
+    }
+    m_selectedIndex = index;
+}
+
 void EditorScene::MoveSelected(const glm::vec3 & delta)
 {
+    if (SelectedLocked()) {
+        return;
+    }
+
     if (Transform* transform = SelectedTransform()) {
         transform->position += delta;
         m_dirty = true;
@@ -232,6 +284,10 @@ void EditorScene::MoveSelected(const glm::vec3 & delta)
 
 void EditorScene::RotateSelectedYaw(float degrees)
 {
+    if (SelectedLocked()) {
+        return;
+    }
+
     if (Transform* transform = SelectedTransform()) {
         const glm::quat yaw = glm::angleAxis(glm::radians(degrees), glm::vec3(0.0f, 1.0f, 0.0f));
         transform->rotation = yaw * transform->rotation;
@@ -241,6 +297,10 @@ void EditorScene::RotateSelectedYaw(float degrees)
 
 void EditorScene::ScaleSelected(float factor)
 {
+    if (SelectedLocked()) {
+        return;
+    }
+
     if (Transform* transform = SelectedTransform()) {
         transform->scale *= factor;
         m_dirty = true;
@@ -249,7 +309,12 @@ void EditorScene::ScaleSelected(float factor)
 
 void EditorScene::ResetSelectedTransform()
 {
+    if (SelectedLocked()) {
+        return;
+    }
+
     if (Transform* transform = SelectedTransform()) {
+        PushUndoSnapshot();
         transform->position = glm::vec3(0.0f);
         transform->scale = glm::vec3(1.0f);
         transform->rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
@@ -345,6 +410,9 @@ bool EditorScene::CycleSelectedColor()
     {
         return false;
     }
+    if (selected->locked) {
+        return false;
+    }
 
     MeshRenderer* renderer = m_registry.TryGet<MeshRenderer>(selected->entity);
     if (!renderer) {
@@ -384,6 +452,40 @@ bool EditorScene::SetSelectedPrimitive(Primitive primitive, const engine::Mesh &
 
     selected.primitive = primitive;
     renderer->mesh = &mesh;
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedModelAsset(const std::string &path)
+{
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) {
+        return false;
+    }
+
+    PushUndoSnapshot();
+    selected.modelAssetPath = path;
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedMaterialAsset(const std::string &path)
+{
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) {
+        return false;
+    }
+
+    PushUndoSnapshot();
+    selected.materialAssetPath = path;
     m_dirty = true;
     return true;
 }
@@ -442,6 +544,9 @@ bool EditorScene::DuplicateSelected(const engine::Mesh & cube, const engine::Mes
 bool EditorScene::DeleteSelected()
 {
     if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+    if (m_objects[static_cast<std::size_t>(m_selectedIndex)].locked) {
         return false;
     }
 

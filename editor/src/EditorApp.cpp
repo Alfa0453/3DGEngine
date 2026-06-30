@@ -1,11 +1,12 @@
 #include "EditorApp.h"
 
+#include <engine/assets/RuntimeAssetManager.h>
+#include <engine/ecs/Registry.h>
 #include <engine/graphics/Primitives.h>
 
 #include <GLFW/glfw3.h>
 #include <glm/gtc/matrix_transform.hpp>
 
-#include <algorithm>
 #include <cstdio>
 #include <filesystem>
 
@@ -85,6 +86,7 @@ void EditorApp::OnInit()
     m_project.Load(m_config);
     RefreshAssets();
     m_scene.BuildDefault(*m_cube, *m_plane);
+    m_imgui.Init(GetWindow());
 }
 
 void EditorApp::OnUpdate(float dt)
@@ -146,7 +148,7 @@ void EditorApp::OnUpdate(float dt)
         RefreshAssets();
     }
     if (Pressed(GLFW_KEY_LEFT_BRACKET)) {
-    m_assets.SelectPrevious();
+        m_assets.SelectPrevious();
     }
     if (Pressed(GLFW_KEY_RIGHT_BRACKET)) {
         m_assets.SelectNext();
@@ -300,11 +302,14 @@ void EditorApp::OnRender()
         }
     );
 
+    m_imgui.BeginFrame();
     DrawEditorOverlay();
+    m_imgui.EndFrame();
 }
 
 void EditorApp::OnShutdown()
 {
+    m_imgui.Shutdown();
     m_project.Save(m_config);
     m_config.Set("window.vsync", GetWindow().IsVSync());
     m_config.Set("window.fullscreen", GetWindow().IsFullscreen());
@@ -327,6 +332,21 @@ void EditorApp::DrawEditorOverlay()
    const engine::Window& window = GetWindow();
     const int width = window.Width();
     const int height = window.Height();
+    EditorDockspace::Context dockspaceContext;
+    dockspaceContext.panels = &m_panels;
+    dockspaceContext.scene = &m_scene;
+    dockspaceContext.assets = &m_assets;
+    dockspaceContext.dragDrop = &m_dragDrop;
+    dockspaceContext.project = &m_project;
+    dockspaceContext.log = &m_log;
+    dockspaceContext.gizmo = &m_gizmo;
+    dockspaceContext.modeName = m_mode == EditorMode::Edit ? "Edit" : "Play";
+    dockspaceContext.fps = m_fps;
+    dockspaceContext.sceneDirty = m_scene.IsDirty();
+    const bool dockspaceDrawn = m_dockspace.Draw(dockspaceContext);
+    if (dockspaceContext.viewportDropRequested) {
+        DropPayloadOnScene();
+    }
 
     m_text->Begin(width, height);
 
@@ -345,7 +365,7 @@ void EditorApp::DrawEditorOverlay()
     m_text->Text(line, 24.0f, 52.0f, 1.15f, muted);
 
     float y = 120.0f;
-    if (m_panels.IsOpen(EditorPanels::Panel::Hierarchy)) {
+    if (!dockspaceDrawn && m_panels.IsOpen(EditorPanels::Panel::Hierarchy)) {
         m_text->Text("Hierarchy", 24.0f, 70.0f, 1.45f, text);
         const std::vector<EditorScene::Object>& objects = m_scene.Objects();
         for (int i = 0; i < static_cast<int>(objects.size()); ++i) {
@@ -359,11 +379,11 @@ void EditorApp::DrawEditorOverlay()
             y += 26.0f;
         }
     }
-    if (m_panels.IsOpen(EditorPanels::Panel::Assets)) {
+    if (!dockspaceDrawn && m_panels.IsOpen(EditorPanels::Panel::Assets)) {
         DrawAssetOverlay(24.0f, y + 28.0f, text, muted);
     }
 
-    if (m_panels.IsOpen(EditorPanels::Panel::Inspector)) {
+    if (!dockspaceDrawn && m_panels.IsOpen(EditorPanels::Panel::Inspector)) {
         m_text->Text("Inspector", static_cast<float>(width) - 330.0f, 70.0f, 1.45f, text);
         if (const EditorScene::Object* selected = m_scene.SelectedObject()) {
             const Transform* transform = m_scene.Registry().TryGet<Transform>(selected->entity);
@@ -377,6 +397,12 @@ void EditorApp::DrawEditorOverlay()
             m_text->Text(line, static_cast<float>(width) - 330.0f, 162.0f, 1.2f, muted);
             std::snprintf(line, sizeof(line), "Locked: %s", selected->locked ? "yes" : "no");
             m_text->Text(line, static_cast<float>(width) - 330.0f, 190.0f, 1.2f, muted);
+            std::snprintf(line, sizeof(line), "Model: %s",
+                selected->modelAssetPath.empty() ? "-" : selected->modelAssetPath.c_str());
+            m_text->Text(line, static_cast<float>(width) - 330.0f, 218.0f, 1.05f, muted);
+            std::snprintf(line, sizeof(line), "Material: %s",
+                selected->materialAssetPath.empty() ? "-" : selected->materialAssetPath.c_str());
+            m_text->Text(line, static_cast<float>(width) - 330.0f, 240.0f, 1.05f, muted);
             if (transform) {
                 std::snprintf(line, sizeof(line), "Position: %.2f, %.2f, %.2f",
                     transform->position.x, transform->position.y, transform->position.z);
@@ -400,7 +426,7 @@ void EditorApp::DrawEditorOverlay()
         m_gizmo.ModeName(), m_gizmo.AxisName());
     m_text->Text(line, static_cast<float>(width) - 330.0f, 40.0f, 1.15f, accent);
 
-    if (m_panels.IsOpen(EditorPanels::Panel::Console)) {
+    if (!dockspaceDrawn && m_panels.IsOpen(EditorPanels::Panel::Console)) {
         DrawLogOverlay(static_cast<float>(width) - 330.0f, 292.0f, text, muted);
     }
 
@@ -425,7 +451,8 @@ void EditorApp::DrawAssetOverlay(float x, float y, const glm::vec3 & text, const
     const int maxVisible = 8;
     for (int i = 0; i < static_cast<int>(assets.size()) && i < maxVisible; ++i) {
         const EditorAssets::Asset& asset = assets[static_cast<std::size_t>(i)];
-        std::snprintf(line, sizeof(line), "%s  %s",
+        std::snprintf(line, sizeof(line), "%s%s  %s",
+            i == m_assets.SelectedIndex() ? ">" : " ",
             EditorAssets::TypeName(asset.type), asset.relativePath.c_str());
         m_text->Text(line, x + 6.0f, y + 60.0f + static_cast<float>(i) * 22.0f, 1.05f, muted);
     }
@@ -439,7 +466,12 @@ void EditorApp::DrawAssetOverlay(float x, float y, const glm::vec3 & text, const
 
     if (m_dragDrop.HasPayload()) {
         const EditorDragDrop::Payload& payload = m_dragDrop.CurrentPayload();
-        std::snprintf(line, sizeof(line), "Dragging: %s", payload.path.c_str());
+        if (payload.mouseDriven) {
+            std::snprintf(line, sizeof(line), "Dragging: %s  @ %.0f, %.0f",
+                payload.path.c_str(), payload.cursorX, payload.cursorY);
+        } else {
+            std::snprintf(line, sizeof(line), "Dragging: %s", payload.path.c_str());
+        }
         m_text->Text(line, x + 6.0f, y + 302.0f, 1.05f, text);
     }
 }
@@ -615,9 +647,6 @@ void EditorApp::HandleMouseVIewportGizmo()
         m_mouseGizmoLastY = y;
     }
 
-
-
-
     if (rightReleased && m_mouseGizmoActive) {
         m_scene.EndTransformEdit();
         m_mouseGizmoActive = false;
@@ -661,9 +690,17 @@ void EditorApp::DropPayloadOnScene()
     }
 
     if (payload.typeName == "Model") {
-        m_log.Warning("Model drop needs runtime model component surport");
+        if (m_scene.SetSelectedModelAsset(payload.path)) {
+            m_log.Info("Assigned model asset to selected object");
+        } else {
+            m_log.Warning("Model drop failed: select an unlocked object first");
+        }
     } else if (payload.typeName == "Texture") {
-        m_log.Warning("Texture drop needs material editing surport");
+        if (m_scene.SetSelectedMaterialAsset(payload.path)) {
+            m_log.Info("Assigned material texture to selected object");
+        } else {
+            m_log.Warning("Texture drop failed: select an unlocked object first");
+        }
     } else {
         m_log.Warning("Asset type cannot be dropped on the scene yet");
     }
@@ -903,13 +940,35 @@ void EditorApp::ValidateRuntimeScene()
     std::filesystem::path runtimePath(m_project.ScenePath());
     runtimePath.replace_extension(".runtime.scene");
 
-    RuntimeSceneLoader::Scene runtimeScene;
+    engine::RuntimeSceneLoader::Scene runtimeScene;
     std::string error;
-    if (RuntimeSceneLoader::Load(runtimePath.string(), &runtimeScene, &error)) {
-        m_log.Info("Validated runtime scene: " + std::to_string(runtimeScene.entities.size()) + " entities");
-    } else {
+    if (!engine::RuntimeSceneLoader::Load(runtimePath.string(), &runtimeScene, &error)) {
         m_log.Error("Runtime scene validation failed: " + error);
     }
+
+    if (!m_cube || !m_plane) {
+        m_log.Error("Runtime scene validation failed: editor primitive meshes are not ready");
+        return;
+    }
+
+    engine::ecs::Registry registry;
+    engine::RuntimeSceneLoader::PrimitiveMeshes meshes{&*m_cube, &*m_plane};
+    if (!engine::RuntimeSceneLoader::Instantiate(runtimeScene, registry, meshes, nullptr, &error)) {
+        m_log.Error("Runtime scene validation failed: " + error);
+        return;
+    }
+
+    engine::RuntimeAssetManager assets;
+    const engine::RuntimeAssetManager::ResolveReport report = assets.ResolveRegistryAssets(registry);
+    if (!report.errors.empty()) {
+        m_log.Error("Runtime asset validation failed: " + report.errors.front());
+        return;
+    }
+
+    m_log.Info("Validated runtime scene: "
+        + std::to_string(runtimeScene.entities.size()) + " entities, "
+        + std::to_string(report.modelsAssigned) + " models, "
+        + std::to_string(report.texturesAssigned) + " tectures");
 }
 
 void EditorApp::EnterPlayMode()
@@ -949,7 +1008,9 @@ bool EditorApp::IsTransformEditActive(const engine::Window &window) const
         || window.IsKeyPressed(GLFW_KEY_EQUAL)
         || window.IsKeyPressed(GLFW_KEY_KP_ADD)
         || window.IsKeyPressed(GLFW_KEY_MINUS)
-        || window.IsKeyPressed(GLFW_KEY_KP_SUBTRACT);
+        || window.IsKeyPressed(GLFW_KEY_KP_SUBTRACT)
+        || window.IsKeyPressed(GLFW_KEY_COMMA)
+        || window.IsKeyPressed(GLFW_KEY_PERIOD);
 }
 
 bool EditorApp::Pressed(int key)

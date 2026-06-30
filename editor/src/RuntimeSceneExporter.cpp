@@ -17,6 +17,10 @@ const char* PrimitiveName(EditorScene::Primitive primitive) {
     return "Cube";
 }
 
+const char* StoredPath(const std::string& path) {
+    return path.empty() ? "-" : path.c_str();
+}
+
 } // namespace
 
 bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &path, std::string *error)
@@ -48,7 +52,9 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
             << transform->scale.x << ' ' << transform->scale.y << ' ' << transform->scale.z << ' '
             << transform->rotation.w << ' ' << transform->rotation.x << ' '
             << transform->rotation.y << ' ' << transform->rotation.z << ' '
-            << renderer->color.r << ' ' << renderer->color.g << ' ' << renderer->color.b << '\n';
+            << renderer->color.r << ' ' << renderer->color.g << ' ' << renderer->color.b << ' '
+            << StoredPath(object.modelAssetPath) << ' '
+            << StoredPath(object.materialAssetPath) << '\n';
     }
 
     return true;

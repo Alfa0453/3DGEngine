@@ -93,6 +93,42 @@ FetchContent_MakeAvailable(assimp)
 # GLAD — loads OpenGL 3.3 core function pointers. Vendored (see vendor/glad).
 add_subdirectory(vendor/glad)
 
+# OpenGL itself (opengl32 on Windows, libGL on Linux, the framework on macOS).
+find_package(OpenGL REQUIRED)
+
+# Dear ImGui — immediate-mode UI used by development tools such as the editor.
+FetchContent_Declare(
+    imgui
+    GIT_REPOSITORY https://github.com/ocornut/imgui.git
+    GIT_TAG        docking
+)
+FetchContent_MakeAvailable(imgui)
+
+add_library(imgui STATIC
+    ${imgui_SOURCE_DIR}/imgui.cpp
+    ${imgui_SOURCE_DIR}/imgui_demo.cpp
+    ${imgui_SOURCE_DIR}/imgui_draw.cpp
+    ${imgui_SOURCE_DIR}/imgui_tables.cpp
+    ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+    ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
+    ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp
+)
+
+target_include_directories(imgui PUBLIC
+    ${imgui_SOURCE_DIR}
+    ${imgui_SOURCE_DIR}/backends
+)
+
+target_link_libraries(imgui PUBLIC
+    glfw
+    glad
+    OpenGL::GL
+)
+
+target_compile_definitions(imgui PUBLIC
+    IMGUI_IMPL_OPENGL_LOADER_GLAD
+)
+
 # --- Our libraries and executables -----------------------------------------
 add_subdirectory(engine)   # the reusable engine (static library)
 #add_subdirectory(game)     # the game that links against the engine

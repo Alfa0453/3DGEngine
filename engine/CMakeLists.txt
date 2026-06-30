@@ -33,6 +33,9 @@ add_library(engine STATIC
     src/graphics/IBL.cpp
     src/graphics/SSAO.cpp
     src/graphics/SSR.cpp
+    src/scene/RuntimeSceneLoader.cpp
+    src/assets/RuntimeAssetManager.cpp
+    src/ui/ImGuiLayer.cpp
     src/ecs/Ecs.cpp
     src/audio/AudioEngine.cpp
     src/audio/miniaudio_impl.c
@@ -56,6 +59,7 @@ target_link_libraries(engine
     PUBLIC
         glfw
         glad
+        imgui
         glm::glm
         OpenGL::GL
         Threads::Threads
