@@ -348,6 +348,17 @@ std::string EditorAssets::CopiedDisplayName() const
     return fs::path(m_clipboardRelativePath).filename().string();
 }
 
+std::string EditorAssets::SelectedAssetFullPath() const 
+{
+    const Asset* asset = SelectedAsset();
+    return asset ? FullPathForRelative(asset->relativePath) : std::string();
+}
+
+std::string EditorAssets::CopiedFullPath() const
+{
+    return m_clipboardRelativePath.empty() ? std::string() : FullPathForRelative(m_clipboardRelativePath);
+}
+
 void EditorAssets::SelectNext()
 {
     if (m_assets.empty()) {
@@ -398,6 +409,7 @@ const char *EditorAssets::TypeName(Type type)
 {
     switch (type) {
         case Type::Model: return "Model";
+        case Type::Material: return "Material";
         case Type::Texture: return "Texture";
         case Type::Shader: return "Shader";
         case Type::Audio: return "Audio";
@@ -411,6 +423,9 @@ EditorAssets::Type EditorAssets::ClassifyExtension(const std::string &extension)
 {
     if (extension == ".obj" || extension == ".fbx" || extension == ".gltf" || extension == ".glb") {
     return Type::Model;
+    }
+    if (extension == ".3dgmat") {
+        return Type::Material;
     }
     if (extension == ".png" || extension == ".jpg" || extension == ".jpeg" || extension == ".tga") {
         return Type::Texture;

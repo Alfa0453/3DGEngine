@@ -3,6 +3,7 @@
 #include "engine/ecs/Components.h"
 
 #include <exception>
+#include <filesystem>
 #include <utility>
 
 namespace engine {
@@ -65,6 +66,30 @@ const Texture* RuntimeAssetManager::LoadTexture(const std::string &path, std::st
         return nullptr;
     }
 }
+
+const RuntimeMaterialAsset* RuntimeAssetManager::LoadMaterial(const std::string& path, std::string* error)
+{
+    if (path.empty()) {
+        SetError(error, "RuntimeAssetManager: material path is empty");
+        return nullptr;
+    }
+
+    const auto existing = m_materials.find(path);
+    if (existing != m_materials.end()) {
+        SetError(error, std::string{});
+        return existing->second.get();
+    }
+
+    auto material = std::make_unique<RuntimeMaterialAsset>();
+    if (!LoadMaterialAssetFile(path, material.get(), error)) {
+        return nullptr;
+    }
+
+    const RuntimeMaterialAsset* result = material.get();
+    m_materials.emplace(path, std::move(material));
+    SetError(error, std::string{});
+    return result;
+}
 const Model *RuntimeAssetManager::FindModel(const std::string &path) const
 {
     const auto found = m_models.find(path);
@@ -74,6 +99,12 @@ const Texture *RuntimeAssetManager::FindTexture(const std::string &path) const
 {
     const auto found = m_textures.find(path);
     return found == m_textures.end() ? nullptr : found->second.get();
+}
+
+const RuntimeMaterialAsset* RuntimeAssetManager::FindMaterial(const std::string& path) const
+{
+    const auto found = m_materials.find(path);
+    return found == m_materials.end() ? nullptr : found->second.get();
 }
 RuntimeAssetManager::ResolveReport RuntimeAssetManager::ResolveRegistryAssets(ecs::Registry &registry)
 {
@@ -96,19 +127,62 @@ RuntimeAssetManager::ResolveReport RuntimeAssetManager::ResolveRegistryAssets(ec
     });
 
     registry.view<ecs::MaterialAsset>().each([&](ecs::Entity entity, ecs::MaterialAsset& asset) {
-        const bool wasCached = FindTexture(asset.albedoPath) != nullptr;
-        std::string error;
-        const Texture* texture = LoadTexture(asset.albedoPath, &error);
-        if (!texture) {
-            report.errors.push_back(error);
+        const std::string materialPath = asset.path.empty() ? asset.albedoPath : asset.path;
+        if (materialPath.empty()) {
             return;
         }
 
-        if (!wasCached) {
-            ++report.texturesLoaded;
+        std::string error;
+        ecs::LoadedMaterialAsset loaded;
+
+        if (std::filesystem::path(materialPath).extension() == ".3dgmat") {
+            const bool wasCached = FindMaterial(materialPath) != nullptr;
+            const RuntimeMaterialAsset* material = LoadMaterial(materialPath, &error);
+            if (!material) {
+                report.errors.push_back(error);
+                return;
+            }
+            if (!wasCached) {
+                ++report.materialsLoaded;
+            }
+            loaded.material = material->material;
+            if (!material->albedoMapPath.empty()) {
+                const bool textureCached = FindTexture(material->albedoMapPath) != nullptr;
+                loaded.albedoMap = LoadTexture(material->albedoMapPath, &error);
+                if (!loaded.albedoMap) {
+                    report.errors.push_back(error);
+                    return;
+                }
+                if (!textureCached) {
+                    ++report.texturesLoaded;
+                }
+            }
+            if (!material->normalMapPath.empty()) {
+                loaded.normalMap = LoadTexture(material->normalMapPath, &error);
+            }
+            if (!material->metalRoughMapPath.empty()) {
+                loaded.metalRoughMap = LoadTexture(material->metalRoughMapPath, &error);
+            }
+            ++report.materialsAssigned;
+        } else {
+            const bool wasCached = FindTexture(materialPath) != nullptr;
+            const Texture* texture = LoadTexture(materialPath, &error);
+            if (!texture) {
+                report.errors.push_back(error);
+                return;
+            }
+            if (!wasCached) {
+                ++report.texturesLoaded;
+            }
+            loaded.albedoMap = texture;
+            loaded.material.albedoMap = texture;
+            ++report.texturesAssigned;
         }
-        registry.Add<ecs::LoadedMaterialAsset>(entity, ecs::LoadedMaterialAsset{texture});
-        ++report.texturesAssigned;
+
+        loaded.material.albedoMap = loaded.albedoMap;
+        loaded.material.normalMap = loaded.normalMap;
+        loaded.material.metalRoughMap = loaded.metalRoughMap;
+        registry.Add<ecs::LoadedMaterialAsset>(entity, loaded);
     });
 
     return report;
@@ -117,6 +191,7 @@ void RuntimeAssetManager::Clear()
 {
     m_models.clear();
     m_textures.clear();
+    m_materials.clear();
 }
 
 } // namespace engine

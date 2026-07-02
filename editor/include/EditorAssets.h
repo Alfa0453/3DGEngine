@@ -8,6 +8,7 @@ class EditorAssets {
 public:
     enum class Type {
         Model,
+        Material,
         Texture,
         Shader,
         Audio,
@@ -54,6 +55,8 @@ public:
     const Asset* SelectedAsset() const;
     bool HasCopiedEntry() const { return !m_clipboardRelativePath.empty(); }
     std::string CopiedDisplayName() const;
+    std::string SelectedAssetFullPath() const;
+    std::string CopiedFullPath() const;
 
     void SelectNext();
     void SelectPrevious();

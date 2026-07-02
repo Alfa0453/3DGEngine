@@ -16,7 +16,45 @@ const char* PrimitiveName(EditorScene::Primitive primitive) {
 }
 
 const char* ObjectTypeName(const EditorScene::Object& object) {
-    return object.materialAssetPath.empty() ? PrimitiveName(object.primitive) : "Model";
+    return object.modelAssetPath.empty() ? PrimitiveName(object.primitive) : "Model";
+}
+
+bool IsMaterialDocument(const std::filesystem::path& path) {
+    return path.extension() == ".3dgmat";
+}
+
+std::vector<EditorAssets::Asset> FindMaterialAssets(const EditorAssets& assets) {
+    std::vector<EditorAssets::Asset> materials;
+    std::error_code ec;
+    const std::filesystem::path root = assets.RootPath();
+    if (!std::filesystem::exists(root, ec) || !std::filesystem::is_directory(root, ec)) {
+        return materials;
+    }
+
+    for (const std::filesystem::directory_entry& entry : std::filesystem::recursive_directory_iterator(root, ec)) {
+        if (ec) {
+            break;
+        }
+        if (!entry.is_regular_file(ec) || !IsMaterialDocument(entry.path())) {
+            continue;
+        }
+
+        EditorAssets::Asset material;
+        material.relativePath = std::filesystem::relative(entry.path(), root, ec).string();
+        if (ec) {
+            continue;
+        }
+        std::replace(material.relativePath.begin(), material.relativePath.end(), '\\', '/');
+        material.displayName = entry.path().filename().string();
+        material.type = EditorAssets::Type::Material;
+        materials.push_back(material);
+    }
+
+    std::sort(materials.begin(), materials.end(),
+        [](const EditorAssets::Asset& a, const EditorAssets::Asset& b) {
+            return a.relativePath < b.relativePath;
+        });
+    return materials;
 }
 
 ImVec4 LogColor(EditorLog::Level level) {
@@ -67,7 +105,7 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
     }
 
     if (!context.scene) {
-        ImGui::TextUnformatted("scene unavailable.");
+        ImGui::TextUnformatted("Scene unavailable.");
         ImGui::End();
         return;
     }
@@ -84,8 +122,44 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
     ImGui::Text("Model: %s", selected->modelAssetPath.empty() ? "-" : selected->modelAssetPath.c_str());
     ImGui::Text("Material: %s", selected->materialAssetPath.empty() ? "-" : selected->materialAssetPath.c_str());
 
+    if (context.assets) {
+        const std::vector<EditorAssets::Asset> materials = FindMaterialAssets(*context.assets);
+        const char* preview = selected->materialAssetPath.empty() ? "None" : selected->materialAssetPath.c_str();
+        if (ImGui::BeginCombo("Apply Material", preview)) {
+            if (ImGui::Selectable("None", selected->materialAssetPath.empty())) {
+                if (context.scene->SetSelectedMaterialAsset(std::string())) {
+                    if (context.log) {
+                        context.log->Info("Cleared selected object material");
+                    }
+                } else if (context.log) {
+                    context.log->Warning("Material clear failed: selected object is locked");
+                }
+            }
+            for (const EditorAssets::Asset& material : materials) {
+                const std::string fullPath = (std::filesystem::path(context.assets->RootPath()) / material.relativePath).string();
+                const bool current = selected->materialAssetPath == fullPath;
+                if (ImGui::Selectable(material.relativePath.c_str(), current)) {
+                    if (context.scene->SetSelectedMaterialAsset(fullPath)) {
+                        if (context.log) {
+                            context.log->Info("Applied material: " + material.relativePath);
+                        }
+                    } else if (context.log) {
+                        context.log->Warning("Material apply failed: selected object is locked");
+                    }
+                }
+                if (current) {
+                    ImGui::SetItemDefaultFocus();
+                }
+            }
+            if (materials.empty()) {
+                ImGui::TextUnformatted("No .3dgmat files found.");
+            }
+            ImGui::EndCombo();
+        }
+    }
+
     glm::vec3 linearVelocity = selected->linearVelocity;
-    if (ImGui::DragFloat3("Linear Velocity", &linearVelocity.x, 0.05f)) {
+    if (ImGui::DragFloat3("Linear velocity", &linearVelocity.x, 0.05f)) {
         context.scene->SetSelectedLinearVelocity(linearVelocity);
     }
 
@@ -169,8 +243,16 @@ void DrawAssets(EditorDockspace::Context& context, bool* open) {
     if (ImGui::Button("Copy")) {
         std::string error;
         if (context.assets->CopySelected(&error)) {
+            const EditorAssets::Asset* selectedAsset = context.assets->SelectedAsset();
+            if (selectedAsset && selectedAsset->type == EditorAssets::Type::Texture) {
+                const std::string texturePath = context.assets->SelectedAssetFullPath();
+                ImGui::SetClipboardText(texturePath.c_str());
+            }
             if (context.log) {
                 context.log->Info("Copied Content entry: " + context.assets->CopiedDisplayName());
+                if (selectedAsset && selectedAsset->type == EditorAssets::Type::Texture) {
+                    context.log->Info("Texture path ready for Material Maker paste");
+                }
             }
         } else if (context.log) {
             context.log->Warning(error);
@@ -442,6 +524,8 @@ bool EditorDockspace::Draw(Context &context)
             break;
         case EditorPanels::Panel::Console:
             DrawConsole(context, &open);
+            break;
+        case EditorPanels::Panel::MaterialMaker:
             break;
         case EditorPanels::Panel::Count:
             break;

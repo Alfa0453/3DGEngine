@@ -7,6 +7,8 @@
 #
 # to the engine root CMakeLists.txt. This file assumes the `engine` CMake target
 # already exists, just like the viewer and scene demos do.
+add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../MaterialMaker" "${CMAKE_CURRENT_BINARY_DIR}/MaterialMaker")
+
 add_executable(3DGEditor
     src/main.cpp
     src/EditorApp.cpp
@@ -19,12 +21,18 @@ add_executable(3DGEditor
     src/EditorDragDrop.cpp
     src/EditorPanels.cpp
     src/EditorDockspace.cpp
+    src/EditorViewport.cpp
+    src/EditorContentController.cpp
+    src/EditorCameraController.cpp
+    src/EditorMouseController.cpp
+    src/EditorRuntimeController.cpp
+    src/EditorTransformController.cpp
 )
 
 target_include_directories(3DGEditor PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/engine/include)
-target_link_libraries(3DGEditor PRIVATE engine)
+target_link_libraries(3DGEditor PRIVATE engine MaterialMaker)
 
 add_custom_command(TARGET 3DGEditor POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory

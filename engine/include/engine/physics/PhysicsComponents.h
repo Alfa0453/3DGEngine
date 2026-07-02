@@ -23,6 +23,11 @@ struct RigidBody {
     bool      sleeping   = false;   // solver-managed
     float     sleepTimer = 0.0f;    // solver-managed (seconds of stillness)
 
+    // Continuous collision: sweep this body's motion each step so it cannot
+    // tunnel through thin geometry. Opt-in (costs an extra sweep) -- for bullets
+    // and other fast movers. The moving body is approximated as a sphere.
+    bool      ccd = false;
+
     void AddForce(const glm::vec3& f) { accumForce += f; }
 
     static RigidBody Static() { RigidBody b; b.invMass = 0.0f; b.useGravity = false; return b; }
@@ -43,7 +48,7 @@ struct Collider {
     glm::vec3     halfExtents{0.5f};              // Box
     glm::vec3     planeNormal{0.0f, 1.0f, 0.0f};  // Plane
     float         planeOffset = 0.0f;             // Plane
-    float         restitution = 0.4f;             // material: bounceness
+    float         restitution = 0.4f;             // material: bounciness
     float         friction    = 0.5f;             // material: Coulomb coefficient
     bool          isTrigger   = false;            // overlap-only: detected but never resolved
 

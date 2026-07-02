@@ -35,6 +35,7 @@ add_library(engine STATIC
     src/graphics/SSR.cpp
     src/scene/RuntimeSceneLoader.cpp
     src/assets/RuntimeAssetManager.cpp
+    src/assets/MaterialAssetLoader.cpp
     src/ui/ImGuiLayer.cpp
     src/ecs/Ecs.cpp
     src/audio/AudioEngine.cpp

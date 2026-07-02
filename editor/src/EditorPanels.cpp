@@ -22,6 +22,7 @@ const char *EditorPanels::Name(Panel panel)
     case Panel::Inspector: return "Inspector";
     case Panel::Assets:     return "Assets";
     case Panel::Console:   return "Console";
+    case Panel::MaterialMaker: return "Material Maker";
     case Panel::Count:     break;
     }
     return "Panel";

@@ -625,24 +625,27 @@ bool EditorScene::DuplicateSelected(const engine::Mesh & cube, const engine::Mes
         return false;
     }
 
+    const Object selectedCopy = *selected;
     const Transform* transform = m_registry.TryGet<Transform>(selected->entity);
     const MeshRenderer* renderer = m_registry.TryGet<MeshRenderer>(selected->entity);
-    if (!transform || !renderer) {
+    if (!transform || !renderer || selectedCopy.locked) {
         return false;
     }
 
+    Transform duplicateTransform = *transform;
+    const glm::vec3 duplicateColor = renderer->color;
+
     PushUndoSnapshot();
 
-    Transform duplicateTransform = *transform;
     duplicateTransform.position += glm::vec3(0.8f, 0.0f, 0.8f);
 
-    const engine::Mesh& mesh = MeshFor(selected->primitive, cube, plane);
-    CreateObject(selected->name + "_Copy", selected->primitive, mesh, duplicateTransform, renderer->color);
-    m_objects.back().modelAssetPath = selected->modelAssetPath;
-    m_objects.back().materialAssetPath = selected->materialAssetPath;
-    m_objects.back().linearVelocity = selected->linearVelocity;
-    m_objects.back().angularVelocityAxis = selected->angularVelocityAxis;
-    m_objects.back().angularVelocityRadians = selected->angularVelocityRadians;
+    const engine::Mesh& mesh = MeshFor(selectedCopy.primitive, cube, plane);
+    CreateObject(selectedCopy.name + "_Copy", selectedCopy.primitive, mesh, duplicateTransform, duplicateColor);
+    m_objects.back().modelAssetPath = selectedCopy.modelAssetPath;
+    m_objects.back().materialAssetPath = selectedCopy.materialAssetPath;
+    m_objects.back().linearVelocity = selectedCopy.linearVelocity;
+    m_objects.back().angularVelocityAxis = selectedCopy.angularVelocityAxis;
+    m_objects.back().angularVelocityRadians = selectedCopy.angularVelocityRadians;
     m_selectedIndex = static_cast<int>(m_objects.size()) - 1;
     m_dirty = true;
     return true;

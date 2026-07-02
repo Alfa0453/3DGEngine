@@ -78,6 +78,7 @@ struct ModelAsset {
 };
 
 struct MaterialAsset {
+    std::string path;
     std::string albedoPath;
 };
 
@@ -86,7 +87,10 @@ struct LoadedModelAsset {
 };
 
 struct LoadedMaterialAsset {
+    PbrMaterial material;
     const Texture* albedoMap = nullptr;
+    const Texture* normalMap = nullptr;
+    const Texture* metalRoughMap = nullptr;
 };
 
 // A light source. Point lights take their position from the entity's Transform;

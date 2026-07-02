@@ -9,6 +9,7 @@ public:
         Inspector,
         Assets,
         Console,
+        MaterialMaker,
         Count
     };
 
