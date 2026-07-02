@@ -15,6 +15,10 @@ const char* PrimitiveName(EditorScene::Primitive primitive) {
     return primitive == EditorScene::Primitive::Plane ? "Plane" : "Cube";
 }
 
+const char* ObjectTypeName(const EditorScene::Object& object) {
+    return object.materialAssetPath.empty() ? PrimitiveName(object.primitive) : "Model";
+}
+
 ImVec4 LogColor(EditorLog::Level level) {
     switch (level) {
     case EditorLog::Level::Info: return ImVec4(0.78f, 0.84f, 0.92f, 1.0f);
@@ -76,9 +80,31 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
     }
 
     ImGui::Text("Name: %s", selected->name.c_str());
-    ImGui::Text("Type: %s", PrimitiveName(selected->primitive));
+    ImGui::Text("Type: %s", ObjectTypeName(*selected));
     ImGui::Text("Model: %s", selected->modelAssetPath.empty() ? "-" : selected->modelAssetPath.c_str());
     ImGui::Text("Material: %s", selected->materialAssetPath.empty() ? "-" : selected->materialAssetPath.c_str());
+
+    glm::vec3 linearVelocity = selected->linearVelocity;
+    if (ImGui::DragFloat3("Linear Velocity", &linearVelocity.x, 0.05f)) {
+        context.scene->SetSelectedLinearVelocity(linearVelocity);
+    }
+
+    glm::vec3 angularAxis = selected->angularVelocityAxis;
+    float angularSpeed = selected->angularVelocityRadians;
+    if (ImGui::DragFloat3("Angular axis", &angularAxis.x, 0.05f)) {
+        context.scene->SetSelectedAngularVelocity(angularAxis, angularSpeed);
+    }
+    if (ImGui::DragFloat("Angular speed", &angularSpeed, 0.05f)) {
+        context.scene->SetSelectedAngularVelocity(angularAxis, angularSpeed);
+    }
+    if (ImGui::Button("Spin Y")) {
+        context.scene->SetSelectedAngularVelocity(glm::vec3(0.0f, 1.0f, 0.0f), 1.57f);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Clear motion")) {
+        context.scene->SetSelectedLinearVelocity(glm::vec3(0.0f));
+        context.scene->SetSelectedAngularVelocity(glm::vec3(0.0f, 1.0f, 0.0f), 0.0f);
+    }
 
     bool visible = selected->visible;
     if (ImGui::Checkbox("Visible", &visible)) {
@@ -125,8 +151,105 @@ void DrawAssets(EditorDockspace::Context& context, bool* open) {
     }
 
     ImGui::Text("Root: %s", context.assets->RootPath().c_str());
+    ImGui::Text("Folder: /%s", context.assets->CurrentFolder().c_str());
     ImGui::Text("%d files", static_cast<int>(context.assets->Assets().size()));
+    if (ImGui::Button("Up")) {
+        std::string error;
+        if (!context.assets->GoUp(&error) && context.log) {
+            context.log->Error(error);
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Refresh")) {
+        std::string error;
+        if (!context.assets->Refresh(context.assets->RootPath(), &error) && context.log) {
+            context.log->Error(error);
+        }
+    }
+    if (ImGui::Button("Copy")) {
+        std::string error;
+        if (context.assets->CopySelected(&error)) {
+            if (context.log) {
+                context.log->Info("Copied Content entry: " + context.assets->CopiedDisplayName());
+            }
+        } else if (context.log) {
+            context.log->Warning(error);
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Paste")) {
+        std::string error;
+        if (context.assets->PasteCopied(&error)) {
+            if (context.log) {
+                context.log->Info("Pasted Content entry");
+            }
+        } else if (context.log) {
+            context.log->Warning(error);
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Delete")) {
+        std::string error;
+        if (context.assets->DeleteSelectedEntry(&error)) {
+            if (context.log) {
+                context.log->Info("Deleted Content entry");
+            }
+        } else if (context.log) {
+            context.log->Warning(error);
+        }
+    }
+    if (context.assets->HasCopiedEntry()) {
+        ImGui::Text("Copied: %s", context.assets->CopiedDisplayName().c_str());
+    }
+
+    static char folderName[128] = "NewFolder";
+    ImGui::InputText("Folder name", folderName, sizeof(folderName));
+    ImGui::SameLine();
+    if (ImGui::Button("Create folder")) {
+        std::string error;
+        if (context.assets->CreateFolder(folderName, &error)) {
+            if (context.log) {
+                context.log->Info(std::string("Created Content folder: ") + folderName);
+            }
+            folderName[0] = '\0';
+        } else if (context.log) {
+            context.log->Error(error);
+        }
+    }
+
+    static char importPath[512] = "";
+    ImGui::InputText("Import file", importPath, sizeof(importPath));
+    ImGui::SameLine();
+    if (ImGui::Button("Import")) {
+        std::string error;
+        if (context.assets->ImportAsset(importPath, &error)) {
+            if (context.log) {
+                context.log->Info(std::string("Imported asset: ") + importPath);
+            }
+            importPath[0] = '\0';
+        } else if (context.log) {
+            context.log->Error(error);
+        }
+    }
     ImGui::Separator();
+
+    const std::vector<EditorAssets::Folder>& folders = context.assets->Folders();
+    for (int i = 0; i < static_cast<int>(folders.size()); ++i) {
+        const EditorAssets::Folder& folder = folders[static_cast<std::size_t>(i)];
+        char label[256];
+        std::snprintf(label, sizeof(label), "[Folder] %s", folder.displayName.c_str());
+        const bool selected = context.assets->SelectedType() == EditorAssets::SelectionType::Folder
+            && context.assets->SelectedFolderIndex() == i;
+        if (ImGui::Selectable(label, selected)) {
+            context.assets->SelectFolderIndex(i);
+        }
+        if (selected && ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+            std::string error;
+            if (!context.assets->EnterFolder(i, &error) && context.log) {
+                context.log->Error(error);
+            }
+        }
+    }
 
     const std::vector<EditorAssets::Asset>& assets = context.assets->Assets();
     for (int i =0; i < static_cast<int>(assets.size()); ++i) {
@@ -135,7 +258,9 @@ void DrawAssets(EditorDockspace::Context& context, bool* open) {
         std::snprintf(label, sizeof(label), "[%s] %s",
             EditorAssets::TypeName(asset.type), asset.relativePath.c_str());
         
-        if (ImGui::Selectable(label, i == context.assets->SelectedIndex())) {
+        const bool selected = context.assets->SelectedType() == EditorAssets::SelectionType::Asset
+            && i == context.assets->SelectedIndex();
+        if (ImGui::Selectable(label, selected)) {
             context.assets->SelectIndex(i);
         }
 
@@ -182,6 +307,53 @@ void DrawConsole(EditorDockspace::Context& context, bool* open) {
     if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY()) {
         ImGui::SetScrollHereY(1.0f);
     }
+
+    ImGui::End();
+}
+
+void DrawGizmoToolbar(EditorDockspace::Context& context) {
+    if (!context.gizmo) {
+        return;
+    }
+
+    ImGui::SetNextWindowBgAlpha(0.85f);
+    ImGui::Begin("Gizmo", nullptr,
+        ImGuiWindowFlags_AlwaysAutoResize
+        | ImGuiWindowFlags_NoCollapse
+        | ImGuiWindowFlags_NoSavedSettings);
+
+    const EditorGizmo::Mode mode = context.gizmo->CurrentMode();
+    if (ImGui::Selectable("Move", mode == EditorGizmo::Mode::Translate, 0, ImVec2(72.0f, 0.0f))) {
+        context.gizmo->SetMode(EditorGizmo::Mode::Translate);
+    }
+    ImGui::SameLine();
+    if (ImGui::Selectable("Rotate", mode == EditorGizmo::Mode::Rotate, 0, ImVec2(72.0f, 0.0f))) {
+        context.gizmo->SetMode(EditorGizmo::Mode::Rotate);
+    }
+    ImGui::SameLine();
+    if (ImGui::Selectable("Scale", mode == EditorGizmo::Mode::Scale, 0, ImVec2(72.0f, 0.0f))) {
+        context.gizmo->SetMode(EditorGizmo::Mode::Scale);
+    }
+
+    ImGui::Separator();
+    const EditorGizmo::Axis axis = context.gizmo->CurrentAxis();
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.72f, 0.16f, 0.18f, 1.0f));
+    if (ImGui::Button(axis == EditorGizmo::Axis::X ? "X -> *" : "X ->", ImVec2(68.0f, 0.0f))) {
+        context.gizmo->SetAxis(EditorGizmo::Axis::X);
+    }
+    ImGui::PopStyleColor();
+    ImGui::SameLine();
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.16f, 0.55f, 0.22f, 1.0f));
+    if (ImGui::Button(axis == EditorGizmo::Axis::Y ? "Y ^ *" : "Y ^", ImVec2(68.0f, 0.0f))) {
+        context.gizmo->SetAxis(EditorGizmo::Axis::Y);
+    }
+    ImGui::PopStyleColor();
+    ImGui::SameLine();
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.16f, 0.34f, 0.76f, 1.0f));
+    if (ImGui::Button(axis == EditorGizmo::Axis::Z ? "Z / *" : "Z /", ImVec2(68.0f, 0.0f))) {
+        context.gizmo->SetAxis(EditorGizmo::Axis::Z);
+    }
+    ImGui::PopStyleColor();
 
     ImGui::End();
 }
@@ -277,6 +449,8 @@ bool EditorDockspace::Draw(Context &context)
 
         context.panels->SetOpen(panel, open);
     }
+
+    DrawGizmoToolbar(context);
 
     ImGui::End();
     return true;

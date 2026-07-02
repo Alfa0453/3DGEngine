@@ -100,6 +100,12 @@ Window::Window(const WindowProps& props) {
             data->lastMouseY = y;
         });
 
+    glfwSetScrollCallback(m_window,
+        [](GLFWwindow* win, double, double yoffset) {
+            auto* data = static_cast<Data*>(glfwGetWindowUserPointer(win));
+            data->scrollDeltaY += yoffset;
+        });
+
     SetVSync(m_data.vsync);
 }
 
@@ -119,6 +125,7 @@ void Window::Update() {
     // frame's OnUpdate).
     m_data.mouseDeltaX = 0.0;
     m_data.mouseDeltaY = 0.0;
+    m_data.scrollDeltaY = 0.0;
 
     glfwSwapBuffers(m_window);  // present the frame we just drew
     glfwPollEvents();           // deliver input / resize / close events

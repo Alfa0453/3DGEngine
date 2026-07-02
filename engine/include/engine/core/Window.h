@@ -67,6 +67,10 @@ public:
     float MouseDeltaX() const { return static_cast<float>(m_data.mouseDeltaX); }
     float MouseDeltaY() const { return static_cast<float>(m_data.mouseDeltaY); }
 
+    // Mouse wheel movement since the previous frame. Positive Y means wheel up,
+    // negative Y means wheel down.
+    float ScrollDeltaY() const { return static_cast<float>(m_data.scrollDeltaY); }
+
     // --- Display options -------------------------------------------------
     // Switch between windowed and borderless fullscreen on the primary monitor.
     void ToggleFullscreen();
@@ -100,6 +104,7 @@ private:
         double mouseDeltaY = 0.0;
         double lastMouseX  = 0.0;   // previous cursor position
         double lastMouseY  = 0.0;
+        double scrollDeltaY = 0.0;  // accumulated wheel movement this frame
         bool  firstMouse   = true;  // skip the huge delta on the first event
         int   settleFrames = 0;     // discard mouse motion right after capture
 

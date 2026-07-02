@@ -31,7 +31,7 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         return false;
     }
 
-    out << "3DGRuntimeScene 1\n";
+    out << "3DGRuntimeScene 3\n";
     out << "# Runtime export from 3DGEditor. Editor-only flags are omitted.\n";
 
     for (const EditorScene::Object& object : scene.Objects()) {
@@ -54,7 +54,10 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
             << transform->rotation.y << ' ' << transform->rotation.z << ' '
             << renderer->color.r << ' ' << renderer->color.g << ' ' << renderer->color.b << ' '
             << StoredPath(object.modelAssetPath) << ' '
-            << StoredPath(object.materialAssetPath) << '\n';
+            << StoredPath(object.materialAssetPath) << ' '
+            << object.linearVelocity.x << ' ' << object.linearVelocity.y << ' ' << object.linearVelocity.z << ' '
+            << object.angularVelocityAxis.x << ' ' << object.angularVelocityAxis.y << ' ' << object.angularVelocityAxis.z << ' '
+            << object.angularVelocityRadians << '\n';
     }
 
     return true;

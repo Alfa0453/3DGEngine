@@ -17,6 +17,7 @@ public:
     };
 
     void CycleMode();
+    void SetMode(Mode mode) { m_mode = mode; }
     void SetAxis(Axis axis) { m_axis = axis; }
 
     Mode CurrentMode() const { return m_mode; }

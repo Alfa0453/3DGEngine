@@ -39,6 +39,8 @@ add_library(engine STATIC
     src/ecs/Ecs.cpp
     src/audio/AudioEngine.cpp
     src/audio/miniaudio_impl.c
+    src/physics/PhysicsWorld.cpp
+    src/physics/CharacterController.cpp
 )
 
 # PUBLIC headers live under include/ so consumers write:  #include <engine/...>

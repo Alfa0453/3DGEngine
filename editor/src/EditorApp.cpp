@@ -2,13 +2,20 @@
 
 #include <engine/assets/RuntimeAssetManager.h>
 #include <engine/ecs/Registry.h>
+#include <engine/ecs/RuntimeSystems.h>
+#include <engine/ecs/Systems.h>
 #include <engine/graphics/Primitives.h>
 
 #include <GLFW/glfw3.h>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
 
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
 #include <cstdio>
 #include <filesystem>
+#include <limits>
 
 using engine::ecs::Entity;
 using engine::ecs::MeshRenderer;
@@ -29,6 +36,123 @@ glm::vec3 SelectedColor(bool selected, const glm::vec3& base) {
     return selected ? glm::vec3(1.0f, 0.78f, 0.22f) : base;
 }
 
+template <class T>
+std::size_t ComponentCount(engine::ecs::Registry& registry) {
+    engine::ecs::Pool<T>* pool = registry.TryPool<T>();
+    return pool ? pool->dense.size() : 0;
+}
+
+float DistanceToSegmentSquared(const glm::vec2& point, const glm::vec2& a, const glm::vec2& b) {
+    const glm::vec2 ab = b - a;
+    const float lengthSquared = glm::dot(ab, ab);
+    if (lengthSquared <= 0.0001f) {
+        const glm::vec2 delta = point - a;
+        return glm::dot(delta, delta);
+    }
+
+    const float t = std::clamp(glm::dot(point - a, ab) / lengthSquared, 0.0f, 1.0f);
+    const glm::vec2 closest = a + ab * t;
+    const glm::vec2 delta = point - closest;
+    return glm::dot(delta, delta);
+}
+
+struct PickRay {
+    glm::vec3 origin{0.0f};
+    glm::vec3 direction{0.0f, 0.0f, -1.0f};
+};
+
+bool BuildPickRay(float x, float y, const glm::mat4& viewProj, int width, int height, PickRay* ray) {
+    if (!ray || width <= 0 || height <= 0) {
+        return false;
+    }
+
+    const float ndcX = (2.0f * x) / static_cast<float>(width) - 1.0f;
+    const float ndcY = 1.0f - (2.0f * y) / static_cast<float>(height);
+    const glm::mat4 inverseViewProj = glm::inverse(viewProj);
+
+    glm::vec4 nearWorld = inverseViewProj * glm::vec4(ndcX, ndcY, -1.0f, 1.0f);
+    glm::vec4 farWorld = inverseViewProj * glm::vec4(ndcX, ndcY, 1.0f, 1.0f);
+    if (std::abs(nearWorld.w) <= 0.0001f || std::abs(farWorld.w) <= 0.0001f) {
+        return false;
+    }
+
+    nearWorld /= nearWorld.w;
+    farWorld /= farWorld.w;
+
+    const glm::vec3 direction = glm::vec3(farWorld - nearWorld);
+    if (glm::dot(direction, direction) <= 0.0001f) {
+        return false;
+    }
+
+    ray->origin = glm::vec3(nearWorld);
+    ray->direction = glm::normalize(direction);
+    return true;
+}
+
+PickRay TransformRayToLocal(const PickRay& ray, const glm::mat4& inverseModel) {
+    PickRay local;
+    local.origin = glm::vec3(inverseModel * glm::vec4(ray.origin, 1.0f));
+    local.direction = glm::vec3(inverseModel * glm::vec4(ray.direction, 0.0f));
+    return local;
+}
+
+bool IntersectLocalAabb(const PickRay& ray, const glm::vec3& minimum, const glm::vec3& maximum, float* hitDistance) {
+    float tMin = 0.0f;
+    float tMax = std::numeric_limits<float>::max();
+
+    for (int axis = 0; axis < 3; ++axis) {
+        const float origin = ray.origin[axis];
+        const float direction = ray.direction[axis];
+        if (std::abs(direction) <= 0.0001f) {
+            if (origin < minimum[axis] || origin > maximum[axis]) {
+                return false;
+            }
+            continue;
+        }
+
+        float nearT = (minimum[axis] - origin) / direction;
+        float farT = (maximum[axis] - origin) / direction;
+        if (nearT > farT) {
+            std::swap(nearT, farT);
+        }
+
+        tMin = std::max(tMin, nearT);
+        tMax = std::min(tMax, farT);
+        if (tMin > tMax) {
+            return false;
+        }
+    }
+
+    if (hitDistance) {
+        *hitDistance = tMin;
+    }
+    return true;
+}
+
+bool IntersectLocalPlaneQuad(const PickRay& ray, float* hitDistance) {
+    if (std::abs(ray.direction.y) <= 0.0001f) {
+        return false;
+    }
+
+    const float t = -ray.origin.y / ray.direction.y;
+    if (t < 0.0f) {
+        return false;
+    }
+
+    const glm::vec3 hit = ray.origin + ray.direction * t;
+    constexpr float halfSize = 0.5f;
+    constexpr float epsilon = 0.0001f;
+    if (hit.x < -halfSize - epsilon || hit.x > halfSize + epsilon
+        || hit.z < -halfSize - epsilon || hit.z > halfSize + epsilon) {
+        return false;
+    }
+
+    if (hitDistance) {
+        *hitDistance = t;
+    }
+    return true;
+}
+
 } // namespace
 
 EditorApp::EditorApp(engine::Config &config)
@@ -42,23 +166,27 @@ void EditorApp::OnInit()
     m_renderer.SetClearColor({0.08f, 0.09f, 0.11f, 1.0f});
 
     m_cube.emplace(engine::primitives::Cube());
+    m_cone.emplace(engine::primitives::Cone());
     m_plane.emplace(engine::primitives::Plane(1.0f, 8.0f));
     m_shader.emplace(
         R"glsl(
             #version 330 core
             layout(location = 0) in vec3 aPos;
             layout(location = 1) in vec3 aNormal;
+            layout(location = 2) in vec2 aTexCoord;
 
             uniform mat4 uViewProj;
             uniform mat4 uModel;
 
             out vec3 vNormal;
             out vec3 vWorldPos;
+            out vec2 vTexCoord;
 
             void main() {
                 vec4 world = uModel * vec4(aPos, 1.0);
                 vWorldPos = world.xyz;
                 vNormal = mat3(transpose(inverse(uModel))) * aNormal;
+                vTexCoord = aTexCoord;
                 gl_Position = uViewProj * world;
             }
         )glsl",
@@ -66,18 +194,144 @@ void EditorApp::OnInit()
             #version 330 core
             in vec3 vNormal;
             in vec3 vWorldPos;
+            in vec2 vTexCoord;
 
             uniform vec3 uColor;
             uniform vec3 uLightDir;
+            uniform int uHasDiffuse;
+            uniform sampler2D uDiffuseTex;
 
             out vec4 FragColor;
 
             void main() {
                 vec3 normal = normalize(vNormal);
                 float diffuse = max(dot(normal, normalize(-uLightDir)), 0.0);
+                vec3 base = uColor;
+                if (uHasDiffuse == 1) {
+                    base *= texture(uDiffuseTex, vTexCoord).rgb;
+                }
                 vec3 ambient = uColor * 0.24;
-                vec3 lit = ambient + uColor * diffuse * 0.76;
+                vec3 lit = ambient + base * diffuse * 0.76;
                 FragColor = vec4(lit, 1.0);
+            }
+        )glsl");
+    m_outlineShader.emplace(
+    R"glsl(
+        #version 330 core
+        layout(location = 0) in vec3 aPos;
+        layout(location = 1) in vec3 aNormal;
+
+        uniform mat4 uViewProj;
+        uniform mat4 uModel;
+        uniform float uThickness;
+
+        void main() {
+            mat3 normalMat = mat3(transpose(inverse(uModel)));
+            vec3 worldNormal = normalize(normalMat * aNormal);
+            vec4 world = uModel * vec4(aPos, 1.0);
+            world.xyz += worldNormal * uThickness;
+            gl_Position = uViewProj * world;
+        }
+    )glsl",
+    R"glsl(
+        #version 330 core
+        uniform vec3 uColor;
+
+        out vec4 FragColor;
+
+        void main() {
+            FragColor = vec4(uColor, 1.0);
+        }
+    )glsl");
+    m_modelShader.emplace(
+        R"glsl(
+            #version 330 core
+            layout(location = 0) in vec3 aPos;
+            layout(location = 1) in vec3 aNormal;
+            layout(location = 2) in vec2 aTexCoord;
+            layout(location = 3) in vec3 aTangent;
+
+            uniform mat4 uViewProj;
+            uniform mat4 uModel;
+            uniform mat3 uNormalMat;
+
+            out vec3 vWorldPos;
+            out vec2 vUV;
+            out mat3 vTBN;
+
+            void main() {
+                vec4 world = uModel * vec4(aPos, 1.0);
+                vWorldPos = world.xyz;
+                vUV = aTexCoord;
+
+                vec3 n = normalize(uNormalMat * aNormal);
+                vec3 t = normalize(uNormalMat * aTangent);
+                t = normalize(t - dot(t, n) * n);
+                vec3 b = cross(n, t);
+                vTBN = mat3(t, b, n);
+
+                gl_Position = uViewProj * world;
+            }
+        )glsl",
+        R"glsl(
+            #version 330 core
+            in vec3 vWorldPos;
+            in vec2 vUV;
+            in mat3 vTBN;
+
+            uniform vec3 uLightPos;
+            uniform vec3 uLightColor;
+            uniform vec3 uViewPos;
+
+            uniform vec3 uColor;
+            uniform vec3 uSpecular;
+            uniform vec3 uEmissive;
+            uniform float uShininess;
+
+            uniform int uHasDiffuse;
+            uniform int uHasNormal;
+            uniform int uHasSpecular;
+            uniform int uHasEmissive;
+            uniform sampler2D uDiffuseTex;
+            uniform sampler2D uNormalTex;
+            uniform sampler2D uSpecularTex;
+            uniform sampler2D uEmissiveTex;
+
+            out vec4 FragColor;
+
+            void main() {
+                vec3 base = uColor;
+                if (uHasDiffuse == 1) {
+                    base *= texture(uDiffuseTex, vUV).rgb;
+                }
+
+                vec3 normal = normalize(vTBN[2]);
+                if (uHasNormal == 1) {
+                    vec3 sampled = texture(uNormalTex, vUV).rgb * 2.0 - 1.0;
+                    normal = normalize(vTBN * sampled);
+                }
+
+                vec3 light = normalize(uLightPos - vWorldPos);
+                vec3 view = normalize(uViewPos - vWorldPos);
+                vec3 reflectDir = reflect(-light, normal);
+
+                float diffuseAmount = max(dot(normal, light), 0.0);
+                float specularAmount = pow(max(dot(view, reflectDir), 0.0), max(uShininess, 1.0));
+
+                vec3 specularColor = uSpecular;
+                if (uHasSpecular == 1) {
+                    specularColor *= texture(uSpecularTex, vUV).rgb;
+                }
+
+                vec3 emissiveColor = uEmissive;
+                if (uHasEmissive == 1) {
+                    emissiveColor *= texture(uEmissiveTex, vUV).rgb;
+                }
+
+                vec3 ambient = base * uLightColor * 0.18;
+                vec3 diffuse = base * uLightColor * diffuseAmount;
+                vec3 specular = specularColor * uLightColor * specularAmount;
+                FragColor = vec4(ambient + diffuse + specular + emissiveColor, 1.0);
             }
         )glsl"
     );
@@ -96,186 +350,22 @@ void EditorApp::OnUpdate(float dt)
     if (dt > 0.0f) {
         m_fps = m_fps * 0.92f + (1.0f / dt) * 0.08f;
     }
+    if (m_mode == EditorMode::Play && m_playRegistry) {
+        engine::ecs::UpdateRuntimeMotion(*m_playRegistry, dt);
+    }
 
-    if (Pressed(GLFW_KEY_ESCAPE)) {
-        window.SetShouldClose(true);
-    }
-    if (Pressed(GLFW_KEY_F11)) {
-    window.ToggleFullscreen();
-    }
-    if (Pressed(GLFW_KEY_F1)) {
-        TogglePanel(EditorPanels::Panel::Hierarchy);
-    }
-    if (Pressed(GLFW_KEY_F2)) {
-        TogglePanel(EditorPanels::Panel::Inspector);
-    }
-    if (Pressed(GLFW_KEY_F3)) {
-        TogglePanel(EditorPanels::Panel::Assets);
-    }
-    if (Pressed(GLFW_KEY_F4)) {
-        TogglePanel(EditorPanels::Panel::Console);
-    }
-    if (Pressed(GLFW_KEY_TAB)) {
-        m_scene.SelectNext();
-    }
-    if (Pressed(GLFW_KEY_BACKSPACE)) {
-        m_scene.SelectPrevious();
-    }
-    if (Pressed(GLFW_KEY_P)) {
-        if (m_mode == EditorMode::Edit) {
-            EnterPlayMode();
-        } else {
-            ExitPlayMode();
-        }
-    }
-    if (Pressed(GLFW_KEY_M)) {
-        m_mouseLook = !m_mouseLook;
-        window.SetCursorCaptured(m_mouseLook);
-    }
-    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_F5)) {
-        SaveScene();
-    }
-    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_F7)) {
-        ExportRuntimeScene();
-    }
-    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_F8)) {
-        ValidateRuntimeScene();
-    }
-    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_F9)) {
-        LoadScene();
-    }
-    if (Pressed(GLFW_KEY_F6)) {
-        RefreshAssets();
-    }
-    if (Pressed(GLFW_KEY_LEFT_BRACKET)) {
-        m_assets.SelectPrevious();
-    }
-    if (Pressed(GLFW_KEY_RIGHT_BRACKET)) {
-        m_assets.SelectNext();
-    }
+    HandleGlobalShortcuts(window);
+    UpdateMouseCapture(window);
     HandleMouseAssetDrag();
-    HandleMouseVIewportGizmo();
-    if ((window.IsKeyPressed(GLFW_KEY_LEFT_CONTROL) || window.IsKeyPressed(GLFW_KEY_RIGHT_CONTROL))
-        && Pressed(GLFW_KEY_ENTER)) {
-        BeginAssetDrag();
-    } else
-    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_ENTER)) {
-        UseSelectedAsset();
-    }
-    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_V)) {
-        DropPayloadOnScene();
-    }
-    if (Pressed(GLFW_KEY_BACKSLASH)) {
-        m_dragDrop.Clear();
-        m_log.Info("Drag/drop payload cleared");
-    }
-    if ((window.IsKeyPressed(GLFW_KEY_LEFT_CONTROL) || window.IsKeyPressed(GLFW_KEY_RIGHT_CONTROL))
-    && Pressed(GLFW_KEY_Z)) {
-        Undo();
-    }
-    if ((window.IsKeyPressed(GLFW_KEY_LEFT_CONTROL) || window.IsKeyPressed(GLFW_KEY_RIGHT_CONTROL))
-        && Pressed(GLFW_KEY_Y)) {
-        Redo();
-    }
-    if ((window.IsKeyPressed(GLFW_KEY_LEFT_CONTROL) || window.IsKeyPressed(GLFW_KEY_RIGHT_CONTROL))
-        && Pressed(GLFW_KEY_L)) {
-        m_log.Clear();
-    }
-    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_N)) {
-        AddCube();
-    }
-    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_B)) {
-    AddPlane();
-    }
-    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_C)) {
-        CycleSelectedColor();
-    }
-    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_H)) {
-        ToggleSelectedVisible();
-    }
-    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_O)) {
-        ToggleSelectedLocked();
-    }
-    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_1)) {
-        SetSelectedPrimitive(EditorScene::Primitive::Cube);
-    }
-    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_2)) {
-        SetSelectedPrimitive(EditorScene::Primitive::Plane);
-    }
-    if (m_mode == EditorMode::Edit && !m_mouseLook && Pressed(GLFW_KEY_D)) {
-        DuplicateSelected();
-    }
-    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_DELETE)) {
-        DeleteSelected();
-    }
-    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_R)) {
-        m_scene.ResetSelectedTransform();
-        m_log.Info("Reset selected transform");
-    }
-    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_G)) {
-        m_gizmo.CycleMode();
-        m_log.Info(std::string("Gizmo mode: ") + m_gizmo.ModeName());
-    }
-    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_X)) {
-        m_gizmo.SetAxis(EditorGizmo::Axis::X);
-        m_log.Info("Gizmo axis: X");
-    }
-    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_Y)) {
-        m_gizmo.SetAxis(EditorGizmo::Axis::Y);
-        m_log.Info("Gizmo axis: Y");
-    }
-    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_Z)) {
-        m_gizmo.SetAxis(EditorGizmo::Axis::Z);
-        m_log.Info("Gizmo axis: Z");
-    }
+    HandleMouseViewportSelection();
+    HandleMouseViewportGizmo();
 
-    const float cameraSpeed = (window.IsKeyPressed(GLFW_KEY_LEFT_SHIFT) ? 12.0f : 5.0f) * dt;
-    if (m_mouseLook) {
-        m_camera.AddYawPitch(window.MouseDeltaX() * 0.1f, -window.MouseDeltaY() * 0.1f);
-        if (window.IsKeyPressed(GLFW_KEY_W)) m_camera.MoveForward(cameraSpeed);
-        if (window.IsKeyPressed(GLFW_KEY_S)) m_camera.MoveForward(-cameraSpeed);
-        if (window.IsKeyPressed(GLFW_KEY_D)) m_camera.MoveRight(cameraSpeed);
-        if (window.IsKeyPressed(GLFW_KEY_A)) m_camera.MoveRight(-cameraSpeed);
-        if (window.IsKeyPressed(GLFW_KEY_SPACE)) m_camera.MoveUp(cameraSpeed);
-        if (window.IsKeyPressed(GLFW_KEY_LEFT_CONTROL)) m_camera.MoveUp(-cameraSpeed);
-    }
-
-    const float objectSpeed = 2.0f * dt;
-    if (m_mode == EditorMode::Edit) {
-        const bool transformEditing = IsTransformEditActive(window);
-        if (transformEditing && !m_wasTransformEditing) {
-            m_scene.BeginTransformEdit();
-        }
-        
-        if (window.IsKeyPressed(GLFW_KEY_LEFT)) m_scene.MoveSelected(glm::vec3(-objectSpeed, 0.0f, 0.0f));
-        if (window.IsKeyPressed(GLFW_KEY_RIGHT)) m_scene.MoveSelected(glm::vec3(objectSpeed, 0.0f, 0.0f));
-        if (window.IsKeyPressed(GLFW_KEY_UP)) m_scene.MoveSelected(glm::vec3(0.0f, 0.0f, -objectSpeed));
-        if (window.IsKeyPressed(GLFW_KEY_DOWN)) m_scene.MoveSelected(glm::vec3(0.0f, 0.0f, objectSpeed));
-        if (window.IsKeyPressed(GLFW_KEY_Q)) m_scene.MoveSelected(glm::vec3(0.0f, objectSpeed, 0.0f));
-        if (window.IsKeyPressed(GLFW_KEY_E)) m_scene.MoveSelected(glm::vec3(0.0f, -objectSpeed, 0.0f));
-        if (window.IsKeyPressed(GLFW_KEY_J)) m_scene.RotateSelectedYaw(-90.0f * dt);
-        if (window.IsKeyPressed(GLFW_KEY_L)) m_scene.RotateSelectedYaw(90.0f * dt);
-        if (window.IsKeyPressed(GLFW_KEY_EQUAL) || window.IsKeyPressed(GLFW_KEY_KP_ADD)) {
-            m_scene.ScaleSelected(1.0f + dt);
-        }
-        if (window.IsKeyPressed(GLFW_KEY_MINUS) || window.IsKeyPressed(GLFW_KEY_KP_SUBTRACT)) {
-            m_scene.ScaleSelected(1.0f - dt);
-        }
-        if (window.IsKeyPressed(GLFW_KEY_COMMA)) {
-            ApplyGizmoNudge(-1.0f, dt);
-        }
-        if (window.IsKeyPressed(GLFW_KEY_PERIOD)) {
-            ApplyGizmoNudge(1.0f, dt);
-        }
-
-        if (!transformEditing && m_wasTransformEditing) {
-            m_scene.EndTransformEdit();
-        }
-        m_wasTransformEditing = transformEditing;
-    } else if (m_wasTransformEditing) {
-        m_scene.EndTransformEdit();
-        m_wasTransformEditing = false;
-    }
+    const bool controlDown = window.IsKeyPressed(GLFW_KEY_LEFT_CONTROL)
+        || window.IsKeyPressed(GLFW_KEY_RIGHT_CONTROL);
+    HandleAssetShortcuts(window, controlDown);
+    HandleEditorCommandShortcuts(window, controlDown);
+    UpdateCameraControls(window, dt);
+    UpdateSelectedTransformShortcuts(window, dt);
 }
 
 void EditorApp::OnRender()
@@ -285,22 +375,11 @@ void EditorApp::OnRender()
     const engine::Window& window = GetWindow();
     const glm::mat4 viewProj = m_camera.ProjectionMatrix(window.AspectRatio()) * m_camera.ViewMatrix();
 
-    m_shader->Bind();
-    m_shader->SetMat4("uViewProj", viewProj);
-    m_shader->SetVec3("uLightDir", glm::normalize(glm::vec3(-0.4f, -1.0f, -0.3f)));
-
-    m_scene.Registry().view<Transform, MeshRenderer>().each(
-        [&](Entity entity, Transform& transform, MeshRenderer& renderer) {
-            if (!m_scene.IsVisible(entity)) {
-                return;
-            }
-            const EditorScene::Object* selectedObject = m_scene.SelectedObject();
-            const bool selected = selectedObject && selectedObject->entity == entity;
-            MeshRenderer drawRenderer = renderer;
-            drawRenderer.color = SelectedColor(selected, renderer.color);
-            DrawSceneObject(transform, drawRenderer);
-        }
-    );
+    if (m_mode == EditorMode::Play && m_playRegistry) {
+        DrawPlayScene(viewProj);
+    } else {
+        DrawEditScene(viewProj);
+    }
 
     m_imgui.BeginFrame();
     DrawEditorOverlay();
@@ -316,7 +395,7 @@ void EditorApp::OnShutdown()
     m_config.Save();
 }
 
-void EditorApp::DrawSceneObject(const engine::ecs::Transform &transform, const engine::ecs::MeshRenderer &renderer)
+void EditorApp::DrawSceneObject(const engine::ecs::Transform &transform, const engine::ecs::MeshRenderer &renderer, const engine::Texture* diffuseTexture)
 {
     if (!renderer.mesh) {
         return;
@@ -324,7 +403,255 @@ void EditorApp::DrawSceneObject(const engine::ecs::Transform &transform, const e
 
     m_shader->SetMat4("uModel", transform.Model());
     m_shader->SetVec3("uColor", renderer.color);
+    m_shader->SetInt("uHasDiffuse", diffuseTexture ? 1 : 0);
+    if (diffuseTexture) {
+        diffuseTexture->Bind(0);
+        m_shader->SetInt("uDiffuseTex", 0);
+    }
     m_renderer.Draw(*renderer.mesh);
+}
+
+void EditorApp::DrawEditModeModels(const glm::mat4 & viewProj)
+{
+    if (!m_modelShader) {
+        return;
+    }
+
+    m_modelShader->Bind();
+    m_modelShader->SetMat4("uViewProj", viewProj);
+    m_modelShader->SetVec3("uLightPos", m_camera.Position() + glm::vec3(-4.0f, 6.0f, 4.0f));
+    m_modelShader->SetVec3("uLightColor", glm::vec3(1.0f));
+    m_modelShader->SetVec3("uViewPos", m_camera.Position());
+
+    for (const EditorScene::Object& object : m_scene.Objects()) {
+        if (!object.visible || object.modelAssetPath.empty()) {
+            continue;
+        }
+
+        const Transform* transform = m_scene.TryGetTransform(object.entity);
+        if (!transform) {
+            continue;
+        }
+
+        std::string error;
+        const engine::Model* model = m_editAssets.LoadModel(object.modelAssetPath, &error);
+        if (!model) {
+            if (!m_editModelLoadErrors[object.modelAssetPath]) {
+                m_log.Error("Could not load edit model: " + error);
+                m_editModelLoadErrors[object.modelAssetPath] = true;
+            }
+            continue;
+        }
+
+        const glm::mat4 modelMatrix = transform->Model();
+        m_modelShader->SetMat4("uModel", modelMatrix);
+        m_modelShader->SetMat3("uNormalMat", glm::mat3(glm::transpose(glm::inverse(modelMatrix))));
+        engine::DrawModel(*model, *m_modelShader);
+    }
+
+    m_shader->Bind();
+    m_shader->SetMat4("uViewProj", viewProj);
+    m_shader->SetVec3("uLightDir", glm::normalize(glm::vec3(-0.4f, -1.0f, -0.3f)));
+}
+
+void EditorApp::DrawSelectionOutline(const glm::mat4 & viewProj)
+{
+    if (m_mode != EditorMode::Edit || !m_cube || !m_outlineShader) {
+        return;
+    }
+
+    const EditorScene::Object* selected = m_scene.SelectedObject();
+    const Transform* transform = m_scene.SelectedTransform();
+    if (!selected || !transform || !selected->visible) {
+        return;
+    }
+
+    if (!selected->modelAssetPath.empty()) {
+        std::string error;
+        const engine::Model* model = m_editAssets.LoadModel(selected->modelAssetPath, &error);
+        if (model) {
+            const glm::vec3 color = selected->locked
+                ? glm::vec3(1.0f, 0.48f, 0.22f)
+                : glm::vec3(1.0f, 0.92f, 0.24f);
+            m_outlineShader->Bind();
+            m_outlineShader->SetMat4("uViewProj", viewProj);
+            DrawSelectedModelOutline(*transform, *model, color, 0.045f);
+        }
+        return;
+    }
+
+    const MeshRenderer* renderer = m_scene.TryGetMeshRenderer(selected->entity);
+    if (!renderer || !renderer->mesh) {
+        return;
+    }
+
+    const glm::vec3 color = selected->locked
+        ? glm::vec3(1.0f, 0.48f, 0.22f)
+        : glm::vec3(1.0f, 0.92f, 0.24f);
+    m_outlineShader->Bind();
+    m_outlineShader->SetMat4("uViewProj", viewProj);
+    DrawSelectedMeshOutline(*transform, *renderer->mesh, color, 0.045f);
+}
+
+void EditorApp::DrawSelectedModelOutline(const engine::ecs::Transform & transform, const engine::Model & model, const glm::vec3 & color, float thickness)
+{
+    for (const engine::SubMesh& subMesh : model.SubMeshes()) {
+        DrawSelectedMeshOutline(transform, subMesh.mesh, color, thickness);
+    }
+}
+
+void EditorApp::DrawSelectedMeshOutline(const engine::ecs::Transform & transform, const engine::Mesh & mesh, const glm::vec3 & color, float thickness)
+{
+    if (!m_outlineShader) {
+        return;
+    }
+    
+    const GLboolean wasCullEnabled = glIsEnabled(GL_CULL_FACE);
+    GLint previousCullFace = GL_BACK;
+    GLint previousDepthFunc = GL_LESS;
+    glGetIntegerv(GL_CULL_FACE_MODE, &previousCullFace);
+    glGetIntegerv(GL_DEPTH_FUNC, &previousDepthFunc);
+
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_FRONT);
+    glDepthFunc(GL_LEQUAL);
+
+    m_outlineShader->SetMat4("uModel", transform.Model());
+    m_outlineShader->SetVec3("uColor", color);
+    m_outlineShader->SetFloat("uThickness", thickness);
+    m_renderer.Draw(mesh);
+
+    glCullFace(previousCullFace);
+    if (!wasCullEnabled) {
+        glDisable(GL_CULL_FACE);
+    }
+    glDepthFunc(previousDepthFunc);
+}
+
+void EditorApp::DrawSceneGizmo(const glm::mat4 & viewProj)
+{
+        if (m_mode != EditorMode::Edit || !m_cube || !m_shader) {
+        return;
+    }
+
+    const EditorScene::Object* selected = m_scene.SelectedObject();
+    const Transform* selectedTransform = m_scene.SelectedTransform();
+    if (!selected || !selectedTransform || selected->locked) {
+        return;
+    }
+
+    m_shader->Bind();
+    m_shader->SetMat4("uViewProj", viewProj);
+    m_shader->SetVec3("uLightDir", glm::normalize(glm::vec3(-0.4f, -1.0f, -0.3f)));
+
+    const glm::vec3 center = selectedTransform->position;
+    const glm::vec3 xColor = m_gizmo.CurrentAxis() == EditorGizmo::Axis::X
+        ? glm::vec3(1.0f, 0.86f, 0.24f)
+        : glm::vec3(0.95f, 0.12f, 0.14f);
+    const glm::vec3 yColor = m_gizmo.CurrentAxis() == EditorGizmo::Axis::Y
+        ? glm::vec3(1.0f, 0.86f, 0.24f)
+        : glm::vec3(0.12f, 0.82f, 0.28f);
+    const glm::vec3 zColor = m_gizmo.CurrentAxis() == EditorGizmo::Axis::Z
+        ? glm::vec3(1.0f, 0.86f, 0.24f)
+        : glm::vec3(0.16f, 0.36f, 1.0f);
+
+    constexpr float length = 1.65f;
+    constexpr float thickness = 0.055f;
+    constexpr float head = 0.18f;
+
+    switch (m_gizmo.CurrentMode()) {
+    case EditorGizmo::Mode::Translate:
+        DrawGizmoBox(center + glm::vec3(length * 0.5f, 0.0f, 0.0f), glm::vec3(length, thickness, thickness), xColor);
+        DrawGizmoCone(center + glm::vec3(length + head * 1.6f, 0.0f, 0.0f), EditorGizmo::Axis::X, xColor);
+
+        DrawGizmoBox(center + glm::vec3(0.0f, length * 0.5f, 0.0f), glm::vec3(thickness, length, thickness), yColor);
+        DrawGizmoCone(center + glm::vec3(0.0f, length + head * 1.6f, 0.0f), EditorGizmo::Axis::Y, yColor);
+
+        DrawGizmoBox(center + glm::vec3(0.0f, 0.0f, length * 0.5f), glm::vec3(thickness, thickness, length), zColor);
+        DrawGizmoCone(center + glm::vec3(0.0f, 0.0f, length + head * 1.6f), EditorGizmo::Axis::Z, zColor);
+        break;
+
+    case EditorGizmo::Mode::Scale:
+        DrawGizmoBox(center + glm::vec3(length * 0.45f, 0.0f, 0.0f), glm::vec3(length * 0.9f, thickness, thickness), xColor);
+        DrawGizmoBox(center + glm::vec3(length, 0.0f, 0.0f), glm::vec3(head * 1.15f), xColor);
+
+        DrawGizmoBox(center + glm::vec3(0.0f, length * 0.45f, 0.0f), glm::vec3(thickness, length * 0.9f, thickness), yColor);
+        DrawGizmoBox(center + glm::vec3(0.0f, length, 0.0f), glm::vec3(head * 1.15f), yColor);
+
+        DrawGizmoBox(center + glm::vec3(0.0f, 0.0f, length * 0.45f), glm::vec3(thickness, thickness, length * 0.9f), zColor);
+        DrawGizmoBox(center + glm::vec3(0.0f, 0.0f, length), glm::vec3(head * 1.15f), zColor);
+        break;
+
+    case EditorGizmo::Mode::Rotate:
+        DrawGizmoRing(center, EditorGizmo::Axis::X, xColor);
+        DrawGizmoRing(center, EditorGizmo::Axis::Y, yColor);
+        DrawGizmoRing(center, EditorGizmo::Axis::Z, zColor);
+        break;
+    }
+}
+
+void EditorApp::DrawGizmoBox(const glm::vec3 & position, const glm::vec3 & scale, const glm::vec3 & color)
+{
+        if (!m_cube || !m_shader) {
+        return;
+    }
+
+    Transform transform;
+    transform.position = position;
+    transform.scale = scale;
+    m_shader->SetMat4("uModel", transform.Model());
+    m_shader->SetVec3("uColor", color);
+    m_renderer.Draw(*m_cube);
+}
+
+void EditorApp::DrawGizmoCone(const glm::vec3 & position, EditorGizmo::Axis axis, const glm::vec3 & color)
+{
+        if (!m_cone || !m_shader) {
+        return;
+    }
+
+    Transform transform;
+    transform.position = position;
+    transform.scale = glm::vec3(0.22f, 0.36f, 0.22f);
+    switch (axis) {
+    case EditorGizmo::Axis::X:
+        transform.rotation = glm::angleAxis(glm::radians(-90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+        break;
+    case EditorGizmo::Axis::Y:
+        transform.rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+        break;
+    case EditorGizmo::Axis::Z:
+        transform.rotation = glm::angleAxis(glm::radians(90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+        break;
+    }
+    m_shader->SetMat4("uModel", transform.Model());
+    m_shader->SetVec3("uColor", color);
+    m_renderer.Draw(*m_cone);
+}
+
+void EditorApp::DrawGizmoRing(const glm::vec3 & center, EditorGizmo::Axis axis, const glm::vec3 & color)
+{
+        constexpr int segments = 40;
+    constexpr float radius = 1.25f;
+    constexpr float pi = 3.14159265359f;
+    constexpr float marker = 0.055f;
+
+    for (int i = 0; i < segments; ++i) {
+        const float t = (static_cast<float>(i) / static_cast<float>(segments)) * 2.0f * pi;
+        glm::vec3 offset;
+        switch (axis) {
+        case EditorGizmo::Axis::X:
+            offset = glm::vec3(0.0f, std::cos(t) * radius, std::sin(t) * radius);
+            break;
+        case EditorGizmo::Axis::Y:
+            offset = glm::vec3(std::cos(t) * radius, 0.0f, std::sin(t) * radius);
+            break;
+        case EditorGizmo::Axis::Z:
+            offset = glm::vec3(std::cos(t) * radius, std::sin(t) * radius, 0.0f);
+            break;
+        }
+        DrawGizmoBox(center + offset, glm::vec3(marker), color);
+    }
 }
 
 void EditorApp::DrawEditorOverlay()
@@ -357,7 +684,7 @@ void EditorApp::DrawEditorOverlay()
     char line[160];
     std::snprintf(line, sizeof(line), "3DG EDITOR  %s%s  %.0f fps",
         m_mode == EditorMode::Edit ? "EDIT" : "PLAY",
-        m_scene.IsDirty() ? " *" : "",
+        (m_mode == EditorMode::Edit && m_scene.IsDirty()) ? " *" : "",
         m_fps);
     m_text->Text(line, 24.0f, 22.0f, 1.8f, text);
     std::snprintf(line, sizeof(line), "%s  scene: %s",
@@ -366,7 +693,7 @@ void EditorApp::DrawEditorOverlay()
 
     float y = 120.0f;
     if (!dockspaceDrawn && m_panels.IsOpen(EditorPanels::Panel::Hierarchy)) {
-        m_text->Text("Hierarchy", 24.0f, 70.0f, 1.45f, text);
+        m_text->Text("Hierarchy", 24.0f, 88.0f, 1.45f, text);
         const std::vector<EditorScene::Object>& objects = m_scene.Objects();
         for (int i = 0; i < static_cast<int>(objects.size()); ++i) {
             const EditorScene::Object& object = objects[static_cast<std::size_t>(i)];
@@ -391,7 +718,9 @@ void EditorApp::DrawEditorOverlay()
             std::snprintf(line, sizeof(line), "Name: %s", selected->name.c_str());
             m_text->Text(line, static_cast<float>(width) - 330.0f, 106.0f, 1.2f, muted);
             std::snprintf(line, sizeof(line), "Type: %s",
-                selected->primitive == EditorScene::Primitive::Plane ? "Plane" : "Cube");
+                selected->modelAssetPath.empty()
+                    ? (selected->primitive == EditorScene::Primitive::Plane ? "Plane" : "Cube")
+                    : "Model");
             m_text->Text(line, static_cast<float>(width) - 330.0f, 134.0f, 1.2f, muted);
             std::snprintf(line, sizeof(line), "Visible: %s", selected->visible ? "yes" : "no");
             m_text->Text(line, static_cast<float>(width) - 330.0f, 162.0f, 1.2f, muted);
@@ -403,31 +732,38 @@ void EditorApp::DrawEditorOverlay()
             std::snprintf(line, sizeof(line), "Material: %s",
                 selected->materialAssetPath.empty() ? "-" : selected->materialAssetPath.c_str());
             m_text->Text(line, static_cast<float>(width) - 330.0f, 240.0f, 1.05f, muted);
+            std::snprintf(line, sizeof(line), "Velocity: %.2f, %.2f, %.2f",
+                selected->linearVelocity.x, selected->linearVelocity.y, selected->linearVelocity.z);
+            m_text->Text(line, static_cast<float>(width) - 330.0f, 262.0f, 1.05f, muted);
+            std::snprintf(line, sizeof(line), "Spin: %.2f around %.1f, %.1f, %.1f",
+                selected->angularVelocityRadians,
+                selected->angularVelocityAxis.x, selected->angularVelocityAxis.y, selected->angularVelocityAxis.z);
+            m_text->Text(line, static_cast<float>(width) - 330.0f, 284.0f, 1.05f, muted);
             if (transform) {
                 std::snprintf(line, sizeof(line), "Position: %.2f, %.2f, %.2f",
                     transform->position.x, transform->position.y, transform->position.z);
-                m_text->Text(line, static_cast<float>(width) - 330.0f, 162.0f, 1.2f, muted);
+                m_text->Text(line, static_cast<float>(width) - 330.0f, 314.0f, 1.2f, muted);
                 std::snprintf(line, sizeof(line), "Scale: %.2f, %.2f, %.2f",
                     transform->scale.x, transform->scale.y, transform->scale.z);
-                m_text->Text(line, static_cast<float>(width) - 330.0f, 190.0f, 1.2f, muted);
+                m_text->Text(line, static_cast<float>(width) - 330.0f, 342.0f, 1.2f, muted);
                 std::snprintf(line, sizeof(line), "Rotation: %.2f, %.2f, %.2f, %.2f",
                     transform->rotation.w, transform->rotation.x, transform->rotation.y, transform->rotation.z);
-                m_text->Text(line, static_cast<float>(width) - 330.0f, 218.0f, 1.2f, muted);
+                m_text->Text(line, static_cast<float>(width) - 330.0f, 370.0f, 1.2f, muted);
             }
             if (renderer) {
                 std::snprintf(line, sizeof(line), "Color: %.2f, %.2f, %.2f",
                     renderer->color.r, renderer->color.g, renderer->color.b);
-                m_text->Text(line, static_cast<float>(width) - 330.0f, 246.0f, 1.2f, muted);
+                m_text->Text(line, static_cast<float>(width) - 330.0f, 398.0f, 1.2f, muted);
             }
         }
     }
 
-    std::snprintf(line, sizeof(line), "Gizmo: %s %s   < / > nudge",
+    std::snprintf(line, sizeof(line), "Gizmo: %s %s   < / > or right-drag",
         m_gizmo.ModeName(), m_gizmo.AxisName());
     m_text->Text(line, static_cast<float>(width) - 330.0f, 40.0f, 1.15f, accent);
 
     if (!dockspaceDrawn && m_panels.IsOpen(EditorPanels::Panel::Console)) {
-        DrawLogOverlay(static_cast<float>(width) - 330.0f, 292.0f, text, muted);
+        DrawLogOverlay(static_cast<float>(width) - 330.0f, 348.0f, text, muted);
     }
 
     std::snprintf(line, sizeof(line), "Status: %s", m_log.LatestMessage().c_str());
@@ -440,21 +776,38 @@ void EditorApp::DrawEditorOverlay()
 
 void EditorApp::DrawAssetOverlay(float x, float y, const glm::vec3 & text, const glm::vec3 & muted)
 {
-    m_text->Text("Assets", x, y, 1.45f, text);
+    m_text->Text("Content", x, y, 1.45f, text);
 
-    char line [180];
-    std::snprintf(line, sizeof(line), "%s   (%zu files)",
-        m_assets.RootPath().c_str(), m_assets.Assets().size());
+    char line[180];
+    std::snprintf(line, sizeof(line), "%s/%s  (%zu files)",
+        m_assets.RootPath().c_str(),
+        m_assets.CurrentFolder().empty() ? "" : m_assets.CurrentFolder().c_str(),
+        m_assets.TotalFileCount());
     m_text->Text(line, x + 6.0f, y + 32.0f, 1.05f, muted);
+    m_text->Text("Enter: open/use  Ctrl+C/V: copy/paste  Del: delete  U: up",
+        x + 6.0f, y + 52.0f, 0.9f, muted);
 
+    const std::vector<EditorAssets::Folder>& folders = m_assets.Folders();
     const std::vector<EditorAssets::Asset>& assets = m_assets.Assets();
     const int maxVisible = 8;
-    for (int i = 0; i < static_cast<int>(assets.size()) && i < maxVisible; ++i) {
+    int row = 0;
+    for (int i = 0; i < static_cast<int>(folders.size()) && row < maxVisible; ++i, ++row) {
+        const EditorAssets::Folder& folder = folders[static_cast<std::size_t>(i)];
+        std::snprintf(line, sizeof(line), "%s[Folder]  %s",
+            (m_assets.SelectedType() == EditorAssets::SelectionType::Folder
+                && i == m_assets.SelectedFolderIndex()) ? ">" : " ",
+            folder.displayName.c_str());
+        m_text->Text(line, x + 6.0f, y + 78.0f + static_cast<float>(row) * 22.0f, 1.05f,
+            (m_assets.SelectedType() == EditorAssets::SelectionType::Folder
+                && i == m_assets.SelectedFolderIndex()) ? text : muted);
+    }
+    for (int i = 0; i < static_cast<int>(assets.size()) && row < maxVisible; ++i, ++row) {
         const EditorAssets::Asset& asset = assets[static_cast<std::size_t>(i)];
         std::snprintf(line, sizeof(line), "%s%s  %s",
-            i == m_assets.SelectedIndex() ? ">" : " ",
-            EditorAssets::TypeName(asset.type), asset.relativePath.c_str());
-        m_text->Text(line, x + 6.0f, y + 60.0f + static_cast<float>(i) * 22.0f, 1.05f, muted);
+            (m_assets.SelectedType() == EditorAssets::SelectionType::Asset
+                && i == m_assets.SelectedIndex()) ? ">" : " ",
+            EditorAssets::TypeName(asset.type), asset.displayName.c_str());
+        m_text->Text(line, x + 6.0f, y + 78.0f + static_cast<float>(row) * 22.0f, 1.05f, muted);
     }
 
     if (const EditorAssets::Asset* selected = m_assets.SelectedAsset()) {
@@ -462,6 +815,15 @@ void EditorApp::DrawAssetOverlay(float x, float y, const glm::vec3 & text, const
         m_text->Text(line, x + 6.0f, y + 248.0f, 1.05f, text);
         std::snprintf(line, sizeof(line), "Type: %s", EditorAssets::TypeName(selected->type));
         m_text->Text(line, x + 6.0f, y + 272.0f, 1.05f, muted);
+    } else if (const EditorAssets::Folder* selectedFolder = m_assets.SelectedFolder()) {
+        std::snprintf(line, sizeof(line), "Selected: %s", selectedFolder->displayName.c_str());
+        m_text->Text(line, x + 6.0f, y + 248.0f, 1.05f, text);
+        m_text->Text("Type: Folder", x + 6.0f, y + 272.0f, 1.05f, muted);
+    }
+
+    if (m_assets.HasCopiedEntry()) {
+        std::snprintf(line, sizeof(line), "Copied: %s", m_assets.CopiedDisplayName().c_str());
+        m_text->Text(line, x + 6.0f, y + 292.0f, 1.05f, muted);
     }
 
     if (m_dragDrop.HasPayload()) {
@@ -472,8 +834,325 @@ void EditorApp::DrawAssetOverlay(float x, float y, const glm::vec3 & text, const
         } else {
             std::snprintf(line, sizeof(line), "Dragging: %s", payload.path.c_str());
         }
-        m_text->Text(line, x + 6.0f, y + 302.0f, 1.05f, text);
+        m_text->Text(line, x + 6.0f, y + 320.0f, 1.05f, text);
     }
+}
+
+void EditorApp::HandleGlobalShortcuts(engine::Window & window)
+{
+    if (Pressed(GLFW_KEY_ESCAPE)) {
+       window.SetShouldClose(true);
+    }
+   if (Pressed(GLFW_KEY_F11)) {
+       window.ToggleFullscreen();
+    }
+   if (Pressed(GLFW_KEY_F1)) {
+       TogglePanel(EditorPanels::Panel::Hierarchy);
+    }
+   if (Pressed(GLFW_KEY_F2)) {
+       TogglePanel(EditorPanels::Panel::Inspector);
+    }
+   if (Pressed(GLFW_KEY_F3)) {
+       TogglePanel(EditorPanels::Panel::Assets);
+    }
+   if (Pressed(GLFW_KEY_F4)) {
+       TogglePanel(EditorPanels::Panel::Console);
+    }
+   if (Pressed(GLFW_KEY_TAB)) {
+       m_scene.SelectNext();
+    }
+   if (Pressed(GLFW_KEY_BACKSPACE)) {
+       m_scene.SelectPrevious();
+    }
+   if (Pressed(GLFW_KEY_P)) {
+       if (m_mode == EditorMode::Edit) {
+           EnterPlayMode();
+       } else {
+           ExitPlayMode();
+       }
+    }
+   if (Pressed(GLFW_KEY_M)) {
+       m_mouseLookPinned = !m_mouseLookPinned;
+    }
+}
+
+void EditorApp::UpdateMouseCapture(engine::Window & window)
+{
+    const bool rightMouseDown = window.Native()
+        && glfwGetMouseButton(window.Native(), GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
+    const bool rightMousePressed = rightMouseDown && !m_rightMouseLookPrev;
+    if (!rightMouseDown) {
+        m_rightMouseLookActive = false;
+    } else if (rightMousePressed && m_mode == EditorMode::Edit && window.Native()) {
+        double cursorX = 0.0;
+        double cursorY = 0.0;
+        glfwGetCursorPos(window.Native(), &cursorX, &cursorY);
+        m_rightMouseLookActive = IsViewportDropPosition(static_cast<float>(cursorX), static_cast<float>(cursorY));
+    }
+    m_rightMouseLookPrev = rightMouseDown;
+    const bool shouldMouseLook = m_mouseLookPinned || m_rightMouseLookActive;
+    if (m_mouseLook != shouldMouseLook) {
+        m_mouseLook = shouldMouseLook;
+        window.SetCursorCaptured(m_mouseLook);
+    }
+    const bool middleMouseDown = window.Native()
+        && glfwGetMouseButton(window.Native(), GLFW_MOUSE_BUTTON_MIDDLE) == GLFW_PRESS;
+    const bool middleMousePressed = middleMouseDown && !m_middleMousePanPrev;
+    if (!middleMouseDown || m_mouseLook) {
+        m_middleMousePanActive = false;
+    } else if (middleMousePressed && m_mode == EditorMode::Edit && window.Native()) {
+        double cursorX = 0.0;
+        double cursorY = 0.0;
+        glfwGetCursorPos(window.Native(), &cursorX, &cursorY);
+        m_middleMousePanActive = IsViewportDropPosition(static_cast<float>(cursorX), static_cast<float>(cursorY));
+    }
+    m_middleMousePanPrev = middleMouseDown;
+}
+
+void EditorApp::HandleAssetShortcuts(engine::Window & window, bool controlDown)
+{
+    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_F5)) {
+        SaveScene();
+    }
+    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_F7)) {
+        ExportRuntimeScene();
+    }
+    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_F8)) {
+        ValidateRuntimeScene();
+    }
+    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_F9)) {
+        LoadScene();
+    }
+    if (Pressed(GLFW_KEY_F6)) {
+        RefreshAssets();
+    }
+    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_U)) {
+        std::string error;
+        if (m_assets.GoUp(&error)) {
+            m_log.Info("Content folder: " + (m_assets.CurrentFolder().empty() ? std::string("/") : m_assets.CurrentFolder()));
+        } else {
+            m_log.Error(error);
+        }
+    }
+    if (Pressed(GLFW_KEY_LEFT_BRACKET)) {
+        m_assets.SelectPrevious();
+    }
+    if (Pressed(GLFW_KEY_RIGHT_BRACKET)) {
+        m_assets.SelectNext();
+    }
+    if (m_mode == EditorMode::Edit && m_panels.IsOpen(EditorPanels::Panel::Assets)
+        && controlDown && Pressed(GLFW_KEY_C)) {
+        CopyContentEntry();
+    }
+    if (m_mode == EditorMode::Edit && m_panels.IsOpen(EditorPanels::Panel::Assets)
+        && controlDown && Pressed(GLFW_KEY_V)) {
+        PasteContentEntry();
+    }
+    if (controlDown && Pressed(GLFW_KEY_ENTER)) {
+        BeginAssetDrag();
+    } else
+    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_ENTER)) {
+        UseSelectedAsset();
+    }
+    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_V)) {
+        DropPayloadOnScene();
+    }
+    if (Pressed(GLFW_KEY_BACKSLASH)) {
+        m_dragDrop.Clear();
+        m_log.Info("Drag/drop payload cleared");
+    }
+}
+
+void EditorApp::HandleEditorCommandShortcuts(engine::Window & window, bool controlDown)
+{
+    if (controlDown && Pressed(GLFW_KEY_Z)) {
+        Undo();
+    }
+    if (controlDown && Pressed(GLFW_KEY_Y)) {
+        Redo();
+    }
+    if (controlDown && Pressed(GLFW_KEY_L)) {
+        m_log.Clear();
+    }
+    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_N)) {
+        AddCube();
+    }
+    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_B)) {
+        AddPlane();
+    }
+    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_C)) {
+        CycleSelectedColor();
+    }
+    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_H)) {
+        ToggleSelectedVisible();
+    }
+    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_O)) {
+        ToggleSelectedLocked();
+    }
+    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_1)) {
+        SetSelectedPrimitive(EditorScene::Primitive::Cube);
+    }
+    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_2)) {
+        SetSelectedPrimitive(EditorScene::Primitive::Plane);
+    }
+    if (m_mode == EditorMode::Edit && !m_mouseLook && Pressed(GLFW_KEY_D)) {
+        DuplicateSelected();
+    }
+    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_DELETE)) {
+        if (m_panels.IsOpen(EditorPanels::Panel::Assets)
+            && m_assets.SelectedType() != EditorAssets::SelectionType::None) {
+            DeleteContentEntry();
+        } else {
+            DeleteSelected();
+        }
+    }
+    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_R)) {
+        m_scene.ResetSelectedTransform();
+        m_log.Info("Reset selected transform");
+    }
+    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_G)) {
+        m_gizmo.CycleMode();
+        m_log.Info(std::string("Gizmo mode: ") + m_gizmo.ModeName());
+    }
+    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_X)) {
+        m_gizmo.SetAxis(EditorGizmo::Axis::X);
+        m_log.Info("Gizmo axis: X");
+    }
+    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_Y)) {
+        m_gizmo.SetAxis(EditorGizmo::Axis::Y);
+        m_log.Info("Gizmo axis: Y");
+    }
+    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_Z)) {
+        m_gizmo.SetAxis(EditorGizmo::Axis::Z);
+        m_log.Info("Gizmo axis: Z");
+    }
+}
+
+void EditorApp::UpdateCameraControls(engine::Window & window, float dt)
+{
+    const float cameraSpeed = (window.IsKeyPressed(GLFW_KEY_LEFT_SHIFT) ? 12.0f : 5.0f) * dt;
+    if (m_mode == EditorMode::Edit && window.Native()) {
+        double cursorX = 0.0;
+        double cursorY = 0.0;
+        glfwGetCursorPos(window.Native(), &cursorX, &cursorY);
+        const float scrollY = window.ScrollDeltaY();
+        if (scrollY != 0.0f
+            && IsViewportDropPosition(static_cast<float>(cursorX), static_cast<float>(cursorY))) {
+            const float zoomSpeed = window.IsKeyPressed(GLFW_KEY_LEFT_SHIFT) ? 2.0f : 1.0f;
+            m_camera.MoveForward(scrollY * zoomSpeed);
+        }
+    }
+    if (m_mouseLook) {
+        m_camera.AddYawPitch(window.MouseDeltaX() * 0.1f, -window.MouseDeltaY() * 0.1f);
+        if (window.IsKeyPressed(GLFW_KEY_W)) m_camera.MoveForward(cameraSpeed);
+        if (window.IsKeyPressed(GLFW_KEY_S)) m_camera.MoveForward(-cameraSpeed);
+        if (window.IsKeyPressed(GLFW_KEY_D)) m_camera.MoveRight(cameraSpeed);
+        if (window.IsKeyPressed(GLFW_KEY_A)) m_camera.MoveRight(-cameraSpeed);
+        if (window.IsKeyPressed(GLFW_KEY_SPACE)) m_camera.MoveUp(cameraSpeed);
+        if (window.IsKeyPressed(GLFW_KEY_LEFT_CONTROL)) m_camera.MoveUp(-cameraSpeed);
+    } else if (m_middleMousePanActive) {
+        const float panSpeed = window.IsKeyPressed(GLFW_KEY_LEFT_SHIFT) ? 0.04f : 0.02f;
+        m_camera.MoveRight(-window.MouseDeltaX() * panSpeed);
+        m_camera.MoveUp(window.MouseDeltaY() * panSpeed);
+    }
+}
+
+void EditorApp::UpdateSelectedTransformShortcuts(engine::Window & window, float dt)
+{
+    const float objectSpeed = 2.0f * dt;
+    if (m_mode == EditorMode::Edit) {
+        const bool transformEditing = IsTransformEditActive(window);
+        if (transformEditing && !m_wasTransformEditing) {
+            m_scene.BeginTransformEdit();
+        }
+
+        if (window.IsKeyPressed(GLFW_KEY_LEFT)) m_scene.MoveSelected(glm::vec3(-objectSpeed, 0.0f, 0.0f));
+        if (window.IsKeyPressed(GLFW_KEY_RIGHT)) m_scene.MoveSelected(glm::vec3(objectSpeed, 0.0f, 0.0f));
+        if (window.IsKeyPressed(GLFW_KEY_UP)) m_scene.MoveSelected(glm::vec3(0.0f, 0.0f, -objectSpeed));
+        if (window.IsKeyPressed(GLFW_KEY_DOWN)) m_scene.MoveSelected(glm::vec3(0.0f, 0.0f, objectSpeed));
+        if (window.IsKeyPressed(GLFW_KEY_Q)) m_scene.MoveSelected(glm::vec3(0.0f, objectSpeed, 0.0f));
+        if (window.IsKeyPressed(GLFW_KEY_E)) m_scene.MoveSelected(glm::vec3(0.0f, -objectSpeed, 0.0f));
+        if (window.IsKeyPressed(GLFW_KEY_J)) m_scene.RotateSelectedYaw(-90.0f * dt);
+        if (window.IsKeyPressed(GLFW_KEY_L)) m_scene.RotateSelectedYaw(90.0f * dt);
+        if (window.IsKeyPressed(GLFW_KEY_EQUAL) || window.IsKeyPressed(GLFW_KEY_KP_ADD)) {
+            m_scene.ScaleSelectedAxis(m_gizmo.AxisVector(), 1.0f + dt);
+        }
+        if (window.IsKeyPressed(GLFW_KEY_MINUS) || window.IsKeyPressed(GLFW_KEY_KP_SUBTRACT)) {
+            m_scene.ScaleSelectedAxis(m_gizmo.AxisVector(), 1.0f - dt);
+        }
+        if (window.IsKeyPressed(GLFW_KEY_COMMA)) {
+            ApplyGizmoNudge(-1.0f, dt);
+        }
+        if (window.IsKeyPressed(GLFW_KEY_PERIOD)) {
+            ApplyGizmoNudge(1.0f, dt);
+        }
+
+        if (!transformEditing && m_wasTransformEditing) {
+            m_scene.EndTransformEdit();
+        }
+        m_wasTransformEditing = transformEditing;
+    } else if (m_wasTransformEditing) {
+        m_scene.EndTransformEdit();
+        m_wasTransformEditing = false;
+    }
+}
+
+void EditorApp::DrawPlayScene(const glm::mat4 & viewProj)
+{
+    m_shader->Bind();
+    m_shader->SetMat4("uViewProj", viewProj);
+    m_shader->SetVec3("uLightDir", glm::normalize(glm::vec3(-0.4f, -1.0f, -0.3f)));
+
+    if (m_modelShader) {
+        m_modelShader->Bind();
+        m_modelShader->SetMat4("uViewProj", viewProj);
+        m_modelShader->SetVec3("uLightPos", m_camera.Position() + glm::vec3(-4.0f, 6.0f, 4.0f));
+        m_modelShader->SetVec3("uLightColor", glm::vec3(1.0f));
+        m_modelShader->SetVec3("uViewPos", m_camera.Position());
+        engine::ecs::RenderLoadedModels(*m_playRegistry, *m_modelShader);
+    }
+
+    m_shader->Bind();
+    m_shader->SetMat4("uViewProj", viewProj);
+    m_shader->SetVec3("uLightDir", glm::normalize(glm::vec3(-0.4f, -1.0f, -0.3f)));
+    engine::ecs::RenderMeshes(*m_playRegistry, m_renderer, *m_shader);
+}
+
+void EditorApp::DrawEditScene(const glm::mat4 & viewProj)
+{
+    m_shader->Bind();
+    m_shader->SetMat4("uViewProj", viewProj);
+    m_shader->SetVec3("uLightDir", glm::normalize(glm::vec3(-0.4f, -1.0f, -0.3f)));
+
+    m_scene.Registry().view<Transform, MeshRenderer>().each(
+        [&](Entity entity, Transform& transform, MeshRenderer& renderer) {
+            if (!m_scene.IsVisible(entity)) {
+                return;
+            }
+            const std::vector<EditorScene::Object>& objects = m_scene.Objects();
+            const auto objectIt = std::find_if(objects.begin(), objects.end(),
+                [&](const EditorScene::Object& object) { return object.entity == entity; });
+            if (objectIt != objects.end() && !objectIt->modelAssetPath.empty()) {
+                return;
+            }
+            const EditorScene::Object* selectedObject = m_scene.SelectedObject();
+            const bool selected = selectedObject && selectedObject->entity == entity;
+            MeshRenderer drawRenderer = renderer;
+            drawRenderer.color = SelectedColor(selected, renderer.color);
+            const engine::Texture* diffuseTexture = nullptr;
+            if (objectIt != objects.end() && !objectIt->materialAssetPath.empty()) {
+                std::string error;
+                diffuseTexture = m_editAssets.LoadTexture(objectIt->materialAssetPath, &error);
+                if (!diffuseTexture && !m_editTextureLoadErrors[objectIt->materialAssetPath]) {
+                    m_editTextureLoadErrors[objectIt->materialAssetPath] = true;
+                    m_log.Error("Texture preview failed: " + error);
+                }
+            }
+            DrawSceneObject(transform, drawRenderer, diffuseTexture);
+        });
+    DrawEditModeModels(viewProj);
+    DrawSelectionOutline(viewProj);
+    DrawSceneGizmo(viewProj);
 }
 
 void EditorApp::DrawLogOverlay(float x, float y, const glm::vec3 & text, const glm::vec3 & muted)
@@ -507,14 +1186,10 @@ void EditorApp::ApplyGizmoNudge(float direction, float dt)
         m_scene.MoveSelected(axis * (amount * 2.0f));
         break;
     case EditorGizmo::Mode::Rotate:
-        if (m_gizmo.CurrentAxis() == EditorGizmo::Axis::Y) {
-            m_scene.RotateSelectedYaw(amount * 90.0f);
-        } else {
-            m_log.Warning("Only Y rotation is implemented");
-        }
+        m_scene.RotateSelected(axis, amount * 90.0f);
         break;
     case EditorGizmo::Mode::Scale:
-        m_scene.ScaleSelected(1.0f + amount);
+        m_scene.ScaleSelectedAxis(axis, 1.0f + amount);
         break;
     }
 }
@@ -529,11 +1204,7 @@ void EditorApp::ApplyGizmoDrag(float pixels)
         m_scene.MoveSelected(axis * amount);
         break;
     case EditorGizmo::Mode::Rotate:
-        if (m_gizmo.CurrentAxis() == EditorGizmo::Axis::Y) {
-            m_scene.RotateSelectedYaw(pixels * 0.35f);
-        } else {
-            m_log.Warning("Only Y rotation is implemented");
-        }
+        m_scene.RotateSelected(axis, pixels * 0.35f);
         break;
     case EditorGizmo::Mode::Scale:
         {
@@ -541,7 +1212,7 @@ void EditorApp::ApplyGizmoDrag(float pixels)
             if (factor < 0.05f) {
                 factor = 0.05f;
             }
-            m_scene.ScaleSelected(factor);
+            m_scene.ScaleSelectedAxis(axis, factor);
         }
         break;
     }
@@ -589,7 +1260,7 @@ void EditorApp::HandleMouseAssetDrag()
 
     if (leftReleased && m_dragDrop.IsMouseDriven()) {
         m_dragDrop.UpdateCursor(x, y);
-        if (IsViewpoertDropPosition(x, y)) {
+        if (IsViewportDropPosition(x, y)) {
             DropPayloadOnScene();
         } else {
             m_dragDrop.Clear();
@@ -600,7 +1271,83 @@ void EditorApp::HandleMouseAssetDrag()
     m_leftMousePrev = leftDown;
 }
 
-void EditorApp::HandleMouseVIewportGizmo()
+void EditorApp::HandleMouseViewportSelection()
+{
+    engine::Window& window = GetWindow();
+    if (m_mouseLook || m_mode != EditorMode::Edit || !window.Native()) {
+        if (m_mouseGizmoActive && m_mouseGizmoButton == GLFW_MOUSE_BUTTON_LEFT) {
+            m_scene.EndTransformEdit();
+        }
+        m_mouseGizmoActive = m_mouseGizmoButton == GLFW_MOUSE_BUTTON_LEFT ? false : m_mouseGizmoActive;
+        m_mouseGizmoButton = m_mouseGizmoButton == GLFW_MOUSE_BUTTON_LEFT ? -1 : m_mouseGizmoButton;
+        m_viewportLeftMousePrev = false;
+        return;
+    }
+
+    double cursorX = 0.0;
+    double cursorY = 0.0;
+    glfwGetCursorPos(window.Native(), &cursorX, &cursorY);
+
+    const bool leftDown = glfwGetMouseButton(window.Native(), GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+    const bool leftPressed = leftDown && !m_viewportLeftMousePrev;
+    const bool leftReleased = !leftDown && m_viewportLeftMousePrev;
+    const float x = static_cast<float>(cursorX);
+    const float y = static_cast<float>(cursorY);
+
+    const bool activeLeftGizmo = m_mouseGizmoActive && m_mouseGizmoButton == GLFW_MOUSE_BUTTON_LEFT;
+    if (m_dragDrop.HasPayload() || (!IsViewportDropPosition(x, y) && !activeLeftGizmo)) {
+        m_viewportLeftMousePrev = leftDown;
+        return;
+    }
+
+    const glm::mat4 viewProj = m_camera.ProjectionMatrix(window.AspectRatio()) * m_camera.ViewMatrix();
+
+    if (leftPressed) {
+        if (PickGizmoHandle(x, y, viewProj, window.Width(), window.Height())) {
+            m_mouseGizmoActive = true;
+            m_mouseGizmoButton = GLFW_MOUSE_BUTTON_LEFT;
+            m_mouseGizmoLastX = x;
+            m_mouseGizmoLastY = y;
+            m_scene.BeginTransformEdit();
+            m_log.Info(std::string("Mouse gizmo: ") + m_gizmo.ModeName() + " " + m_gizmo.AxisName());
+        } else {
+            const int picked = PickSceneObject(x, y, viewProj, window.Width(), window.Height());
+            if (picked >= 0) {
+                m_scene.SelectIndex(picked);
+                if (const EditorScene::Object* selected = m_scene.SelectedObject()) {
+                    m_log.Info("Selected " + selected->name);
+                }
+            } else if (m_scene.SelectedObject()) {
+                m_scene.Deselect();
+                m_log.Info("Deselected object");
+            }
+        }
+    }
+
+    if (leftDown && m_mouseGizmoActive && m_mouseGizmoButton == GLFW_MOUSE_BUTTON_LEFT) {
+        const float dx = x - m_mouseGizmoLastX;
+        const float dy = y - m_mouseGizmoLastY;
+        const float pixels = m_gizmo.CurrentAxis() == EditorGizmo::Axis::Y ? -dy : dx;
+
+        if (pixels != 0.0f) {
+            ApplyGizmoDrag(pixels);
+        }
+
+        m_mouseGizmoLastX = x;
+        m_mouseGizmoLastY = y;
+    }
+
+    if (leftReleased && m_mouseGizmoActive && m_mouseGizmoButton == GLFW_MOUSE_BUTTON_LEFT) {
+        m_scene.EndTransformEdit();
+        m_mouseGizmoActive = false;
+        m_mouseGizmoButton = -1;
+        m_log.Info("Mouse gizmo edit complete");
+    }
+
+    m_viewportLeftMousePrev = leftDown;
+}
+
+void EditorApp::HandleMouseViewportGizmo()
 {
     engine::Window& window = GetWindow();
     if (m_mouseLook || m_mode != EditorMode::Edit || !window.Native()) {
@@ -608,6 +1355,7 @@ void EditorApp::HandleMouseVIewportGizmo()
             m_scene.EndTransformEdit();
         }
         m_mouseGizmoActive = false;
+        m_mouseGizmoButton = -1;
         m_rightMousePrev = false;
         return;
     }
@@ -623,18 +1371,20 @@ void EditorApp::HandleMouseVIewportGizmo()
     const float y = static_cast<float>(cursorY);
 
     if (rightPressed
+        && !m_mouseGizmoActive
         && !m_dragDrop.HasPayload()
         && m_scene.SelectedObject()
         && !m_scene.SelectedLocked()
-        && IsViewpoertDropPosition(x, y)) {
+        && IsViewportDropPosition(x, y)) {
         m_mouseGizmoActive = true;
+        m_mouseGizmoButton = GLFW_MOUSE_BUTTON_RIGHT;
         m_mouseGizmoLastX = x;
         m_mouseGizmoLastY = y;
         m_scene.BeginTransformEdit();
         m_log.Info(std::string("Mouse gizmo: ") + m_gizmo.ModeName() + " " + m_gizmo.AxisName());
     }
 
-    if (rightDown && m_mouseGizmoActive) {
+    if (rightDown && m_mouseGizmoActive && m_mouseGizmoButton == GLFW_MOUSE_BUTTON_RIGHT) {
         const float dx = x - m_mouseGizmoLastX;
         const float dy = y - m_mouseGizmoLastY;
         const float pixels = m_gizmo.CurrentAxis() == EditorGizmo::Axis::Y ? -dy : dx;
@@ -647,13 +1397,202 @@ void EditorApp::HandleMouseVIewportGizmo()
         m_mouseGizmoLastY = y;
     }
 
-    if (rightReleased && m_mouseGizmoActive) {
+    if (rightReleased && m_mouseGizmoActive && m_mouseGizmoButton == GLFW_MOUSE_BUTTON_RIGHT) {
         m_scene.EndTransformEdit();
         m_mouseGizmoActive = false;
+        m_mouseGizmoButton = -1;
         m_log.Info("Mouse gizmo edit complete");
     }
 
     m_rightMousePrev = rightDown;
+}
+
+bool EditorApp::ProjectWorldToScreen(const glm::vec3& world, const glm::mat4 viewProj,
+                                     int width, int height, glm::vec2* screen) const
+{
+    const glm::vec4 clip = viewProj * glm::vec4(world, 1.0f);
+    if (clip.w <= 0.0f) {
+        return false;
+    }
+    const glm::vec3 ndc = glm::vec3(clip) / clip.w;
+    if (ndc.z < -1.0f || ndc.z > 1.0f) {
+        return false;
+    }
+    screen->x = (ndc.x * 0.5f + 0.5f) * static_cast<float>(width);
+    screen->y = (1.0f - (ndc.y * 0.5f + 0.5f)) * static_cast<float>(height);
+    return true;
+}
+
+int EditorApp::PickSceneObject(float x, float y, const glm::mat4 & viewProj, int width, int height) const
+{
+    PickRay ray;
+    if (!BuildPickRay(x, y, viewProj, width, height, &ray)) {
+        return -1;
+    }
+
+    int picked = -1;
+    float bestDistance = std::numeric_limits<float>::max();
+
+    const std::vector<EditorScene::Object>& objects = m_scene.Objects();
+    for (int i = 0; i < static_cast<int>(objects.size()); ++i) {
+        const EditorScene::Object& object = objects[static_cast<std::size_t>(i)];
+        if (!object.visible) {
+            continue;
+        }
+
+        const Transform* transform = m_scene.TryGetTransform(object.entity);
+        if (!transform) {
+            continue;
+        }
+        
+        const glm::mat4 inverseModel = glm::inverse(transform->Model());
+        const PickRay localRay = TransformRayToLocal(ray, inverseModel);
+        float hitDistance = 0.0f;
+        bool hit = false;
+        if (!object.modelAssetPath.empty()) {
+            const engine::Model* model = m_editAssets.FindModel(object.modelAssetPath);
+            if (model) {
+                hit = IntersectLocalAabb(localRay, model->Min(), model->Max(), &hitDistance);
+            } else {
+                hit = IntersectLocalAabb(localRay, glm::vec3(-0.5f), glm::vec3(0.5f), &hitDistance);
+            }
+        } else {
+            switch (object.primitive) {
+            case EditorScene::Primitive::Plane:
+                hit = IntersectLocalPlaneQuad(localRay, &hitDistance);
+                break;
+            case EditorScene::Primitive::Cube:
+                hit = IntersectLocalAabb(localRay,
+                    glm::vec3(-0.5f),
+                    glm::vec3(0.5f),
+                    &hitDistance);
+                break;
+            }
+        }
+
+        if (hit && hitDistance < bestDistance) {
+            bestDistance = hitDistance;
+            picked = i;
+        }
+    }
+
+    return picked;
+}
+
+bool EditorApp::PickGizmoHandle(float x, float y, const glm::mat4 & viewProj, int width, int height)
+{
+    const Transform* selectedTransform = m_scene.SelectedTransform();
+    if (!selectedTransform || m_scene.SelectedLocked()) {
+        return false;
+    }
+
+    constexpr float length = 1.65f;
+    constexpr float head = 0.18f;
+    constexpr float rotateRadius = 1.25f;
+    constexpr float pi = 3.14159265359f;
+    const glm::vec2 mouse{x, y};
+    const glm::vec3 center = selectedTransform->position;
+    glm::vec2 centerScreen;
+    if (!ProjectWorldToScreen(center, viewProj, width, height, &centerScreen)) {
+        return false;
+    }
+
+    auto testAxisSegment = [&](EditorGizmo::Axis axis, float axisLength, float maxDistance) {
+        glm::vec3 axisVector;
+        switch (axis) {
+        case EditorGizmo::Axis::X: axisVector = glm::vec3(1.0f, 0.0f, 0.0f); break;
+        case EditorGizmo::Axis::Y: axisVector = glm::vec3(0.0f, 1.0f, 0.0f); break;
+        case EditorGizmo::Axis::Z: axisVector = glm::vec3(0.0f, 0.0f, 1.0f); break;
+        }
+
+        glm::vec2 endScreen;
+        if (!ProjectWorldToScreen(center + axisVector * axisLength, viewProj, width, height, &endScreen)) {
+            return false;
+        }
+
+        return DistanceToSegmentSquared(mouse, centerScreen, endScreen) <= maxDistance * maxDistance;
+    };
+
+    switch (m_gizmo.CurrentMode()) {
+    case EditorGizmo::Mode::Translate:
+        if (testAxisSegment(EditorGizmo::Axis::X, length + head * 1.6f, 18.0f)) {
+                        m_gizmo.SetAxis(EditorGizmo::Axis::X);
+            return true;
+        }
+        if (testAxisSegment(EditorGizmo::Axis::Y, length + head * 1.6f, 18.0f)) {
+            m_gizmo.SetAxis(EditorGizmo::Axis::Y);
+            return true;
+        }
+        if (testAxisSegment(EditorGizmo::Axis::Z, length + head * 1.6f, 18.0f)) {
+            m_gizmo.SetAxis(EditorGizmo::Axis::Z);
+            return true;
+        }
+        break;
+
+    case EditorGizmo::Mode::Scale:
+        if (testAxisSegment(EditorGizmo::Axis::X, length, 18.0f)) {
+            m_gizmo.SetAxis(EditorGizmo::Axis::X);
+            return true;
+        }
+        if (testAxisSegment(EditorGizmo::Axis::Y, length, 18.0f)) {
+            m_gizmo.SetAxis(EditorGizmo::Axis::Y);
+            return true;
+        }
+        if (testAxisSegment(EditorGizmo::Axis::Z, length, 18.0f)) {
+            m_gizmo.SetAxis(EditorGizmo::Axis::Z);
+            return true;
+        }
+        break;
+
+    case EditorGizmo::Mode::Rotate:
+        {
+            const EditorGizmo::Axis axes[] = {
+                EditorGizmo::Axis::X,
+                EditorGizmo::Axis::Y,
+                EditorGizmo::Axis::Z
+            };
+            for (EditorGizmo::Axis axis : axes) {
+                float bestDistanceSquared = std::numeric_limits<float>::max();
+                glm::vec2 previousScreen;
+                bool hasPrevious = false;
+                for (int i = 0; i <= 40; ++i) {
+                    const float t = (static_cast<float>(i) / 40.0f) * 2.0f * pi;
+                    glm::vec3 offset;
+                    switch (axis) {
+                    case EditorGizmo::Axis::X:
+                        offset = glm::vec3(0.0f, std::cos(t) * rotateRadius, std::sin(t) * rotateRadius);
+                        break;
+                                        case EditorGizmo::Axis::Y:
+                        offset = glm::vec3(std::cos(t) * rotateRadius, 0.0f, std::sin(t) * rotateRadius);
+                        break;
+                    case EditorGizmo::Axis::Z:
+                        offset = glm::vec3(std::cos(t) * rotateRadius, std::sin(t) * rotateRadius, 0.0f);
+                        break;
+                    }
+
+                    glm::vec2 screen;
+                    if (!ProjectWorldToScreen(center + offset, viewProj, width, height, &screen)) {
+                        hasPrevious = false;
+                        continue;
+                    }
+                    if (hasPrevious) {
+                        bestDistanceSquared = std::min(bestDistanceSquared,
+                            DistanceToSegmentSquared(mouse, previousScreen, screen));
+                    }
+                    previousScreen = screen;
+                    hasPrevious = true;
+                }
+
+                if (bestDistanceSquared <= 16.0f * 16.0f) {
+                    m_gizmo.SetAxis(axis);
+                    return true;
+                }
+            }
+        }
+        break;
+    }
+
+    return false;
 }
 
 void EditorApp::BeginAssetDrag()
@@ -690,13 +1629,38 @@ void EditorApp::DropPayloadOnScene()
     }
 
     if (payload.typeName == "Model") {
-        if (m_scene.SetSelectedModelAsset(payload.path)) {
-            m_log.Info("Assigned model asset to selected object");
+        std::string error;
+        const engine::Model* model = m_editAssets.LoadModel(payload.path, &error);
+        if (!model) {
+            m_log.Error("Model drop failed: " + error);
+            m_dragDrop.Clear();
+            return;
+        }
+
+        Transform transform;
+        transform.position = SceneDropPosition();
+        const float radius = std::max(model->BoundingRadius(), 0.001f);
+        const float targetRadius = 0.8f;
+        const float uniformScale = targetRadius / radius;
+        transform.scale = glm::vec3(uniformScale);
+
+        if (m_cube && m_scene.AddModel(payload.path, *m_cube, transform)) {
+            m_editModelLoadErrors.erase(payload.path);
+            m_log.Info("Added model object: " + payload.path);
         } else {
-            m_log.Warning("Model drop failed: select an unlocked object first");
+            m_log.Warning("Model drop failed: could not create scene object");
         }
     } else if (payload.typeName == "Texture") {
+        std::string error;
+        const engine::Texture* texture = m_editAssets.LoadTexture(payload.path, &error);
+        if (!texture) {
+            m_log.Error("Texture drop failed: " + error);
+            m_dragDrop.Clear();
+            return;
+        }
+
         if (m_scene.SetSelectedMaterialAsset(payload.path)) {
+            m_editTextureLoadErrors.erase(payload.path);
             m_log.Info("Assigned material texture to selected object");
         } else {
             m_log.Warning("Texture drop failed: select an unlocked object first");
@@ -707,6 +1671,31 @@ void EditorApp::DropPayloadOnScene()
     m_dragDrop.Clear();
 }
 
+glm::vec3 EditorApp::SceneDropPosition()
+{
+    const engine::Window& window = GetWindow();
+    const glm::mat4 viewProj = m_camera.ProjectionMatrix(window.AspectRatio()) * m_camera.ViewMatrix();
+
+    double cursorX = 0.0;
+    double cursorY = 0.0;
+    glfwGetCursorPos(window.Native(), &cursorX, &cursorY);
+
+    PickRay ray;
+    if (!BuildPickRay(static_cast<float>(cursorX), static_cast<float>(cursorY),
+            viewProj, window.Width(), window.Height(), &ray)) {
+        return glm::vec3(0.0f);
+    }
+
+    if (std::abs(ray.direction.y) > 0.0001f) {
+        const float t = -ray.origin.y / ray.direction.y;
+        if (t > 0.0f) {
+            return ray.origin + ray.direction * t;
+        }
+    }
+
+    return ray.origin + ray.direction * 6.0f;
+}
+
 void EditorApp::RefreshAssets()
 {
     std::string error;
@@ -714,6 +1703,56 @@ void EditorApp::RefreshAssets()
         m_log.Info("Scanned assets: " + std::to_string(m_assets.Assets().size()) + "files");
     } else {
         m_log.Error(error);
+    }
+}
+
+void EditorApp::CtreateContentFolder(const std::string & name)
+{
+    std::string error;
+    if (m_assets.CreateFolder(name, &error)) {
+        m_log.Info("Created Content folder: " + name);
+    } else {
+        m_log.Error(error);
+    }
+}
+
+void EditorApp::ImportContentAsset(const std::string & sourcePath)
+{
+    std::string error;
+    if (m_assets.ImportAsset(sourcePath, &error)) {
+        m_log.Info("Imported asset: " + sourcePath);
+    } else {
+        m_log.Error(error);
+    }
+}
+
+void EditorApp::CopyContentEntry()
+{
+    std::string error;
+    if (m_assets.CopySelected(&error)) {
+        m_log.Info("Copied Content entry: " + m_assets.CopiedDisplayName());
+    } else {
+        m_log.Warning(error);
+    }
+}
+
+void EditorApp::PasteContentEntry()
+{
+    std::string error;
+    if (m_assets.PasteCopied(&error)) {
+        m_log.Info("Pasted Content entry");
+    } else {
+        m_log.Warning(error);
+    }
+}
+
+void EditorApp::DeleteContentEntry()
+{
+    std::string error;
+    if (m_assets.DeleteSelectedEntry(&error)) {
+        m_log.Info("Deleted Content entry");
+    } else {
+        m_log.Warning(error);
     }
 }
 
@@ -748,6 +1787,27 @@ float EditorApp::AssetPanelTop() const
     return y + 28.0f;
 }
 
+int EditorApp::FolderIndexAtPosition(float x, float y) const
+{
+    if (x < 30.0f || x > 430.0f) {
+        return -1;
+    }
+
+    const float rowTop = AssetPanelTop() + 78.0f;
+    const float rowHeight = 22.0f;
+    if (y < rowTop) {
+        return -1;
+    }
+
+    const int row = static_cast<int>((y - rowTop) / rowHeight);
+    const int maxVisible = 8;
+    if (row < 0 || row >= maxVisible || row >= static_cast<int>(m_assets.Folders().size())) {
+        return -1;
+    }
+
+    return row;
+}
+
 int EditorApp::AssetIndexAtPosition(float x, float y) const
 {
     if (x < 30.0f || x > 430.0f) {
@@ -769,7 +1829,7 @@ int EditorApp::AssetIndexAtPosition(float x, float y) const
     return index;
 }
 
-bool EditorApp::IsViewpoertDropPosition(float x, float y)
+bool EditorApp::IsViewportDropPosition(float x, float y)
 {
     const engine::Window& window = GetWindow();
     return x > 380.0f
@@ -968,18 +2028,40 @@ void EditorApp::ValidateRuntimeScene()
     m_log.Info("Validated runtime scene: "
         + std::to_string(runtimeScene.entities.size()) + " entities, "
         + std::to_string(report.modelsAssigned) + " models, "
-        + std::to_string(report.texturesAssigned) + " tectures");
+        + std::to_string(report.texturesAssigned) + " tectures, "
+        + std::to_string(ComponentCount<engine::ecs::LinearVelocity>(registry)) + " linear, "
+        + std::to_string(ComponentCount<engine::ecs::AngularVelocity>(registry)) + " angular");
 }
 
 void EditorApp::EnterPlayMode()
 {
     m_editSnapshot = m_scene.CreateSnapshot();
+    std::string error;
+    if (!BuildPlayRuntimePreview(&error)) {
+        m_editSnapshot.reset();
+        m_mode = EditorMode::Edit;
+        m_log.Error("Play mode failed: " + error);
+        return;
+    }
+
+    const std::size_t linearCount = m_playRegistry
+        ? ComponentCount<engine::ecs::LinearVelocity>(*m_playRegistry)
+        : 0;
+    const std::size_t angularCount = m_playRegistry
+        ? ComponentCount<engine::ecs::AngularVelocity>(*m_playRegistry)
+        : 0;
+
     m_mode = EditorMode::Play;
-    m_log.Info("Play mode: edit scene snapshot captured");
+    m_log.Info("Play mode: runtime preview loaded, "
+        + std::to_string(linearCount) + " linear, "
+        + std::to_string(angularCount) + " angular");
 }
 
 void EditorApp::ExitPlayMode()
 {
+    m_playRegistry.reset();
+    m_playAssets.reset();
+
     if (!m_cube || !m_plane) {
         m_log.Error("Could not restore edit scene");
         m_mode = EditorMode::Edit;
@@ -993,6 +2075,53 @@ void EditorApp::ExitPlayMode()
     m_editSnapshot.reset();
     m_mode = EditorMode::Edit;
     m_log.Info("Edit mode: restored scene from before Play");
+}
+
+bool EditorApp::BuildPlayRuntimePreview(std::string * error)
+{
+    if (!m_cube || !m_plane) {
+        if (error) {
+            *error = "editor primitive meshes are not ready";
+        }
+        return false;
+    }
+
+    std::filesystem::path runtimePath(m_project.ScenePath());
+    runtimePath.replace_extension(".runtime.scene");
+
+    if (!RuntimeSceneExporter::Export(m_scene, runtimePath.string(), error)) {
+        return false;
+    }
+
+    engine::RuntimeSceneLoader::Scene runtimeScene;
+    if (!engine::RuntimeSceneLoader::Load(runtimePath.string(), &runtimeScene, error)) {
+        return false;
+    }
+
+    m_playRegistry.emplace();
+    m_playAssets.emplace();
+
+    engine::RuntimeSceneLoader::PrimitiveMeshes meshes{&*m_cube, &*m_plane};
+    if (!engine::RuntimeSceneLoader::Instantiate(runtimeScene, *m_playRegistry, meshes, nullptr, error)) {
+        m_playRegistry.reset();
+        m_playAssets.reset();
+        return false;
+    }
+
+    const engine::RuntimeAssetManager::ResolveReport report = m_playAssets->ResolveRegistryAssets(*m_playRegistry);
+    if (!report.errors.empty()) {
+        if (error) {
+            *error = report.errors.front();
+        }
+        m_playRegistry.reset();
+        m_playAssets.reset();
+        return false;
+    }
+
+    if (error) {
+        *error = {};
+    }
+    return true;
 }
 
 bool EditorApp::IsTransformEditActive(const engine::Window &window) const

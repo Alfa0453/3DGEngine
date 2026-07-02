@@ -2,10 +2,12 @@
 #include "engine/graphics/VertexLayout.h"
 
 #include <glm/gtc/constants.hpp>
+#include <glm/glm.hpp>
 
 #include <cmath>
 #include <cstdint>
 #include <vector>
+
 
 namespace engine {
 namespace primitives{
@@ -82,7 +84,152 @@ Mesh Plane(float size, float uvTiling) {
     return Mesh(v, idx, PNT());
 }
 
-Mesh Sphere (int segments) {
+Mesh Cone(int segments)
+{
+        if (segments < 3) segments = 3;
+    const float R = 0.5f;
+    const float H = 1.0f;
+    const float PI = glm::pi<float>();
+
+    std::vector<float> v;
+    std::vector<std::uint32_t> idx;
+    v.reserve(static_cast<std::size_t>(segments * 2 + 2) * 8);
+
+    const std::uint32_t tip = 0;
+    v.insert(v.end(), {
+        0.0f, H * 0.5f, 0.0f,
+        0.0f, 1.0f, 0.0f,
+        0.5f, 1.0f
+    });
+
+    const std::uint32_t baseCenter = 1;
+    v.insert(v.end(), {
+        0.0f, -H * 0.5f, 0.0f,
+        0.0f, -1.0f, 0.0f,
+        0.5f, 0.5f
+    });
+
+    const std::uint32_t sideStart = 2;
+    for (int i = 0; i < segments; ++i) {
+        const float t = (static_cast<float>(i) / static_cast<float>(segments)) * 2.0f * PI;
+        const float x = std::cos(t) * R;
+        const float z = std::sin(t) * R;
+        const glm::vec3 normal = glm::normalize(glm::vec3(x, R, z));
+        v.insert(v.end(), {
+            x, -H * 0.5f, z,
+            normal.x, normal.y, normal.z,
+            static_cast<float>(i) / static_cast<float>(segments), 0.0f
+        });
+    }
+
+    const std::uint32_t capStart = sideStart + static_cast<std::uint32_t>(segments);
+    for (int i = 0; i < segments; ++i) {
+        const float t = (static_cast<float>(i) / static_cast<float>(segments)) * 2.0f * PI;
+        const float x = std::cos(t) * R;
+        const float z = std::sin(t) * R;
+        v.insert(v.end(), {
+            x, -H * 0.5f, z,
+            0.0f, -1.0f, 0.0f,
+            x + 0.5f, z + 0.5f
+        });
+    }
+
+    for (int i = 0; i < segments; ++i) {
+        const std::uint32_t sideCurrent = sideStart + static_cast<std::uint32_t>(i);
+        const std::uint32_t sideNext = sideStart + static_cast<std::uint32_t>((i + 1) % segments);
+        const std::uint32_t capCurrent = capStart + static_cast<std::uint32_t>(i);
+        const std::uint32_t capNext = capStart + static_cast<std::uint32_t>((i + 1) % segments);
+        idx.insert(idx.end(), {tip, sideCurrent, sideNext});
+        idx.insert(idx.end(), {baseCenter, capNext, capCurrent});
+    }
+
+    return Mesh(v, idx, PNT());
+}
+Mesh Cylinder(int segments)
+{
+        if (segments < 3) segments = 3;
+    const float R = 0.5f;
+    const float H = 1.0f;
+    const float PI = glm::pi<float>();
+
+    std::vector<float> v;
+    std::vector<std::uint32_t> idx;
+    v.reserve(static_cast<std::size_t>(segments * 4 + 2) * 8);
+
+    const std::uint32_t topCenter = 0;
+    v.insert(v.end(), {
+        0.0f, H * 0.5f, 0.0f,
+        0.0f, 1.0f, 0.0f,
+        0.5f, 0.5f
+    });
+
+    const std::uint32_t bottomCenter = 1;
+    v.insert(v.end(), {
+        0.0f, -H * 0.5f, 0.0f,
+        0.0f, -1.0f, 0.0f,
+        0.5f, 0.5f
+    });
+
+    const std::uint32_t sideStart = 2;
+    for (int i = 0; i < segments; ++i) {
+        const float t = (static_cast<float>(i) / static_cast<float>(segments)) * 2.0f * PI;
+        const float x = std::cos(t) * R;
+        const float z = std::sin(t) * R;
+        const glm::vec3 normal = glm::normalize(glm::vec3(x, 0.0f, z));
+        const float u = static_cast<float>(i) / static_cast<float>(segments);
+        v.insert(v.end(), {
+            x, H * 0.5f, z,
+            normal.x, normal.y, normal.z,
+            u, 1.0f,
+            x, -H * 0.5f, z,
+            normal.x, normal.y, normal.z,
+            u, 0.0f
+        });
+    }
+
+    const std::uint32_t topStart = sideStart + static_cast<std::uint32_t>(segments * 2);
+    for (int i = 0; i < segments; ++i) {
+        const float t = (static_cast<float>(i) / static_cast<float>(segments)) * 2.0f * PI;
+        const float x = std::cos(t) * R;
+        const float z = std::sin(t) * R;
+        v.insert(v.end(), {
+            x, H * 0.5f, z,
+            0.0f, 1.0f, 0.0f,
+            x + 0.5f, z + 0.5f
+        });
+    }
+
+    const std::uint32_t bottomStart = topStart + static_cast<std::uint32_t>(segments);
+    for (int i = 0; i < segments; ++i) {
+        const float t = (static_cast<float>(i) / static_cast<float>(segments)) * 2.0f * PI;
+        const float x = std::cos(t) * R;
+        const float z = std::sin(t) * R;
+        v.insert(v.end(), {
+            x, -H * 0.5f, z,
+            0.0f, -1.0f, 0.0f,
+            x + 0.5f, z + 0.5f
+        });
+    }
+
+    for (int i = 0; i < segments; ++i) {
+        const std::uint32_t currentTop = sideStart + static_cast<std::uint32_t>(i * 2);
+        const std::uint32_t currentBottom = currentTop + 1;
+        const std::uint32_t nextTop = sideStart + static_cast<std::uint32_t>(((i + 1) % segments) * 2);
+        const std::uint32_t nextBottom = nextTop + 1;
+        idx.insert(idx.end(), {currentTop, currentBottom, nextBottom, nextBottom, nextTop, currentTop});
+
+        const std::uint32_t capTopCurrent = topStart + static_cast<std::uint32_t>(i);
+        const std::uint32_t capTopNext = topStart + static_cast<std::uint32_t>((i + 1) % segments);
+        const std::uint32_t capBottomCurrent = bottomStart + static_cast<std::uint32_t>(i);
+        const std::uint32_t capBottomNext = bottomStart + static_cast<std::uint32_t>((i + 1) % segments);
+        idx.insert(idx.end(), {topCenter, capTopCurrent, capTopNext});
+        idx.insert(idx.end(), {bottomCenter, capBottomNext, capBottomCurrent});
+    }
+
+    return Mesh(v, idx, PNT());
+}
+Mesh Sphere(int segments)
+{
     if (segments < 3) segments = 3;
     const int    stacks  = segments;        // latitude bands (pole to pole)
     const int    sectors = segments * 2;    // longitude bands (around)

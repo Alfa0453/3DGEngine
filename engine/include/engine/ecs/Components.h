@@ -29,6 +29,15 @@ struct Transform {
     }
 };
 
+struct LinearVelocity {
+    glm::vec3 velocity{0.0f};
+};
+
+struct AngularVelocity {
+    glm::vec3 axis{0.0f, 1.0f, 0.0f};
+    float radiansPerSecond = 0.0f;
+};
+
 // Marks an entity as drawable: which mesh to draw and in what colour. The mesh is
 // referenced, not owned — it lives in the game (e.g. a shared cube) so many
 // entities can point at the same geometry.

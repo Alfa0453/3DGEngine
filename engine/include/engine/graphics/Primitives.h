@@ -22,6 +22,12 @@ Mesh Quad();
 // texture coordinates repeating `uvTiling` times. Handy for ground/floors.
 Mesh Plane(float size = 1.0f, float uvTiling = 1.0f);
 
+// A unit cone pointing up the Y axis, radius 0.5 and height 1.0.
+Mesh Cone(int segments = 24);
+
+// A unit cylinder along the Y axis, radius 0.5 and height 1.0.
+Mesh Cylinder(int segments = 24);
+
 // A unit-diameter UV sphere (radius 0.5) with `segments` latitude bands (and
 // 2*segments longitude bands). Normals point outward; UVs wrap longitude/latitude.
 Mesh Sphere(int segments = 16);

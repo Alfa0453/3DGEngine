@@ -25,6 +25,9 @@ public:
         bool locked = false;
         std::string modelAssetPath;
         std::string materialAssetPath;
+        glm::vec3 linearVelocity{0.0f};
+        glm::vec3 angularVelocityAxis{0.0f, 1.0f, 0.0f};
+        float angularVelocityRadians = 0.0f;
     };
 
     struct ObjectSnapshot {
@@ -59,8 +62,11 @@ public:
     void SelectNext();
     void SelectPrevious();
     void SelectIndex(int index);
+    void Deselect();
     void MoveSelected(const glm::vec3& delta);
+    void RotateSelected(const glm::vec3& axis, float degrees);
     void RotateSelectedYaw(float degrees);
+    void ScaleSelectedAxis(const glm::vec3& axis, float factor);
     void ScaleSelected(float factor);
     void ResetSelectedTransform();
     void BeginTransformEdit();
@@ -71,10 +77,13 @@ public:
     void RestoreFromSnapshot(const Snapshot& snapshot, const engine::Mesh& cube, const engine::Mesh& plane);
     void AddCube(const engine::Mesh& cube);
     void AddPlane(const engine::Mesh& plane);
+    bool AddModel(const std::string& path, const engine::Mesh& placeholderMesh, const engine::ecs::Transform& transform);
     bool CycleSelectedColor();
     bool SetSelectedPrimitive(Primitive primitive, const engine::Mesh& mesh);
     bool SetSelectedModelAsset(const std::string& path);
     bool SetSelectedMaterialAsset(const std::string& path);
+    bool SetSelectedLinearVelocity(const glm::vec3& velocity);
+    bool SetSelectedAngularVelocity(const glm::vec3& axis, float radiansPerSecond);
     bool ToggleSelectVisible();
     bool ToggleSelectedLocked();
     bool DuplicateSelected(const engine::Mesh& cube, const engine::Mesh& plane);

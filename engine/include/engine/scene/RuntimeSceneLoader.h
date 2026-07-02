@@ -27,6 +27,9 @@ public:
         glm::vec3 color{1.0f};
         std::string modelPath;
         std::string materialPath;
+        glm::vec3 linearVelocity{0.0f};
+        glm::vec3 angularVelocityAxis{0.0f, 1.0f, 0.0f};
+        float angularVelocityRadians = 0.0f;
     };
 
     struct Scene {

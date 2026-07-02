@@ -3,7 +3,10 @@
 void EditorProject::Load(engine::Config &config)
 {
     m_projectName = config.GetString("project.name", "Untitled Project");
-    m_assetRoot = config.GetString("project.asses", "assets");
+    m_assetRoot = config.GetString("project.asses", "Content");
+    if (m_assetRoot == "assets") {
+        m_assetRoot = "Content";
+    }
     m_scenePath = config.GetString("project.scene", "editor.scene");
 }
 

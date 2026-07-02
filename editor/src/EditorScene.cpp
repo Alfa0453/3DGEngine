@@ -5,6 +5,7 @@
 #include <fstream>
 #include <sstream>
 #include <cstddef>
+#include <filesystem>
 
 using engine::ecs::Entity;
 using engine::ecs::MeshRenderer;
@@ -93,7 +94,7 @@ bool EditorScene::Save(const std::string & path, std::string * error)
         return false;
     }
 
-    out << "3DGEditorScene 1\n";
+    out << "3DGEditorScene 3\n";
     for (const Object& object : m_objects) {
         const Transform* transform = m_registry.TryGet<Transform>(object.entity);
         const MeshRenderer* renderer = m_registry.TryGet<MeshRenderer>(object.entity);
@@ -112,7 +113,10 @@ bool EditorScene::Save(const std::string & path, std::string * error)
             << (object.visible ? 1 : 0) << ' '
             << (object.locked ? 1 : 0) << ' '
             << StoredPath(object.modelAssetPath) << ' '
-            << StoredPath(object.materialAssetPath) << '\n';
+            << StoredPath(object.materialAssetPath) << ' '
+            << object.linearVelocity.x << ' ' << object.linearVelocity.y << ' ' << object.linearVelocity.z << ' '
+            << object.angularVelocityAxis.x << ' ' << object.angularVelocityAxis.y << ' ' << object.angularVelocityAxis.z << ' '
+            << object.angularVelocityRadians << '\n';
     }
 
     m_dirty = false;
@@ -155,6 +159,9 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         int locked = 0;
         std::string modelAssetPath;
         std::string materialAssetPath;
+        glm::vec3 linearVelocity{0.0f};
+        glm::vec3 angularVelocityAxis{0.0f, 1.0f, 0.0f};
+        float angularVelocityRadians = 0.0f;
 
         in >> primitiveName >> name
            >> transform.position.x >> transform.position.y >> transform.position.z
@@ -182,6 +189,11 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                 materialAssetPath.clear();
             }
         }
+        if (version >= 6) {
+            in >> linearVelocity.x >> linearVelocity.y >> linearVelocity.z
+            >> angularVelocityAxis.x >> angularVelocityAxis.y >> angularVelocityAxis.z
+            >> angularVelocityRadians;
+        }
 
         if (!in || !ParsePrimitive(primitiveName, &primitive)) {
             if (error) *error = "Scene file contains an invalid object record.";
@@ -194,6 +206,9 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         m_objects.back().locked = locked != 0;
         m_objects.back().modelAssetPath = modelAssetPath;
         m_objects.back().materialAssetPath = materialAssetPath;
+        m_objects.back().linearVelocity = linearVelocity;
+        m_objects.back().angularVelocityAxis = angularVelocityAxis;
+        m_objects.back().angularVelocityRadians = angularVelocityRadians;
     }
 
     m_selectedIndex = m_objects.empty() ? -1 : 0;
@@ -270,6 +285,11 @@ void EditorScene::SelectIndex(int index)
     m_selectedIndex = index;
 }
 
+void EditorScene::Deselect()
+{
+    m_selectedIndex = -1;
+}
+
 void EditorScene::MoveSelected(const glm::vec3 & delta)
 {
     if (SelectedLocked()) {
@@ -282,15 +302,41 @@ void EditorScene::MoveSelected(const glm::vec3 & delta)
     }
 }
 
-void EditorScene::RotateSelectedYaw(float degrees)
+void EditorScene::RotateSelected(const glm::vec3 &axis, float degrees)
 {
     if (SelectedLocked()) {
         return;
     }
-
     if (Transform* transform = SelectedTransform()) {
-        const glm::quat yaw = glm::angleAxis(glm::radians(degrees), glm::vec3(0.0f, 1.0f, 0.0f));
-        transform->rotation = yaw * transform->rotation;
+        if (glm::dot(axis, axis) <= 0.0001f) {
+            return;
+        }
+        const glm::quat rotation = glm::angleAxis(glm::radians(degrees), glm::normalize(axis));
+        transform->rotation = rotation * transform->rotation;
+        m_dirty = true;
+    }
+}
+
+void EditorScene::RotateSelectedYaw(float degrees)
+{
+    RotateSelected(glm::vec3(0.0f, 1.0f, 0.0f), degrees);
+}
+
+void EditorScene::ScaleSelectedAxis(const glm::vec3 &axis, float factor)
+{
+    if (SelectedLocked()) {
+        return;
+    }
+    if (Transform* transform = SelectedTransform()) {
+        if (axis.x != 0.0f) {
+            transform->scale.x *= factor;
+        }
+        if (axis.y != 0.0f) {
+            transform->scale.y *= factor;
+        }
+        if (axis.z != 0.0f) {
+            transform->scale.z *= factor;
+        }
         m_dirty = true;
     }
 }
@@ -403,6 +449,27 @@ void EditorScene::AddPlane(const engine::Mesh & plane)
     m_dirty = true;
 }
 
+bool EditorScene::AddModel(const std::string &path, const engine::Mesh &placeholderMesh, const engine::ecs::Transform &transform)
+{
+    if (path.empty()) {
+        return false;
+    }
+
+    PushUndoSnapshot();
+
+    const std::filesystem::path filePath(path);
+    std::string name = filePath.stem().string();
+    if (name.empty()) {
+        name = "Model";
+    }
+
+    CreateObject(name, Primitive::Cube, placeholderMesh, transform, glm::vec3(0.78f, 0.78f, 0.82f));
+    m_objects.back().modelAssetPath = path;
+    m_selectedIndex = static_cast<int>(m_objects.size()) - 1;
+    m_dirty = true;
+    return true;
+}
+
 bool EditorScene::CycleSelectedColor()
 {
     const Object* selected = SelectedObject();
@@ -490,6 +557,41 @@ bool EditorScene::SetSelectedMaterialAsset(const std::string &path)
     return true;
 }
 
+bool EditorScene::SetSelectedLinearVelocity(const glm::vec3 &velocity)
+{
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) {
+        return false;
+    }
+
+    PushUndoSnapshot();
+    selected.linearVelocity = velocity;
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedAngularVelocity(const glm::vec3 &axis, float radiansPerSecond)
+{
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) {
+        return false;
+    }
+
+    PushUndoSnapshot();
+    selected.angularVelocityAxis = axis;
+    selected.angularVelocityRadians = radiansPerSecond;
+    m_dirty = true;
+    return true;
+}
+
 bool EditorScene::ToggleSelectVisible()
 {
     if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
@@ -536,6 +638,11 @@ bool EditorScene::DuplicateSelected(const engine::Mesh & cube, const engine::Mes
 
     const engine::Mesh& mesh = MeshFor(selected->primitive, cube, plane);
     CreateObject(selected->name + "_Copy", selected->primitive, mesh, duplicateTransform, renderer->color);
+    m_objects.back().modelAssetPath = selected->modelAssetPath;
+    m_objects.back().materialAssetPath = selected->materialAssetPath;
+    m_objects.back().linearVelocity = selected->linearVelocity;
+    m_objects.back().angularVelocityAxis = selected->angularVelocityAxis;
+    m_objects.back().angularVelocityRadians = selected->angularVelocityRadians;
     m_selectedIndex = static_cast<int>(m_objects.size()) - 1;
     m_dirty = true;
     return true;

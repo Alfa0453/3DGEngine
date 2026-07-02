@@ -97,12 +97,16 @@ add_subdirectory(vendor/glad)
 find_package(OpenGL REQUIRED)
 
 # Dear ImGui — immediate-mode UI used by development tools such as the editor.
+# imgui has no CMakeLists.txt, so we populate-only and build it ourselves below.
 FetchContent_Declare(
     imgui
     GIT_REPOSITORY https://github.com/ocornut/imgui.git
     GIT_TAG        docking
 )
-FetchContent_MakeAvailable(imgui)
+FetchContent_GetProperties(imgui)
+if(NOT imgui_POPULATED)
+    FetchContent_Populate(imgui)
+endif()
 
 add_library(imgui STATIC
     ${imgui_SOURCE_DIR}/imgui.cpp

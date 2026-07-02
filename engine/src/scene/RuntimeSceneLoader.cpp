@@ -42,9 +42,11 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
     std::string magic;
     int version = 0;
     in >> magic >> version;
-    if (magic != "3DGRuntimeScene" || version != 1) {
+    if (magic != "3DGRuntimeScene" || version < 1 || version > 3) {
         if (error) {
-            *error = "Runtime scene file has an unknown format.";
+            *error = "Runtime scene file has an unknown format: "
+                + magic + " " + std::to_string(version)
+                + " (expected 3DGRuntimeScene 1..3).";
         }
         return false;
     }
@@ -80,7 +82,11 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                 entity.materialPath.clear();
             }
         }
-
+        if (version >= 3) {
+            record >> entity.linearVelocity.x >> entity.linearVelocity.y >> entity.linearVelocity.z
+                   >> entity.angularVelocityAxis.x >> entity.angularVelocityAxis.y >> entity.angularVelocityAxis.z
+                   >> entity.angularVelocityRadians;
+        }
 
         if (!record) {
             if (error) {
@@ -126,6 +132,18 @@ bool RuntimeSceneLoader::Instantiate(const Scene &scene, ecs::Registry &registry
         }
         if (!desc.materialPath.empty()) {
             registry.Add<ecs::MaterialAsset>(entity, ecs::MaterialAsset{desc.materialPath});
+        }
+
+        if (glm::dot(desc.linearVelocity, desc.linearVelocity) > 0.0f) {
+            registry.Add<ecs::LinearVelocity>(entity, ecs::LinearVelocity{desc.linearVelocity});
+        }
+
+        if (desc.angularVelocityRadians != 0.0f &&
+            glm::dot(desc.angularVelocityAxis, desc.angularVelocityAxis) > 0.0f) {
+            registry.Add<ecs::AngularVelocity>(entity, ecs::AngularVelocity{
+                desc.angularVelocityAxis,
+                desc.angularVelocityRadians
+            });
         }
 
         if (created) {

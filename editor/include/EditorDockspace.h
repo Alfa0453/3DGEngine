@@ -16,8 +16,8 @@ public:
         EditorAssets* assets = nullptr;
         EditorDragDrop* dragDrop = nullptr;
         const EditorProject* project = nullptr;
-        const EditorLog* log = nullptr;
-        const EditorGizmo* gizmo = nullptr;
+        EditorLog* log = nullptr;
+        EditorGizmo* gizmo = nullptr;
         const char* modeName = "Edit";
         float fps = 0.0f;
         bool sceneDirty = false;
