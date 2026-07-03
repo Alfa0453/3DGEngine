@@ -108,32 +108,122 @@ void DrawWorldSettings(EditorScene& scene, bool* open) {
     }
 
     EditorScene::Environment environment = scene.GetEnvironment();
+    const EditorScene::Environment defaults{};
     bool changed = false;
 
-    if (ImGui::CollapsingHeader("Scene Lighting", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (ImGui::CollapsingHeader("Presets", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (ImGui::Button("Day")) {
+            environment.timeOfDay = 0.50f;
+            environment.skyLightIntensity = 1.0f;
+            environment.driveSunLight = true;
+            environment.sunIntensity = 1.0f;
+            environment.fog = false;
+            changed = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Night")) {
+            environment.timeOfDay = 0.0f;
+            environment.skyLightIntensity = 0.25f;
+            environment.driveSunLight = true;
+            environment.sunIntensity = 0.45f;
+            environment.fog = false;
+            changed = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Sunset")) {
+            environment.timeOfDay = 0.75f;
+            environment.skyLightIntensity = 0.8f;
+            environment.driveSunLight = true;
+            environment.sunIntensity = 1.2f;
+            environment.fog = true;
+            environment.fogColor = glm::vec3(0.95f, 0.54f, 0.34f);
+            environment.fogDensity = 0.006f;
+            environment.fogHeight = -0.25f;
+            environment.fogHeightFalloff = 0.08f;
+            changed = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Foggy")) {
+            environment.skyLightIntensity = 0.7f;
+            environment.fog = true;
+            environment.fogColor = glm::vec3(0.55f, 0.62f, 0.68f);
+            environment.fogDensity = 0.026f;
+            environment.fogHeight = -0.10f;
+            environment.fogHeightFalloff = 0.18f;
+            changed = true;
+        }
+    }
+
+    if (ImGui::CollapsingHeader("Lighting", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (ImGui::SmallButton("Reset Lighting")) {
+            environment.timeOfDay = defaults.timeOfDay;
+            environment.skyLightIntensity = defaults.skyLightIntensity;
+            environment.driveSunLight = defaults.driveSunLight;
+            environment.sunIntensity = defaults.sunIntensity;
+            changed = true;
+        }
         changed |= ImGui::SliderFloat("Time Of Day", &environment.timeOfDay, 0.0f, 1.0f);
         changed |= ImGui::DragFloat("Sky Light", &environment.skyLightIntensity, 0.02f, 0.0f, 8.0f);
         changed |= ImGui::Checkbox("Time Sun", &environment.driveSunLight);
         changed |= ImGui::DragFloat("Sun Intensity", &environment.sunIntensity, 0.02f, 0.0f, 8.0f);
-        changed |= ImGui::Checkbox("Light Guides", &environment.showLightGuides);
-        changed |= ImGui::Checkbox("Selected Guide Only", &environment.selectedLightGuideOnly);
-        ImGui::SeparatorText("Render Features");
+    }
+
+    if (ImGui::CollapsingHeader("Render Features", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (ImGui::SmallButton("Reset Render Features")) {
+            environment.ibl = defaults.ibl;
+            environment.ssao = defaults.ssao;
+            environment.ssaoRadius = defaults.ssaoRadius;
+            environment.ssaoBias = defaults.ssaoBias;
+            environment.ssr = defaults.ssr;
+            environment.ssrIntensity = defaults.ssrIntensity;
+            changed = true;
+        }
         changed |= ImGui::Checkbox("IBL", &environment.ibl);
         changed |= ImGui::Checkbox("SSAO", &environment.ssao);
         changed |= ImGui::DragFloat("SSAO Radius", &environment.ssaoRadius, 0.01f, 0.05f, 5.0f, "%.2f");
         changed |= ImGui::DragFloat("SSAO Bias", &environment.ssaoBias, 0.001f, 0.0f, 0.2f, "%.3f");
         changed |= ImGui::Checkbox("SSR", &environment.ssr);
         changed |= ImGui::DragFloat("SSR Intensity", &environment.ssrIntensity, 0.01f, 0.0f, 2.0f, "%.2f");
-        ImGui::SeparatorText("Shadows");
+    }
+
+    if (ImGui::CollapsingHeader("Shadows", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (ImGui::SmallButton("Reset Shadows")) {
+            environment.directionalShadows = defaults.directionalShadows;
+            environment.pointShadows = defaults.pointShadows;
+            environment.spotShadows = defaults.spotShadows;
+            environment.shadowSoftness = defaults.shadowSoftness;
+            changed = true;
+        }
         changed |= ImGui::Checkbox("Sun Shadows", &environment.directionalShadows);
         changed |= ImGui::Checkbox("Point Shadows", &environment.pointShadows);
         changed |= ImGui::Checkbox("Spot Shadows", &environment.spotShadows);
         changed |= ImGui::DragFloat("Shadow Softness", &environment.shadowSoftness, 0.05f, 0.1f, 12.0f, "%.2f");
+    }
+
+    if (ImGui::CollapsingHeader("Atmosphere", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (ImGui::SmallButton("Reset Atmosphere")) {
+            environment.fog = defaults.fog;
+            environment.fogColor = defaults.fogColor;
+            environment.fogDensity = defaults.fogDensity;
+            environment.fogHeight = defaults.fogHeight;
+            environment.fogHeightFalloff = defaults.fogHeightFalloff;
+            changed = true;
+        }
         changed |= ImGui::Checkbox("Atmosphere Fog", &environment.fog);
         changed |= ImGui::ColorEdit3("Fog Color", &environment.fogColor.x);
         changed |= ImGui::DragFloat("Fog Density", &environment.fogDensity, 0.001f, 0.0f, 0.20f, "%.4f");
         changed |= ImGui::DragFloat("Fog Height", &environment.fogHeight, 0.02f, -20.0f, 20.0f);
         changed |= ImGui::DragFloat("Fog Falloff", &environment.fogHeightFalloff, 0.005f, 0.001f, 2.0f, "%.3f");
+    }
+
+    if (ImGui::CollapsingHeader("Editor Guides")) {
+        if (ImGui::SmallButton("Reset Guides")) {
+            environment.showLightGuides = defaults.showLightGuides;
+            environment.selectedLightGuideOnly = defaults.selectedLightGuideOnly;
+            changed = true;
+        }
+        changed |= ImGui::Checkbox("Light Guides", &environment.showLightGuides);
+        changed |= ImGui::Checkbox("Selected Guide Only", &environment.selectedLightGuideOnly);
     }
 
     if (changed) {

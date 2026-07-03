@@ -22,5 +22,5 @@ public:
 
 private:
     static constexpr int kPanelCount = static_cast<int>(Panel::Count);
-    std::array<bool, kPanelCount> m_open{{true, true, false, true, true, false}};
+    std::array<bool, kPanelCount> m_open{{true, true, false, true, true, false}};       
 };

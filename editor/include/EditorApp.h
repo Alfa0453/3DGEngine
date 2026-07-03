@@ -59,11 +59,18 @@ private:
         Play 
     };
 
+    enum class PendingSceneAction {
+        None,
+        CloseEditor,
+        LoadScene
+    };
+
     void DrawEditModeModels(const glm::mat4& viewProj);
     void DrawSelectionOutline(const glm::mat4& viewProj);
     void DrawEditorOverlay();
     void DrawMaterialMakerPanel();
     void DrawMaterialMakerTools(bool materialSaved);
+    void DrawDirtyScenePrompt();
     void DrawAssetOverlay(float x, float y, const glm::vec3& text, const glm::vec3& muted);
     void DrawLogOverlay(float x, float y, const glm::vec3& text, const glm::vec3& muted);
     void HandleGlobalShortcuts(engine::Window& window);
@@ -101,6 +108,12 @@ private:
     void SetScenePathDraft(const std::string& path);
     void UpdateAutosave(float dt);
     void LoadScene();
+    void RequestCloseEditor();
+    void RequestLoadSceneFromPath(const std::string& path);
+    void PerformLoadSceneFromPath(const std::string& path);
+    void QueueDirtySceneAction(PendingSceneAction action, const std::string& path = std::string());
+    void CompletePendingSceneAction();
+    void CancelPendingSceneAction();
     void LoadSceneFromPath(const std::string& path);
     void ExportRuntimeScene();
     void ValidateRuntimeScene();
@@ -156,6 +169,9 @@ private:
     float m_autosaveTimer = 0.0f;
     float m_lastIblDay = -1.0f;
     bool m_renderingHdrPreview = false;
+    PendingSceneAction m_pendingSceneAction = PendingSceneAction::None;
+    std::string m_pendingScenePath;
+    bool m_dirtyScenePromptQueued = false;
     std::array<char, 260> m_scenePathDraft{};
     std::unordered_map<int, bool> m_keyPrev;
     std::unordered_map<std::string, bool> m_editModelLoadErrors;

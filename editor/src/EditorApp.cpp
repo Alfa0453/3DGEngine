@@ -484,6 +484,7 @@ void EditorApp::DrawEditorOverlay()
     dockspaceContext.sceneDirty = m_scene.IsDirty();
     const bool dockspaceDrawn = m_dockspace.Draw(dockspaceContext);
     DrawMaterialMakerPanel();
+    DrawDirtyScenePrompt();
     if (dockspaceContext.viewportDropRequested) {
         DropPayloadOnScene();
     }
@@ -494,12 +495,12 @@ void EditorApp::DrawEditorOverlay()
         SaveSceneAs(m_scenePathDraft.data());
     }
     if (dockspaceContext.loadSceneRequested) {
-        LoadSceneFromPath(m_scenePathDraft.data());
+        RequestLoadSceneFromPath(m_scenePathDraft.data());
     }
     if (dockspaceContext.recentSceneRequested >= 0
         && dockspaceContext.project
         && dockspaceContext.recentSceneRequested < static_cast<int>(dockspaceContext.project->RecentScenes().size())) {
-        LoadSceneFromPath(dockspaceContext.project->RecentScenes()[static_cast<std::size_t>(dockspaceContext.recentSceneRequested)]);
+        RequestLoadSceneFromPath(dockspaceContext.project->RecentScenes()[static_cast<std::size_t>(dockspaceContext.recentSceneRequested)]);
     }
     if (dockspaceContext.exportRuntimeRequested) {
         ExportRuntimeScene();
@@ -706,6 +707,46 @@ void EditorApp::DrawMaterialMakerTools(bool materialSaved) {
     }
 }
 
+void EditorApp::DrawDirtyScenePrompt() {
+    if (m_pendingSceneAction == PendingSceneAction::None) {
+        return;
+    }
+
+    if (m_dirtyScenePromptQueued) {
+        ImGui::OpenPopup("Unsaved Scene");
+        m_dirtyScenePromptQueued = false;
+    }
+
+    const ImGuiWindowFlags flags = ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings;
+    if (ImGui::BeginPopupModal("Unsaved Scene", nullptr, flags)) {
+        ImGui::TextUnformatted("The current scene has unsaved changes.");
+        if (m_pendingSceneAction == PendingSceneAction::LoadScene && !m_pendingScenePath.empty()) {
+            ImGui::Text("Next scene: %s", m_pendingScenePath.c_str());
+        }
+        ImGui::Separator();
+
+        if (ImGui::Button("Save", ImVec2(92.0f, 0.0f))) {
+            SaveScene();
+            if (!m_scene.IsDirty()) {
+                ImGui::CloseCurrentPopup();
+                CompletePendingSceneAction();
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Discard", ImVec2(92.0f, 0.0f))) {
+            ImGui::CloseCurrentPopup();
+            CompletePendingSceneAction();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(92.0f, 0.0f))) {
+            ImGui::CloseCurrentPopup();
+            CancelPendingSceneAction();
+        }
+
+        ImGui::EndPopup();
+    }
+}
+
 void EditorApp::DrawAssetOverlay(float x, float y, const glm::vec3 & text, const glm::vec3 & muted)
 {
     m_text->Text("Content", x, y, 1.45f, text);
@@ -773,7 +814,7 @@ void EditorApp::DrawAssetOverlay(float x, float y, const glm::vec3 & text, const
 void EditorApp::HandleGlobalShortcuts(engine::Window & window)
 {
     if (Pressed(GLFW_KEY_ESCAPE)) {
-       window.SetShouldClose(true);
+       RequestCloseEditor();
     }
     if (Pressed(GLFW_KEY_F11)) {
        window.ToggleFullscreen();
@@ -1381,8 +1422,7 @@ void EditorApp::DropPayloadOnScene()
     }
 
     if (payload.typeName == "Scene") {
-        m_project.SetScenePath(payload.path);
-        LoadScene();
+        RequestLoadSceneFromPath(payload.path);
         m_dragDrop.Clear();
         return;
     }
@@ -1651,9 +1691,84 @@ void EditorApp::LoadScene()
     }
 
     if (m_runtime.LoadScene(m_scene, m_project, *m_cube, *m_plane, *m_sphere, m_log)) {
+        m_project.AddRecentScene(m_project.ScenePath());
+        m_project.Save(m_config);
+        m_config.Save();
         m_autosaveTimer = 0.0f;
         SetScenePathDraft(m_project.ScenePath());
     }
+}
+
+void EditorApp::RequestCloseEditor() {
+    if (m_scene.IsDirty()) {
+        QueueDirtySceneAction(PendingSceneAction::CloseEditor);
+        return;
+    }
+
+    GetWindow().SetShouldClose(true);
+}
+
+void EditorApp::RequestLoadSceneFromPath(const std::string& path) {
+    if (m_scene.IsDirty()) {
+        QueueDirtySceneAction(PendingSceneAction::LoadScene, path);
+        return;
+    }
+
+    PerformLoadSceneFromPath(path);
+}
+
+void EditorApp::PerformLoadSceneFromPath(const std::string& path) {
+    if (path.empty()) {
+        m_log.Warning("Load failed: scene path is empty");
+        return;
+    }
+    if (!m_cube || !m_plane) {
+        m_log.Error("Load failed: editor meshes are not ready");
+        return;
+    }
+
+    const std::string previousPath = m_project.ScenePath();
+    m_project.SetScenePath(path);
+    if (m_runtime.LoadScene(m_scene, m_project, *m_cube, *m_plane, *m_sphere, m_log)) {
+        m_project.AddRecentScene(m_project.ScenePath());
+        m_project.Save(m_config);
+        m_config.Save();
+        m_autosaveTimer = 0.0f;
+        SetScenePathDraft(m_project.ScenePath());
+        return;
+    }
+
+    m_project.SetScenePath(previousPath);
+    SetScenePathDraft(previousPath);
+}
+
+void EditorApp::QueueDirtySceneAction(PendingSceneAction action, const std::string& path) {
+    m_pendingSceneAction = action;
+    m_pendingScenePath = path;
+    m_dirtyScenePromptQueued = true;
+}
+
+void EditorApp::CompletePendingSceneAction() {
+    const PendingSceneAction action = m_pendingSceneAction;
+    const std::string path = m_pendingScenePath;
+    CancelPendingSceneAction();
+
+    switch (action) {
+    case PendingSceneAction::CloseEditor:
+        GetWindow().SetShouldClose(true);
+        break;
+    case PendingSceneAction::LoadScene:
+        PerformLoadSceneFromPath(path);
+        break;
+    case PendingSceneAction::None:
+        break;
+    }
+}
+
+void EditorApp::CancelPendingSceneAction() {
+    m_pendingSceneAction = PendingSceneAction::None;
+    m_pendingScenePath.clear();
+    m_dirtyScenePromptQueued = false;
 }
 
 void EditorApp::LoadSceneFromPath(const std::string& path) {
