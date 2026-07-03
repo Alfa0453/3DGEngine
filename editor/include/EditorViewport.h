@@ -26,6 +26,13 @@ public:
                         const EditorGizmo& gizmo,
                         const glm::mat4& viewProj) const;
 
+    void DrawSelectedLightGuide(engine::Renderer& renderer,
+                                engine::Shader& shader,
+                                const engine::Mesh& cube,
+                                const EditorScene& scene,
+                                const glm::mat4& viewProj,
+                                bool selectedOnly) const;
+
     void DrawSelectedModelOutline(engine::Renderer& renderer,
                                   engine::Shader& shader,
                                   const engine::ecs::Transform& transform,
@@ -48,7 +55,8 @@ public:
                          engine::Shader& shader,
                          const engine::ecs::Transform& transform,
                          const engine::ecs::MeshRenderer& meshRenderer,
-                         const engine::Texture* diffuseTexture) const;
+                         const engine::Texture* diffuseTexture,
+                         const glm::vec3& emissive) const;
 
     bool ProjectWorldToScreen(const glm::vec3& world,
                               const glm::mat4& viewProj,

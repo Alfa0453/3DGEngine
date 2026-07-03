@@ -8,6 +8,7 @@
 #include <filesystem>
 
 using engine::ecs::Entity;
+using engine::ecs::Light;
 using engine::ecs::MeshRenderer;
 using engine::ecs::Transform;
 
@@ -17,8 +18,39 @@ const char* PrimitiveName(EditorScene::Primitive primitive) {
     switch (primitive) {
     case EditorScene::Primitive::Plane: return "Plane";
     case EditorScene::Primitive::Cube: return "Cube";
+    case EditorScene::Primitive::Sphere: return "Sphere";
     }
     return "Cube";
+}
+
+const char* LightTypeName(Light::Type type) {
+    switch (type) {
+    case Light::Type::Directional:  return "Directional";
+    case Light::Type::Point:        return "Point";
+    case Light::Type::Spot:         return "Spot";
+    case Light::Type::Area:         return "Area";
+    }
+    return "Point";
+}
+
+bool ParseLightType(const std::string& value, Light::Type* type) {
+    if (value == "Directional") {
+        *type = Light::Type::Directional;
+        return true;
+    }
+    if (value == "Point") {
+        *type = Light::Type::Point;
+        return true;
+    }
+    if (value == "Spot") {
+        *type = Light::Type::Spot;
+        return true;
+    }
+    if (value == "Area") {
+        *type = Light::Type::Area;
+        return true;
+    }
+    return false;
 }
 
 bool ParsePrimitive(const std::string& value, EditorScene::Primitive* primitive) {
@@ -30,12 +62,24 @@ bool ParsePrimitive(const std::string& value, EditorScene::Primitive* primitive)
         *primitive = EditorScene::Primitive::Cube;
         return true;
     }
+    if (value == "Sphere") {
+        *primitive = EditorScene::Primitive::Sphere;
+    }
     return false;
 }
 
 const engine::Mesh& MeshFor(EditorScene::Primitive primitive, const engine::Mesh& cube,
-                            const engine::Mesh& plane){
-    return primitive == EditorScene::Primitive::Plane ? plane : cube;
+                            const engine::Mesh& plane, const engine::Mesh& sphere){
+    if (primitive == EditorScene::Primitive::Sphere)
+    {
+        return sphere;
+    }
+    if (primitive == EditorScene::Primitive::Plane)
+    {
+        return plane;
+    }
+
+    return cube;
 }
 
 const glm::vec3 kPalette[] = {
@@ -54,7 +98,7 @@ const char* StoredPath(const std::string& path) {
 
 } // namespace
 
-void EditorScene::BuildDefault(const engine::Mesh & cube, const engine::Mesh & plane)
+void EditorScene::BuildDefault(const engine::Mesh & cube, const engine::Mesh & plane, const engine::Mesh & sphere)
 {
     Clear();
 
@@ -81,12 +125,15 @@ void EditorScene::BuildDefault(const engine::Mesh & cube, const engine::Mesh & p
         CreateObject("Cube_" + std::to_string(i + 1), Primitive::Cube, cube, cubeTransform, colors[i]);
     }
 
+    AddDirectionalLight(sphere);
+    AddPointLight(sphere);
+
     m_selectedIndex = 1;
     m_dirty = false;
     ClearHistory();
 }
 
-bool EditorScene::Save(const std::string & path, std::string * error)
+bool EditorScene::Save(const std::string & path, std::string * error, bool markClean)
 {
     std::ofstream out(path);
     if (!out) {
@@ -94,11 +141,51 @@ bool EditorScene::Save(const std::string & path, std::string * error)
         return false;
     }
 
-    out << "3DGEditorScene 3\n";
+    out << "3DGEditorScene 12\n";
+    out << "environment "
+        << m_environment.timeOfDay << ' '
+        << m_environment.skyLightIntensity << ' '
+        << (m_environment.driveSunLight ? 1 : 0) << ' '
+        << m_environment.sunIntensity << ' '
+        << (m_environment.showLightGuides ? 1 : 0) << ' '
+        << (m_environment.selectedLightGuideOnly ? 1 : 0) << ' '
+        << (m_environment.ibl ? 1 : 0) << ' '
+        << (m_environment.ssao ? 1 : 0) << ' '
+        << m_environment.ssaoRadius << ' '
+        << m_environment.ssaoBias << ' '
+        << (m_environment.ssr ? 1 : 0) << ' '
+        << m_environment.ssrIntensity << ' '
+        << (m_environment.directionalShadows ? 1 : 0) << ' '
+        << (m_environment.pointShadows ? 1 : 0) << ' '
+        << (m_environment.spotShadows ? 1 : 0) << ' '
+        << m_environment.shadowSoftness << ' '
+        << (m_environment.fog ? 1 : 0) << ' '
+        << m_environment.fogColor.r << ' '
+        << m_environment.fogColor.g << ' '
+        << m_environment.fogColor.b << ' '
+        << m_environment.fogDensity << ' '
+        << m_environment.fogHeight << ' '
+        << m_environment.fogHeightFalloff << '\n';
     for (const Object& object : m_objects) {
         const Transform* transform = m_registry.TryGet<Transform>(object.entity);
         const MeshRenderer* renderer = m_registry.TryGet<MeshRenderer>(object.entity);
         if (!transform || !renderer) {
+            continue;
+        }
+
+        if (object.light) {
+            const Light* light = m_registry.TryGet<Light>(object.entity);
+            const Light& data = light ? *light : object.lightData;
+            out << "light "
+                << object.name << ' '
+                << LightTypeName(data.type) << ' '
+                << transform->position.x << ' ' << transform->position.y << ' ' << transform->position.z << ' '
+                << data.color.r << ' ' << data.color.g << ' ' << data.color.b << ' '
+                << data.intensity << ' '
+                << data.direction.x << ' ' << data.direction.y << ' ' << data.direction.z << ' '
+                << data.innerAngle << ' ' << data.outerAngle << ' ' << data.range << ' ' << data.sourceRadius << ' '
+                << (object.visible ? 1 : 0) << ' '
+                << (object.locked ? 1 : 0) << '\n';
             continue;
         }
 
@@ -119,12 +206,15 @@ bool EditorScene::Save(const std::string & path, std::string * error)
             << object.angularVelocityRadians << '\n';
     }
 
-    m_dirty = false;
-    ClearHistory();
+    if (markClean) {
+        m_dirty = false;
+        ClearHistory();
+    }
+
     return true;
 }
 
-bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, const engine::Mesh & plane, std::string * error)
+bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, const engine::Mesh & plane, const engine::Mesh & sphere, std::string * error)
 {
     std::ifstream in(path);
     if (!in) {
@@ -135,7 +225,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
     std::string magic;
     int version = 0;
     in >> magic >> version;
-    if (magic != "3DGEditorScene" || version != 1) {
+    if (magic != "3DGEditorScene" ||(version < 1 || version > 12)) {
         if (error) *error = "Scene file has an unknown format.";
         return false;
     }
@@ -144,6 +234,107 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
 
     std::string recordType;
     while (in >> recordType) {
+        if (recordType == "environment") {
+            if (version < 8) {
+                std::string rest;
+                std::getline(in, rest);
+                continue;
+            }
+
+            int fog = 1;
+            int driveSun = 1;
+            int showGuides = 1;
+            int selectedGuidesOnly = 1;
+            int ibl = 1;
+            int ssao = 0;
+            int ssr = 0;
+            int directionalShadows = 1;
+            int pointShadows = 1;
+            int spotShadows = 1;
+            in >> m_environment.timeOfDay
+               >> m_environment.skyLightIntensity;
+            if (version >= 9) {
+                in >> driveSun
+                   >> m_environment.sunIntensity;
+            }
+            if (version >= 10) {
+                in >> showGuides
+                   >> selectedGuidesOnly;
+            }
+            if (version >= 11) {
+                in >> ibl
+                   >> ssao
+                   >> m_environment.ssaoRadius
+                   >> m_environment.ssaoBias
+                   >> ssr
+                   >> m_environment.ssrIntensity
+                   >> directionalShadows
+                   >> pointShadows
+                   >> spotShadows
+                   >> m_environment.shadowSoftness;
+            }
+            in >> fog
+               >> m_environment.fogDensity
+               >> m_environment.fogHeight
+               >> m_environment.fogHeightFalloff;
+            if (!in) {
+                if (error) *error = "Scene file contains an invalid environment record.";
+                Clear();
+                return false;
+            }
+            m_environment.driveSunLight = driveSun != 0;
+            m_environment.showLightGuides = showGuides != 0;
+            m_environment.selectedLightGuideOnly = selectedGuidesOnly != 0;
+            m_environment.ibl = ibl != 0;
+            m_environment.ssao = ssao != 0;
+            m_environment.ssr = ssr != 0;
+            m_environment.directionalShadows = directionalShadows != 0;
+            m_environment.pointShadows = pointShadows != 0;
+            m_environment.spotShadows = spotShadows != 0;
+            m_environment.fog = fog != 0;
+            continue;
+        }
+
+        if (recordType == "light") {
+            if (version < 7) {
+                std::string rest;
+                std::getline(in, rest);
+                continue;
+            }
+
+            std::string name;
+            std::string lightTypeName;
+            Transform transform;
+            Light light;
+            int visible = 1;
+            int locked = 0;
+            in >> name >> lightTypeName
+               >> transform.position.x >> transform.position.y >> transform.position.z
+               >> light.color.r >> light.color.g >> light.color.b
+               >> light.intensity
+               >> light.direction.x >> light.direction.y >> light.direction.z
+               >> light.innerAngle >> light.outerAngle >> light.range >> light.sourceRadius
+               >> visible >> locked;
+
+            if (!in || !ParseLightType(lightTypeName, &light.type)) {
+                if (error) *error = "Scene file contains an invalid light record.";
+                Clear();
+                return false;
+            }
+
+            transform.scale = glm::vec3(0.22f);
+            const glm::vec3 color = light.color * light.intensity;
+            CreateObject(name, Primitive::Cube, cube, transform, color);
+            Object& object = m_objects.back();
+            object.light = true;
+            object.lightData = light;
+            object.visible = visible != 0;
+            object.locked = locked != 0;
+            m_registry.Add<Light>(object.entity, light);
+            continue;
+        }
+
+
         if (recordType != "object") {
             std::string rest;
             std::getline(in, rest);
@@ -201,7 +392,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             return false;
         }
 
-        CreateObject(name, primitive, MeshFor(primitive, cube, plane), transform, color);
+        CreateObject(name, primitive, MeshFor(primitive, cube, plane, sphere), transform, color);
         m_objects.back().visible = visible != 0;
         m_objects.back().locked = locked != 0;
         m_objects.back().modelAssetPath = modelAssetPath;
@@ -239,6 +430,11 @@ const engine::ecs::Transform *EditorScene::TryGetTransform(engine::ecs::Entity e
 const engine::ecs::MeshRenderer *EditorScene::TryGetMeshRenderer(engine::ecs::Entity entity) const
 {
     return const_cast<engine::ecs::Registry&>(m_registry).TryGet<MeshRenderer>(entity);
+}
+
+const engine::ecs::Light* EditorScene::TryGetLight(engine::ecs::Entity entity) const
+{
+    return const_cast<engine::ecs::Registry&>(m_registry).TryGet<Light>(entity);
 }
 
 bool EditorScene::IsVisible(engine::ecs::Entity entity) const
@@ -381,28 +577,28 @@ void EditorScene::EndTransformEdit()
     m_transformEditOpen = false;
 }
 
-bool EditorScene::Undo(const engine::Mesh & cube, const engine::Mesh & plane)
+bool EditorScene::Undo(const engine::Mesh & cube, const engine::Mesh & plane, const engine::Mesh & sphere)
 {
     if (m_undoStack.empty()) {
         return false;
     }
 
     m_redoStack.push_back(CaptureSnapshot());
-    RestoreSnapshot(m_undoStack.back(), cube, plane);
+    RestoreSnapshot(m_undoStack.back(), cube, plane, sphere);
     m_undoStack.pop_back();
     m_dirty = true;
     m_transformEditOpen = false;
     return true;
 }
 
-bool EditorScene::Redo(const engine::Mesh & cube, const engine::Mesh & plane)
+bool EditorScene::Redo(const engine::Mesh & cube, const engine::Mesh & plane, const engine::Mesh & sphere)
 {
     if (m_redoStack.empty()) {
         return false;
     }
 
     m_undoStack.push_back(CaptureSnapshot());
-    RestoreSnapshot(m_redoStack.back(), cube, plane);
+    RestoreSnapshot(m_redoStack.back(), cube, plane, sphere);
     m_redoStack.pop_back();
     m_dirty = true;
     m_transformEditOpen = false;
@@ -414,9 +610,9 @@ EditorScene::Snapshot EditorScene::CreateSnapshot()
     return CaptureSnapshot();
 }
 
-void EditorScene::RestoreFromSnapshot(const Snapshot &snapshot, const engine::Mesh &cube, const engine::Mesh &plane)
+void EditorScene::RestoreFromSnapshot(const Snapshot &snapshot, const engine::Mesh &cube, const engine::Mesh &plane, const engine::Mesh &sphere)
 {
-    RestoreSnapshot(snapshot, cube, plane);
+    RestoreSnapshot(snapshot, cube, plane, sphere);
     ClearHistory();
     m_dirty = false;
 }
@@ -445,6 +641,111 @@ void EditorScene::AddPlane(const engine::Mesh & plane)
 
     const glm::vec3 color(0.34f, 0.37f, 0.41f);
     CreateObject("Plane_" + std::to_string(m_nextCubeNumber++), Primitive::Plane, plane, transform, color);
+    m_selectedIndex = static_cast<int>(m_objects.size()) - 1;
+    m_dirty = true;
+}
+
+void EditorScene::AddSphere(const engine::Mesh & sphere)
+{
+    PushUndoSnapshot();
+
+    Transform transform;
+    transform.position = glm::vec3(0.0f, 0.0f, 0.0f);
+    transform.scale = glm::vec3(0.9f);
+
+    const glm::vec3 color(0.68f, 0.27f, 0.31f);
+    CreateObject("Plane_" + std::to_string(m_nextCubeNumber++), Primitive::Sphere, sphere, transform, color);
+    m_selectedIndex = static_cast<int>(m_objects.size()) - 1;
+    m_dirty = true;
+}
+
+void EditorScene::AddDirectionalLight(const engine::Mesh& placeholderMesh) {
+    PushUndoSnapshot();
+
+    Transform transform;
+    transform.position = glm::vec3(-2.5f, 3.0f, 1.5f);
+    transform.scale = glm::vec3(0.22f);
+
+    Light light;
+    light.type = Light::Type::Directional;
+    light.color = glm::vec3(1.0f, 0.92f, 0.82f);
+    light.intensity = 4.0f;
+    light.direction = glm::normalize(glm::vec3(-0.35f, -1.0f, -0.25f));
+
+    CreateObject("DirectionalLight", Primitive::Cube, placeholderMesh, transform, light.color);
+    Object& object = m_objects.back();
+    object.light = true;
+    object.lightData = light;
+    m_registry.Add<Light>(object.entity, light);
+    m_selectedIndex = static_cast<int>(m_objects.size()) - 1;
+    m_dirty = true;
+}
+
+void EditorScene::AddPointLight(const engine::Mesh& placeholderMesh) {
+    PushUndoSnapshot();
+
+    Transform transform;
+    transform.position = glm::vec3(1.8f, 1.6f, 1.4f);
+    transform.scale = glm::vec3(0.18f);
+
+    Light light;
+    light.type = Light::Type::Point;
+    light.color = glm::vec3(0.45f, 0.68f, 1.0f);
+    light.intensity = 45.0f;
+    light.range = 12.0f;
+
+    CreateObject("PointLight", Primitive::Cube, placeholderMesh, transform, light.color);
+    Object& object = m_objects.back();
+    object.light = true;
+    object.lightData = light;
+    m_registry.Add<Light>(object.entity, light);
+    m_selectedIndex = static_cast<int>(m_objects.size()) - 1;
+    m_dirty = true;
+}
+
+void EditorScene::AddSpotLight(const engine::Mesh& placeholderMesh) {
+    PushUndoSnapshot();
+
+    Transform transform;
+    transform.position = glm::vec3(0.0f, 3.0f, 2.5f);
+    transform.scale = glm::vec3(0.2f);
+
+    Light light;
+    light.type = Light::Type::Spot;
+    light.color = glm::vec3(1.0f, 0.86f, 0.58f);
+    light.intensity = 70.0f;
+    light.direction = glm::normalize(glm::vec3(0.0f, -1.0f, -0.35f));
+    light.innerAngle = 18.0f;
+    light.outerAngle = 32.0f;
+    light.range = 18.0f;
+
+    CreateObject("SpotLight", Primitive::Cube, placeholderMesh, transform, light.color);
+    Object& object = m_objects.back();
+    object.light = true;
+    object.lightData = light;
+    m_registry.Add<Light>(object.entity, light);
+    m_selectedIndex = static_cast<int>(m_objects.size()) - 1;
+    m_dirty = true;
+}
+
+void EditorScene::AddAreaLight(const engine::Mesh& placeholderMesh) {
+    PushUndoSnapshot();
+
+    Transform transform;
+    transform.position = glm::vec3(-1.6f, 1.8f, 1.2f);
+    transform.scale = glm::vec3(0.28f);
+
+    Light light;
+    light.type = Light::Type::Area;
+    light.color = glm::vec3(1.0f, 0.72f, 0.42f);
+    light.intensity = 80.0f;
+    light.sourceRadius = 1.2f;
+
+    CreateObject("AreaLight", Primitive::Cube, placeholderMesh, transform, light.color);
+    Object& object = m_objects.back();
+    object.light = true;
+    object.lightData = light;
+    m_registry.Add<Light>(object.entity, light);
     m_selectedIndex = static_cast<int>(m_objects.size()) - 1;
     m_dirty = true;
 }
@@ -557,6 +858,36 @@ bool EditorScene::SetSelectedMaterialAsset(const std::string &path)
     return true;
 }
 
+bool EditorScene::SetSelectedLight(const Light& light) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked || !selected.light) {
+        return false;
+    }
+
+    PushUndoSnapshot();
+    selected.lightData = light;
+    if (Light* component = m_registry.TryGet<Light>(selected.entity)) {
+        *component = light;
+    } else {
+        m_registry.Add<Light>(selected.entity, light);
+    }
+    if (MeshRenderer* renderer = m_registry.TryGet<MeshRenderer>(selected.entity)) {
+        renderer->color = light.color;
+    }
+    m_dirty = true;
+    return true;
+}
+
+void EditorScene::SetEnvironment(const Environment& environment) {
+    PushUndoSnapshot();
+    m_environment = environment;
+    m_dirty = true;
+}
+
 bool EditorScene::SetSelectedLinearVelocity(const glm::vec3 &velocity)
 {
     if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
@@ -618,7 +949,7 @@ bool EditorScene::ToggleSelectedLocked()
     return true;
 }
 
-bool EditorScene::DuplicateSelected(const engine::Mesh & cube, const engine::Mesh & plane)
+bool EditorScene::DuplicateSelected(const engine::Mesh & cube, const engine::Mesh & plane, const engine::Mesh& sphere)
 {
     const Object* selected = SelectedObject();
     if (!selected) {
@@ -639,10 +970,15 @@ bool EditorScene::DuplicateSelected(const engine::Mesh & cube, const engine::Mes
 
     duplicateTransform.position += glm::vec3(0.8f, 0.0f, 0.8f);
 
-    const engine::Mesh& mesh = MeshFor(selectedCopy.primitive, cube, plane);
+    const engine::Mesh& mesh = MeshFor(selectedCopy.primitive, cube, plane, sphere);
     CreateObject(selectedCopy.name + "_Copy", selectedCopy.primitive, mesh, duplicateTransform, duplicateColor);
     m_objects.back().modelAssetPath = selectedCopy.modelAssetPath;
     m_objects.back().materialAssetPath = selectedCopy.materialAssetPath;
+    m_objects.back().light = selectedCopy.light;
+    m_objects.back().lightData = selectedCopy.lightData;
+    if (selectedCopy.light) {
+        m_registry.Add<Light>(m_objects.back().entity, selectedCopy.lightData);
+    }
     m_objects.back().linearVelocity = selectedCopy.linearVelocity;
     m_objects.back().angularVelocityAxis = selectedCopy.angularVelocityAxis;
     m_objects.back().angularVelocityRadians = selectedCopy.angularVelocityRadians;
@@ -708,14 +1044,14 @@ EditorScene::Snapshot EditorScene::CaptureSnapshot()
     return snapshot;
 }
 
-void EditorScene::RestoreSnapshot(const Snapshot & snapshot, const engine::Mesh & cube, const engine::Mesh & plane)
+void EditorScene::RestoreSnapshot(const Snapshot & snapshot, const engine::Mesh & cube, const engine::Mesh & plane, const engine::Mesh& sphere)
 {
     m_registry = engine::ecs::Registry{};
     m_objects.clear();
 
     for (const ObjectSnapshot& objectSnapshot : snapshot.objects) {
         Entity entity = m_registry.Create();
-        const engine::Mesh& mesh = MeshFor(objectSnapshot.object.primitive, cube, plane);
+        const engine::Mesh& mesh = MeshFor(objectSnapshot.object.primitive, cube, plane, sphere);
         m_registry.Add<Transform>(entity, objectSnapshot.transform);
         m_registry.Add<MeshRenderer>(entity, MeshRenderer{&mesh, objectSnapshot.color});
 

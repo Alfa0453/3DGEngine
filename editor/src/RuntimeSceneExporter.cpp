@@ -5,6 +5,7 @@
 #include <fstream>
 
 using engine::ecs::MeshRenderer;
+using engine::ecs::Light;
 using engine::ecs::Transform;
 
 namespace {
@@ -13,12 +14,23 @@ const char* PrimitiveName(EditorScene::Primitive primitive) {
     switch (primitive) {
     case EditorScene::Primitive::Plane: return "Plane";
     case EditorScene::Primitive::Cube: return "Cube";
+    case EditorScene::Primitive::Sphere: return "Sphere";
     }
     return "Cube";
 }
 
 const char* StoredPath(const std::string& path) {
     return path.empty() ? "-" : path.c_str();
+}
+
+const char* LightTypeName(Light::Type type) {
+    switch (type) {
+    case Light::Type::Directional: return "Directional";
+    case Light::Type::Point: return "Point";
+    case Light::Type::Spot: return "Spot";
+    case Light::Type::Area: return "Area";
+    }
+    return "Point";
 }
 
 } // namespace
@@ -31,8 +43,18 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         return false;
     }
 
-    out << "3DGRuntimeScene 3\n";
+    out << "3DGRuntimeScene 6\n";
     out << "# Runtime export from 3DGEditor. Editor-only flags are omitted.\n";
+    const EditorScene::Environment& environment = scene.GetEnvironment();
+    out << "environment "
+        << environment.timeOfDay << ' '
+        << environment.skyLightIntensity << ' '
+        << (environment.driveSunLight ? 1 : 0) << ' '
+        << environment.sunIntensity << ' '
+        << (environment.fog ? 1 : 0) << ' '
+        << environment.fogDensity << ' '
+        << environment.fogHeight << ' '
+        << environment.fogHeightFalloff << '\n';
 
     for (const EditorScene::Object& object : scene.Objects()) {
         if (!object.visible) {
@@ -42,6 +64,20 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         const Transform* transform = scene.TryGetTransform(object.entity);
         const MeshRenderer* renderer = scene.TryGetMeshRenderer(object.entity);
         if (!transform || !renderer) {
+            continue;
+        }
+
+        if (object.light) {
+            const Light* light = scene.TryGetLight(object.entity);
+            const Light& data = light ? *light : object.lightData;
+            out << "light "
+                << object.name << ' '
+                << LightTypeName(data.type) << ' '
+                << transform->position.x << ' ' << transform->position.y << ' ' << transform->position.z << ' '
+                << data.color.r << ' ' << data.color.g << ' ' << data.color.b << ' '
+                << data.intensity << ' '
+                << data.direction.x << ' ' << data.direction.y << ' ' << data.direction.z << ' '
+                << data.innerAngle << ' ' << data.outerAngle << ' ' << data.range << ' ' << data.sourceRadius << '\n';
             continue;
         }
 

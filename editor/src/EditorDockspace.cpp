@@ -1,8 +1,10 @@
 #include "EditorDockspace.h"
+
 #include <engine/ecs/Components.h>
 
 #include <imgui.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdio>
 #include <filesystem>
@@ -16,7 +18,40 @@ const char* PrimitiveName(EditorScene::Primitive primitive) {
 }
 
 const char* ObjectTypeName(const EditorScene::Object& object) {
+    if(object.light) {
+        return "Light";
+    }
     return object.modelAssetPath.empty() ? PrimitiveName(object.primitive) : "Model";
+}
+
+const char* LightTypeName(engine::ecs::Light::Type type) {
+    switch (type) {
+    case engine::ecs::Light::Type::Directional: return "Directional";
+    case engine::ecs::Light::Type::Point: return "Point";
+    case engine::ecs::Light::Type::Spot: return "Spot";
+    case engine::ecs::Light::Type::Area: return "Area";
+    }
+    return "Point";
+}
+
+engine::ecs::Light::Type LightTypeFromIndex(int index) {
+    switch (index) {
+    case 0: return engine::ecs::Light::Type::Directional;
+    case 1: return engine::ecs::Light::Type::Point;
+    case 2: return engine::ecs::Light::Type::Spot;
+    case 3: return engine::ecs::Light::Type::Area;
+    }
+    return engine::ecs::Light::Type::Point;
+}
+
+int LightTypeIndex(engine::ecs::Light::Type type) {
+    switch (type) {
+    case engine::ecs::Light::Type::Directional: return 0;
+    case engine::ecs::Light::Type::Point: return 1;
+    case engine::ecs::Light::Type::Spot: return 2;
+    case engine::ecs::Light::Type::Area: return 3;
+    }
+    return 1;
 }
 
 bool IsMaterialDocument(const std::filesystem::path& path) {
@@ -66,6 +101,48 @@ ImVec4 LogColor(EditorLog::Level level) {
     return ImVec4(0.78f, 0.84f, 0.92f, 1.0f);
 }
 
+void DrawWorldSettings(EditorScene& scene, bool* open) {
+    if (!ImGui::Begin(EditorPanels::Name(EditorPanels::Panel::WorldSettings), open)) {
+        ImGui::End();
+        return;
+    }
+
+    EditorScene::Environment environment = scene.GetEnvironment();
+    bool changed = false;
+
+    if (ImGui::CollapsingHeader("Scene Lighting", ImGuiTreeNodeFlags_DefaultOpen)) {
+        changed |= ImGui::SliderFloat("Time Of Day", &environment.timeOfDay, 0.0f, 1.0f);
+        changed |= ImGui::DragFloat("Sky Light", &environment.skyLightIntensity, 0.02f, 0.0f, 8.0f);
+        changed |= ImGui::Checkbox("Time Sun", &environment.driveSunLight);
+        changed |= ImGui::DragFloat("Sun Intensity", &environment.sunIntensity, 0.02f, 0.0f, 8.0f);
+        changed |= ImGui::Checkbox("Light Guides", &environment.showLightGuides);
+        changed |= ImGui::Checkbox("Selected Guide Only", &environment.selectedLightGuideOnly);
+        ImGui::SeparatorText("Render Features");
+        changed |= ImGui::Checkbox("IBL", &environment.ibl);
+        changed |= ImGui::Checkbox("SSAO", &environment.ssao);
+        changed |= ImGui::DragFloat("SSAO Radius", &environment.ssaoRadius, 0.01f, 0.05f, 5.0f, "%.2f");
+        changed |= ImGui::DragFloat("SSAO Bias", &environment.ssaoBias, 0.001f, 0.0f, 0.2f, "%.3f");
+        changed |= ImGui::Checkbox("SSR", &environment.ssr);
+        changed |= ImGui::DragFloat("SSR Intensity", &environment.ssrIntensity, 0.01f, 0.0f, 2.0f, "%.2f");
+        ImGui::SeparatorText("Shadows");
+        changed |= ImGui::Checkbox("Sun Shadows", &environment.directionalShadows);
+        changed |= ImGui::Checkbox("Point Shadows", &environment.pointShadows);
+        changed |= ImGui::Checkbox("Spot Shadows", &environment.spotShadows);
+        changed |= ImGui::DragFloat("Shadow Softness", &environment.shadowSoftness, 0.05f, 0.1f, 12.0f, "%.2f");
+        changed |= ImGui::Checkbox("Atmosphere Fog", &environment.fog);
+        changed |= ImGui::ColorEdit3("Fog Color", &environment.fogColor.x);
+        changed |= ImGui::DragFloat("Fog Density", &environment.fogDensity, 0.001f, 0.0f, 0.20f, "%.4f");
+        changed |= ImGui::DragFloat("Fog Height", &environment.fogHeight, 0.02f, -20.0f, 20.0f);
+        changed |= ImGui::DragFloat("Fog Falloff", &environment.fogHeightFalloff, 0.005f, 0.001f, 2.0f, "%.3f");
+    }
+
+    if (changed) {
+        scene.SetEnvironment(environment);
+    }
+
+    ImGui::End();
+}
+
 void DrawHierarchy(EditorDockspace::Context& context, bool* open) {
     if (!ImGui::Begin(EditorPanels::Name(EditorPanels::Panel::Hierarchy), open)) {
         ImGui::End();
@@ -85,9 +162,10 @@ void DrawHierarchy(EditorDockspace::Context& context, bool* open) {
     for (int i = 0; i < static_cast<int>(objects.size()); ++i) {
         const EditorScene::Object& object = objects[static_cast<std::size_t>(i)];
         char label[192];
-        std::snprintf(label, sizeof(label), "%s%s %s",
+        std::snprintf(label, sizeof(label), "%s%s%s %s",
             object.visible ? "" : "[hidden] ",
             object.locked ? "[locked] " : "",
+            object.light ? "[light]" : "",
             object.name.c_str());
 
         if (ImGui::Selectable(label, i == context.scene->SelectedIndex())) {
@@ -121,6 +199,41 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
     ImGui::Text("Type: %s", ObjectTypeName(*selected));
     ImGui::Text("Model: %s", selected->modelAssetPath.empty() ? "-" : selected->modelAssetPath.c_str());
     ImGui::Text("Material: %s", selected->materialAssetPath.empty() ? "-" : selected->materialAssetPath.c_str());
+
+    if (selected->light) {
+    engine::ecs::Light light = selected->lightData;
+        if (const engine::ecs::Light* component = context.scene->TryGetLight(selected->entity)) {
+            light = *component;
+        }
+
+        int typeIndex = LightTypeIndex(light.type);
+        const char* lightTypes[] = {"Directional", "Point", "Spot", "Area"};
+        if (ImGui::Combo("Light Type", &typeIndex, lightTypes, 4)) {
+            light.type = LightTypeFromIndex(typeIndex);
+            context.scene->SetSelectedLight(light);
+        }
+        if (ImGui::ColorEdit3("Light Color", &light.color.x)) {
+            context.scene->SetSelectedLight(light);
+        }
+        if (ImGui::DragFloat("Intensity", &light.intensity, 0.1f, 0.0f, 10000.0f)) {
+            context.scene->SetSelectedLight(light);
+        }
+        if (ImGui::DragFloat3("Direction", &light.direction.x, 0.02f)) {
+            context.scene->SetSelectedLight(light);
+        }
+        if (ImGui::DragFloat("Inner Angle", &light.innerAngle, 0.25f, 0.0f, 179.0f)) {
+            context.scene->SetSelectedLight(light);
+        }
+        if (ImGui::DragFloat("Outer Angle", &light.outerAngle, 0.25f, 0.0f, 179.0f)) {
+            context.scene->SetSelectedLight(light);
+        }
+        if (ImGui::DragFloat("Range", &light.range, 0.25f, 0.0f, 10000.0f)) {
+            context.scene->SetSelectedLight(light);
+        }
+        if (ImGui::DragFloat("Source Radius", &light.sourceRadius, 0.05f, 0.0f, 1000.0f)) {
+            context.scene->SetSelectedLight(light);
+        }
+    }
 
     if (context.assets) {
         const std::vector<EditorAssets::Asset> materials = FindMaterialAssets(*context.assets);
@@ -465,7 +578,7 @@ bool EditorDockspace::Draw(Context &context)
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
-    ImGui::Begin("3DGEditiorDockspace", nullptr, flags);
+    ImGui::Begin("3DGEditorDockspace", nullptr, flags);
     ImGui::PopStyleVar(2);
 
     const ImGuiID dockspaceId = ImGui::GetID("3DGEditorDockspaceRoot");
@@ -488,6 +601,51 @@ bool EditorDockspace::Draw(Context &context)
             ImGui::Text("Scene dirty: %s", context.sceneDirty ? "yes" : "no");
             if (context.gizmo) {
                 ImGui::Text("Gizmo: %s %s", context.gizmo->ModeName(), context.gizmo->AxisName());
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Save")) {
+                context.saveSceneRequested = true;
+            }
+            if (context.scenePathBuffer && context.scenePathBufferSize > 0) {
+                ImGui::SetNextItemWidth(280.0f);
+                ImGui::InputText("Scene Path", context.scenePathBuffer, context.scenePathBufferSize);
+            }
+            if (ImGui::MenuItem("Save As")) {
+                context.saveAsSceneRequested = true;
+            }
+            if (ImGui::MenuItem("Load")) {
+                context.loadSceneRequested = true;
+            }
+            if (ImGui::MenuItem("Export Runtime")) {
+                context.exportRuntimeRequested = true;
+            }
+            if (ImGui::MenuItem("Validate Runtime")) {
+                context.validateRuntimeRequested = true;
+            }
+            if (context.project && !context.project->RecentScenes().empty()) {
+                ImGui::Separator();
+                if (ImGui::BeginMenu("Recent Scenes")) {
+                    const std::vector<std::string>& recentScenes = context.project->RecentScenes();
+                    for (int i = 0; i < static_cast<int>(recentScenes.size()); ++i) {
+                        if (ImGui::MenuItem(recentScenes[static_cast<std::size_t>(i)].c_str())) {
+                            context.recentSceneRequested = i;
+                        }
+                    }
+                    ImGui::EndMenu();
+                }
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Add Directional Light")) {
+                context.addDirectionalLightRequested = true;
+            }
+            if (ImGui::MenuItem("Add Point Light")) {
+                context.addPointLightRequested = true;
+            }
+            if (ImGui::MenuItem("Add Spot Light")) {
+                context.addSpotLightRequested = true;
+            }
+            if (ImGui::MenuItem("Add Area Light")) {
+                context.addAreaLightRequested = true;
             }
             ImGui::EndMenu();
         }
@@ -518,6 +676,11 @@ bool EditorDockspace::Draw(Context &context)
             break;
         case EditorPanels::Panel::Inspector:
             DrawInspector(context, &open);
+            break;
+        case EditorPanels::Panel::WorldSettings:
+            if (context.scene) {
+                DrawWorldSettings(*context.scene, &open);
+            }
             break;
         case EditorPanels::Panel::Assets:
             DrawAssets(context, &open);

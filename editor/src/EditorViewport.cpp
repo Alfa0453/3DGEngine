@@ -165,6 +165,32 @@ glm::vec3 AxisColor(EditorGizmo::Axis axis, EditorGizmo::Axis activeAxis) {
     return glm::vec3(1.0f);
 }
 
+glm::quat RotationFromX(const glm::vec3& direction) {
+    if (glm::dot(direction, direction) <= 0.0001f) {
+        return glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+    }
+
+    const glm::vec3 from(1.0f, 0.0f, 0.0f);
+    const glm::vec3 to = glm::normalize(direction);
+    const float d = glm::clamp(glm::dot(from, to), -1.0f, 1.0f);
+    if (d > 0.999f) {
+        return glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+    }
+    if (d < -0.999f) {
+        return glm::angleAxis(glm::radians(180.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+    }
+
+    return glm::angleAxis(std::acos(d), glm::normalize(glm::cross(from, to)));
+}
+
+glm::vec3 LightGuideColor(const engine::ecs::Light& light) {
+    const float maxChannel = std::max(std::max(light.color.r, light.color.g), light.color.b);
+    if (maxChannel <= 0.0001f) {
+        return glm::vec3(1.0f, 0.86f, 0.32f);
+    }
+    return glm::mix(glm::vec3(1.0f), light.color / maxChannel, 0.72f);
+}
+
 void DrawGizmoBox(engine::Renderer& renderer,
                   engine::Shader& shader,
                   const engine::Mesh& cube,
@@ -177,6 +203,96 @@ void DrawGizmoBox(engine::Renderer& renderer,
     shader.SetMat4("uModel", transform.Model());
     shader.SetVec3("uColor", color);
     renderer.Draw(cube);
+}
+
+void DrawGuideSegment(engine::Renderer& renderer,
+                      engine::Shader& shader,
+                      const engine::Mesh& cube,
+                      const glm::vec3& a,
+                      const glm::vec3& b,
+                      float thickness,
+                      const glm::vec3& color) {
+    const glm::vec3 delta = b - a;
+    const float length = glm::length(delta);
+    if (length <= 0.0001f) {
+        return;
+    }
+
+    engine::ecs::Transform transform;
+    transform.position = (a + b) * 0.5f;
+    transform.rotation = RotationFromX(delta);
+    transform.scale = glm::vec3(length, thickness, thickness);
+    shader.SetMat4("uModel", transform.Model());
+    shader.SetVec3("uColor", color);
+    renderer.Draw(cube);
+}
+
+void DrawGuideRing(engine::Renderer& renderer,
+                   engine::Shader& shader,
+                   const engine::Mesh& cube,
+                   const glm::vec3& center,
+                   EditorGizmo::Axis axis,
+                   float radius,
+                   float marker,
+                   const glm::vec3& color) {
+    if (radius <= 0.0001f) {
+        return;
+    }
+
+    constexpr int segments = 64;
+    constexpr float pi = 3.14159265359f;
+    for (int i = 0; i < segments; ++i) {
+        const float t = (static_cast<float>(i) / static_cast<float>(segments)) * 2.0f * pi;
+        DrawGizmoBox(renderer, shader, cube, center + RingOffset(axis, t, radius), glm::vec3(marker), color);
+    }
+}
+
+void BuildBasis(const glm::vec3& direction, glm::vec3* right, glm::vec3* up) {
+    const glm::vec3 forward = glm::normalize(direction);
+    glm::vec3 reference(0.0f, 1.0f, 0.0f);
+    if (std::abs(glm::dot(forward, reference)) > 0.96f) {
+        reference = glm::vec3(1.0f, 0.0f, 0.0f);
+    }
+
+    *right = glm::normalize(glm::cross(reference, forward));
+    *up = glm::normalize(glm::cross(forward, *right));
+}
+
+void DrawSpotConeGuide(engine::Renderer& renderer,
+                       engine::Shader& shader,
+                       const engine::Mesh& cube,
+                       const glm::vec3& origin,
+                       const engine::ecs::Light& light,
+                       const glm::vec3& color) {
+    if (glm::dot(light.direction, light.direction) <= 0.0001f || light.range <= 0.0001f) {
+        return;
+    }
+
+    const glm::vec3 forward = glm::normalize(light.direction);
+    const float outerRadians = glm::radians(glm::clamp(light.outerAngle, 0.0f, 89.5f));
+    const float radius = std::tan(outerRadians) * light.range;
+    const glm::vec3 center = origin + forward * light.range;
+
+    glm::vec3 right;
+    glm::vec3 up;
+    BuildBasis(forward, &right, &up);
+
+    constexpr int segments = 48;
+    constexpr float pi = 3.14159265359f;
+    constexpr float thickness = 0.025f;
+    for (int i = 0; i < segments; ++i) {
+        const float t0 = (static_cast<float>(i) / static_cast<float>(segments)) * 2.0f * pi;
+        const float t1 = (static_cast<float>(i + 1) / static_cast<float>(segments)) * 2.0f * pi;
+        const glm::vec3 p0 = center + right * std::cos(t0) * radius + up * std::sin(t0) * radius;
+        const glm::vec3 p1 = center + right * std::cos(t1) * radius + up * std::sin(t1) * radius;
+        DrawGuideSegment(renderer, shader, cube, p0, p1, thickness, color);
+    }
+
+    for (int i = 0; i < 4; ++i) {
+        const float t = (static_cast<float>(i) / 4.0f) * 2.0f * pi;
+        const glm::vec3 edge = center + right * std::cos(t) * radius + up * std::sin(t) * radius;
+        DrawGuideSegment(renderer, shader, cube, origin, edge, thickness, color);
+    }
 }
 
 void DrawGizmoCone(engine::Renderer& renderer,
@@ -248,6 +364,7 @@ void EditorViewport::DrawSceneGizmo(engine::Renderer& renderer,
     shader.Bind();
     shader.SetMat4("uViewProj", viewProj);
     shader.SetVec3("uLightDir", glm::normalize(glm::vec3(-0.4f, -1.0f, -0.3f)));
+    shader.SetVec3("uEmissive", glm::vec3(0.0f));
 
     const glm::vec3 center = selectedTransform->position;
     const glm::vec3 xColor = AxisColor(EditorGizmo::Axis::X, gizmo.CurrentAxis());
@@ -299,6 +416,73 @@ void EditorViewport::DrawSceneGizmo(engine::Renderer& renderer,
         DrawGizmoRing(renderer, shader, cube, center, EditorGizmo::Axis::Z, zColor);
         break;
     }
+}
+
+void EditorViewport::DrawSelectedLightGuide(engine::Renderer& renderer,
+                                            engine::Shader& shader,
+                                            const engine::Mesh& cube,
+                                            const EditorScene& scene,
+                                            const glm::mat4& viewProj,
+                                            bool selectedOnly) const {
+    const EditorScene::Object* selected = scene.SelectedObject();
+    if (selectedOnly && (!selected || !selected->light || !selected->visible)) {
+        return;
+    }
+
+    shader.Bind();
+    shader.SetMat4("uViewProj", viewProj);
+    shader.SetVec3("uLightDir", glm::normalize(glm::vec3(-0.4f, -1.0f, -0.3f)));
+    shader.SetInt("uHasDiffuse", 0);
+
+    constexpr float marker = 0.045f;
+    for (const EditorScene::Object& object : scene.Objects()) {
+        if (!object.light && !object.visible) {
+            continue;
+        }
+        const bool selectedLight = selected && selected->entity == object.entity;
+        if (selectedOnly && !selectedLight) {
+            continue;
+        }
+
+        const engine::ecs::Transform* transform = scene.TryGetTransform(object.entity);
+        const engine::ecs::Light* light = scene.TryGetLight(object.entity);
+        if (!transform || !light) {
+            continue;
+        }
+
+        const glm::vec3 color = selectedLight
+            ? LightGuideColor(*light)
+            : glm::mix(glm::vec3(0.35f), LightGuideColor(*light), 0.58f);
+        shader.SetVec3("uEmissive", color * (selectedLight ? 0.45f : 0.18f));
+
+        switch (light->type) {
+        case engine::ecs::Light::Type::Directional:
+            if (glm::dot(light->direction, light->direction) <= 0.0001f) {
+                break;
+            }
+            DrawGuideSegment(renderer, shader, cube, transform->position,
+                transform->position + glm::normalize(light->direction) * 2.4f, 0.045f, color);
+            break;
+        case engine::ecs::Light::Type::Point: {
+            const glm::vec3 c = light->color * light->intensity;
+            const float radius = std::sqrt(std::max(std::max(c.r, c.g), c.b) / 0.03f);
+            DrawGuideRing(renderer, shader, cube, transform->position, EditorGizmo::Axis::X, radius, marker, color);
+            DrawGuideRing(renderer, shader, cube, transform->position, EditorGizmo::Axis::Y, radius, marker, color);
+            DrawGuideRing(renderer, shader, cube, transform->position, EditorGizmo::Axis::Z, radius, marker, color);
+            break;
+        }
+        case engine::ecs::Light::Type::Spot:
+            DrawSpotConeGuide(renderer, shader, cube, transform->position, *light, color);
+            break;
+        case engine::ecs::Light::Type::Area:
+            DrawGuideRing(renderer, shader, cube, transform->position, EditorGizmo::Axis::X, light->sourceRadius, marker, color);
+            DrawGuideRing(renderer, shader, cube, transform->position, EditorGizmo::Axis::Y, light->sourceRadius, marker, color);
+            DrawGuideRing(renderer, shader, cube, transform->position, EditorGizmo::Axis::Z, light->sourceRadius, marker, color);
+            break;
+        }
+    }
+
+    shader.SetVec3("uEmissive", glm::vec3(0.0f));
 }
 
 void EditorViewport::DrawSelectedModelOutline(engine::Renderer& renderer,
@@ -353,13 +537,15 @@ void EditorViewport::DrawSceneObject(engine::Renderer& renderer,
                                      engine::Shader& shader,
                                      const engine::ecs::Transform& transform,
                                      const engine::ecs::MeshRenderer& meshRenderer,
-                                     const engine::Texture* diffuseTexture) const {
+                                     const engine::Texture* diffuseTexture,
+                                     const glm::vec3& emissive) const {
     if (!meshRenderer.mesh) {
         return;
     }
 
     shader.SetMat4("uModel", transform.Model());
     shader.SetVec3("uColor", meshRenderer.color);
+    shader.SetVec3("uEmissive", emissive);
     shader.SetInt("uHasDiffuse", diffuseTexture ? 1 : 0);
     if (diffuseTexture) {
         diffuseTexture->Bind(0);

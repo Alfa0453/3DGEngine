@@ -41,6 +41,7 @@ public:
         const SSAO* ssao = nullptr;    // screen-space ambient occlusion (optional)
         bool        pointShadows = true;    // omnidirectional shadows for point lights
         bool        spotShadows  = true;  // perspective shadows for spotlights
+        bool        directionalShadows = true; // cascaded shadows for the directional sun
         float       shadowSoftness = 2.5f; // PCSS sun-shadow softness (light size)
 
         // Distance + height fog (applied to lit geometry in linear HDR).

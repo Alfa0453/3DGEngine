@@ -75,6 +75,11 @@ ProceduralSky::ProceduralSky()
 
 void ProceduralSky::Draw(const glm::mat4& view, const glm::mat4& projection,
                          const DayNightCycle::Sample& sky, bool tonemap) {
+    GLint previousDepthFunc = GL_LESS;
+    GLboolean previousDepthMask = GL_TRUE;
+    glGetIntegerv(GL_DEPTH_FUNC, &previousDepthFunc);
+    glGetBooleanv(GL_DEPTH_WRITEMASK, &previousDepthMask);
+
     glDepthFunc(GL_LEQUAL);
     m_shader.Bind();
     m_shader.SetMat4("uViewProj", projection * glm::mat4(glm::mat3(view)));
@@ -87,7 +92,8 @@ void ProceduralSky::Draw(const glm::mat4& view, const glm::mat4& projection,
     m_shader.SetFloat("uDayFactor", sky.dayFactor);
     m_shader.SetInt("uApplyTonemap", tonemap ? 1 : 0);
     m_cube.Draw();
-    glDepthFunc(GL_LESS);
+    glDepthMask(previousDepthMask);
+    glDepthFunc(previousDepthFunc);
 }
 
 } // namespace engine

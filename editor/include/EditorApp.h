@@ -6,12 +6,18 @@
 #include <engine/ecs/Components.h>
 #include <engine/ecs/Registry.h>
 #include <engine/graphics/Camera.h>
+#include <engine/graphics/DayNightCycle.h>
+#include <engine/graphics/IBL.h>
 #include <engine/graphics/Mesh.h>
 #include <engine/graphics/Model.h>
+#include <engine/graphics/PbrRenderer.h>
+#include <engine/graphics/PostProcess.h>
+#include <engine/graphics/ProceduralSky.h>
 #include <engine/graphics/Renderer.h>
 #include <engine/graphics/Shader.h>
+#include <engine/graphics/SSAO.h>
+#include <engine/graphics/SSR.h>
 #include <engine/graphics/TextRenderer.h>
-#include <engine/scene/RuntimeSceneLoader.h>
 #include <engine/ui/ImGuiLayer.h>
 #include <MaterialMaker/MaterialMakerPanel.h>
 
@@ -65,6 +71,12 @@ private:
     void HandleEditorCommandShortcuts(engine::Window& window, bool controlDown);
     void DrawPlayScene(const glm::mat4& viewProj);
     void DrawEditScene(const glm::mat4& viewProj);
+    void UpdateEnvironmentIbl(const EditorScene::Environment& environment,
+                          const engine::DayNightCycle::Sample& sky);
+    void ConfigureEnvironmentPbrOptions(engine::ecs::Registry& registry,
+                                        engine::PbrRenderer::Options& options,
+                                        const EditorScene::Environment& environment,
+                                        const engine::DayNightCycle::Sample& sky);
     void TogglePanel(EditorPanels::Panel panel);
     void HandleMouseAssetDrag();
     void HandleMouseViewportSelection();
@@ -75,6 +87,7 @@ private:
     bool IsViewportDropPosition(float x, float y);
     void AddCube();
     void AddPlane();
+    void AddSphere();
     void CycleSelectedColor();
     void SetSelectedPrimitive(EditorScene::Primitive primitive);
     void ToggleSelectedVisible();
@@ -84,7 +97,11 @@ private:
     void Undo();
     void Redo();
     void SaveScene();
+    void SaveSceneAs(const std::string& path);
+    void SetScenePathDraft(const std::string& path);
+    void UpdateAutosave(float dt);
     void LoadScene();
+    void LoadSceneFromPath(const std::string& path);
     void ExportRuntimeScene();
     void ValidateRuntimeScene();
     void EnterPlayMode();
@@ -110,15 +127,22 @@ private:
     EditorTransformController m_transformController;
     EditorViewport        m_viewport;
 
-    std::optional<engine::Mesh>         m_cube;
-    std::optional<engine::Mesh>         m_cone;
-    std::optional<engine::Mesh>         m_plane;
-    std::optional<engine::Shader>       m_shader;
-    std::optional<engine::Shader>       m_modelShader;
-    std::optional<engine::Shader>       m_outlineShader;
-    std::optional<engine::TextRenderer> m_text;
-    engine::ImGuiLayer                  m_imgui;
-    material_maker::MaterialMakerPanel  m_materialMaker;
+    std::optional<engine::Mesh>          m_cube;
+    std::optional<engine::Mesh>          m_cone;
+    std::optional<engine::Mesh>          m_plane;
+    std::optional<engine::Mesh>          m_sphere;
+    std::optional<engine::Shader>        m_shader;
+    std::optional<engine::Shader>        m_modelShader;
+    std::optional<engine::Shader>        m_outlineShader;
+    std::optional<engine::PbrRenderer>   m_pbrRenderer;
+    std::optional<engine::PostProcess>   m_postProcess;
+    std::optional<engine::ProceduralSky> m_sky;
+    std::optional<engine::IBL>           m_ibl;
+    std::optional<engine::SSAO>          m_ssao;
+    std::optional<engine::SSR>           m_ssr;
+    std::optional<engine::TextRenderer>  m_text;
+    engine::ImGuiLayer                   m_imgui;
+    material_maker::MaterialMakerPanel   m_materialMaker;
 
     EditorMode       m_mode = EditorMode::Edit;
     std::optional<EditorScene::Snapshot> m_editSnapshot;
@@ -128,6 +152,11 @@ private:
 
     float m_fps = 60.0f;
     float m_elapsed = 0.0f;
+    float m_dt = 0.016f;
+    float m_autosaveTimer = 0.0f;
+    float m_lastIblDay = -1.0f;
+    bool m_renderingHdrPreview = false;
+    std::array<char, 260> m_scenePathDraft{};
     std::unordered_map<int, bool> m_keyPrev;
     std::unordered_map<std::string, bool> m_editModelLoadErrors;
     std::unordered_map<std::string, bool> m_editTextureLoadErrors;

@@ -7,6 +7,7 @@ public:
     enum class Panel {
         Hierarchy,
         Inspector,
+        WorldSettings,
         Assets,
         Console,
         MaterialMaker,
@@ -21,5 +22,5 @@ public:
 
 private:
     static constexpr int kPanelCount = static_cast<int>(Panel::Count);
-    std::array<bool, kPanelCount> m_open{{true, true, true, true}};
+    std::array<bool, kPanelCount> m_open{{true, true, false, true, true, false}};
 };

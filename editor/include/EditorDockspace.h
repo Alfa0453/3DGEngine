@@ -8,6 +8,8 @@
 #include "EditorProject.h"
 #include "EditorScene.h"
 
+#include <cstddef>
+
 class EditorDockspace {
 public:
     struct Context {
@@ -19,9 +21,21 @@ public:
         EditorLog* log = nullptr;
         EditorGizmo* gizmo = nullptr;
         const char* modeName = "Edit";
+        char* scenePathBuffer = nullptr;
+        std::size_t scenePathBufferSize = 0;
         float fps = 0.0f;
         bool sceneDirty = false;
         bool viewportDropRequested = false;
+        bool saveSceneRequested = false;
+        bool saveAsSceneRequested = false;
+        bool loadSceneRequested = false;
+        bool exportRuntimeRequested = false;
+        bool validateRuntimeRequested = false;
+        int recentSceneRequested = -1;
+        bool addDirectionalLightRequested = false;
+        bool addPointLightRequested = false;
+        bool addSpotLightRequested = false;
+        bool addAreaLightRequested = false;
     };
 
     bool Draw(Context& context);

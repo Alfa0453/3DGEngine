@@ -1,6 +1,7 @@
 #pragma once
 
 #include "engine/ecs/Entity.h"
+#include "engine/ecs/Components.h"
 
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -33,12 +34,31 @@ public:
     };
 
     struct Scene {
+        struct Environment {
+            float timeOfDay = 0.46f;
+            float skyLightIntensity = 1.0f;
+            bool driveSunLight = true;
+            float sunIntensity = 1.0f;
+            bool fog = true;
+            float fogDensity = 0.008f;
+            float fogHeight = -0.35f;
+            float fogHeightFalloff = 0.10f;
+        };
+
+        Environment environment;
         std::vector<EntityDesc> entities;
+        struct LightDesc {
+            std::string name;
+            engine::ecs::Light light;
+            glm::vec3 position{0.0f};
+        };
+        std::vector<LightDesc> lights;
     };
 
     struct PrimitiveMeshes {
         const Mesh* cube = nullptr;
         const Mesh* plane = nullptr;
+        const Mesh* sphere = nullptr;
     };
 
     static bool Load(const std::string& path, Scene* scene, std::string* error);

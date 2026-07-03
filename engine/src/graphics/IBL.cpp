@@ -237,6 +237,11 @@ void IBL::RenderBrdfLUT() {
 }
 
 void IBL::Generate(const std::function<void(const glm::mat4&, const glm::mat4&)>& drawSky) {
+    GLint prevFbo = 0;
+    GLint prevViewport[4] = {0, 0, 0, 0};
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFbo);
+    glGetIntegerv(GL_VIEWPORT, prevViewport);
+
     const glm::mat4 proj = glm::perspective(glm::radians(90.0f), 1.0f, 0.1f, 10.0f);
     const glm::vec3 O(0.0f);
     const glm::mat4 views[6] = {
@@ -301,7 +306,8 @@ void IBL::Generate(const std::function<void(const glm::mat4&, const glm::mat4&)>
         }
     }
 
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prevFbo));
+    glViewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3]);
 }
 
 void IBL::Bind(unsigned int irradianceUnit, unsigned int prefilterUnit,

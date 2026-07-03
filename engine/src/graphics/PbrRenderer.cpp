@@ -96,6 +96,7 @@ uniform mat4  uCascadeVP[4];
 uniform float uCascadeSplits[4];
 uniform mat4  uView;
 uniform float uShadowSoftness;
+uniform int uSunShadowsEnabled;
 uniform samplerCube uPointCube[4];
 uniform int uNumPointShadows;
 uniform int uApplyTonemap;
@@ -246,7 +247,7 @@ void main() {
     vec3 Lo = vec3(0.0);
     vec3 Ls = normalize(-uSunDir);
     float sunNdotL = max(dot(N,Ls),0.0);
-    float shadow = ShadowFactor(sunNdotL);
+    float shadow = (uSunShadowsEnabled == 1) ? ShadowFactor(sunNdotL) : 0.0;
     Lo += (1.0-shadow)*Lighting(N,V,Ls,uSunColor,albedo,F0,metallic,roughness);
     ivec2 tile = ivec2(gl_FragCoord.xy / (uScreenSize / vec2(TILE_COUNT)));
     tile = clamp(tile, ivec2(0), TILE_COUNT - ivec2(1));
@@ -264,6 +265,24 @@ void main() {
         vec3 contrib = Lighting(N, V, L, radiance, albedo, F0, metallic, roughness);
         if (li < uNumPointShadows) contrib *= (1.0 - PointShadowFactor(li, -d));
         Lo += contrib;
+    }
+    for (int i = 0; i < uNumSpots && i < MAX_SPOTS; ++i) {
+        vec3 d = uSpotPos[i] - vWorldPos;
+        float dist2 = dot(d, d);
+        vec3 L = d / sqrt(max(dist2, 0.0001));
+        float theta = dot(-L, normalize(uSpotDir[i]));
+        float cone = clamp((theta - uSpotCosOuter[i]) /
+                        max(uSpotCosInner[i] - uSpotCosOuter[i], 0.0001), 0.0, 1.0);
+        if (cone > 0.0) {
+            vec3 radiance = uSpotColor[i] * cone / max(dist2, 0.0001);
+            vec3 contrib = Lighting(N, V, L, radiance, albedo, F0, metallic, roughness);
+            if (i < uNumSpotShadows) contrib *= (1.0 - SpotShadowFactor(i, vWorldPos));
+            Lo += contrib;
+        }
+    }
+    for (int i = 0; i < uNumAreas && i < MAX_AREAS; ++i) {
+        Lo += AreaLight(N, V, uAreaPos[i] - vWorldPos, uAreaRadius[i], uAreaColor[i],
+                        albedo, F0, metallic, roughness);
     }
     vec3 ambient;
     if (uUseIBL == 1) {
@@ -387,6 +406,7 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
     m_pbr->SetInt("uCascadeMaps", 4);
     m_pbr->SetMat4("uView", view);
     m_pbr->SetFloat("uShadowSoftness", opt.shadowSoftness);
+    m_pbr->SetInt("uSunShadowsEnabled", opt.directionalShadows ? 1 : 0);
     for (int i = 0; i < CascadedShadow::kCascades; ++i) {
         const std::string ix = "[" + std::to_string(i) + "]";
         m_pbr->SetMat4("uCascadeVP" + ix, m_cascade.CascadeVP(i));
@@ -417,7 +437,8 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
     m_pbr->SetInt("uPointCube[2]", 11);
     m_pbr->SetInt("uPointCube[3]", 12);
     m_spotShadow.BindMaps(13);
-    m_pbr->SetInt("uNumSpots", static_cast<int>(spotPos.size()));
+    const int spotCount = std::min(static_cast<int>(spotPos.size()), static_cast<int>(SpotShadow::kMax));
+    m_pbr->SetInt("uNumSpots", spotCount);
     m_pbr->SetInt("uNumSpotShadows", numSpotShadows);
     for (std::size_t i = 0; i < spotPos.size() && i < static_cast<std::size_t>(SpotShadow::kMax); ++i) {
         const std::string ix = "[" + std::to_string(i) + "]";
@@ -432,12 +453,13 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
     m_pbr->SetInt("uSpotMap[1]", 14);
     m_pbr->SetInt("uSpotMap[2]", 15);
     m_pbr->SetInt("uSpotMap[3]", 16);
-    m_pbr->SetInt("uNumAreas", static_cast<int>(areaPos.size()));
-    for (std::size_t i = 0; i < areaPos.size() && i < 4; ++i) {
+    const int areaCount = std::min(static_cast<int>(areaPos.size()), 4);
+    m_pbr->SetInt("uNumAreas", areaCount);
+    for (int i = 0; i < areaCount; ++i) {
         const std::string ix = "[" + std::to_string(i) + "]";
-        m_pbr->SetVec3("uAreaPos" + ix, areaPos[i]);
-        m_pbr->SetVec3("uAreaColor" + ix, areaCol[i]);
-        m_pbr->SetFloat("uAreaRadius" + ix, areaRad[i]);
+        m_pbr->SetVec3("uAreaPos" + ix, areaPos[static_cast<std::size_t>(i)]);
+        m_pbr->SetVec3("uAreaColor" + ix, areaCol[static_cast<std::size_t>(i)]);
+        m_pbr->SetFloat("uAreaRadius" + ix, areaRad[static_cast<std::size_t>(i)]);
     }
     m_pbr->SetInt("uFogEnabled", opt.fog ? 1 : 0);
     m_pbr->SetVec3("uFogColor", opt.fogColor);

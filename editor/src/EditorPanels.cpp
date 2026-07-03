@@ -20,6 +20,7 @@ const char *EditorPanels::Name(Panel panel)
     switch (panel) {
     case Panel::Hierarchy: return "Hierarchy";
     case Panel::Inspector: return "Inspector";
+    case Panel::WorldSettings: return "World Settings";
     case Panel::Assets:     return "Assets";
     case Panel::Console:   return "Console";
     case Panel::MaterialMaker: return "Material Maker";

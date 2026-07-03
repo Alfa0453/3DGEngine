@@ -51,6 +51,40 @@ bool IsEditorKeyboardCaptured() {
     return io.WantTextInput || io.WantCaptureKeyboard;
 }
 
+float LightEmissiveScale(const EditorScene& scene, const EditorScene::Object& object) {
+    if (!object.light) {
+        return 1.0f;
+    }
+
+    const engine::ecs::Light* light = scene.TryGetLight(object.entity);
+    const float intensity = light ? light->intensity : object.lightData.intensity;
+    return 1.0f + std::max(intensity, 0.0f) * 0.1f;
+}
+
+engine::ecs::Light EnvironmentSunLight(const engine::DayNightCycle::Sample& sky, float intensityScale) {
+    engine::ecs::Light light;
+    light.type = engine::ecs::Light::Type::Directional;
+    light.direction = sky.keyLightDirection;
+
+    const glm::vec3 radiance = sky.keyLightColor * std::max(intensityScale, 0.0f);
+    light.intensity = std::max(std::max(radiance.r, radiance.g), radiance.b);
+    light.color = light.intensity > 0.0001f ? radiance / light.intensity : glm::vec3(1.0f);
+    return light;
+}
+
+void AddEnvironmentSunIfNeeded(engine::ecs::Registry& registry,
+                               const EditorScene::Environment& environment,
+                               const engine::DayNightCycle::Sample& sky,
+                               bool alreadyApplied) {
+    if (!environment.driveSunLight || alreadyApplied) {
+        return;
+    }
+
+    const Entity entity = registry.Create();
+    registry.Add<Transform>(entity, Transform{});
+    registry.Add<engine::ecs::Light>(entity, EnvironmentSunLight(sky, environment.sunIntensity));
+}
+
 } // namespace
 
 EditorApp::EditorApp(engine::Config &config)
@@ -66,6 +100,7 @@ void EditorApp::OnInit()
     m_cube.emplace(engine::primitives::Cube());
     m_cone.emplace(engine::primitives::Cone());
     m_plane.emplace(engine::primitives::Plane(1.0f, 8.0f));
+    m_sphere.emplace(engine::primitives::Sphere());
     m_shader.emplace(
         R"glsl(
             #version 330 core
@@ -95,6 +130,7 @@ void EditorApp::OnInit()
             in vec2 vTexCoord;
 
             uniform vec3 uColor;
+            uniform vec3 uEmissive;
             uniform vec3 uLightDir;
             uniform int uHasDiffuse;
             uniform sampler2D uDiffuseTex;
@@ -108,9 +144,9 @@ void EditorApp::OnInit()
                 if (uHasDiffuse == 1) {
                     base *= texture(uDiffuseTex, vTexCoord).rgb;
                 }
-                vec3 ambient = uColor * 0.24;
+                vec3 ambient = base * 0.24;
                 vec3 lit = ambient + base * diffuse * 0.76;
-                FragColor = vec4(lit, 1.0);
+                FragColor = vec4(lit + uEmissive, 1.0);
             }
         )glsl");
     m_outlineShader.emplace(
@@ -233,12 +269,15 @@ void EditorApp::OnInit()
             }
         )glsl"
     );
+    m_pbrRenderer.emplace();
+    m_sky.emplace();
     m_text.emplace();
 
     m_project.Load(m_config);
+    SetScenePathDraft(m_project.ScenePath());
     m_content.Refresh(m_assets, m_project, m_log);
     m_materialMaker.SetOutputDirectory(m_project.AssetRoot());
-    m_scene.BuildDefault(*m_cube, *m_plane);
+    m_scene.BuildDefault(*m_cube, *m_plane, *m_sphere);
     m_imgui.Init(GetWindow());
 }
 
@@ -246,12 +285,14 @@ void EditorApp::OnUpdate(float dt)
 {
     engine::Window& window = GetWindow();
     m_elapsed += dt;
+    m_dt = dt;
     if (dt > 0.0f) {
         m_fps = m_fps * 0.92f + (1.0f / dt) * 0.08f;
     }
     if (m_mode == EditorMode::Play && m_playRegistry) {
         engine::ecs::UpdateRuntimeMotion(*m_playRegistry, dt);
     }
+    UpdateAutosave(dt);
 
     const bool keyboardCaptured = IsEditorKeyboardCaptured();
     if (keyboardCaptured) {
@@ -289,15 +330,45 @@ void EditorApp::OnUpdate(float dt)
 
 void EditorApp::OnRender()
 {
-    m_renderer.Clear();
-
     const engine::Window& window = GetWindow();
     const glm::mat4 viewProj = m_camera.ProjectionMatrix(window.AspectRatio()) * m_camera.ViewMatrix();
+    const EditorScene::Environment& environment = m_scene.GetEnvironment();
+    const bool useHdrPost = environment.ssr;
+
+    if (useHdrPost) {
+        if (!m_postProcess) {
+            m_postProcess.emplace(window.Width(), window.Height());
+            m_postProcess->settings.bloom = false;
+            m_postProcess->settings.autoExposure = false;
+            m_postProcess->settings.exposure = 1.0f;
+        }
+        if (!m_ssr) {
+            m_ssr.emplace(window.Width(), window.Height());
+        }
+        m_postProcess->Resize(window.Width(), window.Height());
+        m_ssr->Resize(window.Width(), window.Height());
+        m_postProcess->BeginScene();
+        m_renderer.Clear();
+        m_renderingHdrPreview = true;
+    } else {
+        m_renderer.Clear();
+    }
 
     if (m_mode == EditorMode::Play && m_playRegistry) {
         DrawPlayScene(viewProj);
     } else {
         DrawEditScene(viewProj);
+    }
+
+    if (useHdrPost && m_postProcess) {
+        if (m_ssr && m_ssao) {
+            m_ssr->intensity = environment.ssrIntensity;
+            m_ssr->Apply(m_postProcess->HdrColor(), m_ssao->PositionTexture(), m_ssao->NormalTexture(),
+                         m_camera.ProjectionMatrix(window.AspectRatio()), m_postProcess->HdrFbo(),
+                         window.Width(), window.Height());
+        }
+        m_renderingHdrPreview = false;
+        m_postProcess->RenderToScreen(window.Width(), window.Height(), m_dt);
     }
 
     m_imgui.BeginFrame();
@@ -407,12 +478,52 @@ void EditorApp::DrawEditorOverlay()
     dockspaceContext.log = &m_log;
     dockspaceContext.gizmo = &m_gizmo;
     dockspaceContext.modeName = m_mode == EditorMode::Edit ? "Edit" : "Play";
+    dockspaceContext.scenePathBuffer = m_scenePathDraft.data();
+    dockspaceContext.scenePathBufferSize = m_scenePathDraft.size();
     dockspaceContext.fps = m_fps;
     dockspaceContext.sceneDirty = m_scene.IsDirty();
     const bool dockspaceDrawn = m_dockspace.Draw(dockspaceContext);
     DrawMaterialMakerPanel();
     if (dockspaceContext.viewportDropRequested) {
         DropPayloadOnScene();
+    }
+    if (dockspaceContext.saveSceneRequested) {
+        SaveScene();
+    }
+    if (dockspaceContext.saveAsSceneRequested) {
+        SaveSceneAs(m_scenePathDraft.data());
+    }
+    if (dockspaceContext.loadSceneRequested) {
+        LoadSceneFromPath(m_scenePathDraft.data());
+    }
+    if (dockspaceContext.recentSceneRequested >= 0
+        && dockspaceContext.project
+        && dockspaceContext.recentSceneRequested < static_cast<int>(dockspaceContext.project->RecentScenes().size())) {
+        LoadSceneFromPath(dockspaceContext.project->RecentScenes()[static_cast<std::size_t>(dockspaceContext.recentSceneRequested)]);
+    }
+    if (dockspaceContext.exportRuntimeRequested) {
+        ExportRuntimeScene();
+    }
+    if (dockspaceContext.validateRuntimeRequested) {
+        ValidateRuntimeScene();
+    }
+    if (m_sphere) {
+        if (dockspaceContext.addDirectionalLightRequested) {
+            m_scene.AddDirectionalLight(*m_sphere);
+            m_log.Info("Added directional light");
+        }
+        if (dockspaceContext.addPointLightRequested) {
+            m_scene.AddPointLight(*m_sphere);
+            m_log.Info("Added point light");
+        }
+        if (dockspaceContext.addSpotLightRequested) {
+            m_scene.AddSpotLight(*m_sphere);
+            m_log.Info("Added spot light");
+        }
+        if (dockspaceContext.addAreaLightRequested) {
+            m_scene.AddAreaLight(*m_cube);
+            m_log.Info("Added area light");
+        }
     }
 
     m_text->Begin(width, height);
@@ -711,9 +822,6 @@ void EditorApp::HandleAssetShortcuts(engine::Window & window, bool controlDown)
     if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_F8)) {
         ValidateRuntimeScene();
     }
-    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_F9)) {
-        LoadScene();
-    }
     if (Pressed(GLFW_KEY_F6)) {
         m_content.Refresh(m_assets, m_project, m_log);
     }
@@ -824,9 +932,76 @@ void EditorApp::HandleEditorCommandShortcuts(engine::Window & window, bool contr
 
 void EditorApp::DrawPlayScene(const glm::mat4 & viewProj)
 {
-    m_shader->Bind();
-    m_shader->SetMat4("uViewProj", viewProj);
-    m_shader->SetVec3("uLightDir", glm::normalize(glm::vec3(-0.4f, -1.0f, -0.3f)));
+    const EditorScene::Environment& environment = m_scene.GetEnvironment();
+    const engine::DayNightCycle::Sample sky = engine::DayNightCycle::At(environment.timeOfDay);
+    if (m_sky) {
+        const engine::Window& window = GetWindow();
+        m_sky->Draw(m_camera.ViewMatrix(), m_camera.ProjectionMatrix(window.AspectRatio()), sky);
+    }
+
+    if (m_pbrRenderer && m_playRegistry) {
+        engine::ecs::Registry pbrRegistry;
+        bool environmentSunApplied = false;
+
+        m_playRegistry->view<Transform, MeshRenderer>().each(
+            [&](Entity source, Transform& transform, MeshRenderer& renderer) {
+                if (m_playRegistry->Has<engine::ecs::LoadedModelAsset>(source) || !renderer.mesh) {
+                    return;
+                }
+
+                engine::ecs::PbrMaterial material;
+                material.albedo = renderer.color;
+                material.roughness = 0.55f;
+                if (engine::ecs::LoadedMaterialAsset* loaded = m_playRegistry->TryGet<engine::ecs::LoadedMaterialAsset>(source)) {
+                    material = loaded->material;
+                }
+
+                const Entity entity = pbrRegistry.Create();
+                pbrRegistry.Add<Transform>(entity, transform);
+                pbrRegistry.Add<engine::ecs::MeshPBR>(entity, engine::ecs::MeshPBR{renderer.mesh, material});
+                if (engine::ecs::Light* light = m_playRegistry->TryGet<engine::ecs::Light>(source)) {
+                    engine::ecs::Light renderLight = *light;
+                    if (environment.driveSunLight
+                        && renderLight.type == engine::ecs::Light::Type::Directional
+                        && !environmentSunApplied) {
+                        renderLight = EnvironmentSunLight(sky, environment.sunIntensity);
+                        environmentSunApplied = true;
+                    }
+                    pbrRegistry.Add<engine::ecs::Light>(entity, renderLight);
+                }
+            }
+        );
+
+        m_playRegistry->view<Transform, engine::ecs::Light>().each(
+            [&](Entity source, Transform& transform, engine::ecs::Light& light) {
+                if (m_playRegistry->Has<MeshRenderer>(source)) {
+                    return;
+                }
+                const Entity entity = pbrRegistry.Create();
+                pbrRegistry.Add<Transform>(entity, transform);
+                engine::ecs::Light renderLight = light;
+                if (environment.driveSunLight
+                    && renderLight.type == engine::ecs::Light::Type::Directional
+                    && !environmentSunApplied) {
+                    renderLight = EnvironmentSunLight(sky, environment.sunIntensity);
+                    environmentSunApplied = true;
+                }
+                pbrRegistry.Add<engine::ecs::Light>(entity, renderLight);
+            }
+        );
+        AddEnvironmentSunIfNeeded(pbrRegistry, environment, sky, environmentSunApplied);
+
+        engine::PbrRenderer::Options options;
+        options.ambient = sky.ambient * environment.skyLightIntensity;
+        options.fog = environment.fog;
+        options.fogColor = sky.horizon;
+        options.fogDensity = environment.fogDensity;
+        options.fogHeight = environment.fogHeight;
+        options.fogHeightFalloff = environment.fogHeightFalloff;
+
+        const engine::Window& window = GetWindow();
+        m_pbrRenderer->Render(pbrRegistry, m_camera, window.AspectRatio(), window.Width(), window.Height(), options);
+    }
 
     if (m_modelShader) {
         m_modelShader->Bind();
@@ -836,61 +1011,97 @@ void EditorApp::DrawPlayScene(const glm::mat4 & viewProj)
         m_modelShader->SetVec3("uViewPos", m_camera.Position());
         engine::ecs::RenderLoadedModels(*m_playRegistry, *m_modelShader);
     }
-
-    m_shader->Bind();
-    m_shader->SetMat4("uViewProj", viewProj);
-    m_shader->SetVec3("uLightDir", glm::normalize(glm::vec3(-0.4f, -1.0f, -0.3f)));
-    engine::ecs::RenderMeshes(*m_playRegistry, m_renderer, *m_shader);
 }
 
 void EditorApp::DrawEditScene(const glm::mat4 & viewProj)
 {
-    m_shader->Bind();
-    m_shader->SetMat4("uViewProj", viewProj);
-    m_shader->SetVec3("uLightDir", glm::normalize(glm::vec3(-0.4f, -1.0f, -0.3f)));
+    const EditorScene::Environment& environment = m_scene.GetEnvironment();
+    const engine::DayNightCycle::Sample sky = engine::DayNightCycle::At(environment.timeOfDay);
+    if (m_sky) {
+        const engine::Window& window = GetWindow();
+        m_sky->Draw(m_camera.ViewMatrix(), m_camera.ProjectionMatrix(window.AspectRatio()), sky);
+    }
 
-    m_scene.Registry().view<Transform, MeshRenderer>().each(
-        [&](Entity entity, Transform& transform, MeshRenderer& renderer) {
-            if (!m_scene.IsVisible(entity)) {
-                return;
+    if (m_pbrRenderer) {
+        engine::ecs::Registry pbrRegistry;
+        const std::vector<EditorScene::Object>& objects = m_scene.Objects();
+        const EditorScene::Object* selectedObject = m_scene.SelectedObject();
+        bool environmentSunApplied = false;
+
+        for (const EditorScene::Object& object : objects) {
+            if (!object.visible || !object.modelAssetPath.empty()) {
+                continue;
             }
-            const std::vector<EditorScene::Object>& objects = m_scene.Objects();
-            const auto objectIt = std::find_if(objects.begin(), objects.end(),
-                [&](const EditorScene::Object& object) { return object.entity == entity; });
-            if (objectIt != objects.end() && !objectIt->modelAssetPath.empty()) {
-                return;
+
+            const Transform* transform = m_scene.TryGetTransform(object.entity);
+            const MeshRenderer* renderer = m_scene.TryGetMeshRenderer(object.entity);
+            if (!transform || !renderer || !renderer->mesh) {
+                continue;
             }
-            const EditorScene::Object* selectedObject = m_scene.SelectedObject();
-            const bool selected = selectedObject && selectedObject->entity == entity;
-            MeshRenderer drawRenderer = renderer;
-            drawRenderer.color = SelectedColor(selected, renderer.color);
-            const engine::Texture* diffuseTexture = nullptr;
-            if (objectIt != objects.end() && !objectIt->materialAssetPath.empty()) {
+
+            engine::ecs::PbrMaterial material;
+            material.albedo = renderer->color;
+            material.roughness = object.light ? 0.24f : 0.55f;
+            const bool selected = selectedObject && selectedObject->entity == object.entity;
+
+            if (!object.materialAssetPath.empty()) {
                 std::string error;
-                if (IsMaterialDocumentPath(objectIt->materialAssetPath)) {
-                    const engine::RuntimeMaterialAsset* material = m_editAssets.LoadMaterial(objectIt->materialAssetPath, &error);
-                    if (material) {
-                        drawRenderer.color = SelectedColor(selected, material->material.albedo);
-                        if (!material->albedoMapPath.empty()) {
-                            diffuseTexture = m_editAssets.LoadTexture(material->albedoMapPath, &error);
+                if (IsMaterialDocumentPath(object.materialAssetPath)) {
+                    const engine::RuntimeMaterialAsset* loaded = m_editAssets.LoadMaterial(object.materialAssetPath, &error);
+                    if (loaded) {
+                        material = loaded->material;
+                        material.albedo = SelectedColor(selected, material.albedo);
+                        material.emissive *= LightEmissiveScale(m_scene, object);
+                        if (!loaded->albedoMapPath.empty()) {
+                            material.albedoMap = m_editAssets.LoadTexture(loaded->albedoMapPath, &error);
                         }
-                    }
-                    if (!material && !m_editMaterialLoadErrors[objectIt->materialAssetPath]) {
-                        m_editMaterialLoadErrors[objectIt->materialAssetPath] = true;
+                        if (!loaded->normalMapPath.empty()) {
+                            material.normalMap = m_editAssets.LoadTexture(loaded->normalMapPath, &error);
+                        }
+                        if (!loaded->metalRoughMapPath.empty()) {
+                            material.metalRoughMap = m_editAssets.LoadTexture(loaded->metalRoughMapPath, &error);
+                        }
+                    } else if (!m_editTextureLoadErrors[object.materialAssetPath]) {
+                        m_editTextureLoadErrors[object.materialAssetPath] = true;
                         m_log.Error("Material preview failed: " + error);
                     }
                 } else {
-                    diffuseTexture = m_editAssets.LoadTexture(objectIt->materialAssetPath, &error);
-                    if (!diffuseTexture && !m_editTextureLoadErrors[objectIt->materialAssetPath]) {
-                        m_editTextureLoadErrors[objectIt->materialAssetPath] = true;
+                    material.albedoMap = m_editAssets.LoadTexture(object.materialAssetPath, &error);
+                    if (!material.albedoMap && !m_editTextureLoadErrors[object.materialAssetPath]) {
+                        m_editTextureLoadErrors[object.materialAssetPath] = true;
                         m_log.Error("Texture preview failed: " + error);
                     }
+                    material.albedo = SelectedColor(selected, material.albedo);
+                }
+            } else {
+                material.albedo = SelectedColor(selected, material.albedo);
+                if (object.light) {
+                    material.emissive = object.lightData.color * LightEmissiveScale(m_scene, object);
                 }
             }
-            m_viewport.DrawSceneObject(m_renderer, *m_shader, transform, drawRenderer, diffuseTexture);
-        });
+
+            const Entity entity = pbrRegistry.Create();
+            pbrRegistry.Add<Transform>(entity, *transform);
+            pbrRegistry.Add<engine::ecs::MeshPBR>(entity, engine::ecs::MeshPBR{renderer->mesh, material});
+            if (const engine::ecs::Light* light = m_scene.TryGetLight(object.entity)) {
+                pbrRegistry.Add<engine::ecs::Light>(entity, *light);
+            }
+        }
+
+        AddEnvironmentSunIfNeeded(pbrRegistry, environment, sky, environmentSunApplied);
+
+        engine::PbrRenderer::Options options;
+        ConfigureEnvironmentPbrOptions(pbrRegistry, options, environment, sky);
+
+        const engine::Window& window = GetWindow();
+        m_pbrRenderer->Render(pbrRegistry, m_camera, window.AspectRatio(), window.Width(), window.Height(), options);
+    }
     DrawEditModeModels(viewProj);
     DrawSelectionOutline(viewProj);
+    if (m_shader && m_cube && environment.showLightGuides) {
+        m_viewport.DrawSelectedLightGuide(m_renderer, *m_shader, *m_cube, m_scene, viewProj, environment.selectedLightGuideOnly);
+    }
+
     if (m_shader && m_cube && m_cone) {
         m_viewport.DrawSceneGizmo(m_renderer, *m_shader, *m_cube, *m_cone, m_scene, m_gizmo, viewProj);
     }
@@ -914,6 +1125,56 @@ void EditorApp::DrawLogOverlay(float x, float y, const glm::vec3 & text, const g
             EditorLog::LevelName(entry.level), entry.message.c_str());
         m_text->Text(line, x + 6.0f, rowY, 1.05f, muted);
         rowY += 22.0f;
+    }
+}
+
+void EditorApp::UpdateEnvironmentIbl(const EditorScene::Environment& environment,
+                                     const engine::DayNightCycle::Sample& sky) {
+    if (!environment.ibl || !m_sky) {
+        return;
+    }
+
+    if (!m_ibl) {
+        m_ibl.emplace(256);
+    }
+
+    if (std::abs(sky.dayFactor - m_lastIblDay) > 0.04f) {
+        m_ibl->Generate([&](const glm::mat4& view, const glm::mat4& projection) {
+            m_sky->Draw(view, projection, sky, false);
+        });
+        m_lastIblDay = sky.dayFactor;
+    }
+}
+
+void EditorApp::ConfigureEnvironmentPbrOptions(engine::ecs::Registry& registry,
+                                               engine::PbrRenderer::Options& options,
+                                               const EditorScene::Environment& environment,
+                                               const engine::DayNightCycle::Sample& sky) {
+    const engine::Window& window = GetWindow();
+    UpdateEnvironmentIbl(environment, sky);
+
+    options.ambient = sky.ambient * environment.skyLightIntensity;
+    options.tonemap = !m_renderingHdrPreview;
+    options.ibl = environment.ibl && m_ibl ? &*m_ibl : nullptr;
+    options.pointShadows = environment.pointShadows;
+    options.spotShadows = environment.spotShadows;
+    options.directionalShadows = environment.directionalShadows;
+    options.shadowSoftness = environment.shadowSoftness;
+    options.fog = environment.fog;
+    options.fogColor = environment.fogColor;
+    options.fogColor = sky.horizon;
+    options.fogDensity = environment.fogDensity;
+    options.fogHeight = environment.fogHeight;
+    options.fogHeightFalloff = environment.fogHeightFalloff;
+
+    if (environment.ssao || environment.ssr) {
+        if (!m_ssao) {
+            m_ssao.emplace(window.Width(), window.Height());
+        }
+        m_ssao->radius = std::max(environment.ssaoRadius, 0.05f);
+        m_ssao->bias = std::max(environment.ssaoBias, 0.0f);
+        m_ssao->Generate(registry, m_camera, window.AspectRatio(), window.Width(), window.Height());
+        options.ssao = environment.ssao ? &*m_ssao : nullptr;
     }
 }
 
@@ -1233,6 +1494,17 @@ void EditorApp::AddPlane()
     m_log.Info("Added plane");
 }
 
+void EditorApp::AddSphere()
+{
+    if (!m_sphere) {
+        m_log.Error("Add failed: sphere mesh is not ready");
+        return;
+    }
+
+    m_scene.AddSphere(*m_sphere);
+    m_log.Info("Added sphere");
+}
+
 void EditorApp::CycleSelectedColor()
 {
     if (m_scene.CycleSelectedColor()) {
@@ -1244,12 +1516,12 @@ void EditorApp::CycleSelectedColor()
 
 void EditorApp::SetSelectedPrimitive(EditorScene::Primitive primitive)
 {
-    if (!m_cube || !m_plane) {
+    if (!m_cube || !m_plane || !m_sphere) {
         m_log.Error("Type change failed: editor meshes are not ready");
         return;
     }
 
-    const engine::Mesh& mesh = primitive == EditorScene::Primitive::Cube ? *m_cube : *m_plane;
+    const engine::Mesh& mesh = primitive == EditorScene::Primitive::Cube ? *m_cube : primitive == EditorScene::Primitive::Plane ? *m_plane : *m_sphere;
     if (m_scene.SetSelectedPrimitive(primitive, mesh)) {
         m_log.Info(primitive == EditorScene::Primitive::Cube
             ? "Changed selected type to cube"
@@ -1281,12 +1553,12 @@ void EditorApp::ToggleSelectedLocked()
 
 void EditorApp::DuplicateSelected()
 {
-    if (!m_cube || !m_plane) {
+    if (!m_cube || !m_plane || !m_sphere) {
         m_log.Error("Duplicate failed: editor meshes are not ready");
         return;
     }
 
-    if (m_scene.DuplicateSelected(*m_cube, *m_plane)) {
+    if (m_scene.DuplicateSelected(*m_cube, *m_plane, *m_sphere)) {
         m_log.Info("Duplicated selected object");
     } else {
         m_log.Warning("Duplicate failed: no selected object");
@@ -1304,12 +1576,12 @@ void EditorApp::DeleteSelected()
 
 void EditorApp::Undo()
 {
-    if (!m_cube || !m_plane) {
+    if (!m_cube || !m_plane || !m_sphere) {
         m_log.Error("Undo failed: editor meshes are not ready");
         return;
     }
 
-    if (m_scene.Undo(*m_cube, *m_plane)) {
+    if (m_scene.Undo(*m_cube, *m_plane, *m_sphere)) {
         m_log.Info("Undo");
     } else {
         m_log.Warning("Nothing to undo");
@@ -1318,12 +1590,12 @@ void EditorApp::Undo()
 
 void EditorApp::Redo()
 {
-    if (!m_cube || !m_plane) {
+    if (!m_cube || !m_plane || !m_sphere) {
     m_log.Error("Redo failed: editor meshes are not ready");
     return;
     }
 
-    if (m_scene.Redo(*m_cube, *m_plane)) {
+    if (m_scene.Redo(*m_cube, *m_plane, *m_sphere)) {
         m_log.Info("Redo");
     } else {
         m_log.Warning("Nothing to redo");
@@ -1332,17 +1604,80 @@ void EditorApp::Redo()
 
 void EditorApp::SaveScene()
 {
-    m_runtime.SaveScene(m_scene, m_project, m_log);
+    if (m_runtime.SaveScene(m_scene, m_project, m_log)) {
+        m_autosaveTimer = 0.0f;
+        SetScenePathDraft(m_project.ScenePath());
+    }
+}
+
+void EditorApp::SaveSceneAs(const std::string& path) {
+    if (path.empty()) {
+        m_log.Warning("Save As failed: scene path is empty");
+        return;
+    }
+
+    m_project.SetScenePath(path);
+    if (m_runtime.SaveScene(m_scene, m_project, m_log)) {
+        m_project.Save(m_config);
+        m_config.Save();
+        m_autosaveTimer = 0.0f;
+        SetScenePathDraft(m_project.ScenePath());
+    }
+}
+
+void EditorApp::SetScenePathDraft(const std::string& path) {
+    std::memset(m_scenePathDraft.data(), 0, m_scenePathDraft.size());
+    std::snprintf(m_scenePathDraft.data(), m_scenePathDraft.size(), "%s", path.c_str());
+}
+
+void EditorApp::UpdateAutosave(float dt) {
+    if (m_mode != EditorMode::Edit || !m_scene.IsDirty()) {
+        m_autosaveTimer = 0.0f;
+        return;
+    }
+
+    m_autosaveTimer += dt;
+    if (m_autosaveTimer >= 60.0f) {
+        m_runtime.AutosaveScene(m_scene, m_project, m_log);
+        m_autosaveTimer = 0.0f;
+    }
 }
 
 void EditorApp::LoadScene()
 {
+    if (!m_cube || !m_plane || !m_sphere) {
+        m_log.Error("Load failed: editor meshes are not ready");
+        return;
+    }
+
+    if (m_runtime.LoadScene(m_scene, m_project, *m_cube, *m_plane, *m_sphere, m_log)) {
+        m_autosaveTimer = 0.0f;
+        SetScenePathDraft(m_project.ScenePath());
+    }
+}
+
+void EditorApp::LoadSceneFromPath(const std::string& path) {
+    if (path.empty()) {
+        m_log.Warning("Load failed: scene path is empty");
+        return;
+    }
     if (!m_cube || !m_plane) {
         m_log.Error("Load failed: editor meshes are not ready");
         return;
     }
 
-    m_runtime.LoadScene(m_scene, m_project, *m_cube, *m_plane, m_log);
+    const std::string previousPath = m_project.ScenePath();
+    m_project.SetScenePath(path);
+    if (m_runtime.LoadScene(m_scene, m_project, *m_cube, *m_plane, *m_sphere, m_log)) {
+        m_project.Save(m_config);
+        m_config.Save();
+        m_autosaveTimer = 0.0f;
+        SetScenePathDraft(m_project.ScenePath());
+        return;
+    }
+
+    m_project.SetScenePath(previousPath);
+    SetScenePathDraft(previousPath);
 }
 
 void EditorApp::ExportRuntimeScene()
@@ -1352,12 +1687,12 @@ void EditorApp::ExportRuntimeScene()
 
 void EditorApp::ValidateRuntimeScene()
 {
-    if (!m_cube || !m_plane) {
+    if (!m_cube || !m_plane || !m_sphere) {
         m_log.Error("Runtime scene validation failed: editor primitive meshes are not ready");
         return;
     }
 
-    m_runtime.ValidateRuntimeScene(m_project, *m_cube, *m_plane, m_log);
+    m_runtime.ValidateRuntimeScene(m_project, *m_cube, *m_plane, *m_sphere, m_log);
 }
 
 void EditorApp::EnterPlayMode()
@@ -1397,7 +1732,7 @@ void EditorApp::ExitPlayMode()
     }
 
     if (m_editSnapshot) {
-        m_scene.RestoreFromSnapshot(*m_editSnapshot, *m_cube, *m_plane);
+        m_scene.RestoreFromSnapshot(*m_editSnapshot, *m_cube, *m_plane, *m_sphere);
     }
     m_editSnapshot.reset();
     m_mode = EditorMode::Edit;
@@ -1406,7 +1741,7 @@ void EditorApp::ExitPlayMode()
 
 bool EditorApp::BuildPlayRuntimePreview(std::string * error)
 {
-    if (!m_cube || !m_plane) {
+    if (!m_cube || !m_plane || !m_sphere) {
         if (error) {
             *error = "editor primitive meshes are not ready";
         }
@@ -1419,6 +1754,7 @@ bool EditorApp::BuildPlayRuntimePreview(std::string * error)
             m_project,
             *m_cube,
             *m_plane,
+            *m_sphere,
             *m_playRegistry,
             *m_playAssets,
             error)) {

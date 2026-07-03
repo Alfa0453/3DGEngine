@@ -15,12 +15,14 @@ class Mesh;
 
 class EditorScene {
 public:
-    enum class Primitive { Plane, Cube };
+    enum class Primitive { Plane, Cube, Sphere };
 
     struct Object {
         engine::ecs::Entity entity = engine::ecs::kNull;
         std::string name;
         Primitive primitive = Primitive::Cube;
+        bool light = false;
+        engine::ecs::Light lightData;
         bool visible = true;
         bool locked = false;
         std::string modelAssetPath;
@@ -36,15 +38,39 @@ public:
         glm::vec3 color{1.0f};
     };
 
+    struct Environment {
+        float timeOfDay = 0.46f;
+        float skyLightIntensity = 1.0f;
+        bool driveSunLight = true;
+        float sunIntensity = 1.0f;
+        bool showLightGuides = true;
+        bool selectedLightGuideOnly = true;
+        bool ibl = true;
+        bool ssao = false;
+        float ssaoRadius = 0.5f;
+        float ssaoBias = 0.025f;
+        bool ssr = false;
+        float ssrIntensity = 0.5f;
+        bool directionalShadows = true;
+        bool pointShadows = true;
+        bool spotShadows = true;
+        float shadowSoftness = 2.5f;
+        bool  fog = true;
+        glm::vec3 fogColor{0.58f, 0.68f, 0.80f};
+        float fogDensity = 0.008f;
+        float fogHeight = -0.35f;
+        float fogHeightFalloff = 0.10f;
+    };
+
     struct Snapshot {
         std::vector<ObjectSnapshot> objects;
         int selectedIndex = -1;
         int nextCubeNumber = 1;
     };
 
-    void BuildDefault(const engine::Mesh& Cube, const engine::Mesh& plane);
-    bool Save(const std::string& path, std::string* error);
-    bool Load(const std::string& path, const engine::Mesh& cube, const engine::Mesh& plane, std::string* error);
+    void BuildDefault(const engine::Mesh& Cube, const engine::Mesh& plane, const engine::Mesh& sphere);
+    bool Save(const std::string& path, std::string* error, bool markClean = true);
+    bool Load(const std::string& path, const engine::Mesh& cube, const engine::Mesh& plane, const engine::Mesh& sphere, std::string* error);
 
     engine::ecs::Registry& Registry() { return m_registry; }
     const std::vector<Object>& Objects() const { return m_objects; }
@@ -56,6 +82,8 @@ public:
     engine::ecs::Transform* SelectedTransform();
     const engine::ecs::Transform* TryGetTransform(engine::ecs::Entity entity) const;
     const engine::ecs::MeshRenderer* TryGetMeshRenderer(engine::ecs::Entity entity) const;
+    const engine::ecs::Light* TryGetLight(engine::ecs::Entity entity) const;
+    const Environment& GetEnvironment() const { return m_environment; }
     bool IsVisible(engine::ecs::Entity entity) const;
     bool SelectedLocked() const;
 
@@ -71,22 +99,29 @@ public:
     void ResetSelectedTransform();
     void BeginTransformEdit();
     void EndTransformEdit();
-    bool Undo(const engine::Mesh& cube, const engine::Mesh& plane);
-    bool Redo(const engine::Mesh& cube, const engine::Mesh& plane);
+    bool Undo(const engine::Mesh& cube, const engine::Mesh& plane, const engine::Mesh& sphere);
+    bool Redo(const engine::Mesh& cube, const engine::Mesh& plane, const engine::Mesh& sphere);
     Snapshot CreateSnapshot();
-    void RestoreFromSnapshot(const Snapshot& snapshot, const engine::Mesh& cube, const engine::Mesh& plane);
+    void RestoreFromSnapshot(const Snapshot& snapshot, const engine::Mesh& cube, const engine::Mesh& plane, const engine::Mesh& sphere);
     void AddCube(const engine::Mesh& cube);
     void AddPlane(const engine::Mesh& plane);
+    void AddSphere(const engine::Mesh& sphere);
+    void AddDirectionalLight(const engine::Mesh& placeholderMesh);
+    void AddPointLight(const engine::Mesh& placeholderMesh);
+    void AddSpotLight(const engine::Mesh& placeholderMesh);
+    void AddAreaLight(const engine::Mesh& placeholderMesh);
     bool AddModel(const std::string& path, const engine::Mesh& placeholderMesh, const engine::ecs::Transform& transform);
     bool CycleSelectedColor();
     bool SetSelectedPrimitive(Primitive primitive, const engine::Mesh& mesh);
     bool SetSelectedModelAsset(const std::string& path);
     bool SetSelectedMaterialAsset(const std::string& path);
+    bool SetSelectedLight(const engine::ecs::Light& light);
+    void SetEnvironment(const Environment& environment);
     bool SetSelectedLinearVelocity(const glm::vec3& velocity);
     bool SetSelectedAngularVelocity(const glm::vec3& axis, float radiansPerSecond);
     bool ToggleSelectVisible();
     bool ToggleSelectedLocked();
-    bool DuplicateSelected(const engine::Mesh& cube, const engine::Mesh& plane);
+    bool DuplicateSelected(const engine::Mesh& cube, const engine::Mesh& plane, const engine::Mesh& sphere);
     bool DeleteSelected();
 
 private:
@@ -94,7 +129,7 @@ private:
                                      const engine::Mesh& mesh, const engine::ecs::Transform& transform,
                                      const glm::vec3& color);
     Snapshot CaptureSnapshot();
-    void RestoreSnapshot(const Snapshot& snapshot, const engine::Mesh& cube, const engine::Mesh& plane);
+    void RestoreSnapshot(const Snapshot& snapshot, const engine::Mesh& cube, const engine::Mesh& plane, const engine::Mesh& sphere);
     void PushUndoSnapshot();
     void ClearHistory();
     void Clear();
@@ -103,6 +138,7 @@ private:
     std::vector<Object> m_objects;
     std::vector<Snapshot> m_undoStack;
     std::vector<Snapshot> m_redoStack;
+    Environment m_environment;
     int m_selectedIndex = -1;
     int m_nextCubeNumber = 1;
     bool m_dirty = false;

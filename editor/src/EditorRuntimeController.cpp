@@ -25,6 +25,13 @@ std::filesystem::path RuntimePathFor(const EditorProject& project) {
     return runtimePath;
 }
 
+std::filesystem::path AutosavePathFor(const EditorProject& project) {
+    std::filesystem::path autosavePath(project.ScenePath());
+    const std::filesystem::path extension = autosavePath.extension();
+    autosavePath.replace_extension(".autosave" + extension.string());
+    return autosavePath;
+}
+
 } // namespace
 
 bool EditorRuntimeController::SaveScene(EditorScene& scene, const EditorProject& project, EditorLog& log) const {
@@ -38,13 +45,27 @@ bool EditorRuntimeController::SaveScene(EditorScene& scene, const EditorProject&
     return false;
 }
 
+bool EditorRuntimeController::AutosaveScene(EditorScene& scene, const EditorProject& project, EditorLog& log) const {
+    const std::filesystem::path autosavePath = AutosavePathFor(project);
+
+    std::string error;
+    if (scene.Save(autosavePath.string(), &error, false)) {
+        log.Info("Autosaved " + autosavePath.string());
+        return true;
+    }
+
+    log.Warning("Autosave failed: " + error);
+    return false;
+}
+
 bool EditorRuntimeController::LoadScene(EditorScene& scene,
     const EditorProject& project,
     const engine::Mesh& cube,
     const engine::Mesh& plane,
+    const engine::Mesh& sphere,
     EditorLog& log) const {
     std::string error;
-    if (scene.Load(project.ScenePath(), cube, plane, &error)) {
+    if (scene.Load(project.ScenePath(), cube, plane, sphere, &error)) {
         log.Info("Loaded " + project.ScenePath());
         return true;
     }
@@ -71,6 +92,7 @@ bool EditorRuntimeController::ExportRuntimeScene(const EditorScene& scene,
 bool EditorRuntimeController::ValidateRuntimeScene(const EditorProject& project,
     const engine::Mesh& cube,
     const engine::Mesh& plane,
+    const engine::Mesh& sphere,
     EditorLog& log) const {
     engine::RuntimeSceneLoader::Scene runtimeScene;
     std::string error;
@@ -80,7 +102,7 @@ bool EditorRuntimeController::ValidateRuntimeScene(const EditorProject& project,
     }
 
     engine::ecs::Registry registry;
-    engine::RuntimeSceneLoader::PrimitiveMeshes meshes{&cube, &plane};
+    engine::RuntimeSceneLoader::PrimitiveMeshes meshes{&cube, &plane, &sphere};
     if (!engine::RuntimeSceneLoader::Instantiate(runtimeScene, registry, meshes, nullptr, &error)) {
         log.Error("Runtime scene validation failed: " + error);
         return false;
@@ -106,6 +128,7 @@ bool EditorRuntimeController::BuildPlayRuntimePreview(const EditorScene& scene,
     const EditorProject& project,
     const engine::Mesh& cube,
     const engine::Mesh& plane,
+    const engine::Mesh& sphere,
     engine::ecs::Registry& playRegistry,
     engine::RuntimeAssetManager& playAssets,
     std::string* error) const {
@@ -120,7 +143,7 @@ bool EditorRuntimeController::BuildPlayRuntimePreview(const EditorScene& scene,
         return false;
     }
 
-    engine::RuntimeSceneLoader::PrimitiveMeshes meshes{&cube, &plane};
+    engine::RuntimeSceneLoader::PrimitiveMeshes meshes{&cube, &plane, &sphere};
     if (!engine::RuntimeSceneLoader::Instantiate(runtimeScene, playRegistry, meshes, nullptr, error)) {
         return false;
     }
