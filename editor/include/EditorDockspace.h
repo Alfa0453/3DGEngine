@@ -40,6 +40,11 @@ public:
         int physicsEventStayCount = 0;
         int physicsEventExitCount = 0;
         const std::vector<PhysicsEventRow>* physicsEventRows = nullptr;
+        bool* showPhysicsEventGuides = nullptr;
+        bool* physicsEventGuidesSelectedOnly = nullptr;
+        bool* physicsEventGuidesTriggersOnly = nullptr;
+        bool* physicsEventGuidesEnterExitOnly = nullptr;
+        bool clearPhysicsEventGuidesRequested = false;
         char* scenePathBuffer = nullptr;
         std::size_t scenePathBufferSize = 0;
         float fps = 0.0f;

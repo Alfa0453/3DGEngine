@@ -44,7 +44,7 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         return false;
     }
 
-    out << "3DGRuntimeScene 9\n";
+    out << "3DGRuntimeScene 10\n";
     out << "# Runtime export from 3DGEditor. Editor-only flags are omitted.\n";
     const EditorScene::Environment& environment = scene.GetEnvironment();
     out << "environment "
@@ -65,6 +65,7 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         << environment.physicsRestitutionThreshold << ' '
         << (environment.physicsAllowSleeping ? 1 : 0) << ' '
         << environment.physicsSleepLinearVelocity << ' '
+        << environment.physicsSleepAngularVelocity << ' '
         << environment.physicsTimeToSleep << '\n';
 
     for (const EditorScene::Object& object : scene.Objects()) {
@@ -113,6 +114,7 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
             << (object.rigidBody.useGravity ? 1 : 0) << ' '
             << (object.rigidBody.allowSleep ? 1 : 0) << ' '
             << (object.rigidBody.ccd ? 1 : 0) << ' '
+            << (object.rigidBody.freezeRotation ? 1 : 0) << ' '
             << (object.colliderEnabled ? 1 : 0) << ' '
             << static_cast<int>(object.collider.shape) << ' '
             << object.collider.radius << ' '

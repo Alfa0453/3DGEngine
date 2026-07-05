@@ -549,6 +549,18 @@ void EditorApp::DrawEditorOverlay()
     dockspaceContext.gizmo = &m_gizmo;
     dockspaceContext.modeName = m_mode == EditorMode::Edit ? "Edit" : "Play";
     dockspaceContext.playMode = m_mode == EditorMode::Play;
+    dockspaceContext.physicsPaused = m_physicsPaused;
+    dockspaceContext.physicsFixedTimestep = m_physicsFixedTimestep;
+    dockspaceContext.physicsAccumulator = m_physicsAccumulator;
+    dockspaceContext.physicsStepsLastFrame = m_physicsStepsLastFrame;
+    dockspaceContext.physicsEventEnterCount = m_physicsEventEnterCount;
+    dockspaceContext.physicsEventStayCount = m_physicsEventStayCount;
+    dockspaceContext.physicsEventExitCount = m_physicsEventExitCount;
+    dockspaceContext.physicsEventRows = &m_physicsEventRows;
+    dockspaceContext.showPhysicsEventGuides = &m_showPhysicsEventGuides;
+    dockspaceContext.physicsEventGuidesSelectedOnly = &m_physicsEventGuidesSelectedOnly;
+    dockspaceContext.physicsEventGuidesTriggersOnly = &m_physicsEventGuidesTriggersOnly;
+    dockspaceContext.physicsEventGuidesEnterExitOnly = &m_physicsEventGuidesEnterExitOnly;
     dockspaceContext.scenePathBuffer = m_scenePathDraft.data();
     dockspaceContext.scenePathBufferSize = m_scenePathDraft.size();
     dockspaceContext.fps = m_fps;
@@ -593,6 +605,24 @@ void EditorApp::DrawEditorOverlay()
     }
     if (dockspaceContext.validateRuntimeRequested) {
         ValidateRuntimeScene();
+    }
+    if (dockspaceContext.physicsPauseToggleRequested && m_mode == EditorMode::Play) {
+        m_physicsPaused = !m_physicsPaused;
+        m_log.Info(m_physicsPaused ? "Play physics paused" : "Play physics resumed");
+    }
+    if (dockspaceContext.physicsStepRequested && m_mode == EditorMode::Play) {
+        m_physicsStepRequested = true;
+        if (!m_physicsPaused) {
+            m_physicsPaused = true;
+            m_log.Info("Play physics paused for single-step");
+        }
+    }
+    if (dockspaceContext.clearPhysicsEventGuidesRequested) {
+        m_physicsEventRows.clear();
+        m_physicsEventGuides.clear();
+        m_physicsEventEnterCount = 0;
+        m_physicsEventStayCount = 0;
+        m_physicsEventExitCount = 0;
     }
     if (dockspaceContext.addCubeRequested) {
         AddCube();
@@ -1166,9 +1196,32 @@ void EditorApp::DrawPlayScene(const glm::mat4 & viewProj)
         m_modelShader->SetVec3("uViewPos", m_camera.Position());
         engine::ecs::RenderLoadedModels(*m_playRegistry, *m_modelShader);
     }
+    if (m_shader && m_cube && m_showPhysicsEventGuides && !m_physicsEventGuides.empty()) {
+        std::vector<EditorViewport::PhysicsEventGuide> visibleGuides;
+        visibleGuides.reserve(m_physicsEventGuides.size());
 
-    if (m_shader && m_cube && !m_physicsEventGuides.empty()) {
-        m_viewport.DrawPhysicsEventGuides(m_renderer, *m_shader, *m_cube, m_physicsEventGuides, viewProj);
+        std::string selectedName;
+        if (const EditorScene::Object* selected = m_scene.SelectedObject()) {
+            selectedName = selected->name;
+        }
+
+        for (const EditorViewport::PhysicsEventGuide& guide : m_physicsEventGuides) {
+            if (m_physicsEventGuidesSelectedOnly && (selectedName.empty()
+                || (guide.objectA != selectedName && guide.objectB != selectedName))) {
+                continue;
+            }
+            if (m_physicsEventGuidesTriggersOnly && !guide.trigger) {
+                continue;
+            }
+            if (m_physicsEventGuidesEnterExitOnly && guide.phase == 1) {
+                continue;
+            }
+            visibleGuides.push_back(guide);
+        }
+
+        if (!visibleGuides.empty()) {
+            m_viewport.DrawPhysicsEventGuides(m_renderer, *m_shader, *m_cube, visibleGuides, viewProj);
+        }
     }
 }
 
@@ -2140,6 +2193,46 @@ bool EditorApp::BuildPlayRuntimePreview(std::string * error)
         return false;
     }
 
+    m_playEntityNames.clear();
+    std::unordered_map<std::string, engine::ecs::Entity> playEntitiesByName;
+    const std::size_t count = std::min(createdEntities.size(), createdNames.size());
+    for (std::size_t i = 0; i < count; ++i) {
+        m_playEntityNames[createdEntities[i]] = createdNames[i];
+        playEntitiesByName[createdNames[i]] = createdEntities[i];
+    }
+
+    m_playPhysics.ClearJoints();
+    for (const EditorScene::PhysicsJoint& joint : m_scene.PhysicsJoints()) {
+        if (!joint.enabled) {
+            continue;
+        }
+
+        const auto a = playEntitiesByName.find(joint.objectA);
+        if (a == playEntitiesByName.end()) {
+            continue;
+        }
+
+        if (joint.worldAnchor) {
+            if (joint.type == EditorScene::PhysicsJoint::Type::Spring) {
+                m_playPhysics.AddSpringJointToWorld(a->second, joint.anchor, joint.restLength, joint.stiffness, joint.damping);
+            } else {
+                m_playPhysics.AddDistanceJointToWorld(a->second, joint.anchor, joint.restLength, joint.rope);
+            }
+            continue;
+        }
+
+        const auto b = playEntitiesByName.find(joint.objectB);
+        if (b == playEntitiesByName.end()) {
+            continue;
+        }
+
+        if (joint.type == EditorScene::PhysicsJoint::Type::Spring) {
+            m_playPhysics.AddSpringJoint(a->second, b->second, joint.restLength, joint.stiffness, joint.damping);
+        } else {
+            m_playPhysics.AddDistanceJoint(a->second, b->second, joint.restLength, joint.rope);
+        }
+    }
+
     return true;
 }
 
@@ -2162,6 +2255,7 @@ void EditorApp::StepPlayPhysics(float dt)
     m_playPhysics.restitutionThreshold = environment.physicsRestitutionThreshold;
     m_playPhysics.allowSleeping = environment.physicsAllowSleeping;
     m_playPhysics.sleepLinearVelocity = environment.physicsSleepLinearVelocity;
+    m_playPhysics.sleepAngularVelocity = environment.physicsSleepAngularVelocity;
     m_playPhysics.timeToSleep = environment.physicsTimeToSleep;
 
     const float step = std::max(m_physicsFixedTimestep, 0.0001f);

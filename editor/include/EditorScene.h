@@ -45,6 +45,24 @@ public:
         glm::vec3 color{1.0f};
     };
 
+    struct PhysicsJoint {
+        enum class Type {
+            Distance,
+            Spring
+        };
+
+        Type type = Type::Distance;
+        bool enabled = true;
+        std::string objectA;
+        std::string objectB;
+        bool worldAnchor = false;
+        glm::vec3 anchor{0.0f};
+        float restLength = 1.0f;
+        bool rope = false;
+        float stiffness = 100.0f;
+        float damping = 1.0f;
+    };
+
     struct Environment {
         float timeOfDay = 0.46f;
         float skyLightIntensity = 1.0f;
@@ -74,6 +92,7 @@ public:
         float physicsRestitutionThreshold = 0.5f;
         bool physicsAllowSleeping = true;
         float physicsSleepLinearVelocity = 0.06f;
+        float physicsSleepAngularVelocity = 0.15f;
         float physicsTimeToSleep = 0.5f;
         bool showPhysicsGuides = true;
         bool selectedPhysicsGuideOnly = false;
@@ -81,6 +100,8 @@ public:
 
     struct Snapshot {
         std::vector<ObjectSnapshot> objects;
+        std::vector<PhysicsJoint> joints;
+        Environment environment;
         int selectedIndex = -1;
         int nextCubeNumber = 1;
     };
@@ -91,6 +112,7 @@ public:
 
     engine::ecs::Registry& Registry() { return m_registry; }
     const std::vector<Object>& Objects() const { return m_objects; }
+    const std::vector<PhysicsJoint>& PhysicsJoints() const { return m_joints; }
     bool IsDirty() const { return m_dirty; }
     void MarkClean() { m_dirty = false; }
     void MarkDirty() { m_dirty = true; }
@@ -146,6 +168,9 @@ public:
     bool SetSelectedRigidBody(const engine::ecs::RigidBody& rigidBody);
     bool SetSelectedColliderEnabled(bool enabled);
     bool SetSelectedCollider(const engine::ecs::Collider& collider);
+    bool AddPhysicsJoint(const PhysicsJoint& joint);
+    bool SetPhysicsJoint(std::size_t index, const PhysicsJoint& joint);
+    bool RemovePhysicsJoint(std::size_t index);
     bool ToggleSelectVisible();
     bool ToggleSelectedLocked();
     bool DuplicateSelected(const engine::Mesh& cube, const engine::Mesh& plane, const engine::Mesh& sphere);
@@ -163,6 +188,7 @@ private:
 
     engine::ecs::Registry m_registry;
     std::vector<Object> m_objects;
+    std::vector<PhysicsJoint> m_joints;
     std::vector<Snapshot> m_undoStack;
     std::vector<Snapshot> m_redoStack;
     Environment m_environment;

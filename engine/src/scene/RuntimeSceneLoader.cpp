@@ -79,11 +79,11 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
     std::string magic;
     int version = 0;
     in >> magic >> version;
-    if (magic != "3DGRuntimeScene" || version < 1 || version > 9) {
+    if (magic != "3DGRuntimeScene" || version < 1 || version > 10) {
         if (error) {
             *error = "Runtime scene file has an unknown format: "
                 + magic + " " + std::to_string(version)
-                + " (expected 3DGRuntimeScene 1..9).";
+                + " (expected 3DGRuntimeScene 1..10).";
         }
         return false;
     }
@@ -127,8 +127,11 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                        >> loaded.environment.physicsCellSize
                        >> loaded.environment.physicsRestitutionThreshold
                        >> physicsAllowSleeping
-                       >> loaded.environment.physicsSleepLinearVelocity
-                       >> loaded.environment.physicsTimeToSleep;
+                       >> loaded.environment.physicsSleepLinearVelocity;
+                if (version >= 10) {
+                    record >> loaded.environment.physicsSleepAngularVelocity;
+                }
+                record >> loaded.environment.physicsTimeToSleep;
                 if (!record) {
                     record.clear();
                     loaded.environment.physicsGravity = glm::vec3(0.0f, -9.81f, 0.0f);
@@ -138,6 +141,7 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                     loaded.environment.physicsRestitutionThreshold = 0.5f;
                     physicsAllowSleeping = 1;
                     loaded.environment.physicsSleepLinearVelocity = 0.06f;
+                    loaded.environment.physicsSleepAngularVelocity = 0.15f;
                     loaded.environment.physicsTimeToSleep = 0.5f;
                 }
             }
@@ -216,6 +220,7 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             int rigidBodyUseGravity = entity.rigidBody.useGravity ? 1 : 0;
             int rigidBodyAllowSleep = entity.rigidBody.allowSleep ? 1 : 0;
             int rigidBodyCcd = entity.rigidBody.ccd ? 1 : 0;
+            int rigidBodyFreezeRotation = entity.rigidBody.freezeRotation ? 1 : 0;
             int colliderEnabled = 0;
             int colliderShape = static_cast<int>(ecs::ColliderShape::Sphere);
             int colliderTrigger = entity.collider.isTrigger ? 1 : 0;
@@ -224,20 +229,24 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                 >> entity.rigidBody.invMass
                 >> rigidBodyUseGravity
                 >> rigidBodyAllowSleep
-                >> rigidBodyCcd
-                >> colliderEnabled
-                >> colliderShape
-                >> entity.collider.radius
-                >> entity.collider.halfExtents.x >> entity.collider.halfExtents.y >> entity.collider.halfExtents.z
-                >> entity.collider.planeNormal.x >> entity.collider.planeNormal.y >> entity.collider.planeNormal.z
-                >> entity.collider.planeOffset
-                >> entity.collider.restitution
-                >> entity.collider.friction
-                >> colliderTrigger;
+                >> rigidBodyCcd;
+            if (version >= 10) {
+                record >> rigidBodyFreezeRotation;
+            }
+            record >> colliderEnabled
+                   >> colliderShape
+                   >> entity.collider.radius
+                   >> entity.collider.halfExtents.x >> entity.collider.halfExtents.y >> entity.collider.halfExtents.z
+                   >> entity.collider.planeNormal.x >> entity.collider.planeNormal.y >> entity.collider.planeNormal.z
+                   >> entity.collider.planeOffset
+                   >> entity.collider.restitution
+                   >> entity.collider.friction
+                   >> colliderTrigger;
             entity.rigidBodyEnabled = rigidBodyEnabled != 0;
             entity.rigidBody.useGravity = rigidBodyUseGravity != 0;
             entity.rigidBody.allowSleep = rigidBodyAllowSleep != 0;
             entity.rigidBody.ccd = rigidBodyCcd != 0;
+            entity.rigidBody.freezeRotation = version >= 10 && rigidBodyFreezeRotation != 0;
             entity.colliderEnabled = colliderEnabled != 0;
             entity.collider.isTrigger = colliderTrigger != 0;
             if (colliderShape == static_cast<int>(ecs::ColliderShape::Plane)) {

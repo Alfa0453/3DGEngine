@@ -57,6 +57,7 @@ public:
             float physicsRestitutionThreshold = 0.5f;
             bool physicsAllowSleeping = true;
             float physicsSleepLinearVelocity = 0.06f;
+            float physicsSleepAngularVelocity = 0.15f;
             float physicsTimeToSleep = 0.5f;
         };
 

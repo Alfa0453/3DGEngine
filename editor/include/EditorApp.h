@@ -184,6 +184,10 @@ private:
     int m_physicsEventExitCount = 0;
     std::vector<EditorDockspace::PhysicsEventRow> m_physicsEventRows;
     std::vector<EditorViewport::PhysicsEventGuide> m_physicsEventGuides;
+    bool m_showPhysicsEventGuides = true;
+    bool m_physicsEventGuidesSelectedOnly = false;
+    bool m_physicsEventGuidesTriggersOnly = false;
+    bool m_physicsEventGuidesEnterExitOnly = false;
     std::unordered_map<engine::ecs::Entity, std::string> m_playEntityNames;
 
     float m_fps = 60.0f;

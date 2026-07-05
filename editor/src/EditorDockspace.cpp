@@ -25,7 +25,7 @@ const char* PrimitiveName(EditorScene::Primitive primitive) {
 }
 
 const char* ObjectTypeName(const EditorScene::Object& object) {
-    if(object.light) {
+    if (object.light) {
         return "Light";
     }
     return object.modelAssetPath.empty() ? PrimitiveName(object.primitive) : "Model";
@@ -100,6 +100,7 @@ struct ScenePhysicsStatus {
     std::size_t planes = 0;
     std::size_t dynamicBodiesWithoutCollider = 0;
     std::size_t invalidColliders = 0;
+    std::size_t joints = 0;
 };
 
 bool ColliderIsInvalid(const engine::ecs::Collider& collider) {
@@ -122,6 +123,7 @@ bool ColliderIsInvalid(const engine::ecs::Collider& collider) {
 ScenePhysicsStatus CollectScenePhysicsStatus(const EditorScene& scene) {
     ScenePhysicsStatus status;
     status.objects = scene.Objects().size();
+    status.joints = scene.PhysicsJoints().size();
 
     for (const EditorScene::Object& object : scene.Objects()) {
         if (object.rigidBodyEnabled) {
@@ -165,6 +167,13 @@ ScenePhysicsStatus CollectScenePhysicsStatus(const EditorScene& scene) {
     }
 
     return status;
+}
+
+const char* PhysicsJointTypeName(EditorScene::PhysicsJoint::Type type, bool rope) {
+    if (type == EditorScene::PhysicsJoint::Type::Spring) {
+        return "Spring";
+    }
+    return rope ? "Rope" : "Distance";
 }
 
 void DrawStatusRow(const char* label, std::size_t value) {
@@ -233,7 +242,7 @@ std::vector<EditorAssets::Asset> FindMaterialAssets(const EditorAssets& assets) 
 ImVec4 LogColor(EditorLog::Level level) {
     switch (level) {
     case EditorLog::Level::Info: return ImVec4(0.78f, 0.84f, 0.92f, 1.0f);
-    case EditorLog::Level::Warning : return ImVec4(1.0f, 0.78f, 0.30f, 1.0f);
+    case EditorLog::Level::Warning: return ImVec4(1.0f, 0.78f, 0.30f, 1.0f);
     case EditorLog::Level::Error: return ImVec4(1.0f, 0.34f, 0.32f, 1.0f);
     }
     return ImVec4(0.78f, 0.84f, 0.92f, 1.0f);
@@ -363,6 +372,7 @@ void DrawWorldSettings(EditorScene& scene, bool* open) {
             environment.physicsRestitutionThreshold = defaults.physicsRestitutionThreshold;
             environment.physicsAllowSleeping = defaults.physicsAllowSleeping;
             environment.physicsSleepLinearVelocity = defaults.physicsSleepLinearVelocity;
+            environment.physicsSleepAngularVelocity = defaults.physicsSleepAngularVelocity;
             environment.physicsTimeToSleep = defaults.physicsTimeToSleep;
             changed = true;
         }
@@ -372,7 +382,8 @@ void DrawWorldSettings(EditorScene& scene, bool* open) {
         changed |= ImGui::DragFloat("Cell Size", &environment.physicsCellSize, 0.05f, 0.1f, 100.0f, "%.2f");
         changed |= ImGui::DragFloat("Bounce Threshold", &environment.physicsRestitutionThreshold, 0.02f, 0.0f, 10.0f, "%.2f");
         changed |= ImGui::Checkbox("Allow Sleeping", &environment.physicsAllowSleeping);
-        changed |= ImGui::DragFloat("Sleep Velocity", &environment.physicsSleepLinearVelocity, 0.005f, 0.0f, 10.0f, "%.3f");
+        changed |= ImGui::DragFloat("Sleep Linear Velocity", &environment.physicsSleepLinearVelocity, 0.005f, 0.0f, 10.0f, "%.3f");
+        changed |= ImGui::DragFloat("Sleep Angular Velocity", &environment.physicsSleepAngularVelocity, 0.005f, 0.0f, 10.0f, "%.3f");
         changed |= ImGui::DragFloat("Sleep Time", &environment.physicsTimeToSleep, 0.02f, 0.0f, 10.0f, "%.2f");
     }
 
@@ -478,6 +489,18 @@ void DrawPhysicsStatus(EditorDockspace::Context& context, bool* open) {
             ImGui::TextUnformatted("Sleeping");
             ImGui::TableNextColumn();
             ImGui::TextUnformatted(environment.physicsAllowSleeping ? "On" : "Off");
+
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted("Sleep Linear");
+            ImGui::TableNextColumn();
+            ImGui::Text("%.3f", environment.physicsSleepLinearVelocity);
+
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted("Sleep Angular");
+            ImGui::TableNextColumn();
+            ImGui::Text("%.3f", environment.physicsSleepAngularVelocity);
             ImGui::EndTable();
         }
     }
@@ -494,6 +517,7 @@ void DrawPhysicsStatus(EditorDockspace::Context& context, bool* open) {
             DrawStatusRow("Sphere Colliders", status.spheres);
             DrawStatusRow("Box Colliders", status.boxes);
             DrawStatusRow("Plane Colliders", status.planes);
+            DrawStatusRow("Joints", status.joints);
             ImGui::EndTable();
         }
     }
@@ -518,6 +542,7 @@ void DrawPhysicsStatus(EditorDockspace::Context& context, bool* open) {
                     selected->rigidBody.velocity.z);
                 ImGui::Text("Gravity: %s", selected->rigidBody.useGravity ? "On" : "Off");
                 ImGui::Text("CCD: %s", selected->rigidBody.ccd ? "On" : "Off");
+                ImGui::Text("Freeze Rotation: %s", selected->rigidBody.freezeRotation ? "On" : "Off");
                 ImGui::Text("Sleep: %s", selected->rigidBody.allowSleep ? "Allowed" : "Blocked");
             }
 
@@ -568,7 +593,25 @@ void DrawPhysicsStatus(EditorDockspace::Context& context, bool* open) {
         if (!hasWarning) {
             ImGui::TextUnformatted("No physics warnings.");
         }
-        
+    }
+
+    if (ImGui::CollapsingHeader("Scene Debug", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (context.showPhysicsEventGuides) {
+            ImGui::Checkbox("Event Guides", context.showPhysicsEventGuides);
+        }
+        if (context.physicsEventGuidesSelectedOnly) {
+            ImGui::Checkbox("Selected Events Only", context.physicsEventGuidesSelectedOnly);
+        }
+        if (context.physicsEventGuidesTriggersOnly) {
+            ImGui::Checkbox("Trigger Events Only", context.physicsEventGuidesTriggersOnly);
+        }
+        if (context.physicsEventGuidesEnterExitOnly) {
+            ImGui::Checkbox("Enter/Exit Events Only", context.physicsEventGuidesEnterExitOnly);
+        }
+        if (ImGui::Button("Clear Recent Events")) {
+            context.clearPhysicsEventGuidesRequested = true;
+        }
+        ImGui::TextUnformatted("Light and collider guide visibility is in World Settings.");
     }
 
     if (ImGui::CollapsingHeader("Recent Events", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -642,7 +685,7 @@ void DrawHierarchy(EditorDockspace::Context& context, bool* open) {
         std::snprintf(label, sizeof(label), "%s%s%s %s",
             object.visible ? "" : "[hidden] ",
             object.locked ? "[locked] " : "",
-            object.light ? "[light] " : "",
+            object.light ? "[light]" : "",
             object.name.c_str());
 
         if (g_hierarchyFilter.PassFilter(label)) {
@@ -681,7 +724,7 @@ void DrawHierarchy(EditorDockspace::Context& context, bool* open) {
             if (ImGui::MenuItem(object.visible ? "Hide" : "Show")) {
                 context.scene->ToggleSelectVisible();
             }
-            if (ImGui::MenuItem(object.locked ? "Unlock" : "lock")) {
+            if (ImGui::MenuItem(object.locked ? "Unlock" : "Lock")) {
                 context.scene->ToggleSelectedLocked();
             }
             if (ImGui::MenuItem("Delete", nullptr, false, !object.locked)) {
@@ -747,7 +790,7 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
         }
 
         bool visible = selected->visible;
-        if(ImGui::Checkbox("Visible", &visible)) {
+        if (ImGui::Checkbox("Visible", &visible)) {
             context.scene->ToggleSelectVisible();
         }
 
@@ -887,7 +930,7 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
         }
     }
 
-        if (ImGui::CollapsingHeader("Runtime Components", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (ImGui::CollapsingHeader("Runtime Components", ImGuiTreeNodeFlags_DefaultOpen)) {
         bool linearVelocityEnabled = selected->linearVelocityEnabled;
         if (ImGui::Checkbox("LinearVelocity", &linearVelocityEnabled)) {
             context.scene->SetSelectedLinearVelocityEnabled(linearVelocityEnabled);
@@ -995,6 +1038,13 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             if (ImGui::Checkbox("CCD", &rigidBody.ccd)) {
                 context.scene->SetSelectedRigidBody(rigidBody);
             }
+            if (ImGui::Checkbox("Freeze Rotation", &rigidBody.freezeRotation)) {
+                if (rigidBody.freezeRotation) {
+                    rigidBody.angularVelocity = glm::vec3(0.0f);
+                    rigidBody.accumTorque = glm::vec3(0.0f);
+                }
+                context.scene->SetSelectedRigidBody(rigidBody);
+            }
         }
 
         bool colliderEnabled = selected->colliderEnabled;
@@ -1035,6 +1085,116 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                 context.scene->SetSelectedCollider(collider);
             }
         }
+
+        ImGui::Separator();
+        if (ImGui::CollapsingHeader("Physics Joints", ImGuiTreeNodeFlags_DefaultOpen)) {
+            static int jointTargetIndex = 0;
+            const std::vector<EditorScene::Object>& objects = context.scene->Objects();
+            if (jointTargetIndex >= static_cast<int>(objects.size())) {
+                jointTargetIndex = 0;
+            }
+
+            const char* preview = "None";
+            if (jointTargetIndex >= 0 && jointTargetIndex < static_cast<int>(objects.size())) {
+                preview = objects[static_cast<std::size_t>(jointTargetIndex)].name.c_str();
+            }
+
+            if (ImGui::BeginCombo("Target", preview)) {
+                for (std::size_t i = 0; i < objects.size(); ++i) {
+                    if (objects[i].name == selected->name) {
+                        continue;
+                    }
+                    const bool isSelected = jointTargetIndex == static_cast<int>(i);
+                    if (ImGui::Selectable(objects[i].name.c_str(), isSelected)) {
+                        jointTargetIndex = static_cast<int>(i);
+                    }
+                    if (isSelected) {
+                        ImGui::SetItemDefaultFocus();
+                    }
+                }
+                ImGui::EndCombo();
+            }
+
+            auto addJoint = [&](EditorScene::PhysicsJoint::Type type, bool rope) {
+                if (jointTargetIndex < 0 || jointTargetIndex >= static_cast<int>(objects.size())) {
+                    return;
+                }
+                const EditorScene::Object& target = objects[static_cast<std::size_t>(jointTargetIndex)];
+                if (target.name == selected->name) {
+                    return;
+                }
+
+                EditorScene::PhysicsJoint joint;
+                joint.type = type;
+                joint.objectA = selected->name;
+                joint.objectB = target.name;
+                joint.rope = rope;
+
+                const engine::ecs::Transform* selectedJointTransform = context.scene->TryGetTransform(selected->entity);
+                const engine::ecs::Transform* targetTransform = context.scene->TryGetTransform(target.entity);
+                if (selectedJointTransform && targetTransform) {
+                    joint.restLength = glm::length(targetTransform->position - selectedJointTransform->position);
+                }
+                if (joint.restLength <= 0.001f) {
+                    joint.restLength = 1.0f;
+                }
+                context.scene->AddPhysicsJoint(joint);
+            };
+
+            if (ImGui::Button("Add Distance")) {
+                addJoint(EditorScene::PhysicsJoint::Type::Distance, false);
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Add Rope")) {
+                addJoint(EditorScene::PhysicsJoint::Type::Distance, true);
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Add Spring")) {
+                addJoint(EditorScene::PhysicsJoint::Type::Spring, false);
+            }
+
+            const std::vector<EditorScene::PhysicsJoint>& joints = context.scene->PhysicsJoints();
+            int shown = 0;
+            for (std::size_t i = 0; i < joints.size(); ++i) {
+                const EditorScene::PhysicsJoint& joint = joints[i];
+                if (joint.objectA != selected->name && joint.objectB != selected->name) {
+                    continue;
+                }
+
+                ImGui::PushID(static_cast<int>(i));
+                EditorScene::PhysicsJoint edited = joint;
+                if (ImGui::Checkbox("Enabled", &edited.enabled)) {
+                    context.scene->SetPhysicsJoint(i, edited);
+                }
+                ImGui::SameLine();
+                ImGui::Text("%s: %s <-> %s",
+                    PhysicsJointTypeName(joint.type, joint.rope),
+                    joint.objectA.c_str(),
+                    joint.worldAnchor ? "World" : joint.objectB.c_str());
+                if (ImGui::DragFloat("Rest Length", &edited.restLength, 0.05f, 0.001f, 10000.0f)) {
+                    context.scene->SetPhysicsJoint(i, edited);
+                }
+                if (edited.type == EditorScene::PhysicsJoint::Type::Spring) {
+                    bool changed = false;
+                    changed |= ImGui::DragFloat("Stiffness", &edited.stiffness, 1.0f, 0.0f, 100000.0f);
+                    changed |= ImGui::DragFloat("Damping", &edited.damping, 0.05f, 0.0f, 10000.0f);
+                    if (changed) {
+                        context.scene->SetPhysicsJoint(i, edited);
+                    }
+                }
+                if (ImGui::Button("Delete Joint")) {
+                    context.scene->RemovePhysicsJoint(i);
+                    ImGui::PopID();
+                    break;
+                }
+                ImGui::Separator();
+                ImGui::PopID();
+                ++shown;
+            }
+            if (shown == 0) {
+                ImGui::TextUnformatted("No joints connected to this object.");
+            }
+        }
     }
 
     ImGui::End();
@@ -1054,7 +1214,7 @@ void DrawAssets(EditorDockspace::Context& context, bool* open) {
 
     ImGui::Text("Root: %s", context.assets->RootPath().c_str());
     ImGui::Text("Folder: /%s", context.assets->CurrentFolder().c_str());
-    ImGui::Text("%d files", static_cast<int>(context.assets->Assets().size()));
+    ImGui::Text("%d files", static_cast<int>(context.assets->TotalFileCount()));
     if (ImGui::Button("Up")) {
         std::string error;
         if (!context.assets->GoUp(&error) && context.log) {
@@ -1162,12 +1322,12 @@ void DrawAssets(EditorDockspace::Context& context, bool* open) {
     }
 
     const std::vector<EditorAssets::Asset>& assets = context.assets->Assets();
-    for (int i =0; i < static_cast<int>(assets.size()); ++i) {
+    for (int i = 0; i < static_cast<int>(assets.size()); ++i) {
         const EditorAssets::Asset& asset = assets[static_cast<std::size_t>(i)];
         char label[256];
         std::snprintf(label, sizeof(label), "[%s] %s",
             EditorAssets::TypeName(asset.type), asset.relativePath.c_str());
-        
+
         const bool selected = context.assets->SelectedType() == EditorAssets::SelectionType::Asset
             && i == context.assets->SelectedIndex();
         if (ImGui::Selectable(label, selected)) {
@@ -1270,8 +1430,7 @@ void DrawGizmoToolbar(EditorDockspace::Context& context) {
 
 } // namespace
 
-bool EditorDockspace::Draw(Context &context)
-{
+bool EditorDockspace::Draw(Context& context) {
     if (!context.panels) {
         return false;
     }
@@ -1390,9 +1549,6 @@ bool EditorDockspace::Draw(Context &context)
                 if (ImGui::MenuItem("Plane")) {
                     context.addPlaneRequested = true;
                 }
-                if (ImGui::MenuItem("Sphere")) {
-                    context.addSphereRequested = true;
-                }
                 ImGui::EndMenu();
             }
             if (ImGui::BeginMenu("Physics")) {
@@ -1507,6 +1663,7 @@ bool EditorDockspace::Draw(Context &context)
             break;
         case EditorPanels::Panel::PhysicsStatus:
             DrawPhysicsStatus(context, &open);
+            break;
         case EditorPanels::Panel::Count:
             break;
         }
@@ -1514,13 +1671,12 @@ bool EditorDockspace::Draw(Context &context)
         context.panels->SetOpen(panel, open);
     }
 
-    //DrawGizmoToolbar(context);
+    DrawGizmoToolbar(context);
 
     ImGui::End();
     return true;
 }
 
-bool EditorDockspace::IsCompiledWithImGui() const
-{
-    return false;
+bool EditorDockspace::IsCompiledWithImGui() const {
+    return true;
 }

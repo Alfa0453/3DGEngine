@@ -71,6 +71,26 @@ bool ParsePrimitive(const std::string& value, EditorScene::Primitive* primitive)
     return false;
 }
 
+const char* PhysicsJointTypeName(EditorScene::PhysicsJoint::Type type) {
+    switch (type) {
+    case EditorScene::PhysicsJoint::Type::Distance: return "Distance";
+    case EditorScene::PhysicsJoint::Type::Spring: return "Spring";
+    }
+    return "Distance";
+}
+
+bool ParsePhysicsJointType(const std::string& value, EditorScene::PhysicsJoint::Type* type) {
+    if (value == "Distance" || value == "Rope") {
+        *type = EditorScene::PhysicsJoint::Type::Distance;
+        return true;
+    }
+    if (value == "Spring") {
+        *type = EditorScene::PhysicsJoint::Type::Spring;
+        return true;
+    }
+    return false;
+}
+
 const engine::Mesh& MeshFor(EditorScene::Primitive primitive, const engine::Mesh& cube,
                             const engine::Mesh& plane, const engine::Mesh& sphere){
     if (primitive == EditorScene::Primitive::Sphere)
@@ -144,7 +164,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         return false;
     }
 
-    out << "3DGEditorScene 16\n";
+    out << "3DGEditorScene 18\n";
     out << "environment "
         << m_environment.timeOfDay << ' '
         << m_environment.skyLightIntensity << ' '
@@ -178,6 +198,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         << m_environment.physicsRestitutionThreshold << ' '
         << (m_environment.physicsAllowSleeping ? 1 : 0) << ' '
         << m_environment.physicsSleepLinearVelocity << ' '
+        << m_environment.physicsSleepAngularVelocity << ' '
         << m_environment.physicsTimeToSleep << ' '
         << (m_environment.showPhysicsGuides ? 1 : 0) << ' '
         << (m_environment.selectedPhysicsGuideOnly ? 1 : 0) << '\n';
@@ -227,6 +248,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
             << (object.rigidBody.useGravity ? 1 : 0) << ' '
             << (object.rigidBody.allowSleep ? 1 : 0) << ' '
             << (object.rigidBody.ccd ? 1 : 0) << ' '
+            << (object.rigidBody.freezeRotation ? 1 : 0) << ' '
             << (object.colliderEnabled ? 1 : 0) << ' '
             << static_cast<int>(object.collider.shape) << ' '
             << object.collider.radius << ' '
@@ -236,6 +258,20 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
             << object.collider.restitution << ' '
             << object.collider.friction << ' '
             << (object.collider.isTrigger ? 1 : 0) << '\n';
+    }
+
+    for (const PhysicsJoint& joint : m_joints) {
+        out << "joint "
+            << PhysicsJointTypeName(joint.type) << ' '
+            << (joint.enabled ? 1 : 0) << ' '
+            << StoredPath(joint.objectA) << ' '
+            << StoredPath(joint.objectB) << ' '
+            << (joint.worldAnchor ? 1 : 0) << ' '
+            << joint.anchor.x << ' ' << joint.anchor.y << ' ' << joint.anchor.z << ' '
+            << joint.restLength << ' '
+            << (joint.rope ? 1 : 0) << ' '
+            << joint.stiffness << ' '
+            << joint.damping << '\n';
     }
 
     if (markClean) {
@@ -257,7 +293,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
     std::string magic;
     int version = 0;
     in >> magic >> version;
-    if (magic != "3DGEditorScene" ||(version < 1 || version > 14)) {
+    if (magic != "3DGEditorScene" ||(version < 1 || version > 18)) {
         if (error) *error = "Scene file has an unknown format.";
         return false;
     }
@@ -327,8 +363,11 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                    >> m_environment.physicsCellSize
                    >> m_environment.physicsRestitutionThreshold
                    >> physicsAllowSleeping
-                   >> m_environment.physicsSleepLinearVelocity
-                   >> m_environment.physicsTimeToSleep;
+                   >> m_environment.physicsSleepLinearVelocity;
+                if (version >= 17) {
+                    in >> m_environment.physicsSleepAngularVelocity;
+                }
+                in >> m_environment.physicsTimeToSleep;
             }
             if (version >= 16) {
                 in >> showPhysicsGuides
@@ -395,6 +434,46 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             continue;
         }
 
+        if (recordType == "joint") {
+            if (version < 18) {
+                std::string rest;
+                std::getline(in, rest);
+                continue;
+            }
+
+            std::string typeName;
+            std::string objectA;
+            std::string objectB;
+            int enabled = 1;
+            int worldAnchor = 0;
+            int rope = 0;
+            PhysicsJoint joint;
+            in >> typeName
+               >> enabled
+               >> objectA
+               >> objectB
+               >> worldAnchor
+               >> joint.anchor.x >> joint.anchor.y >> joint.anchor.z
+               >> joint.restLength
+               >> rope
+               >> joint.stiffness
+               >> joint.damping;
+
+            if (!in || !ParsePhysicsJointType(typeName, &joint.type)) {
+                if (error) *error = "Scene file contains an invalid joint record.";
+                Clear();
+                return false;
+            }
+
+            joint.enabled = enabled != 0;
+            joint.objectA = objectA == "-" ? std::string() : objectA;
+            joint.objectB = objectB == "-" ? std::string() : objectB;
+            joint.worldAnchor = worldAnchor != 0;
+            joint.rope = rope != 0;
+            m_joints.push_back(joint);
+            continue;
+        }
+
         if (recordType != "object") {
             std::string rest;
             std::getline(in, rest);
@@ -423,6 +502,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         int rigidBodyUseGravity = rigidBody.useGravity ? 1 : 0;
         int rigidBodyAllowSleep = rigidBody.allowSleep ? 1 : 0;
         int rigidBodyCcd = rigidBody.ccd ? 1 : 0;
+        int rigidBodyFreezeRotation = rigidBody.freezeRotation ? 1 : 0;
         int colliderTrigger = collider.isTrigger ? 1 : 0;
 
         in >> primitiveName >> name
@@ -470,8 +550,11 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                >> rigidBody.invMass
                >> rigidBodyUseGravity
                >> rigidBodyAllowSleep
-               >> rigidBodyCcd
-               >> colliderEnabled
+               >> rigidBodyCcd;
+            if (version >= 17) {
+                in >> rigidBodyFreezeRotation;
+            }
+            in >> colliderEnabled
                >> colliderShape
                >> collider.radius
                >> collider.halfExtents.x >> collider.halfExtents.y >> collider.halfExtents.z
@@ -483,6 +566,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             rigidBody.useGravity = rigidBodyUseGravity != 0;
             rigidBody.allowSleep = rigidBodyAllowSleep != 0;
             rigidBody.ccd = rigidBodyCcd != 0;
+            rigidBody.freezeRotation = version >= 17 && rigidBodyFreezeRotation != 0;
             collider.isTrigger = colliderTrigger != 0;
             if (colliderShape == static_cast<int>(engine::ecs::ColliderShape::Plane)) {
                 collider.shape = engine::ecs::ColliderShape::Plane;
@@ -504,6 +588,8 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         m_objects.back().locked = locked != 0;
         m_objects.back().modelAssetPath = modelAssetPath;
         m_objects.back().materialAssetPath = materialAssetPath;
+        m_objects.back().linearVelocityEnabled = linearVelocityEnabled != 0;
+        m_objects.back().angularVelocityEnabled = angularVelocityEnabled != 0;
         m_objects.back().linearVelocity = linearVelocity;
         m_objects.back().angularVelocityAxis = angularVelocityAxis;
         m_objects.back().angularVelocityRadians = angularVelocityRadians;
@@ -1209,6 +1295,45 @@ bool EditorScene::SetSelectedCollider(const engine::ecs::Collider &collider)
     PushUndoSnapshot();
     selected.colliderEnabled = true;
     selected.collider = collider;
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::AddPhysicsJoint(const PhysicsJoint &joint)
+{
+    if (joint.objectA.empty() || (!joint.worldAnchor && joint.objectB.empty())) {
+        return false;
+    }
+
+    PushUndoSnapshot();
+    m_joints.push_back(joint);
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetPhysicsJoint(std::size_t index, const PhysicsJoint &joint)
+{
+    if (index >= m_joints.size()) {
+        return false;
+    }
+    if (joint.objectA.empty() || (!joint.worldAnchor && joint.objectB.empty())) {
+        return false;
+    }
+
+    PushUndoSnapshot();
+    m_joints[index] = joint;
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::RemovePhysicsJoint(std::size_t index)
+{
+    if (index >= m_joints.size()) {
+        return false;
+    }
+
+    PushUndoSnapshot();
+    m_joints.erase(m_joints.begin() + static_cast<std::ptrdiff_t>(index));
     m_dirty = true;
     return true;
 }
