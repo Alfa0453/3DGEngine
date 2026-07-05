@@ -1,6 +1,7 @@
 #pragma once
 
 #include "engine/graphics/Shader.h"
+#include "engine/graphics/ShadowCasters.h"
 
 #include <glm/glm.hpp>
 
@@ -42,6 +43,7 @@ private:
     unsigned int m_maps[kMax] = {0, 0, 0, 0};
     glm::mat4 m_vp[kMax];
     Shader m_shader;
+    ShadowCasterBatch m_batch;
 };
 
 } // namespace engine

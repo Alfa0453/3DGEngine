@@ -27,6 +27,8 @@ struct ContactManifold {
     int       a = 0, b = 0;
     glm::vec3 normal{0.0f};
     float     penetration = 0.0f;
+    int       count = 0;            // number of contact points (1..4)
+    glm::vec3 points[4]{};          // world-space contact points (for torque)
 };
 
 // A ray for scene queries. direction is normalized by Raycast if needed.
@@ -61,15 +63,19 @@ struct CollisionEvent {
 // Spring pulls softly toward restLength with stiffness + damping. With no angular
 // dynamics yet, joints attach at body centres (rods, pendulums, ropes, springs).
 struct Joint {
-    enum class Type { Distance, Spring };
+    enum class Type { Distance, Spring, Ball, Hinge };
     Type        type = Type::Distance;
     ecs::Entity a = ecs::kNull;
-    ecs::Entity b = ecs::kNull;        // kNull => attached to 'anchor'
-    glm::vec3   anchor{0.0f};
+    ecs::Entity b = ecs::kNull;        // kNull => attached to the world 'anchor' point
+    glm::vec3   anchor{0.0f};          // world attach point when b == kNull
+    glm::vec3   localA{0.0f};          // attach point in A's local frame (offset from COM)
+    glm::vec3   localB{0.0f};          // attach point in B's local frame
     float       restLength = 1.0f;
     bool        rope = false;          // Distance only: resist stretch, allow slack
     float       stiffness = 100.0f;    // Spring only
     float       damping   = 1.0f;      // Spring only
+    glm::vec3   axisA{0.0f, 1.0f, 0.0f};   // Hinge: rotation axis in A's local frame
+    glm::vec3   axisB{0.0f, 1.0f, 0.0f};   // Hinge: rotation axis in B's local frame
 };
 
 // The physics solver. Step() integrates every RigidBody under gravity, detects
@@ -92,9 +98,10 @@ public:
 
     // Sleeping: a body moving slower than sleepLinearVelocity for timeToSleep
     // seconds is put to sleep; a fast contact wakes it.
-    bool      allowSleeping       = true;
-    float     sleepLinearVelocity = 0.06f;
-    float     timeToSleep         = 0.5f;
+    bool      allowSleeping        = true;
+    float     sleepLinearVelocity  = 0.06f;
+    float     sleepAngularVelocity = 0.15f;   // rad/s below which a body may sleep
+    float     timeToSleep          = 0.5f;
 
     void Step(ecs::Registry& registry, float dt);
 
@@ -126,6 +133,37 @@ public:
         j.stiffness = stiffness; j.damping = damping; m_joints.push_back(j);
     }
     void ClearJoints() { m_joints.clear(); }
+
+    // Ball (point-to-point) joint: pins a point on A to a point on B (localA/localB
+    // are offsets from each body's centre), leaving all 3 rotational DOF free.
+    void AddBallJoint(ecs::Entity a, ecs::Entity b,
+                      const glm::vec3& localA = glm::vec3(0.0f),
+                      const glm::vec3& localB = glm::vec3(0.0f)) {
+        Joint j; j.type = Joint::Type::Ball; j.a = a; j.b = b; j.localA = localA; j.localB = localB;
+        m_joints.push_back(j);
+    }
+    void AddBallJointToWorld(ecs::Entity a, const glm::vec3& worldPoint,
+                             const glm::vec3& localA = glm::vec3(0.0f)) {
+        Joint j; j.type = Joint::Type::Ball; j.a = a; j.anchor = worldPoint; j.localA = localA;
+        m_joints.push_back(j);
+    }
+
+    // Hinge joint: a ball joint (pinned point) plus an axis-alignment constraint,
+    // leaving one rotational DOF -- rotation about the hinge axis (a door, a lid).
+    void AddHingeJoint(ecs::Entity a, ecs::Entity b,
+                       const glm::vec3& localA, const glm::vec3& localB,
+                       const glm::vec3& axisA, const glm::vec3& axisB) {
+        Joint j; j.type = Joint::Type::Hinge; j.a = a; j.b = b;
+        j.localA = localA; j.localB = localB; j.axisA = axisA; j.axisB = axisB;
+        m_joints.push_back(j);
+    }
+    void AddHingeJointToWorld(ecs::Entity a, const glm::vec3& worldPoint,
+                              const glm::vec3& localAnchor,
+                              const glm::vec3& localAxis, const glm::vec3& worldAxis) {
+        Joint j; j.type = Joint::Type::Hinge; j.a = a; j.anchor = worldPoint;
+        j.localA = localAnchor; j.axisA = localAxis; j.axisB = worldAxis;
+        m_joints.push_back(j);
+    }
 
 private:
     std::vector<CollisionEvent>             m_events;    // events from the last step

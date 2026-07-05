@@ -1,6 +1,7 @@
 #include "RuntimeSceneExporter.h"
 
 #include <engine/ecs/Components.h>
+#include <engine/physics/PhysicsComponents.h>
 
 #include <fstream>
 
@@ -43,7 +44,7 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         return false;
     }
 
-    out << "3DGRuntimeScene 6\n";
+    out << "3DGRuntimeScene 9\n";
     out << "# Runtime export from 3DGEditor. Editor-only flags are omitted.\n";
     const EditorScene::Environment& environment = scene.GetEnvironment();
     out << "environment "
@@ -54,7 +55,17 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         << (environment.fog ? 1 : 0) << ' '
         << environment.fogDensity << ' '
         << environment.fogHeight << ' '
-        << environment.fogHeightFalloff << '\n';
+        << environment.fogHeightFalloff << ' '
+        << environment.physicsGravity.x << ' '
+        << environment.physicsGravity.y << ' '
+        << environment.physicsGravity.z << ' '
+        << environment.physicsSolverIterations << ' '
+        << (environment.physicsBroadPhase ? 1 : 0) << ' '
+        << environment.physicsCellSize << ' '
+        << environment.physicsRestitutionThreshold << ' '
+        << (environment.physicsAllowSleeping ? 1 : 0) << ' '
+        << environment.physicsSleepLinearVelocity << ' '
+        << environment.physicsTimeToSleep << '\n';
 
     for (const EditorScene::Object& object : scene.Objects()) {
         if (!object.visible) {
@@ -93,7 +104,24 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
             << StoredPath(object.materialAssetPath) << ' '
             << object.linearVelocity.x << ' ' << object.linearVelocity.y << ' ' << object.linearVelocity.z << ' '
             << object.angularVelocityAxis.x << ' ' << object.angularVelocityAxis.y << ' ' << object.angularVelocityAxis.z << ' '
-            << object.angularVelocityRadians << '\n';
+            << object.angularVelocityRadians << ' '
+            << (object.linearVelocityEnabled ? 1 : 0) << ' '
+            << (object.angularVelocityEnabled ? 1 : 0) << ' '
+            << (object.rigidBodyEnabled ? 1 : 0) << ' '
+            << object.rigidBody.velocity.x << ' ' << object.rigidBody.velocity.y << ' ' << object.rigidBody.velocity.z << ' '
+            << object.rigidBody.invMass << ' '
+            << (object.rigidBody.useGravity ? 1 : 0) << ' '
+            << (object.rigidBody.allowSleep ? 1 : 0) << ' '
+            << (object.rigidBody.ccd ? 1 : 0) << ' '
+            << (object.colliderEnabled ? 1 : 0) << ' '
+            << static_cast<int>(object.collider.shape) << ' '
+            << object.collider.radius << ' '
+            << object.collider.halfExtents.x << ' ' << object.collider.halfExtents.y << ' ' << object.collider.halfExtents.z << ' '
+            << object.collider.planeNormal.x << ' ' << object.collider.planeNormal.y << ' ' << object.collider.planeNormal.z << ' '
+            << object.collider.planeOffset << ' '
+            << object.collider.restitution << ' '
+            << object.collider.friction << ' '
+            << (object.collider.isTrigger ? 1 : 0) << '\n';
     }
 
     return true;

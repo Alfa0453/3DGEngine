@@ -41,6 +41,8 @@ struct Contact {
     bool      hit = false;
     glm::vec3 normal{0.0f};   // points from A toward B
     float     penetration = 0.0f;
+    int       count = 0;
+    glm::vec3 points[4]{};    // world-space contact points
 };
 
 // An oriented bounding box in world space (built from Transform + Collider).
@@ -62,6 +64,14 @@ glm::vec3 velOf(const Body& b) {
 void Wake(Body& b) {
     if (b.rb && b.rb->sleeping) { b.rb->sleeping = false; b.rb->sleepTimer = 0.0f; }
 }
+glm::vec3 AngVelOf(const Body& b) {
+    return (b.rb && !b.rb->sleeping) ? b.rb->angularVelocity : glm::vec3(0.0f);
+}
+glm::mat3 InvIWorld(const Body& b) {
+    if (!b.rb || b.rb->sleeping) return glm::mat3(0.0f);
+    const glm::mat3 R = glm::mat3_cast(b.t->rotation);
+    return R * b.rb->invInertiaLocal * glm::transpose(R);
+}
 
 // Shape ordering so each pair is tested in one canonical direction. Sphere < Box
 // < Plane; the higher-priority shape becomes B, and the contact normal points
@@ -73,6 +83,13 @@ int priority(ColliderShape s) {
         case ColliderShape::Plane:  return 2;
     }
     return 0;
+}
+
+// Body-space inverse inertia for a collider (plane/other -> no rotation).
+glm::mat3 InertiaFor(const Collider& c, float mass) {
+    if (c.shape == ColliderShape::Box)    return RigidBody::SolidBoxInvInertia(mass, c.halfExtents);
+    if (c.shape == ColliderShape::Sphere) return RigidBody::SolidSphereInvInertia(mass, c.radius);
+    return glm::mat3(0.0f);
 }
 
 OBB MakeOBB(const Body& b) {
@@ -96,6 +113,8 @@ Contact SphereSphere(const glm::vec3& pa, float ra, const glm::vec3& pb, float r
     ct.hit = true;
     ct.normal = (dist > 1e-6f) ? d / dist : glm::vec3(0.0f, 1.0f, 0.0f);
     ct.penetration = r - dist;
+    ct.points[0] = pa + ct.normal * ra;   // on A's surface toward B
+    ct.count = 1;
     return ct;
 }
 
@@ -108,6 +127,8 @@ Contact SpherePlane(const glm::vec3& pa, float ra, const glm::vec3& n, float off
     ct.hit = true;
     ct.normal = -n;
     ct.penetration = pen;
+    ct.points[0] = pa + ct.normal * ra;   // sphere's contact point on the plane side
+    ct.count = 1;
     return ct;
 }
 
@@ -131,6 +152,8 @@ Contact SphereBox(const glm::vec3& sc, float r, const OBB& box) {
         ct.hit = true;
         ct.normal = -boxToSphere;               // A(sphere) -> B(box)
         ct.penetration = r + bestFace;
+        ct.points[0] = sc;                      // centre (sphere is inside the box)
+        ct.count = 1;
         return ct;
     }
 
@@ -143,6 +166,8 @@ Contact SphereBox(const glm::vec3& sc, float r, const OBB& box) {
     ct.hit = true;
     ct.normal = (dist > 1e-6f) ? -(delta / dist) : glm::vec3(0.0f, -1.0f, 0.0f);  // A -> B
     ct.penetration = r - dist;
+    ct.points[0] = closest;                 // closest point on the box surface
+    ct.count = 1;
     return ct;
 }
 
@@ -158,9 +183,12 @@ Contact BoxPlane(const OBB& box, const glm::vec3& n, float off) {
             + float(sy) * box.ext[1] * box.axis[1]
             + float(sz) * box.ext[2] * box.axis[2];
         const float pen = off - glm::dot(n, corner);   // >0 means below the plane
-        deepest = std::max(deepest, pen);
+        if (pen > 0.0f) {
+            if (ct.count < 4) ct.points[ct.count++] = corner;   // every below-plane corner is a contact
+            deepest = std::max(deepest, pen);
+        }
     }
-    if (deepest <= 0.0f) return ct;
+    if (ct.count == 0) return ct;
     ct.hit = true;
     ct.normal = -n;                 // A(box) -> B(plane)
     ct.penetration = deepest;
@@ -173,37 +201,82 @@ Contact BoxBox(const OBB& A, const OBB& B) {
     Contact ct;
     const glm::vec3 t = B.center - A.center;
 
-    std::array<glm::vec3, 15> axes;
+    glm::vec3 axes[15];
     int n = 0;
-    for (int i = 0; i < 3; ++i) axes[n++] = A.axis[i];   // face normals of A (tested first)
-    for (int i = 0; i < 3; ++i) axes[n++] = B.axis[i];   // face normals of B
+    for (int i = 0; i < 3; ++i) axes[n++] = A.axis[i];   // 0..2  A faces
+    for (int i = 0; i < 3; ++i) axes[n++] = B.axis[i];   // 3..5  B faces
     for (int i = 0; i < 3; ++i)
-        for (int j = 0; j < 3; ++j) {
-            glm::vec3 c = glm::cross(A.axis[i], B.axis[j]);
-            axes[n++] = c;   // edge-edge axes (may be near-zero -> skipped below)
-        }
+        for (int j = 0; j < 3; ++j) axes[n++] = glm::cross(A.axis[i], B.axis[j]);  // 6..14 edges
 
     float minOverlap = std::numeric_limits<float>::max();
     glm::vec3 bestAxis(0.0f);
+    int bestIdx = -1;
     for (int k = 0; k < 15; ++k) {
         glm::vec3 L = axes[k];
         const float len2 = glm::dot(L, L);
-        if (len2 < 1e-6f) continue;          // parallel edges: degenerate axis
+        if (len2 < 1e-6f) continue;
         L /= std::sqrt(len2);
         float rA = 0.0f, rB = 0.0f;
         for (int i = 0; i < 3; ++i) rA += A.ext[i] * std::fabs(glm::dot(A.axis[i], L));
         for (int i = 0; i < 3; ++i) rB += B.ext[i] * std::fabs(glm::dot(B.axis[i], L));
         const float dist = std::fabs(glm::dot(t, L));
         const float overlap = rA + rB - dist;
-        if (overlap < 0.0f) return ct;       // separating axis found: no contact
-        if (overlap < minOverlap - 1e-4f) {  // bias favours earlier (face) axes on ties
+        if (overlap < 0.0f) return ct;
+        if (overlap < minOverlap - 1e-4f) {
             minOverlap = overlap;
             bestAxis = (glm::dot(t, L) < 0.0f) ? -L : L;   // orient A -> B
+            bestIdx = k;
         }
     }
     ct.hit = true;
     ct.normal = bestAxis;
     ct.penetration = minOverlap;
+
+    if (bestIdx >= 0 && bestIdx < 6) {
+        // Face contact: clip the incident face's corners to the reference face,
+        // giving up to four contact points -> stable resting and stacking.
+        const bool refIsA = bestIdx < 3;
+        const OBB& ref = refIsA ? A : B;
+        const OBB& inc = refIsA ? B : A;
+        const glm::vec3 rN = refIsA ? bestAxis : -bestAxis;   // ref face outward, toward inc
+
+        int ra = 0; float bestP = -1.0f;
+        for (int i = 0; i < 3; ++i) { const float d = std::fabs(glm::dot(ref.axis[i], rN)); if (d > bestP) { bestP = d; ra = i; } }
+        const float rsign = (glm::dot(ref.axis[ra], rN) >= 0.0f) ? 1.0f : -1.0f;
+        const glm::vec3 refN = rsign * ref.axis[ra];
+        const glm::vec3 rC = ref.center + refN * ref.ext[ra];   // reference face centre
+        const int ru = (ra + 1) % 3, rv = (ra + 2) % 3;
+        const glm::vec3 uA = ref.axis[ru]; const float ue = ref.ext[ru];
+        const glm::vec3 vA = ref.axis[rv]; const float ve = ref.ext[rv];
+
+        int ia = 0; float bestI = -1.0f;
+        for (int i = 0; i < 3; ++i) { const float d = std::fabs(glm::dot(inc.axis[i], refN)); if (d > bestI) { bestI = d; ia = i; } }
+        const float isign = (glm::dot(inc.axis[ia], refN) >= 0.0f) ? -1.0f : 1.0f;
+        const glm::vec3 iC = inc.center + (isign * inc.axis[ia]) * inc.ext[ia];   // incident face centre
+        const int iu = (ia + 1) % 3, iv = (ia + 2) % 3;
+        const glm::vec3 iua = inc.axis[iu] * inc.ext[iu];
+        const glm::vec3 iva = inc.axis[iv] * inc.ext[iv];
+        const glm::vec3 corners[4] = { iC + iua + iva, iC - iua + iva, iC - iua - iva, iC + iua - iva };
+
+        for (int c = 0; c < 4 && ct.count < 4; ++c) {
+            const glm::vec3 d = corners[c] - rC;
+            const float pu = glm::dot(d, uA), pv = glm::dot(d, vA);
+            if (std::fabs(pu) <= ue + 1e-3f && std::fabs(pv) <= ve + 1e-3f) {   // within the ref face
+                const float depth = glm::dot(refN, rC - corners[c]);           // >0 = below the face
+                if (depth > -1e-3f) ct.points[ct.count++] = corners[c];
+            }
+        }
+    }
+
+    if (ct.count == 0) {   // edge contact (or no clipped corner): single midpoint
+        glm::vec3 pA = A.center, pB = B.center;
+        for (int i = 0; i < 3; ++i) {
+            pA += (glm::dot(A.axis[i], ct.normal) >= 0.0f ? A.ext[i] : -A.ext[i]) * A.axis[i];
+            pB += (glm::dot(B.axis[i], ct.normal) >= 0.0f ? -B.ext[i] : B.ext[i]) * B.axis[i];
+        }
+        ct.points[0] = 0.5f * (pA + pB);
+        ct.count = 1;
+    }
     return ct;
 }
 
@@ -223,41 +296,59 @@ Contact Detect(const Body& A, const Body& B) {
     return Contact{};
 }
 
-void ResolveVelocity(Body& A, Body& B, const glm::vec3& n,
-                     float restitutionThreshold, float wakeSpeed) {
-    // A fast-closing contact wakes either sleeper before we resolve it.
-    {
+void ResolveContact(Body& A, Body& B, const ContactManifold& man,
+                    float restitutionThreshold, float wakeSpeed) {
+    const glm::vec3 n = man.normal;
+    {   // a fast-closing contact wakes either sleeper first
         const glm::vec3 rv0 = velOf(B) - velOf(A);
         if (glm::dot(rv0, n) < -wakeSpeed) { Wake(A); Wake(B); }
     }
-
     const float imA = invMassOf(A), imB = invMassOf(B);
     const float imSum = imA + imB;
-    if (imSum <= 0.0f) return;   // both static or asleep
+    if (imSum <= 0.0f) return;                       // both static or asleep
 
-    const glm::vec3 relVel = velOf(B) - velOf(A);
-    const float vn = glm::dot(relVel, n);
-    if (vn >= 0.0f) return;      // separating
+    const glm::mat3 IA = InvIWorld(A), IB = InvIWorld(B);
+    const glm::vec3 cA = A.t->position, cB = B.t->position;
+    const float e0 = std::min(A.c->restitution, B.c->restitution);
+    const float mu = std::sqrt(A.c->friction * B.c->friction);
+    const int   cnt = man.count;
+    if (cnt <= 0) return;
+    const float share = 1.0f / static_cast<float>(cnt);   // split load across points
 
-    // Restitution slop: below a small closing speed, don't bounce.
-    const float e = (-vn > restitutionThreshold)
-                    ? std::min(A.c->restitution, B.c->restitution) : 0.0f;
-    const float j = -(1.0f + e) * vn / imSum;
-    const glm::vec3 impulse = j * n;
-    if (A.rb) A.rb->velocity -= impulse * imA;
-    if (B.rb) B.rb->velocity += impulse * imB;
+    for (int k = 0; k < cnt; ++k) {
+        const glm::vec3 p  = man.points[k];
+        const glm::vec3 rA = p - cA, rB = p - cB;
 
-    // Coulomb friction along the tangent.
-    glm::vec3 rv = velOf(B) - velOf(A);
-    glm::vec3 tangent = rv - glm::dot(rv, n) * n;
-    if (glm::dot(tangent, tangent) > 1e-8f) {
-        tangent = glm::normalize(tangent);
-        float jt = -glm::dot(rv, tangent) / imSum;
-        const float mu = std::sqrt(A.c->friction * B.c->friction);
-        jt = std::clamp(jt, -j * mu, j * mu);
-        const glm::vec3 fr = jt * tangent;
-        if (A.rb) A.rb->velocity -= fr * imA;
-        if (B.rb) B.rb->velocity += fr * imB;
+        // Relative velocity AT the contact point (linear + omega x r).
+        glm::vec3 relVel = (velOf(B) + glm::cross(AngVelOf(B), rB))
+                         - (velOf(A) + glm::cross(AngVelOf(A), rA));
+        const float vn = glm::dot(relVel, n);
+        if (vn >= 0.0f) continue;                    // separating at this point
+
+        // Effective mass along the normal, including the angular contribution.
+        const glm::vec3 raxn = glm::cross(rA, n), rbxn = glm::cross(rB, n);
+        const float kN = imSum + glm::dot(glm::cross(IA * raxn, rA) + glm::cross(IB * rbxn, rB), n);
+        const float e  = (-vn > restitutionThreshold) ? e0 : 0.0f;
+        const float j  = (-(1.0f + e) * vn / kN) * share;
+        const glm::vec3 P = j * n;
+        if (A.rb) { A.rb->velocity -= P * imA; A.rb->angularVelocity -= IA * glm::cross(rA, P); }
+        if (B.rb) { B.rb->velocity += P * imB; B.rb->angularVelocity += IB * glm::cross(rB, P); }
+
+        // Coulomb friction along the tangent at the contact point.
+        relVel = (velOf(B) + glm::cross(AngVelOf(B), rB))
+               - (velOf(A) + glm::cross(AngVelOf(A), rA));
+        glm::vec3 tangent = relVel - glm::dot(relVel, n) * n;
+        if (glm::dot(tangent, tangent) > 1e-8f) {
+            tangent = glm::normalize(tangent);
+            const glm::vec3 raxt = glm::cross(rA, tangent), rbxt = glm::cross(rB, tangent);
+            const float kT = imSum + glm::dot(glm::cross(IA * raxt, rA) + glm::cross(IB * rbxt, rB), tangent);
+            float jt = (-glm::dot(relVel, tangent) / kT) * share;
+            const float jmax = std::fabs(j) * mu;
+            jt = std::clamp(jt, -jmax, jmax);
+            const glm::vec3 Pt = jt * tangent;
+            if (A.rb) { A.rb->velocity -= Pt * imA; A.rb->angularVelocity -= IA * glm::cross(rA, Pt); }
+            if (B.rb) { B.rb->velocity += Pt * imB; B.rb->angularVelocity += IB * glm::cross(rB, Pt); }
+        }
     }
 }
 
@@ -310,65 +401,178 @@ namespace {
 
 // Apply a spring joint's Hooke + damping force to its bodies' force accumulators
 // (called before integration). Spring bodies are kept awake so they stay live.
-void ApplySpring(ecs::Registry& reg, const Joint& j) {
-    if (!reg.Has<Transform>(j.a)) return;
-    const glm::vec3 pa = reg.Get<Transform>(j.a).position;
-    RigidBody* ra = reg.TryGet<RigidBody>(j.a);
-    glm::vec3 pb; RigidBody* rb = nullptr;
-    if (j.b == ecs::kNull) { pb = j.anchor; }
-    else { if (!reg.Has<Transform>(j.b)) return; pb = reg.Get<Transform>(j.b).position; rb = reg.TryGet<RigidBody>(j.b); }
+// Skew-symmetric matrix S with S*v == cross(r, v).
+glm::mat3 Skew(const glm::vec3& r) {
+    glm::mat3 s(0.0f);
+    s[1][0] = -r.z; s[2][0] =  r.y;
+    s[0][1] =  r.z; s[2][1] = -r.x;
+    s[0][2] = -r.y; s[1][2] =  r.x;
+    return s;
+}
+// World-space inverse inertia of a body (0 if static/asleep/frozen).
+glm::mat3 JointInvI(const Transform& t, const RigidBody* rb) {
+    if (!rb || rb->sleeping) return glm::mat3(0.0f);
+    const glm::mat3 R = glm::mat3_cast(t.rotation);
+    return R * rb->invInertiaLocal * glm::transpose(R);
+}
 
-    const glm::vec3 d = pb - pa;
+// Resolve one joint's world anchor points and bodies. anchorA = posA + Ra*localA;
+// the B end is either posB + Rb*localB or the fixed world 'anchor'.
+struct JointEnds {
+    Transform* ta = nullptr; RigidBody* ra = nullptr; glm::vec3 pA{0.0f}, rA{0.0f};
+    Transform* tb = nullptr; RigidBody* rb = nullptr; glm::vec3 pB{0.0f}, rB{0.0f};
+    bool ok = false;
+};
+JointEnds ResolveEnds(ecs::Registry& reg, const Joint& j) {
+    JointEnds e;
+    if (!reg.Has<Transform>(j.a)) return e;
+    e.ta = &reg.Get<Transform>(j.a); e.ra = reg.TryGet<RigidBody>(j.a);
+    e.rA = glm::mat3_cast(e.ta->rotation) * j.localA;
+    e.pA = e.ta->position + e.rA;
+    if (j.b == ecs::kNull) { e.pB = j.anchor; }
+    else {
+        if (!reg.Has<Transform>(j.b)) return e;
+        e.tb = &reg.Get<Transform>(j.b); e.rb = reg.TryGet<RigidBody>(j.b);
+        e.rB = glm::mat3_cast(e.tb->rotation) * j.localB;
+        e.pB = e.tb->position + e.rB;
+    }
+    e.ok = true;
+    return e;
+}
+glm::vec3 AnchorVel(const RigidBody* rb, const glm::vec3& r) {
+    if (!rb || rb->sleeping) return glm::vec3(0.0f);
+    return rb->velocity + glm::cross(rb->angularVelocity, r);
+}
+
+// Spring joint: Hooke + damping force applied AT the anchor points (so an
+// off-centre spring also torques the body).
+void ApplySpring(ecs::Registry& reg, const Joint& j) {
+    JointEnds e = ResolveEnds(reg, j);
+    if (!e.ok) return;
+    const glm::vec3 d = e.pB - e.pA;
     const float len = glm::length(d);
     if (len < 1e-6f) return;
     const glm::vec3 n = d / len;
-    const glm::vec3 va = ra ? ra->velocity : glm::vec3(0.0f);
-    const glm::vec3 vb = rb ? rb->velocity : glm::vec3(0.0f);
-    const float vrel = glm::dot(vb - va, n);
+    const float vrel = glm::dot(AnchorVel(e.rb, e.rB) - AnchorVel(e.ra, e.rA), n);
     const float fMag = j.stiffness * (len - j.restLength) + j.damping * vrel;
-    const glm::vec3 fOnA = fMag * n;   // toward b when stretched
-    if (ra && ra->invMass > 0.0f) { ra->accumForce += fOnA; ra->sleeping = false; ra->sleepTimer = 0.0f; }
-    if (rb && rb->invMass > 0.0f) { rb->accumForce -= fOnA; rb->sleeping = false; rb->sleepTimer = 0.0f; }
+    const glm::vec3 fOnA = fMag * n;   // toward B when stretched
+    if (e.ra && e.ra->invMass > 0.0f) {
+        e.ra->accumForce += fOnA; e.ra->accumTorque += glm::cross(e.rA, fOnA);
+        e.ra->sleeping = false; e.ra->sleepTimer = 0.0f;
+    }
+    if (e.rb && e.rb->invMass > 0.0f) {
+        e.rb->accumForce -= fOnA; e.rb->accumTorque += glm::cross(e.rB, -fOnA);
+        e.rb->sleeping = false; e.rb->sleepTimer = 0.0f;
+    }
 }
 
-// Solve one rigid distance joint (velocity impulse + Baumgarte position pull).
-// Called inside the solver iteration loop. Ropes only resist stretching.
+// Rigid distance joint at the anchor points (impulse applies linear + angular).
 void SolveDistance(ecs::Registry& reg, const Joint& j) {
-    if (!reg.Has<Transform>(j.a)) return;
-    Transform& ta = reg.Get<Transform>(j.a);
-    RigidBody* ra = reg.TryGet<RigidBody>(j.a);
-    Transform* tb = nullptr; RigidBody* rb = nullptr; glm::vec3 pb;
-    if (j.b == ecs::kNull) { pb = j.anchor; }
-    else { if (!reg.Has<Transform>(j.b)) return; tb = &reg.Get<Transform>(j.b); pb = tb->position; rb = reg.TryGet<RigidBody>(j.b); }
-
-    const glm::vec3 d = pb - ta.position;
+    JointEnds e = ResolveEnds(reg, j);
+    if (!e.ok) return;
+    const glm::vec3 d = e.pB - e.pA;
     const float len = glm::length(d);
     if (len < 1e-6f) return;
     const glm::vec3 n = d / len;
     const float C = len - j.restLength;
-    if (j.rope && C < 0.0f) return;      // slack: nothing to do
+    if (j.rope && C < 0.0f) return;
 
-    // Wake bodies if the constraint is meaningfully violated.
     if (std::fabs(C) > 0.005f) {
-        if (ra && ra->sleeping) { ra->sleeping = false; ra->sleepTimer = 0.0f; }
-        if (rb && rb->sleeping) { rb->sleeping = false; rb->sleepTimer = 0.0f; }
+        if (e.ra && e.ra->sleeping) { e.ra->sleeping = false; e.ra->sleepTimer = 0.0f; }
+        if (e.rb && e.rb->sleeping) { e.rb->sleeping = false; e.rb->sleepTimer = 0.0f; }
     }
-    const float imA = (ra && !ra->sleeping) ? ra->invMass : 0.0f;
-    const float imB = (rb && !rb->sleeping) ? rb->invMass : 0.0f;
+    const float imA = (e.ra && !e.ra->sleeping) ? e.ra->invMass : 0.0f;
+    const float imB = (e.rb && !e.rb->sleeping) ? e.rb->invMass : 0.0f;
+    const glm::mat3 IA = JointInvI(*e.ta, e.ra);
+    const glm::mat3 IB = e.tb ? JointInvI(*e.tb, e.rb) : glm::mat3(0.0f);
+
+    const glm::vec3 raxn = glm::cross(e.rA, n), rbxn = glm::cross(e.rB, n);
+    const float k = imA + imB + glm::dot(glm::cross(IA * raxn, e.rA) + glm::cross(IB * rbxn, e.rB), n);
+    if (k <= 0.0f) return;
+
+    const float vrel = glm::dot(AnchorVel(e.rb, e.rB) - AnchorVel(e.ra, e.rA), n);
+    const glm::vec3 P = (-vrel / k) * n;
+    if (e.ra) { e.ra->velocity -= P * imA; e.ra->angularVelocity -= IA * glm::cross(e.rA, P); }
+    if (e.rb) { e.rb->velocity += P * imB; e.rb->angularVelocity += IB * glm::cross(e.rB, P); }
+
     const float imSum = imA + imB;
-    if (imSum <= 0.0f) return;
+    if (imSum > 0.0f) {
+        const glm::vec3 corr = n * (C * 0.2f / imSum);
+        if (e.ra)          e.ta->position += corr * imA;
+        if (e.rb && e.tb)  e.tb->position -= corr * imB;
+    }
+}
 
-    const glm::vec3 va = ra ? ra->velocity : glm::vec3(0.0f);
-    const glm::vec3 vb = rb ? rb->velocity : glm::vec3(0.0f);
-    const float vrel = glm::dot(vb - va, n);
-    const glm::vec3 P = (-vrel / imSum) * n;
-    if (ra) ra->velocity -= P * imA;
-    if (rb) rb->velocity += P * imB;
+// Perpendicular unit vector to v.
+glm::vec3 PerpAxis(const glm::vec3& v) {
+    const glm::vec3 a = (std::fabs(v.x) < 0.9f) ? glm::vec3(1, 0, 0) : glm::vec3(0, 1, 0);
+    return glm::normalize(glm::cross(v, a));
+}
 
-    const float beta = 0.2f;             // position stabilisation factor
-    const glm::vec3 corr = n * (C * beta / imSum);
-    if (ra)          ta.position   += corr * imA;   // pull a toward b when C>0
-    if (rb && tb)    tb->position  -= corr * imB;
+// Point-to-point constraint at the anchor points (shared by ball + hinge). Drives
+// the two anchor points together in 3D with the constraint effective mass.
+void SolvePointConstraint(JointEnds& e) {
+    const glm::vec3 C = e.pB - e.pA;
+    if (glm::length(C) > 0.005f) {
+        if (e.ra && e.ra->sleeping) { e.ra->sleeping = false; e.ra->sleepTimer = 0.0f; }
+        if (e.rb && e.rb->sleeping) { e.rb->sleeping = false; e.rb->sleepTimer = 0.0f; }
+    }
+    const float imA = (e.ra && !e.ra->sleeping) ? e.ra->invMass : 0.0f;
+    const float imB = (e.rb && !e.rb->sleeping) ? e.rb->invMass : 0.0f;
+    const glm::mat3 IA = JointInvI(*e.ta, e.ra);
+    const glm::mat3 IB = e.tb ? JointInvI(*e.tb, e.rb) : glm::mat3(0.0f);
+
+    const glm::mat3 sA = Skew(e.rA), sB = Skew(e.rB);
+    glm::mat3 K = glm::mat3(imA + imB) - sA * IA * sA - sB * IB * sB;
+    if (std::fabs(glm::determinant(K)) < 1e-9f) return;
+    const glm::vec3 P = glm::inverse(K) * (-(AnchorVel(e.rb, e.rB) - AnchorVel(e.ra, e.rA)));
+    if (e.ra) { e.ra->velocity -= P * imA; e.ra->angularVelocity -= IA * glm::cross(e.rA, P); }
+    if (e.rb) { e.rb->velocity += P * imB; e.rb->angularVelocity += IB * glm::cross(e.rB, P); }
+
+    const float imSum = imA + imB;
+    if (imSum > 0.0f) {
+        const glm::vec3 corr = C * (0.2f / imSum);
+        if (e.ra)          e.ta->position += corr * imA;
+        if (e.rb && e.tb)  e.tb->position -= corr * imB;
+    }
+}
+
+// Ball (point-to-point) joint: just the point constraint.
+void SolveBall(ecs::Registry& reg, const Joint& j) {
+    JointEnds e = ResolveEnds(reg, j);
+    if (!e.ok) return;
+    SolvePointConstraint(e);
+}
+
+// Hinge joint: point constraint + keep the two hinge axes aligned (removing the
+// two rotational DOF perpendicular to the axis, leaving rotation about it).
+void SolveHinge(ecs::Registry& reg, const Joint& j) {
+    JointEnds e = ResolveEnds(reg, j);
+    if (!e.ok) return;
+    SolvePointConstraint(e);
+
+    const glm::mat3 IA = JointInvI(*e.ta, e.ra);
+    const glm::mat3 IB = e.tb ? JointInvI(*e.tb, e.rb) : glm::mat3(0.0f);
+    const glm::mat3 Isum = IA + IB;
+
+    const glm::vec3 aA = glm::normalize(glm::mat3_cast(e.ta->rotation) * j.axisA);
+    const glm::vec3 aB = e.tb ? glm::normalize(glm::mat3_cast(e.tb->rotation) * j.axisB)
+                              : glm::normalize(j.axisB);
+    const glm::vec3 err = glm::cross(aA, aB);          // 0 when aligned
+    const glm::vec3 perp[2] = { PerpAxis(aA), glm::cross(aA, PerpAxis(aA)) };
+
+    for (int i = 0; i < 2; ++i) {
+        const glm::vec3 t = perp[i];
+        const float k = glm::dot(t, Isum * t);
+        if (k < 1e-9f) continue;
+        const glm::vec3 wA = (e.ra && !e.ra->sleeping) ? e.ra->angularVelocity : glm::vec3(0.0f);
+        const glm::vec3 wB = (e.rb && !e.rb->sleeping) ? e.rb->angularVelocity : glm::vec3(0.0f);
+        const float vn = glm::dot(wB - wA, t);
+        const float Ct = glm::dot(err, t);            // alignment drift along t
+        const glm::vec3 L = (-(vn + 0.2f * Ct) / k) * t;
+        if (e.ra) e.ra->angularVelocity -= IA * L;
+        if (e.rb) e.rb->angularVelocity += IB * L;
+    }
 }
 
 } // namespace
@@ -480,8 +684,8 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
     // 1) Integrate (semi-implicit Euler): velocity first, then position. A body
     //    with CCD enabled sweeps its motion and clamps to the first impact.
     reg.view<Transform, RigidBody>().each([&](Entity e, Transform& t, RigidBody& rb) {
-        if (rb.invMass <= 0.0f) { rb.accumForce = glm::vec3(0.0f); return; }
-        if (rb.sleeping)          { rb.accumForce = glm::vec3(0.0f); return; }
+        if (rb.invMass <= 0.0f) { rb.accumForce = glm::vec3(0.0f); rb.accumTorque = glm::vec3(0.0f); return; }
+        if (rb.sleeping)          { rb.accumForce = glm::vec3(0.0f); rb.accumTorque = glm::vec3(0.0f); return; }
         glm::vec3 accel = rb.accumForce * rb.invMass;
         if (rb.useGravity) accel += gravity;
         rb.velocity  += accel * dt;
@@ -499,7 +703,25 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
             }
         }
         t.position    = end;
-        rb.accumForce = glm::vec3(0.0f);
+
+        // Angular: initialise inertia from the collider once, then integrate the
+        // orientation from angular velocity (dq = 0.5 * omega * q).
+        if (!rb.freezeRotation && rb.invInertiaLocal == glm::mat3(0.0f)) {
+            if (const Collider* col = reg.TryGet<Collider>(e))
+                rb.invInertiaLocal = InertiaFor(*col, 1.0f / rb.invMass);
+        }
+        if (rb.freezeRotation) {
+            rb.angularVelocity = glm::vec3(0.0f);
+        } else if (rb.invInertiaLocal != glm::mat3(0.0f)) {
+            const glm::mat3 R     = glm::mat3_cast(t.rotation);
+            const glm::mat3 invIw = R * rb.invInertiaLocal * glm::transpose(R);
+            rb.angularVelocity += invIw * rb.accumTorque * dt;
+            const glm::quat wq(0.0f, rb.angularVelocity.x, rb.angularVelocity.y, rb.angularVelocity.z);
+            t.rotation = glm::normalize(t.rotation + 0.5f * wq * t.rotation * dt);
+        }
+
+        rb.accumForce  = glm::vec3(0.0f);
+        rb.accumTorque = glm::vec3(0.0f);
     });
 
     // 2) Gather colliders into the reused body list.
@@ -582,6 +804,8 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
             m.b = static_cast<int>(B - base);
             m.normal = ct.normal;
             m.penetration = ct.penetration;
+            m.count = ct.count;
+            for (int pi = 0; pi < ct.count; ++pi) m.points[pi] = ct.points[pi];
             m_manifolds.push_back(m);
         }
     }
@@ -614,9 +838,12 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
     const float wakeSpeed = sleepLinearVelocity * 2.0f;
     for (int iter = 0; iter < solverIterations; ++iter) {
         for (const ContactManifold& m : m_manifolds)
-            ResolveVelocity(m_bodies[m.a], m_bodies[m.b], m.normal, restitutionThreshold, wakeSpeed);
-        for (const Joint& j : m_joints)
+            ResolveContact(m_bodies[m.a], m_bodies[m.b], m, restitutionThreshold, wakeSpeed);
+        for (const Joint& j : m_joints) {
             if (j.type == Joint::Type::Distance) SolveDistance(reg, j);
+            else if (j.type == Joint::Type::Ball)  SolveBall(reg, j);
+            else if (j.type == Joint::Type::Hinge) SolveHinge(reg, j);
+        }
     }
 
     // 7) One positional-correction pass from the cached penetrations.
@@ -625,14 +852,19 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
 
     // 8) Update sleep state: bodies that stayed slow long enough go to sleep.
     if (allowSleeping) {
-        const float thresh2 = sleepLinearVelocity * sleepLinearVelocity;
+        const float thresh2  = sleepLinearVelocity * sleepLinearVelocity;
+        const float aThresh2 = sleepAngularVelocity * sleepAngularVelocity;
         reg.view<Transform, RigidBody>().each([&](Entity, Transform&, RigidBody& rb) {
             if (rb.invMass <= 0.0f) return;
             if (!rb.allowSleep) { rb.sleeping = false; rb.sleepTimer = 0.0f; return; }
             if (rb.sleeping) return;
-            if (glm::dot(rb.velocity, rb.velocity) < thresh2) {
+            const bool slow = glm::dot(rb.velocity, rb.velocity) < thresh2
+                           && glm::dot(rb.angularVelocity, rb.angularVelocity) < aThresh2;
+            if (slow) {
                 rb.sleepTimer += dt;
-                if (rb.sleepTimer >= timeToSleep) { rb.sleeping = true; rb.velocity = glm::vec3(0.0f); }
+                if (rb.sleepTimer >= timeToSleep) {
+                    rb.sleeping = true; rb.velocity = glm::vec3(0.0f); rb.angularVelocity = glm::vec3(0.0f);
+                }
             } else {
                 rb.sleepTimer = 0.0f;
             }

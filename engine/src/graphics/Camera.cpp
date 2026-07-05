@@ -26,23 +26,15 @@ void Camera::AddYawPitch(float deltaYawDegrees, float deltaPitchDegrees)
     UpdateVectors();
 }
 
-void Camera::MoveForward(float amount)
-{
-    m_position += m_front * amount;
-}
+void Camera::MoveForward(float amount) { m_position += m_front * amount; }
 
-void Camera::MoveRight(float amount)
-{
-    m_position += m_right * amount;
-}
+void Camera::MoveRight(float amount) { m_position += m_right * amount; }
 
-void Camera::MoveUp(float amount)
-{
-    m_position += kWorldUp * amount;
-}
+void Camera::MoveUp(float amount) { m_position += kWorldUp * amount; }
 
-void Camera::LookAt(const glm::vec3& target)
-{
+void Camera::SetPosition(const glm::vec3& position) { m_position = position; }
+
+void Camera::LookAt(const glm::vec3& target) {
     const glm::vec3 dir = glm::normalize(target - m_position);
     // Recover yaw/pitch from the direction (inverse of UpdateVectors).
     m_pitch = glm::degrees(std::asin(glm::clamp(dir.y, -1.0f, 1.0f)));
@@ -51,18 +43,15 @@ void Camera::LookAt(const glm::vec3& target)
     UpdateVectors();
 }
 
-glm::mat4 Camera::ViewMatrix() const
-{
+glm::mat4 Camera::ViewMatrix() const {
     // lookAt builds a matrix that places the camera at m_position looking
     // toward m_position + m_front, with m_up defining the roll.
     return glm::lookAt(m_position, m_position + m_front, m_up);
 }
-glm::mat4 Camera::ProjectionMatrix(float aspect) const
-{
+glm::mat4 Camera::ProjectionMatrix(float aspect) const {
     return glm::perspective(glm::radians(fov), aspect, nearPlane, farPlane);
 }
-void Camera::UpdateVectors()
-{
+void Camera::UpdateVectors() {
     // Convert yaw/pitch (Euler angles) into a unit direction vector. This is
     // the standard spherical-to-Cartesian conversion.
     const float yawRad = glm::radians(m_yaw);

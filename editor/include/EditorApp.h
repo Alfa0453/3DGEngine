@@ -18,6 +18,8 @@
 #include <engine/graphics/SSAO.h>
 #include <engine/graphics/SSR.h>
 #include <engine/graphics/TextRenderer.h>
+#include <engine/physics/PhysicsComponents.h>
+#include <engine/physics/PhysicsWorld.h>
 #include <engine/ui/ImGuiLayer.h>
 #include <MaterialMaker/MaterialMakerPanel.h>
 
@@ -62,6 +64,7 @@ private:
     enum class PendingSceneAction {
         None,
         CloseEditor,
+        NewScene,
         LoadScene
     };
 
@@ -95,10 +98,14 @@ private:
     void AddCube();
     void AddPlane();
     void AddSphere();
+    void AddDynamicCube();
+    void AddStaticFloor();
+    void AddTriggerVolume();
     void CycleSelectedColor();
     void SetSelectedPrimitive(EditorScene::Primitive primitive);
     void ToggleSelectedVisible();
     void ToggleSelectedLocked();
+    void FrameSelected();
     void DuplicateSelected();
     void DeleteSelected();
     void Undo();
@@ -109,7 +116,9 @@ private:
     void UpdateAutosave(float dt);
     void LoadScene();
     void RequestCloseEditor();
+    void RequestNewScene();
     void RequestLoadSceneFromPath(const std::string& path);
+    void PerformNewScene();
     void PerformLoadSceneFromPath(const std::string& path);
     void QueueDirtySceneAction(PendingSceneAction action, const std::string& path = std::string());
     void CompletePendingSceneAction();
@@ -120,6 +129,8 @@ private:
     void EnterPlayMode();
     void ExitPlayMode();
     bool BuildPlayRuntimePreview(std::string* error);
+    void StepPlayPhysics(float dt);
+    void CapturePlayPhysicsEvents();
     bool Pressed(int key);
 
     engine::Config&       m_config;
@@ -160,8 +171,20 @@ private:
     EditorMode       m_mode = EditorMode::Edit;
     std::optional<EditorScene::Snapshot> m_editSnapshot;
     engine::RuntimeAssetManager m_editAssets;
+    engine::PhysicsWorld m_playPhysics;
     std::optional<engine::ecs::Registry> m_playRegistry;
     std::optional<engine::RuntimeAssetManager> m_playAssets;
+    bool m_physicsPaused = false;
+    bool m_physicsStepRequested = false;
+    float m_physicsFixedTimestep = 1.0f / 60.0f;
+    float m_physicsAccumulator = 0.0f;
+    int m_physicsStepsLastFrame = 0;
+    int m_physicsEventEnterCount = 0;
+    int m_physicsEventStayCount = 0;
+    int m_physicsEventExitCount = 0;
+    std::vector<EditorDockspace::PhysicsEventRow> m_physicsEventRows;
+    std::vector<EditorViewport::PhysicsEventGuide> m_physicsEventGuides;
+    std::unordered_map<engine::ecs::Entity, std::string> m_playEntityNames;
 
     float m_fps = 60.0f;
     float m_elapsed = 0.0f;

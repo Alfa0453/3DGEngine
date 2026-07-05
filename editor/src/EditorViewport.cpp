@@ -247,6 +247,20 @@ void DrawGuideRing(engine::Renderer& renderer,
     }
 }
 
+glm::vec3 PhysicsEventGuideColor(const EditorViewport::PhysicsEventGuide& guide) {
+    if (guide.phase == 2) {
+        return glm::vec3(1.0f, 0.22f, 0.18f);
+    }
+    if (guide.trigger) {
+        return guide.phase == 0
+            ? glm::vec3(0.26f, 0.92f, 1.0f)
+            : glm::vec3(0.56f, 0.42f, 1.0f);
+    }
+    return guide.phase == 0
+        ? glm::vec3(1.0f, 0.72f, 0.18f)
+        : glm::vec3(1.0f, 0.48f, 0.20f);
+}
+
 void BuildBasis(const glm::vec3& direction, glm::vec3* right, glm::vec3* up) {
     const glm::vec3 forward = glm::normalize(direction);
     glm::vec3 reference(0.0f, 1.0f, 0.0f);
@@ -293,6 +307,94 @@ void DrawSpotConeGuide(engine::Renderer& renderer,
         const glm::vec3 edge = center + right * std::cos(t) * radius + up * std::sin(t) * radius;
         DrawGuideSegment(renderer, shader, cube, origin, edge, thickness, color);
     }
+}
+
+glm::vec3 PhysicsGuideColor(const EditorScene::Object& object) {
+    if (object.rigidBodyEnabled && object.rigidBody.invMass > 0.0f) {
+        return glm::vec3(0.24f, 0.82f, 1.0f);
+    }
+    if (object.collider.isTrigger) {
+        return glm::vec3(0.78f, 0.45f, 1.0f);
+    }
+    return glm::vec3(0.24f, 1.0f, 0.58f);
+}
+
+void DrawBoxColliderGuide(engine::Renderer& renderer,
+                          engine::Shader& shader,
+                          const engine::Mesh& cube,
+                          const engine::ecs::Transform& transform,
+                          const engine::ecs::Collider& collider,
+                          const glm::vec3& color) {
+    const glm::mat3 rotation = glm::mat3_cast(transform.rotation);
+    const glm::vec3 halfExtents = glm::max(collider.halfExtents, glm::vec3(0.001f));
+    const glm::vec3 corners[] = {
+        {-halfExtents.x, -halfExtents.y, -halfExtents.z},
+        { halfExtents.x, -halfExtents.y, -halfExtents.z},
+        { halfExtents.x,  halfExtents.y, -halfExtents.z},
+        {-halfExtents.x,  halfExtents.y, -halfExtents.z},
+        {-halfExtents.x, -halfExtents.y,  halfExtents.z},
+        { halfExtents.x, -halfExtents.y,  halfExtents.z},
+        { halfExtents.x,  halfExtents.y,  halfExtents.z},
+        {-halfExtents.x,  halfExtents.y,  halfExtents.z}
+    };
+    glm::vec3 world[8];
+    for (int i = 0; i < 8; ++i) {
+        world[i] = transform.position + rotation * corners[i];
+    }
+
+    constexpr int edges[][2] = {
+        {0, 1}, {1, 2}, {2, 3}, {3, 0},
+        {4, 5}, {5, 6}, {6, 7}, {7, 4},
+        {0, 4}, {1, 5}, {2, 6}, {3, 7}
+    };
+    for (const auto& edge : edges) {
+        DrawGuideSegment(renderer, shader, cube, world[edge[0]], world[edge[1]], 0.025f, color);
+    }
+}
+
+void DrawPlaneColliderGuide(engine::Renderer& renderer,
+                            engine::Shader& shader,
+                            const engine::Mesh& cube,
+                            const engine::ecs::Collider& collider,
+                            const glm::vec3& color) {
+    glm::vec3 normal = collider.planeNormal;
+    if (glm::dot(normal, normal) <= 0.0001f) {
+        normal = glm::vec3(0.0f, 1.0f, 0.0f);
+    } else {
+        normal = glm::normalize(normal);
+    }
+
+    glm::vec3 right;
+    glm::vec3 up;
+    BuildBasis(normal, &right, &up);
+    const glm::vec3 center = normal * collider.planeOffset;
+    constexpr float size = 3.0f;
+    const glm::vec3 corners[] = {
+        center + right * -size + up * -size,
+        center + right *  size + up * -size,
+        center + right *  size + up *  size,
+        center + right * -size + up *  size
+    };
+
+    DrawGuideSegment(renderer, shader, cube, corners[0], corners[1], 0.025f, color);
+    DrawGuideSegment(renderer, shader, cube, corners[1], corners[2], 0.025f, color);
+    DrawGuideSegment(renderer, shader, cube, corners[2], corners[3], 0.025f, color);
+    DrawGuideSegment(renderer, shader, cube, corners[3], corners[0], 0.025f, color);
+    DrawGuideSegment(renderer, shader, cube, center - right * size, center + right * size, 0.018f, color);
+    DrawGuideSegment(renderer, shader, cube, center - up * size, center + up * size, 0.018f, color);
+    DrawGuideSegment(renderer, shader, cube, center, center + normal * 0.75f, 0.035f, color);
+}
+
+void DrawSphereColliderGuide(engine::Renderer& renderer,
+                             engine::Shader& shader,
+                             const engine::Mesh& cube,
+                             const engine::ecs::Transform& transform,
+                             const engine::ecs::Collider& collider,
+                             const glm::vec3& color) {
+    const float radius = std::max(collider.radius, 0.001f);
+    DrawGuideRing(renderer, shader, cube, transform.position, EditorGizmo::Axis::X, radius, 0.035f, color);
+    DrawGuideRing(renderer, shader, cube, transform.position, EditorGizmo::Axis::Y, radius, 0.035f, color);
+    DrawGuideRing(renderer, shader, cube, transform.position, EditorGizmo::Axis::Z, radius, 0.035f, color);
 }
 
 void DrawGizmoCone(engine::Renderer& renderer,
@@ -436,7 +538,7 @@ void EditorViewport::DrawSelectedLightGuide(engine::Renderer& renderer,
 
     constexpr float marker = 0.045f;
     for (const EditorScene::Object& object : scene.Objects()) {
-        if (!object.light && !object.visible) {
+        if (!object.light || !object.visible) {
             continue;
         }
         const bool selectedLight = selected && selected->entity == object.entity;
@@ -480,6 +582,90 @@ void EditorViewport::DrawSelectedLightGuide(engine::Renderer& renderer,
             DrawGuideRing(renderer, shader, cube, transform->position, EditorGizmo::Axis::Z, light->sourceRadius, marker, color);
             break;
         }
+    }
+
+    shader.SetVec3("uEmissive", glm::vec3(0.0f));
+}
+
+void EditorViewport::DrawPhysicsColliderGuides(engine::Renderer& renderer,
+                                               engine::Shader& shader,
+                                               const engine::Mesh& cube,
+                                               const EditorScene& scene,
+                                               const glm::mat4& viewProj,
+                                               bool selectedOnly) const {
+    const EditorScene::Object* selected = scene.SelectedObject();
+    if (selectedOnly && (!selected || !selected->colliderEnabled || !selected->visible)) {
+        return;
+    }
+
+    shader.Bind();
+    shader.SetMat4("uViewProj", viewProj);
+    shader.SetVec3("uLightDir", glm::normalize(glm::vec3(-0.4f, -1.0f, -0.3f)));
+    shader.SetInt("uHasDiffuse", 0);
+
+    for (const EditorScene::Object& object : scene.Objects()) {
+        if (!object.colliderEnabled || !object.visible) {
+            continue;
+        }
+        const bool selectedCollider = selected && selected->entity == object.entity;
+        if (selectedOnly && !selectedCollider) {
+            continue;
+        }
+
+        const engine::ecs::Transform* transform = scene.TryGetTransform(object.entity);
+        if (!transform) {
+            continue;
+        }
+
+        const glm::vec3 baseColor = PhysicsGuideColor(object);
+        const glm::vec3 color = selectedCollider
+            ? baseColor
+            : glm::mix(glm::vec3(0.30f), baseColor, 0.48f);
+        shader.SetVec3("uEmissive", color * (selectedCollider ? 0.36f : 0.12f));
+
+        switch (object.collider.shape) {
+        case engine::ecs::ColliderShape::Sphere:
+            DrawSphereColliderGuide(renderer, shader, cube, *transform, object.collider, color);
+            break;
+        case engine::ecs::ColliderShape::Box:
+            DrawBoxColliderGuide(renderer, shader, cube, *transform, object.collider, color);
+            break;
+        case engine::ecs::ColliderShape::Plane:
+            DrawPlaneColliderGuide(renderer, shader, cube, object.collider, color);
+            break;
+        }
+    }
+
+    shader.SetVec3("uEmissive", glm::vec3(0.0f));
+}
+
+void EditorViewport::DrawPhysicsEventGuides(engine::Renderer& renderer,
+                                            engine::Shader& shader,
+                                            const engine::Mesh& cube,
+                                            const std::vector<PhysicsEventGuide>& guides,
+                                            const glm::mat4& viewProj) const {
+    if (guides.empty()) {
+        return;
+    }
+
+    shader.Bind();
+    shader.SetMat4("uViewProj", viewProj);
+    shader.SetVec3("uLightDir", glm::normalize(glm::vec3(-0.4f, -1.0f, -0.3f)));
+    shader.SetInt("uHasDiffuse", 0);
+
+    for (const PhysicsEventGuide& guide : guides) {
+        if (glm::length(guide.b - guide.a) <= 0.001f) {
+            continue;
+        }
+
+        const glm::vec3 color = PhysicsEventGuideColor(guide);
+        const float thickness = guide.trigger ? 0.045f : 0.035f;
+        const glm::vec3 markerSize(guide.trigger ? 0.09f : 0.065f);
+
+        shader.SetVec3("uEmissive", color * (guide.trigger ? 0.48f : 0.32f));
+        DrawGuideSegment(renderer, shader, cube, guide.a, guide.b, thickness, color);
+        DrawGizmoBox(renderer, shader, cube, guide.a, markerSize, color);
+        DrawGizmoBox(renderer, shader, cube, guide.b, markerSize, color);
     }
 
     shader.SetVec3("uEmissive", glm::vec3(0.0f));

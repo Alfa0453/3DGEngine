@@ -6,10 +6,13 @@
 #include <sstream>
 #include <cstddef>
 #include <filesystem>
+#include <glm/gtc/quaternion.hpp>
 
 using engine::ecs::Entity;
 using engine::ecs::Light;
 using engine::ecs::MeshRenderer;
+using engine::ecs::RigidBody;
+using engine::ecs::Collider;
 using engine::ecs::Transform;
 
 namespace {
@@ -141,7 +144,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         return false;
     }
 
-    out << "3DGEditorScene 12\n";
+    out << "3DGEditorScene 16\n";
     out << "environment "
         << m_environment.timeOfDay << ' '
         << m_environment.skyLightIntensity << ' '
@@ -165,7 +168,19 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         << m_environment.fogColor.b << ' '
         << m_environment.fogDensity << ' '
         << m_environment.fogHeight << ' '
-        << m_environment.fogHeightFalloff << '\n';
+        << m_environment.fogHeightFalloff << ' '
+        << m_environment.physicsGravity.x << ' '
+        << m_environment.physicsGravity.y << ' '
+        << m_environment.physicsGravity.z << ' '
+        << m_environment.physicsSolverIterations << ' '
+        << (m_environment.physicsBroadPhase ? 1 : 0) << ' '
+        << m_environment.physicsCellSize << ' '
+        << m_environment.physicsRestitutionThreshold << ' '
+        << (m_environment.physicsAllowSleeping ? 1 : 0) << ' '
+        << m_environment.physicsSleepLinearVelocity << ' '
+        << m_environment.physicsTimeToSleep << ' '
+        << (m_environment.showPhysicsGuides ? 1 : 0) << ' '
+        << (m_environment.selectedPhysicsGuideOnly ? 1 : 0) << '\n';
     for (const Object& object : m_objects) {
         const Transform* transform = m_registry.TryGet<Transform>(object.entity);
         const MeshRenderer* renderer = m_registry.TryGet<MeshRenderer>(object.entity);
@@ -203,7 +218,24 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
             << StoredPath(object.materialAssetPath) << ' '
             << object.linearVelocity.x << ' ' << object.linearVelocity.y << ' ' << object.linearVelocity.z << ' '
             << object.angularVelocityAxis.x << ' ' << object.angularVelocityAxis.y << ' ' << object.angularVelocityAxis.z << ' '
-            << object.angularVelocityRadians << '\n';
+            << object.angularVelocityRadians << ' '
+            << (object.linearVelocityEnabled ? 1 : 0) << ' '
+            << (object.angularVelocityEnabled ? 1 : 0) << ' '
+            << (object.rigidBodyEnabled ? 1 : 0) << ' '
+            << object.rigidBody.velocity.x << ' ' << object.rigidBody.velocity.y << ' ' << object.rigidBody.velocity.z << ' '
+            << object.rigidBody.invMass << ' '
+            << (object.rigidBody.useGravity ? 1 : 0) << ' '
+            << (object.rigidBody.allowSleep ? 1 : 0) << ' '
+            << (object.rigidBody.ccd ? 1 : 0) << ' '
+            << (object.colliderEnabled ? 1 : 0) << ' '
+            << static_cast<int>(object.collider.shape) << ' '
+            << object.collider.radius << ' '
+            << object.collider.halfExtents.x << ' ' << object.collider.halfExtents.y << ' ' << object.collider.halfExtents.z << ' '
+            << object.collider.planeNormal.x << ' ' << object.collider.planeNormal.y << ' ' << object.collider.planeNormal.z << ' '
+            << object.collider.planeOffset << ' '
+            << object.collider.restitution << ' '
+            << object.collider.friction << ' '
+            << (object.collider.isTrigger ? 1 : 0) << '\n';
     }
 
     if (markClean) {
@@ -225,7 +257,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
     std::string magic;
     int version = 0;
     in >> magic >> version;
-    if (magic != "3DGEditorScene" ||(version < 1 || version > 12)) {
+    if (magic != "3DGEditorScene" ||(version < 1 || version > 14)) {
         if (error) *error = "Scene file has an unknown format.";
         return false;
     }
@@ -251,6 +283,10 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             int directionalShadows = 1;
             int pointShadows = 1;
             int spotShadows = 1;
+            int physicsBroadPhase = m_environment.physicsBroadPhase ? 1 : 0;
+            int physicsAllowSleeping = m_environment.physicsAllowSleeping ? 1 : 0;
+            int showPhysicsGuides = m_environment.showPhysicsGuides ? 1 : 0;
+            int selectedPhysicsGuideOnly = m_environment.selectedPhysicsGuideOnly ? 1 : 0;
             in >> m_environment.timeOfDay
                >> m_environment.skyLightIntensity;
             if (version >= 9) {
@@ -273,10 +309,31 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                    >> spotShadows
                    >> m_environment.shadowSoftness;
             }
-            in >> fog
-               >> m_environment.fogDensity
+            in >> fog;
+            if (version >= 12) {
+                in >> m_environment.fogColor.r
+                >> m_environment.fogColor.g
+                >> m_environment.fogColor.b;
+            }
+            in >> m_environment.fogDensity
                >> m_environment.fogHeight
                >> m_environment.fogHeightFalloff;
+            if (version >= 15) {
+                in >> m_environment.physicsGravity.x
+                   >> m_environment.physicsGravity.y
+                   >> m_environment.physicsGravity.z
+                   >> m_environment.physicsSolverIterations
+                   >> physicsBroadPhase
+                   >> m_environment.physicsCellSize
+                   >> m_environment.physicsRestitutionThreshold
+                   >> physicsAllowSleeping
+                   >> m_environment.physicsSleepLinearVelocity
+                   >> m_environment.physicsTimeToSleep;
+            }
+            if (version >= 16) {
+                in >> showPhysicsGuides
+                   >> selectedPhysicsGuideOnly;
+            }
             if (!in) {
                 if (error) *error = "Scene file contains an invalid environment record.";
                 Clear();
@@ -292,6 +349,10 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             m_environment.pointShadows = pointShadows != 0;
             m_environment.spotShadows = spotShadows != 0;
             m_environment.fog = fog != 0;
+            m_environment.physicsBroadPhase = physicsBroadPhase != 0;
+            m_environment.physicsAllowSleeping = physicsAllowSleeping != 0;
+            m_environment.showPhysicsGuides = showPhysicsGuides != 0;
+            m_environment.selectedPhysicsGuideOnly = selectedPhysicsGuideOnly != 0;
             continue;
         }
 
@@ -334,7 +395,6 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             continue;
         }
 
-
         if (recordType != "object") {
             std::string rest;
             std::getline(in, rest);
@@ -353,6 +413,17 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         glm::vec3 linearVelocity{0.0f};
         glm::vec3 angularVelocityAxis{0.0f, 1.0f, 0.0f};
         float angularVelocityRadians = 0.0f;
+        int linearVelocityEnabled = 0;
+        int angularVelocityEnabled = 0;
+        int rigidBodyEnabled = 0;
+        RigidBody rigidBody;
+        int colliderEnabled = 0;
+        Collider collider;
+        int colliderShape = static_cast<int>(engine::ecs::ColliderShape::Sphere);
+        int rigidBodyUseGravity = rigidBody.useGravity ? 1 : 0;
+        int rigidBodyAllowSleep = rigidBody.allowSleep ? 1 : 0;
+        int rigidBodyCcd = rigidBody.ccd ? 1 : 0;
+        int colliderTrigger = collider.isTrigger ? 1 : 0;
 
         in >> primitiveName >> name
            >> transform.position.x >> transform.position.y >> transform.position.z
@@ -385,6 +456,42 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             >> angularVelocityAxis.x >> angularVelocityAxis.y >> angularVelocityAxis.z
             >> angularVelocityRadians;
         }
+        if (version >= 13) {
+            in >> linearVelocityEnabled
+               >> angularVelocityEnabled;
+        } else {
+            linearVelocityEnabled = glm::dot(linearVelocity, linearVelocity) > 0.0f ? 1 : 0;
+            angularVelocityEnabled = angularVelocityRadians != 0.0f
+                && glm::dot(angularVelocityAxis, angularVelocityAxis) > 0.0f ? 1 : 0;
+        }
+        if (version >= 14) {
+            in >> rigidBodyEnabled
+               >> rigidBody.velocity.x >> rigidBody.velocity.y >> rigidBody.velocity.z
+               >> rigidBody.invMass
+               >> rigidBodyUseGravity
+               >> rigidBodyAllowSleep
+               >> rigidBodyCcd
+               >> colliderEnabled
+               >> colliderShape
+               >> collider.radius
+               >> collider.halfExtents.x >> collider.halfExtents.y >> collider.halfExtents.z
+               >> collider.planeNormal.x >> collider.planeNormal.y >> collider.planeNormal.z
+               >> collider.planeOffset
+               >> collider.restitution
+               >> collider.friction
+               >> colliderTrigger;
+            rigidBody.useGravity = rigidBodyUseGravity != 0;
+            rigidBody.allowSleep = rigidBodyAllowSleep != 0;
+            rigidBody.ccd = rigidBodyCcd != 0;
+            collider.isTrigger = colliderTrigger != 0;
+            if (colliderShape == static_cast<int>(engine::ecs::ColliderShape::Plane)) {
+                collider.shape = engine::ecs::ColliderShape::Plane;
+            } else if (colliderShape == static_cast<int>(engine::ecs::ColliderShape::Box)) {
+                collider.shape = engine::ecs::ColliderShape::Box;
+            } else {
+                collider.shape = engine::ecs::ColliderShape::Sphere;
+            }
+        }
 
         if (!in || !ParsePrimitive(primitiveName, &primitive)) {
             if (error) *error = "Scene file contains an invalid object record.";
@@ -400,6 +507,10 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         m_objects.back().linearVelocity = linearVelocity;
         m_objects.back().angularVelocityAxis = angularVelocityAxis;
         m_objects.back().angularVelocityRadians = angularVelocityRadians;
+        m_objects.back().rigidBodyEnabled = rigidBodyEnabled != 0;
+        m_objects.back().rigidBody = rigidBody;
+        m_objects.back().colliderEnabled = colliderEnabled != 0;
+        m_objects.back().collider = collider;
     }
 
     m_selectedIndex = m_objects.empty() ? -1 : 0;
@@ -547,6 +658,30 @@ void EditorScene::ScaleSelected(float factor)
         transform->scale *= factor;
         m_dirty = true;
     }
+}
+
+bool EditorScene::SetSelectedTransform(const Transform& value) {
+    if (SelectedLocked()) {
+        return false;
+    }
+
+    Transform* transform = SelectedTransform();
+    if (!transform) {
+        return false;
+    }
+
+    if (transform->position == value.position
+        && transform->scale == value.scale
+        && transform->rotation == value.rotation) {
+        return false;
+    }
+
+    if (!m_transformEditOpen) {
+        PushUndoSnapshot();
+    }
+    *transform = value;
+    m_dirty = true;
+    return true;
 }
 
 void EditorScene::ResetSelectedTransform()
@@ -804,6 +939,45 @@ bool EditorScene::CycleSelectedColor()
     return true;
 }
 
+bool EditorScene::SetSelectedName(const std::string& name) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked || name.empty() || selected.name == name) {
+        return false;
+    }
+
+    PushUndoSnapshot();
+    selected.name = name;
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedColor(const glm::vec3& color) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    MeshRenderer* renderer = m_registry.TryGet<MeshRenderer>(selected.entity);
+    if (!renderer || selected.locked || renderer->color == color) {
+        return false;
+    }
+
+    PushUndoSnapshot();
+    renderer->color = color;
+    if (selected.light) {
+        selected.lightData.color = color;
+        if (Light* light = m_registry.TryGet<Light>(selected.entity)) {
+            light->color = color;
+        }
+    }
+    m_dirty = true;
+    return true;
+}
+
 bool EditorScene::SetSelectedPrimitive(Primitive primitive, const engine::Mesh & mesh)
 {
     if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
@@ -888,6 +1062,40 @@ void EditorScene::SetEnvironment(const Environment& environment) {
     m_dirty = true;
 }
 
+bool EditorScene::SetSelectedLinearVelocityEnabled(bool enabled)
+{
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked || selected.linearVelocityEnabled == enabled) {
+        return false;
+    }
+
+    PushUndoSnapshot();
+    selected.linearVelocityEnabled = enabled;
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedAngularVelocityEnabled(bool enabled)
+{ 
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked || selected.angularVelocityEnabled == enabled) {
+        return false;
+    }
+
+    PushUndoSnapshot();
+    selected.angularVelocityEnabled = enabled;
+    m_dirty = true;
+    return true;
+}
+
 bool EditorScene::SetSelectedLinearVelocity(const glm::vec3 &velocity)
 {
     if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
@@ -919,6 +1127,88 @@ bool EditorScene::SetSelectedAngularVelocity(const glm::vec3 &axis, float radian
     PushUndoSnapshot();
     selected.angularVelocityAxis = axis;
     selected.angularVelocityRadians = radiansPerSecond;
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedRigidBodyEnabled(bool enabled)
+{
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked || selected.rigidBodyEnabled == enabled) {
+        return false;
+    }
+
+    PushUndoSnapshot();
+    selected.rigidBodyEnabled = enabled;
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedRigidBody(const engine::ecs::RigidBody &rigidBody)
+{
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) {
+        return false;
+    }
+
+    PushUndoSnapshot();
+    selected.rigidBodyEnabled = true;
+    selected.rigidBody = rigidBody;
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedColliderEnabled(bool enabled)
+{
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked || selected.colliderEnabled == enabled) {
+        return false;
+    }
+
+    PushUndoSnapshot();
+    selected.colliderEnabled = enabled;
+    if (enabled) {
+        const Transform* transform = m_registry.TryGet<Transform>(selected.entity);
+        if (selected.primitive == Primitive::Plane && selected.modelAssetPath.empty()) {
+            selected.collider = Collider::MakePlane(glm::vec3(0.0f, 1.0f, 0.0f),
+                transform ? transform->position.y : 0.0f);
+        } else if (transform) {
+            selected.collider = Collider::MakeBox(glm::vec3(
+                std::max(transform->scale.x * 0.5f, 0.001f),
+                std::max(transform->scale.y * 0.5f, 0.001f),
+                std::max(transform->scale.z * 0.5f, 0.001f)));
+        }
+    }
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedCollider(const engine::ecs::Collider &collider)
+{
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) {
+        return false;
+    }
+
+    PushUndoSnapshot();
+    selected.colliderEnabled = true;
+    selected.collider = collider;
     m_dirty = true;
     return true;
 }

@@ -18,11 +18,17 @@ namespace {
 const char* kVert = R"GLSL(
 #version 330 core
 layout (location = 0) in vec3 aPos;
+layout (location = 3) in vec4 aIModel0;
+layout (location = 4) in vec4 aIModel1;
+layout (location = 5) in vec4 aIModel2;
+layout (location = 6) in vec4 aIModel3;
+uniform int  uInstanced;
 uniform mat4 uModel;
 uniform mat4 uLightVP;
 out vec3 vWorld;
 void main() {
-    vec4 w = uModel * vec4(aPos, 1.0);
+    mat4 model = (uInstanced == 1) ? mat4(aIModel0, aIModel1, aIModel2, aIModel3) : uModel;
+    vec4 w = model * vec4(aPos, 1.0);
     vWorld = w.xyz;
     gl_Position = uLightVP * w;
 }
@@ -73,40 +79,33 @@ void PointShadow::Generate(ecs::Registry &reg, const std::vector<glm::vec3> &lig
 
     GLint prevFbo = 0;
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFbo);
+    GLfloat prevClear[4];
+    glGetFloatv(GL_COLOR_CLEAR_VALUE, prevClear);
 
     glViewport(0, 0, m_faceSize, m_faceSize);
     glBindFramebuffer(GL_FRAMEBUFFER, m_fbo);
     m_shader.Bind();
+    glClearColor(1.0e6f, 1.0e6f, 1.0e6f, 1.0e6f);  // unrendered = "very far" = lit
 
     const glm::mat4 proj = glm::perspective(glm::radians(90.0f), 1.0f, 0.1f, m_far);
     const glm::vec3 dir[6] = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
     const glm::vec3 up[6]  = {{0,-1,0},{0,-1,0},{0,0,1},{0,0,-1},{0,-1,0},{0,-1,0}};
-    // glClearColor clamps to [0,1] even for float attachments; use glClearBufferfv
-    // so unrendered pixels hold 1e6 ("very far" = lit) in the R32F cubemap.
-    const GLfloat farClear[4] = {1.0e6f, 0.0f, 0.0f, 0.0f};
-
+   
+    m_batch.Build(reg);
     for (int i = 0; i < m_count; ++i) {
         const glm::vec3 lp = lights[static_cast<std::size_t>(i)];
         m_shader.SetVec3("uLightPos", lp);
         for (unsigned int f = 0; f < 6; ++f) {
             glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                                    GL_TEXTURE_CUBE_MAP_POSITIVE_X + f, m_cubes[i], 0);
-            glClearBufferfv(GL_COLOR, 0, farClear);
-            glClear(GL_DEPTH_BUFFER_BIT);
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             m_shader.SetMat4("uLightVP", proj * glm::lookAt(lp, lp + dir[f], up[f]));
-            reg.view<Transform, MeshPBR>().each([&](Entity, Transform& t, MeshPBR& m) {
-                if (!m.mesh) return;
-                // Skip emissive geometry (the light gizmos): a marker sphere sits
-                // ON the light, so casting it would block the light everywhere.
-                const glm::vec3& e = m.material.emissive;
-                if (e.x > 0.0f || e.y > 0.0f || e.z > 0.0f) return;
-                m_shader.SetMat4("uModel", t.Model());
-                m.mesh->Draw();
-            });
+            m_batch.Draw(m_shader);
         }
     }
 
     glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prevFbo));
+    glClearColor(prevClear[0], prevClear[1], prevClear[2], prevClear[3]);
 }
 
 void PointShadow::BindCubes(unsigned int startUnit) const {

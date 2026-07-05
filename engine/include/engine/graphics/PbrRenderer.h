@@ -72,6 +72,7 @@ private:
     SpotShadow              m_spotShadow;
     ClusteredLights         m_clustered;
     std::unique_ptr<Shader> m_pbr;
+    unsigned int            m_instanceVBO = 0;   // per-instance data for batching
 };
 
 } // namespace engine

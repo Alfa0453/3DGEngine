@@ -2,6 +2,7 @@
 
 #include "engine/ecs/Entity.h"
 #include "engine/ecs/Components.h"
+#include "engine/physics/PhysicsComponents.h"
 
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -28,9 +29,15 @@ public:
         glm::vec3 color{1.0f};
         std::string modelPath;
         std::string materialPath;
+        bool linearVelocityEnabled = false;
+        bool angularVelocityEnabled = false;
         glm::vec3 linearVelocity{0.0f};
         glm::vec3 angularVelocityAxis{0.0f, 1.0f, 0.0f};
         float angularVelocityRadians = 0.0f;
+        bool rigidBodyEnabled = false;
+        bool colliderEnabled = false;
+        engine::ecs::RigidBody rigidBody;
+        engine::ecs::Collider collider;
     };
 
     struct Scene {
@@ -43,6 +50,14 @@ public:
             float fogDensity = 0.008f;
             float fogHeight = -0.35f;
             float fogHeightFalloff = 0.10f;
+            glm::vec3 physicsGravity{0.0f, -9.81f, 0.0f};
+            int physicsSolverIterations = 4;
+            bool physicsBroadPhase = true;
+            float physicsCellSize = 2.0f;
+            float physicsRestitutionThreshold = 0.5f;
+            bool physicsAllowSleeping = true;
+            float physicsSleepLinearVelocity = 0.06f;
+            float physicsTimeToSleep = 0.5f;
         };
 
         Environment environment;

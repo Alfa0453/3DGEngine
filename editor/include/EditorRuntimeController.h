@@ -33,5 +33,7 @@ public:
         const engine::Mesh& sphere,
         engine::ecs::Registry& playRegistry,
         engine::RuntimeAssetManager& playAssets,
+        std::vector<engine::ecs::Entity>* createdEntities,
+        std::vector<std::string>* createdNames,
         std::string* error) const;
 };

@@ -15,6 +15,21 @@ void EditorPanels::Toggle(Panel panel)
     SetOpen(panel, !IsOpen(panel));
 }
 
+void EditorPanels::ShowAll()
+{
+    m_open.fill(true);
+}
+
+void EditorPanels::HideAll()
+{
+    m_open.fill(false);
+}
+
+void EditorPanels::ResetDefaults()
+{
+    m_open = kDefaultOpen;
+}
+
 const char *EditorPanels::Name(Panel panel)
 {
     switch (panel) {
@@ -24,6 +39,7 @@ const char *EditorPanels::Name(Panel panel)
     case Panel::Assets:     return "Assets";
     case Panel::Console:   return "Console";
     case Panel::MaterialMaker: return "Material Maker";
+    case Panel::PhysicsStatus: return "PhysicsStatus";
     case Panel::Count:     break;
     }
     return "Panel";

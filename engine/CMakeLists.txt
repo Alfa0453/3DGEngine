@@ -16,11 +16,14 @@ add_library(engine STATIC
     src/graphics/Primitives.cpp
     src/graphics/ModelDraw.cpp
     src/graphics/Model.cpp
+    src/graphics/SkinnedModel.cpp
+    src/graphics/SkinnedRenderer.cpp
     src/graphics/PngDecoder.cpp
     src/graphics/JpegDecoder.cpp
     src/graphics/ObjData.cpp
     src/graphics/Cubemap.cpp
     src/graphics/ShadowMap.cpp
+    src/graphics/ShadowCasters.cpp
     src/graphics/CascadedShadow.cpp
     src/graphics/ClusteredLights.cpp
     src/graphics/Skybox.cpp
@@ -42,6 +45,7 @@ add_library(engine STATIC
     src/audio/miniaudio_impl.c
     src/physics/PhysicsWorld.cpp
     src/physics/CharacterController.cpp
+    src/animation/Animator.cpp
 )
 
 # PUBLIC headers live under include/ so consumers write:  #include <engine/...>

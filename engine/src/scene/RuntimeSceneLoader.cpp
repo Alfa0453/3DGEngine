@@ -4,6 +4,7 @@
 #include "engine/ecs/Registry.h"
 #include "engine/graphics/DayNightCycle.h"
 #include "engine/graphics/Mesh.h"
+#include "engine/physics/PhysicsComponents.h"
 
 #include <fstream>
 #include <sstream>
@@ -78,11 +79,11 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
     std::string magic;
     int version = 0;
     in >> magic >> version;
-    if (magic != "3DGRuntimeScene" || version < 1 || version > 5) {
+    if (magic != "3DGRuntimeScene" || version < 1 || version > 9) {
         if (error) {
             *error = "Runtime scene file has an unknown format: "
                 + magic + " " + std::to_string(version)
-                + " (expected 3DGRuntimeScene 1..5).";
+                + " (expected 3DGRuntimeScene 1..9).";
         }
         return false;
     }
@@ -104,19 +105,46 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             }
 
             int fog = 1;
+            int driveSun = 1;
+            int physicsBroadPhase = loaded.environment.physicsBroadPhase ? 1 : 0;
+            int physicsAllowSleeping = loaded.environment.physicsAllowSleeping ? 1 : 0;
             record >> loaded.environment.timeOfDay
-                >> loaded.environment.skyLightIntensity
-                >> fog
-                >> loaded.environment.fogDensity
-                >> loaded.environment.fogHeight
-                >> loaded.environment.fogHeightFalloff;
-            if (!record) {
-                if (error) {
-                    *error = "Runtime scene contains an invalid environment record.";
-                }
-                return false;
+                   >> loaded.environment.skyLightIntensity;
+            if (version >= 6) {
+                record >> driveSun
+                       >> loaded.environment.sunIntensity;
             }
+            record >> fog
+                   >> loaded.environment.fogDensity
+                   >> loaded.environment.fogHeight
+                   >> loaded.environment.fogHeightFalloff;
+            if (version >= 9) {
+                record >> loaded.environment.physicsGravity.x
+                       >> loaded.environment.physicsGravity.y
+                       >> loaded.environment.physicsGravity.z
+                       >> loaded.environment.physicsSolverIterations
+                       >> physicsBroadPhase
+                       >> loaded.environment.physicsCellSize
+                       >> loaded.environment.physicsRestitutionThreshold
+                       >> physicsAllowSleeping
+                       >> loaded.environment.physicsSleepLinearVelocity
+                       >> loaded.environment.physicsTimeToSleep;
+                if (!record) {
+                    record.clear();
+                    loaded.environment.physicsGravity = glm::vec3(0.0f, -9.81f, 0.0f);
+                    loaded.environment.physicsSolverIterations = 4;
+                    physicsBroadPhase = 1;
+                    loaded.environment.physicsCellSize = 2.0f;
+                    loaded.environment.physicsRestitutionThreshold = 0.5f;
+                    physicsAllowSleeping = 1;
+                    loaded.environment.physicsSleepLinearVelocity = 0.06f;
+                    loaded.environment.physicsTimeToSleep = 0.5f;
+                }
+            }
+            loaded.environment.driveSunLight = driveSun != 0;
             loaded.environment.fog = fog != 0;
+            loaded.environment.physicsBroadPhase = physicsBroadPhase != 0;
+            loaded.environment.physicsAllowSleeping = physicsAllowSleeping != 0;
             continue;
         }
 
@@ -131,11 +159,11 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             Scene::LightDesc desc;
             std::string typeName;
             record >> desc.name >> typeName
-                >> desc.position.x >> desc.position.y >> desc.position.z
-                >> desc.light.color.r >> desc.light.color.g >> desc.light.color.b
-                >> desc.light.intensity
-                >> desc.light.direction.x >> desc.light.direction.y >> desc.light.direction.z
-                >> desc.light.innerAngle >> desc.light.outerAngle >> desc.light.range >> desc.light.sourceRadius;
+                   >> desc.position.x >> desc.position.y >> desc.position.z
+                   >> desc.light.color.r >> desc.light.color.g >> desc.light.color.b
+                   >> desc.light.intensity
+                   >> desc.light.direction.x >> desc.light.direction.y >> desc.light.direction.z
+                   >> desc.light.innerAngle >> desc.light.outerAngle >> desc.light.range >> desc.light.sourceRadius;
 
             if (!record || !ParseLightType(typeName, &desc.light.type)) {
                 if (error) {
@@ -171,6 +199,54 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             record >> entity.linearVelocity.x >> entity.linearVelocity.y >> entity.linearVelocity.z
                    >> entity.angularVelocityAxis.x >> entity.angularVelocityAxis.y >> entity.angularVelocityAxis.z
                    >> entity.angularVelocityRadians;
+        }
+        if (version >= 7) {
+            int linearVelocityEnabled = 0;
+            int angularVelocityEnabled = 0;
+            record >> linearVelocityEnabled >> angularVelocityEnabled;
+            entity.linearVelocityEnabled = linearVelocityEnabled != 0;
+            entity.angularVelocityEnabled = angularVelocityEnabled != 0;
+        } else {
+            entity.linearVelocityEnabled = glm::dot(entity.linearVelocity, entity.linearVelocity) > 0.0f;
+            entity.angularVelocityEnabled = entity.angularVelocityRadians != 0.0f
+                && glm::dot(entity.angularVelocityAxis, entity.angularVelocityAxis) > 0.0f;
+        }
+        if (version >= 8) {
+            int rigidBodyEnabled = 0;
+            int rigidBodyUseGravity = entity.rigidBody.useGravity ? 1 : 0;
+            int rigidBodyAllowSleep = entity.rigidBody.allowSleep ? 1 : 0;
+            int rigidBodyCcd = entity.rigidBody.ccd ? 1 : 0;
+            int colliderEnabled = 0;
+            int colliderShape = static_cast<int>(ecs::ColliderShape::Sphere);
+            int colliderTrigger = entity.collider.isTrigger ? 1 : 0;
+            record >> rigidBodyEnabled
+                >> entity.rigidBody.velocity.x >> entity.rigidBody.velocity.y >> entity.rigidBody.velocity.z
+                >> entity.rigidBody.invMass
+                >> rigidBodyUseGravity
+                >> rigidBodyAllowSleep
+                >> rigidBodyCcd
+                >> colliderEnabled
+                >> colliderShape
+                >> entity.collider.radius
+                >> entity.collider.halfExtents.x >> entity.collider.halfExtents.y >> entity.collider.halfExtents.z
+                >> entity.collider.planeNormal.x >> entity.collider.planeNormal.y >> entity.collider.planeNormal.z
+                >> entity.collider.planeOffset
+                >> entity.collider.restitution
+                >> entity.collider.friction
+                >> colliderTrigger;
+            entity.rigidBodyEnabled = rigidBodyEnabled != 0;
+            entity.rigidBody.useGravity = rigidBodyUseGravity != 0;
+            entity.rigidBody.allowSleep = rigidBodyAllowSleep != 0;
+            entity.rigidBody.ccd = rigidBodyCcd != 0;
+            entity.colliderEnabled = colliderEnabled != 0;
+            entity.collider.isTrigger = colliderTrigger != 0;
+            if (colliderShape == static_cast<int>(ecs::ColliderShape::Plane)) {
+                entity.collider.shape = ecs::ColliderShape::Plane;
+            } else if (colliderShape == static_cast<int>(ecs::ColliderShape::Box)) {
+                entity.collider.shape = ecs::ColliderShape::Box;
+            } else {
+                entity.collider.shape = ecs::ColliderShape::Sphere;
+            }
         }
 
         if (!record) {
@@ -229,6 +305,12 @@ bool RuntimeSceneLoader::Instantiate(const Scene &scene, ecs::Registry &registry
                 desc.angularVelocityAxis,
                 desc.angularVelocityRadians
             });
+        }
+        if (desc.rigidBodyEnabled) {
+            registry.Add<ecs::RigidBody>(entity, desc.rigidBody);
+        }
+        if (desc.colliderEnabled) {
+            registry.Add<ecs::Collider>(entity, desc.collider);
         }
 
         if (created) {

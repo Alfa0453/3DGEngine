@@ -42,6 +42,78 @@ std::size_t ComponentCount(engine::ecs::Registry& registry) {
     return pool ? pool->dense.size() : 0;
 }
 
+struct PhysicsRuntimeStats {
+    std::size_t rigidBodies = 0;
+    std::size_t dynamicBodies = 0;
+    std::size_t colliders = 0;
+    std::size_t staticColliders = 0;
+    std::size_t triggerColliders = 0;
+    std::size_t dynamicBodiesWithoutCollider = 0;
+    std::size_t invalidColliders = 0;
+};
+
+bool RuntimeColliderShapeIsInvalid(const engine::ecs::Collider& collider) {
+    switch (collider.shape) {
+    case engine::ecs::ColliderShape::Sphere:
+        return collider.radius <= 0.0f;
+    case engine::ecs::ColliderShape::Box:
+        return collider.halfExtents.x <= 0.0f
+            || collider.halfExtents.y <= 0.0f
+            || collider.halfExtents.z <= 0.0f;
+    case engine::ecs::ColliderShape::Plane:
+        return glm::dot(collider.planeNormal, collider.planeNormal) <= 0.0001f;
+    }
+
+    return true;
+}
+
+PhysicsRuntimeStats CollectPhysicsRuntimeStats(engine::ecs::Registry& registry) {
+    PhysicsRuntimeStats stats;
+
+    if (engine::ecs::Pool<engine::ecs::RigidBody>* bodies = registry.TryPool<engine::ecs::RigidBody>()) {
+        stats.rigidBodies = bodies->dense.size();
+        for (const engine::ecs::Entity entity : bodies->dense) {
+            const engine::ecs::RigidBody& body = bodies->Get(entity);
+            if (body.invMass > 0.0f) {
+                ++stats.dynamicBodies;
+                if (!registry.Has<engine::ecs::Collider>(entity)) {
+                    ++stats.dynamicBodiesWithoutCollider;
+                }
+            }
+        }
+    }
+
+    if (engine::ecs::Pool<engine::ecs::Collider>* colliders = registry.TryPool<engine::ecs::Collider>()) {
+        stats.colliders = colliders->dense.size();
+        for (const engine::ecs::Entity entity : colliders->dense) {
+            const engine::ecs::Collider& collider = colliders->Get(entity);
+            if (collider.isTrigger) {
+                ++stats.triggerColliders;
+            }
+            if (RuntimeColliderShapeIsInvalid(collider)) {
+                ++stats.invalidColliders;
+            }
+
+            const engine::ecs::RigidBody* body = registry.TryGet<engine::ecs::RigidBody>(entity);
+            if (!body || body->invMass <= 0.0f) {
+                ++stats.staticColliders;
+            }
+        }
+    }
+
+    return stats;
+}
+
+const char* CollisionPhaseName(engine::CollisionEvent::Phase phase) {
+    switch (phase) {
+    case engine::CollisionEvent::Phase::Enter: return "Enter";
+    case engine::CollisionEvent::Phase::Stay: return "Stay";
+    case engine::CollisionEvent::Phase::Exit: return "Exit";
+    }
+
+    return "Event";
+}
+
 bool IsMaterialDocumentPath(const std::string& path) {
     return std::filesystem::path(path).extension() == ".3dgmat";
 }
@@ -289,9 +361,7 @@ void EditorApp::OnUpdate(float dt)
     if (dt > 0.0f) {
         m_fps = m_fps * 0.92f + (1.0f / dt) * 0.08f;
     }
-    if (m_mode == EditorMode::Play && m_playRegistry) {
-        engine::ecs::UpdateRuntimeMotion(*m_playRegistry, dt);
-    }
+    StepPlayPhysics(dt);
     UpdateAutosave(dt);
 
     const bool keyboardCaptured = IsEditorKeyboardCaptured();
@@ -478,6 +548,7 @@ void EditorApp::DrawEditorOverlay()
     dockspaceContext.log = &m_log;
     dockspaceContext.gizmo = &m_gizmo;
     dockspaceContext.modeName = m_mode == EditorMode::Edit ? "Edit" : "Play";
+    dockspaceContext.playMode = m_mode == EditorMode::Play;
     dockspaceContext.scenePathBuffer = m_scenePathDraft.data();
     dockspaceContext.scenePathBufferSize = m_scenePathDraft.size();
     dockspaceContext.fps = m_fps;
@@ -487,6 +558,21 @@ void EditorApp::DrawEditorOverlay()
     DrawDirtyScenePrompt();
     if (dockspaceContext.viewportDropRequested) {
         DropPayloadOnScene();
+    }
+    if (dockspaceContext.newSceneRequested) {
+        RequestNewScene();
+    }
+    if (dockspaceContext.enterPlayModeRequested && m_mode == EditorMode::Edit) {
+        EnterPlayMode();
+    }
+    if (dockspaceContext.exitPlayModeRequested && m_mode == EditorMode::Play) {
+        ExitPlayMode();
+    }
+    if (dockspaceContext.undoRequested) {
+        Undo();
+    }
+    if (dockspaceContext.redoRequested) {
+        Redo();
     }
     if (dockspaceContext.saveSceneRequested) {
         SaveScene();
@@ -508,6 +594,24 @@ void EditorApp::DrawEditorOverlay()
     if (dockspaceContext.validateRuntimeRequested) {
         ValidateRuntimeScene();
     }
+    if (dockspaceContext.addCubeRequested) {
+        AddCube();
+    }
+    if (dockspaceContext.addPlaneRequested) {
+        AddPlane();
+    }
+    if (dockspaceContext.addSphereRequested) {
+        AddSphere();
+    }
+    if (dockspaceContext.addDynamicCubeRequested) {
+        AddDynamicCube();
+    }
+    if (dockspaceContext.addStaticFloorRequested) {
+        AddStaticFloor();
+    }
+    if (dockspaceContext.addTriggerVolumeRequested) {
+        AddTriggerVolume();
+    }
     if (m_sphere) {
         if (dockspaceContext.addDirectionalLightRequested) {
             m_scene.AddDirectionalLight(*m_sphere);
@@ -525,6 +629,15 @@ void EditorApp::DrawEditorOverlay()
             m_scene.AddAreaLight(*m_cube);
             m_log.Info("Added area light");
         }
+    }
+    if (dockspaceContext.duplicateSelectedRequested) {
+        DuplicateSelected();
+    }
+    if (dockspaceContext.deleteSelectedRequested) {
+        DeleteSelected();
+    }
+    if (dockspaceContext.frameSelectedRequested) {
+        FrameSelected();
     }
 
     m_text->Begin(width, height);
@@ -834,6 +947,9 @@ void EditorApp::HandleGlobalShortcuts(engine::Window & window)
     if (Pressed(GLFW_KEY_F10)) {
         TogglePanel(EditorPanels::Panel::MaterialMaker);
     }
+    if (Pressed(GLFW_KEY_F12)) {
+        TogglePanel(EditorPanels::Panel::PhysicsStatus);
+    }
     if (Pressed(GLFW_KEY_TAB)) {
        m_scene.SelectNext();
     }
@@ -852,7 +968,7 @@ void EditorApp::HandleGlobalShortcuts(engine::Window & window)
     }
 }
 
-void EditorApp::HandleAssetShortcuts(engine::Window & window, bool controlDown)
+void EditorApp::HandleAssetShortcuts(engine::Window& window, bool controlDown)
 {
     if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_F5)) {
         SaveScene();
@@ -906,7 +1022,7 @@ void EditorApp::HandleAssetShortcuts(engine::Window & window, bool controlDown)
     }
 }
 
-void EditorApp::HandleEditorCommandShortcuts(engine::Window & window, bool controlDown)
+void EditorApp::HandleEditorCommandShortcuts(engine::Window& window, bool controlDown)
 {
     if (controlDown && Pressed(GLFW_KEY_Z)) {
         Undo();
@@ -925,6 +1041,9 @@ void EditorApp::HandleEditorCommandShortcuts(engine::Window & window, bool contr
     }
     if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_C)) {
         CycleSelectedColor();
+    }
+    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_F)) {
+        FrameSelected();
     }
     if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_H)) {
         ToggleSelectedVisible();
@@ -1033,12 +1152,7 @@ void EditorApp::DrawPlayScene(const glm::mat4 & viewProj)
         AddEnvironmentSunIfNeeded(pbrRegistry, environment, sky, environmentSunApplied);
 
         engine::PbrRenderer::Options options;
-        options.ambient = sky.ambient * environment.skyLightIntensity;
-        options.fog = environment.fog;
-        options.fogColor = sky.horizon;
-        options.fogDensity = environment.fogDensity;
-        options.fogHeight = environment.fogHeight;
-        options.fogHeightFalloff = environment.fogHeightFalloff;
+        ConfigureEnvironmentPbrOptions(pbrRegistry, options, environment, sky);
 
         const engine::Window& window = GetWindow();
         m_pbrRenderer->Render(pbrRegistry, m_camera, window.AspectRatio(), window.Width(), window.Height(), options);
@@ -1051,6 +1165,10 @@ void EditorApp::DrawPlayScene(const glm::mat4 & viewProj)
         m_modelShader->SetVec3("uLightColor", glm::vec3(1.0f));
         m_modelShader->SetVec3("uViewPos", m_camera.Position());
         engine::ecs::RenderLoadedModels(*m_playRegistry, *m_modelShader);
+    }
+
+    if (m_shader && m_cube && !m_physicsEventGuides.empty()) {
+        m_viewport.DrawPhysicsEventGuides(m_renderer, *m_shader, *m_cube, m_physicsEventGuides, viewProj);
     }
 }
 
@@ -1142,7 +1260,10 @@ void EditorApp::DrawEditScene(const glm::mat4 & viewProj)
     if (m_shader && m_cube && environment.showLightGuides) {
         m_viewport.DrawSelectedLightGuide(m_renderer, *m_shader, *m_cube, m_scene, viewProj, environment.selectedLightGuideOnly);
     }
-
+    if (m_shader && m_cube && environment.showPhysicsGuides) {
+        m_viewport.DrawPhysicsColliderGuides(m_renderer, *m_shader, *m_cube, m_scene, viewProj,
+            environment.selectedPhysicsGuideOnly);
+    }
     if (m_shader && m_cube && m_cone) {
         m_viewport.DrawSceneGizmo(m_renderer, *m_shader, *m_cube, *m_cone, m_scene, m_gizmo, viewProj);
     }
@@ -1545,6 +1666,56 @@ void EditorApp::AddSphere()
     m_log.Info("Added sphere");
 }
 
+void EditorApp::AddDynamicCube() {
+    if (!m_cube) {
+        m_log.Error("Add failed: cube mesh is not ready");
+        return;
+    }
+
+    m_scene.AddCube(*m_cube);
+    engine::ecs::RigidBody rigidBody = engine::ecs::RigidBody::Dynamic(1.0f);
+    m_scene.SetSelectedRigidBody(rigidBody);
+
+    const Transform* transform = m_scene.SelectedTransform();
+    engine::ecs::Collider collider = engine::ecs::Collider::MakeBox(transform
+        ? glm::max(transform->scale * 0.5f, glm::vec3(0.001f))
+        : glm::vec3(0.5f));
+    m_scene.SetSelectedCollider(collider);
+    m_log.Info("Added dynamic cube");
+}
+
+void EditorApp::AddStaticFloor() {
+    if (!m_plane) {
+        m_log.Error("Add failed: plane mesh is not ready");
+        return;
+    }
+
+    m_scene.AddPlane(*m_plane);
+    m_scene.SetSelectedRigidBodyEnabled(false);
+    const Transform* transform = m_scene.SelectedTransform();
+    engine::ecs::Collider collider = engine::ecs::Collider::MakePlane(glm::vec3(0.0f, 1.0f, 0.0f),
+        transform ? transform->position.y : 0.0f);
+    m_scene.SetSelectedCollider(collider);
+    m_log.Info("Added static floor");
+}
+
+void EditorApp::AddTriggerVolume() {
+    if (!m_cube) {
+        m_log.Error("Add failed: cube mesh is not ready");
+        return;
+    }
+
+    m_scene.AddCube(*m_cube);
+    m_scene.SetSelectedRigidBodyEnabled(false);
+    const Transform* transform = m_scene.SelectedTransform();
+    engine::ecs::Collider collider = engine::ecs::Collider::MakeBox(transform
+        ? glm::max(transform->scale * 0.5f, glm::vec3(0.001f))
+        : glm::vec3(0.5f));
+    collider.isTrigger = true;
+    m_scene.SetSelectedCollider(collider);
+    m_log.Info("Added trigger volume");
+}
+
 void EditorApp::CycleSelectedColor()
 {
     if (m_scene.CycleSelectedColor()) {
@@ -1589,6 +1760,29 @@ void EditorApp::ToggleSelectedLocked()
     } else {
         m_log.Warning("Lock change failed: no selected object");
     }
+}
+
+void EditorApp::FrameSelected() {
+    const EditorScene::Object* selected = m_scene.SelectedObject();
+    if (!selected) {
+        m_log.Warning("Frame selected failed: no selected object");
+        return;
+    }
+
+    const Transform* transform = m_scene.TryGetTransform(selected->entity);
+    if (!transform) {
+        m_log.Warning("Frame selected failed: selected object has no transform");
+        return;
+    }
+
+    const float largestScale = std::max(std::max(transform->scale.x, transform->scale.y), transform->scale.z);
+    const float radius = std::max(largestScale, 0.5f);
+    const glm::vec3 target = transform->position;
+    const glm::vec3 offset(0.0f, std::max(1.5f, radius * 1.5f), std::max(3.0f, radius * 4.0f));
+
+    m_camera.SetPosition(target + offset);
+    m_camera.LookAt(target);
+    m_log.Info("Framed selected object");
 }
 
 void EditorApp::DuplicateSelected()
@@ -1708,6 +1902,16 @@ void EditorApp::RequestCloseEditor() {
     GetWindow().SetShouldClose(true);
 }
 
+void EditorApp::RequestNewScene()
+{
+    if (m_scene.IsDirty()) {
+        QueueDirtySceneAction(PendingSceneAction::NewScene);
+        return;
+    }
+
+    PerformNewScene();
+}
+
 void EditorApp::RequestLoadSceneFromPath(const std::string& path) {
     if (m_scene.IsDirty()) {
         QueueDirtySceneAction(PendingSceneAction::LoadScene, path);
@@ -1715,6 +1919,19 @@ void EditorApp::RequestLoadSceneFromPath(const std::string& path) {
     }
 
     PerformLoadSceneFromPath(path);
+}
+
+void EditorApp::PerformNewScene()
+{
+    if (!m_cube || !m_plane) {
+        m_log.Error("New scene failed: editor primitive meshes are not ready");
+        return;
+    }
+
+    m_scene.BuildDefault(*m_cube, *m_plane, *m_sphere);
+    m_scene.MarkDirty();
+    m_autosaveTimer = 0.0f;
+    m_log.Info("Created new scene");
 }
 
 void EditorApp::PerformLoadSceneFromPath(const std::string& path) {
@@ -1813,6 +2030,16 @@ void EditorApp::ValidateRuntimeScene()
 void EditorApp::EnterPlayMode()
 {
     m_editSnapshot = m_scene.CreateSnapshot();
+    m_physicsPaused = false;
+    m_physicsStepRequested = false;
+    m_physicsAccumulator = 0.0f;
+    m_physicsStepsLastFrame = 0;
+    m_physicsEventEnterCount = 0;
+    m_physicsEventStayCount = 0;
+    m_physicsEventExitCount = 0;
+    m_physicsEventRows.clear();
+    m_physicsEventGuides.clear();
+    m_playEntityNames.clear();
     std::string error;
     if (!BuildPlayRuntimePreview(&error)) {
         m_editSnapshot.reset();
@@ -1827,17 +2054,48 @@ void EditorApp::EnterPlayMode()
     const std::size_t angularCount = m_playRegistry
         ? ComponentCount<engine::ecs::AngularVelocity>(*m_playRegistry)
         : 0;
+    const PhysicsRuntimeStats physics = m_playRegistry
+        ? CollectPhysicsRuntimeStats(*m_playRegistry)
+        : PhysicsRuntimeStats{};
 
     m_mode = EditorMode::Play;
     m_log.Info("Play mode: runtime preview loaded, "
         + std::to_string(linearCount) + " linear, "
-        + std::to_string(angularCount) + " angular");
+        + std::to_string(angularCount) + " angular, "
+        + std::to_string(physics.rigidBodies) + " rigid bodies, "
+        + std::to_string(physics.dynamicBodies) + " dynamic, "
+        + std::to_string(physics.colliders) + " colliders, "
+        + std::to_string(physics.staticColliders) + " static, "
+        + std::to_string(physics.triggerColliders) + " triggers");
+    if (physics.dynamicBodiesWithoutCollider > 0) {
+        m_log.Warning("Play mode physics: "
+            + std::to_string(physics.dynamicBodiesWithoutCollider)
+            + " dynamic body/bodies have no collider");
+    }
+    if (physics.invalidColliders > 0) {
+        m_log.Warning("Play mode physics: "
+            + std::to_string(physics.invalidColliders)
+            + " collider(s) have invalid radius, extents, or plane normal");
+    }
+    if (physics.dynamicBodies > 0 && physics.staticColliders == 0) {
+        m_log.Warning("Play mode physics: dynamic bodies exist but there are no static colliders to collide with");
+    }
 }
 
 void EditorApp::ExitPlayMode()
 {
     m_playRegistry.reset();
     m_playAssets.reset();
+    m_physicsPaused = false;
+    m_physicsStepRequested = false;
+    m_physicsAccumulator = 0.0f;
+    m_physicsStepsLastFrame = 0;
+    m_physicsEventEnterCount = 0;
+    m_physicsEventStayCount = 0;
+    m_physicsEventExitCount = 0;
+    m_physicsEventRows.clear();
+    m_physicsEventGuides.clear();
+    m_playEntityNames.clear();
 
     if (!m_cube || !m_plane) {
         m_log.Error("Could not restore edit scene");
@@ -1865,6 +2123,8 @@ bool EditorApp::BuildPlayRuntimePreview(std::string * error)
 
     m_playRegistry.emplace();
     m_playAssets.emplace();
+    std::vector<engine::ecs::Entity> createdEntities;
+    std::vector<std::string> createdNames;
     if (!m_runtime.BuildPlayRuntimePreview(m_scene,
             m_project,
             *m_cube,
@@ -1872,6 +2132,8 @@ bool EditorApp::BuildPlayRuntimePreview(std::string * error)
             *m_sphere,
             *m_playRegistry,
             *m_playAssets,
+            &createdEntities,
+            &createdNames,
             error)) {
         m_playRegistry.reset();
         m_playAssets.reset();
@@ -1879,6 +2141,122 @@ bool EditorApp::BuildPlayRuntimePreview(std::string * error)
     }
 
     return true;
+}
+
+void EditorApp::StepPlayPhysics(float dt)
+{
+    m_physicsStepsLastFrame = 0;
+    m_physicsEventEnterCount = 0;
+    m_physicsEventStayCount = 0;
+    m_physicsEventExitCount = 0;
+    if (m_mode != EditorMode::Play || !m_playRegistry) {
+        m_physicsStepRequested = false;
+        return;
+    }
+
+    const EditorScene::Environment& environment = m_scene.GetEnvironment();
+    m_playPhysics.gravity = environment.physicsGravity;
+    m_playPhysics.solverIterations = environment.physicsSolverIterations;
+    m_playPhysics.broadPhase = environment.physicsBroadPhase;
+    m_playPhysics.cellSize = environment.physicsCellSize;
+    m_playPhysics.restitutionThreshold = environment.physicsRestitutionThreshold;
+    m_playPhysics.allowSleeping = environment.physicsAllowSleeping;
+    m_playPhysics.sleepLinearVelocity = environment.physicsSleepLinearVelocity;
+    m_playPhysics.timeToSleep = environment.physicsTimeToSleep;
+
+    const float step = std::max(m_physicsFixedTimestep, 0.0001f);
+    if (m_physicsStepRequested) {
+        engine::ecs::UpdateRuntimeMotion(*m_playRegistry, step);
+        m_playPhysics.Step(*m_playRegistry, step);
+        CapturePlayPhysicsEvents();
+        m_physicsStepRequested = false;
+        m_physicsStepsLastFrame = 1;
+        return;
+    }
+
+    if (m_physicsPaused) {
+        return;
+    }
+
+    m_physicsAccumulator += std::min(dt, 0.25f);
+    constexpr int kMaxPhysicsStepsPerFrame = 5;
+    while (m_physicsAccumulator >= step && m_physicsStepsLastFrame < kMaxPhysicsStepsPerFrame) {
+        engine::ecs::UpdateRuntimeMotion(*m_playRegistry, step);
+        m_playPhysics.Step(*m_playRegistry, step);
+        CapturePlayPhysicsEvents();
+        m_physicsAccumulator -= step;
+        ++m_physicsStepsLastFrame;
+    }
+
+    if (m_physicsStepsLastFrame == kMaxPhysicsStepsPerFrame && m_physicsAccumulator >= step) {
+        m_physicsAccumulator = 0.0f;
+        m_log.Warning("Play physics skipped accumulated time to keep the editor responsive");
+    }
+}
+
+void EditorApp::CapturePlayPhysicsEvents()
+{
+    constexpr std::size_t kMaxRecentEvents = 32;
+
+    auto entityName = [this](engine::ecs::Entity entity) {
+        const auto it = m_playEntityNames.find(entity);
+        if (it != m_playEntityNames.end() && !it->second.empty()) {
+            return it->second;
+        }
+
+        char fallback[48];
+        std::snprintf(fallback, sizeof(fallback), "Entity_%u", engine::ecs::EntityIndex(entity));
+        return std::string(fallback);
+    };
+
+    for (const engine::CollisionEvent& event : m_playPhysics.Events()) {
+        switch (event.phase) {
+        case engine::CollisionEvent::Phase::Enter:
+            ++m_physicsEventEnterCount;
+            break;
+        case engine::CollisionEvent::Phase::Stay:
+            ++m_physicsEventStayCount;
+            break;
+        case engine::CollisionEvent::Phase::Exit:
+            ++m_physicsEventExitCount;
+            break;
+        }
+
+        const std::string type = event.trigger ? "Trigger" : "Collision";
+        EditorDockspace::PhysicsEventRow row;
+        row.objectA = entityName(event.a);
+        row.objectB = entityName(event.b);
+        row.phase = static_cast<int>(event.phase);
+        row.trigger = event.trigger;
+        row.text = std::string(CollisionPhaseName(event.phase))
+            + " " + type + ": "
+            + row.objectA + " <-> " + row.objectB;
+        m_physicsEventRows.push_back(row);
+
+        if (m_playRegistry) {
+            const Transform* transformA = m_playRegistry->TryGet<Transform>(event.a);
+            const Transform* transformB = m_playRegistry->TryGet<Transform>(event.b);
+            if (transformA && transformB) {
+                EditorViewport::PhysicsEventGuide guide;
+                guide.a = transformA->position;
+                guide.b = transformB->position;
+                guide.phase = row.phase;
+                guide.trigger = row.trigger;
+                m_physicsEventGuides.push_back(guide);
+            }
+        }
+    }
+
+    if (m_physicsEventRows.size() > kMaxRecentEvents) {
+        m_physicsEventRows.erase(
+            m_physicsEventRows.begin(),
+            m_physicsEventRows.end() - static_cast<std::ptrdiff_t>(kMaxRecentEvents));
+    }
+    if (m_physicsEventGuides.size() > kMaxRecentEvents) {
+        m_physicsEventGuides.erase(
+            m_physicsEventGuides.begin(),
+            m_physicsEventGuides.end() - static_cast<std::ptrdiff_t>(kMaxRecentEvents));
+    }
 }
 
 bool EditorApp::Pressed(int key)

@@ -24,6 +24,7 @@ public:
     void MoveForward(float amount);  // along the look direction
     void MoveRight(float amount);    // strafe
     void MoveUp(float amount);       // straight up/down (world axis)
+    void SetPosition(const glm::vec3& position);
 
     // Aim the camera at a world-space point (sets yaw/pitch). Handy for a
     // fixed camera that should look at a target rather than be flown around.

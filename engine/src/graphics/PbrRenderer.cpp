@@ -15,6 +15,7 @@
 
 #include <glad/glad.h>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/type_ptr.hpp>
 
 #include <string>
 #include <vector>
@@ -32,17 +33,37 @@ const char* kPbrVert = R"GLSL(
 layout (location = 0) in vec3 aPos;
 layout (location = 1) in vec3 aNormal;
 layout (location = 2) in vec2 aTexCoord;
+layout (location = 3) in vec4 aIModel0;   // per-instance model matrix (columns)
+layout (location = 4) in vec4 aIModel1;
+layout (location = 5) in vec4 aIModel2;
+layout (location = 6) in vec4 aIModel3;
+layout (location = 7) in vec3 aIAlbedo;   // per-instance material
+layout (location = 8) in vec3 aIMRA;      // metallic, roughness, ao
+layout (location = 9) in vec3 aIEmissive;
+uniform int  uInstanced;
 uniform mat4 uModel;
 uniform mat4 uViewProj;
 uniform mat3 uNormalMat;
 out vec3 vWorldPos;
 out vec3 vNormal;
 out vec2 vUV;
+flat out vec3 vIAlbedo;
+flat out vec3 vIMRA;
+flat out vec3 vIEmissive;
 void main() {
-    vec4 world  = uModel * vec4(aPos, 1.0);
-    vWorldPos   = world.xyz;
-    vNormal     = normalize(uNormalMat * aNormal);
-    vUV         = aTexCoord;
+    mat4 model; mat3 nrm;
+    if (uInstanced == 1) {
+        model = mat4(aIModel0, aIModel1, aIModel2, aIModel3);
+        nrm   = transpose(inverse(mat3(model)));
+        vIAlbedo = aIAlbedo; vIMRA = aIMRA; vIEmissive = aIEmissive;
+    } else {
+        model = uModel; nrm = uNormalMat;
+        vIAlbedo = vec3(0.0); vIMRA= vec3(0.0); vIEmissive = vec3(0.0);
+    }
+    vec4 world = model * vec4(aPos, 1.0);
+    vWorldPos  = world.xyz;
+    vNormal    = normalize(nrm * aNormal);
+    vUV        = aTexCoord;
     gl_Position = uViewProj * world;
 }
 )GLSL";
@@ -55,6 +76,10 @@ in vec3 vWorldPos;
 in vec3 vNormal;
 in vec2 vUV;
 out vec4 FragColor;
+flat in vec3 vIAlbedo;
+flat in vec3 vIMRA;
+flat in vec3 vIEmissive;
+uniform int  uInstanced;
 uniform vec3  uViewPos;
 uniform vec3  uAlbedo;
 uniform float uMetallic;
@@ -227,11 +252,11 @@ mat3 CotangentFrame(vec3 N, vec3 p, vec2 uv) {
     return mat3(T * invmax, B * invmax, N);
 }
 void main() {
-    vec3 albedo = uAlbedo;
+    vec3 albedo = (uInstanced == 1) ? vIAlbedo : uAlbedo;
     if (uHasAlbedoMap == 1) albedo *= texture(uAlbedoMap, vUV).rgb;
-    float metallic = uMetallic;
-    float roughness = uRoughness;
-    float ao = uAO;
+    float metallic = (uInstanced == 1) ? vIMRA.x : uMetallic;
+    float roughness = (uInstanced == 1) ? vIMRA.y : uRoughness;
+    float ao = (uInstanced == 1) ? vIMRA.z : uAO;
     if (uHasMetalRoughMap == 1) {
         vec3 mr = texture(uMetalRoughMap, vUV).rgb;
         roughness *= mr.g;
@@ -299,7 +324,7 @@ void main() {
         ambient = uAmbient*albedo*ao;
     }
     if (uUseSSAO == 1) ambient *= texture(uSsaoMap, gl_FragCoord.xy / uScreenSize).r;
-    vec3 color = ambient + Lo + uEmissive;
+    vec3 color = ambient + Lo + ((uInstanced == 1) ? vIEmissive : uEmissive);
 
     if (uFogEnabled == 1) {
         float dist = length(uViewPos - vWorldPos);
@@ -326,9 +351,12 @@ PbrRenderer::PbrRenderer(int shadowSize)
       m_pbr(std::make_unique<Shader>(kPbrVert, kPbrFrag)) {
     const unsigned int blk = glGetUniformBlockIndex(m_pbr->ID(), "LightBlock");
     if (blk != GL_INVALID_INDEX) glUniformBlockBinding(m_pbr->ID(), blk, 0);
+    glGenBuffers(1, &m_instanceVBO);
 }
 
-PbrRenderer::~PbrRenderer() = default;
+PbrRenderer::~PbrRenderer() {
+    if (m_instanceVBO) glDeleteBuffers(1, &m_instanceVBO);
+}
 
 void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
                          int screenWidth, int screenHeight) {
@@ -467,8 +495,34 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
     m_pbr->SetFloat("uFogHeight", opt.fogHeight);
     m_pbr->SetFloat("uFogHeightFalloff", opt.fogHeightFalloff);
 
+    // Main lit pass. Untextured MeshPBR entities that share a mesh are drawn in
+    // ONE instanced call (per-instance model + material); textured ones fall back
+    // to per-object draws. Instancing collapses N draw calls to ~one per mesh.
+    std::unordered_map<const Mesh*, std::vector<float>> batches;
+    std::vector<std::pair<Transform*, MeshPBR*>> textured;
     reg.view<Transform, MeshPBR>().each([&](Entity, Transform& t, MeshPBR& m) {
         if (!m.mesh) return;
+        if (m.material.albedoMap || m.material.normalMap || m.material.metalRoughMap) {
+            textured.emplace_back(&t, &m);
+            return;
+        }
+        std::vector<float>& v = batches[m.mesh];
+        const glm::mat4 model = t.Model();
+        const float* mp = glm::value_ptr(model);
+        v.insert(v.end(), mp, mp + 16);
+        v.push_back(m.material.albedo.x); v.push_back(m.material.albedo.y); v.push_back(m.material.albedo.z);
+        v.push_back(m.material.metallic); v.push_back(m.material.roughness); v.push_back(m.material.ao);
+        v.push_back(m.material.emissive.x); v.push_back(m.material.emissive.y); v.push_back(m.material.emissive.z);
+    });
+
+    // Textured entities: per-object (uInstanced = 0).
+    m_pbr->SetInt("uInstanced", 0);
+    auto bindMap = [&](const Texture* tex, int unit, const char* flag, const char* samp) {
+        if (tex) { tex->Bind(static_cast<unsigned int>(unit)); m_pbr->SetInt(samp, unit); m_pbr->SetInt(flag, 1); }
+        else m_pbr->SetInt(flag, 0);
+    };
+    for (auto& pr : textured) {
+        Transform& t = *pr.first; MeshPBR& m = *pr.second;
         const glm::mat4 model = t.Model();
         m_pbr->SetMat4("uModel", model);
         m_pbr->SetMat3("uNormalMat", glm::mat3(glm::transpose(glm::inverse(model))));
@@ -477,15 +531,52 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
         m_pbr->SetFloat("uRoughness", m.material.roughness);
         m_pbr->SetFloat("uAO", m.material.ao);
         m_pbr->SetVec3("uEmissive", m.material.emissive);
-        auto bindMap = [&](const Texture* tex, int unit, const char* flag, const char* samp) {
-            if (tex) { tex->Bind(static_cast<unsigned int>(unit)); m_pbr->SetInt(samp, unit); m_pbr->SetInt(flag, 1); }
-            else m_pbr->SetInt(flag, 0);
-        };
         bindMap(m.material.albedoMap,     0, "uHasAlbedoMap",     "uAlbedoMap");
         bindMap(m.material.normalMap,     1, "uHasNormalMap",     "uNormalMap");
         bindMap(m.material.metalRoughMap, 2, "uHasMetalRoughMap", "uMetalRoughMap");
         m.mesh->Draw();
-    });
+    }
+    
+    // Instanced batches (uInstanced = 1, no textures).
+    if (!batches.empty()) {
+        m_pbr->SetInt("uInstanced", 1);
+        m_pbr->SetInt("uHasAlbedoMap", 0);
+        m_pbr->SetInt("uHasNormalMap", 0);
+        m_pbr->SetInt("uHasMetalRoughMap", 0);
+        const GLsizei stride = 25 * static_cast<GLsizei>(sizeof(float));
+        for (auto& kv : batches) {
+            const Mesh* mesh = kv.first;
+            std::vector<float>& data = kv.second;
+            const GLsizei count = static_cast<GLsizei>(data.size() / 25);
+            glBindVertexArray(mesh->Vao());
+            glBindBuffer(GL_ARRAY_BUFFER, m_instanceVBO);
+            glBufferData(GL_ARRAY_BUFFER,
+                        static_cast<GLsizeiptr>(data.size() * sizeof(float)),
+                        data.data(), GL_DYNAMIC_DRAW);
+            for (int c = 0; c < 4; ++c) {   // mat4 columns -> locations 3..6
+                const GLuint loc = static_cast<GLuint>(3 + c);
+                glEnableVertexAttribArray(loc);
+                glVertexAttribPointer(loc, 4, GL_FLOAT, GL_FALSE, stride,
+                                    reinterpret_cast<void*>(static_cast<std::size_t>(c * 4) * sizeof(float)));
+                glVertexAttribDivisor(loc, 1);
+            }
+            const struct { GLuint loc; int off; } mats[3] = {{7, 16}, {8, 19}, {9, 22}};
+            for (auto& a : mats) {
+                glEnableVertexAttribArray(a.loc);
+                glVertexAttribPointer(a.loc, 3, GL_FLOAT, GL_FALSE, stride,
+                                    reinterpret_cast<void*>(static_cast<std::size_t>(a.off) * sizeof(float)));
+                glVertexAttribDivisor(a.loc, 1);
+            }
+            glDrawElementsInstanced(GL_TRIANGLES, static_cast<GLsizei>(mesh->IndexCount()),
+                                    GL_UNSIGNED_INT, nullptr, count);
+            for (GLuint loc = 3; loc <= 9; ++loc) {   // leave the mesh VAO as we found it
+                glVertexAttribDivisor(loc, 0);
+                glDisableVertexAttribArray(loc);
+            }
+        }
+        glBindVertexArray(0);
+        m_pbr->SetInt("uInstanced", 0);
+    }
 }
 
 } // namespace engine

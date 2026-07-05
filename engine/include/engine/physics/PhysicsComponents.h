@@ -28,10 +28,45 @@ struct RigidBody {
     // and other fast movers. The moving body is approximated as a sphere.
     bool      ccd = false;
 
+
+    // Angular dynamics. invInertiaLocal is the body-space inverse inertia tensor;
+    // it is initialized from the collider on the first step (unless freezeRotation
+    // is set, which locks the body against spinning). Orientation lives on the
+    // entity's Transform.rotation.
+    glm::vec3 angularVelocity{0.0f};
+    glm::vec3 accumTorque{0.0f};
+    glm::mat3 invInertiaLocal{0.0f};
+    bool      freezeRotation = false;
+
     void AddForce(const glm::vec3& f) { accumForce += f; }
+    void AddTorque(const glm::vec3& tq) { accumTorque += tq; }
+    // Apply a force at a world point (com = centre of mass): adds the torque too.
+    void AddForceAtPoint(const glm::vec3& f, const glm::vec3& point, const glm::vec3& com) {
+        accumForce  += f;
+        accumTorque += glm::cross(point - com, f);
+    }
 
     static RigidBody Static() { RigidBody b; b.invMass = 0.0f; b.useGravity = false; return b; }
     static RigidBody Dynamic(float mass) { RigidBody b; b.invMass = (mass > 0.0f) ? 1.0f / mass : 0.0f; return b; }
+
+    // Inverse inertia tensors (body space, diagonal) for the primitive shapes.
+    static glm::mat3 SolidBoxInvInertia(float mass, const glm::vec3& half) {
+        if (mass <= 0.0f) return glm::mat3(0.0f);
+        const float x = half.x * 2.0f, y = half.y * 2.0f, z = half.z * 2.0f;   // full extents
+        const float ix = (mass / 12.0f) * (y * y + z * z);
+        const float iy = (mass / 12.0f) * (x * x + z * z);
+        const float iz = (mass / 12.0f) * (x * x + y * y);
+        glm::mat3 m(0.0f);
+        m[0][0] = 1.0f / ix; m[1][1] = 1.0f / iy; m[2][2] = 1.0f / iz;
+        return m;
+    }
+    static glm::mat3 SolidSphereInvInertia(float mass, float radius) {
+        if (mass <= 0.0f || radius <= 0.0f) return glm::mat3(0.0f);
+        const float i = (2.0f / 5.0f) * mass * radius * radius;
+        glm::mat3 m(0.0f);
+        m[0][0] = m[1][1] = m[2][2] = 1.0f / i;
+        return m;
+    }
 };
 
 enum class ColliderShape { Sphere, Plane, Box };

@@ -5,6 +5,9 @@
 
 #include <glm/glm.hpp>
 
+#include <string>
+#include <vector>
+
 namespace engine {
 class Mesh;
 class Model;
@@ -16,6 +19,15 @@ class Texture;
 
 class EditorViewport {
 public:
+    struct PhysicsEventGuide {
+        glm::vec3 a{0.0f};
+        glm::vec3 b{0.0f};
+        std::string objectA;
+        std::string objectB;
+        int phase = 0; // 0 enter, 1 stay, 2 exit
+        bool trigger = false;
+    };
+
     bool ContainsPoint(float x, float y, int width, int height) const;
 
     void DrawSceneGizmo(engine::Renderer& renderer,
@@ -32,6 +44,19 @@ public:
                                 const EditorScene& scene,
                                 const glm::mat4& viewProj,
                                 bool selectedOnly) const;
+
+    void DrawPhysicsColliderGuides(engine::Renderer& renderer,
+                                   engine::Shader& shader,
+                                   const engine::Mesh& cube,
+                                   const EditorScene& scene,
+                                   const glm::mat4& viewProj,
+                                   bool selectedOnly) const;
+
+    void DrawPhysicsEventGuides(engine::Renderer& renderer,
+                                engine::Shader& shader,
+                                const engine::Mesh& cube,
+                                const std::vector<PhysicsEventGuide>& guides,
+                                const glm::mat4& viewProj) const;
 
     void DrawSelectedModelOutline(engine::Renderer& renderer,
                                   engine::Shader& shader,

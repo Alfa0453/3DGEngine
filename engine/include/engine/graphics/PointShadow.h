@@ -1,6 +1,7 @@
 #pragma once
 
 #include "engine/graphics/Shader.h"
+#include "engine/graphics/ShadowCasters.h"
 
 #include <glm/glm.hpp>
 
@@ -40,6 +41,7 @@ private:
     unsigned int m_fbo = 0, m_depthRbo = 0;
     unsigned int m_cubes[kMax] = {0, 0, 0, 0};
     Shader m_shader;
+    ShadowCasterBatch m_batch;
 };
 
 } // namespace engine

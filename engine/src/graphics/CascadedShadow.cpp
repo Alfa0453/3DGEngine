@@ -21,9 +21,17 @@ namespace {
 const char* kVert = R"GLSL(
 #version 330 core
 layout (location = 0) in vec3 aPos;
+layout (location = 3) in vec4 aIModel0;
+layout (location = 4) in vec4 aIModel1;
+layout (location = 5) in vec4 aIModel2;
+layout (location = 6) in vec4 aIModel3;
+uniform int  uInstanced;
 uniform mat4 uModel;
 uniform mat4 uLightVP;
-void main() { gl_Position = uLightVP * uModel * vec4(aPos, 1.0); }
+void main() {
+    mat4 model = (uInstanced == 1) ? mat4(aIModel0, aIModel1, aIModel2, aIModel3) : uModel;
+    gl_Position = uLightVP * model * vec4(aPos, 1.0);
+}
 )GLSL";
 const char* kFrag = R"GLSL(
 #version 330 core
@@ -114,6 +122,7 @@ void CascadedShadow::Generate(ecs::Registry& reg, const Camera& camera, float as
     glViewport(0, 0, m_size, m_size);
     glBindFramebuffer(GL_FRAMEBUFFER, m_fbo);
     m_shader.Bind();
+    m_batch.Build(reg);
 
     for (int i = 0; i < kCascades; ++i) {
         const float cn = (i == 0) ? near : splitFar[i - 1];
@@ -123,13 +132,7 @@ void CascadedShadow::Generate(ecs::Registry& reg, const Camera& camera, float as
         glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, m_texArray, 0, i);
         glClear(GL_DEPTH_BUFFER_BIT);
         m_shader.SetMat4("uLightVP", m_vp[i]);
-        reg.view<Transform, MeshPBR>().each([&](Entity, Transform& t, MeshPBR& m) {
-            if (!m.mesh) return;
-            const glm::vec3& e = m.material.emissive;
-            if (e.x > 0.0f || e.y > 0.0f || e.z > 0.0f) return;   // skip gizmos
-            m_shader.SetMat4("uModel", t.Model());
-            m.mesh->Draw();
-        });
+        m_batch.Draw(m_shader);
     }
 
     glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prevFbo));

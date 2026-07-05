@@ -34,6 +34,10 @@ target_include_directories(3DGEditor PRIVATE
     ${CMAKE_SOURCE_DIR}/engine/include)
 target_link_libraries(3DGEditor PRIVATE engine MaterialMaker)
 
+# Keep the editor in its own bin/editor subfolder, separate from other targets.
+set_target_properties(3DGEditor PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/editor")
+
 add_custom_command(TARGET 3DGEditor POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
             "${CMAKE_CURRENT_SOURCE_DIR}/assets" "$<TARGET_FILE_DIR:3DGEditor>/assets"

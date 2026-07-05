@@ -1,6 +1,7 @@
 #pragma once
 
 #include "engine/graphics/Shader.h"
+#include "engine/graphics/ShadowCasters.h"
 
 #include <glm/glm.hpp>
 
@@ -38,6 +39,7 @@ private:
     glm::mat4 m_vp[kCascades];
     float     m_splits[kCascades] = {0, 0, 0, 0};
     Shader    m_shader;
+    ShadowCasterBatch m_batch;
 };
 
 } // namespace engine

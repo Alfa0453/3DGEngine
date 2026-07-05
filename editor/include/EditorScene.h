@@ -3,6 +3,7 @@
 #include <engine/ecs/Components.h>
 #include <engine/ecs/Entity.h>
 #include <engine/ecs/Registry.h>
+#include <engine/physics/PhysicsComponents.h>
 
 #include <glm/glm.hpp>
 
@@ -27,9 +28,15 @@ public:
         bool locked = false;
         std::string modelAssetPath;
         std::string materialAssetPath;
+        bool linearVelocityEnabled = false;
+        bool angularVelocityEnabled = false;
         glm::vec3 linearVelocity{0.0f};
         glm::vec3 angularVelocityAxis{0.0f, 1.0f, 0.0f};
         float angularVelocityRadians = 0.0f;
+        bool rigidBodyEnabled = false;
+        bool colliderEnabled = false;
+        engine::ecs::RigidBody rigidBody;
+        engine::ecs::Collider collider;
     };
 
     struct ObjectSnapshot {
@@ -60,6 +67,16 @@ public:
         float fogDensity = 0.008f;
         float fogHeight = -0.35f;
         float fogHeightFalloff = 0.10f;
+        glm::vec3 physicsGravity{0.0f, -9.81f, 0.0f};
+        int physicsSolverIterations = 4;
+        bool physicsBroadPhase = true;
+        float physicsCellSize = 2.0f;
+        float physicsRestitutionThreshold = 0.5f;
+        bool physicsAllowSleeping = true;
+        float physicsSleepLinearVelocity = 0.06f;
+        float physicsTimeToSleep = 0.5f;
+        bool showPhysicsGuides = true;
+        bool selectedPhysicsGuideOnly = false;
     };
 
     struct Snapshot {
@@ -76,6 +93,7 @@ public:
     const std::vector<Object>& Objects() const { return m_objects; }
     bool IsDirty() const { return m_dirty; }
     void MarkClean() { m_dirty = false; }
+    void MarkDirty() { m_dirty = true; }
 
     int SelectedIndex() const { return m_selectedIndex; }
     const Object* SelectedObject() const;
@@ -96,6 +114,7 @@ public:
     void RotateSelectedYaw(float degrees);
     void ScaleSelectedAxis(const glm::vec3& axis, float factor);
     void ScaleSelected(float factor);
+    bool SetSelectedTransform(const engine::ecs::Transform& transform);
     void ResetSelectedTransform();
     void BeginTransformEdit();
     void EndTransformEdit();
@@ -112,13 +131,21 @@ public:
     void AddAreaLight(const engine::Mesh& placeholderMesh);
     bool AddModel(const std::string& path, const engine::Mesh& placeholderMesh, const engine::ecs::Transform& transform);
     bool CycleSelectedColor();
+    bool SetSelectedName(const std::string& name);
+    bool SetSelectedColor(const glm::vec3& color);
     bool SetSelectedPrimitive(Primitive primitive, const engine::Mesh& mesh);
     bool SetSelectedModelAsset(const std::string& path);
     bool SetSelectedMaterialAsset(const std::string& path);
     bool SetSelectedLight(const engine::ecs::Light& light);
     void SetEnvironment(const Environment& environment);
+    bool SetSelectedLinearVelocityEnabled(bool enabled);
+    bool SetSelectedAngularVelocityEnabled(bool enabled);
     bool SetSelectedLinearVelocity(const glm::vec3& velocity);
     bool SetSelectedAngularVelocity(const glm::vec3& axis, float radiansPerSecond);
+    bool SetSelectedRigidBodyEnabled(bool enabled);
+    bool SetSelectedRigidBody(const engine::ecs::RigidBody& rigidBody);
+    bool SetSelectedColliderEnabled(bool enabled);
+    bool SetSelectedCollider(const engine::ecs::Collider& collider);
     bool ToggleSelectVisible();
     bool ToggleSelectedLocked();
     bool DuplicateSelected(const engine::Mesh& cube, const engine::Mesh& plane, const engine::Mesh& sphere);

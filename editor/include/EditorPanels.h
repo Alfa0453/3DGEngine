@@ -11,16 +11,21 @@ public:
         Assets,
         Console,
         MaterialMaker,
+        PhysicsStatus,
         Count
     };
 
     bool IsOpen(Panel panel) const;
     void SetOpen(Panel panel, bool open);
     void Toggle(Panel panel);
+    void ShowAll();
+    void HideAll();
+    void ResetDefaults();
 
     static const char* Name(Panel panel);
 
 private:
     static constexpr int kPanelCount = static_cast<int>(Panel::Count);
-    std::array<bool, kPanelCount> m_open{{true, true, false, true, true, false}};       
+    static constexpr std::array<bool, kPanelCount> kDefaultOpen{{true, true, false, true, true, false}};
+    std::array<bool, kPanelCount> m_open{kDefaultOpen};      
 };

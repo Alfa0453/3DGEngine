@@ -1,10 +1,13 @@
 #include "EditorDockspace.h"
 
 #include <engine/ecs/Components.h>
+#include <engine/physics/PhysicsComponents.h>
 
+#include <glm/gtc/quaternion.hpp>
 #include <imgui.h>
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdio>
 #include <filesystem>
@@ -12,6 +15,10 @@
 #include <vector>
 
 namespace {
+
+std::array<char, 128> g_objectNameBuffer{};
+engine::ecs::Entity g_objectNameEntity = engine::ecs::kNull;
+ImGuiTextFilter g_hierarchyFilter;
 
 const char* PrimitiveName(EditorScene::Primitive primitive) {
     return primitive == EditorScene::Primitive::Plane ? "Plane" : "Cube";
@@ -52,6 +59,137 @@ int LightTypeIndex(engine::ecs::Light::Type type) {
     case engine::ecs::Light::Type::Area: return 3;
     }
     return 1;
+}
+
+int ColliderShapeIndex(engine::ecs::ColliderShape shape) {
+    switch (shape) {
+    case engine::ecs::ColliderShape::Sphere: return 0;
+    case engine::ecs::ColliderShape::Box: return 1;
+    case engine::ecs::ColliderShape::Plane: return 2;
+    }
+    return 0;
+}
+
+engine::ecs::ColliderShape ColliderShapeFromIndex(int index) {
+    switch (index) {
+    case 1: return engine::ecs::ColliderShape::Box;
+    case 2: return engine::ecs::ColliderShape::Plane;
+    default: return engine::ecs::ColliderShape::Sphere;
+    }
+}
+
+const char* ColliderShapeName(engine::ecs::ColliderShape shape) {
+    switch (shape) {
+    case engine::ecs::ColliderShape::Sphere: return "Sphere";
+    case engine::ecs::ColliderShape::Box: return "Box";
+    case engine::ecs::ColliderShape::Plane: return "Plane";
+    }
+    return "Unknown";
+}
+
+struct ScenePhysicsStatus {
+    std::size_t objects = 0;
+    std::size_t rigidBodies = 0;
+    std::size_t dynamicBodies = 0;
+    std::size_t staticBodies = 0;
+    std::size_t colliders = 0;
+    std::size_t staticColliders = 0;
+    std::size_t triggers = 0;
+    std::size_t spheres = 0;
+    std::size_t boxes = 0;
+    std::size_t planes = 0;
+    std::size_t dynamicBodiesWithoutCollider = 0;
+    std::size_t invalidColliders = 0;
+};
+
+bool ColliderIsInvalid(const engine::ecs::Collider& collider) {
+    switch (collider.shape) {
+    case engine::ecs::ColliderShape::Sphere:
+        return collider.radius <= 0.0f;
+    case engine::ecs::ColliderShape::Box:
+        return collider.halfExtents.x <= 0.0f
+            || collider.halfExtents.y <= 0.0f
+            || collider.halfExtents.z <= 0.0f;
+    case engine::ecs::ColliderShape::Plane:
+        return collider.planeNormal.x == 0.0f
+            && collider.planeNormal.y == 0.0f
+            && collider.planeNormal.z == 0.0f;
+    }
+
+    return true;
+}
+
+ScenePhysicsStatus CollectScenePhysicsStatus(const EditorScene& scene) {
+    ScenePhysicsStatus status;
+    status.objects = scene.Objects().size();
+
+    for (const EditorScene::Object& object : scene.Objects()) {
+        if (object.rigidBodyEnabled) {
+            ++status.rigidBodies;
+            if (object.rigidBody.invMass > 0.0f) {
+                ++status.dynamicBodies;
+                if (!object.colliderEnabled) {
+                    ++status.dynamicBodiesWithoutCollider;
+                }
+            } else {
+                ++status.staticBodies;
+            }
+        }
+
+        if (!object.colliderEnabled) {
+            continue;
+        }
+
+        ++status.colliders;
+        if (object.collider.isTrigger) {
+            ++status.triggers;
+        }
+        if (!object.rigidBodyEnabled || object.rigidBody.invMass <= 0.0f) {
+            ++status.staticColliders;
+        }
+        if (ColliderIsInvalid(object.collider)) {
+            ++status.invalidColliders;
+        }
+
+        switch (object.collider.shape) {
+        case engine::ecs::ColliderShape::Sphere:
+            ++status.spheres;
+            break;
+        case engine::ecs::ColliderShape::Box:
+            ++status.boxes;
+            break;
+        case engine::ecs::ColliderShape::Plane:
+            ++status.planes;
+            break;
+        }
+    }
+
+    return status;
+}
+
+void DrawStatusRow(const char* label, std::size_t value) {
+    ImGui::TableNextRow();
+    ImGui::TableNextColumn();
+    ImGui::TextUnformatted(label);
+    ImGui::TableNextColumn();
+    ImGui::Text("%d", static_cast<int>(value));
+}
+
+engine::ecs::Collider DefaultColliderForObject(const EditorScene::Object& object,
+                                               const engine::ecs::Transform* transform) {
+    if (object.primitive == EditorScene::Primitive::Plane && object.modelAssetPath.empty()) {
+        const float planeOffset = transform ? transform->position.y : 0.0f;
+        return engine::ecs::Collider::MakePlane(glm::vec3(0.0f, 1.0f, 0.0f), planeOffset);
+    }
+
+    if (transform) {
+        return engine::ecs::Collider::MakeBox(glm::vec3(
+            std::max(transform->scale.x * 0.5f, 0.001f),
+            std::max(transform->scale.y * 0.5f, 0.001f),
+            std::max(transform->scale.z * 0.5f, 0.001f)));
+    }
+
+    return engine::ecs::Collider::MakeBox(glm::vec3(0.5f));
 }
 
 bool IsMaterialDocument(const std::filesystem::path& path) {
@@ -216,18 +354,268 @@ void DrawWorldSettings(EditorScene& scene, bool* open) {
         changed |= ImGui::DragFloat("Fog Falloff", &environment.fogHeightFalloff, 0.005f, 0.001f, 2.0f, "%.3f");
     }
 
+    if (ImGui::CollapsingHeader("Physics", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (ImGui::SmallButton("Reset Physics")) {
+            environment.physicsGravity = defaults.physicsGravity;
+            environment.physicsSolverIterations = defaults.physicsSolverIterations;
+            environment.physicsBroadPhase = defaults.physicsBroadPhase;
+            environment.physicsCellSize = defaults.physicsCellSize;
+            environment.physicsRestitutionThreshold = defaults.physicsRestitutionThreshold;
+            environment.physicsAllowSleeping = defaults.physicsAllowSleeping;
+            environment.physicsSleepLinearVelocity = defaults.physicsSleepLinearVelocity;
+            environment.physicsTimeToSleep = defaults.physicsTimeToSleep;
+            changed = true;
+        }
+        changed |= ImGui::DragFloat3("Gravity", &environment.physicsGravity.x, 0.05f);
+        changed |= ImGui::DragInt("Solver Iterations", &environment.physicsSolverIterations, 1.0f, 1, 32);
+        changed |= ImGui::Checkbox("Broad Phase", &environment.physicsBroadPhase);
+        changed |= ImGui::DragFloat("Cell Size", &environment.physicsCellSize, 0.05f, 0.1f, 100.0f, "%.2f");
+        changed |= ImGui::DragFloat("Bounce Threshold", &environment.physicsRestitutionThreshold, 0.02f, 0.0f, 10.0f, "%.2f");
+        changed |= ImGui::Checkbox("Allow Sleeping", &environment.physicsAllowSleeping);
+        changed |= ImGui::DragFloat("Sleep Velocity", &environment.physicsSleepLinearVelocity, 0.005f, 0.0f, 10.0f, "%.3f");
+        changed |= ImGui::DragFloat("Sleep Time", &environment.physicsTimeToSleep, 0.02f, 0.0f, 10.0f, "%.2f");
+    }
+
     if (ImGui::CollapsingHeader("Editor Guides")) {
         if (ImGui::SmallButton("Reset Guides")) {
             environment.showLightGuides = defaults.showLightGuides;
             environment.selectedLightGuideOnly = defaults.selectedLightGuideOnly;
+            environment.showPhysicsGuides = defaults.showPhysicsGuides;
+            environment.selectedPhysicsGuideOnly = defaults.selectedPhysicsGuideOnly;
             changed = true;
         }
         changed |= ImGui::Checkbox("Light Guides", &environment.showLightGuides);
         changed |= ImGui::Checkbox("Selected Guide Only", &environment.selectedLightGuideOnly);
+        changed |= ImGui::Checkbox("Physics Guides", &environment.showPhysicsGuides);
+        changed |= ImGui::Checkbox("Selected Physics Only", &environment.selectedPhysicsGuideOnly);
     }
 
     if (changed) {
         scene.SetEnvironment(environment);
+    }
+
+    ImGui::End();
+}
+
+void DrawPhysicsStatus(EditorDockspace::Context& context, bool* open) {
+    if (!ImGui::Begin(EditorPanels::Name(EditorPanels::Panel::PhysicsStatus), open)) {
+        ImGui::End();
+        return;
+    }
+
+    if (!context.scene) {
+        ImGui::TextUnformatted("Scene unavailable.");
+        ImGui::End();
+        return;
+    }
+
+    const EditorScene::Environment& environment = context.scene->GetEnvironment();
+    const ScenePhysicsStatus status = CollectScenePhysicsStatus(*context.scene);
+
+    if (ImGui::Button("Validate Runtime")) {
+        context.validateRuntimeRequested = true;
+    }
+    ImGui::SameLine();
+    if (context.playMode) {
+        ImGui::TextUnformatted("Mode: Play");
+    } else {
+        ImGui::TextUnformatted("Mode: Edit");
+    }
+
+    if (context.playMode) {
+        if (ImGui::Button(context.physicsPaused ? "Resume Physics" : "Pause Physics")) {
+            context.physicsPauseToggleRequested = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Step Physics")) {
+            context.physicsStepRequested = true;
+        }
+    } else {
+        ImGui::TextUnformatted("Physics playback controls are available in Play mode.");
+    }
+
+    ImGui::Text("Fixed Step: %.4f s (%.1f Hz)",
+        context.physicsFixedTimestep,
+        context.physicsFixedTimestep > 0.0f ? 1.0f / context.physicsFixedTimestep : 0.0f);
+    ImGui::Text("Accumulator: %.4f s", context.physicsAccumulator);
+    ImGui::Text("Steps Last Frame: %d", context.physicsStepsLastFrame);
+    ImGui::Text("Events: %d enter, %d stay, %d exit",
+        context.physicsEventEnterCount,
+        context.physicsEventStayCount,
+        context.physicsEventExitCount);
+
+    if (ImGui::CollapsingHeader("World Physics", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (ImGui::BeginTable("PhysicsWorldStatus", 2, ImGuiTableFlags_BordersInnerV)) {
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted("Gravity");
+            ImGui::TableNextColumn();
+            ImGui::Text("%.2f, %.2f, %.2f",
+                environment.physicsGravity.x,
+                environment.physicsGravity.y,
+                environment.physicsGravity.z);
+
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted("Solver Iterations");
+            ImGui::TableNextColumn();
+            ImGui::Text("%d", environment.physicsSolverIterations);
+
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted("Broad Phase");
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(environment.physicsBroadPhase ? "On" : "Off");
+
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted("Cell Size");
+            ImGui::TableNextColumn();
+            ImGui::Text("%.2f", environment.physicsCellSize);
+
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted("Sleeping");
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(environment.physicsAllowSleeping ? "On" : "Off");
+            ImGui::EndTable();
+        }
+    }
+
+    if (ImGui::CollapsingHeader("Scene Physics", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (ImGui::BeginTable("PhysicsSceneStatus", 2, ImGuiTableFlags_BordersInnerV)) {
+            DrawStatusRow("Objects", status.objects);
+            DrawStatusRow("Rigid Bodies", status.rigidBodies);
+            DrawStatusRow("Dynamic Bodies", status.dynamicBodies);
+            DrawStatusRow("Static Bodies", status.staticBodies);
+            DrawStatusRow("Colliders", status.colliders);
+            DrawStatusRow("Static Colliders", status.staticColliders);
+            DrawStatusRow("Triggers", status.triggers);
+            DrawStatusRow("Sphere Colliders", status.spheres);
+            DrawStatusRow("Box Colliders", status.boxes);
+            DrawStatusRow("Plane Colliders", status.planes);
+            ImGui::EndTable();
+        }
+    }
+
+    if (ImGui::CollapsingHeader("Selected Object", ImGuiTreeNodeFlags_DefaultOpen)) {
+        const EditorScene::Object* selected = context.scene->SelectedObject();
+        if (!selected) {
+            ImGui::TextUnformatted("No object selected.");
+        } else {
+            ImGui::Text("Name: %s", selected->name.c_str());
+            ImGui::Text("Type: %s", ObjectTypeName(*selected));
+            ImGui::Text("Rigid Body: %s", selected->rigidBodyEnabled ? "Enabled" : "Disabled");
+            if (selected->rigidBodyEnabled) {
+                const bool dynamic = selected->rigidBody.invMass > 0.0f;
+                ImGui::Text("Mode: %s", dynamic ? "Dynamic" : "Static");
+                if (dynamic) {
+                    ImGui::Text("Mass: %.3f", 1.0f / selected->rigidBody.invMass);
+                }
+                ImGui::Text("Velocity: %.3f, %.3f, %.3f",
+                    selected->rigidBody.velocity.x,
+                    selected->rigidBody.velocity.y,
+                    selected->rigidBody.velocity.z);
+                ImGui::Text("Gravity: %s", selected->rigidBody.useGravity ? "On" : "Off");
+                ImGui::Text("CCD: %s", selected->rigidBody.ccd ? "On" : "Off");
+                ImGui::Text("Sleep: %s", selected->rigidBody.allowSleep ? "Allowed" : "Blocked");
+            }
+
+            ImGui::Separator();
+            ImGui::Text("Collider: %s", selected->colliderEnabled ? "Enabled" : "Disabled");
+            if (selected->colliderEnabled) {
+                ImGui::Text("Shape: %s", ColliderShapeName(selected->collider.shape));
+                if (selected->collider.shape == engine::ecs::ColliderShape::Sphere) {
+                    ImGui::Text("Radius: %.3f", selected->collider.radius);
+                } else if (selected->collider.shape == engine::ecs::ColliderShape::Box) {
+                    ImGui::Text("Half Extents: %.3f, %.3f, %.3f",
+                        selected->collider.halfExtents.x,
+                        selected->collider.halfExtents.y,
+                        selected->collider.halfExtents.z);
+                } else {
+                    ImGui::Text("Plane: %.3f, %.3f, %.3f / %.3f",
+                        selected->collider.planeNormal.x,
+                        selected->collider.planeNormal.y,
+                        selected->collider.planeNormal.z,
+                        selected->collider.planeOffset);
+                }
+                ImGui::Text("Trigger: %s", selected->collider.isTrigger ? "Yes" : "No");
+                ImGui::Text("Restitution: %.3f", selected->collider.restitution);
+                ImGui::Text("Friction: %.3f", selected->collider.friction);
+            }
+        }
+    }
+
+    if (ImGui::CollapsingHeader("Warnings", ImGuiTreeNodeFlags_DefaultOpen)) {
+        bool hasWarning = false;
+        if (status.dynamicBodiesWithoutCollider > 0) {
+            hasWarning = true;
+            ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.30f, 1.0f),
+                "%d dynamic body/bodies have no collider",
+                static_cast<int>(status.dynamicBodiesWithoutCollider));
+        }
+        if (status.invalidColliders > 0) {
+            hasWarning = true;
+            ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.30f, 1.0f),
+                "%d collider(s) have invalid dimensions",
+                static_cast<int>(status.invalidColliders));
+        }
+        if (status.dynamicBodies > 0 && status.staticColliders == 0) {
+            hasWarning = true;
+            ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.30f, 1.0f),
+                "Dynamic bodies exist but no static colliders are present");
+        }
+        if (!hasWarning) {
+            ImGui::TextUnformatted("No physics warnings.");
+        }
+        
+    }
+
+    if (ImGui::CollapsingHeader("Recent Events", ImGuiTreeNodeFlags_DefaultOpen)) {
+        static bool selectedOnly = false;
+        static bool triggersOnly = false;
+        static bool enterExitOnly = false;
+
+        ImGui::Checkbox("Selected Only##PhysicsEvents", &selectedOnly);
+        ImGui::SameLine();
+        ImGui::Checkbox("Triggers Only##PhysicsEvents", &triggersOnly);
+        ImGui::SameLine();
+        ImGui::Checkbox("Enter/Exit Only##PhysicsEvents", &enterExitOnly);
+
+        std::string selectedName;
+        if (context.scene) {
+            if (const EditorScene::Object* selected = context.scene->SelectedObject()) {
+                selectedName = selected->name;
+            }
+        }
+
+        if (!context.playMode) {
+            ImGui::TextUnformatted("Enter Play mode to capture physics events.");
+        } else if (!context.physicsEventRows || context.physicsEventRows->empty()) {
+            ImGui::TextUnformatted("No collision or trigger events captured yet.");
+        } else {
+            int visibleRows = 0;
+            ImGui::BeginChild("PhysicsEventList", ImVec2(0.0f, 150.0f), true);
+            for (const EditorDockspace::PhysicsEventRow& row : *context.physicsEventRows) {
+                if (selectedOnly && (selectedName.empty()
+                    || (row.objectA != selectedName && row.objectB != selectedName))) {
+                    continue;
+                }
+                if (triggersOnly && !row.trigger) {
+                    continue;
+                }
+                if (enterExitOnly && row.phase == 1) {
+                    continue;
+                }
+
+                ImGui::TextUnformatted(row.text.c_str());
+                ++visibleRows;
+            }
+            if (visibleRows == 0) {
+                ImGui::TextUnformatted("No events match the active filters.");
+            }
+            ImGui::EndChild();
+        }
     }
 
     ImGui::End();
@@ -246,7 +634,27 @@ void DrawHierarchy(EditorDockspace::Context& context, bool* open) {
     }
 
     const std::vector<EditorScene::Object>& objects = context.scene->Objects();
-    ImGui::Text("%d objects", static_cast<int>(objects.size()));
+    g_hierarchyFilter.Draw("Filter");
+
+    int visibleObjects = 0;
+    for (const EditorScene::Object& object : objects) {
+        char label[192];
+        std::snprintf(label, sizeof(label), "%s%s%s %s",
+            object.visible ? "" : "[hidden] ",
+            object.locked ? "[locked] " : "",
+            object.light ? "[light] " : "",
+            object.name.c_str());
+
+        if (g_hierarchyFilter.PassFilter(label)) {
+            ++visibleObjects;
+        }
+    }
+
+    if (g_hierarchyFilter.IsActive()) {
+        ImGui::Text("%d of %d objects", visibleObjects, static_cast<int>(objects.size()));
+    } else {
+        ImGui::Text("%d objects", static_cast<int>(objects.size()));
+    }
     ImGui::Separator();
 
     for (int i = 0; i < static_cast<int>(objects.size()); ++i) {
@@ -258,8 +666,35 @@ void DrawHierarchy(EditorDockspace::Context& context, bool* open) {
             object.light ? "[light]" : "",
             object.name.c_str());
 
+        if (!g_hierarchyFilter.PassFilter(label)) {
+            continue;
+        }
+
         if (ImGui::Selectable(label, i == context.scene->SelectedIndex())) {
             context.scene->SelectIndex(i);
+        }
+        if (ImGui::BeginPopupContextItem()) {
+            context.scene->SelectIndex(i);
+            if (ImGui::MenuItem("Duplicate", nullptr, false, !object.locked)) {
+                context.duplicateSelectedRequested = true;
+            }
+            if (ImGui::MenuItem(object.visible ? "Hide" : "Show")) {
+                context.scene->ToggleSelectVisible();
+            }
+            if (ImGui::MenuItem(object.locked ? "Unlock" : "lock")) {
+                context.scene->ToggleSelectedLocked();
+            }
+            if (ImGui::MenuItem("Delete", nullptr, false, !object.locked)) {
+                context.deleteSelectedRequested = true;
+            }
+            if (ImGui::MenuItem("Frame Selected")) {
+                context.frameSelectedRequested = true;
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Deselect")) {
+                context.scene->Deselect();
+            }
+            ImGui::EndPopup();
         }
     }
 
@@ -285,131 +720,321 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
         return;
     }
 
-    ImGui::Text("Name: %s", selected->name.c_str());
-    ImGui::Text("Type: %s", ObjectTypeName(*selected));
-    ImGui::Text("Model: %s", selected->modelAssetPath.empty() ? "-" : selected->modelAssetPath.c_str());
-    ImGui::Text("Material: %s", selected->materialAssetPath.empty() ? "-" : selected->materialAssetPath.c_str());
-
-    if (selected->light) {
-    engine::ecs::Light light = selected->lightData;
-        if (const engine::ecs::Light* component = context.scene->TryGetLight(selected->entity)) {
-            light = *component;
+    if (ImGui::CollapsingHeader("Object", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (g_objectNameEntity != selected->entity) {
+            std::snprintf(g_objectNameBuffer.data(), g_objectNameBuffer.size(), "%s", selected->name.c_str());
+            g_objectNameEntity = selected->entity;
         }
 
-        int typeIndex = LightTypeIndex(light.type);
-        const char* lightTypes[] = {"Directional", "Point", "Spot", "Area"};
-        if (ImGui::Combo("Light Type", &typeIndex, lightTypes, 4)) {
-            light.type = LightTypeFromIndex(typeIndex);
-            context.scene->SetSelectedLight(light);
+        const bool submitted = ImGui::InputText("Name",
+            g_objectNameBuffer.data(),
+            g_objectNameBuffer.size(),
+            ImGuiInputTextFlags_EnterReturnsTrue);
+        const bool nameEditFinished = ImGui::IsItemDeactivatedAfterEdit();
+        if (submitted || nameEditFinished) {
+            if (context.scene->SetSelectedName(g_objectNameBuffer.data())) {
+                const EditorScene::Object* renamed = context.scene->SelectedObject();
+                std::snprintf(g_objectNameBuffer.data(), g_objectNameBuffer.size(), "%s",
+                    renamed ? renamed->name.c_str() : "");
+            } else {
+                std::snprintf(g_objectNameBuffer.data(), g_objectNameBuffer.size(), "%s", selected->name.c_str());
+            }
         }
-        if (ImGui::ColorEdit3("Light Color", &light.color.x)) {
-            context.scene->SetSelectedLight(light);
+
+        ImGui::Text("Type: %s", ObjectTypeName(*selected));
+        if (ImGui::Button("Frame Selected")) {
+            context.frameSelectedRequested = true;
         }
-        if (ImGui::DragFloat("Intensity", &light.intensity, 0.1f, 0.0f, 10000.0f)) {
-            context.scene->SetSelectedLight(light);
+
+        bool visible = selected->visible;
+        if(ImGui::Checkbox("Visible", &visible)) {
+            context.scene->ToggleSelectVisible();
         }
-        if (ImGui::DragFloat3("Direction", &light.direction.x, 0.02f)) {
-            context.scene->SetSelectedLight(light);
-        }
-        if (ImGui::DragFloat("Inner Angle", &light.innerAngle, 0.25f, 0.0f, 179.0f)) {
-            context.scene->SetSelectedLight(light);
-        }
-        if (ImGui::DragFloat("Outer Angle", &light.outerAngle, 0.25f, 0.0f, 179.0f)) {
-            context.scene->SetSelectedLight(light);
-        }
-        if (ImGui::DragFloat("Range", &light.range, 0.25f, 0.0f, 10000.0f)) {
-            context.scene->SetSelectedLight(light);
-        }
-        if (ImGui::DragFloat("Source Radius", &light.sourceRadius, 0.05f, 0.0f, 1000.0f)) {
-            context.scene->SetSelectedLight(light);
+
+        bool locked = selected->locked;
+        if (ImGui::Checkbox("Locked", &locked)) {
+            context.scene->ToggleSelectedLocked();
         }
     }
 
-    if (context.assets) {
-        const std::vector<EditorAssets::Asset> materials = FindMaterialAssets(*context.assets);
-        const char* preview = selected->materialAssetPath.empty() ? "None" : selected->materialAssetPath.c_str();
-        if (ImGui::BeginCombo("Apply Material", preview)) {
-            if (ImGui::Selectable("None", selected->materialAssetPath.empty())) {
-                if (context.scene->SetSelectedMaterialAsset(std::string())) {
-                    if (context.log) {
-                        context.log->Info("Cleared selected object material");
-                    }
-                } else if (context.log) {
-                    context.log->Warning("Material clear failed: selected object is locked");
-                }
+    if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
+        const engine::ecs::Transform* transform = context.scene->TryGetTransform(selected->entity);
+        if (transform) {
+            engine::ecs::Transform edited = *transform;
+            glm::vec3 rotationDegrees = glm::degrees(glm::eulerAngles(transform->rotation));
+            bool transformChanged = false;
+            bool transformEditEnded = false;
+
+            transformChanged |= ImGui::DragFloat3("Position", &edited.position.x, 0.05f);
+            if (ImGui::IsItemActivated()) {
+                context.scene->BeginTransformEdit();
             }
-            for (const EditorAssets::Asset& material : materials) {
-                const std::string fullPath = (std::filesystem::path(context.assets->RootPath()) / material.relativePath).string();
-                const bool current = selected->materialAssetPath == fullPath;
-                if (ImGui::Selectable(material.relativePath.c_str(), current)) {
-                    if (context.scene->SetSelectedMaterialAsset(fullPath)) {
+            transformEditEnded |= ImGui::IsItemDeactivatedAfterEdit();
+
+            transformChanged |= ImGui::DragFloat3("Scale", &edited.scale.x, 0.02f, 0.001f, 1000.0f);
+            if (ImGui::IsItemActivated()) {
+                context.scene->BeginTransformEdit();
+            }
+            transformEditEnded |= ImGui::IsItemDeactivatedAfterEdit();
+
+            if (ImGui::DragFloat3("Rotation", &rotationDegrees.x, 0.5f)) {
+                edited.rotation = glm::quat(glm::radians(rotationDegrees));
+                transformChanged = true;
+            }
+            if (ImGui::IsItemActivated()) {
+                context.scene->BeginTransformEdit();
+            }
+            transformEditEnded |= ImGui::IsItemDeactivatedAfterEdit();
+
+            if (transformChanged) {
+                context.scene->SetSelectedTransform(edited);
+            }
+            if (transformEditEnded) {
+                context.scene->EndTransformEdit();
+            }
+
+            if (ImGui::Button("Reset Transform")) {
+                context.scene->ResetSelectedTransform();
+            }
+        } else {
+            ImGui::TextUnformatted("No transform component.");
+        }
+    }
+
+    if (ImGui::CollapsingHeader("Rendering", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Text("Model: %s", selected->modelAssetPath.empty() ? "-" : selected->modelAssetPath.c_str());
+        ImGui::Text("Material: %s", selected->materialAssetPath.empty() ? "-" : selected->materialAssetPath.c_str());
+
+        const engine::ecs::MeshRenderer* renderer = context.scene->TryGetMeshRenderer(selected->entity);
+        if (renderer) {
+            glm::vec3 color = renderer->color;
+            if (ImGui::ColorEdit3("Color", &color.x)) {
+                context.scene->SetSelectedColor(color);
+            }
+        }
+
+        if (context.assets) {
+            const std::vector<EditorAssets::Asset> materials = FindMaterialAssets(*context.assets);
+            const char* preview = selected->materialAssetPath.empty() ? "None" : selected->materialAssetPath.c_str();
+            if (ImGui::BeginCombo("Apply Material", preview)) {
+                if (ImGui::Selectable("None", selected->materialAssetPath.empty())) {
+                    if (context.scene->SetSelectedMaterialAsset(std::string())) {
                         if (context.log) {
-                            context.log->Info("Applied material: " + material.relativePath);
+                            context.log->Info("Cleared selected object material");
                         }
                     } else if (context.log) {
-                        context.log->Warning("Material apply failed: selected object is locked");
+                        context.log->Warning("Material clear failed: selected object is locked");
                     }
                 }
-                if (current) {
-                    ImGui::SetItemDefaultFocus();
+                for (const EditorAssets::Asset& material : materials) {
+                    const std::string fullPath = (std::filesystem::path(context.assets->RootPath()) / material.relativePath).string();
+                    const bool current = selected->materialAssetPath == fullPath;
+                    if (ImGui::Selectable(material.relativePath.c_str(), current)) {
+                        if (context.scene->SetSelectedMaterialAsset(fullPath)) {
+                            if (context.log) {
+                                context.log->Info("Applied material: " + material.relativePath);
+                            }
+                        } else if (context.log) {
+                            context.log->Warning("Material apply failed: selected object is locked");
+                        }
+                    }
+                    if (current) {
+                        ImGui::SetItemDefaultFocus();
+                    }
                 }
+                if (materials.empty()) {
+                    ImGui::TextUnformatted("No .3dgmat files found.");
+                }
+                ImGui::EndCombo();
             }
-            if (materials.empty()) {
-                ImGui::TextUnformatted("No .3dgmat files found.");
-            }
-            ImGui::EndCombo();
         }
     }
 
-    glm::vec3 linearVelocity = selected->linearVelocity;
-    if (ImGui::DragFloat3("Linear velocity", &linearVelocity.x, 0.05f)) {
-        context.scene->SetSelectedLinearVelocity(linearVelocity);
+    if (selected->light) {
+        if (ImGui::CollapsingHeader("Light", ImGuiTreeNodeFlags_DefaultOpen)) {
+            engine::ecs::Light light = selected->lightData;
+            if (const engine::ecs::Light* component = context.scene->TryGetLight(selected->entity)) {
+                light = *component;
+            }
+
+            int typeIndex = LightTypeIndex(light.type);
+            const char* lightTypes[] = {"Directional", "Point", "Spot", "Area"};
+            if (ImGui::Combo("Light Type", &typeIndex, lightTypes, 4)) {
+                light.type = LightTypeFromIndex(typeIndex);
+                context.scene->SetSelectedLight(light);
+            }
+            if (ImGui::ColorEdit3("Light Color", &light.color.x)) {
+                context.scene->SetSelectedLight(light);
+            }
+            if (ImGui::DragFloat("Intensity", &light.intensity, 0.1f, 0.0f, 10000.0f)) {
+                context.scene->SetSelectedLight(light);
+            }
+            if (ImGui::DragFloat3("Direction", &light.direction.x, 0.02f)) {
+                context.scene->SetSelectedLight(light);
+            }
+            if (ImGui::DragFloat("Inner Angle", &light.innerAngle, 0.25f, 0.0f, 179.0f)) {
+                context.scene->SetSelectedLight(light);
+            }
+            if (ImGui::DragFloat("Outer Angle", &light.outerAngle, 0.25f, 0.0f, 179.0f)) {
+                context.scene->SetSelectedLight(light);
+            }
+            if (ImGui::DragFloat("Range", &light.range, 0.25f, 0.0f, 10000.0f)) {
+                context.scene->SetSelectedLight(light);
+            }
+            if (ImGui::DragFloat("Source Radius", &light.sourceRadius, 0.05f, 0.0f, 1000.0f)) {
+                context.scene->SetSelectedLight(light);
+            }
+        }
     }
 
-    glm::vec3 angularAxis = selected->angularVelocityAxis;
-    float angularSpeed = selected->angularVelocityRadians;
-    if (ImGui::DragFloat3("Angular axis", &angularAxis.x, 0.05f)) {
-        context.scene->SetSelectedAngularVelocity(angularAxis, angularSpeed);
-    }
-    if (ImGui::DragFloat("Angular speed", &angularSpeed, 0.05f)) {
-        context.scene->SetSelectedAngularVelocity(angularAxis, angularSpeed);
-    }
-    if (ImGui::Button("Spin Y")) {
-        context.scene->SetSelectedAngularVelocity(glm::vec3(0.0f, 1.0f, 0.0f), 1.57f);
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Clear motion")) {
-        context.scene->SetSelectedLinearVelocity(glm::vec3(0.0f));
-        context.scene->SetSelectedAngularVelocity(glm::vec3(0.0f, 1.0f, 0.0f), 0.0f);
-    }
+        if (ImGui::CollapsingHeader("Runtime Components", ImGuiTreeNodeFlags_DefaultOpen)) {
+        bool linearVelocityEnabled = selected->linearVelocityEnabled;
+        if (ImGui::Checkbox("LinearVelocity", &linearVelocityEnabled)) {
+            context.scene->SetSelectedLinearVelocityEnabled(linearVelocityEnabled);
+        }
+        if (linearVelocityEnabled) {
+            glm::vec3 linearVelocity = selected->linearVelocity;
+            if (ImGui::DragFloat3("Velocity", &linearVelocity.x, 0.05f)) {
+                context.scene->SetSelectedLinearVelocity(linearVelocity);
+            }
+        }
 
-    bool visible = selected->visible;
-    if (ImGui::Checkbox("Visible", &visible)) {
-        context.scene->ToggleSelectVisible();
-    }
+        bool angularVelocityEnabled = selected->angularVelocityEnabled;
+        if (ImGui::Checkbox("AngularVelocity", &angularVelocityEnabled)) {
+            context.scene->SetSelectedAngularVelocityEnabled(angularVelocityEnabled);
+        }
+        if (angularVelocityEnabled) {
+            glm::vec3 angularAxis = selected->angularVelocityAxis;
+            float angularSpeed = selected->angularVelocityRadians;
+            if (ImGui::DragFloat3("Axis", &angularAxis.x, 0.05f)) {
+                context.scene->SetSelectedAngularVelocity(angularAxis, angularSpeed);
+            }
+            if (ImGui::DragFloat("Speed", &angularSpeed, 0.05f)) {
+                context.scene->SetSelectedAngularVelocity(angularAxis, angularSpeed);
+            }
+            if (ImGui::Button("Spin Y")) {
+                context.scene->SetSelectedAngularVelocity(glm::vec3(0.0f, 1.0f, 0.0f), 1.57f);
+            }
+        }
 
-    bool locked = selected->locked;
-    if (ImGui::Checkbox("Locked", &locked)) {
-        context.scene->ToggleSelectedLocked();
-    }
+        if (ImGui::Button("Clear Runtime Motion")) {
+            context.scene->SetSelectedLinearVelocityEnabled(false);
+            context.scene->SetSelectedAngularVelocityEnabled(false);
+        }
 
-    ImGui::Separator();
+        ImGui::Separator();
+        const engine::ecs::Transform* selectedTransform = context.scene->TryGetTransform(selected->entity);
+        if (ImGui::Button("Dynamic Body")) {
+            engine::ecs::RigidBody rigidBody = engine::ecs::RigidBody::Dynamic(1.0f);
+            rigidBody.velocity = selected->rigidBody.velocity;
+            context.scene->SetSelectedRigidBody(rigidBody);
 
-    const engine::ecs::Transform* transform = context.scene->TryGetTransform(selected->entity);
-    if (transform) {
-        ImGui::Text("Position: %.2f, %.2f, %.2f",
-            transform->position.x, transform->position.y, transform->position.z);
-        ImGui::Text("Scale: %.2f, %.2f, %.2f",
-            transform->scale.x, transform->scale.y, transform->scale.z);
-        ImGui::Text("Rotation: %.2f, %.2f, %.2f, %.2f",
-            transform->rotation.w, transform->rotation.x,
-            transform->rotation.y, transform->rotation.z);
-    }
+            engine::ecs::Collider collider = selected->colliderEnabled
+                ? selected->collider
+                : DefaultColliderForObject(*selected, selectedTransform);
+            collider.isTrigger = false;
+            context.scene->SetSelectedCollider(collider);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Static Collider")) {
+            context.scene->SetSelectedRigidBodyEnabled(false);
+            engine::ecs::Collider collider = selected->colliderEnabled
+                ? selected->collider
+                : DefaultColliderForObject(*selected, selectedTransform);
+            collider.isTrigger = false;
+            context.scene->SetSelectedCollider(collider);
+        }
+        if (ImGui::Button("Trigger##PhysicsPreset")) {
+            context.scene->SetSelectedRigidBodyEnabled(false);
+            engine::ecs::Collider collider = selected->colliderEnabled
+                ? selected->collider
+                : DefaultColliderForObject(*selected, selectedTransform);
+            collider.isTrigger = true;
+            context.scene->SetSelectedCollider(collider);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Clear Physics")) {
+            context.scene->SetSelectedRigidBodyEnabled(false);
+            context.scene->SetSelectedColliderEnabled(false);
+        }
 
-    const engine::ecs::MeshRenderer* renderer = context.scene->TryGetMeshRenderer(selected->entity);
-    if (renderer) {
-        ImGui::Text("Color: %.2f, %.2f, %.2f",
-            renderer->color.r, renderer->color.g, renderer->color.b);
+        bool rigidBodyEnabled = selected->rigidBodyEnabled;
+        if (ImGui::Checkbox("RigidBody", &rigidBodyEnabled)) {
+            context.scene->SetSelectedRigidBodyEnabled(rigidBodyEnabled);
+        }
+        if (rigidBodyEnabled) {
+            engine::ecs::RigidBody rigidBody = selected->rigidBody;
+            bool dynamicBody = rigidBody.invMass > 0.0f;
+            if (ImGui::Checkbox("Dynamic", &dynamicBody)) {
+                if (dynamicBody && rigidBody.invMass <= 0.0f) {
+                    rigidBody.invMass = 1.0f;
+                    rigidBody.useGravity = true;
+                } else if (!dynamicBody) {
+                    rigidBody.invMass = 0.0f;
+                    rigidBody.useGravity = false;
+                }
+                context.scene->SetSelectedRigidBody(rigidBody);
+            }
+            float mass = rigidBody.invMass > 0.0f ? 1.0f / rigidBody.invMass : 0.0f;
+            if (ImGui::DragFloat("Mass", &mass, 0.05f, 0.0f, 10000.0f)) {
+                rigidBody.invMass = mass > 0.0f ? 1.0f / mass : 0.0f;
+                if (rigidBody.invMass == 0.0f) {
+                    rigidBody.useGravity = false;
+                }
+                context.scene->SetSelectedRigidBody(rigidBody);
+            }
+            if (ImGui::DragFloat3("Physics Velocity", &rigidBody.velocity.x, 0.05f)) {
+                context.scene->SetSelectedRigidBody(rigidBody);
+            }
+            if (ImGui::Checkbox("Gravity", &rigidBody.useGravity)) {
+                context.scene->SetSelectedRigidBody(rigidBody);
+            }
+            if (ImGui::Checkbox("Allow Sleep", &rigidBody.allowSleep)) {
+                context.scene->SetSelectedRigidBody(rigidBody);
+            }
+            if (ImGui::Checkbox("CCD", &rigidBody.ccd)) {
+                context.scene->SetSelectedRigidBody(rigidBody);
+            }
+        }
+
+        bool colliderEnabled = selected->colliderEnabled;
+        if (ImGui::Checkbox("Collider", &colliderEnabled)) {
+            context.scene->SetSelectedColliderEnabled(colliderEnabled);
+        }
+        if (colliderEnabled) {
+            engine::ecs::Collider collider = selected->collider;
+            int shapeIndex = ColliderShapeIndex(collider.shape);
+            const char* shapes[] = {"Sphere", "Box", "Plane"};
+            if (ImGui::Combo("Collider Shape", &shapeIndex, shapes, 3)) {
+                collider.shape = ColliderShapeFromIndex(shapeIndex);
+                context.scene->SetSelectedCollider(collider);
+            }
+            if (collider.shape == engine::ecs::ColliderShape::Sphere) {
+                if (ImGui::DragFloat("Radius", &collider.radius, 0.02f, 0.001f, 1000.0f)) {
+                    context.scene->SetSelectedCollider(collider);
+                }
+            } else if (collider.shape == engine::ecs::ColliderShape::Box) {
+                if (ImGui::DragFloat3("Half Extents", &collider.halfExtents.x, 0.02f, 0.001f, 1000.0f)) {
+                    context.scene->SetSelectedCollider(collider);
+                }
+            } else {
+                if (ImGui::DragFloat3("Plane Normal", &collider.planeNormal.x, 0.02f)) {
+                    context.scene->SetSelectedCollider(collider);
+                }
+                if (ImGui::DragFloat("Plane Offset", &collider.planeOffset, 0.02f)) {
+                    context.scene->SetSelectedCollider(collider);
+                }
+            }
+            if (ImGui::DragFloat("Restitution", &collider.restitution, 0.02f, 0.0f, 1.0f)) {
+                context.scene->SetSelectedCollider(collider);
+            }
+            if (ImGui::DragFloat("Friction", &collider.friction, 0.02f, 0.0f, 10.0f)) {
+                context.scene->SetSelectedCollider(collider);
+            }
+            if (ImGui::Checkbox("Trigger##ColliderMode", &collider.isTrigger)) {
+                context.scene->SetSelectedCollider(collider);
+            }
+        }
     }
 
     ImGui::End();
@@ -693,6 +1318,16 @@ bool EditorDockspace::Draw(Context &context)
                 ImGui::Text("Gizmo: %s %s", context.gizmo->ModeName(), context.gizmo->AxisName());
             }
             ImGui::Separator();
+            if (ImGui::MenuItem("New Scene")) {
+                context.newSceneRequested = true;
+            }
+            if (ImGui::MenuItem("Play", "P", false, !context.playMode)) {
+                context.enterPlayModeRequested = true;
+            }
+            if (ImGui::MenuItem("Stop", "P", false, context.playMode)) {
+                context.exitPlayModeRequested = true;
+            }
+            ImGui::Separator();
             if (ImGui::MenuItem("Save")) {
                 context.saveSceneRequested = true;
             }
@@ -724,23 +1359,113 @@ bool EditorDockspace::Draw(Context &context)
                     ImGui::EndMenu();
                 }
             }
+            ImGui::EndMenu();
+        }
+
+        if (ImGui::BeginMenu("Edit")) {
+            if (ImGui::MenuItem("Undo", "Ctrl+Z")) {
+                context.undoRequested = true;
+            }
+            if (ImGui::MenuItem("Redo", "Ctrl+Y")) {
+                context.redoRequested = true;
+            }
             ImGui::Separator();
-            if (ImGui::MenuItem("Add Directional Light")) {
-                context.addDirectionalLightRequested = true;
+            if (ImGui::MenuItem("Duplicate", "Ctrl+D", false, context.scene && context.scene->SelectedObject())) {
+                context.duplicateSelectedRequested = true;
             }
-            if (ImGui::MenuItem("Add Point Light")) {
-                context.addPointLightRequested = true;
+            if (ImGui::MenuItem("Delete", "Del", false, context.scene && context.scene->SelectedObject())) {
+                context.deleteSelectedRequested = true;
             }
-            if (ImGui::MenuItem("Add Spot Light")) {
-                context.addSpotLightRequested = true;
+            if (ImGui::MenuItem("Frame Selected", "F", false, context.scene && context.scene->SelectedObject())) {
+                context.frameSelectedRequested = true;
             }
-            if (ImGui::MenuItem("Add Area Light")) {
-                context.addAreaLightRequested = true;
+            ImGui::EndMenu();
+        }
+
+        if (ImGui::BeginMenu("Add")) {
+            if (ImGui::BeginMenu("Primitives")) {
+                if (ImGui::MenuItem("Cube")) {
+                    context.addCubeRequested = true;
+                }
+                if (ImGui::MenuItem("Plane")) {
+                    context.addPlaneRequested = true;
+                }
+                if (ImGui::MenuItem("Sphere")) {
+                    context.addSphereRequested = true;
+                }
+                ImGui::EndMenu();
+            }
+            if (ImGui::BeginMenu("Physics")) {
+                if (ImGui::MenuItem("Dynamic Cube")) {
+                    context.addDynamicCubeRequested = true;
+                }
+                if (ImGui::MenuItem("Static Floor")) {
+                    context.addStaticFloorRequested = true;
+                }
+                if (ImGui::MenuItem("Trigger Volume")) {
+                    context.addTriggerVolumeRequested = true;
+                }
+                ImGui::EndMenu();
+            }
+            if (ImGui::BeginMenu("Lights")) {
+                if (ImGui::MenuItem("Directional Light")) {
+                    context.addDirectionalLightRequested = true;
+                }
+                if (ImGui::MenuItem("Point Light")) {
+                    context.addPointLightRequested = true;
+                }
+                if (ImGui::MenuItem("Spot Light")) {
+                    context.addSpotLightRequested = true;
+                }
+                if (ImGui::MenuItem("Area Light")) {
+                    context.addAreaLightRequested = true;
+                }
+                ImGui::EndMenu();
+            }
+            ImGui::EndMenu();
+        }
+
+        if (context.gizmo && ImGui::BeginMenu("Gizmo")) {
+            if (ImGui::BeginMenu("Mode")) {
+                const EditorGizmo::Mode mode = context.gizmo->CurrentMode();
+                if (ImGui::MenuItem("Move", "G", mode == EditorGizmo::Mode::Translate)) {
+                    context.gizmo->SetMode(EditorGizmo::Mode::Translate);
+                }
+                if (ImGui::MenuItem("Rotate", nullptr, mode == EditorGizmo::Mode::Rotate)) {
+                    context.gizmo->SetMode(EditorGizmo::Mode::Rotate);
+                }
+                if (ImGui::MenuItem("Scale", nullptr, mode == EditorGizmo::Mode::Scale)) {
+                    context.gizmo->SetMode(EditorGizmo::Mode::Scale);
+                }
+                ImGui::EndMenu();
+            }
+            if (ImGui::BeginMenu("Axis")) {
+                const EditorGizmo::Axis axis = context.gizmo->CurrentAxis();
+                if (ImGui::MenuItem("X", "X", axis == EditorGizmo::Axis::X)) {
+                    context.gizmo->SetAxis(EditorGizmo::Axis::X);
+                }
+                if (ImGui::MenuItem("Y", "Y", axis == EditorGizmo::Axis::Y)) {
+                    context.gizmo->SetAxis(EditorGizmo::Axis::Y);
+                }
+                if (ImGui::MenuItem("Z", "Z", axis == EditorGizmo::Axis::Z)) {
+                    context.gizmo->SetAxis(EditorGizmo::Axis::Z);
+                }
+                ImGui::EndMenu();
             }
             ImGui::EndMenu();
         }
 
         if (ImGui::BeginMenu("Panels")) {
+            if (ImGui::MenuItem("Show All")) {
+                context.panels->ShowAll();
+            }
+            if (ImGui::MenuItem("Hide All")) {
+                context.panels->HideAll();
+            }
+            if (ImGui::MenuItem("Reset Defaults")) {
+                context.panels->ResetDefaults();
+            }
+            ImGui::Separator();
             for (int i = 0; i < static_cast<int>(EditorPanels::Panel::Count); ++i) {
                 const EditorPanels::Panel panel = static_cast<EditorPanels::Panel>(i);
                 const bool open = context.panels->IsOpen(panel);
@@ -780,6 +1505,8 @@ bool EditorDockspace::Draw(Context &context)
             break;
         case EditorPanels::Panel::MaterialMaker:
             break;
+        case EditorPanels::Panel::PhysicsStatus:
+            DrawPhysicsStatus(context, &open);
         case EditorPanels::Panel::Count:
             break;
         }
@@ -787,7 +1514,7 @@ bool EditorDockspace::Draw(Context &context)
         context.panels->SetOpen(panel, open);
     }
 
-    DrawGizmoToolbar(context);
+    //DrawGizmoToolbar(context);
 
     ImGui::End();
     return true;

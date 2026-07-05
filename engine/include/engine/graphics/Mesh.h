@@ -30,6 +30,10 @@ public:
 
     unsigned int IndexCount() const { return m_indexCount; }
 
+    // The vertex array object, so callers can attach per-instance attributes for
+    // instanced drawing (see PbrRenderer's instanced lit pass).
+    unsigned int Vao() const { return m_vao; }
+
 private:
     void Release();     // delete the GL objects (used by dtor + move-assign)
 

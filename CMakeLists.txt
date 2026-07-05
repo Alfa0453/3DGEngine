@@ -140,7 +140,8 @@ add_subdirectory(engine)   # the reusable engine (static library)
 #add_subdirectory(viewer)   # a model-viewer tool (loads + renders OBJ models)
 #add_subdirectory(scene)    # a PBR lighting + ECS scene demo (shadows, skybox)
 add_subdirectory(editor)
-#add_subdirectory(physics)    # unit tests (GoogleTest)
+#add_subdirectory(physics)  # moved to standalone GameEngine project
+#add_subDirectory(marble)
 
 # ---------------------------------------------------------------------------
 # Packaging: `cmake --install build --prefix dist` stages a runnable folder,
