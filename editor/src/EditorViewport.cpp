@@ -258,7 +258,19 @@ glm::vec3 PhysicsEventGuideColor(const EditorViewport::PhysicsEventGuide& guide)
     }
     return guide.phase == 0
         ? glm::vec3(1.0f, 0.72f, 0.18f)
-        : glm::vec3(1.0f, 0.48f, 0.20f);
+            : glm::vec3(1.0f, 0.48f, 0.20f);
+}
+
+glm::vec3 PhysicsJointGuideColor(const EditorViewport::PhysicsJointGuide& guide) {
+    if (!guide.enabled) {
+        return glm::vec3(0.34f, 0.36f, 0.40f);
+    }
+    if (guide.type == 1) {
+        return glm::vec3(0.36f, 0.92f, 0.48f);
+    }
+    return guide.rope
+        ? glm::vec3(0.30f, 0.78f, 1.0f)
+        : glm::vec3(1.0f, 0.78f, 0.24f);
 }
 
 void BuildBasis(const glm::vec3& direction, glm::vec3* right, glm::vec3* up) {
@@ -666,6 +678,35 @@ void EditorViewport::DrawPhysicsEventGuides(engine::Renderer& renderer,
         DrawGuideSegment(renderer, shader, cube, guide.a, guide.b, thickness, color);
         DrawGizmoBox(renderer, shader, cube, guide.a, markerSize, color);
         DrawGizmoBox(renderer, shader, cube, guide.b, markerSize, color);
+    }
+
+    shader.SetVec3("uEmissive", glm::vec3(0.0f));
+}
+
+void EditorViewport::DrawPhysicsJointGuides(engine::Renderer& renderer,
+                                            engine::Shader& shader,
+                                            const engine::Mesh& cube,
+                                            const std::vector<PhysicsJointGuide>& guides,
+                                            const glm::mat4& viewProj) const {
+    if (guides.empty()) {
+        return;
+    }
+
+    shader.Bind();
+    shader.SetMat4("uViewProj", viewProj);
+    shader.SetVec3("uLightDir", glm::normalize(glm::vec3(-0.4f, -1.0f, -0.3f)));
+    shader.SetInt("uHasDiffuse", 0);
+
+    for (const PhysicsJointGuide& guide : guides) {
+        if (glm::length(guide.b - guide.a) <= 0.001f) {
+            continue;
+        }
+
+        const glm::vec3 color = PhysicsJointGuideColor(guide);
+        shader.SetVec3("uEmissive", color * (guide.enabled ? 0.32f : 0.10f));
+        DrawGuideSegment(renderer, shader, cube, guide.a, guide.b, guide.rope ? 0.030f : 0.038f, color);
+        DrawGizmoBox(renderer, shader, cube, guide.a, glm::vec3(0.055f), color);
+        DrawGizmoBox(renderer, shader, cube, guide.b, glm::vec3(0.055f), color);
     }
 
     shader.SetVec3("uEmissive", glm::vec3(0.0f));

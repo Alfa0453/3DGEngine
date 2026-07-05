@@ -1316,6 +1316,45 @@ void EditorApp::DrawEditScene(const glm::mat4 & viewProj)
     if (m_shader && m_cube && environment.showPhysicsGuides) {
         m_viewport.DrawPhysicsColliderGuides(m_renderer, *m_shader, *m_cube, m_scene, viewProj,
             environment.selectedPhysicsGuideOnly);
+        
+        std::vector<EditorViewport::PhysicsJointGuide> jointGuides;
+        for (const EditorScene::PhysicsJoint& joint : m_scene.PhysicsJoints()) {
+            const EditorScene::Object* objectA = nullptr;
+            const EditorScene::Object* objectB = nullptr;
+            for (const EditorScene::Object& object : m_scene.Objects()) {
+                if (object.name == joint.objectA) {
+                    objectA = &object;
+                }
+                if (object.name == joint.objectB) {
+                    objectB = &object;
+                }
+            }
+
+            if (!objectA || (!joint.worldAnchor && !objectB)) {
+                continue;
+            }
+            if (environment.selectedPhysicsGuideOnly) {
+                const EditorScene::Object* selected = m_scene.SelectedObject();
+                if (!selected || (selected->name != joint.objectA && selected->name != joint.objectB)) {
+                    continue;
+                }
+            }
+
+            const Transform* transformA = m_scene.TryGetTransform(objectA->entity);
+            const Transform* transformB = objectB ? m_scene.TryGetTransform(objectB->entity) : nullptr;
+            if (!transformA || (!joint.worldAnchor && !transformB)) {
+                continue;
+            }
+
+            EditorViewport::PhysicsJointGuide guide;
+            guide.a = transformA->position;
+            guide.b = joint.worldAnchor ? joint.anchor : transformB->position;
+            guide.type = joint.type == EditorScene::PhysicsJoint::Type::Spring ? 1 : 0;
+            guide.rope = joint.rope;
+            guide.enabled = joint.enabled;
+            jointGuides.push_back(guide);
+        }
+        m_viewport.DrawPhysicsJointGuides(m_renderer, *m_shader, *m_cube, jointGuides, viewProj);
     }
     if (m_shader && m_cube && m_cone) {
         m_viewport.DrawSceneGizmo(m_renderer, *m_shader, *m_cube, *m_cone, m_scene, m_gizmo, viewProj);

@@ -28,6 +28,14 @@ public:
         bool trigger = false;
     };
 
+    struct PhysicsJointGuide {
+        glm::vec3 a{0.0f};
+        glm::vec3 b{0.0f};
+        int type = 0; // 0 distance, 1 spring
+        bool rope = false;
+        bool enabled = true;
+    };
+
     bool ContainsPoint(float x, float y, int width, int height) const;
 
     void DrawSceneGizmo(engine::Renderer& renderer,
@@ -57,6 +65,12 @@ public:
                                 const engine::Mesh& cube,
                                 const std::vector<PhysicsEventGuide>& guides,
                                 const glm::mat4& viewProj) const;
+
+    void DrawPhysicsJointGuides(engine::Renderer& renderer,
+                            engine::Shader& shader,
+                            const engine::Mesh& cube,
+                            const std::vector<PhysicsJointGuide>& guides,
+                            const glm::mat4& viewProj) const;
 
     void DrawSelectedModelOutline(engine::Renderer& renderer,
                                   engine::Shader& shader,
