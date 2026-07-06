@@ -37,6 +37,10 @@ public:
         bool colliderEnabled = false;
         engine::ecs::RigidBody rigidBody;
         engine::ecs::Collider collider;
+        bool rotatorEnabled = false;
+        engine::ecs::Rotator rotator;
+        bool moverEnabled = false;
+        engine::ecs::Mover mover;
     };
 
     struct ObjectSnapshot {
@@ -168,6 +172,10 @@ public:
     bool SetSelectedRigidBody(const engine::ecs::RigidBody& rigidBody);
     bool SetSelectedColliderEnabled(bool enabled);
     bool SetSelectedCollider(const engine::ecs::Collider& collider);
+    bool SetSelectedRotatorEnabled(bool enabled);
+    bool SetSelectedRotator(const engine::ecs::Rotator& rotator);
+    bool SetSelectedMoverEnabled(bool enabled);
+    bool SetSelectedMover(const engine::ecs::Mover& mover);
     bool AddPhysicsJoint(const PhysicsJoint& joint);
     bool SetPhysicsJoint(std::size_t index, const PhysicsJoint& joint);
     bool RemovePhysicsJoint(std::size_t index);

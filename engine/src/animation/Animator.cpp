@@ -51,6 +51,29 @@ glm::mat4 LocalAt(const BoneChannel& ch, float t, const glm::mat4& bind) {
          * glm::scale(glm::mat4(1.0f), scale);
 }
 
+float WrapTicks(const Animation& anim, float timeSeconds) {
+    if (anim.duration <= 0.0f) return 0.0f;
+    const float tps = (anim.ticksPerSecond > 0.0f) ? anim.ticksPerSecond : 25.0f;
+    float t = std::fmod(timeSeconds * tps, anim.duration);
+    if (t < 0.0f) t += anim.duration;
+    return t;
+}
+
+struct BonePose { glm::vec3 pos; glm::quat rot; glm::vec3 scale; };
+
+BonePose SampleBoneTRS(const Animation& anim, std::size_t bone, float ticks, const Bone& b) {
+    if (bone < anim.channels.size() && !anim.channels[bone].Empty()) {
+        const BoneChannel& ch = anim.channels[bone];
+        return { SampleVecAt(ch.positions, ticks, glm::vec3(0.0f)),
+                 SampleQuatAt(ch.rotations, ticks),
+                 SampleVecAt(ch.scales, ticks, glm::vec3(1.0f)) };
+    }
+    // No channel: fall back to the bind pose (translation + rotation from localBind).
+    return { glm::vec3(b.localBind[3]),
+             glm::normalize(glm::quat_cast(glm::mat3(b.localBind))),
+             glm::vec3(1.0f) };
+}
+
 } // namespace
 
 void Animator::ComputePose(const Skeleton& skel, const Animation& anim, float timeSeconds, std::vector<glm::mat4>& out) {
@@ -82,6 +105,31 @@ void Animator::ComputeBindPose(const Skeleton& skel, std::vector<glm::mat4>& out
         const Bone& b = skel.bones[i];
         world[i] = (b.parent >= 0) ? world[b.parent] * b.localBind : b.localBind;
         out[i]   = skel.globalInverse * world[i] * b.offset;
+    }
+}
+
+void Animator::ComputeBlendedPose(const Skeleton& skel,
+                                  const Animation& a, float timeA,
+                                  const Animation& b, float timeB,
+                                  float blend, std::vector<glm::mat4>& out) {
+    const std::size_t n = skel.bones.size();
+    out.assign(n, glm::mat4(1.0f));
+    std::vector<glm::mat4> world(n, glm::mat4(1.0f));
+    const float tA = WrapTicks(a, timeA), tB = WrapTicks(b, timeB);
+    const float w  = glm::clamp(blend, 0.0f, 1.0f);
+
+    for (std::size_t i = 0; i < n; ++i) {
+        const Bone& bone = skel.bones[i];
+        const BonePose pa = SampleBoneTRS(a, i, tA, bone);
+        const BonePose pb = SampleBoneTRS(b, i, tB, bone);
+        const glm::vec3 pos = glm::mix(pa.pos, pb.pos, w);
+        const glm::quat rot = glm::normalize(glm::slerp(pa.rot, pb.rot, w));
+        const glm::vec3 scl = glm::mix(pa.scale, pb.scale, w);
+        const glm::mat4 local = glm::translate(glm::mat4(1.0f), pos)
+                              * glm::mat4_cast(rot)
+                              * glm::scale(glm::mat4(1.0f), scl);
+        world[i] = (bone.parent >= 0) ? world[bone.parent] * local : local;
+        out[i]   = skel.globalInverse * world[i] * bone.offset;
     }
 }
 

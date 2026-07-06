@@ -269,5 +269,62 @@ Mesh Sphere(int segments)
     return Mesh(v, idx, PNT());
 }
 
+Mesh Capsule(float radius, float height, int segments)
+{
+    if (segments < 3) segments = 3;
+    if (height < 2.0f * radius) height = 2.0f * radius;   // degenerate -> sphere
+    const int   sectors   = segments * 2;                 // longitude bands (around)
+    const int   capStacks = std::max(segments / 2, 2);    // latitude bands per hemisphere
+    const float PI = glm::pi<float>();
+    const float cylHalf = height * 0.5f - radius;         // hemisphere-centre offset from origin
+
+    // One vertical strip of rings, top pole -> bottom pole. The two hemispheres'
+    // equator rings (normal purely radial, y = +/-cylHalf) double as the cylinder
+    // wall's end rings, so connecting them spans the tube with correct side
+    // normals -- no separate cylinder geometry needed and the seam is watertight.
+    std::vector<float> v;
+    std::vector<std::uint32_t> idx;
+
+    // Emit one ring given the vertical normal component `ny`, the ring's world y,
+    // and a v texture coordinate. Radial component follows from the unit normal.
+    auto emitRing = [&](float ny, float y, float vCoord) {
+        const float rr = std::sqrt(std::max(1.0f - ny * ny, 0.0f));   // radial normal magnitude
+        for (int j = 0; j <= sectors; ++j) {
+            const float theta = 2.0f * PI * static_cast<float>(j) / sectors;
+            const float cx = std::cos(theta), cz = std::sin(theta);
+            v.insert(v.end(), {
+                cx * rr * radius, y, cz * rr * radius,   // position
+                cx * rr, ny, cz * rr,                    // unit normal
+                static_cast<float>(j) / sectors, vCoord, // uv
+            });
+        }
+    };
+
+    // Top hemisphere: ny from +1 (pole) to 0 (equator at y = +cylHalf).
+    for (int i = 0; i <= capStacks; ++i) {
+        const float phi = (PI * 0.5f) * (1.0f - static_cast<float>(i) / capStacks);
+        const float ny = std::sin(phi);
+        emitRing(ny, cylHalf + ny * radius, 0.25f * static_cast<float>(i) / capStacks);
+    }
+    // Bottom hemisphere: ny from 0 (equator at y = -cylHalf) to -1 (pole). This
+    // ring set starts at the tube's bottom; the quad strip joining the last top
+    // ring to this first ring IS the cylinder wall.
+    for (int i = 0; i <= capStacks; ++i) {
+        const float phi = -(PI * 0.5f) * (static_cast<float>(i) / capStacks);
+        const float ny = std::sin(phi);
+        emitRing(ny, -cylHalf + ny * radius, 0.75f + 0.25f * static_cast<float>(i) / capStacks);
+    }
+
+    const std::uint32_t cols = static_cast<std::uint32_t>(sectors + 1);
+    const int totalRings = 2 * (capStacks + 1);
+    for (int r = 0; r < totalRings - 1; ++r) {
+        for (int j = 0; j < sectors; ++j) {
+            const std::uint32_t k1 = static_cast<std::uint32_t>(r) * cols + static_cast<std::uint32_t>(j);
+            const std::uint32_t k2 = k1 + cols;
+            idx.insert(idx.end(), { k1, k2, k1 + 1, k1 + 1, k2, k2 + 1 });
+        }
+    }
+    return Mesh(v, idx, PNT());
+}
 } // namespace primitives
 } // namespace engine

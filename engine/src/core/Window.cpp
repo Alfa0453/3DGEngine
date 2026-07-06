@@ -157,6 +157,10 @@ bool Window::IsKeyPressed(int key) const
 {
     return glfwGetKey(m_window, key) == GLFW_PRESS;
 }
+
+bool Window::IsMouseButtonPressed(int button) const {
+    return glfwGetMouseButton(m_window, button) == GLFW_PRESS;
+}
 void Window::SetCursorCaptured(bool captured)
 {
     glfwSetInputMode(m_window, GLFW_CURSOR,

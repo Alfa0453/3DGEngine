@@ -44,7 +44,7 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         return false;
     }
 
-    out << "3DGRuntimeScene 10\n";
+    out << "3DGRuntimeScene 12\n";
     out << "# Runtime export from 3DGEditor. Editor-only flags are omitted.\n";
     const EditorScene::Environment& environment = scene.GetEnvironment();
     out << "environment "
@@ -123,7 +123,15 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
             << object.collider.planeOffset << ' '
             << object.collider.restitution << ' '
             << object.collider.friction << ' '
-            << (object.collider.isTrigger ? 1 : 0) << '\n';
+            << (object.collider.isTrigger ? 1 : 0) << ' '
+            << (object.rotatorEnabled ? 1 : 0) << ' '
+            << object.rotator.axis.x << ' ' << object.rotator.axis.y << ' ' << object.rotator.axis.z << ' '
+            << object.rotator.radiansPerSecond << ' '
+            << (object.moverEnabled ? 1 : 0) << ' '
+            << object.mover.axis.x << ' ' << object.mover.axis.y << ' ' << object.mover.axis.z << ' '
+            << object.mover.distance << ' '
+            << object.mover.speed << ' '
+            << object.mover.phase << '\n';
     }
 
     return true;

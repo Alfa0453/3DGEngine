@@ -107,5 +107,23 @@ struct Light {
     float     sourceRadius = 1.0f;            // Area: physical sphere radius
 };
 
+// Small native gameplay component used by the editor/runtime path. Rotates an
+// entity around an axis every gameplay tick.
+struct Rotator {
+    glm::vec3 axis{0.0f, 1.0f, 0.0f};
+    float radiansPerSecond = 1.0f;
+};
+
+// Small native gameplay component used by the editor/runtime path. Moves an
+// entity back and forth around its starting position every gameplay tick.
+struct Mover {
+    glm::vec3 axis{1.0f, 0.0f, 0.0f};
+    float distance = 1.0f;
+    float speed = 1.0f;
+    float phase = 0.0f;
+    glm::vec3 origin{0.0f};
+    bool initialized = false;
+};
+
 } // namespace ecs
 } // namespace engine

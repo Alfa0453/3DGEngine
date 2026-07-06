@@ -103,7 +103,8 @@ CascadedShadow::~CascadedShadow() {
 }
 
 void CascadedShadow::Generate(ecs::Registry& reg, const Camera& camera, float aspect,
-                              const glm::vec3& lightDir, float shadowFar) {
+                              const glm::vec3& lightDir, float shadowFar,
+                              const std::function<void(const glm::mat4&)>& drawExtraCasters) {
     const glm::mat4 camView = camera.ViewMatrix();
     const float near = camera.nearPlane;
 
@@ -133,6 +134,7 @@ void CascadedShadow::Generate(ecs::Registry& reg, const Camera& camera, float as
         glClear(GL_DEPTH_BUFFER_BIT);
         m_shader.SetMat4("uLightVP", m_vp[i]);
         m_batch.Draw(m_shader);
+        if (drawExtraCasters) drawExtraCasters(m_vp[i]);   // skinned / non-ECS casters
     }
 
     glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prevFbo));

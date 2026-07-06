@@ -79,11 +79,11 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
     std::string magic;
     int version = 0;
     in >> magic >> version;
-    if (magic != "3DGRuntimeScene" || version < 1 || version > 10) {
+    if (magic != "3DGRuntimeScene" || version < 1 || version > 12) {
         if (error) {
             *error = "Runtime scene file has an unknown format: "
                 + magic + " " + std::to_string(version)
-                + " (expected 3DGRuntimeScene 1..10).";
+                + " (expected 3DGRuntimeScene 1..12).";
         }
         return false;
     }
@@ -257,6 +257,22 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                 entity.collider.shape = ecs::ColliderShape::Sphere;
             }
         }
+        if (version >= 11) {
+            int rotatorEnabled = 0;
+            record >> rotatorEnabled
+                   >> entity.rotator.axis.x >> entity.rotator.axis.y >> entity.rotator.axis.z
+                   >> entity.rotator.radiansPerSecond;
+            entity.rotatorEnabled = rotatorEnabled != 0;
+        }
+        if (version >= 12) {
+            int moverEnabled = 0;
+            record >> moverEnabled
+                   >> entity.mover.axis.x >> entity.mover.axis.y >> entity.mover.axis.z
+                   >> entity.mover.distance
+                   >> entity.mover.speed
+                   >> entity.mover.phase;
+            entity.moverEnabled = moverEnabled != 0;
+        }
 
         if (!record) {
             if (error) {
@@ -320,6 +336,15 @@ bool RuntimeSceneLoader::Instantiate(const Scene &scene, ecs::Registry &registry
         }
         if (desc.colliderEnabled) {
             registry.Add<ecs::Collider>(entity, desc.collider);
+        }
+        if (desc.rotatorEnabled) {
+            registry.Add<ecs::Rotator>(entity, desc.rotator);
+        }
+        if (desc.moverEnabled) {
+            ecs::Mover mover = desc.mover;
+            mover.origin = desc.position;
+            mover.initialized = true;
+            registry.Add<ecs::Mover>(entity, mover);
         }
 
         if (created) {

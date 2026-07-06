@@ -5,6 +5,8 @@
 
 #include <glm/glm.hpp>
 
+#include <functional>
+
 namespace engine {
 
 class Camera;
@@ -26,7 +28,8 @@ public:
     CascadedShadow& operator=(const CascadedShadow&) = delete;
 
     void Generate(ecs::Registry& registry, const Camera& camera, float aspect,
-                  const glm::vec3& lightDir, float shadowFar);
+                  const glm::vec3& lightDir, float shadowFar,
+                  const std::function<void(const glm::mat4&)>& drawExtraCasters = {});
 
     void BindArray(unsigned int unit) const;        // sampler2DArray
     const glm::mat4& CascadeVP(int i) const { return m_vp[i]; }

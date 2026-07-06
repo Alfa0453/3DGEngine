@@ -57,6 +57,7 @@ public:
     // --- Input -----------------------------------------------------------
     // True while `key` (a GLFW_KEY_* code) is held down this frame.
     bool IsKeyPressed(int key) const;
+    bool IsMouseButtonPressed(int button) const;
 
     // Lock the cursor to the window and hide it (FPS-style mouse look), or
     // release it back to a normal desktop cursor.

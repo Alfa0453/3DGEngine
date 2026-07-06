@@ -17,7 +17,16 @@ public:
                             float timeSeconds, std::vector<glm::mat4>& outMatrices);
 
     // The rest pose (no animation): each bone uses its localBind.
-    static void ComputeBindPose(const Skeleton& skel, std::vector<glm::mat4>& outMatrices);    
+    static void ComputeBindPose(const Skeleton& skel, std::vector<glm::mat4>& outMatrices);
+    
+    // Cross-fade blend of two clips into one pose. blend in [0,1]: 0 = clip A,
+    // 1 = clip B. Each bone's local translate/rotate/scale is sampled from both
+    // clips and interpolated (lerp position/scale, slerp rotation) before the
+    // hierarchy is composed -- used to transition smoothly between animations.
+    static void ComputeBlendedPose(const Skeleton& skel,
+                                   const Animation& a, float timeA,
+                                   const Animation& b, float timeB,
+                                   float blend, std::vector<glm::mat4>& outMatrices);
 };
 
 } // namespace engine

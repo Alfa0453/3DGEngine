@@ -2,6 +2,8 @@
 
 #include <glm/glm.hpp>
 
+#include <algorithm>
+
 namespace engine {
 namespace ecs {
 
@@ -27,7 +29,6 @@ struct RigidBody {
     // tunnel through thin geometry. Opt-in (costs an extra sweep) -- for bullets
     // and other fast movers. The moving body is approximated as a sphere.
     bool      ccd = false;
-
 
     // Angular dynamics. invInertiaLocal is the body-space inverse inertia tensor;
     // it is initialized from the collider on the first step (unless freezeRotation
@@ -67,9 +68,22 @@ struct RigidBody {
         m[0][0] = m[1][1] = m[2][2] = 1.0f / i;
         return m;
     }
+    // Capsule aligned with the local +Y axis: radius `r`, and `halfHeight` = the
+    // half-length of the central segment (total tip-to-tip height is
+    // 2*(halfHeight + r)). Approximated as a solid cylinder of the full height --
+    // stable and cheap, exact enough for gameplay bodies.
+    static glm::mat3 CapsuleInvInertia(float mass, float r, float halfHeight) {
+        if (mass <= 0.0f || r <= 0.0f) return glm::mat3(0.0f);
+        const float H  = 2.0f * (halfHeight + r);                  // full height
+        const float iy = 0.5f * mass * r * r;                     // about the capsule axis
+        const float ix = (mass / 12.0f) * (3.0f * r * r + H * H); // perpendicular
+        glm::mat3 m(0.0f);
+        m[0][0] = 1.0f / ix; m[1][1] = 1.0f / iy; m[2][2] = 1.0f / ix;
+        return m;
+    }
 };
 
-enum class ColliderShape { Sphere, Plane, Box };
+enum class ColliderShape { Sphere, Plane, Box, Capsule };
 
 // The collision shape attached to an entity (positioned by its Transform). A
 // Plane is an infinite half-space defined in world space by a normal and offset
@@ -83,6 +97,7 @@ struct Collider {
     glm::vec3     halfExtents{0.5f};              // Box
     glm::vec3     planeNormal{0.0f, 1.0f, 0.0f};  // Plane
     float         planeOffset = 0.0f;             // Plane
+    float         halfHeight  = 0.5f;             // Capsule: half-length of the central segment
     float         restitution = 0.4f;             // material: bounciness
     float         friction    = 0.5f;             // material: Coulomb coefficient
     bool          isTrigger   = false;            // overlap-only: detected but never resolved
@@ -92,6 +107,15 @@ struct Collider {
         Collider c; c.shape = ColliderShape::Plane; c.planeNormal = glm::normalize(n); c.planeOffset = off; return c;
     }
     static Collider MakeBox(const glm::vec3& he) { Collider c; c.shape = ColliderShape::Box; c.halfExtents = he; return c; }
+    // Capsule along local +Y. `r` = radius, `halfHeight` = half-length of the
+    // central segment (total height = 2*(halfHeight + r)). Convenience overload
+    // takes the total height instead.
+    static Collider MakeCapsule(float r, float halfHeight) {
+        Collider c; c.shape = ColliderShape::Capsule; c.radius = r; c.halfHeight = halfHeight; return c;
+    }
+    static Collider MakeCapsuleFromHeight(float r, float totalHeight) {
+        return MakeCapsule(r, std::max(0.0f, totalHeight * 0.5f - r));
+    }
 };
 
 } // namespace ecs

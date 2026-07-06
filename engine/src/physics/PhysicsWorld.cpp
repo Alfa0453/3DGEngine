@@ -78,17 +78,19 @@ glm::mat3 InvIWorld(const Body& b) {
 // from A toward B.
 int priority(ColliderShape s) {
     switch (s) {
-        case ColliderShape::Sphere: return 0;
-        case ColliderShape::Box:    return 1;
-        case ColliderShape::Plane:  return 2;
+        case ColliderShape::Sphere:  return 0;
+        case ColliderShape::Capsule: return 1;
+        case ColliderShape::Box:     return 2;
+        case ColliderShape::Plane:   return 3;
     }
     return 0;
 }
 
 // Body-space inverse inertia for a collider (plane/other -> no rotation).
 glm::mat3 InertiaFor(const Collider& c, float mass) {
-    if (c.shape == ColliderShape::Box)    return RigidBody::SolidBoxInvInertia(mass, c.halfExtents);
-    if (c.shape == ColliderShape::Sphere) return RigidBody::SolidSphereInvInertia(mass, c.radius);
+    if (c.shape == ColliderShape::Box)     return RigidBody::SolidBoxInvInertia(mass, c.halfExtents);
+    if (c.shape == ColliderShape::Sphere)  return RigidBody::SolidSphereInvInertia(mass, c.radius);
+    if (c.shape == ColliderShape::Capsule) return RigidBody::CapsuleInvInertia(mass, c.radius, c.halfHeight);
     return glm::mat3(0.0f);
 }
 
@@ -280,6 +282,103 @@ Contact BoxBox(const OBB& A, const OBB& B) {
     return ct;
 }
 
+// ---- capsule geometry helpers + generators ---------------------------------
+
+// Endpoints of a capsule body's central segment (local +Y, rotated by Transform).
+void CapsuleSegment(const Body& b, glm::vec3& p0, glm::vec3& p1) {
+    const glm::vec3 up = glm::mat3_cast(b.t->rotation) * glm::vec3(0.0f, 1.0f, 0.0f);
+    const glm::vec3 h  = up * b.c->halfHeight;
+    p0 = b.t->position - h;
+    p1 = b.t->position + h;
+}
+
+// Closest point on segment [a,b] to point p.
+glm::vec3 ClosestOnSeg(const glm::vec3& a, const glm::vec3& b, const glm::vec3& p) {
+    const glm::vec3 ab = b - a;
+    const float denom = glm::dot(ab, ab);
+    float t = (denom > 1e-9f) ? glm::dot(p - a, ab) / denom : 0.0f;
+    t = glm::clamp(t, 0.0f, 1.0f);
+    return a + t * ab;
+}
+
+// Closest points between segments [p1,q1] and [p2,q2] (Ericson, Real-Time
+// Collision Detection). Fills c1 on the first segment, c2 on the second.
+void ClosestSegSeg(const glm::vec3& p1, const glm::vec3& q1,
+                   const glm::vec3& p2, const glm::vec3& q2,
+                   glm::vec3& c1, glm::vec3& c2) {
+    const glm::vec3 d1 = q1 - p1, d2 = q2 - p2, r = p1 - p2;
+    const float a = glm::dot(d1, d1), e = glm::dot(d2, d2), f = glm::dot(d2, r);
+    float s, t;
+    if (a <= 1e-9f && e <= 1e-9f) { c1 = p1; c2 = p2; return; }
+    if (a <= 1e-9f) { s = 0.0f; t = glm::clamp(f / e, 0.0f, 1.0f); }
+    else {
+        const float c = glm::dot(d1, r);
+        if (e <= 1e-9f) { t = 0.0f; s = glm::clamp(-c / a, 0.0f, 1.0f); }
+        else {
+            const float b = glm::dot(d1, d2);
+            const float denom = a * e - b * b;
+            s = (denom > 1e-9f) ? glm::clamp((b * f - c * e) / denom, 0.0f, 1.0f) : 0.0f;
+            t = (b * s + f) / e;
+            if (t < 0.0f)      { t = 0.0f; s = glm::clamp(-c / a, 0.0f, 1.0f); }
+            else if (t > 1.0f) { t = 1.0f; s = glm::clamp((b - c) / a, 0.0f, 1.0f); }
+        }
+    }
+    c1 = p1 + d1 * s;
+    c2 = p2 + d2 * t;
+}
+
+// A = sphere, B = capsule. Nearest point on the capsule axis -> sphere-sphere.
+Contact SphereCapsule(const glm::vec3& sc, float rs, const glm::vec3& p0, const glm::vec3& p1, float rc) {
+    return SphereSphere(sc, rs, ClosestOnSeg(p0, p1, sc), rc);   // normal A(sphere) -> B(capsule)
+}
+
+// A = capsule, B = capsule. Closest points between the two axes -> sphere-sphere.
+Contact CapsuleCapsule(const glm::vec3& a0, const glm::vec3& a1, float ra,
+                       const glm::vec3& b0, const glm::vec3& b1, float rb) {
+    glm::vec3 c1, c2; ClosestSegSeg(a0, a1, b0, b1, c1, c2);
+    return SphereSphere(c1, ra, c2, rb);        // normal A -> B
+}
+
+// A = capsule, B = plane. Each endpoint hemisphere below the plane is a contact,
+// giving up to two points -> a lying capsule rests without tipping.
+Contact CapsulePlane(const glm::vec3& p0, const glm::vec3& p1, float r,
+                     const glm::vec3& n, float off) {
+    Contact ct;
+    const glm::vec3 ends[2] = { p0, p1 };
+    float deepest = 0.0f;
+    for (int i = 0; i < 2; ++i) {
+        const float s = glm::dot(n, ends[i]) - off;     // endpoint centre above plane
+        const float pen = r - s;
+        if (pen > 0.0f) {
+            if (ct.count < 4) ct.points[ct.count++] = ends[i] - n * r;   // on the plane side
+            deepest = std::max(deepest, pen);
+        }
+    }
+    if (ct.count == 0) return ct;
+    ct.hit = true;
+    ct.normal = -n;                 // A(capsule) -> B(plane)
+    ct.penetration = deepest;
+    return ct;
+}
+
+// A = capsule, B = box. Probe the capsule endpoints (and, if neither touches, the
+// segment point nearest the box) as spheres against the OBB. Two endpoint hits on
+// the same face give a stable two-point manifold for a capsule lying on a box.
+Contact CapsuleBox(const glm::vec3& p0, const glm::vec3& p1, float r, const OBB& box) {
+    Contact ct;
+    auto probe = [&](const glm::vec3& sc) {
+        const Contact e = SphereBox(sc, r, box);   // normal sphere->box == capsule->box
+        if (!e.hit) return;
+        if (!ct.hit || e.penetration > ct.penetration) { ct.normal = e.normal; ct.penetration = e.penetration; }
+        if (ct.count < 4) ct.points[ct.count++] = e.points[0];
+        ct.hit = true;
+    };
+    probe(p0);
+    probe(p1);
+    if (!ct.hit) probe(ClosestOnSeg(p0, p1, box.center));
+    return ct;
+}
+
 // Dispatch by the (canonically ordered) shape pair.
 Contact Detect(const Body& A, const Body& B) {
     const auto sa = A.c->shape, sb = B.c->shape;
@@ -293,6 +392,22 @@ Contact Detect(const Body& A, const Body& B) {
         return BoxBox(MakeOBB(A), MakeOBB(B));
     if (sa == ColliderShape::Box && sb == ColliderShape::Plane)
         return BoxPlane(MakeOBB(A), B.c->planeNormal, B.c->planeOffset);
+    if (sa == ColliderShape::Sphere && sb == ColliderShape::Capsule) {
+        glm::vec3 b0, b1; CapsuleSegment(B, b0, b1);
+        return SphereCapsule(A.t->position, A.c->radius, b0, b1, B.c->radius);
+    }
+    if (sa == ColliderShape::Capsule && sb == ColliderShape::Capsule) {
+        glm::vec3 a0, a1, b0, b1; CapsuleSegment(A, a0, a1); CapsuleSegment(B, b0, b1);
+        return CapsuleCapsule(a0, a1, A.c->radius, b0, b1, B.c->radius);
+    }
+    if (sa == ColliderShape::Capsule && sb == ColliderShape::Box) {
+        glm::vec3 a0, a1; CapsuleSegment(A, a0, a1);
+        return CapsuleBox(a0, a1, A.c->radius, MakeOBB(B));
+    }
+    if (sa == ColliderShape::Capsule && sb == ColliderShape::Plane) {
+        glm::vec3 a0, a1; CapsuleSegment(A, a0, a1);
+        return CapsulePlane(a0, a1, A.c->radius, B.c->planeNormal, B.c->planeOffset);
+    }
     return Contact{};
 }
 
@@ -375,6 +490,11 @@ AABB ComputeAABB(const Body& b) {
     if (b.c->shape == ColliderShape::Sphere) {
         const glm::vec3 r(b.c->radius);
         return { b.t->position - r, b.t->position + r };
+    }
+    if (b.c->shape == ColliderShape::Capsule) {
+        glm::vec3 p0, p1; CapsuleSegment(b, p0, p1);
+        const glm::vec3 r(b.c->radius);
+        return { glm::min(p0, p1) - r, glm::max(p0, p1) + r };
     }
     // Box: project the oriented half-extents onto the world axes.
     const OBB o = MakeOBB(b);
@@ -669,8 +789,9 @@ float SweepToTOI(ecs::Registry& reg, Entity self, const glm::vec3& A,
 
 float SweepRadiusOf(const Collider* c) {
     if (!c) return 0.1f;
-    if (c->shape == ColliderShape::Sphere) return c->radius;
-    if (c->shape == ColliderShape::Box)    return glm::length(c->halfExtents);
+    if (c->shape == ColliderShape::Sphere)  return c->radius;
+    if (c->shape == ColliderShape::Box)     return glm::length(c->halfExtents);
+    if (c->shape == ColliderShape::Capsule) return c->radius + c->halfHeight;
     return 0.1f;
 }
 
@@ -933,6 +1054,53 @@ float RayBox(const glm::vec3& o, const glm::vec3& d, const OBB& box, glm::vec3& 
     return t;
 }
 
+// Ray vs an upright capsule (segment p0..p1, radius r). Nearest surface entry
+// across the two end spheres and the finite side cylinder. Returns t (>=0) or -1.
+float RayCapsule(const glm::vec3& o, const glm::vec3& d,
+                 const glm::vec3& p0, const glm::vec3& p1, float r, glm::vec3& outN) {
+    float best = -1.0f; glm::vec3 bestN(0.0f);
+    auto consider = [&](float t, const glm::vec3& n) {
+        if (t >= 0.0f && (best < 0.0f || t < best)) { best = t; bestN = n; }
+    };
+    // End caps.
+    { glm::vec3 n0; const float t0 = RaySphere(o, d, p0, r, n0); consider(t0, n0); }
+    { glm::vec3 n1; const float t1 = RaySphere(o, d, p1, r, n1); consider(t1, n1); }
+
+    // Finite side cylinder around axis va.
+    glm::vec3 va = p1 - p0;
+    const float L = glm::length(va);
+    if (L > 1e-6f) {
+        va /= L;
+        const glm::vec3 dp = o - p0;
+        const float dVa  = glm::dot(d, va);
+        const float dpVa = glm::dot(dp, va);
+        const float a = glm::dot(d, d) - dVa * dVa;
+        const float b = glm::dot(d, dp) - dVa * dpVa;
+        const float c = glm::dot(dp, dp) - dpVa * dpVa - r * r;
+        if (std::fabs(a) > 1e-9f) {
+            const float disc = b * b - a * c;
+            if (disc >= 0.0f) {
+                const float t = (-b - std::sqrt(disc)) / a;
+                if (t >= 0.0f) {
+                    const float along = dpVa + t * dVa;         // projection onto axis
+                    if (along >= 0.0f && along <= L) {
+                        const glm::vec3 hit = o + t * d;
+                        const glm::vec3 axisPt = p0 + va * along;
+                        glm::vec3 n = hit - axisPt;
+                        const float nl = glm::length(n);
+                        n = (nl > 1e-6f) ? n / nl : va;
+                        consider(t, n);
+                    }
+                }
+            }
+        }
+    }
+    if (best < 0.0f) return -1.0f;
+    outN = bestN;
+    if (glm::dot(outN, d) > 0.0f) outN = -outN;
+    return best;
+}
+
 } // namespace
 
 RaycastHit PhysicsWorld::Raycast(ecs::Registry& reg, const Ray& ray, float maxDistance) const {
@@ -949,6 +1117,10 @@ RaycastHit PhysicsWorld::Raycast(ecs::Registry& reg, const Ray& ray, float maxDi
             hitT = RaySphere(ray.origin, d, t.position, c.radius, n);
         } else if (c.shape == ColliderShape::Plane) {
             hitT = RayPlane(ray.origin, d, c.planeNormal, c.planeOffset, n);
+        } else if (c.shape == ColliderShape::Capsule) {
+            const glm::vec3 up = glm::mat3_cast(t.rotation) * glm::vec3(0.0f, 1.0f, 0.0f);
+            const glm::vec3 h  = up * c.halfHeight;
+            hitT = RayCapsule(ray.origin, d, t.position - h, t.position + h, c.radius, n);
         } else { // Box
             OBB o; o.center = t.position;
             const glm::mat3 R = glm::mat3_cast(t.rotation);

@@ -53,6 +53,24 @@ Pen CapsuleVsCollider(const glm::vec3& p0, const glm::vec3& p1, float r, const T
         }
         return out;
     }
+    if (c.shape == ColliderShape::Capsule) {
+        // Capsule vs capsule: closest points between the two axis segments.
+        const glm::vec3 up = glm::mat3_cast(t.rotation) * glm::vec3(0.0f, 1.0f, 0.0f);
+        const glm::vec3 h  = up * c.halfHeight;
+        const glm::vec3 b0 = t.position - h, b1 = t.position + h;
+        // Cheap closest approach: clamp each segment's midpoint onto the other.
+        const glm::vec3 qa = ClosestOnSegment(p0, p1, ClosestOnSegment(b0, b1, 0.5f * (p0 + p1)));
+        const glm::vec3 qb = ClosestOnSegment(b0, b1, qa);
+        const glm::vec3 delta = qa - qb;
+        const float dist = glm::length(delta);
+        const float rr = r + c.radius;
+        if (dist < rr) {
+            out.hit = true;
+            out.normal = (dist > 1e-6f) ? delta / dist : glm::vec3(0, 1, 0);
+            out.depth = rr - dist;
+        }
+        return out;
+    }
     // Box (OBB): approximate by the capsule's closest segment point to the box.
     const glm::mat3 R = glm::mat3_cast(t.rotation);
     const glm::vec3 ax[3] = { R[0], R[1], R[2] };

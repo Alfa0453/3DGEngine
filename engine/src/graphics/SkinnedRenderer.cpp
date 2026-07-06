@@ -73,6 +73,29 @@ void main() {
 }
 )GLSL";
 
+// Skinned depth-only shader for shadow maps (position + bones only, empty frag).
+const char* kDepthVert = R"GLSL(
+#version 330 core
+layout (location = 0) in vec3 aPos;
+layout (location = 3) in vec4 aBoneIds;
+layout (location = 4) in vec4 aWeights;
+const int MAX_BONES = 128;
+uniform mat4 uBones[MAX_BONES];
+uniform mat4 uModel;
+uniform mat4 uLightVP;
+void main() {
+    mat4 skin = aWeights.x * uBones[int(aBoneIds.x)]
+              + aWeights.y * uBones[int(aBoneIds.y)]
+              + aWeights.z * uBones[int(aBoneIds.z)]
+              + aWeights.w * uBones[int(aBoneIds.w)];
+    gl_Position = uLightVP * uModel * skin * vec4(aPos, 1.0);
+}
+)GLSL";
+const char* kDepthFrag = R"GLSL(
+#version 330 core
+void main() {}
+)GLSL";
+
 } // namespace
 
 SkinnedRenderer::SkinnedRenderer()
@@ -123,6 +146,19 @@ void SkinnedRenderer::Draw(const SkinnedModel& model,
         }
         sm.mesh.Draw();
     }
+}
+
+void SkinnedRenderer::DrawDepth(const SkinnedModel& model,
+                                const std::vector<glm::mat4>& bones,
+                                const glm::mat4& modelMatrix, const glm::mat4& lightVP) {
+    m_depth->Bind();
+    m_depth->SetMat4("uLightVP", lightVP);
+    m_depth->SetMat4("uModel", modelMatrix);
+    const std::size_t n = (bones.size() < static_cast<std::size_t>(kMaxBones))
+                          ? bones.size() : static_cast<std::size_t>(kMaxBones);
+    for (std::size_t i = 0; i < n; ++i)
+        m_depth->SetMat4("uBones[" + std::to_string(i) + "]", bones[i]);
+    for (const SubMesh& sm : model.SubMeshes()) sm.mesh.Draw();
 }
 
 } // namespace engine

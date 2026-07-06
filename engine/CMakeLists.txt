@@ -46,6 +46,11 @@ add_library(engine STATIC
     src/physics/PhysicsWorld.cpp
     src/physics/CharacterController.cpp
     src/animation/Animator.cpp
+    src/ai/AStar.cpp
+    src/ai/Perception.cpp
+    src/ai/Steering.cpp
+    src/ai/AiAgent.cpp
+    src/gameplay/PlayerController.cpp
 )
 
 # PUBLIC headers live under include/ so consumers write:  #include <engine/...>

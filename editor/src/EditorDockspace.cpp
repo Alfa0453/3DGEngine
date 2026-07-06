@@ -1197,6 +1197,52 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
         }
     }
 
+    if (ImGui::CollapsingHeader("Gameplay Components", ImGuiTreeNodeFlags_DefaultOpen)) {
+        bool rotatorEnabled = selected->rotatorEnabled;
+        if (ImGui::Checkbox("Rotator", &rotatorEnabled)) {
+            context.scene->SetSelectedRotatorEnabled(rotatorEnabled);
+        }
+        if (rotatorEnabled) {
+            engine::ecs::Rotator rotator = selected->rotator;
+            bool changed = false;
+            changed |= ImGui::DragFloat3("Rotator Axis", &rotator.axis.x, 0.05f);
+            changed |= ImGui::DragFloat("Rotator Speed", &rotator.radiansPerSecond, 0.05f, -100.0f, 100.0f);
+            if (changed) {
+                context.scene->SetSelectedRotator(rotator);
+            }
+            if (ImGui::Button("Spin Y##Rotator")) {
+                rotator.axis = glm::vec3(0.0f, 1.0f, 0.0f);
+                rotator.radiansPerSecond = 1.57f;
+                context.scene->SetSelectedRotator(rotator);
+            }
+        }
+
+        bool moverEnabled = selected->moverEnabled;
+        if (ImGui::Checkbox("Mover", &moverEnabled)) {
+            context.scene->SetSelectedMoverEnabled(moverEnabled);
+        }
+        if (moverEnabled) {
+            engine::ecs::Mover mover = selected->mover;
+            bool changed = false;
+            changed |= ImGui::DragFloat3("Mover Axis", &mover.axis.x, 0.05f);
+            changed |= ImGui::DragFloat("Mover Distance", &mover.distance, 0.05f, 0.0f, 1000.0f);
+            changed |= ImGui::DragFloat("Mover Speed", &mover.speed, 0.05f, -100.0f, 100.0f);
+            changed |= ImGui::DragFloat("Mover Phase", &mover.phase, 0.05f, -1000.0f, 1000.0f);
+            if (changed) {
+                mover.initialized = false;
+                context.scene->SetSelectedMover(mover);
+            }
+            if (ImGui::Button("Move X##Mover")) {
+                mover.axis = glm::vec3(1.0f, 0.0f, 0.0f);
+                mover.distance = 2.0f;
+                mover.speed = 1.0f;
+                mover.phase = 0.0f;
+                mover.initialized = false;
+                context.scene->SetSelectedMover(mover);
+            }
+        }
+    }
+
     ImGui::End();
 }
 

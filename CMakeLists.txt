@@ -142,6 +142,9 @@ add_subdirectory(engine)   # the reusable engine (static library)
 add_subdirectory(editor)
 #add_subdirectory(physics)  # moved to standalone GameEngine project
 #add_subDirectory(marble)
+add_subdirectory(character)
+add_subdirectory(aidemo)
+add_subdirectory(playerdemo)
 
 # ---------------------------------------------------------------------------
 # Packaging: `cmake --install build --prefix dist` stages a runnable folder,

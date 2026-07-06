@@ -1,3 +1,4 @@
+#include <unordered_map>
 #include "engine/graphics/PbrRenderer.h"
 
 #include "engine/graphics/Shader.h"
@@ -9,6 +10,7 @@
 #include "engine/graphics/SSAO.h"
 #include "engine/graphics/CascadedShadow.h"
 #include "engine/graphics/Texture.h"
+#include "engine/graphics/Frustum.h"
 
 #include <algorithm>
 #include <cmath>
@@ -58,12 +60,12 @@ void main() {
         vIAlbedo = aIAlbedo; vIMRA = aIMRA; vIEmissive = aIEmissive;
     } else {
         model = uModel; nrm = uNormalMat;
-        vIAlbedo = vec3(0.0); vIMRA= vec3(0.0); vIEmissive = vec3(0.0);
+        vIAlbedo = vec3(0.0); vIMRA = vec3(0.0); vIEmissive = vec3(0.0);
     }
-    vec4 world = model * vec4(aPos, 1.0);
-    vWorldPos  = world.xyz;
-    vNormal    = normalize(nrm * aNormal);
-    vUV        = aTexCoord;
+    vec4 world  = model * vec4(aPos, 1.0);
+    vWorldPos   = world.xyz;
+    vNormal     = normalize(nrm * aNormal);
+    vUV         = aTexCoord;
     gl_Position = uViewProj * world;
 }
 )GLSL";
@@ -121,7 +123,6 @@ uniform mat4  uCascadeVP[4];
 uniform float uCascadeSplits[4];
 uniform mat4  uView;
 uniform float uShadowSoftness;
-uniform int uSunShadowsEnabled;
 uniform samplerCube uPointCube[4];
 uniform int uNumPointShadows;
 uniform int uApplyTonemap;
@@ -272,7 +273,7 @@ void main() {
     vec3 Lo = vec3(0.0);
     vec3 Ls = normalize(-uSunDir);
     float sunNdotL = max(dot(N,Ls),0.0);
-    float shadow = (uSunShadowsEnabled == 1) ? ShadowFactor(sunNdotL) : 0.0;
+    float shadow = ShadowFactor(sunNdotL);
     Lo += (1.0-shadow)*Lighting(N,V,Ls,uSunColor,albedo,F0,metallic,roughness);
     ivec2 tile = ivec2(gl_FragCoord.xy / (uScreenSize / vec2(TILE_COUNT)));
     tile = clamp(tile, ivec2(0), TILE_COUNT - ivec2(1));
@@ -290,24 +291,6 @@ void main() {
         vec3 contrib = Lighting(N, V, L, radiance, albedo, F0, metallic, roughness);
         if (li < uNumPointShadows) contrib *= (1.0 - PointShadowFactor(li, -d));
         Lo += contrib;
-    }
-    for (int i = 0; i < uNumSpots && i < MAX_SPOTS; ++i) {
-        vec3 d = uSpotPos[i] - vWorldPos;
-        float dist2 = dot(d, d);
-        vec3 L = d / sqrt(max(dist2, 0.0001));
-        float theta = dot(-L, normalize(uSpotDir[i]));
-        float cone = clamp((theta - uSpotCosOuter[i]) /
-                        max(uSpotCosInner[i] - uSpotCosOuter[i], 0.0001), 0.0, 1.0);
-        if (cone > 0.0) {
-            vec3 radiance = uSpotColor[i] * cone / max(dist2, 0.0001);
-            vec3 contrib = Lighting(N, V, L, radiance, albedo, F0, metallic, roughness);
-            if (i < uNumSpotShadows) contrib *= (1.0 - SpotShadowFactor(i, vWorldPos));
-            Lo += contrib;
-        }
-    }
-    for (int i = 0; i < uNumAreas && i < MAX_AREAS; ++i) {
-        Lo += AreaLight(N, V, uAreaPos[i] - vWorldPos, uAreaRadius[i], uAreaColor[i],
-                        albedo, F0, metallic, roughness);
     }
     vec3 ambient;
     if (uUseIBL == 1) {
@@ -399,7 +382,7 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
     });
 
     // Cascaded directional (sun) shadow pass.
-    m_cascade.Generate(reg, camera, aspect, sunDir, 60.0f);
+    m_cascade.Generate(reg, camera, aspect, sunDir, 60.0f, opt.shadowCasters);
     glViewport(0, 0, screenWidth, screenHeight);
 
     int numPointShadows = 0;
@@ -419,6 +402,7 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
     // Lit pass.
     const glm::mat4 view = camera.ViewMatrix();
     const glm::mat4 proj = camera.ProjectionMatrix(aspect);
+    const Frustum frustum = ExtractFrustum(proj * view);
     m_pbr->Bind();
     m_pbr->SetMat4("uViewProj", proj * view);
     m_pbr->SetVec3("uViewPos", camera.Position());
@@ -434,7 +418,6 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
     m_pbr->SetInt("uCascadeMaps", 4);
     m_pbr->SetMat4("uView", view);
     m_pbr->SetFloat("uShadowSoftness", opt.shadowSoftness);
-    m_pbr->SetInt("uSunShadowsEnabled", opt.directionalShadows ? 1 : 0);
     for (int i = 0; i < CascadedShadow::kCascades; ++i) {
         const std::string ix = "[" + std::to_string(i) + "]";
         m_pbr->SetMat4("uCascadeVP" + ix, m_cascade.CascadeVP(i));
@@ -465,8 +448,7 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
     m_pbr->SetInt("uPointCube[2]", 11);
     m_pbr->SetInt("uPointCube[3]", 12);
     m_spotShadow.BindMaps(13);
-    const int spotCount = std::min(static_cast<int>(spotPos.size()), static_cast<int>(SpotShadow::kMax));
-    m_pbr->SetInt("uNumSpots", spotCount);
+    m_pbr->SetInt("uNumSpots", static_cast<int>(spotPos.size()));
     m_pbr->SetInt("uNumSpotShadows", numSpotShadows);
     for (std::size_t i = 0; i < spotPos.size() && i < static_cast<std::size_t>(SpotShadow::kMax); ++i) {
         const std::string ix = "[" + std::to_string(i) + "]";
@@ -481,13 +463,12 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
     m_pbr->SetInt("uSpotMap[1]", 14);
     m_pbr->SetInt("uSpotMap[2]", 15);
     m_pbr->SetInt("uSpotMap[3]", 16);
-    const int areaCount = std::min(static_cast<int>(areaPos.size()), 4);
-    m_pbr->SetInt("uNumAreas", areaCount);
-    for (int i = 0; i < areaCount; ++i) {
+    m_pbr->SetInt("uNumAreas", static_cast<int>(areaPos.size()));
+    for (std::size_t i = 0; i < areaPos.size() && i < 4; ++i) {
         const std::string ix = "[" + std::to_string(i) + "]";
-        m_pbr->SetVec3("uAreaPos" + ix, areaPos[static_cast<std::size_t>(i)]);
-        m_pbr->SetVec3("uAreaColor" + ix, areaCol[static_cast<std::size_t>(i)]);
-        m_pbr->SetFloat("uAreaRadius" + ix, areaRad[static_cast<std::size_t>(i)]);
+        m_pbr->SetVec3("uAreaPos" + ix, areaPos[i]);
+        m_pbr->SetVec3("uAreaColor" + ix, areaCol[i]);
+        m_pbr->SetFloat("uAreaRadius" + ix, areaRad[i]);
     }
     m_pbr->SetInt("uFogEnabled", opt.fog ? 1 : 0);
     m_pbr->SetVec3("uFogColor", opt.fogColor);
@@ -502,8 +483,11 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
     std::vector<std::pair<Transform*, MeshPBR*>> textured;
     reg.view<Transform, MeshPBR>().each([&](Entity, Transform& t, MeshPBR& m) {
         if (!m.mesh) return;
-        if (m.material.albedoMap || m.material.normalMap || m.material.metalRoughMap) {
-            textured.emplace_back(&t, &m);
+        if (opt.frustumCull &&
+            !SphereInFrustum(frustum, t.position, 0.5f * glm::length(t.scale)))
+            return;                                   // off-screen: skip it
+        if (m.material.albedoMap || m.material.normalMap || m.material.metalRoughMap || !opt.instancing) {
+            textured.emplace_back(&t, &m);   // textured, or instancing disabled -> per-object
             return;
         }
         std::vector<float>& v = batches[m.mesh];
@@ -536,7 +520,7 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
         bindMap(m.material.metalRoughMap, 2, "uHasMetalRoughMap", "uMetalRoughMap");
         m.mesh->Draw();
     }
-    
+
     // Instanced batches (uInstanced = 1, no textures).
     if (!batches.empty()) {
         m_pbr->SetInt("uInstanced", 1);
@@ -551,20 +535,20 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
             glBindVertexArray(mesh->Vao());
             glBindBuffer(GL_ARRAY_BUFFER, m_instanceVBO);
             glBufferData(GL_ARRAY_BUFFER,
-                        static_cast<GLsizeiptr>(data.size() * sizeof(float)),
-                        data.data(), GL_DYNAMIC_DRAW);
+                         static_cast<GLsizeiptr>(data.size() * sizeof(float)),
+                         data.data(), GL_DYNAMIC_DRAW);
             for (int c = 0; c < 4; ++c) {   // mat4 columns -> locations 3..6
                 const GLuint loc = static_cast<GLuint>(3 + c);
                 glEnableVertexAttribArray(loc);
                 glVertexAttribPointer(loc, 4, GL_FLOAT, GL_FALSE, stride,
-                                    reinterpret_cast<void*>(static_cast<std::size_t>(c * 4) * sizeof(float)));
+                                      reinterpret_cast<void*>(static_cast<std::size_t>(c * 4) * sizeof(float)));
                 glVertexAttribDivisor(loc, 1);
             }
             const struct { GLuint loc; int off; } mats[3] = {{7, 16}, {8, 19}, {9, 22}};
             for (auto& a : mats) {
                 glEnableVertexAttribArray(a.loc);
                 glVertexAttribPointer(a.loc, 3, GL_FLOAT, GL_FALSE, stride,
-                                    reinterpret_cast<void*>(static_cast<std::size_t>(a.off) * sizeof(float)));
+                                      reinterpret_cast<void*>(static_cast<std::size_t>(a.off) * sizeof(float)));
                 glVertexAttribDivisor(a.loc, 1);
             }
             glDrawElementsInstanced(GL_TRIANGLES, static_cast<GLsizei>(mesh->IndexCount()),

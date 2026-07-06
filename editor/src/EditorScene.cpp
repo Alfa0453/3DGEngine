@@ -164,7 +164,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         return false;
     }
 
-    out << "3DGEditorScene 18\n";
+    out << "3DGEditorScene 20\n";
     out << "environment "
         << m_environment.timeOfDay << ' '
         << m_environment.skyLightIntensity << ' '
@@ -257,7 +257,15 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
             << object.collider.planeOffset << ' '
             << object.collider.restitution << ' '
             << object.collider.friction << ' '
-            << (object.collider.isTrigger ? 1 : 0) << '\n';
+            << (object.collider.isTrigger ? 1 : 0) << ' '
+            << (object.rotatorEnabled ? 1 : 0) << ' '
+            << object.rotator.axis.x << ' ' << object.rotator.axis.y << ' ' << object.rotator.axis.z << ' '
+            << object.rotator.radiansPerSecond << ' '
+            << (object.moverEnabled ? 1 : 0) << ' '
+            << object.mover.axis.x << ' ' << object.mover.axis.y << ' ' << object.mover.axis.z << ' '
+            << object.mover.distance << ' '
+            << object.mover.speed << ' '
+            << object.mover.phase << '\n';
     }
 
     for (const PhysicsJoint& joint : m_joints) {
@@ -293,7 +301,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
     std::string magic;
     int version = 0;
     in >> magic >> version;
-    if (magic != "3DGEditorScene" ||(version < 1 || version > 18)) {
+    if (magic != "3DGEditorScene" ||(version < 1 || version > 20)) {
         if (error) *error = "Scene file has an unknown format.";
         return false;
     }
@@ -504,6 +512,10 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         int rigidBodyCcd = rigidBody.ccd ? 1 : 0;
         int rigidBodyFreezeRotation = rigidBody.freezeRotation ? 1 : 0;
         int colliderTrigger = collider.isTrigger ? 1 : 0;
+        int rotatorEnabled = 0;
+        engine::ecs::Rotator rotator;
+        int moverEnabled = 0;
+        engine::ecs::Mover mover;
 
         in >> primitiveName >> name
            >> transform.position.x >> transform.position.y >> transform.position.z
@@ -576,6 +588,18 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                 collider.shape = engine::ecs::ColliderShape::Sphere;
             }
         }
+        if (version >= 19) {
+            in >> rotatorEnabled
+               >> rotator.axis.x >> rotator.axis.y >> rotator.axis.z
+               >> rotator.radiansPerSecond;
+        }
+        if (version >= 20) {
+            in >> moverEnabled
+               >> mover.axis.x >> mover.axis.y >> mover.axis.z
+               >> mover.distance
+               >> mover.speed
+               >> mover.phase;
+        }
 
         if (!in || !ParsePrimitive(primitiveName, &primitive)) {
             if (error) *error = "Scene file contains an invalid object record.";
@@ -597,6 +621,10 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         m_objects.back().rigidBody = rigidBody;
         m_objects.back().colliderEnabled = colliderEnabled != 0;
         m_objects.back().collider = collider;
+        m_objects.back().rotatorEnabled = rotatorEnabled != 0;
+        m_objects.back().rotator = rotator;
+        m_objects.back().moverEnabled = moverEnabled != 0;
+        m_objects.back().mover = mover;
     }
 
     m_selectedIndex = m_objects.empty() ? -1 : 0;
@@ -1299,6 +1327,77 @@ bool EditorScene::SetSelectedCollider(const engine::ecs::Collider &collider)
     return true;
 }
 
+bool EditorScene::SetSelectedRotatorEnabled(bool enabled)
+{
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked || selected.rotatorEnabled == enabled) {
+        return false;
+    }
+
+    PushUndoSnapshot();
+    selected.rotatorEnabled = enabled;
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedRotator(const engine::ecs::Rotator &rotator)
+{
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) {
+        return false;
+    }
+
+    PushUndoSnapshot();
+    selected.rotatorEnabled = true;
+    selected.rotator = rotator;
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedMoverEnabled(bool enabled)
+{
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked || selected.moverEnabled == enabled) {
+        return false;
+    }
+
+    PushUndoSnapshot();
+    selected.moverEnabled = enabled;
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedMover(const engine::ecs::Mover &mover)
+{
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) {
+        return false;
+    }
+
+    PushUndoSnapshot();
+    selected.moverEnabled = true;
+    selected.mover = mover;
+    selected.mover.initialized = false;
+    m_dirty = true;
+    return true;
+}
+
 bool EditorScene::AddPhysicsJoint(const PhysicsJoint &joint)
 {
     if (joint.objectA.empty() || (!joint.worldAnchor && joint.objectB.empty())) {
@@ -1394,9 +1493,17 @@ bool EditorScene::DuplicateSelected(const engine::Mesh & cube, const engine::Mes
     if (selectedCopy.light) {
         m_registry.Add<Light>(m_objects.back().entity, selectedCopy.lightData);
     }
+    m_objects.back().linearVelocityEnabled = selectedCopy.linearVelocityEnabled;
+    m_objects.back().angularVelocityEnabled = selectedCopy.angularVelocityEnabled;
     m_objects.back().linearVelocity = selectedCopy.linearVelocity;
     m_objects.back().angularVelocityAxis = selectedCopy.angularVelocityAxis;
     m_objects.back().angularVelocityRadians = selectedCopy.angularVelocityRadians;
+    m_objects.back().rigidBodyEnabled = selectedCopy.rigidBodyEnabled;
+    m_objects.back().rigidBody = selectedCopy.rigidBody;
+    m_objects.back().colliderEnabled = selectedCopy.colliderEnabled;
+    m_objects.back().collider = selectedCopy.collider;
+    m_objects.back().rotatorEnabled = selectedCopy.rotatorEnabled;
+    m_objects.back().rotator = selectedCopy.rotator;
     m_selectedIndex = static_cast<int>(m_objects.size()) - 1;
     m_dirty = true;
     return true;

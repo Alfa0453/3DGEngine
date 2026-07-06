@@ -38,6 +38,10 @@ public:
         bool colliderEnabled = false;
         engine::ecs::RigidBody rigidBody;
         engine::ecs::Collider collider;
+        bool rotatorEnabled = false;
+        engine::ecs::Rotator rotator;
+        bool moverEnabled = false;
+        engine::ecs::Mover mover;
     };
 
     struct Scene {

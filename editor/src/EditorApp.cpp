@@ -42,6 +42,40 @@ std::size_t ComponentCount(engine::ecs::Registry& registry) {
     return pool ? pool->dense.size() : 0;
 }
 
+std::size_t CountAuthoredRotators(const EditorScene& scene) {
+    return static_cast<std::size_t>(std::count_if(
+        scene.Objects().begin(),
+        scene.Objects().end(),
+        [](const EditorScene::Object& object) {
+            return object.rotatorEnabled;
+        }));
+}
+
+std::size_t CountAuthoredMovers(const EditorScene& scene) {
+    return static_cast<std::size_t>(std::count_if(
+        scene.Objects().begin(),
+        scene.Objects().end(),
+        [](const EditorScene::Object& object) {
+            return object.moverEnabled;
+        }));
+}
+
+std::size_t CountRuntimeRotatorsWithFrozenRigidBody(engine::ecs::Registry& registry) {
+    engine::ecs::Pool<engine::ecs::Rotator>* rotators = registry.TryPool<engine::ecs::Rotator>();
+    if (!rotators) {
+        return 0;
+    }
+
+    std::size_t count = 0;
+    for (const engine::ecs::Entity entity : rotators->dense) {
+        const engine::ecs::RigidBody* body = registry.TryGet<engine::ecs::RigidBody>(entity);
+        if (body && body->freezeRotation) {
+            ++count;
+        }
+    }
+    return count;
+}
+
 struct PhysicsRuntimeStats {
     std::size_t rigidBodies = 0;
     std::size_t dynamicBodies = 0;
@@ -2131,6 +2165,7 @@ void EditorApp::EnterPlayMode()
     m_physicsEventExitCount = 0;
     m_physicsEventRows.clear();
     m_physicsEventGuides.clear();
+    m_playPhysics.ClearJoints();
     m_playEntityNames.clear();
     std::string error;
     if (!BuildPlayRuntimePreview(&error)) {
@@ -2146,6 +2181,17 @@ void EditorApp::EnterPlayMode()
     const std::size_t angularCount = m_playRegistry
         ? ComponentCount<engine::ecs::AngularVelocity>(*m_playRegistry)
         : 0;
+    const std::size_t rotatorCount = m_playRegistry
+        ? ComponentCount<engine::ecs::Rotator>(*m_playRegistry)
+        : 0;
+    const std::size_t moverCount = m_playRegistry
+        ? ComponentCount<engine::ecs::Mover>(*m_playRegistry)
+        : 0;
+    const std::size_t authoredRotatorCount = CountAuthoredRotators(m_scene);
+    const std::size_t authoredMoverCount = CountAuthoredMovers(m_scene);
+    const std::size_t frozenRotators = m_playRegistry
+        ? CountRuntimeRotatorsWithFrozenRigidBody(*m_playRegistry)
+        : 0;
     const PhysicsRuntimeStats physics = m_playRegistry
         ? CollectPhysicsRuntimeStats(*m_playRegistry)
         : PhysicsRuntimeStats{};
@@ -2154,11 +2200,25 @@ void EditorApp::EnterPlayMode()
     m_log.Info("Play mode: runtime preview loaded, "
         + std::to_string(linearCount) + " linear, "
         + std::to_string(angularCount) + " angular, "
+        + std::to_string(rotatorCount) + " rotators, "
+        + std::to_string(authoredRotatorCount) + " authored rotators, "
+        + std::to_string(authoredMoverCount) + " authored movers, "
         + std::to_string(physics.rigidBodies) + " rigid bodies, "
         + std::to_string(physics.dynamicBodies) + " dynamic, "
         + std::to_string(physics.colliders) + " colliders, "
         + std::to_string(physics.staticColliders) + " static, "
         + std::to_string(physics.triggerColliders) + " triggers");
+    if (authoredRotatorCount > 0 && rotatorCount == 0) {
+        m_log.Warning("Play mode gameplay: scene has Rotator objects, but none reached the runtime registry");
+    }
+    if (authoredMoverCount > 0 && moverCount == 0) {
+        m_log.Warning("Play mode gameplay: scene has Mover objects, but none reached the runtime registry");
+    }
+    if (frozenRotators > 0) {
+        m_log.Warning("Play mode gameplay: "
+            + std::to_string(frozenRotators)
+            + " Rotator object(s) also have freeze rotation enabled");
+    }
     if (physics.dynamicBodiesWithoutCollider > 0) {
         m_log.Warning("Play mode physics: "
             + std::to_string(physics.dynamicBodiesWithoutCollider)
@@ -2299,6 +2359,7 @@ void EditorApp::StepPlayPhysics(float dt)
 
     const float step = std::max(m_physicsFixedTimestep, 0.0001f);
     if (m_physicsStepRequested) {
+        engine::ecs::UpdateGameplay(*m_playRegistry, step);
         engine::ecs::UpdateRuntimeMotion(*m_playRegistry, step);
         m_playPhysics.Step(*m_playRegistry, step);
         CapturePlayPhysicsEvents();
@@ -2314,6 +2375,7 @@ void EditorApp::StepPlayPhysics(float dt)
     m_physicsAccumulator += std::min(dt, 0.25f);
     constexpr int kMaxPhysicsStepsPerFrame = 5;
     while (m_physicsAccumulator >= step && m_physicsStepsLastFrame < kMaxPhysicsStepsPerFrame) {
+        engine::ecs::UpdateGameplay(*m_playRegistry, step);
         engine::ecs::UpdateRuntimeMotion(*m_playRegistry, step);
         m_playPhysics.Step(*m_playRegistry, step);
         CapturePlayPhysicsEvents();

@@ -7,6 +7,7 @@
 
 #include <glm/glm.hpp>
 
+#include <functional>
 #include <memory>
 
 namespace engine {
@@ -32,6 +33,11 @@ class PbrRenderer {
 public:
     struct Options {
         glm::vec3 ambient{0.03f, 0.03f, 0.03f};  // sky/fill light
+        // Extra sun-shadow casters (non-ECS, e.g. skinned models): called per cascade
+        // with that cascade's view-projection. See SkinnedRenderer::DrawDepth.
+        std::function<void(const glm::mat4&)> shadowCasters;
+        bool frustumCull = true;   // skip MeshPBR entities outside the camera frustum
+        bool instancing  = true;   // batch untextured meshes; false = per-object (fallback)
         // Shadow frustum. If radius <= 0 it is fitted automatically to the
         // MeshPBR entities each frame.
         glm::vec3 shadowCenter{0.0f};

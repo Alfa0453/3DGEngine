@@ -32,5 +32,12 @@ Mesh Cylinder(int segments = 24);
 // 2*segments longitude bands). Normals point outward; UVs wrap longitude/latitude.
 Mesh Sphere(int segments = 16);
 
+// A capsule (pill) standing upright along +Y: a cylinder of the given `radius`
+// and `height` (the TOTAL tip-to-tip height, must be >= 2*radius) capped by two
+// hemispheres. Centred at the origin. Matches the `Capsule` collider, so it drops
+// straight onto a capsule rigid body / character controller. `segments` controls
+// the smoothness (longitude bands around; latitude bands per cap).
+Mesh Capsule(float radius = 0.4f, float height = 1.8f, int segments = 16);
+
 } // namespace primitives
 } // namespace engine
