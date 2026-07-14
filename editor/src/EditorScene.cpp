@@ -177,7 +177,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         return false;
     }
 
-    out << "3DGEditorScene 33\n";
+    out << "3DGEditorScene 35\n";
     out << "environment "
         << m_environment.timeOfDay << ' '
         << m_environment.skyLightIntensity << ' '
@@ -296,7 +296,10 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
                 << StoredPath(transition.parameter) << ' '
                 << static_cast<int>(transition.compare) << ' '
                 << transition.threshold << ' '
-                << transition.fade << ' ';
+                << transition.fade << ' '
+                << transition.exitTime << ' '
+                << transition.priority << ' '
+                << (transition.canInterrupt ? 1 : 0) << ' ';
         }
         out
             << object.linearVelocity.x << ' ' << object.linearVelocity.y << ' ' << object.linearVelocity.z << ' '
@@ -396,7 +399,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
     std::string magic;
     int version = 0;
     in >> magic >> version;
-    if (magic != "3DGEditorScene" ||(version < 1 || version > 29)) {
+    if (magic != "3DGEditorScene" ||(version < 1 || version > 35)) {
         if (error) *error = "Scene file has an unknown format.";
         return false;
     }
@@ -781,6 +784,13 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                    >> compare
                    >> transition.threshold
                    >> transition.fade;
+                if (version >= 34) {
+                    in >> transition.exitTime;
+                }
+                if (version >= 35) {
+                    in >> transition.priority
+                       >> transition.canInterrupt;
+                }
                 if (transition.fromState == "-") {
                     transition.fromState.clear();
                 }
@@ -1637,6 +1647,7 @@ bool EditorScene::SetSelectedAnimationStateGraph(const std::vector<AnimationStat
     selected.animationTransitions = transitions;
     for (AnimationStateTransition& transition : selected.animationTransitions) {
         transition.fade = std::max(transition.fade, 0.0f);
+        transition.exitTime = std::clamp(transition.exitTime, 0.0f, 1.0f);
     }
     m_dirty = true;
     return true;

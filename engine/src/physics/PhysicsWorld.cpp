@@ -810,6 +810,7 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
         glm::vec3 accel = rb.accumForce * rb.invMass;
         if (rb.useGravity) accel += gravity;
         rb.velocity  += accel * dt;
+        rb.velocity  *= 1.0f / (1.0f + dt * std::max(rb.linearDamping, 0.0f));   // damp residual jitter
 
         glm::vec3 start = t.position;
         glm::vec3 end   = start + rb.velocity * dt;
@@ -837,6 +838,7 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
             const glm::mat3 R     = glm::mat3_cast(t.rotation);
             const glm::mat3 invIw = R * rb.invInertiaLocal * glm::transpose(R);
             rb.angularVelocity += invIw * rb.accumTorque * dt;
+            rb.angularVelocity *= 1.0f / (1.0f + dt * std::max(rb.angularDamping, 0.0f));  // stop rocking / rolling
             const glm::quat wq(0.0f, rb.angularVelocity.x, rb.angularVelocity.y, rb.angularVelocity.z);
             t.rotation = glm::normalize(t.rotation + 0.5f * wq * t.rotation * dt);
         }

@@ -7,6 +7,7 @@
 #include <fstream>
 #include <iomanip>
 #include <sstream>
+#include <system_error>
 
 namespace material_maker {
 namespace {
@@ -140,6 +141,43 @@ bool FindVec3(const std::string& text, const std::string& key, std::array<float,
 
 } // namespace
 
+namespace {
+
+// Make `path` relative to `baseDir` for on-disk storage, so a saved material stays
+// valid when the project moves. Falls back to the original (absolute) path when a
+// relative form does not exist — e.g. a different Windows drive.
+std::string MakeRelativePath(const std::string& path, const std::string& baseDir) {
+    if (path.empty() || baseDir.empty()) {
+        return path;
+    }
+    std::error_code ec;
+    const std::filesystem::path rel = std::filesystem::relative(path, baseDir, ec);
+    if (ec || rel.empty()) {
+        return path;
+    }
+    return rel.generic_string();   // forward slashes: portable in the JSON
+}
+
+// Resolve a stored (possibly relative) path back to an absolute one against the
+// material file's directory, so the loaded material can open its textures.
+std::string ResolveRelativePath(const std::string& path, const std::string& baseDir) {
+    if (path.empty()) {
+        return path;
+    }
+    const std::filesystem::path p(path);
+    if (p.is_absolute() || baseDir.empty()) {
+        return path;
+    }
+    std::error_code ec;
+    std::filesystem::path abs = std::filesystem::weakly_canonical(std::filesystem::path(baseDir) / p, ec);
+    if (ec || abs.empty()) {
+        abs = std::filesystem::path(baseDir) / p;
+    }
+    return abs.string();
+}
+
+} // namespace
+
 std::string SanitizeFileStem(const std::string& name) {
     std::string result;
     for (char c : name) {
@@ -164,7 +202,12 @@ std::string ToJson(const MaterialDocument& material) {
     out << "  \"metallic\": " << material.metallic << ",\n";
     out << "  \"roughness\": " << material.roughness << ",\n";
     out << "  \"ao\": " << material.ao << ",\n";
-    out << "  \"emissive\": " << Vec3Json(material.emissive) << ",\n";
+    // Bake the strength multiplier into the emissive the engine consumes, so a
+    // value above 1 blooms. (The raw colour + strength are an authoring convenience.)
+    const std::array<float, 3> emissiveHdr{material.emissive[0] * material.emissiveStrength,
+                                           material.emissive[1] * material.emissiveStrength,
+                                           material.emissive[2] * material.emissiveStrength};
+    out << "  \"emissive\": " << Vec3Json(emissiveHdr) << ",\n";
     out << "  \"maps\": {\n";
     out << "    \"albedo\": \"" << EscapeJson(material.albedoMap) << "\",\n";
     out << "    \"normal\": \"" << EscapeJson(material.normalMap) << "\",\n";
@@ -187,7 +230,10 @@ std::string ToCppInitializer(const MaterialDocument& material) {
     out << variable << ".metallic = " << material.metallic << "f;\n";
     out << variable << ".roughness = " << material.roughness << "f;\n";
     out << variable << ".ao = " << material.ao << "f;\n";
-    out << variable << ".emissive = " << Vec3Cpp(material.emissive) << ";\n";
+    const std::array<float, 3> emissiveHdr{material.emissive[0] * material.emissiveStrength,
+                                           material.emissive[1] * material.emissiveStrength,
+                                           material.emissive[2] * material.emissiveStrength};
+    out << variable << ".emissive = " << Vec3Cpp(emissiveHdr) << ";\n";
     return out.str();
 }
 
@@ -203,7 +249,13 @@ bool SaveMaterialFile(const MaterialDocument& material, const std::string& outpu
             return false;
         }
 
-        out << ToJson(material);
+        // Store texture paths relative to the material file so the material stays
+        // valid when the project moves.
+        MaterialDocument stored = material;
+        stored.albedoMap     = MakeRelativePath(stored.albedoMap, directory.string());
+        stored.normalMap     = MakeRelativePath(stored.normalMap, directory.string());
+        stored.metalRoughMap = MakeRelativePath(stored.metalRoughMap, directory.string());
+        out << ToJson(stored);
         if (writtenPath) *writtenPath = filePath.string();
         if (error) error->clear();
         return true;
@@ -235,20 +287,32 @@ bool LoadMaterialFile(const std::string& path, MaterialDocument* material, std::
         return false;
     }
 
-    MaterialDocument loaded;
-    FindString(text, "name", &loaded.name);
-    FindVec3(text, "albedo", &loaded.albedo);
-    FindFloat(text, "metallic", &loaded.metallic);
-    FindFloat(text, "roughness", &loaded.roughness);
-    FindFloat(text, "ao", &loaded.ao);
-    FindVec3(text, "emissive", &loaded.emissive);
-
+    // Scope the top-level scalar/vector reads to the text BEFORE the "maps" object,
+    // so a similarly-named key inside "maps" or "engineMapping" can never be picked
+    // up by a first-occurrence scan (hardening against key collisions).
     const std::size_t mapsStart = text.find("\"maps\"");
+    const std::string top = (mapsStart == std::string::npos) ? text : text.substr(0, mapsStart);
+
+    MaterialDocument loaded;
+    FindString(top, "name", &loaded.name);
+    FindVec3(top, "albedo", &loaded.albedo);
+    FindFloat(top, "metallic", &loaded.metallic);
+    FindFloat(top, "roughness", &loaded.roughness);
+    FindFloat(top, "ao", &loaded.ao);
+    FindVec3(top, "emissive", &loaded.emissive);
+
     if (mapsStart != std::string::npos) {
         FindStringFrom(text, "albedo", mapsStart, &loaded.albedoMap);
         FindStringFrom(text, "normal", mapsStart, &loaded.normalMap);
         FindStringFrom(text, "metalRough", mapsStart, &loaded.metalRoughMap);
     }
+
+    // Stored paths are relative to the material file; resolve them back to absolute
+    // so the loaded material can open its textures regardless of the CWD.
+    const std::string baseDir = std::filesystem::path(path).parent_path().string();
+    loaded.albedoMap     = ResolveRelativePath(loaded.albedoMap, baseDir);
+    loaded.normalMap     = ResolveRelativePath(loaded.normalMap, baseDir);
+    loaded.metalRoughMap = ResolveRelativePath(loaded.metalRoughMap, baseDir);
 
     *material = loaded;
     if (error) error->clear();

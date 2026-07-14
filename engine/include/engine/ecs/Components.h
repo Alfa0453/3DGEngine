@@ -119,6 +119,9 @@ struct SkinnedModelAsset {
         int compare = 0;
         float threshold = 0.0f;
         float fade = 0.2f;
+        float exitTime = 0.0f;
+        int priority = 0;
+        bool canInterrupt = false;
     };
 
     std::string path;

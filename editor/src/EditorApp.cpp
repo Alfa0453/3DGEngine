@@ -19,6 +19,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 
 using engine::ecs::Entity;
@@ -577,7 +578,46 @@ void EditorApp::DrawEditModeModels(const glm::mat4 & viewProj)
                     }
                     return std::clamp(clip, 0, static_cast<int>(model->AnimationCount() - 1));
                 };
-                if (object.animationLocomotionEnabled) {
+                auto clipSeconds = [&](int clip) {
+                    const auto& animations = model->Animations();
+                    if (clip < 0 || clip >= static_cast<int>(animations.size())) {
+                        return 0.0f;
+                    }
+                    return AnimationClipSeconds(animations[static_cast<std::size_t>(clip)]);
+                };
+                if (!object.animationStates.empty()) {
+                    std::unordered_map<std::string, int> stateIndices;
+                    for (const EditorScene::AnimationStateNode& stateNode : object.animationStates) {
+                        const int clip = resolveClip(stateNode.clipIndex, stateNode.clipName);
+                        const int index = animated.controller.AddState(engine::AnimationController::State{
+                            stateNode.name.empty() ? std::string("State") : stateNode.name,
+                            clip,
+                            stateNode.loop,
+                            std::max(stateNode.speed, 0.0f),
+                            -std::numeric_limits<float>::infinity(),
+                            std::numeric_limits<float>::infinity(),
+                            clipSeconds(clip)
+                        });
+                        stateIndices[stateNode.name] = index;
+                    }
+                    for (const EditorScene::AnimationStateTransition& transition : object.animationTransitions) {
+                        const auto from = stateIndices.find(transition.fromState);
+                        const auto to = stateIndices.find(transition.toState);
+                        if (from == stateIndices.end() || to == stateIndices.end()) {
+                            continue;
+                        }
+                        animated.controller.AddTransition(engine::AnimationController::Transition{
+                            from->second,
+                            to->second,
+                            transition.parameter,
+                            static_cast<engine::AnimationController::Transition::Compare>(
+                            std::clamp(static_cast<int>(transition.compare), 0, 3)),
+                            transition.threshold,
+                            std::max(transition.fade, 0.0f),
+                            std::clamp(transition.exitTime, 0.0f, 1.0f)
+                        });
+                    }
+                } else if (object.animationLocomotionEnabled) {
                     animated.controller = engine::AnimationController::Locomotion(
                         resolveClip(object.animationIdleClipIndex, object.animationIdleClipName),
                         resolveClip(object.animationWalkClipIndex, object.animationWalkClipName),
@@ -604,6 +644,11 @@ void EditorApp::DrawEditModeModels(const glm::mat4 & viewProj)
             const Entity previewEntity = previewRegistry.Create();
             previewRegistry.Add<Transform>(previewEntity, *transform);
             previewRegistry.Add<engine::AnimatedModel>(previewEntity, std::move(animated));
+            if (engine::AnimatedModel* preview = previewRegistry.TryGet<engine::AnimatedModel>(previewEntity)) {
+                for (const auto& entry : m_animationPreviewParameters) {
+                    preview->controller.SetParameter(entry.first, entry.second);
+                }
+            }
             if (m_animationPreviewAction.active
                 && m_animationPreviewAction.entity == object.entity
                 && m_animationPreviewAction.clip >= 0
@@ -742,6 +787,7 @@ void EditorApp::DrawEditorOverlay()
     dockspaceContext.animationActionSpeed = &m_animationActionSpeed;
     dockspaceContext.animationActionMaskRoot = m_animationActionMaskRoot.data();
     dockspaceContext.animationActionMaskRootSize = m_animationActionMaskRoot.size();
+    dockspaceContext.animationPreviewParameters = &m_animationPreviewParameters;
     dockspaceContext.sceneDirty = m_scene.IsDirty();
     const bool dockspaceDrawn = m_dockspace.Draw(dockspaceContext);
     DrawMaterialMakerPanel();
@@ -2780,7 +2826,13 @@ void EditorApp::TriggerAnimationPreviewAction() {
             return;
         }
 
-        animated->PlayAction(clip, {}, {}, fadeIn, fadeOut, speed);
+        std::vector<float> mask;
+        if (!buildMask(*animated->model, &mask)) {
+            m_log.Warning("Animation action mask root bone was not found: " + maskRoot);
+            return;
+        }
+
+        animated->PlayAction(clip, std::move(mask), {}, fadeIn, fadeOut, speed);
         m_log.Info("Play animation action preview started");
         return;
     }
@@ -2798,6 +2850,11 @@ void EditorApp::TriggerAnimationPreviewAction() {
     m_animationPreviewAction.fadeIn = fadeIn;
     m_animationPreviewAction.fadeOut = fadeOut;
     m_animationPreviewAction.speed = speed;
+    if (!buildMask(*model, &m_animationPreviewAction.mask)) {
+        m_log.Warning("Animation action mask root bone was not found: " + maskRoot);
+        m_animationPreviewAction.active = false;
+        return;
+    }
     m_animationPreviewAction.active = true;
     m_log.Info("Edit animation action preview started");
 }

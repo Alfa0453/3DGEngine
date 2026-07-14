@@ -25,6 +25,13 @@ struct RigidBody {
     bool      sleeping   = false;   // solver-managed
     float     sleepTimer = 0.0f;    // solver-managed (seconds of stillness)
 
+    // Velocity damping, applied every step (v *= 1/(1 + dt*damping)). Bleeds off
+    // residual jitter left by the non-warm-started contact solver so resting bodies
+    // actually settle and sleep; angular damping also stops slow rocking and lets
+    // rolling spheres come to rest. Raise for floatier motion, set 0 to disable.
+    float     linearDamping  = 0.05f;
+    float     angularDamping = 0.6f;
+
     // Continuous collision: sweep this body's motion each step so it cannot
     // tunnel through thin geometry. Opt-in (costs an extra sweep) -- for bullets
     // and other fast movers. The moving body is approximated as a sphere.

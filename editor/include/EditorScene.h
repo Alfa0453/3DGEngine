@@ -82,6 +82,9 @@ public:
         Compare compare = Compare::GreaterOrEqual;
         float threshold = 0.0f;
         float fade = 0.2f;
+        float exitTime = 0.0f;
+        int priority = 0;
+        bool canInterrupt = false;
     };
 
     struct Object {

@@ -1,10 +1,15 @@
 #include "MaterialMaker/MaterialMakerPanel.h"
 
+#include "MaterialMaker/MaterialPreview.h"
+#include "MaterialMaker/TexturePacker.h"
+#include "MaterialMaker/ModelMaterialImport.h"
+
 #include <imgui.h>
 
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -60,12 +65,51 @@ bool IsSupportedTexturePath(const std::filesystem::path& path) {
     return extension == ".png" || extension == ".jpg" || extension == ".jpeg" || extension == ".tga";
 }
 
+// Starter presets. Metal entries use measured base reflectances (F0), which is the
+// physically-correct "albedo" for a metallic-workflow material.
+struct Preset {
+    const char* name;
+    float albedo[3];
+    float metallic;
+    float roughness;
+};
+const Preset kPresets[] = {
+    {"Gold",            {1.000f, 0.766f, 0.336f}, 1.0f, 0.22f},
+    {"Silver",          {0.972f, 0.960f, 0.915f}, 1.0f, 0.18f},
+    {"Copper",          {0.955f, 0.638f, 0.538f}, 1.0f, 0.25f},
+    {"Aluminium",       {0.913f, 0.922f, 0.924f}, 1.0f, 0.30f},
+    {"Iron",            {0.560f, 0.570f, 0.580f}, 1.0f, 0.35f},
+    {"Chrome",          {0.550f, 0.556f, 0.554f}, 1.0f, 0.05f},
+    {"Plastic (white)", {0.900f, 0.900f, 0.900f}, 0.0f, 0.35f},
+    {"Rubber",          {0.180f, 0.180f, 0.180f}, 0.0f, 0.90f},
+    {"Painted wood",    {0.350f, 0.220f, 0.120f}, 0.0f, 0.70f},
+    {"Ceramic",         {0.850f, 0.830f, 0.800f}, 0.0f, 0.25f},
+};
+constexpr int kPresetCount = static_cast<int>(sizeof(kPresets) / sizeof(kPresets[0]));
+
+// Field-wise equality, for the unsaved-changes indicator.
+bool SameMaterial(const MaterialDocument& a, const MaterialDocument& b) {
+    return a.name == b.name &&
+           a.albedo == b.albedo &&
+           a.metallic == b.metallic &&
+           a.roughness == b.roughness &&
+           a.ao == b.ao &&
+           a.emissive == b.emissive &&
+           a.emissiveStrength == b.emissiveStrength &&
+           a.albedoMap == b.albedoMap &&
+           a.normalMap == b.normalMap &&
+           a.metalRoughMap == b.metalRoughMap;
+}
+
 } // namespace
 
 MaterialMakerPanel::MaterialMakerPanel(std::string outputDirectory)
-    : m_outputDirectory(std::move(outputDirectory)) {
+    : m_outputDirectory(std::move(outputDirectory)),
+      m_preview(std::make_unique<MaterialPreview>()) {
     Reset();
 }
+
+MaterialMakerPanel::~MaterialMakerPanel() = default;
 
 bool MaterialMakerPanel::Draw() {
     return Draw(nullptr);
@@ -84,11 +128,17 @@ bool MaterialMakerPanel::Draw(bool* open) {
 bool MaterialMakerPanel::DrawContent() {
     DrawPreview();
     ImGui::Separator();
+    DrawPresetControls();
     DrawSurfaceControls();
+    DrawValidation();
     ImGui::Separator();
     DrawTextureControls();
     ImGui::Separator();
     DrawExportControls();
+    ImGui::Separator();
+    DrawModelImport();
+    ImGui::Separator();
+    DrawLibraryControls();
     return m_savedThisFrame;
 }
 
@@ -105,6 +155,7 @@ bool MaterialMakerPanel::LoadFromFile(const std::string& path) {
     }
 
     m_material = loaded;
+    m_savedSnapshot = m_material;
     m_lastSavedPath = path;
     m_outputDirectory = std::filesystem::path(path).parent_path().string();
     SyncBuffersFromMaterial();
@@ -132,6 +183,51 @@ void MaterialMakerPanel::SetMetalRoughMap(const std::string& path) {
     CopyToBuffer(m_metalRoughMapBuffer, sizeof(m_metalRoughMapBuffer), m_material.metalRoughMap);
 }
 
+void MaterialMakerPanel::ApplyPreset(int index) {
+    if (index < 0 || index >= kPresetCount) {
+        return;
+    }
+    const Preset& p = kPresets[index];
+    m_material.albedo    = {p.albedo[0], p.albedo[1], p.albedo[2]};
+    m_material.metallic  = p.metallic;
+    m_material.roughness = p.roughness;
+    m_material.ao        = 1.0f;
+    m_status = std::string("Applied preset: ") + p.name;
+}
+
+void MaterialMakerPanel::DrawPresetControls() {
+    // A menu-style combo: picking an entry applies it, then the combo closes.
+    ImGui::SetNextItemWidth(180.0f);
+    if (ImGui::BeginCombo("Preset", "Load a preset...")) {
+        for (int i = 0; i < kPresetCount; ++i) {
+            if (ImGui::Selectable(kPresets[i].name)) {
+                ApplyPreset(i);
+            }
+        }
+        ImGui::EndCombo();
+    }
+}
+
+void MaterialMakerPanel::DrawValidation() {
+    const float maxC = std::max(m_material.albedo[0], std::max(m_material.albedo[1], m_material.albedo[2]));
+    const float minC = std::min(m_material.albedo[0], std::min(m_material.albedo[1], m_material.albedo[2]));
+    const bool  dielectric = m_material.metallic < 0.1f;
+
+    bool any = false;
+    auto warn = [&](const char* msg) {
+        any = true;
+        ImGui::TextColored(ImVec4(0.95f, 0.80f, 0.35f, 1.0f), "! %s", msg);
+    };
+    if (dielectric && maxC < 0.05f) warn("Albedo very dark for a non-metal (below ~sRGB 30).");
+    if (dielectric && minC > 0.94f) warn("Albedo very bright for a non-metal (above ~sRGB 240).");
+    if (m_material.metallic > 0.1f && m_material.metallic < 0.9f) warn("Partial metallic: real surfaces are usually 0 or 1.");
+    if (m_material.roughness < 0.04f) warn("Roughness near 0 can alias/sparkle; keep a small floor.");
+    if (m_material.metallic > 0.9f && maxC < 0.30f) warn("Metal base colour is dark; metal reflectance (F0) is usually bright.");
+    if (!any) {
+        ImGui::TextColored(ImVec4(0.45f, 0.82f, 0.58f, 1.0f), "PBR: looks physically plausible.");
+    }
+}
+
 void MaterialMakerPanel::DrawSurfaceControls() {
     if (ImGui::InputText("Name", m_nameBuffer, sizeof(m_nameBuffer))) {
         m_material.name = m_nameBuffer;
@@ -142,7 +238,10 @@ void MaterialMakerPanel::DrawSurfaceControls() {
     ImGui::SliderFloat("Roughness", &m_material.roughness, 0.02f, 1.0f, "%.2f");
     ImGui::SliderFloat("AO", &m_material.ao, 0.0f, 1.0f, "%.2f");
     ImGui::ColorEdit3("Emissive", m_material.emissive.data(), ImGuiColorEditFlags_Float);
+    ImGui::SliderFloat("Emissive Strength", &m_material.emissiveStrength, 0.0f, 20.0f, "%.2fx");
 
+    for (float& channel : m_material.emissive) channel = Clamp01(channel);
+    m_material.emissiveStrength = std::max(0.0f, m_material.emissiveStrength);
     for (float& channel : m_material.albedo) channel = Clamp01(channel);
     m_material.metallic = Clamp01(m_material.metallic);
     m_material.roughness = std::max(0.02f, Clamp01(m_material.roughness));
@@ -176,30 +275,233 @@ void MaterialMakerPanel::DrawTextureControls() {
         m_status = std::string(label) + " texture path pasted.";
     };
 
+    // Accept a texture dragged from the editor's content browser (which emits the
+    // "3DGEDITOR_ASSET" payload = the file path) onto the preceding widget.
+    auto acceptTextureDrop = [&](std::string& target, char* buffer, std::size_t bufferSize) {
+        if (!ImGui::BeginDragDropTarget()) {
+            return;
+        }
+        if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("3DGEDITOR_ASSET")) {
+            const char* dropped = static_cast<const char*>(payload->Data);
+            if (dropped) {
+                const std::filesystem::path path(dropped);
+                if (IsSupportedTexturePath(path)) {
+                    target = dropped;
+                    CopyToBuffer(buffer, bufferSize, target);
+                    m_status = "Assigned dropped texture.";
+                } else {
+                    m_status = "Dropped file is not a supported texture.";
+                }
+            }
+        }
+        ImGui::EndDragDropTarget();
+    };
+
+    // Load (cached) and show a thumbnail + status for one map slot.
+    auto showThumbnail = [&](const std::string& path) {
+        if (path.empty() || !m_preview) {
+            return;
+        }
+        const MaterialPreview::MapInfo info = m_preview->AcquireMap(path);
+        if (info.ok && info.textureId != 0) {
+            ImGui::Image((ImTextureID)(std::intptr_t)info.textureId, ImVec2(48.0f, 48.0f),
+                         ImVec2(0.0f, 1.0f), ImVec2(1.0f, 0.0f));
+            ImGui::SameLine();
+            ImGui::Text("%d x %d", info.width, info.height);
+        } else {
+            ImGui::TextColored(ImVec4(0.90f, 0.40f, 0.35f, 1.0f), "could not decode image");
+        }
+    };
+
+    ImGui::TextDisabled("Type/paste a path, or drag a texture from the Content browser.");
+
     if (ImGui::InputText("Albedo Map", m_albedoMapBuffer, sizeof(m_albedoMapBuffer))) {
         m_material.albedoMap = m_albedoMapBuffer;
     }
+    acceptTextureDrop(m_material.albedoMap, m_albedoMapBuffer, sizeof(m_albedoMapBuffer));
     ImGui::SameLine();
     if (ImGui::Button("Paste##albedo")) {
         pasteTexturePath(m_material.albedoMap, m_albedoMapBuffer, sizeof(m_albedoMapBuffer), "Albedo");
     }
+    showThumbnail(m_material.albedoMap);
+
     if (ImGui::InputText("Normal Map", m_normalMapBuffer, sizeof(m_normalMapBuffer))) {
         m_material.normalMap = m_normalMapBuffer;
     }
+    acceptTextureDrop(m_material.normalMap, m_normalMapBuffer, sizeof(m_normalMapBuffer));
     ImGui::SameLine();
     if (ImGui::Button("Paste##normal")) {
         pasteTexturePath(m_material.normalMap, m_normalMapBuffer, sizeof(m_normalMapBuffer), "Normal");
     }
+    showThumbnail(m_material.normalMap);
+
     if (ImGui::InputText("Metal/Rough Map", m_metalRoughMapBuffer, sizeof(m_metalRoughMapBuffer))) {
         m_material.metalRoughMap = m_metalRoughMapBuffer;
     }
+    acceptTextureDrop(m_material.metalRoughMap, m_metalRoughMapBuffer, sizeof(m_metalRoughMapBuffer));
     ImGui::SameLine();
     if (ImGui::Button("Paste##metal_rough")) {
         pasteTexturePath(m_material.metalRoughMap, m_metalRoughMapBuffer, sizeof(m_metalRoughMapBuffer), "Metal/Rough");
     }
+    showThumbnail(m_material.metalRoughMap);
+
+    DrawOrmPacker();
+}
+
+void MaterialMakerPanel::DrawOrmPacker() {
+    if (!ImGui::TreeNode("Pack Metal/Rough (ORM)")) {
+        return;
+    }
+    ImGui::TextWrapped("Combine separate grayscale maps into one ORM texture "
+                       "(R = AO, G = roughness, B = metallic). PNG/JPG sources.");
+
+    auto sourceRow = [&](const char* label, std::string& target, const char* pasteId) {
+        ImGui::TextUnformatted(label);
+        ImGui::SameLine();
+        if (ImGui::Button(pasteId)) {
+            const char* text = ImGui::GetClipboardText();
+            const std::string picked = TrimClipboardPath(text ? text : "");
+            std::error_code ec;
+            if (!picked.empty() && std::filesystem::is_regular_file(picked, ec)) {
+                target = picked;
+            } else {
+                m_status = "ORM: clipboard is not a valid file path.";
+            }
+        }
+        ImGui::SameLine();
+        ImGui::TextWrapped("%s", target.empty() ? "(none)" : target.c_str());
+    };
+    sourceRow("Metallic :", m_packMetallic,  "Paste##orm_metal");
+    sourceRow("Roughness:", m_packRoughness, "Paste##orm_rough");
+    sourceRow("AO (opt) :", m_packAO,        "Paste##orm_ao");
+
+    if (ImGui::Button("Pack ORM -> Metal/Rough")) {
+        const std::string stem = SanitizeFileStem(m_material.name);
+        const std::string outPath =
+            (std::filesystem::path(m_outputDirectory) / (stem + "_ORM.tga")).string();
+        const PackResult result = PackMetalRoughAO(m_packMetallic, m_packRoughness, m_packAO, outPath);
+        if (result.ok) {
+            m_material.metalRoughMap = result.outputPath;
+            CopyToBuffer(m_metalRoughMapBuffer, sizeof(m_metalRoughMapBuffer), m_material.metalRoughMap);
+            m_status = "Packed ORM: " + result.outputPath;
+        } else {
+            m_status = "ORM pack failed: " + result.error;
+        }
+    }
+    ImGui::TreePop();
+}
+
+void MaterialMakerPanel::DrawModelImport() {
+    if (!ImGui::CollapsingHeader("Import from Model")) {
+        return;
+    }
+    ImGui::TextWrapped("Read a material (colours + external texture maps) from a "
+                       "model file (glTF / OBJ / FBX). Embedded textures are skipped.");
+
+    ImGui::TextUnformatted("Model:");
+    ImGui::SameLine();
+    if (ImGui::Button("Paste##model_path")) {
+        const char* text = ImGui::GetClipboardText();
+        const std::string picked = TrimClipboardPath(text ? text : "");
+        std::error_code ec;
+        if (!picked.empty() && std::filesystem::is_regular_file(picked, ec)) {
+            m_importModelPath = picked;
+            m_importMaterialIndex = 0;
+        } else {
+            m_status = "Import: clipboard is not a valid file path.";
+        }
+    }
+    ImGui::SameLine();
+    ImGui::TextWrapped("%s", m_importModelPath.empty() ? "(none)" : m_importModelPath.c_str());
+
+    ImGui::SetNextItemWidth(120.0f);
+    ImGui::InputInt("Material index", &m_importMaterialIndex);
+    if (m_importMaterialIndex < 0) {
+        m_importMaterialIndex = 0;
+    }
+
+    if (ImGui::Button("Import Material") && !m_importModelPath.empty()) {
+        const ModelImportResult result =
+            ImportMaterialFromModel(m_importModelPath, m_importMaterialIndex, &m_material);
+        if (result.ok) {
+            m_material.emissiveStrength = 1.0f;
+            SyncBuffersFromMaterial();
+            char line[96];
+            std::snprintf(line, sizeof(line), "Imported material %d of %d.",
+                          m_importMaterialIndex, result.materialCount);
+            m_status = line;
+        } else {
+            m_status = "Import failed: " + result.error;
+        }
+    }
+}
+
+void MaterialMakerPanel::RefreshLibrary() {
+    m_libraryFiles.clear();
+    m_libraryScanned = true;
+    std::error_code ec;
+    const std::filesystem::path dir(m_outputDirectory);
+    if (!std::filesystem::is_directory(dir, ec)) {
+        return;
+    }
+    for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+        std::error_code fec;
+        if (std::filesystem::is_regular_file(entry.path(), fec) &&
+            LowerExtension(entry.path()) == ".3dgmat") {
+            m_libraryFiles.push_back(entry.path().string());
+        }
+    }
+    std::sort(m_libraryFiles.begin(), m_libraryFiles.end());
+}
+
+void MaterialMakerPanel::DrawLibraryControls() {
+    if (!ImGui::CollapsingHeader("Library")) {
+        return;
+    }
+    if (!m_libraryScanned) {
+        RefreshLibrary();
+    }
+
+    if (ImGui::Button("Refresh")) {
+        RefreshLibrary();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("New")) {
+        Reset();
+        m_lastSavedPath.clear();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Duplicate")) {
+        m_material.name += "_copy";
+        SyncBuffersFromMaterial();
+        if (Save()) {
+            RefreshLibrary();
+        }
+    }
+
+    ImGui::BeginChild("##material_library", ImVec2(-1.0f, 150.0f), true);
+    if (m_libraryFiles.empty()) {
+        ImGui::TextDisabled("No .3dgmat files in the output folder.");
+    }
+    for (const std::string& file : m_libraryFiles) {
+        const std::string label = std::filesystem::path(file).filename().string();
+        const bool selected = (file == m_lastSavedPath);
+        if (ImGui::Selectable(label.c_str(), selected)) {
+            LoadFromFile(file);
+            RefreshLibrary();
+        }
+    }
+    ImGui::EndChild();
+    ImGui::Text("%zu material(s)", m_libraryFiles.size());
 }
 
 void MaterialMakerPanel::DrawExportControls() {
+    if (SameMaterial(m_material, m_savedSnapshot)) {
+        ImGui::TextColored(ImVec4(0.45f, 0.82f, 0.58f, 1.0f), "No unsaved changes");
+    } else {
+        ImGui::TextColored(ImVec4(0.95f, 0.80f, 0.35f, 1.0f), "* Unsaved changes");
+    }
+
     if (ImGui::Button("Save .3dgmat")) {
         Save();
     }
@@ -248,6 +550,7 @@ void MaterialMakerPanel::Reset() {
     m_material.ao = 1.0f;
 
     SyncBuffersFromMaterial();
+    m_savedSnapshot = m_material;
     m_status = "Ready.";
 }
 
@@ -261,7 +564,84 @@ void MaterialMakerPanel::SyncBuffersFromMaterial() {
 
 void MaterialMakerPanel::DrawPreview() {
     ImGui::TextUnformatted("Preview");
+    if (m_preview) {
+        ImGui::SameLine();
+        ImGui::Checkbox("Live", &m_useLivePreview);   // always toggleable
+    }
 
+    // Try the live, engine-rendered PBR preview first; fall back to the hand-drawn
+    // approximation if it is unavailable (no GL context / creation failed).
+    unsigned int texture = 0;
+    int side = 0;
+    if (m_useLivePreview && m_preview) {
+        side = static_cast<int>(std::min(ImGui::GetContentRegionAvail().x, 260.0f));
+        if (side < 64) side = 64;
+
+        // Build the engine material from the document's scalar fields. (Texture
+        // maps are a follow-up milestone step; see the roadmap.)
+        engine::ecs::PbrMaterial pbr;
+        pbr.albedo    = glm::vec3(m_material.albedo[0], m_material.albedo[1], m_material.albedo[2]);
+        pbr.metallic  = m_material.metallic;
+        pbr.roughness = m_material.roughness;
+        pbr.ao        = m_material.ao;
+        const float es = m_material.emissiveStrength;
+        pbr.emissive  = glm::vec3(m_material.emissive[0] * es, m_material.emissive[1] * es,
+                                  m_material.emissive[2] * es);
+
+        MaterialPreview::Settings s;
+        s.size           = side;
+        s.yawDeg         = m_previewYaw;
+        s.pitchDeg       = m_previewPitch;
+        s.shape          = static_cast<MaterialPreview::Shape>(m_previewShape);
+        s.channel        = static_cast<MaterialPreview::Channel>(m_previewChannel);
+        s.envTime        = m_previewEnv;
+        s.envYawDeg      = m_previewEnvYaw;
+        s.lightIntensity = m_previewLight;
+        s.groundPlane    = m_previewGround;
+        s.background     = glm::vec3(m_previewBg[0], m_previewBg[1], m_previewBg[2]);
+        s.albedoMapPath     = m_material.albedoMap;
+        s.normalMapPath     = m_material.normalMap;
+        s.metalRoughMapPath = m_material.metalRoughMap;
+
+        texture = m_preview->Render(pbr, s);
+    }
+
+    if (texture != 0) {
+        const ImVec2 imageSize(static_cast<float>(side), static_cast<float>(side));
+        // GL textures have a bottom-left origin, so flip V to display upright.
+        ImGui::Image((ImTextureID)(std::intptr_t)texture,
+                     imageSize, ImVec2(0.0f, 1.0f), ImVec2(1.0f, 0.0f));
+
+        // Drag on the image to orbit the camera.
+        if (ImGui::IsItemHovered() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+            const ImVec2 delta = ImGui::GetIO().MouseDelta;
+            m_previewYaw += delta.x * 0.4f;
+            m_previewPitch = std::max(-85.0f, std::min(85.0f, m_previewPitch - delta.y * 0.4f));
+        }
+
+        const char* shapes[]   = {"Sphere", "Cube", "Plane"};
+        const char* channels[] = {"Full (PBR)", "Albedo", "Metallic", "Roughness", "Normals", "AO"};
+        ImGui::SetNextItemWidth(110.0f);
+        ImGui::Combo("Shape", &m_previewShape, shapes, IM_ARRAYSIZE(shapes));
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(120.0f);
+        ImGui::Combo("View", &m_previewChannel, channels, IM_ARRAYSIZE(channels));
+
+        if (ImGui::TreeNode("Environment")) {
+            ImGui::SliderFloat("Time of day", &m_previewEnv, 0.0f, 1.0f, "%.2f");
+            ImGui::SliderFloat("Rotate", &m_previewEnvYaw, -180.0f, 180.0f, "%.0f deg");
+            ImGui::SliderFloat("Light", &m_previewLight, 0.0f, 3.0f, "%.2f");
+            ImGui::Checkbox("Ground + shadow", &m_previewGround);
+            ImGui::ColorEdit3("Background", m_previewBg, ImGuiColorEditFlags_NoInputs);
+            ImGui::TreePop();
+        }
+        return;
+    }
+
+    DrawApproxPreview();
+}
+
+void MaterialMakerPanel::DrawApproxPreview() {
     const ImVec2 canvasSize(ImGui::GetContentRegionAvail().x, 230.0f);
     ImGui::BeginChild("##material_preview", canvasSize, true, ImGuiWindowFlags_NoScrollbar);
 
@@ -336,6 +716,7 @@ bool MaterialMakerPanel::Save() {
     std::string error;
     if (SaveMaterialFile(m_material, m_outputDirectory, &m_lastSavedPath, &error)) {
         m_status = "Saved " + m_lastSavedPath;
+        m_savedSnapshot = m_material;
         m_savedThisFrame = true;
         return true;
     }

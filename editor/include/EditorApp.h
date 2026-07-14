@@ -91,6 +91,7 @@ private:
         float fadeIn = 0.08f;
         float fadeOut = 0.15f;
         float speed = 1.0f;
+        std::vector<float> mask;
         bool active = false;
     };
 
@@ -257,6 +258,7 @@ private:
     std::unordered_map<std::string, bool> m_editModelLoadErrors;
     std::unordered_map<std::string, bool> m_editTextureLoadErrors;
     std::unordered_map<engine::ecs::Entity, float> m_animationPreviewTimes;
+    std::unordered_map<std::string, float> m_animationPreviewParameters;
     AnimationPreviewAction m_animationPreviewAction;
     int m_animationActionClip = 0;
     float m_animationActionFadeIn = 0.08f;

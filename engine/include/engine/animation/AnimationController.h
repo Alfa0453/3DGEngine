@@ -2,6 +2,7 @@
 
 #include <limits>
 #include <string>
+#include <unordered_set>
 #include <unordered_map>
 #include <vector>
 
@@ -27,6 +28,7 @@ public:
         // Auto-selected while param is in [paramMin, paramMax]. Default = manual.
         float paramMin = -std::numeric_limits<float>::infinity();
         float paramMax =  std::numeric_limits<float>::infinity();
+        float durationSeconds = 0.0f;
     };
 
     struct Transition {
@@ -43,6 +45,9 @@ public:
         Compare compare = Compare::GreaterOrEqual;
         float threshold = 0.0f;
         float fade = 0.2f;
+        float exitTime = 0.0f; // normalized current-state time, 0 = no wait
+        int priority = 0;      // higher values win when several transitions pass
+        bool canInterrupt = false;
     };
 
     float crossfade = 0.25f;     // seconds to blend between states
@@ -58,9 +63,12 @@ public:
     void SetParameter(float v) { SetParameter("Speed", v); }
     void SetParameter(const std::string& name, float value);
     void SetBoolParameter(const std::string& name, bool value);
+    void SetTriggerParameter(const std::string& name);
+    void ResetTriggerParameter(const std::string& name);
     float Parameter() const { return m_param; }
     float Parameter(const std::string& name, float fallback = 0.0f) const;
     bool BoolParameter(const std::string& name, bool fallback = false) const;
+    const std::unordered_map<std::string, float>& Parameters() const { return m_parameters; }
 
     // Manually transition to a state (cross-fades unless immediate).
     void Play(int stateIndex, bool immediate = false);
@@ -85,6 +93,8 @@ private:
     int  PickByParam() const;
     int  PickByTransition() const;
     bool TestTransition(const Transition& transition) const;
+    bool ExitTimeReached(const Transition& transition) const;
+    const Transition* BestTransition() const;
     void Begin(int to, bool immediate);
     void Begin(int to, bool immediate, float fadeSeconds);
 
@@ -95,6 +105,7 @@ private:
     float m_blend = 1.0f;   // 1 = fully in current
     float m_param = 0.0f;
     std::unordered_map<std::string, float> m_parameters;
+    std::unordered_set<std::string> m_triggers;
 };
 
 } // namespace engine

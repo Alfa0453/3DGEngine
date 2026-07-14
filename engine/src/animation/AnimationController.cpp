@@ -45,6 +45,22 @@ void AnimationController::SetBoolParameter(const std::string& name, bool value) 
     SetParameter(name, value ? 1.0f : 0.0f);
 }
 
+void AnimationController::SetTriggerParameter(const std::string& name) {
+    if (name.empty()) {
+        return;
+    }
+    m_triggers.insert(name);
+    SetParameter(name, 1.0f);
+}
+
+void AnimationController::ResetTriggerParameter(const std::string& name) {
+    if (name.empty()) {
+        return;
+    }
+    SetParameter(name, 0.0f);
+    m_triggers.erase(name);
+}
+
 float AnimationController::Parameter(const std::string& name, float fallback) const {
     const std::string key = name.empty() ? std::string("Speed") : name;
     if (key == "Speed") {
@@ -70,6 +86,10 @@ void AnimationController::Play(int stateIndex, bool immediate) {
 }
 
 bool AnimationController::TestTransition(const Transition& transition) const {
+    if (!ExitTimeReached(transition)) {
+        return false;
+    }
+
     const float value = Parameter(transition.parameter, 0.0f);
 
     switch (transition.compare) {
@@ -85,16 +105,38 @@ bool AnimationController::TestTransition(const Transition& transition) const {
     return false;
 }
 
-int AnimationController::PickByTransition() const {
-    if (m_cur < 0) {
-        return m_cur;
+bool AnimationController::ExitTimeReached(const Transition& transition) const {
+    if (transition.exitTime <= 0.0f || m_cur < 0) {
+        return true;
     }
+    const State& state = m_states[static_cast<std::size_t>(m_cur)];
+    const float duration = state.durationSeconds;
+    if (duration <= 0.0f) {
+        return true;
+    }
+    return (m_curTime / duration) >= transition.exitTime;
+}
+
+const AnimationController::Transition* AnimationController::BestTransition() const {
+    if (m_cur < 0) {
+        return nullptr;
+    }
+
+    const Transition* best = nullptr;
     for (const Transition& transition : m_transitions) {
-        if (transition.from == m_cur && TestTransition(transition)) {
-            return transition.to;
+        if (transition.from != m_cur || !TestTransition(transition)) {
+            continue;
+        }
+        if (!best || transition.priority > best->priority) {
+            best = &transition;
         }
     }
-    return m_cur;
+    return best;
+}
+
+int AnimationController::PickByTransition() const {
+    const Transition* transition = BestTransition();
+    return transition ? transition->to : m_cur;
 }
 
 int AnimationController::PickByParam() const {
@@ -133,18 +175,20 @@ void AnimationController::Update(float dt) {
     if (m_cur < 0) return;
 
     // Parameter-driven transition.
-    int want = PickByTransition();
-    if (want != m_cur) {
-        float fade = crossfade;
-        for (const Transition& transition : m_transitions) {
-            if (transition.from == m_cur && transition.to == want && TestTransition(transition)) {
-                fade = transition.fade;
-                break;
-            }
+    const Transition* transition = BestTransition();
+    if (transition) {
+        const int want = transition->to;
+        const float fade = transition->fade;
+        std::string consumedTrigger;
+        if (m_triggers.find(transition->parameter) != m_triggers.end()) {
+            consumedTrigger = transition->parameter;
         }
         Begin(want, false, fade);
+        if (!consumedTrigger.empty()) {
+            ResetTriggerParameter(consumedTrigger);
+        }
     } else if (m_transitions.empty()) {
-        want = PickByParam();
+        int want = PickByParam();
         if (want != m_cur) Begin(want, false);
     }
 

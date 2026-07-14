@@ -82,11 +82,11 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
     std::string magic;
     int version = 0;
     in >> magic >> version;
-    if (magic != "3DGRuntimeScene" || version < 1 || version > 21) {
+    if (magic != "3DGRuntimeScene" || version < 1 || version > 23) {
         if (error) {
             *error = "Runtime scene file has an unknown format: "
                 + magic + " " + std::to_string(version)
-                + " (expected 3DGRuntimeScene 1..21).";
+                + " (expected 3DGRuntimeScene 1..23).";
         }
         return false;
     }
@@ -325,6 +325,13 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                        >> transition.compare
                        >> transition.threshold
                        >> transition.fade;
+                if (version >= 22) {
+                    record >> transition.exitTime;
+                }
+                if (version >= 23) {
+                    record >> transition.priority
+                           >> transition.canInterrupt;
+                }
                 if (transition.fromState == "-") {
                     transition.fromState.clear();
                 }
@@ -336,6 +343,7 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                 }
                 transition.compare = std::clamp(transition.compare, 0, 3);
                 transition.fade = std::max(transition.fade, 0.0f);
+                transition.exitTime = std::clamp(transition.exitTime, 0.0f, 1.0f);
                 entity.animationTransitions.push_back(transition);
             }
         }
@@ -576,7 +584,10 @@ bool RuntimeSceneLoader::Instantiate(const Scene &scene, ecs::Registry &registry
                     transition.parameter,
                     transition.compare,
                     transition.threshold,
-                    transition.fade
+                    transition.fade,
+                    transition.exitTime,
+                    transition.priority,
+                    transition.canInterrupt
                 });
             }
             registry.Add<ecs::SkinnedModelAsset>(entity, ecs::SkinnedModelAsset{
@@ -595,7 +606,10 @@ bool RuntimeSceneLoader::Instantiate(const Scene &scene, ecs::Registry &registry
                 desc.animationRunClipName,
                 desc.animationWalkAt,
                 desc.animationRunAt,
-                std::move(notifies)
+                std::move(notifies),
+                std::move(actionProfiles),
+                std::move(states),
+                std::move(transitions)
             });
         } else if (!desc.modelPath.empty()) {
             registry.Add<ecs::ModelAsset>(entity, ecs::ModelAsset{desc.modelPath});

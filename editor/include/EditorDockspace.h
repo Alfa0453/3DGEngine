@@ -59,6 +59,11 @@ public:
             int depth = 0;
         };
 
+        struct ParameterInfo {
+            std::string name;
+            float value = 0.0f;
+        };
+
         bool hasSelection = false;
         bool skeletalModel = false;
         bool modelLoaded = false;
@@ -73,6 +78,7 @@ public:
         std::vector<EditorScene::AnimationActionProfile> actionProfiles;
         std::vector<EditorScene::AnimationStateNode> states;
         std::vector<EditorScene::AnimationStateTransition> transitions;
+        std::vector<ParameterInfo> parameters;
         int defaultClipIndex = 0;
         std::string defaultClipName;
         bool autoplay = true;
@@ -141,6 +147,7 @@ public:
         char* animationActionMaskRoot = nullptr;
         std::size_t animationActionMaskRootSize = 0;
         bool animationActionRequested = false;
+        std::unordered_map<std::string, float>* animationPreviewParameters = nullptr;
         bool sceneDirty = false;
         bool viewportDropRequested = false;
         bool newSceneRequested = false;

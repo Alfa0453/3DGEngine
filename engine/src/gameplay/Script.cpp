@@ -7,8 +7,11 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
+#include <exception>
 #include <utility>
+#include <vector>
 
 namespace engine {
 
@@ -296,6 +299,15 @@ bool Script::SetAnimationBool(const std::string& name, bool value) {
     return true;
 }
 
+bool Script::SetAnimationTrigger(const std::string& name) {
+    AnimatedModel* animated = TryGet<AnimatedModel>();
+    if (!animated || name.empty()) {
+        return false;
+    }
+    animated->controller.SetTriggerParameter(name);
+    return true;
+}
+
 float Script::GetAnimationParameter(const std::string& name, float fallback) const {
     const AnimatedModel* animated = TryGet<AnimatedModel>();
     return (!animated || name.empty()) ? fallback : animated->controller.Parameter(name, fallback);
@@ -376,36 +388,109 @@ std::unique_ptr<Script> ScriptRegistry::Create(const std::string& className) con
     return it == m_factories.end() ? nullptr : it->second();
 }
 
+namespace {
+
+// Run a script callback, isolating exceptions so one misbehaving script cannot
+// take down the whole update loop. A throwing script is disabled and logged once.
+template <class Fn>
+void RunGuarded(NativeScriptComponent& script, Fn&& fn) {
+    try {
+        fn();
+    } catch (const std::exception& e) {
+        script.enabled = false;
+        std::fprintf(stderr, "[Script] '%s' disabled after exception: %s\n",
+                     script.className.c_str(), e.what());
+    } catch (...) {
+        script.enabled = false;
+        std::fprintf(stderr, "[Script] '%s' disabled after unknown exception\n",
+                     script.className.c_str());
+    }
+}
+
+// Ensure the script has a live instance and has run OnCreate, and REFRESH its
+// context every call — destroyQueue/input are per-call, so the pointers captured
+// at creation time would otherwise dangle. Returns the instance, or nullptr if the
+// script is disabled or its factory is missing.
+Script* PrepareScript(ecs::Registry& registry, ecs::Entity entity, NativeScriptComponent& script,
+                      std::vector<ecs::Entity>& destroyQueue, const ScriptInputState* input) {
+    if (!script.enabled || script.className.empty()) {
+        return nullptr;
+    }
+    if (!script.instance) {
+        if (script.missingFactory) {
+            return nullptr;   // already known-missing: don't retry every frame
+        }
+        script.instance = ScriptRegistry::Instance().Create(script.className);
+        if (!script.instance) {
+            script.missingFactory = true;
+            std::fprintf(stderr,
+                         "[Script] no registered factory for class '%s' "
+                         "(rebuild the game and register the script?)\n",
+                         script.className.c_str());
+            return nullptr;
+        }
+    }
+    script.instance->SetContext(ScriptContext{&registry, entity, &destroyQueue, input});
+    if (!script.created) {
+        RunGuarded(script, [&] { script.instance->OnCreate(); });
+        script.created = true;
+    }
+    return script.enabled ? script.instance.get() : nullptr;
+}
+
+// Destroy queued entities, giving each scripted entity an OnDestroy() first.
+void FlushDestroyQueue(ecs::Registry& registry, const std::vector<ecs::Entity>& destroyQueue) {
+    for (ecs::Entity entity : destroyQueue) {
+        if (!registry.Valid(entity)) {
+            continue;
+        }
+        if (NativeScriptComponent* script = registry.TryGet<NativeScriptComponent>(entity)) {
+            if (script->instance && script->created) {
+                RunGuarded(*script, [&] { script->instance->OnDestroy(); });
+            }
+        }
+        registry.Destroy(entity);
+    }
+}
+
+} // namespace
+
 void UpdateScripts(ecs::Registry& registry, float dt, const ScriptInputState* input) {
     std::vector<ecs::Entity> destroyQueue;
     registry.view<NativeScriptComponent>().each(
-        [&registry, &destroyQueue, input, dt](ecs::Entity entity, NativeScriptComponent& script) {
-            if (!script.enabled || script.className.empty()) {
+        [&](ecs::Entity entity, NativeScriptComponent& script) {
+            if (Script* instance = PrepareScript(registry, entity, script, destroyQueue, input)) {
+                RunGuarded(script, [&] { instance->OnUpdate(dt); });
+            }
+        });
+    FlushDestroyQueue(registry, destroyQueue);
+}
+
+void FixedUpdateScripts(ecs::Registry& registry, float dt, const ScriptInputState* input) {
+    std::vector<ecs::Entity> destroyQueue;
+    registry.view<NativeScriptComponent>().each(
+        [&](ecs::Entity entity, NativeScriptComponent& script) {
+            // Creation + OnCreate happen in UpdateScripts; only run already-live scripts.
+            if (!script.enabled || !script.instance || !script.created) {
                 return;
             }
+            script.instance->SetContext(ScriptContext{&registry, entity, &destroyQueue, input});
+            RunGuarded(script, [&] { script.instance->OnFixedUpdate(dt); });
+        });
+    FlushDestroyQueue(registry, destroyQueue);
+}
 
-            if (!script.instance) {
-                script.instance = ScriptRegistry::Instance().Create(script.className);
-                script.missingFactory = !script.instance;
-                if (!script.instance) {
-                    return;
-                }
-                script.instance->SetContext(ScriptContext{&registry, entity, &destroyQueue, input});
+void ShutdownScripts(ecs::Registry& registry) {
+    registry.view<NativeScriptComponent>().each(
+        [&](ecs::Entity entity, NativeScriptComponent& script) {
+            if (script.instance && script.created) {
+                // No destroy queue / input during teardown.
+                script.instance->SetContext(ScriptContext{&registry, entity, nullptr, nullptr});
+                RunGuarded(script, [&] { script.instance->OnDestroy(); });
             }
-
-            if (!script.created) {
-                script.instance->OnCreate();
-                script.created = true;
-            }
-            script.instance->OnUpdate(dt);
-        }
-    );
-
-    for (ecs::Entity entity : destroyQueue) {
-        if (registry.Valid(entity)) {
-            registry.Destroy(entity);
-        }
-    }
+            script.instance.reset();
+            script.created = false;
+        });
 }
 
 } // namespace engine

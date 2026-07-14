@@ -13,6 +13,7 @@ struct MaterialDocument {
     float roughness = 0.5f;
     float ao = 1.0f;
     std::array<float, 3> emissive{0.0f, 0.0f, 0.0f};
+    float emissiveStrength = 1.0f;   // multiplier -> HDR emissive that blooms (>1)
 
     std::string albedoMap;
     std::string normalMap;

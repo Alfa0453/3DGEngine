@@ -183,6 +183,15 @@ RuntimeAssetManager::ResolveReport RuntimeAssetManager::ResolveRegistryAssets(ec
             }
             return std::clamp(clip, 0, static_cast<int>(model->AnimationCount() - 1));
         };
+        auto clipSeconds = [&](int clipIndex) {
+            const auto& animations = model->Animations();
+            if (clipIndex < 0 || clipIndex >= static_cast<int>(animations.size())) {
+                return 0.0f;
+            }
+            const Animation& clip = animations[static_cast<std::size_t>(clipIndex)];
+            const float ticksPerSecond = clip.ticksPerSecond > 0.0f ? clip.ticksPerSecond : 25.0f;
+            return clip.duration > 0.0f ? clip.duration / ticksPerSecond : 0.0f;
+        };
 
         AnimatedModel animated;
         animated.SetModel(model);
@@ -204,7 +213,10 @@ RuntimeAssetManager::ResolveReport RuntimeAssetManager::ResolveRegistryAssets(ec
                         state.name.empty() ? std::string("State") : state.name,
                         clip,
                         state.loop,
-                        std::max(state.speed, 0.0f)
+                        std::max(state.speed, 0.0f),
+                        -std::numeric_limits<float>::infinity(),
+                        std::numeric_limits<float>::infinity(),
+                        clipSeconds(clip)
                     });
                 }
                 for (const ecs::SkinnedModelAsset::AnimationTransition& transition : asset.transitions) {
@@ -215,7 +227,8 @@ RuntimeAssetManager::ResolveReport RuntimeAssetManager::ResolveRegistryAssets(ec
                         static_cast<engine::AnimationController::Transition::Compare>(
                             std::clamp(transition.compare, 0, 3)),
                         transition.threshold,
-                        std::max(transition.fade, 0.0f)
+                        std::max(transition.fade, 0.0f),
+                        std::clamp(transition.exitTime, 0.0f, 1.0f)
                     });
                 }
             } else if (asset.locomotionEnabled) {

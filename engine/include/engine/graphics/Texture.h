@@ -37,6 +37,9 @@ public:
     int Width() const { return m_width; }
     int Height() const { return m_height; }
 
+    // The raw GL texture object, e.g. to display as an ImGui::Image thumbnail.
+    unsigned int ID() const { return m_id; }
+
 private:
     // Create the GL texture object from RGBA pixels.
     void Create(const unsigned char* rgba, int width, int height, bool smooth);

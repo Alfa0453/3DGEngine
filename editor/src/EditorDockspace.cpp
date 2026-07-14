@@ -1,6 +1,7 @@
 #include "EditorDockspace.h"
 
 #include <engine/ecs/Components.h>
+#include <engine/graphics/SkinnedModel.h>
 #include <engine/physics/PhysicsComponents.h>
 
 #include <glm/gtc/quaternion.hpp>
@@ -9,6 +10,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cmath>
 #include <cstddef>
 #include <cstdio>
 #include <fstream>
@@ -507,19 +509,24 @@ void DrawStatusRow(const char* label, std::size_t value) {
 
 engine::ecs::Collider DefaultColliderForObject(const EditorScene::Object& object,
                                                const engine::ecs::Transform* transform) {
+    // A low restitution so editor bodies settle on landing instead of bouncing.
+    constexpr float kDefaultRestitution = 0.1f;
+
     if (object.primitive == EditorScene::Primitive::Plane && object.modelAssetPath.empty()) {
         const float planeOffset = transform ? transform->position.y : 0.0f;
-        return engine::ecs::Collider::MakePlane(glm::vec3(0.0f, 1.0f, 0.0f), planeOffset);
+        engine::ecs::Collider collider = engine::ecs::Collider::MakePlane(glm::vec3(0.0f, 1.0f, 0.0f), planeOffset);
+        collider.restitution = kDefaultRestitution;
+        return collider;
     }
 
-    if (transform) {
-        return engine::ecs::Collider::MakeBox(glm::vec3(
-            std::max(transform->scale.x * 0.5f, 0.001f),
-            std::max(transform->scale.y * 0.5f, 0.001f),
-            std::max(transform->scale.z * 0.5f, 0.001f)));
-    }
-
-    return engine::ecs::Collider::MakeBox(glm::vec3(0.5f));
+    engine::ecs::Collider collider = transform
+        ? engine::ecs::Collider::MakeBox(glm::vec3(
+              std::max(transform->scale.x * 0.5f, 0.001f),
+              std::max(transform->scale.y * 0.5f, 0.001f),
+              std::max(transform->scale.z * 0.5f, 0.001f)))
+        : engine::ecs::Collider::MakeBox(glm::vec3(0.5f));
+    collider.restitution = kDefaultRestitution;
+    return collider;
 }
 
 bool IsMaterialDocument(const std::filesystem::path& path) {
@@ -1383,6 +1390,16 @@ void DrawAnimationPreview(EditorDockspace::Context& context, bool* open) {
                     transition.fade = std::max(transition.fade, 0.0f);
                     changed = true;
                 }
+                if (ImGui::SliderFloat("Exit Time", &transition.exitTime, 0.0f, 1.0f, "%.2f")) {
+                    transition.exitTime = std::clamp(transition.exitTime, 0.0f, 1.0f);
+                    changed = true;
+                }
+                if (ImGui::DragInt("Priority", &transition.priority, 1.0f, -100, 100)) {
+                    changed = true;
+                }
+                if (ImGui::Checkbox("Interrupt Blend", &transition.canInterrupt)) {
+                    changed = true;
+                }
                 if (ImGui::Button("Remove Transition")) {
                     removeTransition = static_cast<int>(i);
                 }
@@ -1410,6 +1427,42 @@ void DrawAnimationPreview(EditorDockspace::Context& context, bool* open) {
 
             if (changed) {
                 context.scene->SetSelectedAnimationStateGraph(states, transitions);
+            }
+        }
+    }
+
+    if (ImGui::CollapsingHeader("Graph Parameters", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (state.parameters.empty()) {
+            ImGui::TextUnformatted("No graph parameters are referenced by transitions.");
+        } else if (state.playMode || !context.animationPreviewParameters) {
+            for (const EditorDockspace::AnimationPreviewState::ParameterInfo& parameter : state.parameters) {
+                ImGui::Text("%s: %.3f", parameter.name.c_str(), parameter.value);
+            }
+        } else {
+            for (const EditorDockspace::AnimationPreviewState::ParameterInfo& parameter : state.parameters) {
+                float value = parameter.value;
+                const auto found = context.animationPreviewParameters->find(parameter.name);
+                if (found != context.animationPreviewParameters->end()) {
+                    value = found->second;
+                }
+                if (ImGui::DragFloat(parameter.name.c_str(), &value, 0.01f, -1000.0f, 1000.0f, "%.3f")) {
+                    (*context.animationPreviewParameters)[parameter.name] = value;
+                }
+                ImGui::SameLine();
+                std::string buttonLabel = "Toggle##" + parameter.name;
+                if (ImGui::Button(buttonLabel.c_str())) {
+                    (*context.animationPreviewParameters)[parameter.name] = std::abs(value) > 0.0001f ? 0.0f : 1.0f;
+                }
+                ImGui::SameLine();
+                std::string triggerLabel = "Trigger##" + parameter.name;
+                if (ImGui::Button(triggerLabel.c_str())) {
+                    (*context.animationPreviewParameters)[parameter.name] = 1.0f;
+                }
+            }
+            if (ImGui::Button("Reset Parameters")) {
+                for (const EditorDockspace::AnimationPreviewState::ParameterInfo& parameter : state.parameters) {
+                    (*context.animationPreviewParameters)[parameter.name] = 0.0f;
+                }
             }
         }
     }
@@ -2132,6 +2185,36 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
         if (ImGui::Button("Clear Physics")) {
             context.scene->SetSelectedRigidBodyEnabled(false);
             context.scene->SetSelectedColliderEnabled(false);
+        }
+
+        // Colliders are world-sized (physics ignores Transform.scale), so a resized
+        // object leaves its collider stale. Re-fit the collider's dimensions to the
+        // current scale while preserving its shape, material and trigger flag.
+        if (selected->colliderEnabled && selectedTransform) {
+            if (ImGui::Button("Match Collider to Scale")) {
+                engine::ecs::Collider collider = selected->collider;
+                const glm::vec3 s = selectedTransform->scale;
+                switch (collider.shape) {
+                    case engine::ecs::ColliderShape::Box:
+                        collider.halfExtents = glm::max(s * 0.5f, glm::vec3(0.001f));
+                        break;
+                    case engine::ecs::ColliderShape::Sphere:
+                        collider.radius = std::max(std::max(s.x, std::max(s.y, s.z)) * 0.5f, 0.001f);
+                        break;
+                    case engine::ecs::ColliderShape::Capsule:
+                        collider.radius = std::max(std::max(s.x, s.z) * 0.5f, 0.001f);
+                        collider.halfHeight = std::max(s.y * 0.5f - collider.radius, 0.0f);
+                        break;
+                    case engine::ecs::ColliderShape::Plane:
+                    default:
+                        break;   // plane offset tracks position, not scale
+                }
+                context.scene->SetSelectedCollider(collider);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Re-fit the collider to the object's current scale "
+                                  "(physics uses collider size, not Transform scale).");
+            }
         }
 
         bool rigidBodyEnabled = selected->rigidBodyEnabled;

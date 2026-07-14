@@ -57,8 +57,10 @@ struct ScriptField {
 class Script {
 public:
     virtual ~Script() = default;
-    virtual void OnCreate() {}
-    virtual void OnUpdate(float dt) { (void)dt; }
+    virtual void OnCreate() {}                          // once, when the script starts
+    virtual void OnUpdate(float dt) { (void)dt; }       // once per rendered frame (variable dt)
+    virtual void OnFixedUpdate(float dt) { (void)dt; }  // per physics step (fixed dt)
+    virtual void OnDestroy() {}                          // once, before the entity/script is destroyed
 
     void SetContext(ScriptContext context) { m_context = context; }
 
@@ -82,7 +84,7 @@ protected:
     float MouseDeltaY() const;
     bool IsTriggerTouching(ecs::Entity entity) const;
     bool WasTriggerEntered(ecs::Entity entity) const;
-    bool WasTriggerExited(ecs::Entity entity) const;;
+    bool WasTriggerExited(ecs::Entity entity) const;
     bool WasAnimationEvent(const std::string& name) const;
     bool WasAnimationEvent(ecs::Entity entity, const std::string& name) const;
     bool PlayAnimationAction(int clipIndex,
@@ -106,6 +108,7 @@ protected:
     bool PlayAnimationProfile(const std::string& profileName);
     bool SetAnimationParameter(const std::string& name, float value);
     bool SetAnimationBool(const std::string& name, bool value);
+    bool SetAnimationTrigger(const std::string& name);
     float GetAnimationParameter(const std::string& name, float fallback = 0.0f) const;
     bool GetAnimationBool(const std::string& name, bool fallback = false) const;
     bool IsAnimationActionPlaying() const;
@@ -184,6 +187,15 @@ private:
     std::unordered_map<std::string, Factory> m_factories;
 };
 
+// Per-frame update: creates instances, calls OnCreate once, then OnUpdate(dt).
 void UpdateScripts(ecs::Registry& registry, float dt, const ScriptInputState* input = nullptr);
+
+// Per-physics-step update: calls OnFixedUpdate(dt) on already-created scripts. Call
+// this from the fixed-timestep loop; instance creation stays in UpdateScripts.
+void FixedUpdateScripts(ecs::Registry& registry, float dt, const ScriptInputState* input = nullptr);
+
+// Calls OnDestroy() on every live script and releases the instances. Call when
+// leaving Play mode or unloading the scene so scripts can clean up.
+void ShutdownScripts(ecs::Registry& registry);
 
 } // namespace engine
