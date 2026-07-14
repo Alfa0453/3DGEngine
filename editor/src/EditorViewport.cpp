@@ -1,11 +1,13 @@
 #include "EditorViewport.h"
 
 #include <engine/assets/RuntimeAssetManager.h>
+#include <engine/graphics/Camera.h>
 #include <engine/ecs/Components.h>
 #include <engine/graphics/Mesh.h>
 #include <engine/graphics/Model.h>
 #include <engine/graphics/Renderer.h>
 #include <engine/graphics/Shader.h>
+#include <engine/graphics/SkinnedModel.h>
 #include <engine/graphics/Texture.h>
 
 #include <glad/glad.h>
@@ -24,6 +26,67 @@ struct PickRay {
     glm::vec3 origin{0.0f};
     glm::vec3 direction{0.0f, 0.0f, -1.0f};
 };
+
+template <class DrawGeometry>
+void DrawStencilSelectionOutline(engine::Shader& shader,
+                                 const engine::ecs::Transform& transform,
+                                 const glm::vec3& color,
+                                 float thickness,
+                                 DrawGeometry&& drawGeometry) {
+    GLboolean colorMask[4]{};
+    GLboolean depthWrite = GL_TRUE;
+    const GLboolean stencilEnabled = glIsEnabled(GL_STENCIL_TEST);
+    const GLboolean cullEnabled = glIsEnabled(GL_CULL_FACE);
+    GLint depthFunc = GL_LESS, cullFace = GL_BACK;
+    GLint stencilFunc = GL_ALWAYS, stencilRef = 0, stencilValueMask = ~0;
+    GLint stencilWriteMask = ~0, stencilFail = GL_KEEP, stencilDepthFail = GL_KEEP, stencilDepthPass = GL_KEEP;
+    glGetBooleanv(GL_COLOR_WRITEMASK, colorMask);
+    glGetBooleanv(GL_DEPTH_WRITEMASK, &depthWrite);
+    glGetIntegerv(GL_DEPTH_FUNC, &depthFunc);
+    glGetIntegerv(GL_CULL_FACE_MODE, &cullFace);
+    glGetIntegerv(GL_STENCIL_FUNC, &stencilFunc);
+    glGetIntegerv(GL_STENCIL_REF, &stencilRef);
+    glGetIntegerv(GL_STENCIL_VALUE_MASK, &stencilValueMask);
+    glGetIntegerv(GL_STENCIL_WRITEMASK, &stencilWriteMask);
+    glGetIntegerv(GL_STENCIL_FAIL, &stencilFail);
+    glGetIntegerv(GL_STENCIL_PASS_DEPTH_FAIL, &stencilDepthFail);
+    glGetIntegerv(GL_STENCIL_PASS_DEPTH_PASS, &stencilDepthPass);
+
+    glClearStencil(0);
+    glClear(GL_STENCIL_BUFFER_BIT);
+    glEnable(GL_STENCIL_TEST);
+    glStencilMask(0xFF);
+    glStencilFunc(GL_ALWAYS, 1, 0xFF);
+    glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+    glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+    glDepthMask(GL_FALSE);
+    glDepthFunc(GL_LEQUAL);
+    glDisable(GL_CULL_FACE);
+
+    shader.SetMat4("uModel", transform.Model());
+    shader.SetVec3("uColor", color);
+    shader.SetFloat("uThickness", 0.0f);
+    drawGeometry();
+
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glStencilMask(0x00);
+    glStencilFunc(GL_NOTEQUAL, 1, 0xFF);
+    glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_FRONT);
+    shader.SetFloat("uThickness", std::max(thickness, 1.0f));
+    drawGeometry();
+
+    glColorMask(colorMask[0], colorMask[1], colorMask[2], colorMask[3]);
+    glDepthMask(depthWrite);
+    glDepthFunc(depthFunc);
+    glCullFace(cullFace);
+    if (!cullEnabled) glDisable(GL_CULL_FACE);
+    glStencilMask(static_cast<GLuint>(stencilWriteMask));
+    glStencilFunc(stencilFunc, stencilRef, static_cast<GLuint>(stencilValueMask));
+    glStencilOp(stencilFail, stencilDepthFail, stencilDepthPass);
+    if (!stencilEnabled) glDisable(GL_STENCIL_TEST);
+}
 
 float DistanceToSegmentSquared(const glm::vec2& point, const glm::vec2& a, const glm::vec2& b) {
     const glm::vec2 ab = b - a;
@@ -165,6 +228,19 @@ glm::vec3 AxisColor(EditorGizmo::Axis axis, EditorGizmo::Axis activeAxis) {
     return glm::vec3(1.0f);
 }
 
+float GizmoWorldScale(const engine::ecs::Transform& transform,
+                      const engine::Camera& camera,
+                      int viewportHeight) {
+    const float distance = std::max(glm::length(camera.Position() - transform.position), 0.1f);
+    const float halfFov = glm::radians(glm::clamp(camera.fov, 10.0f, 120.0f) * 0.5f);
+    const float worldPerPixel = (2.0f * distance * std::tan(halfFov))
+        / static_cast<float>(std::max(viewportHeight, 1));
+    const glm::vec3 absoluteScale = glm::abs(transform.scale);
+    const float objectScale = std::max({absoluteScale.x, absoluteScale.y, absoluteScale.z, 0.001f});
+    const float objectInfluence = glm::clamp(std::pow(objectScale, 0.18f), 0.8f, 1.45f);
+    return glm::clamp(worldPerPixel * 105.0f * objectInfluence, 0.12f, 40.0f);
+}
+
 glm::quat RotationFromX(const glm::vec3& direction) {
     if (glm::dot(direction, direction) <= 0.0001f) {
         return glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
@@ -181,6 +257,17 @@ glm::quat RotationFromX(const glm::vec3& direction) {
     }
 
     return glm::angleAxis(std::acos(d), glm::normalize(glm::cross(from, to)));
+}
+
+glm::quat RotationFromY(const glm::vec3& direction) {
+    if (glm::dot(direction, direction) <= 0.0001f) return glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+    const glm::vec3 from(0.0f, 1.0f, 0.0f);
+    const glm::vec3 to = glm::normalize(direction);
+    const float d = glm::clamp(glm::dot(from, to), -1.0f, 1.0f);
+    if (d > 0.999f) return glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+    if (d < -0.999f) return glm::angleAxis(glm::radians(180.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+    const glm::vec3 c = glm::cross(from, to);
+    return glm::normalize(glm::quat(1.0f + d, c.x, c.y, c.z));
 }
 
 glm::vec3 LightGuideColor(const engine::ecs::Light& light) {
@@ -468,22 +555,13 @@ void DrawGizmoCone(engine::Renderer& renderer,
                    engine::Shader& shader,
                    const engine::Mesh& cone,
                    const glm::vec3& position,
-                   EditorGizmo::Axis axis,
-                   const glm::vec3& color) {
+                   const glm::vec3& direction,
+                   const glm::vec3& color,
+                   float size) {
     engine::ecs::Transform transform;
     transform.position = position;
-    transform.scale = glm::vec3(0.22f, 0.36f, 0.22f);
-    switch (axis) {
-    case EditorGizmo::Axis::X:
-        transform.rotation = glm::angleAxis(glm::radians(-90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
-        break;
-    case EditorGizmo::Axis::Y:
-        transform.rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
-        break;
-    case EditorGizmo::Axis::Z:
-        transform.rotation = glm::angleAxis(glm::radians(90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-        break;
-    }
+    transform.scale = glm::vec3(size * 0.55f, size, size * 0.55f);
+    transform.rotation = RotationFromY(direction);
     shader.SetMat4("uModel", transform.Model());
     shader.SetVec3("uColor", color);
     renderer.Draw(cone);
@@ -494,11 +572,11 @@ void DrawGizmoRing(engine::Renderer& renderer,
                    const engine::Mesh& cube,
                    const glm::vec3& center,
                    EditorGizmo::Axis axis,
-                   const glm::vec3& color) {
+                   const glm::vec3& color,
+                   float radius,
+                   float marker) {
     constexpr int segments = 40;
-    constexpr float radius = 1.25f;
     constexpr float pi = 3.14159265359f;
-    constexpr float marker = 0.055f;
 
     for (int i = 0; i < segments; ++i) {
         const float t = (static_cast<float>(i) / static_cast<float>(segments)) * 2.0f * pi;
@@ -521,7 +599,9 @@ void EditorViewport::DrawSceneGizmo(engine::Renderer& renderer,
                                     const engine::Mesh& cone,
                                     const EditorScene& scene,
                                     const EditorGizmo& gizmo,
-                                    const glm::mat4& viewProj) const {
+                                    const glm::mat4& viewProj,
+                                    const engine::Camera& camera,
+                                    int viewportHeight) const {
     const EditorScene::Object* selected = scene.SelectedObject();
     const engine::ecs::Transform* selectedTransform = selected
         ? scene.TryGetTransform(selected->entity)
@@ -540,51 +620,66 @@ void EditorViewport::DrawSceneGizmo(engine::Renderer& renderer,
     const glm::vec3 yColor = AxisColor(EditorGizmo::Axis::Y, gizmo.CurrentAxis());
     const glm::vec3 zColor = AxisColor(EditorGizmo::Axis::Z, gizmo.CurrentAxis());
 
-    constexpr float length = 1.65f;
-    constexpr float thickness = 0.055f;
-    constexpr float head = 0.18f;
+    const float gizmoScale = GizmoWorldScale(*selectedTransform, camera, viewportHeight);
+    const float length = gizmoScale * 0.78f;
+    const float thickness = gizmoScale * 0.022f;
+    const float head = gizmoScale * 0.16f;
+    const float ringRadius = gizmoScale * 0.72f;
+    const float ringMarker = gizmoScale * 0.018f;
+    const glm::mat3 localBasis = glm::mat3_cast(selectedTransform->rotation);
+    const glm::vec3 localX = glm::normalize(localBasis * glm::vec3(1.0f, 0.0f, 0.0f));
+    const glm::vec3 localY = glm::normalize(localBasis * glm::vec3(0.0f, 1.0f, 0.0f));
+    const glm::vec3 localZ = glm::normalize(localBasis * glm::vec3(0.0f, 0.0f, 1.0f));
+    const GLboolean depthEnabled = glIsEnabled(GL_DEPTH_TEST);
+    glDisable(GL_DEPTH_TEST);
+
+    auto setAxisStyle = [&](const glm::vec3& color) {
+        shader.SetVec3("uEmissive", color * 0.45f);
+    };
 
     switch (gizmo.CurrentMode()) {
     case EditorGizmo::Mode::Translate:
-        DrawGizmoBox(renderer, shader, cube, center + glm::vec3(length * 0.5f, 0.0f, 0.0f),
-            glm::vec3(length, thickness, thickness), xColor);
-        DrawGizmoCone(renderer, shader, cone, center + glm::vec3(length + head * 1.6f, 0.0f, 0.0f),
-            EditorGizmo::Axis::X, xColor);
+        setAxisStyle(xColor);
+        DrawGuideSegment(renderer, shader, cube, center, center + localX * length, thickness, xColor);
+        DrawGizmoCone(renderer, shader, cone, center + localX * (length + head * 0.55f), localX, xColor, head);
 
-        DrawGizmoBox(renderer, shader, cube, center + glm::vec3(0.0f, length * 0.5f, 0.0f),
-            glm::vec3(thickness, length, thickness), yColor);
-        DrawGizmoCone(renderer, shader, cone, center + glm::vec3(0.0f, length + head * 1.6f, 0.0f),
-            EditorGizmo::Axis::Y, yColor);
+        setAxisStyle(yColor);
+        DrawGuideSegment(renderer, shader, cube, center, center + localY * length, thickness, yColor);
+        DrawGizmoCone(renderer, shader, cone, center + localY * (length + head * 0.55f), localY, yColor, head);
 
-        DrawGizmoBox(renderer, shader, cube, center + glm::vec3(0.0f, 0.0f, length * 0.5f),
-            glm::vec3(thickness, thickness, length), zColor);
-        DrawGizmoCone(renderer, shader, cone, center + glm::vec3(0.0f, 0.0f, length + head * 1.6f),
-            EditorGizmo::Axis::Z, zColor);
+        setAxisStyle(zColor);
+        DrawGuideSegment(renderer, shader, cube, center, center + localZ * length, thickness, zColor);
+        DrawGizmoCone(renderer, shader, cone, center + localZ * (length + head * 0.55f), localZ, zColor, head);
         break;
 
     case EditorGizmo::Mode::Scale:
-        DrawGizmoBox(renderer, shader, cube, center + glm::vec3(length * 0.45f, 0.0f, 0.0f),
-            glm::vec3(length * 0.9f, thickness, thickness), xColor);
-        DrawGizmoBox(renderer, shader, cube, center + glm::vec3(length, 0.0f, 0.0f),
-            glm::vec3(head * 1.15f), xColor);
+        setAxisStyle(xColor);
+        DrawGuideSegment(renderer, shader, cube, center, center + localX * length, thickness, xColor);
+        DrawGizmoBox(renderer, shader, cube, center + localX * length,
+            glm::vec3(head * 0.72f), xColor);
 
-        DrawGizmoBox(renderer, shader, cube, center + glm::vec3(0.0f, length * 0.45f, 0.0f),
-            glm::vec3(thickness, length * 0.9f, thickness), yColor);
-        DrawGizmoBox(renderer, shader, cube, center + glm::vec3(0.0f, length, 0.0f),
-            glm::vec3(head * 1.15f), yColor);
+        setAxisStyle(yColor);
+        DrawGuideSegment(renderer, shader, cube, center, center + localY * length, thickness, yColor);
+        DrawGizmoBox(renderer, shader, cube, center + localY * length,
+            glm::vec3(head * 0.72f), yColor);
 
-        DrawGizmoBox(renderer, shader, cube, center + glm::vec3(0.0f, 0.0f, length * 0.45f),
-            glm::vec3(thickness, thickness, length * 0.9f), zColor);
-        DrawGizmoBox(renderer, shader, cube, center + glm::vec3(0.0f, 0.0f, length),
-            glm::vec3(head * 1.15f), zColor);
+        setAxisStyle(zColor);
+        DrawGuideSegment(renderer, shader, cube, center, center + localZ * length, thickness, zColor);
+        DrawGizmoBox(renderer, shader, cube, center + localZ * length,
+            glm::vec3(head * 0.72f), zColor);
         break;
 
     case EditorGizmo::Mode::Rotate:
-        DrawGizmoRing(renderer, shader, cube, center, EditorGizmo::Axis::X, xColor);
-        DrawGizmoRing(renderer, shader, cube, center, EditorGizmo::Axis::Y, yColor);
-        DrawGizmoRing(renderer, shader, cube, center, EditorGizmo::Axis::Z, zColor);
+        setAxisStyle(xColor);
+        DrawGizmoRing(renderer, shader, cube, center, EditorGizmo::Axis::X, xColor, ringRadius, ringMarker);
+        setAxisStyle(yColor);
+        DrawGizmoRing(renderer, shader, cube, center, EditorGizmo::Axis::Y, yColor, ringRadius, ringMarker);
+        setAxisStyle(zColor);
+        DrawGizmoRing(renderer, shader, cube, center, EditorGizmo::Axis::Z, zColor, ringRadius, ringMarker);
         break;
     }
+    shader.SetVec3("uEmissive", glm::vec3(0.0f));
+    if (depthEnabled) glEnable(GL_DEPTH_TEST);
 }
 
 void EditorViewport::DrawSelectedLightGuide(engine::Renderer& renderer,
@@ -776,9 +871,9 @@ void EditorViewport::DrawSelectedModelOutline(engine::Renderer& renderer,
                                               const engine::Model& model,
                                               const glm::vec3& color,
                                               float thickness) const {
-    for (const engine::SubMesh& subMesh : model.SubMeshes()) {
-        DrawSelectedMeshOutline(renderer, shader, transform, subMesh.mesh, color, thickness);
-    }
+    DrawStencilSelectionOutline(shader, transform, color, thickness, [&]() {
+        for (const engine::SubMesh& subMesh : model.SubMeshes()) renderer.Draw(subMesh.mesh);
+    });
 }
 
 void EditorViewport::DrawSelectedMeshOutline(engine::Renderer& renderer,
@@ -787,26 +882,23 @@ void EditorViewport::DrawSelectedMeshOutline(engine::Renderer& renderer,
                                              const engine::Mesh& mesh,
                                              const glm::vec3& color,
                                              float thickness) const {
-    const GLboolean wasCullEnabled = glIsEnabled(GL_CULL_FACE);
-    GLint previousCullFace = GL_BACK;
-    GLint previousDepthFunc = GL_LESS;
-    glGetIntegerv(GL_CULL_FACE_MODE, &previousCullFace);
-    glGetIntegerv(GL_DEPTH_FUNC, &previousDepthFunc);
+    DrawStencilSelectionOutline(shader, transform, color, thickness, [&]() { renderer.Draw(mesh); });
+}
 
-    glEnable(GL_CULL_FACE);
-    glCullFace(GL_FRONT);
-    glDepthFunc(GL_LEQUAL);
-
-    shader.SetMat4("uModel", transform.Model());
-    shader.SetFloat("uThickness", thickness);
-    shader.SetVec3("uColor", color);
-    renderer.Draw(mesh);
-
-    glCullFace(previousCullFace);
-    if (!wasCullEnabled) {
-        glDisable(GL_CULL_FACE);
+void EditorViewport::DrawSelectedSkinnedModelOutline(engine::Renderer& renderer,
+                                                      engine::Shader& shader,
+                                                      const engine::ecs::Transform& transform,
+                                                      const engine::SkinnedModel& model,
+                                                      const std::vector<glm::mat4>& pose,
+                                                      const glm::vec3& color,
+                                                      float thickness) const {
+    const std::size_t boneCount = std::min<std::size_t>(pose.size(), engine::SkinnedModel::kMaxBones);
+    for (std::size_t i = 0; i < boneCount; ++i) {
+        shader.SetMat4("uBones[" + std::to_string(i) + "]", pose[i]);
     }
-    glDepthFunc(previousDepthFunc);
+    DrawStencilSelectionOutline(shader, transform, color, thickness, [&]() {
+        for (const engine::SubMesh& subMesh : model.SubMeshes()) renderer.Draw(subMesh.mesh);
+    });
 }
 
 void EditorViewport::DrawLoadedModel(engine::Shader& shader,
@@ -925,7 +1017,8 @@ bool EditorViewport::PickGizmoHandle(EditorGizmo& gizmo,
                                      float y,
                                      const glm::mat4& viewProj,
                                      int width,
-                                     int height) const {
+                                     int height,
+                                     const engine::Camera& camera) const {
     const EditorScene::Object* selectedObject = scene.SelectedObject();
     const engine::ecs::Transform* selectedTransform = selectedObject
         ? scene.TryGetTransform(selectedObject->entity)
@@ -934,9 +1027,10 @@ bool EditorViewport::PickGizmoHandle(EditorGizmo& gizmo,
         return false;
     }
 
-    constexpr float length = 1.65f;
-    constexpr float head = 0.18f;
-    constexpr float rotateRadius = 1.25f;
+    const float gizmoScale = GizmoWorldScale(*selectedTransform, camera, height);
+    const float length = gizmoScale * 0.78f;
+    const float head = gizmoScale * 0.16f;
+    const float rotateRadius = gizmoScale * 0.72f;
     constexpr float pi = 3.14159265359f;
     const glm::vec2 mouse{x, y};
     const glm::vec3 center = selectedTransform->position;
@@ -947,7 +1041,12 @@ bool EditorViewport::PickGizmoHandle(EditorGizmo& gizmo,
 
     auto testAxisSegment = [&](EditorGizmo::Axis axis, float axisLength, float maxDistance) {
         glm::vec2 endScreen;
-        if (!ProjectWorldToScreen(center + AxisVector(axis) * axisLength, viewProj, width, height, &endScreen)) {
+        glm::vec3 worldAxis = AxisVector(axis);
+        if (gizmo.CurrentMode() == EditorGizmo::Mode::Translate
+            || gizmo.CurrentMode() == EditorGizmo::Mode::Scale) {
+            worldAxis = glm::mat3_cast(selectedTransform->rotation) * worldAxis;
+        }
+        if (!ProjectWorldToScreen(center + worldAxis * axisLength, viewProj, width, height, &endScreen)) {
             return false;
         }
 
@@ -956,30 +1055,30 @@ bool EditorViewport::PickGizmoHandle(EditorGizmo& gizmo,
 
     switch (gizmo.CurrentMode()) {
     case EditorGizmo::Mode::Translate:
-        if (testAxisSegment(EditorGizmo::Axis::X, length + head * 1.6f, 18.0f)) {
+        if (testAxisSegment(EditorGizmo::Axis::X, length + head * 0.55f, 12.0f)) {
             gizmo.SetAxis(EditorGizmo::Axis::X);
             return true;
         }
-        if (testAxisSegment(EditorGizmo::Axis::Y, length + head * 1.6f, 18.0f)) {
+        if (testAxisSegment(EditorGizmo::Axis::Y, length + head * 0.55f, 12.0f)) {
             gizmo.SetAxis(EditorGizmo::Axis::Y);
             return true;
         }
-        if (testAxisSegment(EditorGizmo::Axis::Z, length + head * 1.6f, 18.0f)) {
+        if (testAxisSegment(EditorGizmo::Axis::Z, length + head * 0.55f, 12.0f)) {
             gizmo.SetAxis(EditorGizmo::Axis::Z);
             return true;
         }
         break;
 
     case EditorGizmo::Mode::Scale:
-        if (testAxisSegment(EditorGizmo::Axis::X, length, 18.0f)) {
+        if (testAxisSegment(EditorGizmo::Axis::X, length, 12.0f)) {
             gizmo.SetAxis(EditorGizmo::Axis::X);
             return true;
         }
-        if (testAxisSegment(EditorGizmo::Axis::Y, length, 18.0f)) {
+        if (testAxisSegment(EditorGizmo::Axis::Y, length, 12.0f)) {
             gizmo.SetAxis(EditorGizmo::Axis::Y);
             return true;
         }
-        if (testAxisSegment(EditorGizmo::Axis::Z, length, 18.0f)) {
+        if (testAxisSegment(EditorGizmo::Axis::Z, length, 12.0f)) {
             gizmo.SetAxis(EditorGizmo::Axis::Z);
             return true;
         }

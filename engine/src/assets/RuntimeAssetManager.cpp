@@ -216,7 +216,19 @@ RuntimeAssetManager::ResolveReport RuntimeAssetManager::ResolveRegistryAssets(ec
                         std::max(state.speed, 0.0f),
                         -std::numeric_limits<float>::infinity(),
                         std::numeric_limits<float>::infinity(),
-                        clipSeconds(clip)
+                        clipSeconds(clip),
+                        state.blendClipIndex >= 0 ? resolveClip(state.blendClipIndex, state.blendClipName) : -1,
+                        state.blendParameter,
+                        state.blendMin,
+                        state.blendMax,
+                        state.rootMotion
+                    });
+                }
+                for (const ecs::SkinnedModelAsset::AnimationParameter& parameter : asset.parameters) {
+                    animated.controller.DeclareParameter({
+                        parameter.name,
+                        static_cast<engine::AnimationController::ParameterType>(std::clamp(parameter.type, 0, 2)),
+                        parameter.defaultValue
                     });
                 }
                 for (const ecs::SkinnedModelAsset::AnimationTransition& transition : asset.transitions) {
@@ -228,7 +240,9 @@ RuntimeAssetManager::ResolveReport RuntimeAssetManager::ResolveRegistryAssets(ec
                             std::clamp(transition.compare, 0, 3)),
                         transition.threshold,
                         std::max(transition.fade, 0.0f),
-                        std::clamp(transition.exitTime, 0.0f, 1.0f)
+                        std::clamp(transition.exitTime, 0.0f, 1.0f),
+                        transition.priority,
+                        transition.canInterrupt
                     });
                 }
             } else if (asset.locomotionEnabled) {

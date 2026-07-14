@@ -13,6 +13,7 @@
 
 #include <GLFW/glfw3.h>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
 #include <imgui.h>
 
 #include <algorithm>
@@ -21,6 +22,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <unordered_set>
 
 using engine::ecs::Entity;
 using engine::ecs::MeshRenderer;
@@ -294,13 +296,19 @@ void EditorApp::OnInit()
         uniform mat4 uViewProj;
         uniform mat4 uModel;
         uniform float uThickness;
+        uniform vec2 uViewportSize;
 
         void main() {
             mat3 normalMat = mat3(transpose(inverse(uModel)));
             vec3 worldNormal = normalize(normalMat * aNormal);
             vec4 world = uModel * vec4(aPos, 1.0);
-            world.xyz += worldNormal * uThickness;
-            gl_Position = uViewProj * world;
+            vec4 clip = uViewProj * world;
+            vec2 direction = (uViewProj * vec4(worldNormal, 0.0)).xy;
+            float directionLength = length(direction);
+            if (directionLength > 0.00001 && uThickness > 0.0) {
+                clip.xy += direction / directionLength * (2.0 * uThickness / uViewportSize) * clip.w;
+            }
+            gl_Position = clip;
         }
     )glsl",
     R"glsl(
@@ -312,6 +320,45 @@ void EditorApp::OnInit()
         void main() {
             FragColor = vec4(uColor, 1.0);
         }
+    )glsl");
+    m_skinnedOutlineShader.emplace(
+    R"glsl(
+        #version 330 core
+        const int MAX_BONES = 128;
+        layout(location = 0) in vec3 aPos;
+        layout(location = 1) in vec3 aNormal;
+        layout(location = 3) in vec4 aBoneIds;
+        layout(location = 4) in vec4 aWeights;
+
+        uniform mat4 uViewProj;
+        uniform mat4 uModel;
+        uniform mat4 uBones[MAX_BONES];
+        uniform float uThickness;
+        uniform vec2 uViewportSize;
+
+        void main() {
+            mat4 skin = aWeights.x * uBones[int(aBoneIds.x)]
+                      + aWeights.y * uBones[int(aBoneIds.y)]
+                      + aWeights.z * uBones[int(aBoneIds.z)]
+                      + aWeights.w * uBones[int(aBoneIds.w)];
+            vec4 local = skin * vec4(aPos, 1.0);
+            vec3 localNormal = normalize(mat3(skin) * aNormal);
+            vec4 world = uModel * local;
+            vec3 worldNormal = normalize(mat3(transpose(inverse(uModel))) * localNormal);
+            vec4 clip = uViewProj * world;
+            vec2 direction = (uViewProj * vec4(worldNormal, 0.0)).xy;
+            float directionLength = length(direction);
+            if (directionLength > 0.00001 && uThickness > 0.0) {
+                clip.xy += direction / directionLength * (2.0 * uThickness / uViewportSize) * clip.w;
+            }
+            gl_Position = clip;
+        }
+    )glsl",
+    R"glsl(
+        #version 330 core
+        uniform vec3 uColor;
+        out vec4 FragColor;
+        void main() { FragColor = vec4(uColor, 1.0); }
     )glsl");
     m_modelShader.emplace(
         R"glsl(
@@ -525,6 +572,7 @@ void EditorApp::OnShutdown()
 
 void EditorApp::DrawEditModeModels(const glm::mat4 & viewProj)
 {
+    m_editAnimationPoses.clear();
     if (!m_modelShader && !m_skinnedRenderer) {
         return;
     }
@@ -596,25 +644,41 @@ void EditorApp::DrawEditModeModels(const glm::mat4 & viewProj)
                             std::max(stateNode.speed, 0.0f),
                             -std::numeric_limits<float>::infinity(),
                             std::numeric_limits<float>::infinity(),
-                            clipSeconds(clip)
+                            clipSeconds(clip),
+                            stateNode.blendClipIndex >= 0
+                                ? resolveClip(stateNode.blendClipIndex, stateNode.blendClipName)
+                                : -1,
+                            stateNode.blendParameter,
+                            stateNode.blendMin,
+                            stateNode.blendMax,
+                            stateNode.rootMotion
                         });
                         stateIndices[stateNode.name] = index;
+                    }
+                    for (const EditorScene::AnimationParameter& parameter : object.animationParameters) {
+                        animated.controller.DeclareParameter({
+                            parameter.name,
+                            static_cast<engine::AnimationController::ParameterType>(parameter.type),
+                            parameter.defaultValue
+                        });
                     }
                     for (const EditorScene::AnimationStateTransition& transition : object.animationTransitions) {
                         const auto from = stateIndices.find(transition.fromState);
                         const auto to = stateIndices.find(transition.toState);
-                        if (from == stateIndices.end() || to == stateIndices.end()) {
+                        if ((!transition.fromState.empty() && from == stateIndices.end()) || to == stateIndices.end()) {
                             continue;
                         }
                         animated.controller.AddTransition(engine::AnimationController::Transition{
-                            from->second,
+                            transition.fromState.empty() ? -1 : from->second,
                             to->second,
                             transition.parameter,
                             static_cast<engine::AnimationController::Transition::Compare>(
                             std::clamp(static_cast<int>(transition.compare), 0, 3)),
                             transition.threshold,
                             std::max(transition.fade, 0.0f),
-                            std::clamp(transition.exitTime, 0.0f, 1.0f)
+                            std::clamp(transition.exitTime, 0.0f, 1.0f),
+                            transition.priority,
+                            transition.canInterrupt
                         });
                     }
                 } else if (object.animationLocomotionEnabled) {
@@ -675,6 +739,7 @@ void EditorApp::DrawEditModeModels(const glm::mat4 & viewProj)
                 engine::UpdateAnimations(previewRegistry, previewTime);
             }
             if (engine::AnimatedModel* preview = previewRegistry.TryGet<engine::AnimatedModel>(previewEntity)) {
+                m_editAnimationPoses[object.entity] = preview->pose;
                 m_skinnedRenderer->Draw(*model,
                                         preview->pose,
                                         transform->Model(),
@@ -720,14 +785,34 @@ void EditorApp::DrawSelectionOutline(const glm::mat4 & viewProj)
 
     if (!selected->modelAssetPath.empty()) {
         std::string error;
+        const glm::vec3 color = selected->locked
+            ? glm::vec3(1.0f, 0.28f, 0.08f)
+            : glm::vec3(1.0f, 0.55f, 0.05f);
+        const engine::Window& window = GetWindow();
+        const glm::vec2 viewportSize(static_cast<float>(window.Width()), static_cast<float>(window.Height()));
+        if (selected->skeletalModel && m_skinnedOutlineShader) {
+            if (const engine::SkinnedModel* model = m_editAssets.LoadSkinnedModel(selected->modelAssetPath, &error)) {
+                std::vector<glm::mat4> bindPose;
+                const auto found = m_editAnimationPoses.find(selected->entity);
+                const std::vector<glm::mat4>* pose = found != m_editAnimationPoses.end() ? &found->second : nullptr;
+                if (!pose) {
+                    engine::Animator::ComputeBindPose(model->GetSkeleton(), bindPose);
+                    pose = &bindPose;
+                }
+                m_skinnedOutlineShader->Bind();
+                m_skinnedOutlineShader->SetMat4("uViewProj", viewProj);
+                m_skinnedOutlineShader->SetVec2("uViewportSize", viewportSize);
+                m_viewport.DrawSelectedSkinnedModelOutline(m_renderer, *m_skinnedOutlineShader,
+                    *transform, *model, *pose, color, 2.0f);
+            }
+            return;
+        }
         const engine::Model* model = m_editAssets.LoadModel(selected->modelAssetPath, &error);
         if (model) {
-            const glm::vec3 color = selected->locked
-                ? glm::vec3(1.0f, 0.48f, 0.22f)
-                : glm::vec3(1.0f, 0.92f, 0.24f);
             m_outlineShader->Bind();
             m_outlineShader->SetMat4("uViewProj", viewProj);
-            m_viewport.DrawSelectedModelOutline(m_renderer, *m_outlineShader, *transform, *model, color, 0.045f);
+            m_outlineShader->SetVec2("uViewportSize", viewportSize);
+            m_viewport.DrawSelectedModelOutline(m_renderer, *m_outlineShader, *transform, *model, color, 2.0f);
         }
         return;
     }
@@ -738,11 +823,13 @@ void EditorApp::DrawSelectionOutline(const glm::mat4 & viewProj)
     }
 
     const glm::vec3 color = selected->locked
-        ? glm::vec3(1.0f, 0.48f, 0.22f)
-        : glm::vec3(1.0f, 0.92f, 0.24f);
+        ? glm::vec3(1.0f, 0.28f, 0.08f)
+        : glm::vec3(1.0f, 0.55f, 0.05f);
     m_outlineShader->Bind();
     m_outlineShader->SetMat4("uViewProj", viewProj);
-    m_viewport.DrawSelectedMeshOutline(m_renderer, *m_outlineShader, *transform, *renderer->mesh, color, 0.045f);
+    const engine::Window& window = GetWindow();
+    m_outlineShader->SetVec2("uViewportSize", glm::vec2(window.Width(), window.Height()));
+    m_viewport.DrawSelectedMeshOutline(m_renderer, *m_outlineShader, *transform, *renderer->mesh, color, 2.0f);
 }
 
 void EditorApp::DrawEditorOverlay()
@@ -792,7 +879,7 @@ void EditorApp::DrawEditorOverlay()
     const bool dockspaceDrawn = m_dockspace.Draw(dockspaceContext);
     DrawMaterialMakerPanel();
     DrawDirtyScenePrompt();
-    if (dockspaceContext.viewportDropRequested) {
+    if (dockspaceContext.viewportDropRequested && m_dragDrop.HasPayload()) {
         DropPayloadOnScene();
     }
     if (dockspaceContext.newSceneRequested) {
@@ -1228,7 +1315,39 @@ EditorDockspace::AnimationPreviewState EditorApp::BuildAnimationPreviewState() {
     state.events = selected->animationEvents;
     state.actionProfiles = selected->animationActionProfiles;
     state.states = selected->animationStates;
+    state.parameterDefinitions = selected->animationParameters;
     state.transitions = selected->animationTransitions;
+    auto addPreviewParameter = [&](const std::string& name, float value,
+                                   EditorScene::AnimationParameter::Type type = EditorScene::AnimationParameter::Type::Float) {
+        const std::string parameterName = name.empty() ? std::string("Speed") : name;
+        for (EditorDockspace::AnimationPreviewState::ParameterInfo& parameter : state.parameters) {
+            if (parameter.name == parameterName) {
+                parameter.value = value;
+                parameter.type = type;
+                return;
+            }
+        }
+        state.parameters.push_back(EditorDockspace::AnimationPreviewState::ParameterInfo{
+            parameterName,
+            value,
+            type
+        });
+    };
+    for (const EditorScene::AnimationParameter& parameter : selected->animationParameters) {
+        const auto found = m_animationPreviewParameters.find(parameter.name);
+        addPreviewParameter(parameter.name,
+            found == m_animationPreviewParameters.end() ? parameter.defaultValue : found->second,
+            parameter.type);
+    }
+    for (const EditorScene::AnimationStateTransition& transition : selected->animationTransitions) {
+        const std::string name = transition.parameter.empty() ? std::string("Speed") : transition.parameter;
+        const auto found = m_animationPreviewParameters.find(name);
+        auto type = EditorScene::AnimationParameter::Type::Float;
+        for (const EditorScene::AnimationParameter& definition : selected->animationParameters) {
+            if (definition.name == name) { type = definition.type; break; }
+        }
+        addPreviewParameter(name, found == m_animationPreviewParameters.end() ? 0.0f : found->second, type);
+    }
     state.actionPlaying = m_animationPreviewAction.active
         && m_animationPreviewAction.entity == selected->entity;
     const auto previewTimeIt = m_animationPreviewTimes.find(selected->entity);
@@ -1286,6 +1405,50 @@ EditorDockspace::AnimationPreviewState EditorApp::BuildAnimationPreviewState() {
         }
     }
 
+    {
+        std::unordered_set<std::string> names;
+        for (const EditorScene::AnimationStateNode& node : state.states) {
+            if (node.name.empty()) {
+                state.graphWarnings.push_back("A state has no name.");
+            } else if (!names.insert(node.name).second) {
+                state.graphWarnings.push_back("Duplicate state name: " + node.name);
+            }
+            if (state.modelLoaded && (node.clipIndex < 0 || node.clipIndex >= static_cast<int>(state.clips.size()))) {
+                state.graphWarnings.push_back("State '" + node.name + "' references a missing clip.");
+            }
+        }
+        std::unordered_set<std::string> parameters;
+        for (const EditorScene::AnimationParameter& parameter : state.parameterDefinitions) {
+            if (parameter.name.empty()) state.graphWarnings.push_back("A graph parameter has no name.");
+            else if (!parameters.insert(parameter.name).second) {
+                state.graphWarnings.push_back("Duplicate parameter: " + parameter.name);
+            }
+        }
+        for (const EditorScene::AnimationStateTransition& transition : state.transitions) {
+            if ((!transition.fromState.empty() && names.find(transition.fromState) == names.end())
+                || names.find(transition.toState) == names.end()) {
+                state.graphWarnings.push_back("Transition references a missing state.");
+            }
+            if (!transition.parameter.empty() && parameters.find(transition.parameter) == parameters.end()) {
+                state.graphWarnings.push_back("Transition uses undeclared parameter: " + transition.parameter);
+            }
+        }
+        if (!state.states.empty()) {
+            std::unordered_set<std::string> reachable{state.states.front().name};
+            bool expanded = true;
+            while (expanded) {
+                expanded = false;
+                for (const auto& transition : state.transitions) {
+                    if ((transition.fromState.empty() || reachable.count(transition.fromState))
+                        && reachable.insert(transition.toState).second) expanded = true;
+                }
+            }
+            for (const auto& node : state.states) {
+                if (!reachable.count(node.name)) state.graphWarnings.push_back("Unreachable state: " + node.name);
+            }
+        }
+    }
+
     if (m_mode != EditorMode::Play || !m_playRegistry) {
         return state;
     }
@@ -1312,6 +1475,27 @@ EditorDockspace::AnimationPreviewState EditorApp::BuildAnimationPreviewState() {
         state.parameter = animated->controller.Parameter();
         state.stateCount = animated->controller.StateCount();
         state.poseBones = animated->pose.size();
+        for (const auto& parameter : animated->controller.Parameters()) {
+            addPreviewParameter(parameter.first, parameter.second,
+                static_cast<EditorScene::AnimationParameter::Type>(animated->controller.ParameterKind(parameter.first)));
+        }
+        for (const engine::AnimationController::TransitionDebugInfo& debug : animated->controller.TransitionDebug()) {
+            state.transitionDebugRows.push_back(EditorDockspace::AnimationPreviewState::TransitionDebugRow{
+                debug.fromState,
+                debug.toState,
+                debug.parameter,
+                debug.value,
+                debug.threshold,
+                debug.exitTime,
+                debug.priority,
+                debug.canInterrupt,
+                debug.conditionMet,
+                debug.exitTimeReached,
+                debug.blockedByBlend,
+                debug.eligible,
+                debug.selected
+            });
+        }
         if (animated->model && state.clips.empty()) {
             fillClips(*animated->model);
         }
@@ -1806,7 +1990,8 @@ void EditorApp::DrawEditScene(const glm::mat4 & viewProj)
         m_viewport.DrawPhysicsJointGuides(m_renderer, *m_shader, *m_cube, jointGuides, viewProj);
     }
     if (m_shader && m_cube && m_cone) {
-        m_viewport.DrawSceneGizmo(m_renderer, *m_shader, *m_cube, *m_cone, m_scene, m_gizmo, viewProj);
+        m_viewport.DrawSceneGizmo(m_renderer, *m_shader, *m_cube, *m_cone, m_scene, m_gizmo,
+            viewProj, m_camera, GetWindow().Height());
     }
 }
 
@@ -1969,7 +2154,8 @@ void EditorApp::HandleMouseViewportSelection()
     const glm::mat4 viewProj = m_camera.ProjectionMatrix(window.AspectRatio()) * m_camera.ViewMatrix();
 
     if (left.pressed) {
-        if (m_viewport.PickGizmoHandle(m_gizmo, m_scene, x, y, viewProj, window.Width(), window.Height())) {
+        if (m_viewport.PickGizmoHandle(m_gizmo, m_scene, x, y, viewProj,
+                window.Width(), window.Height(), m_camera)) {
             m_mouse.BeginGizmoDrag(GLFW_MOUSE_BUTTON_LEFT, x, y);
             m_scene.BeginTransformEdit();
             m_log.Info(std::string("Mouse gizmo: ") + m_gizmo.ModeName() + " " + m_gizmo.AxisName());
@@ -1990,7 +2176,7 @@ void EditorApp::HandleMouseViewportSelection()
     if (left.down && m_mouse.GizmoActiveFor(GLFW_MOUSE_BUTTON_LEFT)) {
         const float dx = x - m_mouse.GizmoLastX();
         const float dy = y - m_mouse.GizmoLastY();
-        const float pixels = m_gizmo.CurrentAxis() == EditorGizmo::Axis::Y ? -dy : dx;
+        const float pixels = ProjectGizmoDrag(dx, dy, viewProj, window.Width(), window.Height());
 
         if (pixels != 0.0f) {
             m_transformController.ApplyGizmoDrag(m_scene, m_gizmo, pixels);
@@ -2041,7 +2227,8 @@ void EditorApp::HandleMouseViewportGizmo()
     if (right.down && m_mouse.GizmoActiveFor(GLFW_MOUSE_BUTTON_RIGHT)) {
         const float dx = x - m_mouse.GizmoLastX();
         const float dy = y - m_mouse.GizmoLastY();
-        const float pixels = m_gizmo.CurrentAxis() == EditorGizmo::Axis::Y ? -dy : dx;
+        const glm::mat4 viewProj = m_camera.ProjectionMatrix(window.AspectRatio()) * m_camera.ViewMatrix();
+        const float pixels = ProjectGizmoDrag(dx, dy, viewProj, window.Width(), window.Height());
 
         if (pixels != 0.0f) {
             m_transformController.ApplyGizmoDrag(m_scene, m_gizmo, pixels);
@@ -2055,6 +2242,36 @@ void EditorApp::HandleMouseViewportGizmo()
         m_mouse.EndGizmoDrag();
         m_log.Info("Mouse gizmo edit complete");
     }
+}
+
+float EditorApp::ProjectGizmoDrag(float dx, float dy, const glm::mat4& viewProj,
+                                  int viewportWidth, int viewportHeight) const {
+    const EditorScene::Object* selected = m_scene.SelectedObject();
+    const Transform* transform = selected ? m_scene.TryGetTransform(selected->entity) : nullptr;
+    if (!transform || m_gizmo.CurrentMode() == EditorGizmo::Mode::Rotate) {
+        return m_gizmo.CurrentAxis() == EditorGizmo::Axis::Y ? -dy : dx;
+    }
+
+    glm::vec2 centerScreen;
+    glm::vec2 axisScreen;
+    glm::vec3 axis = m_gizmo.AxisVector();
+    if (m_gizmo.CurrentMode() == EditorGizmo::Mode::Translate
+        || m_gizmo.CurrentMode() == EditorGizmo::Mode::Scale) {
+        axis = glm::mat3_cast(transform->rotation) * axis;
+    }
+    if (!m_viewport.ProjectWorldToScreen(transform->position, viewProj,
+            viewportWidth, viewportHeight, &centerScreen)
+        || !m_viewport.ProjectWorldToScreen(transform->position + axis, viewProj,
+            viewportWidth, viewportHeight, &axisScreen)) {
+        return m_gizmo.CurrentAxis() == EditorGizmo::Axis::Y ? -dy : dx;
+    }
+
+    const glm::vec2 screenDirection = axisScreen - centerScreen;
+    const float lengthSquared = glm::dot(screenDirection, screenDirection);
+    if (lengthSquared <= 0.0001f) {
+        return std::abs(dx) >= std::abs(dy) ? dx : -dy;
+    }
+    return glm::dot(glm::vec2(dx, dy), screenDirection / std::sqrt(lengthSquared));
 }
 
 void EditorApp::BeginAssetDrag()
@@ -2090,18 +2307,49 @@ void EditorApp::DropPayloadOnScene()
     }
 
     if (payload.typeName == "Model" || payload.typeName == "Skeletal Model") {
-        const bool skeletalModel = payload.typeName == "Skeletal Model";
+        bool skeletalModel = payload.typeName == "Skeletal Model";
         std::string error;
-        const engine::Model* model = m_editAssets.LoadModel(payload.path, &error);
-        if (!model) {
-            m_log.Error("Model drop failed: " + error);
-            m_dragDrop.Clear();
-            return;
+        float radius = 0.0f;
+        glm::vec3 boundsSize(0.0f);
+        if (!skeletalModel) {
+            std::string skeletalError;
+            if (const engine::SkinnedModel* skinned = m_editAssets.LoadSkinnedModel(payload.path, &skeletalError);
+                skinned && !skinned->GetSkeleton().bones.empty()) {
+                skeletalModel = true;
+                radius = skinned->BoundingRadius();
+                boundsSize = skinned->Max() - skinned->Min();
+            }
+        }
+        if (!skeletalModel) {
+            const engine::Model* model = m_editAssets.LoadModel(payload.path, &error);
+            if (!model) {
+                m_log.Error("Model drop failed: " + error);
+                m_dragDrop.Clear();
+                return;
+            }
+            radius = model->BoundingRadius();
+            boundsSize = model->Max() - model->Min();
+        } else if (radius <= 0.0f) {
+            const engine::SkinnedModel* model = m_editAssets.LoadSkinnedModel(payload.path, &error);
+            if (!model) {
+                m_log.Error("Skeletal model drop failed: " + error);
+                m_dragDrop.Clear();
+                return;
+            }
+            radius = model->BoundingRadius();
+            boundsSize = model->Max() - model->Min();
         }
 
         Transform transform;
         transform.position = SceneDropPosition();
-        const float radius = std::max(model->BoundingRadius(), 0.001f);
+        // T-pose characters are often wider on X than they are tall, so X is not
+        // useful for detecting the authored up axis. UE/FBX characters are Z-up:
+        // their Z extent is much larger than their front/back depth on Y.
+        const bool zUpAsset = skeletalModel && boundsSize.z > boundsSize.y * 1.25f;
+        if (zUpAsset) {
+            transform.rotation = glm::angleAxis(glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+        }
+        radius = std::max(radius, 0.001f);
         const float targetRadius = 0.8f;
         const float uniformScale = targetRadius / radius;
         transform.scale = glm::vec3(uniformScale);
@@ -2112,6 +2360,9 @@ void EditorApp::DropPayloadOnScene()
             }
             m_editModelLoadErrors.erase(payload.path);
             m_log.Info(std::string("Added ") + (skeletalModel ? "skeletal model" : "model") + " object: " + payload.path);
+            if (zUpAsset) {
+                m_log.Info("Applied Z-up to Y-up model orientation correction");
+            }
         } else {
             m_log.Warning("Model drop failed: could not create scene object");
         }
@@ -2170,7 +2421,7 @@ glm::vec3 EditorApp::SceneDropPosition()
 bool EditorApp::IsViewportDropPosition(float x, float y)
 {
     const ImGuiIO& io = ImGui::GetIO();
-    if (io.WantCaptureMouse) {
+    if (io.WantCaptureMouse && !m_dragDrop.IsMouseDriven()) {
         return false;
     }
 

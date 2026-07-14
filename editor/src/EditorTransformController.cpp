@@ -7,6 +7,7 @@
 
 #include <GLFW/glfw3.h>
 #include <glm/glm.hpp>
+#include <glm/gtc/quaternion.hpp>
 
 void EditorTransformController::UpdateKeyboardShortcuts(engine::Window& window,
                                                         EditorScene& scene,
@@ -64,7 +65,9 @@ void EditorTransformController::ApplyGizmoNudge(EditorScene& scene,
 
     switch (gizmo.CurrentMode()) {
     case EditorGizmo::Mode::Translate:
-        scene.MoveSelected(axis * (amount * 2.0f));
+        if (const engine::ecs::Transform* transform = scene.SelectedTransform()) {
+            scene.MoveSelected((glm::mat3_cast(transform->rotation) * axis) * (amount * 2.0f));
+        }
         break;
     case EditorGizmo::Mode::Rotate:
         scene.RotateSelected(axis, amount * 90.0f);
@@ -81,7 +84,9 @@ void EditorTransformController::ApplyGizmoDrag(EditorScene& scene, const EditorG
 
     switch (gizmo.CurrentMode()) {
     case EditorGizmo::Mode::Translate:
-        scene.MoveSelected(axis * amount);
+        if (const engine::ecs::Transform* transform = scene.SelectedTransform()) {
+            scene.MoveSelected((glm::mat3_cast(transform->rotation) * axis) * amount);
+        }
         break;
     case EditorGizmo::Mode::Rotate:
         scene.RotateSelected(axis, pixels * 0.35f);

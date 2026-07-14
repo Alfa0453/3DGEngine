@@ -110,6 +110,18 @@ struct SkinnedModelAsset {
         std::string clipName;
         bool loop = true;
         float speed = 1.0f;
+        int blendClipIndex = -1;
+        std::string blendClipName;
+        std::string blendParameter;
+        float blendMin = 0.0f;
+        float blendMax = 1.0f;
+        bool rootMotion = false;
+    };
+
+    struct AnimationParameter {
+        std::string name;
+        int type = 0;
+        float defaultValue = 0.0f;
     };
 
     struct AnimationTransition {
@@ -142,6 +154,7 @@ struct SkinnedModelAsset {
     std::vector<Notify> notifies;
     std::vector<ActionProfile> actionProfiles;
     std::vector<AnimationState> states;
+    std::vector<AnimationParameter> parameters;
     std::vector<AnimationTransition> transitions;
 };
 

@@ -62,6 +62,23 @@ public:
         struct ParameterInfo {
             std::string name;
             float value = 0.0f;
+            EditorScene::AnimationParameter::Type type = EditorScene::AnimationParameter::Type::Float;
+        };
+
+        struct TransitionDebugRow {
+            std::string fromState;
+            std::string toState;
+            std::string parameter;
+            float value = 0.0f;
+            float threshold = 0.0f;
+            float exitTime = 0.0f;
+            int priority = 0;
+            bool canInterrupt = false;
+            bool conditionMet = false;
+            bool exitTimeReached = false;
+            bool blockedByBlend = false;
+            bool eligible = false;
+            bool selected = false;
         };
 
         bool hasSelection = false;
@@ -77,8 +94,11 @@ public:
         std::vector<BoneInfo> bones;
         std::vector<EditorScene::AnimationActionProfile> actionProfiles;
         std::vector<EditorScene::AnimationStateNode> states;
+        std::vector<EditorScene::AnimationParameter> parameterDefinitions;
         std::vector<EditorScene::AnimationStateTransition> transitions;
+        std::vector<std::string> graphWarnings;
         std::vector<ParameterInfo> parameters;
+        std::vector<TransitionDebugRow> transitionDebugRows;
         int defaultClipIndex = 0;
         std::string defaultClipName;
         bool autoplay = true;

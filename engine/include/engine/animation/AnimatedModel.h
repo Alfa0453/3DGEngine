@@ -52,6 +52,7 @@ struct AnimatedModel {
     AnimAction                            action;
     std::vector<AnimEvent>                events;  // base controller notifies
     std::function<void(const std::string&)> onEvent;
+    std::function<void(const std::string&, const std::string&)> onStateChanged;
 
     // PBR material overrides (the imported Material is Phong-ish). albedo tints the
     // model's diffuse; metallic/roughness set the surface response; emissive is an

@@ -44,7 +44,7 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         return false;
     }
 
-    out << "3DGRuntimeScene 23\n";
+    out << "3DGRuntimeScene 24\n";
     out << "# Runtime export from 3DGEditor. Editor-only flags are omitted.\n";
     const EditorScene::Environment& environment = scene.GetEnvironment();
     out << "environment "
@@ -140,7 +140,19 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
                 << state.clipIndex << ' '
                 << StoredPath(state.clipName) << ' '
                 << (state.loop ? 1 : 0) << ' '
-                << state.speed << ' ';
+                << state.speed << ' '
+                << state.blendClipIndex << ' '
+                << StoredPath(state.blendClipName) << ' '
+                << StoredPath(state.blendParameter) << ' '
+                << state.blendMin << ' '
+                << state.blendMax << ' '
+                << (state.rootMotion ? 1 : 0) << ' ';
+        }
+        out << object.animationParameters.size() << ' ';
+        for (const EditorScene::AnimationParameter& parameter : object.animationParameters) {
+            out << StoredPath(parameter.name) << ' '
+                << static_cast<int>(parameter.type) << ' '
+                << parameter.defaultValue << ' ';
         }
         out << object.animationTransitions.size() << ' ';
         for (const EditorScene::AnimationStateTransition& transition : object.animationTransitions) {

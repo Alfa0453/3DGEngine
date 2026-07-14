@@ -13,13 +13,32 @@ int AnimationController::AddState(const State& s) {
 }
 
 void AnimationController::AddTransition(const Transition& t) {
-    if (t.from < 0 || t.to < 0
+    if (t.from < -1 || t.to < 0
         || t.from >= static_cast<int>(m_states.size())
         || t.to >= static_cast<int>(m_states.size())
         || t.from == t.to) {
         return;
     }
     m_transitions.push_back(t);
+}
+
+void AnimationController::DeclareParameter(const ParameterDefinition& definition) {
+    if (definition.name.empty()) return;
+    for (ParameterDefinition& current : m_parameterDefinitions) {
+        if (current.name == definition.name) {
+            current = definition;
+            return;
+        }
+    }
+    m_parameterDefinitions.push_back(definition);
+    SetParameter(definition.name, definition.defaultValue);
+}
+
+AnimationController::ParameterType AnimationController::ParameterKind(const std::string& name) const {
+    for (const ParameterDefinition& definition : m_parameterDefinitions) {
+        if (definition.name == name) return definition.type;
+    }
+    return ParameterType::Float;
 }
 
 AnimationController AnimationController::Locomotion(int idleClip, int walkClip, int runClip,
@@ -124,7 +143,10 @@ const AnimationController::Transition* AnimationController::BestTransition() con
 
     const Transition* best = nullptr;
     for (const Transition& transition : m_transitions) {
-        if (transition.from != m_cur || !TestTransition(transition)) {
+        if ((transition.from != -1 && transition.from != m_cur)
+            || transition.to == m_cur
+            || (Blending() && !transition.canInterrupt)
+            || !TestTransition(transition)) {
             continue;
         }
         if (!best || transition.priority > best->priority) {
@@ -132,6 +154,54 @@ const AnimationController::Transition* AnimationController::BestTransition() con
         }
     }
     return best;
+}
+
+std::vector<AnimationController::TransitionDebugInfo> AnimationController::TransitionDebug() const {
+    std::vector<TransitionDebugInfo> rows;
+    rows.reserve(m_transitions.size());
+    const Transition* selected = BestTransition();
+
+    for (const Transition& transition : m_transitions) {
+        TransitionDebugInfo row;
+        if (transition.from == -1) {
+            row.fromState = "Any State";
+        } else if (transition.from >= 0 && transition.from < static_cast<int>(m_states.size())) {
+            row.fromState = m_states[static_cast<std::size_t>(transition.from)].name;
+        }
+        if (transition.to >= 0 && transition.to < static_cast<int>(m_states.size())) {
+            row.toState = m_states[static_cast<std::size_t>(transition.to)].name;
+        }
+        row.parameter = transition.parameter;
+        row.value = Parameter(transition.parameter, 0.0f);
+        row.threshold = transition.threshold;
+        row.exitTime = transition.exitTime;
+        row.priority = transition.priority;
+        row.canInterrupt = transition.canInterrupt;
+        row.exitTimeReached = ExitTimeReached(transition);
+        row.blockedByBlend = Blending() && !transition.canInterrupt;
+        switch (transition.compare) {
+        case Transition::Compare::GreaterOrEqual:
+            row.conditionMet = row.value >= transition.threshold;
+            break;
+        case Transition::Compare::Less:
+            row.conditionMet = row.value < transition.threshold;
+            break;
+        case Transition::Compare::Equal:
+            row.conditionMet = std::abs(row.value - transition.threshold) <= 0.0001f;
+            break;
+        case Transition::Compare::NotEqual:
+            row.conditionMet = std::abs(row.value - transition.threshold) > 0.0001f;
+            break;
+        }
+        row.eligible = (transition.from == -1 || transition.from == m_cur)
+            && transition.to != m_cur
+            && row.conditionMet
+            && row.exitTimeReached
+            && !row.blockedByBlend;
+        row.selected = selected == &transition;
+        rows.push_back(std::move(row));
+    }
+    return rows;
 }
 
 int AnimationController::PickByTransition() const {
@@ -206,6 +276,15 @@ void AnimationController::Update(float dt) {
 const std::string& AnimationController::CurrentStateName() const {
     static const std::string kNone = "(none)";
     return (m_cur >= 0) ? m_states[static_cast<std::size_t>(m_cur)].name : kNone;
+}
+
+float AnimationController::CurrentBlendWeight() const {
+    if (m_cur < 0) return 0.0f;
+    const State& state = m_states[static_cast<std::size_t>(m_cur)];
+    if (state.blendClip < 0 || state.blendParameter.empty()) return 0.0f;
+    const float span = state.blendMax - state.blendMin;
+    if (std::abs(span) <= 0.0001f) return 0.0f;
+    return std::clamp((Parameter(state.blendParameter) - state.blendMin) / span, 0.0f, 1.0f);
 }
 
 } // namespace engine

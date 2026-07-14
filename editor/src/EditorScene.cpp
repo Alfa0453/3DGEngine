@@ -177,7 +177,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         return false;
     }
 
-    out << "3DGEditorScene 35\n";
+    out << "3DGEditorScene 36\n";
     out << "environment "
         << m_environment.timeOfDay << ' '
         << m_environment.skyLightIntensity << ' '
@@ -287,7 +287,19 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
                 << state.clipIndex << ' '
                 << StoredPath(state.clipName) << ' '
                 << (state.loop ? 1 : 0) << ' '
-                << state.speed << ' ';
+                << state.speed << ' '
+                << state.blendClipIndex << ' '
+                << StoredPath(state.blendClipName) << ' '
+                << StoredPath(state.blendParameter) << ' '
+                << state.blendMin << ' '
+                << state.blendMax << ' '
+                << (state.rootMotion ? 1 : 0) << ' ';
+        }
+        out << object.animationParameters.size() << ' ';
+        for (const AnimationParameter& parameter : object.animationParameters) {
+            out << StoredPath(parameter.name) << ' '
+                << static_cast<int>(parameter.type) << ' '
+                << parameter.defaultValue << ' ';
         }
         out << object.animationTransitions.size() << ' ';
         for (const AnimationStateTransition& transition : object.animationTransitions) {
@@ -399,7 +411,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
     std::string magic;
     int version = 0;
     in >> magic >> version;
-    if (magic != "3DGEditorScene" ||(version < 1 || version > 35)) {
+    if (magic != "3DGEditorScene" ||(version < 1 || version > 36)) {
         if (error) *error = "Scene file has an unknown format.";
         return false;
     }
@@ -613,6 +625,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         std::vector<AnimationEvent> animationEvents;
         std::vector<AnimationActionProfile> animationActionProfiles;
         std::vector<AnimationStateNode> animationStates;
+        std::vector<AnimationParameter> animationParameters;
         std::vector<AnimationStateTransition> animationTransitions;
         glm::vec3 linearVelocity{0.0f};
         glm::vec3 angularVelocityAxis{0.0f, 1.0f, 0.0f};
@@ -761,6 +774,18 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                    >> state.clipName
                    >> loop
                    >> state.speed;
+                if (version >= 36) {
+                    int rootMotion = 0;
+                    in >> state.blendClipIndex
+                       >> state.blendClipName
+                       >> state.blendParameter
+                       >> state.blendMin
+                       >> state.blendMax
+                       >> rootMotion;
+                    if (state.blendClipName == "-") state.blendClipName.clear();
+                    if (state.blendParameter == "-") state.blendParameter.clear();
+                    state.rootMotion = rootMotion != 0;
+                }
                 if (state.name == "-") {
                     state.name.clear();
                 }
@@ -771,6 +796,19 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                 state.loop = loop != 0;
                 state.speed = std::max(state.speed, 0.0f);
                 animationStates.push_back(state);
+            }
+
+            if (version >= 36) {
+                std::size_t parameterCount = 0;
+                in >> parameterCount;
+                for (std::size_t i = 0; i < parameterCount; ++i) {
+                    AnimationParameter parameter;
+                    int type = 0;
+                    in >> parameter.name >> type >> parameter.defaultValue;
+                    if (parameter.name == "-") parameter.name.clear();
+                    parameter.type = static_cast<AnimationParameter::Type>(std::clamp(type, 0, 2));
+                    animationParameters.push_back(parameter);
+                }
             }
 
             std::size_t transitionCount = 0;
@@ -979,6 +1017,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         m_objects.back().animationEvents = animationEvents;
         m_objects.back().animationActionProfiles = animationActionProfiles;
         m_objects.back().animationStates = animationStates;
+        m_objects.back().animationParameters = animationParameters;
         m_objects.back().animationTransitions = animationTransitions;
         m_objects.back().linearVelocityEnabled = linearVelocityEnabled != 0;
         m_objects.back().angularVelocityEnabled = angularVelocityEnabled != 0;
@@ -1628,7 +1667,8 @@ bool EditorScene::SetSelectedAnimationActionProfiles(const std::vector<Animation
 }
 
 bool EditorScene::SetSelectedAnimationStateGraph(const std::vector<AnimationStateNode>& states,
-                                                 const std::vector<AnimationStateTransition>& transitions) {
+                                                 const std::vector<AnimationStateTransition>& transitions,
+                                                 const std::vector<AnimationParameter>& parameters) {
     if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
         return false;
     }
@@ -1643,6 +1683,14 @@ bool EditorScene::SetSelectedAnimationStateGraph(const std::vector<AnimationStat
     for (AnimationStateNode& state : selected.animationStates) {
         state.clipIndex = std::max(state.clipIndex, 0);
         state.speed = std::max(state.speed, 0.0f);
+        state.blendClipIndex = std::max(state.blendClipIndex, -1);
+        if (state.blendMax < state.blendMin) std::swap(state.blendMin, state.blendMax);
+    }
+    selected.animationParameters = parameters;
+    for (AnimationParameter& parameter : selected.animationParameters) {
+        if (parameter.type != AnimationParameter::Type::Float) {
+            parameter.defaultValue = parameter.defaultValue != 0.0f ? 1.0f : 0.0f;
+        }
     }
     selected.animationTransitions = transitions;
     for (AnimationStateTransition& transition : selected.animationTransitions) {
@@ -2248,6 +2296,7 @@ bool EditorScene::DuplicateSelected(const engine::Mesh & cube, const engine::Mes
     m_objects.back().animationEvents = selectedCopy.animationEvents;
     m_objects.back().animationActionProfiles = selectedCopy.animationActionProfiles;
     m_objects.back().animationStates = selectedCopy.animationStates;
+    m_objects.back().animationParameters = selectedCopy.animationParameters;
     m_objects.back().animationTransitions = selectedCopy.animationTransitions;
     m_objects.back().light = selectedCopy.light;
     m_objects.back().lightData = selectedCopy.lightData;

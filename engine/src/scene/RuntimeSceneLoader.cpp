@@ -82,11 +82,11 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
     std::string magic;
     int version = 0;
     in >> magic >> version;
-    if (magic != "3DGRuntimeScene" || version < 1 || version > 23) {
+    if (magic != "3DGRuntimeScene" || version < 1 || version > 24) {
         if (error) {
             *error = "Runtime scene file has an unknown format: "
                 + magic + " " + std::to_string(version)
-                + " (expected 3DGRuntimeScene 1..23).";
+                + " (expected 3DGRuntimeScene 1..24).";
         }
         return false;
     }
@@ -303,6 +303,18 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                        >> state.clipName
                        >> loop
                        >> state.speed;
+                if (version >= 24) {
+                    int rootMotion = 0;
+                    record >> state.blendClipIndex
+                           >> state.blendClipName
+                           >> state.blendParameter
+                           >> state.blendMin
+                           >> state.blendMax
+                           >> rootMotion;
+                    if (state.blendClipName == "-") state.blendClipName.clear();
+                    if (state.blendParameter == "-") state.blendParameter.clear();
+                    state.rootMotion = rootMotion != 0;
+                }
                 if (state.name == "-") {
                     state.name.clear();
                 }
@@ -313,6 +325,18 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                 state.loop = loop != 0;
                 state.speed = std::max(state.speed, 0.0f);
                 entity.animationStates.push_back(state);
+            }
+
+            if (version >= 24) {
+                std::size_t parameterCount = 0;
+                record >> parameterCount;
+                for (std::size_t i = 0; i < parameterCount; ++i) {
+                    AnimationParameterDesc parameter;
+                    record >> parameter.name >> parameter.type >> parameter.defaultValue;
+                    if (parameter.name == "-") parameter.name.clear();
+                    parameter.type = std::clamp(parameter.type, 0, 2);
+                    entity.animationParameters.push_back(parameter);
+                }
             }
 
             std::size_t transitionCount = 0;
@@ -559,8 +583,21 @@ bool RuntimeSceneLoader::Instantiate(const Scene &scene, ecs::Registry &registry
                     state.clipIndex,
                     state.clipName,
                     state.loop,
-                    state.speed
+                    state.speed,
+                    state.blendClipIndex,
+                    state.blendClipName,
+                    state.blendParameter,
+                    state.blendMin,
+                    state.blendMax,
+                    state.rootMotion
                 });
+            }
+            std::vector<ecs::SkinnedModelAsset::AnimationParameter> parameters;
+            parameters.reserve(desc.animationParameters.size());
+            for (const AnimationParameterDesc& parameter : desc.animationParameters) {
+                if (!parameter.name.empty()) {
+                    parameters.push_back({parameter.name, parameter.type, parameter.defaultValue});
+                }
             }
             auto findState = [&](const std::string& name) {
                 for (std::size_t i = 0; i < states.size(); ++i) {
@@ -573,9 +610,9 @@ bool RuntimeSceneLoader::Instantiate(const Scene &scene, ecs::Registry &registry
             std::vector<ecs::SkinnedModelAsset::AnimationTransition> transitions;
             transitions.reserve(desc.animationTransitions.size());
             for (const AnimationTransitionDesc& transition : desc.animationTransitions) {
-                const int from = findState(transition.fromState);
+                const int from = transition.fromState.empty() ? -1 : findState(transition.fromState);
                 const int to = findState(transition.toState);
-                if (from < 0 || to < 0 || from == to) {
+                if (from < -1 || to < 0 || from == to) {
                     continue;
                 }
                 transitions.push_back(ecs::SkinnedModelAsset::AnimationTransition{
@@ -609,6 +646,7 @@ bool RuntimeSceneLoader::Instantiate(const Scene &scene, ecs::Registry &registry
                 std::move(notifies),
                 std::move(actionProfiles),
                 std::move(states),
+                std::move(parameters),
                 std::move(transitions)
             });
         } else if (!desc.modelPath.empty()) {

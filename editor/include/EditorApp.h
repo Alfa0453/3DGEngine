@@ -124,6 +124,8 @@ private:
     void DropPayloadOnScene();
     glm::vec3 SceneDropPosition();
     bool IsViewportDropPosition(float x, float y);
+    float ProjectGizmoDrag(float dx, float dy, const glm::mat4& viewProj,
+                           int viewportWidth, int viewportHeight) const;
     void AddCube();
     void AddPlane();
     void AddSphere();
@@ -205,6 +207,7 @@ private:
     std::optional<engine::Shader>        m_modelShader;
     std::optional<engine::SkinnedRenderer> m_skinnedRenderer;
     std::optional<engine::Shader>        m_outlineShader;
+    std::optional<engine::Shader>        m_skinnedOutlineShader;
     std::optional<engine::PbrRenderer>   m_pbrRenderer;
     std::optional<engine::PostProcess>   m_postProcess;
     std::optional<engine::ProceduralSky> m_sky;
@@ -258,6 +261,7 @@ private:
     std::unordered_map<std::string, bool> m_editModelLoadErrors;
     std::unordered_map<std::string, bool> m_editTextureLoadErrors;
     std::unordered_map<engine::ecs::Entity, float> m_animationPreviewTimes;
+    std::unordered_map<engine::ecs::Entity, std::vector<glm::mat4>> m_editAnimationPoses;
     std::unordered_map<std::string, float> m_animationPreviewParameters;
     AnimationPreviewAction m_animationPreviewAction;
     int m_animationActionClip = 0;

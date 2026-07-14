@@ -66,6 +66,19 @@ public:
         std::string clipName;
         bool loop = true;
         float speed = 1.0f;
+        int blendClipIndex = -1;
+        std::string blendClipName;
+        std::string blendParameter;
+        float blendMin = 0.0f;
+        float blendMax = 1.0f;
+        bool rootMotion = false;
+    };
+
+    struct AnimationParameter {
+        enum class Type { Float = 0, Bool = 1, Trigger = 2 };
+        std::string name = "Speed";
+        Type type = Type::Float;
+        float defaultValue = 0.0f;
     };
 
     struct AnimationStateTransition {
@@ -115,6 +128,7 @@ public:
         std::vector<AnimationEvent> animationEvents;
         std::vector<AnimationActionProfile> animationActionProfiles;
         std::vector<AnimationStateNode> animationStates;
+        std::vector<AnimationParameter> animationParameters;
         std::vector<AnimationStateTransition> animationTransitions;
         bool linearVelocityEnabled = false;
         bool angularVelocityEnabled = false;
@@ -281,7 +295,8 @@ public:
     bool SetSelectedAnimationEvents(const std::vector<AnimationEvent>& events);
     bool SetSelectedAnimationActionProfiles(const std::vector<AnimationActionProfile>& profiles);
     bool SetSelectedAnimationStateGraph(const std::vector<AnimationStateNode>& states,
-                                        const std::vector<AnimationStateTransition>& transitions);
+                                        const std::vector<AnimationStateTransition>& transitions,
+                                        const std::vector<AnimationParameter>& parameters = {});
     bool SetSelectedLight(const engine::ecs::Light& light);
     void SetEnvironment(const Environment& environment);
     bool SetSelectedLinearVelocityEnabled(bool enabled);

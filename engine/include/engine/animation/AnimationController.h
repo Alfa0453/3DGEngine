@@ -20,6 +20,14 @@ namespace engine {
 // CurrentClip()/PrevClip()/times/Blend() to produce the actual pose.
 class AnimationController {
 public:
+    enum class ParameterType { Float = 0, Bool = 1, Trigger = 2 };
+
+    struct ParameterDefinition {
+        std::string name;
+        ParameterType type = ParameterType::Float;
+        float defaultValue = 0.0f;
+    };
+
     struct State {
         std::string name;
         int   clip  = 0;         // index into SkinnedModel::Animations()
@@ -29,6 +37,11 @@ public:
         float paramMin = -std::numeric_limits<float>::infinity();
         float paramMax =  std::numeric_limits<float>::infinity();
         float durationSeconds = 0.0f;
+        int blendClip = -1;
+        std::string blendParameter;
+        float blendMin = 0.0f;
+        float blendMax = 1.0f;
+        bool rootMotion = false;
     };
 
     struct Transition {
@@ -50,6 +63,22 @@ public:
         bool canInterrupt = false;
     };
 
+    struct TransitionDebugInfo {
+        std::string fromState;
+        std::string toState;
+        std::string parameter;
+        float value = 0.0f;
+        float threshold = 0.0f;
+        float exitTime = 0.0f;
+        int priority = 0;
+        bool canInterrupt = false;
+        bool conditionMet = false;
+        bool exitTimeReached = false;
+        bool blockedByBlend = false;
+        bool eligible = false;
+        bool selected = false;
+    };
+
     float crossfade = 0.25f;     // seconds to blend between states
 
     // Add a state; the first one added becomes current. Returns its index.
@@ -61,6 +90,7 @@ public:
                                           float runAt = 3.0f, float crossfadeSeconds = 0.2f);
                         
     void SetParameter(float v) { SetParameter("Speed", v); }
+    void DeclareParameter(const ParameterDefinition& definition);
     void SetParameter(const std::string& name, float value);
     void SetBoolParameter(const std::string& name, bool value);
     void SetTriggerParameter(const std::string& name);
@@ -69,6 +99,8 @@ public:
     float Parameter(const std::string& name, float fallback = 0.0f) const;
     bool BoolParameter(const std::string& name, bool fallback = false) const;
     const std::unordered_map<std::string, float>& Parameters() const { return m_parameters; }
+    const std::vector<ParameterDefinition>& ParameterDefinitions() const { return m_parameterDefinitions; }
+    ParameterType ParameterKind(const std::string& name) const;
 
     // Manually transition to a state (cross-fades unless immediate).
     void Play(int stateIndex, bool immediate = false);
@@ -82,12 +114,16 @@ public:
     int   CurrentState()const { return m_cur; }
     int   CurrentClip() const { return (m_cur  >= 0) ? m_states[static_cast<std::size_t>(m_cur)].clip  : -1; }
     int   PrevClip()    const { return (m_prev >= 0) ? m_states[static_cast<std::size_t>(m_prev)].clip : -1; }
+    int   CurrentBlendClip() const { return (m_cur >= 0) ? m_states[static_cast<std::size_t>(m_cur)].blendClip : -1; }
+    float CurrentBlendWeight() const;
+    bool  CurrentRootMotion() const { return m_cur >= 0 && m_states[static_cast<std::size_t>(m_cur)].rootMotion; }
     bool  CurrentLoop() const { return (m_cur  >= 0) ? m_states[static_cast<std::size_t>(m_cur)].loop  : true; }
     float CurrentTime() const { return m_curTime; }
     float PrevTime()    const { return m_prevTime; }
     const std::string& CurrentStateName() const;
     std::size_t StateCount() const { return m_states.size(); }
     std::size_t TransitionCount() const { return m_transitions.size(); }
+    std::vector<TransitionDebugInfo> TransitionDebug() const;
 
 private:
     int  PickByParam() const;
@@ -105,6 +141,7 @@ private:
     float m_blend = 1.0f;   // 1 = fully in current
     float m_param = 0.0f;
     std::unordered_map<std::string, float> m_parameters;
+    std::vector<ParameterDefinition> m_parameterDefinitions;
     std::unordered_set<std::string> m_triggers;
 };
 

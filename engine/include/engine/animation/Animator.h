@@ -44,6 +44,8 @@ public:
     // Sample a clip into per-bone LOCAL transforms (looping via the clip's ticks).
     static void SampleLocal(const Skeleton& skel, const Animation& anim, 
                             float timeSeconds, std::vector<BoneLocal>& out);
+    static glm::vec3 SampleRootTranslation(const Skeleton& skel, const Animation& anim,
+                                           float timeSeconds);
 
     // Uniform blend of two local poses (per bone: lerp pos/scale, slerp rot).
     static void BlendLocal(const std::vector<BoneLocal>& a, const std::vector<BoneLocal>& b,

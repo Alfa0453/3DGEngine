@@ -6,6 +6,7 @@
 #include "engine/ecs/Components.h"
 
 #include <algorithm>
+#include <cmath>
 #include <utility>
 
 namespace engine {
@@ -33,7 +34,7 @@ void AnimatedModel::PlayAction(int clip, std::vector<float> mask, std::vector<An
 }
 
 void UpdateAnimations(ecs::Registry& reg, float dt) {
-    reg.view<ecs::Transform, AnimatedModel>().each([&](ecs::Entity, ecs::Transform&, AnimatedModel& am) {
+    reg.view<ecs::Transform, AnimatedModel>().each([&](ecs::Entity, ecs::Transform& transform, AnimatedModel& am) {
         if (!am.model) return;
         const Skeleton& skel = am.model->GetSkeleton();
         const auto& clips = am.model->Animations();
@@ -45,7 +46,16 @@ void UpdateAnimations(ecs::Registry& reg, float dt) {
 
         const int previousBaseClip = am.controller.CurrentClip();
         const float previousBaseTime = am.controller.CurrentTime();
+        const std::string previousState = am.controller.CurrentStateName();
         am.controller.Update(dt);
+        const std::string currentState = am.controller.CurrentStateName();
+        if (previousState != currentState) {
+            if (am.onStateChanged) am.onStateChanged(previousState, currentState);
+            if (am.onEvent) {
+                am.onEvent("StateExit:" + previousState);
+                am.onEvent("StateEnter:" + currentState);
+            }
+        }
 
         auto clipAt = [&](int idx) -> const Animation* {
             return (idx >= 0 && idx < static_cast<int>(clips.size()))
@@ -80,6 +90,26 @@ void UpdateAnimations(ecs::Registry& reg, float dt) {
         const Animation* cur = clipAt(am.controller.CurrentClip());
         if (!cur) { Animator::ComputeBindPose(skel, am.pose); return; }
 
+        if (am.controller.CurrentRootMotion()
+            && previousBaseClip == am.controller.CurrentClip()
+            && dt > 0.0f) {
+            const glm::vec3 before = Animator::SampleRootTranslation(skel, *cur, previousBaseTime);
+            const glm::vec3 after = Animator::SampleRootTranslation(skel, *cur, am.controller.CurrentTime());
+            glm::vec3 delta = after - before;
+            const float length = ClipSeconds(*cur);
+            if (length > 0.0f) {
+                const int previousCycle = static_cast<int>(std::floor(previousBaseTime / length));
+                const int currentCycle = static_cast<int>(std::floor(am.controller.CurrentTime() / length));
+                if (currentCycle > previousCycle) {
+                    const glm::vec3 start = Animator::SampleRootTranslation(skel, *cur, 0.0f);
+                    const glm::vec3 end = Animator::SampleRootTranslation(skel, *cur, length - 0.0001f);
+                    delta = (end - before) + (after - start)
+                        + static_cast<float>(currentCycle - previousCycle - 1) * (end - start);
+                }
+            }
+            transform.position += transform.rotation * delta;
+        }
+
         float curTime = am.controller.CurrentTime();
         if (!am.controller.CurrentLoop()) {
             const float len = ClipSeconds(*cur);
@@ -95,6 +125,20 @@ void UpdateAnimations(ecs::Registry& reg, float dt) {
             Animator::BlendLocal(a, b, am.controller.Blend(), local);
         } else {
             Animator::SampleLocal(skel, *cur, curTime, local);
+        }
+
+
+        const Animation* blendClip = clipAt(am.controller.CurrentBlendClip());
+        const float blendWeight = am.controller.CurrentBlendWeight();
+        if (blendClip && blendWeight > 0.0f) {
+            std::vector<BoneLocal> blendPose;
+            Animator::SampleLocal(skel, *blendClip, curTime, blendPose);
+            std::vector<BoneLocal> mixed;
+            Animator::BlendLocal(local, blendPose, blendWeight, mixed);
+            local = std::move(mixed);
+        }
+        if (am.controller.CurrentRootMotion() && !local.empty() && !skel.bones.empty()) {
+            local[0].pos = glm::vec3(skel.bones[0].localBind[3]);
         }
 
         // --- Action layer (one-shot, masked, over the base) --------------------

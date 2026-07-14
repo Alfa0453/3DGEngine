@@ -143,6 +143,11 @@ void Animator::SampleLocal(const Skeleton& skel, const Animation& anim, float ti
     }
 }
 
+glm::vec3 Animator::SampleRootTranslation(const Skeleton& skel, const Animation& anim, float timeSeconds) {
+    if (skel.bones.empty()) return glm::vec3(0.0f);
+    return SampleBoneTRS(anim, 0, WrapTicks(anim, timeSeconds), skel.bones[0]).pos;
+}
+
 void Animator::BlendLocal(const std::vector<BoneLocal>& a, const std::vector<BoneLocal>& b,
                           float blend, std::vector<BoneLocal>& out) {
     const std::size_t n = std::min(a.size(), b.size());

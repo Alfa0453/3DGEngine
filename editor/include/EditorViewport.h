@@ -9,11 +9,13 @@
 #include <vector>
 
 namespace engine {
+class Camera;
 class Mesh;
 class Model;
 class Renderer;
 class RuntimeAssetManager;
 class Shader;
+class SkinnedModel;
 class Texture;
 }
 
@@ -42,9 +44,11 @@ public:
                         engine::Shader& shader,
                         const engine::Mesh& cube,
                         const engine::Mesh& cone,
-                        const EditorScene& scene,
-                        const EditorGizmo& gizmo,
-                        const glm::mat4& viewProj) const;
+                                    const EditorScene& scene,
+                                    const EditorGizmo& gizmo,
+                                    const glm::mat4& viewProj,
+                                    const engine::Camera& camera,
+                                    int viewportHeight) const;
 
     void DrawSelectedLightGuide(engine::Renderer& renderer,
                                 engine::Shader& shader,
@@ -86,6 +90,14 @@ public:
                                  const glm::vec3& color,
                                  float thickness) const;
 
+    void DrawSelectedSkinnedModelOutline(engine::Renderer& renderer,
+                                         engine::Shader& shader,
+                                         const engine::ecs::Transform& transform,
+                                         const engine::SkinnedModel& model,
+                                         const std::vector<glm::mat4>& pose,
+                                         const glm::vec3& color,
+                                         float thickness) const;
+
     void DrawLoadedModel(engine::Shader& shader,
                          const engine::ecs::Transform& transform,
                          const engine::Model& model) const;
@@ -117,7 +129,8 @@ public:
                          float y,
                          const glm::mat4& viewProj,
                          int width,
-                         int height) const;
+                         int height,
+                         const engine::Camera& camera) const;
 
     glm::vec3 SceneDropPosition(float x,
                                 float y,

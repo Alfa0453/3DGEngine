@@ -1259,6 +1259,7 @@ void DrawAnimationPreview(EditorDockspace::Context& context, bool* open) {
             ImGui::TextUnformatted("No animation clips found.");
         } else {
             std::vector<EditorScene::AnimationStateNode> states = state.states;
+            std::vector<EditorScene::AnimationParameter> parameters = state.parameterDefinitions;
             std::vector<EditorScene::AnimationStateTransition> transitions = state.transitions;
             bool changed = false;
             int removeState = -1;
@@ -1305,6 +1306,33 @@ void DrawAnimationPreview(EditorDockspace::Context& context, bool* open) {
                     node.speed = std::max(node.speed, 0.0f);
                     changed = true;
                 }
+                const char* blendClip = node.blendClipIndex >= 0 && node.blendClipIndex < static_cast<int>(state.clips.size())
+                    ? state.clips[static_cast<std::size_t>(node.blendClipIndex)].name.c_str() : "Disabled";
+                if (ImGui::BeginCombo("Blend Clip", blendClip)) {
+                    if (ImGui::Selectable("Disabled", node.blendClipIndex < 0)) {
+                        node.blendClipIndex = -1;
+                        node.blendClipName.clear();
+                        changed = true;
+                    }
+                    for (std::size_t clipIndex = 0; clipIndex < state.clips.size(); ++clipIndex) {
+                        if (ImGui::Selectable(state.clips[clipIndex].name.c_str(), node.blendClipIndex == static_cast<int>(clipIndex))) {
+                            node.blendClipIndex = static_cast<int>(clipIndex);
+                            node.blendClipName = state.clips[clipIndex].name;
+                            changed = true;
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                if (node.blendClipIndex >= 0) {
+                    std::array<char, 64> blendParameter{};
+                    std::snprintf(blendParameter.data(), blendParameter.size(), "%s", node.blendParameter.c_str());
+                    if (ImGui::InputText("Blend Parameter", blendParameter.data(), blendParameter.size())) {
+                        node.blendParameter = blendParameter.data(); changed = true;
+                    }
+                    changed |= ImGui::DragFloat("Blend Min", &node.blendMin, 0.01f);
+                    changed |= ImGui::DragFloat("Blend Max", &node.blendMax, 0.01f);
+                }
+                if (ImGui::Checkbox("Root Motion", &node.rootMotion)) changed = true;
                 if (ImGui::Button("Remove State")) {
                     removeState = static_cast<int>(i);
                 }
@@ -1335,15 +1363,46 @@ void DrawAnimationPreview(EditorDockspace::Context& context, bool* open) {
             }
 
             ImGui::Separator();
+            ImGui::Text("Parameters: %zu", parameters.size());
+            int removeParameter = -1;
+            const char* parameterTypes[] = {"Float", "Bool", "Trigger"};
+            for (std::size_t i = 0; i < parameters.size(); ++i) {
+                auto& parameter = parameters[i];
+                ImGui::PushID(5000 + static_cast<int>(i));
+                std::array<char, 64> name{};
+                std::snprintf(name.data(), name.size(), "%s", parameter.name.c_str());
+                if (ImGui::InputText("Name", name.data(), name.size())) { parameter.name = name.data(); changed = true; }
+                int type = std::clamp(static_cast<int>(parameter.type), 0, 2);
+                if (ImGui::Combo("Type", &type, parameterTypes, 3)) {
+                    parameter.type = static_cast<EditorScene::AnimationParameter::Type>(type); changed = true;
+                }
+                if (parameter.type == EditorScene::AnimationParameter::Type::Float) {
+                    changed |= ImGui::DragFloat("Default", &parameter.defaultValue, 0.01f);
+                } else {
+                    bool defaultValue = parameter.defaultValue != 0.0f;
+                    if (ImGui::Checkbox("Default", &defaultValue)) { parameter.defaultValue = defaultValue ? 1.0f : 0.0f; changed = true; }
+                }
+                if (ImGui::Button("Remove Parameter")) removeParameter = static_cast<int>(i);
+                ImGui::Separator(); ImGui::PopID();
+            }
+            if (removeParameter >= 0) { parameters.erase(parameters.begin() + removeParameter); changed = true; }
+            if (ImGui::Button("Add Parameter")) {
+                parameters.push_back({"Parameter", EditorScene::AnimationParameter::Type::Float, 0.0f}); changed = true;
+            }
+
+            ImGui::Separator();
             ImGui::Text("Transitions: %zu", transitions.size());
             const char* compareLabels[] = {">=", "<", "==", "!="};
             for (std::size_t i = 0; i < transitions.size(); ++i) {
                 EditorScene::AnimationStateTransition& transition = transitions[i];
                 ImGui::PushID(10000 + static_cast<int>(i));
 
-                auto drawStateCombo = [&](const char* label, std::string& value) {
-                    const char* current = value.empty() ? "-" : value.c_str();
+                auto drawStateCombo = [&](const char* label, std::string& value, bool allowAny) {
+                    const char* current = value.empty() ? (allowAny ? "Any State" : "-") : value.c_str();
                     if (ImGui::BeginCombo(label, current)) {
+                        if (allowAny && ImGui::Selectable("Any State", value.empty())) {
+                            value.clear(); changed = true;
+                        }
                         for (const EditorScene::AnimationStateNode& node : states) {
                             const bool selectedNode = node.name == value;
                             if (ImGui::Selectable(node.name.empty() ? "(unnamed)" : node.name.c_str(), selectedNode)) {
@@ -1358,20 +1417,36 @@ void DrawAnimationPreview(EditorDockspace::Context& context, bool* open) {
                     }
                 };
 
-                drawStateCombo("From", transition.fromState);
-                drawStateCombo("To", transition.toState);
+                drawStateCombo("From", transition.fromState, true);
+                drawStateCombo("To", transition.toState, false);
 
-                std::array<char, 64> parameterBuffer{};
-                std::snprintf(parameterBuffer.data(), parameterBuffer.size(), "%s", transition.parameter.c_str());
-                if (ImGui::InputText("Parameter", parameterBuffer.data(), parameterBuffer.size())) {
-                    transition.parameter = parameterBuffer.data();
-                    changed = true;
+                if (!parameters.empty() && ImGui::BeginCombo("Parameter", transition.parameter.empty() ? "-" : transition.parameter.c_str())) {
+                    for (const auto& parameter : parameters) {
+                        if (ImGui::Selectable(parameter.name.c_str(), transition.parameter == parameter.name)) {
+                            transition.parameter = parameter.name;
+                            if (parameter.type == EditorScene::AnimationParameter::Type::Trigger) {
+                                transition.compare = EditorScene::AnimationStateTransition::Compare::NotEqual;
+                                transition.threshold = 0.0f;
+                            }
+                            changed = true;
+                        }
+                    }
+                    ImGui::EndCombo();
+                } else if (parameters.empty()) {
+                    std::array<char, 64> parameterBuffer{};
+                    std::snprintf(parameterBuffer.data(), parameterBuffer.size(), "%s", transition.parameter.c_str());
+                    if (ImGui::InputText("Parameter", parameterBuffer.data(), parameterBuffer.size())) {
+                        transition.parameter = parameterBuffer.data(); changed = true;
+                    }
                 }
 
+                auto parameterType = EditorScene::AnimationParameter::Type::Float;
+                for (const auto& parameter : parameters) if (parameter.name == transition.parameter) { parameterType = parameter.type; break; }
                 int compare = static_cast<int>(transition.compare);
                 compare = std::clamp(compare, 0, 3);
-                if (ImGui::BeginCombo("Compare", compareLabels[compare])) {
-                    for (int c = 0; c < 4; ++c) {
+                if (parameterType != EditorScene::AnimationParameter::Type::Trigger && ImGui::BeginCombo("Compare", compareLabels[compare])) {
+                    const int firstCompare = parameterType == EditorScene::AnimationParameter::Type::Bool ? 2 : 0;
+                    for (int c = firstCompare; c < 4; ++c) {
                         const bool selectedCompare = c == compare;
                         if (ImGui::Selectable(compareLabels[c], selectedCompare)) {
                             transition.compare = static_cast<EditorScene::AnimationStateTransition::Compare>(c);
@@ -1383,8 +1458,13 @@ void DrawAnimationPreview(EditorDockspace::Context& context, bool* open) {
                     }
                     ImGui::EndCombo();
                 }
-                if (ImGui::DragFloat("Threshold", &transition.threshold, 0.01f, -1000.0f, 1000.0f, "%.2f")) {
-                    changed = true;
+                if (parameterType == EditorScene::AnimationParameter::Type::Float) {
+                    if (ImGui::DragFloat("Threshold", &transition.threshold, 0.01f, -1000.0f, 1000.0f, "%.2f")) changed = true;
+                } else if (parameterType == EditorScene::AnimationParameter::Type::Bool) {
+                    bool expected = transition.threshold != 0.0f;
+                    if (ImGui::Checkbox("Expected", &expected)) { transition.threshold = expected ? 1.0f : 0.0f; changed = true; }
+                } else {
+                    ImGui::TextDisabled("Trigger is consumed after this transition fires.");
                 }
                 if (ImGui::DragFloat("Fade", &transition.fade, 0.01f, 0.0f, 5.0f, "%.2f s")) {
                     transition.fade = std::max(transition.fade, 0.0f);
@@ -1426,9 +1506,56 @@ void DrawAnimationPreview(EditorDockspace::Context& context, bool* open) {
             }
 
             if (changed) {
-                context.scene->SetSelectedAnimationStateGraph(states, transitions);
+                context.scene->SetSelectedAnimationStateGraph(states, transitions, parameters);
             }
         }
+    }
+
+    if (ImGui::CollapsingHeader("Graph View", ImGuiTreeNodeFlags_DefaultOpen)) {
+        const ImVec2 origin = ImGui::GetCursorScreenPos();
+        const float width = std::max(ImGui::GetContentRegionAvail().x, 240.0f);
+        const float height = std::max(180.0f, 90.0f * std::ceil(static_cast<float>(std::max<std::size_t>(state.states.size(), 1)) / 3.0f));
+        ImGui::InvisibleButton("animation_graph_canvas", ImVec2(width, height));
+        ImDrawList* draw = ImGui::GetWindowDrawList();
+        draw->AddRectFilled(origin, ImVec2(origin.x + width, origin.y + height), IM_COL32(24, 27, 32, 255), 5.0f);
+        std::vector<ImVec2> centers;
+        for (std::size_t i = 0; i < state.states.size(); ++i) {
+            centers.emplace_back(origin.x + 75.0f + static_cast<float>(i % 3) * ((width - 150.0f) / 2.0f),
+                origin.y + 45.0f + static_cast<float>(i / 3) * 90.0f);
+        }
+        auto findState = [&](const std::string& name) -> int {
+            for (std::size_t i = 0; i < state.states.size(); ++i) if (state.states[i].name == name) return static_cast<int>(i);
+            return -1;
+        };
+        for (const auto& transition : state.transitions) {
+            const int to = findState(transition.toState);
+            if (to < 0) continue;
+            const int from = findState(transition.fromState);
+            const ImVec2 target = centers[static_cast<std::size_t>(to)];
+            const ImVec2 source = transition.fromState.empty() ? ImVec2(origin.x + 10.0f, target.y)
+                : (from >= 0 ? centers[static_cast<std::size_t>(from)] : target);
+            const ImU32 color = transition.fromState.empty() ? IM_COL32(240, 170, 70, 220) : IM_COL32(110, 155, 220, 210);
+            draw->AddLine(source, target, color, 2.0f);
+            const float dx = target.x - source.x, dy = target.y - source.y;
+            const float length = std::sqrt(dx * dx + dy * dy);
+            if (length > 1.0f) draw->AddCircleFilled(ImVec2(target.x - dx / length * 39.0f, target.y - dy / length * 19.0f), 3.0f, color);
+        }
+        for (std::size_t i = 0; i < state.states.size(); ++i) {
+            const ImVec2 c = centers[i];
+            const bool active = state.playMode && state.currentState == state.states[i].name;
+            draw->AddRectFilled(ImVec2(c.x - 55.0f, c.y - 20.0f), ImVec2(c.x + 55.0f, c.y + 20.0f),
+                active ? IM_COL32(65, 135, 85, 255) : IM_COL32(55, 62, 74, 255), 5.0f);
+            draw->AddRect(ImVec2(c.x - 55.0f, c.y - 20.0f), ImVec2(c.x + 55.0f, c.y + 20.0f),
+                active ? IM_COL32(120, 240, 145, 255) : IM_COL32(105, 120, 145, 255), 5.0f);
+            const std::string label = state.states[i].name.empty() ? "(unnamed)" : state.states[i].name;
+            const ImVec2 size = ImGui::CalcTextSize(label.c_str());
+            draw->AddText(ImVec2(c.x - size.x * 0.5f, c.y - size.y * 0.5f), IM_COL32_WHITE, label.c_str());
+        }
+    }
+
+    if (ImGui::CollapsingHeader("Graph Validation", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (state.graphWarnings.empty()) ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.55f, 1.0f), "Graph is valid.");
+        else for (const std::string& warning : state.graphWarnings) ImGui::BulletText("%s", warning.c_str());
     }
 
     if (ImGui::CollapsingHeader("Graph Parameters", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -1436,7 +1563,8 @@ void DrawAnimationPreview(EditorDockspace::Context& context, bool* open) {
             ImGui::TextUnformatted("No graph parameters are referenced by transitions.");
         } else if (state.playMode || !context.animationPreviewParameters) {
             for (const EditorDockspace::AnimationPreviewState::ParameterInfo& parameter : state.parameters) {
-                ImGui::Text("%s: %.3f", parameter.name.c_str(), parameter.value);
+                if (parameter.type == EditorScene::AnimationParameter::Type::Float) ImGui::Text("%s: %.3f", parameter.name.c_str(), parameter.value);
+                else ImGui::Text("%s: %s", parameter.name.c_str(), parameter.value != 0.0f ? "true" : "false");
             }
         } else {
             for (const EditorDockspace::AnimationPreviewState::ParameterInfo& parameter : state.parameters) {
@@ -1445,17 +1573,14 @@ void DrawAnimationPreview(EditorDockspace::Context& context, bool* open) {
                 if (found != context.animationPreviewParameters->end()) {
                     value = found->second;
                 }
-                if (ImGui::DragFloat(parameter.name.c_str(), &value, 0.01f, -1000.0f, 1000.0f, "%.3f")) {
-                    (*context.animationPreviewParameters)[parameter.name] = value;
-                }
-                ImGui::SameLine();
-                std::string buttonLabel = "Toggle##" + parameter.name;
-                if (ImGui::Button(buttonLabel.c_str())) {
-                    (*context.animationPreviewParameters)[parameter.name] = std::abs(value) > 0.0001f ? 0.0f : 1.0f;
-                }
-                ImGui::SameLine();
-                std::string triggerLabel = "Trigger##" + parameter.name;
-                if (ImGui::Button(triggerLabel.c_str())) {
+                if (parameter.type == EditorScene::AnimationParameter::Type::Float) {
+                    if (ImGui::DragFloat(parameter.name.c_str(), &value, 0.01f, -1000.0f, 1000.0f, "%.3f"))
+                        (*context.animationPreviewParameters)[parameter.name] = value;
+                } else if (parameter.type == EditorScene::AnimationParameter::Type::Bool) {
+                    bool enabled = std::abs(value) > 0.0001f;
+                    if (ImGui::Checkbox(parameter.name.c_str(), &enabled))
+                        (*context.animationPreviewParameters)[parameter.name] = enabled ? 1.0f : 0.0f;
+                } else if (ImGui::Button(parameter.name.c_str())) {
                     (*context.animationPreviewParameters)[parameter.name] = 1.0f;
                 }
             }
@@ -1463,6 +1588,45 @@ void DrawAnimationPreview(EditorDockspace::Context& context, bool* open) {
                 for (const EditorDockspace::AnimationPreviewState::ParameterInfo& parameter : state.parameters) {
                     (*context.animationPreviewParameters)[parameter.name] = 0.0f;
                 }
+            }
+        }
+    }
+
+    if (ImGui::CollapsingHeader("Transition Debug", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (!state.playMode) {
+            ImGui::TextUnformatted("Transition diagnostics are live in Play mode.");
+        } else if (!state.runtimeAnimated) {
+            ImGui::TextUnformatted("Selected object has no runtime animation controller.");
+        } else if (state.transitionDebugRows.empty()) {
+            ImGui::TextUnformatted("No runtime graph transitions are active on this object.");
+        } else {
+            for (const EditorDockspace::AnimationPreviewState::TransitionDebugRow& row : state.transitionDebugRows) {
+                const char* status = "Blocked";
+                if (row.selected) {
+                    status = "Selected";
+                } else if (row.eligible) {
+                    status = "Ready";
+                } else if (row.blockedByBlend) {
+                    status = "Blend";
+                } else if (!row.exitTimeReached) {
+                    status = "Exit";
+                } else if (!row.conditionMet) {
+                    status = "Condition";
+                }
+
+                ImGui::Text("%s -> %s", row.fromState.empty() ? "(none)" : row.fromState.c_str(),
+                    row.toState.empty() ? "(none)" : row.toState.c_str());
+                ImGui::SameLine();
+                ImGui::TextDisabled("[%s]", status);
+                ImGui::Text("Param %s: %.3f / %.3f", row.parameter.empty() ? "Speed" : row.parameter.c_str(),
+                    row.value,
+                    row.threshold);
+                ImGui::Text("Exit %.2f %s  Priority %d%s",
+                    row.exitTime,
+                    row.exitTimeReached ? "ready" : "waiting",
+                    row.priority,
+                    row.canInterrupt ? "  interrupt" : "");
+                ImGui::Separator();
             }
         }
     }
