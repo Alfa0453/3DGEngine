@@ -8,6 +8,7 @@ class EditorAssets {
 public:
     enum class Type {
         Model,
+        SkeletalModel,
         Material,
         Texture,
         Shader,

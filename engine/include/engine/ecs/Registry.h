@@ -30,6 +30,8 @@ public:
     virtual ~IPool() = default;
     virtual void Remove(Entity e) = 0;
     virtual bool Has(Entity e) const = 0;
+    // Copy this component (if present on `src`) onto `dst`. Used by Registry::Clone.
+    virtual void CopyComponent(Entity src, Entity dist) = 0;
 };
 
 template <class T>
@@ -61,6 +63,13 @@ public:
 
     T& Get(Entity e) { return comps[sparse[EntityIndex(e)]]; }
     const T& Get(Entity e) const { return comps[sparse[EntityIndex(e)]]; }
+
+    void CopyComponent(Entity src, Entity dst) override {
+        if (!Has(src)) return;
+        if constexpr (std::is_copy_constructible_v<T>)
+            Add(dst, comps[sparse[EntityIndex(src)]]);  // copy the component value
+         // (move-only components can't be cloned and are skipped)
+    }
 
     void Remove(Entity e) override {
         const std::uint32_t i = EntityIndex(e);
@@ -108,6 +117,16 @@ public:
         for (auto& kv : m_pools) kv.second->Remove(e);
         ++m_generations[EntityIndex(e)];
         m_free.push_back(EntityIndex(e));
+    }
+
+    // Create a new entity that is a COPY of `src`: every component on `src` is
+    // copied onto the new entity (the prototype pattern for prefabs). Returns the
+    // new entity (empty if `src` is invalid).
+    Entity Clone(Entity src) {
+        Entity dst = Create();
+        if (Valid(src))
+            for (auto& kv : m_pools) kv.second->CopyComponent(src, dst);
+        return dst;
     }
 
     template <class T> T& Add(Entity e, T value = T{}) {

@@ -3,6 +3,8 @@
 #include <engine/ecs/Components.h>
 #include <engine/ecs/Entity.h>
 #include <engine/ecs/Registry.h>
+#include <engine/gameplay/GameplayComponents.h>
+#include <engine/gameplay/Script.h>
 #include <engine/physics/PhysicsComponents.h>
 
 #include <glm/glm.hpp>
@@ -18,6 +20,70 @@ class EditorScene {
 public:
     enum class Primitive { Plane, Cube, Sphere };
 
+    enum class TriggerActionMode {
+        None = 0,
+        Enable = 1,
+        Disable = 2,
+        Toggle = 3,
+    };
+
+    struct PlayerControllerSettings {
+        bool firstPerson = false;
+        float walkSpeed = 4.0f;
+        float runSpeed = 7.0f;
+        float jumpSpeed = 5.0f;
+        float lookSensitivity = 0.1f;
+        float capsuleRadius = 0.4f;
+        float capsuleHeight = 1.8f;
+        float eyeHeight = 0.6f;
+        float cameraDistance = 5.0f;
+        float cameraTargetHeight = 1.0f;
+        float maxSlopeDegrees = 50.0f;
+        float stepHeight = 0.35f;
+    };
+
+    using ScriptField = engine::ScriptField;
+
+    struct AnimationEvent {
+        int clipIndex = 0;
+        float time = 0.0f;
+        std::string name;
+    };
+
+    struct AnimationActionProfile {
+        std::string name = "Action";
+        int clipIndex = 0;
+        std::string clipName;
+        std::string maskRootBone;
+        float fadeIn = 0.08f;
+        float fadeOut = 0.15f;
+        float speed = 1.0f;
+    };
+
+    struct AnimationStateNode {
+        std::string name = "State";
+        int clipIndex = 0;
+        std::string clipName;
+        bool loop = true;
+        float speed = 1.0f;
+    };
+
+    struct AnimationStateTransition {
+        enum class Compare {
+            GreaterOrEqual = 0,
+            Less = 1,
+            Equal = 2,
+            NotEqual = 3
+        };
+
+        std::string fromState;
+        std::string toState;
+        std::string parameter = "Speed";
+        Compare compare = Compare::GreaterOrEqual;
+        float threshold = 0.0f;
+        float fade = 0.2f;
+    };
+
     struct Object {
         engine::ecs::Entity entity = engine::ecs::kNull;
         std::string name;
@@ -28,6 +94,25 @@ public:
         bool locked = false;
         std::string modelAssetPath;
         std::string materialAssetPath;
+        bool skeletalModel = false;
+        int animationClipIndex = 0;
+        std::string animationClipName;
+        bool animationAutoplay = true;
+        bool animationLoop = true;
+        float animationSpeed = 1.0f;
+        bool animationLocomotionEnabled = false;
+        int animationIdleClipIndex = 0;
+        int animationWalkClipIndex = 0;
+        int animationRunClipIndex = 0;
+        std::string animationIdleClipName;
+        std::string animationWalkClipName;
+        std::string animationRunClipName;
+        float animationWalkAt = 0.15f;
+        float animationRunAt = 3.0f;
+        std::vector<AnimationEvent> animationEvents;
+        std::vector<AnimationActionProfile> animationActionProfiles;
+        std::vector<AnimationStateNode> animationStates;
+        std::vector<AnimationStateTransition> animationTransitions;
         bool linearVelocityEnabled = false;
         bool angularVelocityEnabled = false;
         glm::vec3 linearVelocity{0.0f};
@@ -41,6 +126,19 @@ public:
         engine::ecs::Rotator rotator;
         bool moverEnabled = false;
         engine::ecs::Mover mover;
+        std::string triggerTargetName;
+        TriggerActionMode triggerEnterMoverAction = TriggerActionMode::None;
+        TriggerActionMode triggerEnterRotatorAction = TriggerActionMode::None;
+        TriggerActionMode triggerExitMoverAction = TriggerActionMode::None;
+        TriggerActionMode triggerExitRotatorAction = TriggerActionMode::None;
+        bool playerControllerEnabled = false;
+        PlayerControllerSettings playerController;
+        bool healthEnabled = false;
+        engine::Health health;
+        bool scriptEnabled = false;
+        std::string scriptClassName;
+        std::string scriptPath;
+        std::vector<ScriptField> scriptFields;
     };
 
     struct ObjectSnapshot {
@@ -162,6 +260,25 @@ public:
     bool SetSelectedPrimitive(Primitive primitive, const engine::Mesh& mesh);
     bool SetSelectedModelAsset(const std::string& path);
     bool SetSelectedMaterialAsset(const std::string& path);
+    bool SetSelectedAnimationSettings(bool skeletalModel,
+                                      int clipIndex,
+                                      const std::string& clipName,
+                                      bool autoplay,
+                                      bool loop,
+                                      float speed);
+    bool SetSelectedAnimationLocomotion(bool enabled,
+                                    int idleClipIndex,
+                                    const std::string& idleClipName,
+                                    int walkClipIndex,
+                                    const std::string& walkClipName,
+                                    int runClipIndex,
+                                    const std::string& runClipName,
+                                    float walkAt,
+                                    float runAt);
+    bool SetSelectedAnimationEvents(const std::vector<AnimationEvent>& events);
+    bool SetSelectedAnimationActionProfiles(const std::vector<AnimationActionProfile>& profiles);
+    bool SetSelectedAnimationStateGraph(const std::vector<AnimationStateNode>& states,
+                                        const std::vector<AnimationStateTransition>& transitions);
     bool SetSelectedLight(const engine::ecs::Light& light);
     void SetEnvironment(const Environment& environment);
     bool SetSelectedLinearVelocityEnabled(bool enabled);
@@ -176,6 +293,21 @@ public:
     bool SetSelectedRotator(const engine::ecs::Rotator& rotator);
     bool SetSelectedMoverEnabled(bool enabled);
     bool SetSelectedMover(const engine::ecs::Mover& mover);
+    bool SetSelectedTriggerAction(const std::string& targetName,
+                              TriggerActionMode enterMoverAction,
+                              TriggerActionMode enterRotatorAction,
+                              TriggerActionMode exitMoverAction,
+                              TriggerActionMode exitRotatorAction);
+    bool SetSelectedPlayerControllerEnabled(bool enabled);
+    bool SetSelectedPlayerController(const PlayerControllerSettings& settings);
+    bool SetSelectedHealthEnabled(bool enabled);
+    bool SetSelectedHealth(const engine::Health& health);
+    bool SetSelectedScript(const std::string& className, const std::string& path, bool enabled);
+    bool SetSelectedScriptEnabled(bool enabled);
+    bool SetSelectedScriptFields(const std::vector<ScriptField>& fields);
+    bool AddSelectedScriptField();
+    bool SetSelectedScriptField(std::size_t index, const ScriptField& field);
+    bool RemoveSelectedScriptField(std::size_t index);
     bool AddPhysicsJoint(const PhysicsJoint& joint);
     bool SetPhysicsJoint(std::size_t index, const PhysicsJoint& joint);
     bool RemovePhysicsJoint(std::size_t index);

@@ -12,6 +12,7 @@ struct AudioEngine::Impl {
     ma_engine engine;
     ma_sound  music;
     bool      musicLoaded = false;
+    float     minDist = 1.0f, maxDist = 40.0f, rolloff = 1.0f;   // spatial falloff
 
     // A pool of identical, decoded voices for one sound file. Cycling through
     // them lets the same effect overlap (rapid bounces).
@@ -109,9 +110,43 @@ void AudioEngine::Play(const std::string& path, float pitch, float volume) {
     ma_sound& v = pool->voices[pool->next];
     pool->next = (pool->next + 1) % pool->voices.size();
 
+    ma_sound_set_spatialization_enabled(&v, MA_FALSE);  // 2D: always centred
     ma_sound_set_pitch(&v, pitch);
     ma_sound_set_volume(&v, volume);
     ma_sound_seek_to_pcm_frame(&v, 0);  // rewind in case this voice just played
+    ma_sound_start(&v);
+}
+
+void AudioEngine::SetListener(const glm::vec3& position, const glm::vec3& forward, const glm::vec3& up) {
+    if (!m_ok) return;
+    ma_engine_listener_set_position(&m_impl->engine, 0, position.x, position.y, position.z);
+    ma_engine_listener_set_direction(&m_impl->engine, 0, forward.x, forward.y, forward.z);
+    ma_engine_listener_set_world_up(&m_impl->engine, 0, up.x, up.y, up.z);
+}
+
+void AudioEngine::SetAttenuation(float minDisatnce, float maxDistance, float rolloff) {
+    m_impl->minDist = minDisatnce;
+    m_impl->maxDist = maxDistance;
+    m_impl->rolloff = rolloff;
+}
+
+void AudioEngine::PlayAt(const std::string& path, const glm::vec3& position, float pitch, float volume) {
+    if (!m_ok) return;
+    Impl::Pool* pool = m_impl->GetOrLoad(path, 8);
+    if (!pool || pool->voices.empty()) return;
+
+    ma_sound& v = pool->voices[pool->next];
+    pool->next = (pool->next + 1) % pool->voices.size();
+
+    ma_sound_set_spatialization_enabled(&v, MA_TRUE);
+    ma_sound_set_attenuation_model(&v, ma_attenuation_model_inverse);
+    ma_sound_set_position(&v, position.x, position.y, position.z);
+    ma_sound_set_min_distance(&v, m_impl->minDist);
+    ma_sound_set_max_distance(&v, m_impl->maxDist);
+    ma_sound_set_rolloff(&v, m_impl->rolloff);
+    ma_sound_set_pitch(&v, pitch);
+    ma_sound_set_volume(&v, volume);
+    ma_sound_seek_to_pcm_frame(&v, 0);
     ma_sound_start(&v);
 }
 

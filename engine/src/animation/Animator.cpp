@@ -133,4 +133,86 @@ void Animator::ComputeBlendedPose(const Skeleton& skel,
     }
 }
 
+void Animator::SampleLocal(const Skeleton& skel, const Animation& anim, float timeSeconds, std::vector<BoneLocal>& out) {
+    const std::size_t n = skel.bones.size();
+    out.assign(n, BoneLocal{});
+    const float ticks = WrapTicks(anim, timeSeconds);
+    for (std::size_t i = 0; i < n; ++i) {
+        const BonePose p = SampleBoneTRS(anim, i, ticks, skel.bones[i]);
+        out[i].pos = p.pos; out[i].rot = p.rot; out[i].scale = p.scale;
+    }
+}
+
+void Animator::BlendLocal(const std::vector<BoneLocal>& a, const std::vector<BoneLocal>& b,
+                          float blend, std::vector<BoneLocal>& out) {
+    const std::size_t n = std::min(a.size(), b.size());
+    const float w = glm::clamp(blend, 0.0f, 1.0f);
+    out.assign(n, BoneLocal{});
+    for (std::size_t i = 0; i < n; ++i) {
+        out[i].pos   = glm::mix(a[i].pos, b[i].pos, w);
+        out[i].rot   = glm::normalize(glm::slerp(a[i].rot, b[i].rot, w));
+        out[i].scale = glm::mix(a[i].scale, b[i].scale, w);
+    }
+}
+
+void Animator::LayerLocal(std::vector<BoneLocal>& base, const std::vector<BoneLocal>& layer,
+                          const std::vector<float>& mask, float weight) {
+    const std::size_t n = std::min(base.size(), layer.size());
+    const float gw = glm::clamp(weight, 0.0f, 1.0f);
+    for (std::size_t i = 0; i < n; ++i) {
+        const float m = (i < mask.size()) ? mask[i] : 1.0f;     // empty/short mask -> full body
+        const float w = gw * m;
+        if (w <= 0.0f) continue;
+        base[i].pos   = glm::mix(base[i].pos, layer[i].pos, w);
+        base[i].rot   = glm::normalize(glm::slerp(base[i].rot, layer[i].rot, w));
+        base[i].scale = glm::mix(base[i].scale, layer[i].scale, w);
+    }
+}
+
+void Animator::Compose(const Skeleton& skel, const std::vector<BoneLocal>& local,
+                       std::vector<glm::mat4>& out) {
+    const std::size_t n = skel.bones.size();
+    out.assign(n, glm::mat4(1.0f));
+    std::vector<glm::mat4> world(n, glm::mat4(1.0f));
+    for (std::size_t i = 0; i < n; ++i) {
+        const BoneLocal& bl = (i < local.size()) ? local[i] : BoneLocal{};
+        const glm::mat4 lm = glm::translate(glm::mat4(1.0f), bl.pos)
+                           * glm::mat4_cast(bl.rot)
+                           * glm::scale(glm::mat4(1.0f), bl.scale);
+        const Bone& b = skel.bones[i];
+        world[i] = (b.parent >= 0) ? world[static_cast<std::size_t>(b.parent)] * lm : lm;
+        out[i]   = skel.globalInverse * world[i] * b.offset;
+    }
+}
+
+void Animator::ComputeLayeredPose(const Skeleton& skel,
+                                  const Animation& base, float baseTime,
+                                  const Animation& layer, float layerTime,
+                                  const std::vector<float>& mask, float weight,
+                                  std::vector<glm::mat4>& out) {
+    std::vector<BoneLocal> b, l;
+    SampleLocal(skel, base, baseTime, b);
+    SampleLocal(skel, layer, layerTime, l);
+    LayerLocal(b, l, mask, weight);
+    Compose(skel, b, out);
+}
+ 
+std::vector<float> Animator::BuildMask(const Skeleton& skel, const std::string& rootBone,
+                                       float inside, float outside) {
+    const std::size_t n = skel.bones.size();
+    std::vector<float> mask(n, outside);
+    const int root = skel.Find(rootBone);
+    if (root < 0) return mask;              // not found -> all outside
+    // Bones are topologically ordered (parent before child), so one forward pass
+    // marks the root and everything descended from it.
+    std::vector<char> in(n, 0);
+    in[static_cast<std::size_t>(root)] = 1;
+    for (std::size_t i = 0; i < n; ++i) {
+        const int par = skel.bones[i].parent;
+        if (par >= 0 && in[static_cast<std::size_t>(par)]) in[i] = 1;
+    }
+    for (std::size_t i = 0; i < n; ++i) mask[i] = in[i] ? inside : outside;
+    return mask;
+}
+
 } // namespace engine

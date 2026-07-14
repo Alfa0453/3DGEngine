@@ -409,6 +409,61 @@ void DrawSphereColliderGuide(engine::Renderer& renderer,
     DrawGuideRing(renderer, shader, cube, transform.position, EditorGizmo::Axis::Z, radius, 0.035f, color);
 }
 
+void DrawBasisRing(engine::Renderer& renderer,
+                   engine::Shader& shader,
+                   const engine::Mesh& cube,
+                   const glm::vec3& center,
+                   const glm::vec3& right,
+                   const glm::vec3& up,
+                   float radius,
+                   float thickness,
+                   const glm::vec3& color) {
+    if (radius <= 0.0001f) {
+        return;
+    }
+
+    constexpr int segments = 48;
+    constexpr float pi = 3.14159265359f;
+    for (int i = 0; i < segments; ++i) {
+        const float a = (static_cast<float>(i) / static_cast<float>(segments)) * 2.0f * pi;
+        const float b = (static_cast<float>(i + 1) / static_cast<float>(segments)) * 2.0f * pi;
+        const glm::vec3 p0 = center + right * std::cos(a) * radius + up * std::sin(a) * radius;
+        const glm::vec3 p1 = center + right * std::cos(b) * radius + up * std::sin(b) * radius;
+        DrawGuideSegment(renderer, shader, cube, p0, p1, thickness, color);
+    }
+}
+
+void DrawCapsuleColliderGuide(engine::Renderer& renderer,
+                              engine::Shader& shader,
+                              const engine::Mesh& cube,
+                              const engine::ecs::Transform& transform,
+                              const engine::ecs::Collider& collider,
+                              const glm::vec3& color) {
+    const float radius = std::max(collider.radius, 0.001f);
+    const float halfHeight = std::max(collider.halfHeight, 0.0f);
+    glm::vec3 axis = glm::mat3_cast(transform.rotation) * glm::vec3(0.0f, 1.0f, 0.0f);
+    if (glm::dot(axis, axis) <= 0.0001f) {
+        axis = glm::vec3(0.0f, 1.0f, 0.0f);
+    } else {
+        axis = glm::normalize(axis);
+    }
+
+    glm::vec3 right;
+    glm::vec3 forward;
+    BuildBasis(axis, &right, &forward);
+    const glm::vec3 a = transform.position - axis * halfHeight;
+    const glm::vec3 b = transform.position + axis * halfHeight;
+
+    DrawBasisRing(renderer, shader, cube, a, right, forward, radius, 0.028f, color);
+    DrawBasisRing(renderer, shader, cube, b, right, forward, radius, 0.028f, color);
+    DrawGuideSegment(renderer, shader, cube, a + right * radius, b + right * radius, 0.028f, color);
+    DrawGuideSegment(renderer, shader, cube, a - right * radius, b - right * radius, 0.028f, color);
+    DrawGuideSegment(renderer, shader, cube, a + forward * radius, b + forward * radius, 0.028f, color);
+    DrawGuideSegment(renderer, shader, cube, a - forward * radius, b - forward * radius, 0.028f, color);
+    DrawGuideRing(renderer, shader, cube, a, EditorGizmo::Axis::X, radius, 0.024f, color);
+    DrawGuideRing(renderer, shader, cube, b, EditorGizmo::Axis::X, radius, 0.024f, color);
+}
+
 void DrawGizmoCone(engine::Renderer& renderer,
                    engine::Shader& shader,
                    const engine::Mesh& cone,
@@ -644,6 +699,9 @@ void EditorViewport::DrawPhysicsColliderGuides(engine::Renderer& renderer,
             break;
         case engine::ecs::ColliderShape::Plane:
             DrawPlaneColliderGuide(renderer, shader, cube, object.collider, color);
+            break;
+        case engine::ecs::ColliderShape::Capsule:
+            DrawCapsuleColliderGuide(renderer, shader, cube, *transform, object.collider, color);
             break;
         }
     }

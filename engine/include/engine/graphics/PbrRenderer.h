@@ -72,6 +72,10 @@ public:
     void Render(ecs::Registry& registry, const Camera& camera, float aspect,
                 int screenWidth, int screenHeight);
 
+    // The sun's cascaded shadow map from the most recent Render() call, for
+    // sharing with other passes (e.g. SkinnedRenderer) that light the same scene.
+    const CascadedShadow& Cascade() const { return m_cascade; }
+
 private:
     CascadedShadow          m_cascade;
     PointShadow             m_pointShadow;

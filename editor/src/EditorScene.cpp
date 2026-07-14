@@ -71,6 +71,19 @@ bool ParsePrimitive(const std::string& value, EditorScene::Primitive* primitive)
     return false;
 }
 
+EditorScene::TriggerActionMode TriggerActionModeFromInt(int value) {
+    switch (value) {
+    case static_cast<int>(EditorScene::TriggerActionMode::Enable):
+        return EditorScene::TriggerActionMode::Enable;
+    case static_cast<int>(EditorScene::TriggerActionMode::Disable):
+        return EditorScene::TriggerActionMode::Disable;
+    case static_cast<int>(EditorScene::TriggerActionMode::Toggle):
+        return EditorScene::TriggerActionMode::Toggle;
+    default:
+        return EditorScene::TriggerActionMode::None;
+    }
+}
+
 const char* PhysicsJointTypeName(EditorScene::PhysicsJoint::Type type) {
     switch (type) {
     case EditorScene::PhysicsJoint::Type::Distance: return "Distance";
@@ -164,7 +177,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         return false;
     }
 
-    out << "3DGEditorScene 20\n";
+    out << "3DGEditorScene 33\n";
     out << "environment "
         << m_environment.timeOfDay << ' '
         << m_environment.skyLightIntensity << ' '
@@ -237,6 +250,55 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
             << (object.locked ? 1 : 0) << ' '
             << StoredPath(object.modelAssetPath) << ' '
             << StoredPath(object.materialAssetPath) << ' '
+            << (object.skeletalModel ? 1 : 0) << ' '
+            << object.animationClipIndex << ' '
+            << StoredPath(object.animationClipName) << ' '
+            << (object.animationAutoplay ? 1 : 0) << ' '
+            << (object.animationLoop ? 1 : 0) << ' '
+            << object.animationSpeed << ' '
+            << (object.animationLocomotionEnabled ? 1 : 0) << ' '
+            << object.animationIdleClipIndex << ' '
+            << StoredPath(object.animationIdleClipName) << ' '
+            << object.animationWalkClipIndex << ' '
+            << StoredPath(object.animationWalkClipName) << ' '
+            << object.animationRunClipIndex << ' '
+            << StoredPath(object.animationRunClipName) << ' '
+            << object.animationWalkAt << ' '
+            << object.animationRunAt << ' '
+            << object.animationEvents.size() << ' ';
+        for (const AnimationEvent& event : object.animationEvents) {
+            out << event.clipIndex << ' '
+                << event.time << ' '
+                << StoredPath(event.name) << ' ';
+        }
+        out << object.animationActionProfiles.size() << ' ';
+        for (const AnimationActionProfile& profile : object.animationActionProfiles) {
+            out << StoredPath(profile.name) << ' '
+                << profile.clipIndex << ' '
+                << StoredPath(profile.clipName) << ' '
+                << StoredPath(profile.maskRootBone) << ' '
+                << profile.fadeIn << ' '
+                << profile.fadeOut << ' '
+                << profile.speed << ' ';
+        }
+        out << object.animationStates.size() << ' ';
+        for (const AnimationStateNode& state : object.animationStates) {
+            out << StoredPath(state.name) << ' '
+                << state.clipIndex << ' '
+                << StoredPath(state.clipName) << ' '
+                << (state.loop ? 1 : 0) << ' '
+                << state.speed << ' ';
+        }
+        out << object.animationTransitions.size() << ' ';
+        for (const AnimationStateTransition& transition : object.animationTransitions) {
+            out << StoredPath(transition.fromState) << ' '
+                << StoredPath(transition.toState) << ' '
+                << StoredPath(transition.parameter) << ' '
+                << static_cast<int>(transition.compare) << ' '
+                << transition.threshold << ' '
+                << transition.fade << ' ';
+        }
+        out
             << object.linearVelocity.x << ' ' << object.linearVelocity.y << ' ' << object.linearVelocity.z << ' '
             << object.angularVelocityAxis.x << ' ' << object.angularVelocityAxis.y << ' ' << object.angularVelocityAxis.z << ' '
             << object.angularVelocityRadians << ' '
@@ -265,7 +327,40 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
             << object.mover.axis.x << ' ' << object.mover.axis.y << ' ' << object.mover.axis.z << ' '
             << object.mover.distance << ' '
             << object.mover.speed << ' '
-            << object.mover.phase << '\n';
+            << object.mover.phase << ' '
+            << StoredPath(object.triggerTargetName) << ' '
+            << static_cast<int>(object.triggerEnterMoverAction) << ' '
+            << static_cast<int>(object.triggerEnterRotatorAction) << ' '
+            << static_cast<int>(object.triggerExitMoverAction) << ' '
+            << static_cast<int>(object.triggerExitRotatorAction) << ' '
+            << (object.playerControllerEnabled ? 1 : 0) << ' '
+            << (object.playerController.firstPerson ? 1 : 0) << ' '
+            << object.playerController.walkSpeed << ' '
+            << object.playerController.runSpeed << ' '
+            << object.playerController.jumpSpeed << ' '
+            << object.playerController.lookSensitivity << ' '
+            << object.playerController.capsuleRadius << ' '
+            << object.playerController.capsuleHeight << ' '
+            << object.playerController.eyeHeight << ' '
+            << object.playerController.cameraDistance << ' '
+            << object.playerController.cameraTargetHeight << ' '
+            << object.playerController.maxSlopeDegrees << ' '
+            << object.playerController.stepHeight << ' '
+            << (object.healthEnabled ? 1 : 0) << ' '
+            << object.health.hp << ' '
+            << object.health.maxHp << ' '
+            << (object.health.alive ? 1 : 0) << ' '
+            << (object.scriptEnabled ? 1 : 0) << ' '
+            << StoredPath(object.scriptClassName) << ' '
+            << StoredPath(object.scriptPath) << ' '
+            << object.scriptFields.size();
+        for (const ScriptField& field : object.scriptFields) {
+            out << ' '
+                << StoredPath(field.name) << ' '
+                << static_cast<int>(field.type) << ' '
+                << StoredPath(field.value);
+        }
+        out << '\n';
     }
 
     for (const PhysicsJoint& joint : m_joints) {
@@ -301,7 +396,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
     std::string magic;
     int version = 0;
     in >> magic >> version;
-    if (magic != "3DGEditorScene" ||(version < 1 || version > 20)) {
+    if (magic != "3DGEditorScene" ||(version < 1 || version > 29)) {
         if (error) *error = "Scene file has an unknown format.";
         return false;
     }
@@ -497,6 +592,25 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         int locked = 0;
         std::string modelAssetPath;
         std::string materialAssetPath;
+        int skeletalModel = 0;
+        int animationClipIndex = 0;
+        std::string animationClipName;
+        int animationAutoplay = 1;
+        int animationLoop = 1;
+        float animationSpeed = 1.0f;
+        int animationLocomotionEnabled = 0;
+        int animationIdleClipIndex = 0;
+        int animationWalkClipIndex = 0;
+        int animationRunClipIndex = 0;
+        std::string animationIdleClipName;
+        std::string animationWalkClipName;
+        std::string animationRunClipName;
+        float animationWalkAt = 0.15f;
+        float animationRunAt = 3.0f;
+        std::vector<AnimationEvent> animationEvents;
+        std::vector<AnimationActionProfile> animationActionProfiles;
+        std::vector<AnimationStateNode> animationStates;
+        std::vector<AnimationStateTransition> animationTransitions;
         glm::vec3 linearVelocity{0.0f};
         glm::vec3 angularVelocityAxis{0.0f, 1.0f, 0.0f};
         float angularVelocityRadians = 0.0f;
@@ -516,6 +630,21 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         engine::ecs::Rotator rotator;
         int moverEnabled = 0;
         engine::ecs::Mover mover;
+        std::string triggerTargetName;
+        int triggerEnterMoverAction = 0;
+        int triggerEnterRotatorAction = 0;
+        int triggerExitMoverAction = 0;
+        int triggerExitRotatorAction = 0;
+        int playerControllerEnabled = 0;
+        int playerFirstPerson = 0;
+        PlayerControllerSettings playerController;
+        int healthEnabled = 0;
+        engine::Health health;
+        int healthAlive = health.alive ? 1 : 0;
+        int scriptEnabled = 0;
+        std::string scriptClassName;
+        std::string scriptPath;
+        std::vector<ScriptField> scriptFields;
 
         in >> primitiveName >> name
            >> transform.position.x >> transform.position.y >> transform.position.z
@@ -543,6 +672,132 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                 materialAssetPath.clear();
             }
         }
+        if (version >= 29) {
+            in >> skeletalModel
+               >> animationClipIndex
+               >> animationClipName
+               >> animationAutoplay
+               >> animationLoop
+               >> animationSpeed;
+            if (animationClipName == "-") {
+                animationClipName.clear();
+            }
+        }
+        if (version >= 30) {
+            in >> animationLocomotionEnabled
+               >> animationIdleClipIndex
+               >> animationIdleClipName
+               >> animationWalkClipIndex
+               >> animationWalkClipName
+               >> animationRunClipIndex
+               >> animationRunClipName
+               >> animationWalkAt
+               >> animationRunAt;
+            if (animationIdleClipName == "-") {
+                animationIdleClipName.clear();
+            }
+            if (animationWalkClipName == "-") {
+                animationWalkClipName.clear();
+            }
+            if (animationRunClipName == "-") {
+                animationRunClipName.clear();
+            }
+        }
+        if (version >= 31) {
+            std::size_t eventCount = 0;
+            in >> eventCount;
+            for (std::size_t i = 0; i < eventCount; ++i) {
+                AnimationEvent event;
+                in >> event.clipIndex
+                   >> event.time
+                   >> event.name;
+                event.clipIndex = std::max(event.clipIndex, 0);
+                event.time = std::max(event.time, 0.0f);
+                if (event.name == "-") {
+                    event.name.clear();
+                }
+                animationEvents.push_back(event);
+            }
+        }
+        if (version >= 32) {
+            std::size_t profileCount = 0;
+            in >> profileCount;
+            for (std::size_t i = 0; i < profileCount; ++i) {
+                AnimationActionProfile profile;
+                in >> profile.name
+                   >> profile.clipIndex
+                   >> profile.clipName
+                   >> profile.maskRootBone
+                   >> profile.fadeIn
+                   >> profile.fadeOut
+                   >> profile.speed;
+                if (profile.name == "-") {
+                    profile.name.clear();
+                }
+                if (profile.clipName == "-") {
+                    profile.clipName.clear();
+                }
+                if (profile.maskRootBone == "-") {
+                    profile.maskRootBone.clear();
+                }
+                profile.clipIndex = std::max(profile.clipIndex, 0);
+                profile.fadeIn = std::max(profile.fadeIn, 0.0f);
+                profile.fadeOut = std::max(profile.fadeOut, 0.0f);
+                profile.speed = std::max(profile.speed, 0.0f);
+                animationActionProfiles.push_back(profile);
+            }
+        }
+        if (version >= 33) {
+            std::size_t stateCount = 0;
+            in >> stateCount;
+            for (std::size_t i = 0; i < stateCount; ++i) {
+                AnimationStateNode state;
+                int loop = 1;
+                in >> state.name
+                   >> state.clipIndex
+                   >> state.clipName
+                   >> loop
+                   >> state.speed;
+                if (state.name == "-") {
+                    state.name.clear();
+                }
+                if (state.clipName == "-") {
+                    state.clipName.clear();
+                }
+                state.clipIndex = std::max(state.clipIndex, 0);
+                state.loop = loop != 0;
+                state.speed = std::max(state.speed, 0.0f);
+                animationStates.push_back(state);
+            }
+
+            std::size_t transitionCount = 0;
+            in >> transitionCount;
+            for (std::size_t i = 0; i < transitionCount; ++i) {
+                AnimationStateTransition transition;
+                int compare = 0;
+                in >> transition.fromState
+                   >> transition.toState
+                   >> transition.parameter
+                   >> compare
+                   >> transition.threshold
+                   >> transition.fade;
+                if (transition.fromState == "-") {
+                    transition.fromState.clear();
+                }
+                if (transition.toState == "-") {
+                    transition.toState.clear();
+                }
+                if (transition.parameter == "-") {
+                    transition.parameter.clear();
+                }
+                if (compare < 0 || compare > static_cast<int>(AnimationStateTransition::Compare::NotEqual)) {
+                    compare = 0;
+                }
+                transition.compare = static_cast<AnimationStateTransition::Compare>(compare);
+                transition.fade = std::max(transition.fade, 0.0f);
+                animationTransitions.push_back(transition);
+            }
+        }
         if (version >= 6) {
             in >> linearVelocity.x >> linearVelocity.y >> linearVelocity.z
             >> angularVelocityAxis.x >> angularVelocityAxis.y >> angularVelocityAxis.z
@@ -568,7 +823,11 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             }
             in >> colliderEnabled
                >> colliderShape
-               >> collider.radius
+               >> collider.radius;
+            if (version >= 24) {
+                in >> collider.halfHeight;
+            }
+            in
                >> collider.halfExtents.x >> collider.halfExtents.y >> collider.halfExtents.z
                >> collider.planeNormal.x >> collider.planeNormal.y >> collider.planeNormal.z
                >> collider.planeOffset
@@ -600,6 +859,86 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                >> mover.speed
                >> mover.phase;
         }
+        if (version >= 21) {
+            in >> triggerTargetName
+               >> triggerEnterMoverAction
+               >> triggerEnterRotatorAction;
+            if (triggerTargetName == "-") {
+                triggerTargetName.clear();
+            }
+            if (version == 21) {
+                triggerEnterMoverAction = triggerEnterMoverAction != 0
+                    ? static_cast<int>(TriggerActionMode::Toggle)
+                    : static_cast<int>(TriggerActionMode::None);
+                triggerEnterRotatorAction = triggerEnterRotatorAction != 0
+                    ? static_cast<int>(TriggerActionMode::Toggle)
+                    : static_cast<int>(TriggerActionMode::None);
+            }
+            if (version >= 23) {
+                in >> triggerExitMoverAction
+                   >> triggerExitRotatorAction;
+            }
+        }
+        if (version >= 25) {
+            in >> playerControllerEnabled
+               >> playerFirstPerson
+               >> playerController.walkSpeed
+               >> playerController.runSpeed
+               >> playerController.jumpSpeed
+               >> playerController.lookSensitivity
+               >> playerController.capsuleRadius
+               >> playerController.capsuleHeight
+               >> playerController.eyeHeight
+               >> playerController.cameraDistance
+               >> playerController.cameraTargetHeight
+               >> playerController.maxSlopeDegrees
+               >> playerController.stepHeight;
+            playerController.firstPerson = playerFirstPerson != 0;
+        }
+        if (version >= 28) {
+            in >> healthEnabled
+               >> health.hp
+               >> health.maxHp
+               >> healthAlive;
+            health.alive = healthAlive != 0;
+            health.justDied = false;
+        }
+        if (version >= 26) {
+            in >> scriptEnabled
+               >> scriptClassName
+               >> scriptPath;
+            if (scriptClassName == "-") {
+                scriptClassName.clear();
+            }
+            if (scriptPath == "-") {
+                scriptPath.clear();
+            }
+            if (version >= 27) {
+                std::size_t scriptFieldCount = 0;
+                in >> scriptFieldCount;
+                for (std::size_t i = 0; i < scriptFieldCount; ++i) {
+                    ScriptField field;
+                    int fieldType = 0;
+                    in >> field.name >> fieldType >> field.value;
+                    if (field.name == "-") {
+                        field.name.clear();
+                    }
+                    if (field.value == "-") {
+                        field.value.clear();
+                    }
+                    if (fieldType == static_cast<int>(ScriptField::Type::Int)) {
+                        field.type = ScriptField::Type::Int;
+                    } else if (fieldType == static_cast<int>(ScriptField::Type::Bool)) {
+                        field.type = ScriptField::Type::Bool;
+                    } else if (fieldType == static_cast<int>(ScriptField::Type::String)) {
+                        field.type = ScriptField::Type::String;
+                    } else {
+                        field.type = ScriptField::Type::Float;
+                    }
+                    scriptFields.push_back(field);
+                }
+            }
+        }
 
         if (!in || !ParsePrimitive(primitiveName, &primitive)) {
             if (error) *error = "Scene file contains an invalid object record.";
@@ -612,6 +951,25 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         m_objects.back().locked = locked != 0;
         m_objects.back().modelAssetPath = modelAssetPath;
         m_objects.back().materialAssetPath = materialAssetPath;
+        m_objects.back().skeletalModel = skeletalModel != 0;
+        m_objects.back().animationClipIndex = std::max(animationClipIndex, 0);
+        m_objects.back().animationClipName = animationClipName;
+        m_objects.back().animationAutoplay = animationAutoplay != 0;
+        m_objects.back().animationLoop = animationLoop != 0;
+        m_objects.back().animationSpeed = std::max(animationSpeed, 0.0f);
+        m_objects.back().animationLocomotionEnabled = animationLocomotionEnabled != 0;
+        m_objects.back().animationIdleClipIndex = std::max(animationIdleClipIndex, 0);
+        m_objects.back().animationWalkClipIndex = std::max(animationWalkClipIndex, 0);
+        m_objects.back().animationRunClipIndex = std::max(animationRunClipIndex, 0);
+        m_objects.back().animationIdleClipName = animationIdleClipName;
+        m_objects.back().animationWalkClipName = animationWalkClipName;
+        m_objects.back().animationRunClipName = animationRunClipName;
+        m_objects.back().animationWalkAt = std::max(animationWalkAt, 0.0f);
+        m_objects.back().animationRunAt = std::max(animationRunAt, m_objects.back().animationWalkAt);
+        m_objects.back().animationEvents = animationEvents;
+        m_objects.back().animationActionProfiles = animationActionProfiles;
+        m_objects.back().animationStates = animationStates;
+        m_objects.back().animationTransitions = animationTransitions;
         m_objects.back().linearVelocityEnabled = linearVelocityEnabled != 0;
         m_objects.back().angularVelocityEnabled = angularVelocityEnabled != 0;
         m_objects.back().linearVelocity = linearVelocity;
@@ -625,6 +983,19 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         m_objects.back().rotator = rotator;
         m_objects.back().moverEnabled = moverEnabled != 0;
         m_objects.back().mover = mover;
+        m_objects.back().triggerTargetName = triggerTargetName;
+        m_objects.back().triggerEnterMoverAction = TriggerActionModeFromInt(triggerEnterMoverAction);
+        m_objects.back().triggerEnterRotatorAction = TriggerActionModeFromInt(triggerEnterRotatorAction);
+        m_objects.back().triggerExitMoverAction = TriggerActionModeFromInt(triggerExitMoverAction);
+        m_objects.back().triggerExitRotatorAction = TriggerActionModeFromInt(triggerExitRotatorAction);
+        m_objects.back().playerControllerEnabled = playerControllerEnabled != 0;
+        m_objects.back().playerController = playerController;
+        m_objects.back().healthEnabled = healthEnabled != 0;
+        m_objects.back().health = health;
+        m_objects.back().scriptEnabled = scriptEnabled != 0;
+        m_objects.back().scriptClassName = scriptClassName;
+        m_objects.back().scriptPath = scriptPath;
+        m_objects.back().scriptFields = scriptFields;
     }
 
     m_selectedIndex = m_objects.empty() ? -1 : 0;
@@ -1146,6 +1517,131 @@ bool EditorScene::SetSelectedMaterialAsset(const std::string &path)
     return true;
 }
 
+bool EditorScene::SetSelectedAnimationSettings(bool skeletalModel,
+                                               int clipIndex,
+                                               const std::string& clipName,
+                                               bool autoplay,
+                                               bool loop,
+                                               float speed) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) {
+        return false;
+    }
+
+    PushUndoSnapshot();
+    selected.skeletalModel = skeletalModel;
+    selected.animationClipIndex = std::max(clipIndex, 0);
+    selected.animationClipName = clipName;
+    selected.animationAutoplay = autoplay;
+    selected.animationLoop = loop;
+    selected.animationSpeed = std::max(speed, 0.0f);
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedAnimationLocomotion(bool enabled,
+                                                 int idleClipIndex,
+                                                 const std::string& idleClipName,
+                                                 int walkClipIndex,
+                                                 const std::string& walkClipName,
+                                                 int runClipIndex,
+                                                 const std::string& runClipName,
+                                                 float walkAt,
+                                                 float runAt) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) {
+        return false;
+    }
+
+    PushUndoSnapshot();
+    selected.animationLocomotionEnabled = enabled;
+    selected.animationIdleClipIndex = std::max(idleClipIndex, 0);
+    selected.animationIdleClipName = idleClipName;
+    selected.animationWalkClipIndex = std::max(walkClipIndex, 0);
+    selected.animationWalkClipName = walkClipName;
+    selected.animationRunClipIndex = std::max(runClipIndex, 0);
+    selected.animationRunClipName = runClipName;
+    selected.animationWalkAt = std::max(walkAt, 0.0f);
+    selected.animationRunAt = std::max(runAt, selected.animationWalkAt);
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedAnimationEvents(const std::vector<AnimationEvent>& events) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) {
+        return false;
+    }
+
+    PushUndoSnapshot();
+    selected.animationEvents = events;
+    for (AnimationEvent& event : selected.animationEvents) {
+        event.clipIndex = std::max(event.clipIndex, 0);
+        event.time = std::max(event.time, 0.0f);
+    }
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedAnimationActionProfiles(const std::vector<AnimationActionProfile>& profiles) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) {
+        return false;
+    }
+
+    PushUndoSnapshot();
+    selected.animationActionProfiles = profiles;
+    for (AnimationActionProfile& profile : selected.animationActionProfiles) {
+        profile.clipIndex = std::max(profile.clipIndex, 0);
+        profile.fadeIn = std::max(profile.fadeIn, 0.0f);
+        profile.fadeOut = std::max(profile.fadeOut, 0.0f);
+        profile.speed = std::max(profile.speed, 0.0f);
+    }
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedAnimationStateGraph(const std::vector<AnimationStateNode>& states,
+                                                 const std::vector<AnimationStateTransition>& transitions) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) {
+        return false;
+    }
+
+    PushUndoSnapshot();
+    selected.animationStates = states;
+    for (AnimationStateNode& state : selected.animationStates) {
+        state.clipIndex = std::max(state.clipIndex, 0);
+        state.speed = std::max(state.speed, 0.0f);
+    }
+    selected.animationTransitions = transitions;
+    for (AnimationStateTransition& transition : selected.animationTransitions) {
+        transition.fade = std::max(transition.fade, 0.0f);
+    }
+    m_dirty = true;
+    return true;
+}
+
 bool EditorScene::SetSelectedLight(const Light& light) {
     if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
         return false;
@@ -1398,6 +1894,241 @@ bool EditorScene::SetSelectedMover(const engine::ecs::Mover &mover)
     return true;
 }
 
+bool EditorScene::SetSelectedTriggerAction(const std::string& targetName,
+                                           TriggerActionMode enterMoverAction,
+                                           TriggerActionMode enterRotatorAction,
+                                           TriggerActionMode exitMoverAction,
+                                           TriggerActionMode exitRotatorAction) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) {
+        return false;
+    }
+    if (selected.triggerTargetName == targetName
+        && selected.triggerEnterMoverAction == enterMoverAction
+        && selected.triggerEnterRotatorAction == enterRotatorAction
+        && selected.triggerExitMoverAction == exitMoverAction
+        && selected.triggerExitRotatorAction == exitRotatorAction) {
+        return false;
+    }
+
+    PushUndoSnapshot();
+    selected.triggerTargetName = targetName;
+    selected.triggerEnterMoverAction = enterMoverAction;
+    selected.triggerEnterRotatorAction = enterRotatorAction;
+    selected.triggerExitMoverAction = exitMoverAction;
+    selected.triggerExitRotatorAction = exitRotatorAction;
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedPlayerControllerEnabled(bool enabled) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked || selected.playerControllerEnabled == enabled) {
+        return false;
+    }
+
+    PushUndoSnapshot();
+    selected.playerControllerEnabled = enabled;
+    if (enabled) {
+        selected.colliderEnabled = true;
+        selected.collider = engine::ecs::Collider::MakeCapsuleFromHeight(
+            selected.playerController.capsuleRadius,
+            selected.playerController.capsuleHeight);
+    }
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedPlayerController(const PlayerControllerSettings& settings) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) {
+        return false;
+    }
+
+    PushUndoSnapshot();
+    selected.playerControllerEnabled = true;
+    selected.playerController = settings;
+    selected.colliderEnabled = true;
+    selected.collider = engine::ecs::Collider::MakeCapsuleFromHeight(settings.capsuleRadius, settings.capsuleHeight);
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedHealthEnabled(bool enabled) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked || selected.healthEnabled == enabled) {
+        return false;
+    }
+
+    PushUndoSnapshot();
+    selected.healthEnabled = enabled;
+    if (enabled) {
+        selected.health.maxHp = std::max(selected.health.maxHp, 1.0f);
+        if (selected.health.hp <= 0.0f) {
+            selected.health.hp = selected.health.maxHp;
+        }
+        selected.health.hp = std::clamp(selected.health.hp, 0.0f, selected.health.maxHp);
+        selected.health.alive = selected.health.hp > 0.0f;
+        selected.health.justDied = false;
+    }
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedHealth(const engine::Health& health) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) {
+        return false;
+    }
+
+    engine::Health edited = health;
+    edited.maxHp = std::max(edited.maxHp, 1.0f);
+    edited.hp = std::clamp(edited.hp, 0.0f, edited.maxHp);
+    edited.alive = edited.alive && edited.hp > 0.0f;
+    edited.justDied = false;
+
+    PushUndoSnapshot();
+    selected.healthEnabled = true;
+    selected.health = edited;
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedScript(const std::string& className, const std::string& path, bool enabled) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) {
+        return false;
+    }
+
+    if (selected.scriptClassName == className
+        && selected.scriptPath == path
+        && selected.scriptEnabled == enabled) {
+        return false;
+    }
+
+    PushUndoSnapshot();
+    selected.scriptClassName = className;
+    selected.scriptPath = path;
+    selected.scriptEnabled = enabled && !className.empty();
+    if (className.empty()) {
+        selected.scriptFields.clear();
+    }
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedScriptEnabled(bool enabled) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked || selected.scriptEnabled == enabled) {
+        return false;
+    }
+
+    PushUndoSnapshot();
+    selected.scriptEnabled = enabled && !selected.scriptClassName.empty();
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedScriptFields(const std::vector<ScriptField>& fields) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) {
+        return false;
+    }
+
+    PushUndoSnapshot();
+    selected.scriptFields = fields;
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::AddSelectedScriptField() {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) {
+        return false;
+    }
+
+    PushUndoSnapshot();
+    ScriptField field;
+    field.name = "speed";
+    field.type = ScriptField::Type::Float;
+    field.value = "1.0";
+    selected.scriptFields.push_back(field);
+    m_dirty = true;
+}
+
+bool EditorScene::SetSelectedScriptField(std::size_t index, const ScriptField& field) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked || index >= selected.scriptFields.size()) {
+        return false;
+    }
+
+    const ScriptField& current = selected.scriptFields[index];
+    if (current.name == field.name && current.type == field.type && current.value == field.value) {
+        return false;
+    }
+
+    PushUndoSnapshot();
+    selected.scriptFields[index] = field;
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::RemoveSelectedScriptField(std::size_t index) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked || index >= selected.scriptFields.size()) {
+        return false;
+    }
+
+    PushUndoSnapshot();
+    selected.scriptFields.erase(selected.scriptFields.begin() + static_cast<std::ptrdiff_t>(index));
+    m_dirty = true;
+    return true;
+}
+
 bool EditorScene::AddPhysicsJoint(const PhysicsJoint &joint)
 {
     if (joint.objectA.empty() || (!joint.worldAnchor && joint.objectB.empty())) {
@@ -1488,6 +2219,25 @@ bool EditorScene::DuplicateSelected(const engine::Mesh & cube, const engine::Mes
     CreateObject(selectedCopy.name + "_Copy", selectedCopy.primitive, mesh, duplicateTransform, duplicateColor);
     m_objects.back().modelAssetPath = selectedCopy.modelAssetPath;
     m_objects.back().materialAssetPath = selectedCopy.materialAssetPath;
+    m_objects.back().skeletalModel = selectedCopy.skeletalModel;
+    m_objects.back().animationClipIndex = selectedCopy.animationClipIndex;
+    m_objects.back().animationClipName = selectedCopy.animationClipName;
+    m_objects.back().animationAutoplay = selectedCopy.animationAutoplay;
+    m_objects.back().animationLoop = selectedCopy.animationLoop;
+    m_objects.back().animationSpeed = selectedCopy.animationSpeed;
+    m_objects.back().animationLocomotionEnabled = selectedCopy.animationLocomotionEnabled;
+    m_objects.back().animationIdleClipIndex = selectedCopy.animationIdleClipIndex;
+    m_objects.back().animationWalkClipIndex = selectedCopy.animationWalkClipIndex;
+    m_objects.back().animationRunClipIndex = selectedCopy.animationRunClipIndex;
+    m_objects.back().animationIdleClipName = selectedCopy.animationIdleClipName;
+    m_objects.back().animationWalkClipName = selectedCopy.animationWalkClipName;
+    m_objects.back().animationRunClipName = selectedCopy.animationRunClipName;
+    m_objects.back().animationWalkAt = selectedCopy.animationWalkAt;
+    m_objects.back().animationRunAt = selectedCopy.animationRunAt;
+    m_objects.back().animationEvents = selectedCopy.animationEvents;
+    m_objects.back().animationActionProfiles = selectedCopy.animationActionProfiles;
+    m_objects.back().animationStates = selectedCopy.animationStates;
+    m_objects.back().animationTransitions = selectedCopy.animationTransitions;
     m_objects.back().light = selectedCopy.light;
     m_objects.back().lightData = selectedCopy.lightData;
     if (selectedCopy.light) {
@@ -1504,6 +2254,21 @@ bool EditorScene::DuplicateSelected(const engine::Mesh & cube, const engine::Mes
     m_objects.back().collider = selectedCopy.collider;
     m_objects.back().rotatorEnabled = selectedCopy.rotatorEnabled;
     m_objects.back().rotator = selectedCopy.rotator;
+    m_objects.back().moverEnabled = selectedCopy.moverEnabled;
+    m_objects.back().mover = selectedCopy.mover;
+    m_objects.back().triggerTargetName = selectedCopy.triggerTargetName;
+    m_objects.back().triggerEnterMoverAction = selectedCopy.triggerEnterMoverAction;
+    m_objects.back().triggerEnterRotatorAction = selectedCopy.triggerEnterRotatorAction;
+    m_objects.back().triggerExitMoverAction = selectedCopy.triggerExitMoverAction;
+    m_objects.back().triggerExitRotatorAction = selectedCopy.triggerExitRotatorAction;
+    m_objects.back().playerControllerEnabled = selectedCopy.playerControllerEnabled;
+    m_objects.back().playerController = selectedCopy.playerController;
+    m_objects.back().healthEnabled = selectedCopy.healthEnabled;
+    m_objects.back().health = selectedCopy.health;
+    m_objects.back().scriptEnabled = selectedCopy.scriptEnabled;
+    m_objects.back().scriptClassName = selectedCopy.scriptClassName;
+    m_objects.back().scriptPath = selectedCopy.scriptPath;
+    m_objects.back().scriptFields = selectedCopy.scriptFields;
     m_selectedIndex = static_cast<int>(m_objects.size()) - 1;
     m_dirty = true;
     return true;

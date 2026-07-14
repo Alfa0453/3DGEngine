@@ -136,7 +136,7 @@ struct Bt {
         return std::make_unique<detail::Sequence<Ctx>>(std::move(v));
     }
     template <class... N> static Ptr Selector(N&&... kids) {
-        std::vector<Ptr> v; v(v.push_back(std::forward<N>(kids)), ...);
+        std::vector<Ptr> v; (v.push_back(std::forward<N>(kids)), ...);
         return std::make_unique<detail::Selector<Ctx>>(std::move(v));
     }
     static Ptr Inverter(Ptr ch)  { return std::make_unique<detail::Inverter<Ctx>>(std::move(ch)); }

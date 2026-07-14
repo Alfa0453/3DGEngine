@@ -135,8 +135,6 @@ target_compile_definitions(imgui PUBLIC
 
 # --- Our libraries and executables -----------------------------------------
 add_subdirectory(engine)   # the reusable engine (static library)
-#add_subdirectory(game)     # the game that links against the engine
-#add_subdirectory(breakout) # a second game (Breakout) on the same engine + ECS
 #add_subdirectory(viewer)   # a model-viewer tool (loads + renders OBJ models)
 #add_subdirectory(scene)    # a PBR lighting + ECS scene demo (shadows, skybox)
 add_subdirectory(editor)
@@ -145,6 +143,14 @@ add_subdirectory(editor)
 add_subdirectory(character)
 add_subdirectory(aidemo)
 add_subdirectory(playerdemo)
+add_subdirectory(wizardscene)
+add_subdirectory(particledemo)
+add_subdirectory(navdemo)
+add_subdirectory(gennavdemo)
+add_subdirectory(terraindemo)
+add_subdirectory(uidemo)
+add_subdirectory(prefabdemo)
+add_subdirectory(ecsgame)
 
 # ---------------------------------------------------------------------------
 # Packaging: `cmake --install build --prefix dist` stages a runnable folder,

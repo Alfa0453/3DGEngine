@@ -21,11 +21,25 @@ class SkinnedModel {
 public:
     static constexpr int kMaxBones = 128;     // GPU bone-matrix uniform array cap
 
+    // Load any rigged format Assimp understands (glTF 2.0, FBX, COLLADA, ...).
+    // Throws std::runtime_error on failure.
     SkinnedModel() = default;
 
     // Load any rigged format Assimp understands (glTF 2.0, FBX, COLLADA, ...).
     // Throws std::runtime_error on failure.
     static SkinnedModel FromFile(const std::string& path);
+    
+    // Load animation clip(s) from a SEPARATE file (e.g. a UE4 / Mixamo per-clip
+    // FBX that shares this model's skeleton) and attach them to this model's
+    // skeleton, matching channels to bones by name. Returns the number of clips
+    // added (their indices are the previous AnimationCount() onward).
+    //   stripRootMotion  freezes the root bone's translation, keeping a locomotion
+    //                    clip in place so gameplay drives the position instead.
+    //   nameOverride     renames the clip when the file contains exactly one.
+    // Throws std::runtime_error if the file can't be read.
+    std::size_t AddAnimationsFromFile(const std::string& path,
+                                      bool stripRootMotion = false,
+                                      const std::string& nameOverride = "");
 
     SkinnedModel(const SkinnedModel&)            = delete;
     SkinnedModel& operator=(const SkinnedModel&) = delete;

@@ -15,6 +15,12 @@ class Texture;   // non-owning material map pointers
 
 namespace ecs{
 
+// Runtime object name exported from the editor. Useful for gameplay scripts,
+// trigger wiring, diagnostics, and small-game object lookup.
+struct RuntimeName {
+    std::string value;
+};
+
 // Position / rotation / scale, with the model matrix derived on demand. The
 // engine's common spatial component — most renderable or moving entities have one.
 struct Transform {
@@ -77,13 +83,68 @@ struct ModelAsset {
     std::string path;
 };
 
+struct LoadedModelAsset {
+    const Model* model = nullptr;
+};
+
+struct SkinnedModelAsset {
+    struct Notify {
+        int clipIndex = 0;
+        float time = 0.0f;
+        std::string name;
+    };
+
+    struct ActionProfile {
+        std::string name;
+        int clipIndex = 0;
+        std::string clipName;
+        std::string maskRootBone;
+        float fadeIn = 0.08f;
+        float fadeOut = 0.15f;
+        float speed = 1.0f;
+    };
+
+    struct AnimationState {
+        std::string name;
+        int clipIndex = 0;
+        std::string clipName;
+        bool loop = true;
+        float speed = 1.0f;
+    };
+
+    struct AnimationTransition {
+        int from = -1;
+        int to = -1;
+        std::string parameter = "Speed";
+        int compare = 0;
+        float threshold = 0.0f;
+        float fade = 0.2f;
+    };
+
+    std::string path;
+    int clipIndex = 0;
+    std::string clipName;
+    bool autoplay = true;
+    bool loop = true;
+    float speed = 1.0f;
+    bool locomotionEnabled = false;
+    int idleClipIndex = 0;
+    int walkClipIndex = 0;
+    int runClipIndex = 0;
+    std::string idleClipName;
+    std::string walkClipName;
+    std::string runClipName;
+    float walkAt = 0.15f;
+    float runAt = 3.0f;
+    std::vector<Notify> notifies;
+    std::vector<ActionProfile> actionProfiles;
+    std::vector<AnimationState> states;
+    std::vector<AnimationTransition> transitions;
+};
+
 struct MaterialAsset {
     std::string path;
     std::string albedoPath;
-};
-
-struct LoadedModelAsset {
-    const Model* model = nullptr;
 };
 
 struct LoadedMaterialAsset {

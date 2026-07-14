@@ -409,6 +409,7 @@ const char *EditorAssets::TypeName(Type type)
 {
     switch (type) {
         case Type::Model: return "Model";
+        case Type::SkeletalModel: return "Skeletal Model";
         case Type::Material: return "Material";
         case Type::Texture: return "Texture";
         case Type::Shader: return "Shader";

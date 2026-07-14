@@ -68,6 +68,10 @@ public:
     float MouseDeltaX() const { return static_cast<float>(m_data.mouseDeltaX); }
     float MouseDeltaY() const { return static_cast<float>(m_data.mouseDeltaY); }
 
+    // Absolute cursor position, in window pixel coordinates.
+    float MouseX() const;
+    float MouseY() const;
+
     // Mouse wheel movement since the previous frame. Positive Y means wheel up,
     // negative Y means wheel down.
     float ScrollDeltaY() const { return static_cast<float>(m_data.scrollDeltaY); }

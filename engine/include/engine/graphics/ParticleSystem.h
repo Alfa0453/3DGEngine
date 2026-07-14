@@ -2,63 +2,75 @@
 
 #include <glm/glm.hpp>
 
-#include <cstddef>
-#include <memory>
-#include <random>
+#include <cstdint>
 #include <vector>
 
 namespace engine {
 
-class Shader;
+// One live particle. Colour and size are interpolated from start->end over its
+// life; start/end are cached so per-frame updates are a single lerp.
+struct Particle {
+    glm::vec3 pos{0.0f};
+    glm::vec3 vel{0.0f};
+    glm::vec4 color{1.0f};
+    float     size = 1.0f;
+    float     age  = 0.0f;
+    float     life = 1.0f;
+    glm::vec4 startColor{1.0f}, endColor{1.0f};
+    float     startSize = 1.0f, endSize = 0.0f;
+};
 
-// A simple CPU-simulated particle system rendered as additive GL points.
-// Particles live in world space, age out over their lifetime, and are recycled
-// from a fixed-capacity pool (no per-frame allocation once warmed up).
-//
-// Typical use: Emit() a trail or EmitBurst() an explosion, Update(dt) each
-// frame, then Render(viewProj, pointScale) after the opaque scene.
-class ParticleSystem {
+enum class EmitShape { Point, Sphere, Cone };
+enum class ParticleBlend { Additive, Alpha };
+
+// How an emitter spawns and evolves particles. Sensible defaults make a warm
+// upward "spark" fountain; tweak for fire / smoke / magic / etc.
+struct EmitterConfig {
+    float     rate = 60.0f;                     // continuous spawn (particles/sec); 0 = burst-only
+    int       maxParticles = 2000;
+
+    EmitShape shape = EmitShape::Cone;
+    float     shapeRadius = 0.1f;               // spawn jitter (Point/Sphere) or cone base radius
+    glm::vec3 direction{0.0f, 1.0f, 0.0f};      // cone axis (normalized on use)
+    float     coneAngleDeg = 20.0f;
+
+    float     speedMin = 1.5f, speedMax = 3.0f;
+    float     lifeMin  = 0.7f, lifeMax   = 1.3f;
+
+    glm::vec3 gravity{0.0f, -2.0f, 0.0f};
+    float     drag = 0.0f;                      // velocity damping (per second)
+
+    glm::vec4 startColor{2.0f, 1.2f, 0.4f, 1.0f};   // HDR (>1 to bloom)
+    glm::vec4 endColor  {1.5f, 0.1f, 0.0f, 0.0f};    // fades to transparent
+    float     startSize = 0.30f, endSize = 0.02f;
+
+    ParticleBlend blend = ParticleBlend::Additive;
+};
+
+// A CPU particle emitter: owns a pool, spawns (continuous rate and/or bursts),
+// integrates and ages them each Update. Rendering is separate (ParticleRenderer),
+// so this is pure logic and unit-testable headless.
+class ParticleEmitter {
 public:
-    explicit ParticleSystem(std::size_t capacity = 2048);
-    ~ParticleSystem();
+    EmitterConfig cfg;
+    glm::vec3     position{0.0f};       // world spawn origin
+    bool          emitting = true;      // continuous emission on/off (bursts always work)
 
-    ParticleSystem(const ParticleSystem&)            = delete;
-    ParticleSystem& operator=(const ParticleSystem&) = delete;
-
-    // Spawn one particle. Dropped silently if the pool is full.
-    void Emit(const glm::vec3& pos, const glm::vec3& vel,
-              const glm::vec4& color, float life, float size);
-
-    // Spawn `count` particles flying outward from `pos` in random directions.
-    void EmitBurst(const glm::vec3& pos, const glm::vec3& color, int count,
-                  float speed, float life, float size);
-
-    // Integrate, age, and recycle dead particles.
-    void Update(float dt);
-
-    // Draw all live particles. `pointScale` converts a particle's world size to
-    // pixels (typically viewportHeight * 0.5 / tan(fov/2)).
-    void Render(const glm::mat4& viewProj, float pointScale);
-
-    std::size_t AliveCount() const { return m_particles.size(); }
+    void Burst(int count);              // spawn `count` particles immediately
+    void Update(float dt);              // spawn (rate) + integrate + age + remove dead
+    void Clear();
+    const std::vector<Particle>& Particles() const { return m_particles; }
+    std::size_t Alive() const { return m_particles.size(); }
 
 private:
-    struct Particle{
-        glm::vec3 pos;
-        glm::vec3 vel;
-        glm::vec4 color;  // rgb + base alpha
-        float life;       // seconds remaining
-        float maxLife;    // seconds at spawn (for the fade curve)
-        float size;       // world-space size
-    };
-    
     std::vector<Particle> m_particles;
-    std::size_t m_capacity;
+    float       m_accum = 0.0f;
+    std::uint32_t m_rng = 0x9E3779B9u;
 
-    unsigned int m_vao = 0;
-    unsigned int m_vbo = 0;
-    std::unique_ptr<Shader> m_shader;
-    std::mt19937 m_rng;
+    void SpawnOne();
+    float Rand01();                     // xorshift32 in [0,1)
+    glm::vec3 SampleDirection();        // within the cone (or the config direction)
+    glm::vec3 SampleOffset();           // spawn position jitter by shape
 };
 
 } // namespace engine

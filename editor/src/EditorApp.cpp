@@ -2,10 +2,14 @@
 
 #include <engine/ecs/Registry.h>
 #include <engine/ecs/RuntimeSystems.h>
+#include <engine/gameplay/GameplayComponents.h>
+#include <engine/gameplay/GameplaySystems.h>
+#include <engine/gameplay/Script.h>
 #include <engine/ecs/Systems.h>
 #include <engine/graphics/Model.h>
 #include <engine/graphics/Primitives.h>
 #include <engine/graphics/Texture.h>
+#include <engine/animation/Animator.h>
 
 #include <GLFW/glfw3.h>
 #include <glm/gtc/matrix_transform.hpp>
@@ -60,6 +64,11 @@ std::size_t CountAuthoredMovers(const EditorScene& scene) {
         }));
 }
 
+float AnimationClipSeconds(const engine::Animation& clip) {
+    const float ticksPerSecond = clip.ticksPerSecond > 0.0f ? clip.ticksPerSecond : 25.0f;
+    return clip.duration > 0.0f ? clip.duration / ticksPerSecond : 0.0f;
+}
+
 std::size_t CountRuntimeRotatorsWithFrozenRigidBody(engine::ecs::Registry& registry) {
     engine::ecs::Pool<engine::ecs::Rotator>* rotators = registry.TryPool<engine::ecs::Rotator>();
     if (!rotators) {
@@ -94,11 +103,31 @@ bool RuntimeColliderShapeIsInvalid(const engine::ecs::Collider& collider) {
         return collider.halfExtents.x <= 0.0f
             || collider.halfExtents.y <= 0.0f
             || collider.halfExtents.z <= 0.0f;
+    case engine::ecs::ColliderShape::Capsule:
+        return collider.radius <= 0.0f || collider.halfHeight < 0.0f;
     case engine::ecs::ColliderShape::Plane:
         return glm::dot(collider.planeNormal, collider.planeNormal) <= 0.0001f;
     }
 
     return true;
+}
+
+bool TriggerActionShouldEnable(EditorScene::TriggerActionMode mode, bool currentlyEnabled, bool* shouldChange) {
+    *shouldChange = false;
+    switch (mode) {
+    case EditorScene::TriggerActionMode::Enable:
+        *shouldChange = !currentlyEnabled;
+        return true;
+    case EditorScene::TriggerActionMode::Disable:
+        *shouldChange = currentlyEnabled;
+        return false;
+    case EditorScene::TriggerActionMode::Toggle:
+        *shouldChange = true;
+        return !currentlyEnabled;
+    case EditorScene::TriggerActionMode::None:
+        return currentlyEnabled;
+    }
+    return currentlyEnabled;
 }
 
 PhysicsRuntimeStats CollectPhysicsRuntimeStats(engine::ecs::Registry& registry) {
@@ -376,6 +405,7 @@ void EditorApp::OnInit()
         )glsl"
     );
     m_pbrRenderer.emplace();
+    m_skinnedRenderer.emplace();
     m_sky.emplace();
     m_text.emplace();
 
@@ -395,10 +425,10 @@ void EditorApp::OnUpdate(float dt)
     if (dt > 0.0f) {
         m_fps = m_fps * 0.92f + (1.0f / dt) * 0.08f;
     }
-    StepPlayPhysics(dt);
+    const bool keyboardCaptured = IsEditorKeyboardCaptured();
+    StepPlayPhysics(dt, !keyboardCaptured);
     UpdateAutosave(dt);
 
-    const bool keyboardCaptured = IsEditorKeyboardCaptured();
     if (keyboardCaptured) {
         for (auto& keyState : m_keyPrev) {
             keyState.second = window.IsKeyPressed(keyState.first);
@@ -420,11 +450,14 @@ void EditorApp::OnUpdate(float dt)
         HandleAssetShortcuts(window, controlDown);
         HandleEditorCommandShortcuts(window, controlDown);
     }
-    m_cameraController.UpdateCamera(window,
-        m_camera,
-        m_mode == EditorMode::Edit && !keyboardCaptured,
-        dt,
-        [&](float x, float y) { return IsViewportDropPosition(x, y); });
+    if (m_mode == EditorMode::Edit) {
+        m_cameraController.UpdateCamera(window,
+            m_camera,
+            !keyboardCaptured,
+            dt,
+            [&](float x, float y) { return IsViewportDropPosition(x, y); });
+    }
+    
     m_transformController.UpdateKeyboardShortcuts(window,
         m_scene,
         m_gizmo,
@@ -491,15 +524,21 @@ void EditorApp::OnShutdown()
 
 void EditorApp::DrawEditModeModels(const glm::mat4 & viewProj)
 {
-    if (!m_modelShader) {
+    if (!m_modelShader && !m_skinnedRenderer) {
         return;
     }
 
-    m_modelShader->Bind();
-    m_modelShader->SetMat4("uViewProj", viewProj);
-    m_modelShader->SetVec3("uLightPos", m_camera.Position() + glm::vec3(-4.0f, 6.0f, 4.0f));
-    m_modelShader->SetVec3("uLightColor", glm::vec3(1.0f));
-    m_modelShader->SetVec3("uViewPos", m_camera.Position());
+    if (m_modelShader) {
+        m_modelShader->Bind();
+        m_modelShader->SetMat4("uViewProj", viewProj);
+        m_modelShader->SetVec3("uLightPos", m_camera.Position() + glm::vec3(-4.0f, 6.0f, 4.0f));
+        m_modelShader->SetVec3("uLightColor", glm::vec3(1.0f));
+        m_modelShader->SetVec3("uViewPos", m_camera.Position());
+    }
+
+    const EditorScene::Environment& environment = m_scene.GetEnvironment();
+    const engine::DayNightCycle::Sample sky = engine::DayNightCycle::At(environment.timeOfDay);
+    const engine::Window& window = GetWindow();
 
     for (const EditorScene::Object& object : m_scene.Objects()) {
         if (!object.visible || object.modelAssetPath.empty()) {
@@ -512,6 +551,97 @@ void EditorApp::DrawEditModeModels(const glm::mat4 & viewProj)
         }
 
         std::string error;
+        if (object.skeletalModel && m_skinnedRenderer) {
+            const engine::SkinnedModel* model = m_editAssets.LoadSkinnedModel(object.modelAssetPath, &error);
+            if (!model) {
+                if (!m_editModelLoadErrors[object.modelAssetPath]) {
+                    m_log.Error("Could not load edit skinned model: " + error);
+                    m_editModelLoadErrors[object.modelAssetPath] = true;
+                }
+                continue;
+            }
+
+            engine::AnimatedModel animated;
+            animated.SetModel(model);
+            if (model->AnimationCount() > 0) {
+                auto resolveClip = [&](int fallback, const std::string& name) {
+                    int clip = fallback;
+                    if (!name.empty()) {
+                        const auto& animations = model->Animations();
+                        for (std::size_t i = 0; i < animations.size(); ++i) {
+                            if (animations[i].name == name) {
+                                clip = static_cast<int>(i);
+                                break;
+                            }
+                        }
+                    }
+                    return std::clamp(clip, 0, static_cast<int>(model->AnimationCount() - 1));
+                };
+                if (object.animationLocomotionEnabled) {
+                    animated.controller = engine::AnimationController::Locomotion(
+                        resolveClip(object.animationIdleClipIndex, object.animationIdleClipName),
+                        resolveClip(object.animationWalkClipIndex, object.animationWalkClipName),
+                        resolveClip(object.animationRunClipIndex, object.animationRunClipName),
+                        std::max(object.animationWalkAt, 0.0f),
+                        std::max(object.animationRunAt, object.animationWalkAt),
+                        0.2f);
+                    animated.controller.SetParameter(0.0f);
+                } else {
+                    const int clip = resolveClip(object.animationClipIndex, object.animationClipName);
+                    animated.controller.AddState(engine::AnimationController::State{
+                        object.animationClipName.empty() ? std::string("Preview") : object.animationClipName,
+                        clip,
+                        object.animationLoop,
+                        std::max(object.animationSpeed, 0.0f)
+                    });
+                }
+            }
+            float& previewTime = m_animationPreviewTimes[object.entity];
+            if (object.animationAutoplay) {
+                previewTime += m_dt;
+            }
+            engine::ecs::Registry previewRegistry;
+            const Entity previewEntity = previewRegistry.Create();
+            previewRegistry.Add<Transform>(previewEntity, *transform);
+            previewRegistry.Add<engine::AnimatedModel>(previewEntity, std::move(animated));
+            if (m_animationPreviewAction.active
+                && m_animationPreviewAction.entity == object.entity
+                && m_animationPreviewAction.clip >= 0
+                && m_animationPreviewAction.clip < static_cast<int>(model->AnimationCount())) {
+                if (engine::AnimatedModel* preview = previewRegistry.TryGet<engine::AnimatedModel>(previewEntity)) {
+                    preview->controller.Update(previewTime);
+                    preview->PlayAction(m_animationPreviewAction.clip,
+                        {},
+                        {},
+                        m_animationPreviewAction.fadeIn,
+                        m_animationPreviewAction.fadeOut,
+                        m_animationPreviewAction.speed);
+                    preview->action.time = m_animationPreviewAction.time;
+                }
+                engine::UpdateAnimations(previewRegistry, 0.0f);
+
+                const engine::Animation& clip = model->Animations()[static_cast<std::size_t>(m_animationPreviewAction.clip)];
+                const float duration = AnimationClipSeconds(clip);
+                m_animationPreviewAction.time += m_dt * std::max(m_animationPreviewAction.speed, 0.0f);
+                if (duration <= 0.0f || m_animationPreviewAction.time >= duration) {
+                    m_animationPreviewAction.active = false;
+                }
+            } else {
+                engine::UpdateAnimations(previewRegistry, previewTime);
+            }
+            if (engine::AnimatedModel* preview = previewRegistry.TryGet<engine::AnimatedModel>(previewEntity)) {
+                m_skinnedRenderer->Draw(*model,
+                                        preview->pose,
+                                        transform->Model(),
+                                        m_camera,
+                                        window.AspectRatio(),
+                                        sky.keyLightDirection,
+                                        sky.keyLightColor * environment.sunIntensity,
+                                        sky.ambient * environment.skyLightIntensity);
+            }
+            continue;
+        }
+
         const engine::Model* model = m_editAssets.LoadModel(object.modelAssetPath, &error);
         if (!model) {
             if (!m_editModelLoadErrors[object.modelAssetPath]) {
@@ -524,9 +654,11 @@ void EditorApp::DrawEditModeModels(const glm::mat4 & viewProj)
         m_viewport.DrawLoadedModel(*m_modelShader, *transform, *model);
     }
 
-    m_shader->Bind();
-    m_shader->SetMat4("uViewProj", viewProj);
-    m_shader->SetVec3("uLightDir", glm::normalize(glm::vec3(-0.4f, -1.0f, -0.3f)));
+    if (m_shader) {
+        m_shader->Bind();
+        m_shader->SetMat4("uViewProj", viewProj);
+        m_shader->SetVec3("uLightDir", glm::normalize(glm::vec3(-0.4f, -1.0f, -0.3f)));
+    }
 }
 
 void EditorApp::DrawSelectionOutline(const glm::mat4 & viewProj)
@@ -590,7 +722,10 @@ void EditorApp::DrawEditorOverlay()
     dockspaceContext.physicsEventEnterCount = m_physicsEventEnterCount;
     dockspaceContext.physicsEventStayCount = m_physicsEventStayCount;
     dockspaceContext.physicsEventExitCount = m_physicsEventExitCount;
+    dockspaceContext.physicsActionCount = m_physicsActionCount;
     dockspaceContext.physicsEventRows = &m_physicsEventRows;
+    dockspaceContext.gameplayDebug = BuildGameplayDebugState();
+    dockspaceContext.animationPreview = BuildAnimationPreviewState();
     dockspaceContext.showPhysicsEventGuides = &m_showPhysicsEventGuides;
     dockspaceContext.physicsEventGuidesSelectedOnly = &m_physicsEventGuidesSelectedOnly;
     dockspaceContext.physicsEventGuidesTriggersOnly = &m_physicsEventGuidesTriggersOnly;
@@ -598,6 +733,15 @@ void EditorApp::DrawEditorOverlay()
     dockspaceContext.scenePathBuffer = m_scenePathDraft.data();
     dockspaceContext.scenePathBufferSize = m_scenePathDraft.size();
     dockspaceContext.fps = m_fps;
+    if (const EditorScene::Object* selected = m_scene.SelectedObject()) {
+        dockspaceContext.animationPreviewTime = &m_animationPreviewTimes[selected->entity];
+    }
+    dockspaceContext.animationActionClip = &m_animationActionClip;
+    dockspaceContext.animationActionFadeIn = &m_animationActionFadeIn;
+    dockspaceContext.animationActionFadeOut = &m_animationActionFadeOut;
+    dockspaceContext.animationActionSpeed = &m_animationActionSpeed;
+    dockspaceContext.animationActionMaskRoot = m_animationActionMaskRoot.data();
+    dockspaceContext.animationActionMaskRootSize = m_animationActionMaskRoot.size();
     dockspaceContext.sceneDirty = m_scene.IsDirty();
     const bool dockspaceDrawn = m_dockspace.Draw(dockspaceContext);
     DrawMaterialMakerPanel();
@@ -657,6 +801,7 @@ void EditorApp::DrawEditorOverlay()
         m_physicsEventEnterCount = 0;
         m_physicsEventStayCount = 0;
         m_physicsEventExitCount = 0;
+        m_physicsActionCount = 0;
     }
     if (dockspaceContext.addCubeRequested) {
         AddCube();
@@ -675,6 +820,24 @@ void EditorApp::DrawEditorOverlay()
     }
     if (dockspaceContext.addTriggerVolumeRequested) {
         AddTriggerVolume();
+    }
+    if (dockspaceContext.addPlayerStartRequested) {
+        AddPlayerStart();
+    }
+    if (dockspaceContext.addDoorRequested) {
+        AddGameplayDoor();
+    }
+    if (dockspaceContext.addPickupRequested) {
+        AddGameplayPickup();
+    }
+    if (dockspaceContext.addDamageZoneRequested) {
+        AddGameplayDamageZone();
+    }
+    if (dockspaceContext.addMovingPlatformRequested) {
+        AddGameplayMovingPlatform();
+    }
+    if (dockspaceContext.addTriggerMoverTestRequested) {
+        AddGameplayTriggerMoverTest();
     }
     if (m_sphere) {
         if (dockspaceContext.addDirectionalLightRequested) {
@@ -922,6 +1085,193 @@ void EditorApp::DrawDirtyScenePrompt() {
 
         ImGui::EndPopup();
     }
+}
+
+EditorDockspace::GameplayDebugState EditorApp::BuildGameplayDebugState() {
+    EditorDockspace::GameplayDebugState debug;
+    const EditorScene::Object* selected = m_scene.SelectedObject();
+    if (!selected) {
+        return debug;
+    }
+
+    debug.hasSelection = true;
+    debug.selectedName = selected->name;
+    debug.authoredFieldCount = static_cast<int>(selected->scriptFields.size());
+
+    if (selected->healthEnabled && m_mode != EditorMode::Play) {
+        debug.hasHealth = true;
+        debug.health = selected->health.hp;
+        debug.maxHealth = selected->health.maxHp;
+        debug.healthAlive = selected->health.alive;
+        debug.healthJustDied = selected->health.justDied;
+    }
+    if (selected->scriptEnabled && m_mode != EditorMode::Play) {
+        debug.hasScript = true;
+        debug.scriptEnabled = selected->scriptEnabled;
+        debug.scriptClassName = selected->scriptClassName;
+        debug.scriptPath = selected->scriptPath;
+        debug.runtimeFieldCount = static_cast<int>(selected->scriptFields.size());
+    }
+
+    if (m_mode != EditorMode::Play || !m_playRegistry) {
+        return debug;
+    }
+
+    engine::ecs::Entity playEntity = engine::ecs::kNull;
+    for (const auto& entry : m_playEntityNames) {
+        if (entry.second == selected->name) {
+            playEntity = entry.first;
+            break;
+        }
+    }
+    if (playEntity == engine::ecs::kNull || !m_playRegistry->Valid(playEntity)) {
+        return debug;
+    }
+
+    debug.playEntityFound = true;
+    if (engine::Health* health = m_playRegistry->TryGet<engine::Health>(playEntity)) {
+        debug.hasHealth = true;
+        debug.health = health->hp;
+        debug.maxHealth = health->maxHp;
+        debug.healthAlive = health->alive;
+        debug.healthJustDied = health->justDied;
+    }
+
+    if (engine::NativeScriptComponent* script = m_playRegistry->TryGet<engine::NativeScriptComponent>(playEntity)) {
+        debug.hasScript = true;
+        debug.scriptEnabled = script->enabled;
+        debug.scriptCreated = script->created;
+        debug.scriptMissingFactory = script->missingFactory;
+        debug.scriptClassName = script->className;
+        debug.scriptPath = script->sourcePath;
+        debug.runtimeFieldCount = static_cast<int>(script->fields.size());
+    }
+
+    for (const EditorDockspace::PhysicsEventRow& row : m_physicsEventRows) {
+        if (!row.trigger || (row.objectA != selected->name && row.objectB != selected->name)) {
+            continue;
+        }
+        if (row.phase == 0) {
+            ++debug.selectedTriggerEnterCount;
+        } else if (row.phase == 1) {
+            ++debug.selectedTriggerTouchCount;
+        } else if (row.phase == 2) {
+            ++debug.selectedTriggerExitCount;
+        }
+    }
+    return debug;
+}
+
+EditorDockspace::AnimationPreviewState EditorApp::BuildAnimationPreviewState() {
+    EditorDockspace::AnimationPreviewState state;
+    const EditorScene::Object* selected = m_scene.SelectedObject();
+    if (!selected) {
+        return state;
+    }
+
+    state.hasSelection = true;
+    state.selectedName = selected->name;
+    state.skeletalModel = selected->skeletalModel;
+    state.modelPath = selected->modelAssetPath;
+    state.playMode = m_mode == EditorMode::Play;
+    state.defaultClipIndex = selected->animationClipIndex;
+    state.defaultClipName = selected->animationClipName;
+    state.autoplay = selected->animationAutoplay;
+    state.loop = selected->animationLoop;
+    state.playbackSpeed = selected->animationSpeed;
+    state.events = selected->animationEvents;
+    state.actionProfiles = selected->animationActionProfiles;
+    state.states = selected->animationStates;
+    state.transitions = selected->animationTransitions;
+    state.actionPlaying = m_animationPreviewAction.active
+        && m_animationPreviewAction.entity == selected->entity;
+    const auto previewTimeIt = m_animationPreviewTimes.find(selected->entity);
+    state.previewTime = previewTimeIt != m_animationPreviewTimes.end() ? previewTimeIt->second : 0.0f;
+    state.locomotionEnabled = selected->animationLocomotionEnabled;
+    state.idleClipIndex = selected->animationIdleClipIndex;
+    state.walkClipIndex = selected->animationWalkClipIndex;
+    state.runClipIndex = selected->animationRunClipIndex;
+    state.idleClipName = selected->animationIdleClipName;
+    state.walkClipName = selected->animationWalkClipName;
+    state.runClipName = selected->animationRunClipName;
+    state.walkAt = selected->animationWalkAt;
+    state.runAt = selected->animationRunAt;
+
+    auto fillClips = [&](const engine::SkinnedModel& model) {
+        state.modelLoaded = true;
+        state.clips.clear();
+        for (const engine::Animation& clip : model.Animations()) {
+            const float ticksPerSecond = clip.ticksPerSecond > 0.0f ? clip.ticksPerSecond : 25.0f;
+            state.clips.push_back(EditorDockspace::AnimationPreviewState::ClipInfo{
+                clip.name,
+                clip.duration > 0.0f ? clip.duration / ticksPerSecond : 0.0f
+            });
+        }
+        if (!state.clips.empty()) {
+            const int clipIndex = std::clamp(state.defaultClipIndex, 0, static_cast<int>(state.clips.size() - 1));
+            state.previewDuration = state.clips[static_cast<std::size_t>(clipIndex)].durationSeconds;
+        }
+
+        const engine::Skeleton& skeleton = model.GetSkeleton();
+        state.bones.clear();
+        state.bones.reserve(skeleton.bones.size());
+        for (std::size_t i = 0; i < skeleton.bones.size(); ++i) {
+            const engine::Bone& bone = skeleton.bones[i];
+            int depth = 0;
+            int parent = bone.parent;
+            while (parent >= 0 && parent < static_cast<int>(skeleton.bones.size())) {
+                ++depth;
+                parent = skeleton.bones[static_cast<std::size_t>(parent)].parent;
+            }
+            state.bones.push_back(EditorDockspace::AnimationPreviewState::BoneInfo{
+                bone.name,
+                bone.parent,
+                depth
+            });
+        }
+    };
+
+    if (selected->skeletalModel && !selected->modelAssetPath.empty()) {
+        std::string error;
+        if (const engine::SkinnedModel* model = m_editAssets.LoadSkinnedModel(selected->modelAssetPath, &error)) {
+            fillClips(*model);
+        } else {
+            state.loadError = error;
+        }
+    }
+
+    if (m_mode != EditorMode::Play || !m_playRegistry) {
+        return state;
+    }
+
+    engine::ecs::Entity playEntity = engine::ecs::kNull;
+    for (const auto& entry : m_playEntityNames) {
+        if (entry.second == selected->name) {
+            playEntity = entry.first;
+            break;
+        }
+    }
+    if (playEntity == engine::ecs::kNull || !m_playRegistry->Valid(playEntity)) {
+        return state;
+    }
+
+    if (engine::AnimatedModel* animated = m_playRegistry->TryGet<engine::AnimatedModel>(playEntity)) {
+        state.runtimeAnimated = true;
+        state.currentState = animated->controller.CurrentStateName();
+        state.currentClip = animated->controller.CurrentClip();
+        state.previousClip = animated->controller.PrevClip();
+        state.currentTime = animated->controller.CurrentTime();
+        state.previousTime = animated->controller.PrevTime();
+        state.blend = animated->controller.Blend();
+        state.parameter = animated->controller.Parameter();
+        state.stateCount = animated->controller.StateCount();
+        state.poseBones = animated->pose.size();
+        if (animated->model && state.clips.empty()) {
+            fillClips(*animated->model);
+        }
+    }
+
+    return state;
 }
 
 void EditorApp::DrawAssetOverlay(float x, float y, const glm::vec3 & text, const glm::vec3 & muted)
@@ -1230,6 +1580,25 @@ void EditorApp::DrawPlayScene(const glm::mat4 & viewProj)
         m_modelShader->SetVec3("uViewPos", m_camera.Position());
         engine::ecs::RenderLoadedModels(*m_playRegistry, *m_modelShader);
     }
+
+    if (m_skinnedRenderer && m_playRegistry) {
+        const engine::Window& window = GetWindow();
+        m_playRegistry->view<Transform, engine::AnimatedModel>().each(
+            [&](Entity, Transform& transform, engine::AnimatedModel& animated) {
+                if (!animated.model) {
+                    return;
+                }
+                m_skinnedRenderer->Draw(*animated.model,
+                                        animated.pose,
+                                        transform.Model(),
+                                        m_camera,
+                                        window.AspectRatio(),
+                                        sky.keyLightDirection,
+                                        sky.keyLightColor * environment.sunIntensity,
+                                        sky.ambient * environment.skyLightIntensity);
+            });
+    }
+
     if (m_shader && m_cube && m_showPhysicsEventGuides && !m_physicsEventGuides.empty()) {
         std::vector<EditorViewport::PhysicsEventGuide> visibleGuides;
         visibleGuides.reserve(m_physicsEventGuides.size());
@@ -1674,7 +2043,8 @@ void EditorApp::DropPayloadOnScene()
         return;
     }
 
-    if (payload.typeName == "Model") {
+    if (payload.typeName == "Model" || payload.typeName == "Skeletal Model") {
+        const bool skeletalModel = payload.typeName == "Skeletal Model";
         std::string error;
         const engine::Model* model = m_editAssets.LoadModel(payload.path, &error);
         if (!model) {
@@ -1691,8 +2061,11 @@ void EditorApp::DropPayloadOnScene()
         transform.scale = glm::vec3(uniformScale);
 
         if (m_cube && m_scene.AddModel(payload.path, *m_cube, transform)) {
+            if (skeletalModel) {
+                m_scene.SetSelectedAnimationSettings(true, 0, std::string(), true, true, 1.0f);
+            }
             m_editModelLoadErrors.erase(payload.path);
-            m_log.Info("Added model object: " + payload.path);
+            m_log.Info(std::string("Added ") + (skeletalModel ? "skeletal model" : "model") + " object: " + payload.path);
         } else {
             m_log.Warning("Model drop failed: could not create scene object");
         }
@@ -1706,7 +2079,7 @@ void EditorApp::DropPayloadOnScene()
         }
 
         if (m_scene.SetSelectedMaterialAsset(payload.path)) {
-            m_editMaterialLoadErrors.erase(payload.path);
+            m_editTextureLoadErrors.erase(payload.path);
             m_log.Info("Assigned material to selected object");
         } else {
             m_log.Warning("Material drop failed: select an unlocked object first");
@@ -1840,6 +2213,212 @@ void EditorApp::AddTriggerVolume() {
     collider.isTrigger = true;
     m_scene.SetSelectedCollider(collider);
     m_log.Info("Added trigger volume");
+}
+
+void EditorApp::AddPlayerStart()
+{
+    if (!m_cube) {
+        m_log.Error("Add failed: cube mesh is not ready");
+        return;
+    }
+
+    m_scene.AddCube(*m_cube);
+    m_scene.SetSelectedName("PlayerStart");
+
+    EditorScene::PlayerControllerSettings player;
+    player.firstPerson = false;
+    player.walkSpeed = 4.0f;
+    player.runSpeed = 7.0f;
+    player.jumpSpeed = 5.0f;
+    player.lookSensitivity = 0.1f;
+    player.capsuleRadius = 0.4f;
+    player.capsuleHeight = 1.8f;
+    player.eyeHeight = 0.6f;
+    player.cameraDistance = 5.0f;
+    player.cameraTargetHeight = 1.0f;
+    player.maxSlopeDegrees = 50.0f;
+    player.stepHeight = 0.35f;
+
+    Transform transform;
+    transform.position = glm::vec3(0.0f, player.capsuleHeight * 0.5f, 4.0f);
+    transform.scale = glm::vec3(player.capsuleRadius * 2.0f, player.capsuleHeight, player.capsuleRadius * 2.0f);
+    m_scene.SetSelectedTransform(transform);
+    m_scene.SetSelectedColor(glm::vec3(0.18f, 0.72f, 1.0f));
+    m_scene.SetSelectedRigidBodyEnabled(false);
+    m_scene.SetSelectedPlayerController(player);
+    engine::Health health;
+    health.Reset(100.0f);
+    m_scene.SetSelectedHealth(health);
+    m_log.Info("Added player start");
+}
+
+void EditorApp::AddGameplayDoor()
+{
+    if (!m_cube) {
+        m_log.Error("Add failed: cube mesh is not ready");
+        return;
+    }
+
+    m_scene.AddCube(*m_cube);
+    m_scene.SetSelectedName("Door");
+    Transform transform;
+    transform.position = glm::vec3(0.0f, 1.5f, -2.5f);
+    transform.scale = glm::vec3(1.2f, 3.0f, 0.25f);
+    m_scene.SetSelectedTransform(transform);
+    m_scene.SetSelectedColor(glm::vec3(0.52f, 0.34f, 0.18f));
+    m_scene.SetSelectedRigidBodyEnabled(false);
+    m_scene.SetSelectedCollider(engine::ecs::Collider::MakeBox(transform.scale * 0.5f));
+    m_scene.SetSelectedScript("DoorOpener", "Game/Scripts/DoorOpener.cpp", true);
+
+    std::vector<EditorScene::ScriptField> fields;
+    fields.push_back(EditorScene::ScriptField{"target", EditorScene::ScriptField::Type::String, "Door"});
+    fields.push_back(EditorScene::ScriptField{"speed", EditorScene::ScriptField::Type::Float, "2.0"});
+    fields.push_back(EditorScene::ScriptField{"height", EditorScene::ScriptField::Type::Float, "3.0"});
+    m_scene.SetSelectedScriptFields(fields);
+    m_log.Info("Added gameplay door");
+}
+
+void EditorApp::AddGameplayPickup()
+{
+    if (!m_cube) {
+        m_log.Error("Add failed: cube mesh is not ready");
+        return;
+    }
+
+    m_scene.AddCube(*m_cube);
+    m_scene.SetSelectedName("Pickup");
+    Transform transform;
+    transform.position = glm::vec3(1.5f, 0.5f, -1.0f);
+    transform.scale = glm::vec3(0.45f);
+    m_scene.SetSelectedTransform(transform);
+    m_scene.SetSelectedColor(glm::vec3(0.95f, 0.82f, 0.22f));
+    m_scene.SetSelectedRigidBodyEnabled(false);
+    engine::ecs::Collider collider = engine::ecs::Collider::MakeBox(transform.scale * 0.5f);
+    collider.isTrigger = true;
+    m_scene.SetSelectedCollider(collider);
+    m_scene.SetSelectedScript("Pickup", "Game/Scripts/Pickup.cpp", true);
+
+    std::vector<EditorScene::ScriptField> fields;
+    fields.push_back(EditorScene::ScriptField{"interactKey", EditorScene::ScriptField::Type::String, "E"});
+    m_scene.SetSelectedScriptFields(fields);
+    m_log.Info("Added gameplay pickup");
+}
+
+void EditorApp::AddGameplayDamageZone()
+{
+    if (!m_cube) {
+        m_log.Error("Add failed: cube mesh is not ready");
+        return;
+    }
+
+    m_scene.AddCube(*m_cube);
+    m_scene.SetSelectedName("DamageZone");
+    Transform transform;
+    transform.position = glm::vec3(-1.5f, 0.25f, -1.0f);
+    transform.scale = glm::vec3(2.0f, 0.5f, 2.0f);
+    m_scene.SetSelectedTransform(transform);
+    m_scene.SetSelectedColor(glm::vec3(0.86f, 0.12f, 0.10f));
+    m_scene.SetSelectedRigidBodyEnabled(false);
+    engine::ecs::Collider collider = engine::ecs::Collider::MakeBox(transform.scale * 0.5f);
+    collider.isTrigger = true;
+    m_scene.SetSelectedCollider(collider);
+    m_scene.SetSelectedScript("DamageZone", "Game/Scripts/DamageZone.cpp", true);
+
+    std::vector<EditorScene::ScriptField> fields;
+    fields.push_back(EditorScene::ScriptField{"target", EditorScene::ScriptField::Type::String, "PlayerStart"});
+    fields.push_back(EditorScene::ScriptField{"damagePerSecond", EditorScene::ScriptField::Type::Float, "10.0"});
+    m_scene.SetSelectedScriptFields(fields);
+    m_log.Info("Added gameplay damage zone");
+}
+
+void EditorApp::AddGameplayMovingPlatform()
+{
+    if (!m_cube) {
+        m_log.Error("Add failed: cube mesh is not ready");
+        return;
+    }
+
+    m_scene.AddCube(*m_cube);
+    m_scene.SetSelectedName("MovingPlatform");
+    Transform transform;
+    transform.position = glm::vec3(0.0f, 0.35f, 2.5f);
+    transform.scale = glm::vec3(2.5f, 0.3f, 1.0f);
+    m_scene.SetSelectedTransform(transform);
+    m_scene.SetSelectedColor(glm::vec3(0.18f, 0.56f, 0.78f));
+    m_scene.SetSelectedRigidBodyEnabled(false);
+    m_scene.SetSelectedCollider(engine::ecs::Collider::MakeBox(transform.scale * 0.5f));
+
+    engine::ecs::Mover mover;
+    mover.axis = glm::vec3(1.0f, 0.0f, 0.0f);
+    mover.distance = 2.5f;
+    mover.speed = 1.0f;
+    mover.phase = 0.0f;
+    mover.initialized = false;
+    m_scene.SetSelectedMover(mover);
+    m_scene.SetSelectedMoverEnabled(true);
+    m_log.Info("Added gameplay moving platform");
+}
+
+void EditorApp::AddGameplayTriggerMoverTest()
+{
+    if (!m_cube) {
+        m_log.Error("Add failed: cube mesh is not ready");
+        return;
+    }
+
+    m_scene.AddCube(*m_cube);
+    m_scene.SetSelectedName("GameplayMoverTarget");
+    Transform targetTransform;
+    targetTransform.position = glm::vec3(2.5f, 0.5f, 0.0f);
+    targetTransform.scale = glm::vec3(0.8f);
+    m_scene.SetSelectedTransform(targetTransform);
+    m_scene.SetSelectedColor(glm::vec3(0.18f, 0.52f, 0.86f));
+
+    engine::ecs::Mover mover;
+    mover.axis = glm::vec3(1.0f, 0.0f, 0.0f);
+    mover.distance = 2.0f;
+    mover.speed = 1.0f;
+    mover.phase = 0.0f;
+    mover.initialized = false;
+    m_scene.SetSelectedMover(mover);
+    m_scene.SetSelectedMoverEnabled(false);
+
+    m_scene.AddCube(*m_cube);
+    m_scene.SetSelectedName("GameplayTrigger");
+    Transform triggerTransform;
+    triggerTransform.position = glm::vec3(-1.5f, 0.5f, 0.0f);
+    triggerTransform.scale = glm::vec3(1.5f, 1.0f, 1.5f);
+    m_scene.SetSelectedTransform(triggerTransform);
+    m_scene.SetSelectedColor(glm::vec3(0.90f, 0.62f, 0.18f));
+    m_scene.SetSelectedRigidBodyEnabled(false);
+
+    engine::ecs::Collider triggerCollider = engine::ecs::Collider::MakeBox(triggerTransform.scale * 0.5f);
+    triggerCollider.isTrigger = true;
+    m_scene.SetSelectedCollider(triggerCollider);
+    m_scene.SetSelectedTriggerAction("GameplayMoverTarget",
+        EditorScene::TriggerActionMode::Enable,
+        EditorScene::TriggerActionMode::None,
+        EditorScene::TriggerActionMode::Disable,
+        EditorScene::TriggerActionMode::None);
+    const int triggerIndex = m_scene.SelectedIndex();
+
+    m_scene.AddCube(*m_cube);
+    m_scene.SetSelectedName("GameplayActivator");
+    Transform activatorTransform;
+    activatorTransform.position = glm::vec3(-4.0f, 0.5f, 0.0f);
+    activatorTransform.scale = glm::vec3(0.6f);
+    m_scene.SetSelectedTransform(activatorTransform);
+    m_scene.SetSelectedColor(glm::vec3(0.24f, 0.78f, 0.36f));
+
+    engine::ecs::RigidBody activatorBody = engine::ecs::RigidBody::Dynamic(1.0f);
+    activatorBody.useGravity = false;
+    activatorBody.velocity = glm::vec3(2.0f, 0.0f, 0.0f);
+    m_scene.SetSelectedRigidBody(activatorBody);
+    m_scene.SetSelectedCollider(engine::ecs::Collider::MakeBox(activatorTransform.scale * 0.5f));
+
+    m_scene.SelectIndex(triggerIndex);
+
+    m_log.Info("Added gameplay trigger mover test");
 }
 
 void EditorApp::CycleSelectedColor()
@@ -2153,6 +2732,76 @@ void EditorApp::ValidateRuntimeScene()
     m_runtime.ValidateRuntimeScene(m_project, *m_cube, *m_plane, *m_sphere, m_log);
 }
 
+void EditorApp::TriggerAnimationPreviewAction() {
+    const EditorScene::Object* selected = m_scene.SelectedObject();
+    if (!selected || !selected->skeletalModel) {
+        m_log.Warning("Animation action preview needs a selected skeletal model");
+        return;
+    }
+
+    const int clip = std::max(m_animationActionClip, 0);
+    const float fadeIn = std::max(m_animationActionFadeIn, 0.0f);
+    const float fadeOut = std::max(m_animationActionFadeOut, 0.0f);
+    const float speed = std::max(m_animationActionSpeed, 0.0f);
+    const std::string maskRoot = m_animationActionMaskRoot.data();
+
+    auto buildMask = [&](const engine::SkinnedModel& model, std::vector<float>* mask) {
+        mask->clear();
+        if (maskRoot.empty()) {
+            return true;
+        }
+        const engine::Skeleton& skeleton = model.GetSkeleton();
+        if (skeleton.Find(maskRoot) < 0) {
+            return false;
+        }
+        *mask = engine::Animator::BuildMask(skeleton, maskRoot);
+        return true;
+    };
+
+    if (m_mode == EditorMode::Play) {
+        if (!m_playRegistry) {
+            m_log.Warning("Animation action preview has no Play registry");
+            return;
+        }
+
+        engine::ecs::Entity playEntity = engine::ecs::kNull;
+        for (const auto& entry : m_playEntityNames) {
+            if (entry.second == selected->name) {
+                playEntity = entry.first;
+                break;
+            }
+        }
+
+        engine::AnimatedModel* animated = playEntity == engine::ecs::kNull
+            ? nullptr
+            : m_playRegistry->TryGet<engine::AnimatedModel>(playEntity);
+        if (!animated || !animated->model || clip >= static_cast<int>(animated->model->AnimationCount())) {
+            m_log.Warning("Selected Play entity cannot play that animation action clip");
+            return;
+        }
+
+        animated->PlayAction(clip, {}, {}, fadeIn, fadeOut, speed);
+        m_log.Info("Play animation action preview started");
+        return;
+    }
+
+    std::string error;
+    const engine::SkinnedModel* model = m_editAssets.LoadSkinnedModel(selected->modelAssetPath, &error);
+    if (!model || clip >= static_cast<int>(model->AnimationCount())) {
+        m_log.Warning("Selected edit model cannot play that animation action clip");
+        return;
+    }
+
+    m_animationPreviewAction.entity = selected->entity;
+    m_animationPreviewAction.clip = clip;
+    m_animationPreviewAction.time = 0.0f;
+    m_animationPreviewAction.fadeIn = fadeIn;
+    m_animationPreviewAction.fadeOut = fadeOut;
+    m_animationPreviewAction.speed = speed;
+    m_animationPreviewAction.active = true;
+    m_log.Info("Edit animation action preview started");
+}
+
 void EditorApp::EnterPlayMode()
 {
     m_editSnapshot = m_scene.CreateSnapshot();
@@ -2163,10 +2812,13 @@ void EditorApp::EnterPlayMode()
     m_physicsEventEnterCount = 0;
     m_physicsEventStayCount = 0;
     m_physicsEventExitCount = 0;
+    m_physicsActionCount = 0;
     m_physicsEventRows.clear();
     m_physicsEventGuides.clear();
+    m_playAnimationEvents.clear();
     m_playPhysics.ClearJoints();
     m_playEntityNames.clear();
+    m_playTriggerActions.clear();
     std::string error;
     if (!BuildPlayRuntimePreview(&error)) {
         m_editSnapshot.reset();
@@ -2203,6 +2855,7 @@ void EditorApp::EnterPlayMode()
         + std::to_string(rotatorCount) + " rotators, "
         + std::to_string(authoredRotatorCount) + " authored rotators, "
         + std::to_string(authoredMoverCount) + " authored movers, "
+        + std::to_string(m_playTriggerActions.size()) + " trigger actions, "
         + std::to_string(physics.rigidBodies) + " rigid bodies, "
         + std::to_string(physics.dynamicBodies) + " dynamic, "
         + std::to_string(physics.colliders) + " colliders, "
@@ -2238,6 +2891,8 @@ void EditorApp::ExitPlayMode()
 {
     m_playRegistry.reset();
     m_playAssets.reset();
+    m_playPlayerController.reset();
+    m_playPlayerEntity = engine::ecs::kNull;
     m_physicsPaused = false;
     m_physicsStepRequested = false;
     m_physicsAccumulator = 0.0f;
@@ -2245,9 +2900,12 @@ void EditorApp::ExitPlayMode()
     m_physicsEventEnterCount = 0;
     m_physicsEventStayCount = 0;
     m_physicsEventExitCount = 0;
+    m_physicsActionCount = 0;
     m_physicsEventRows.clear();
     m_physicsEventGuides.clear();
+    m_playAnimationEvents.clear();
     m_playEntityNames.clear();
+    m_playTriggerActions.clear();
 
     if (!m_cube || !m_plane) {
         m_log.Error("Could not restore edit scene");
@@ -2300,6 +2958,19 @@ bool EditorApp::BuildPlayRuntimePreview(std::string * error)
         playEntitiesByName[createdNames[i]] = createdEntities[i];
     }
 
+    m_playRegistry->view<engine::AnimatedModel>().each(
+        [this](engine::ecs::Entity entity, engine::AnimatedModel& animated) {
+            animated.onEvent = [this, entity](const std::string& name) {
+                if (!name.empty()) {
+                    m_playAnimationEvents.push_back(engine::ScriptAnimationEvent{
+                        entity,
+                        name
+                    });
+                }
+            };
+        }
+    );
+
     m_playPhysics.ClearJoints();
     for (const EditorScene::PhysicsJoint& joint : m_scene.PhysicsJoints()) {
         if (!joint.enabled) {
@@ -2331,16 +3002,279 @@ bool EditorApp::BuildPlayRuntimePreview(std::string * error)
             m_playPhysics.AddDistanceJoint(a->second, b->second, joint.restLength, joint.rope);
         }
     }
-
+    ConfigurePlayPlayerController(playEntitiesByName);
+    BuildPlayTriggerActions(playEntitiesByName);
     return true;
 }
 
-void EditorApp::StepPlayPhysics(float dt)
+void EditorApp::ConfigurePlayPlayerController(const std::unordered_map<std::string, engine::ecs::Entity> &playEntitiesByName)
+{
+    m_playPlayerController.reset();
+    m_playPlayerEntity = engine::ecs::kNull;
+    if (!m_playRegistry) {
+        return;
+    }
+
+    for (const EditorScene::Object& object : m_scene.Objects()) {
+        if (!object.playerControllerEnabled) {
+            continue;
+        }
+
+        const auto found = playEntitiesByName.find(object.name);
+        if (found == playEntitiesByName.end()) {
+            continue;
+        }
+
+        const EditorScene::PlayerControllerSettings& settings = object.playerController;
+        engine::PlayerController controller;
+        controller.view = settings.firstPerson
+            ? engine::PlayerController::View::FirstPerson
+            : engine::PlayerController::View::ThirdPerson;
+        controller.walkSpeed = settings.walkSpeed;
+        controller.runSpeed = settings.runSpeed;
+        controller.jumpSpeed = settings.jumpSpeed;
+        controller.lookSensitivity = settings.lookSensitivity;
+        controller.eyeHeight = settings.eyeHeight;
+        controller.camDistance = settings.cameraDistance;
+        controller.camTargetHeight = settings.cameraTargetHeight;
+        controller.body.stepHeight = settings.stepHeight;
+        controller.body.SetMaxSlopeDegrees(settings.maxSlopeDegrees);
+        controller.SetCapsule(settings.capsuleRadius, settings.capsuleHeight);
+
+        m_playPlayerEntity = found->second;
+        if (const Transform* transform = m_playRegistry->TryGet<Transform>(m_playPlayerEntity)) {
+            controller.SetPosition(transform->position);
+        }
+        if (m_playRegistry->Has<engine::ecs::Collider>(m_playPlayerEntity)) {
+            m_playRegistry->Remove<engine::ecs::Collider>(m_playPlayerEntity);
+        }
+        if (m_playRegistry->Has<engine::ecs::RigidBody>(m_playPlayerEntity)) {
+            m_playRegistry->Remove<engine::ecs::RigidBody>(m_playPlayerEntity);
+        }
+
+        m_playPlayerController = controller;
+        m_log.Info("Play mode player: using " + object.name);
+        return;
+    }
+}
+
+void EditorApp::BuildPlayTriggerActions(const std::unordered_map<std::string, engine::ecs::Entity>& playEntitiesByName) {
+    m_playTriggerActions.clear();
+    for (const EditorScene::Object& object : m_scene.Objects()) {
+        if (!object.colliderEnabled || !object.collider.isTrigger || object.triggerTargetName.empty()) {
+            continue;
+        }
+        if (object.triggerEnterMoverAction == EditorScene::TriggerActionMode::None
+            && object.triggerEnterRotatorAction == EditorScene::TriggerActionMode::None
+            && object.triggerExitMoverAction == EditorScene::TriggerActionMode::None
+            && object.triggerExitRotatorAction == EditorScene::TriggerActionMode::None) {
+            continue;
+        }
+
+        const auto trigger = playEntitiesByName.find(object.name);
+        const auto target = playEntitiesByName.find(object.triggerTargetName);
+        if (trigger == playEntitiesByName.end() || target == playEntitiesByName.end()) {
+            continue;
+        }
+
+        PlayTriggerAction action;
+        action.target = target->second;
+        action.enterMoverAction = object.triggerEnterMoverAction;
+        action.enterRotatorAction = object.triggerEnterRotatorAction;
+        action.exitMoverAction = object.triggerExitMoverAction;
+        action.exitRotatorAction = object.triggerExitRotatorAction;
+
+        for (const EditorScene::Object& targetObject : m_scene.Objects()) {
+            if (targetObject.name == object.triggerTargetName) {
+                action.mover = targetObject.mover;
+                action.rotator = targetObject.rotator;
+                break;
+            }
+        }
+
+        m_playTriggerActions[trigger->second] = action;
+    }
+}
+
+void EditorApp::ApplyPlayTriggerAction(engine::ecs::Entity trigger, engine::ecs::Entity, engine::CollisionEvent::Phase phase) {
+    if (!m_playRegistry) {
+        return;
+    }
+
+    const auto actionIt = m_playTriggerActions.find(trigger);
+    if (actionIt == m_playTriggerActions.end()) {
+        return;
+    }
+
+    const PlayTriggerAction& action = actionIt->second;
+    const std::string triggerName = m_playEntityNames.count(trigger) ? m_playEntityNames[trigger] : "Trigger";
+    const std::string targetName = m_playEntityNames.count(action.target) ? m_playEntityNames[action.target] : "Target";
+    const EditorScene::TriggerActionMode moverAction = phase == engine::CollisionEvent::Phase::Exit
+        ? action.exitMoverAction
+        : action.enterMoverAction;
+    const EditorScene::TriggerActionMode rotatorAction = phase == engine::CollisionEvent::Phase::Exit
+        ? action.exitRotatorAction
+        : action.enterRotatorAction;
+
+    if (moverAction != EditorScene::TriggerActionMode::None) {
+        const bool hasMover = m_playRegistry->Has<engine::ecs::Mover>(action.target);
+        bool shouldChange = false;
+        const bool enableMover = TriggerActionShouldEnable(moverAction, hasMover, &shouldChange);
+        if (shouldChange && !enableMover) {
+            m_playRegistry->Remove<engine::ecs::Mover>(action.target);
+            if (engine::ecs::RigidBody* body = m_playRegistry->TryGet<engine::ecs::RigidBody>(action.target)) {
+                body->velocity = glm::vec3(0.0f);
+            }
+            m_log.Info("Trigger " + triggerName + " disabled Mover on " + targetName);
+            PushPlayTriggerActionRow(triggerName, targetName, "Mover", false, phase);
+        } else if (shouldChange && enableMover) {
+            engine::ecs::Mover mover = action.mover;
+            if (const Transform* transform = m_playRegistry->TryGet<Transform>(action.target)) {
+                mover.origin = transform->position;
+                mover.initialized = true;
+            } else {
+                mover.initialized = false;
+            }
+            m_playRegistry->Add<engine::ecs::Mover>(action.target, mover);
+            m_log.Info("Trigger " + triggerName + " enabled Mover on " + targetName);
+            PushPlayTriggerActionRow(triggerName, targetName, "Mover", true, phase);
+        }
+    }
+
+    if (rotatorAction != EditorScene::TriggerActionMode::None) {
+        const bool hasRotator = m_playRegistry->Has<engine::ecs::Rotator>(action.target);
+        bool shouldChange = false;
+        const bool enableRotator = TriggerActionShouldEnable(rotatorAction, hasRotator, &shouldChange);
+        if (shouldChange && !enableRotator) {
+            m_playRegistry->Remove<engine::ecs::Rotator>(action.target);
+            if (engine::ecs::RigidBody* body = m_playRegistry->TryGet<engine::ecs::RigidBody>(action.target)) {
+                body->angularVelocity = glm::vec3(0.0f);
+            }
+            m_log.Info("Trigger " + triggerName + " disabled Rotator on " + targetName);
+        } else if (shouldChange && enableRotator) {
+            m_playRegistry->Add<engine::ecs::Rotator>(action.target, action.rotator);
+            m_log.Info("Trigger " + triggerName + " enabled Rotator on " + targetName);
+        }
+    }
+}
+
+void EditorApp::PushPlayTriggerActionRow(const std::string& triggerName,
+                                         const std::string& targetName,
+                                         const std::string& componentName,
+                                         bool enabled,
+                                         engine::CollisionEvent::Phase phase) {
+    EditorDockspace::PhysicsEventRow row;
+    row.objectA = triggerName;
+    row.objectB = targetName;
+    row.phase = static_cast<int>(phase);
+    row.trigger = true;
+    row.action = true;
+    row.text = std::string(CollisionPhaseName(phase))
+        + " Action: "
+        + triggerName
+        + (enabled ? " enabled " : " disabled ")
+        + componentName
+        + " on "
+        + targetName;
+    m_physicsEventRows.push_back(row);
+    ++m_physicsActionCount;
+}
+
+void EditorApp::UpdatePlayPlayerController(float dt, bool inputEnabled)
+{
+    if (!m_playRegistry || !m_playPlayerController || m_playPlayerEntity == engine::ecs::kNull) {
+        return;
+    }
+
+    engine::Window& window = GetWindow();
+    engine::PlayerInput input;
+    if (inputEnabled) {
+        if (window.IsKeyPressed(GLFW_KEY_W)) input.moveForward += 1.0f;
+        if (window.IsKeyPressed(GLFW_KEY_S)) input.moveForward -= 1.0f;
+        if (window.IsKeyPressed(GLFW_KEY_D)) input.moveRight += 1.0f;
+        if (window.IsKeyPressed(GLFW_KEY_A)) input.moveRight -= 1.0f;
+        input.jump = window.IsKeyPressed(GLFW_KEY_SPACE);
+        input.sprint = window.IsKeyPressed(GLFW_KEY_LEFT_SHIFT) || window.IsKeyPressed(GLFW_KEY_RIGHT_SHIFT);
+        input.toggleView = window.IsKeyPressed(GLFW_KEY_V);
+
+        const bool rightMouseDown = window.Native()
+            && glfwGetMouseButton(window.Native(), GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
+        if (rightMouseDown || m_cameraController.MouseLookActive()) {
+            input.lookYaw = window.MouseDeltaX();
+            input.lookPitch = window.MouseDeltaY();
+        }
+    }
+
+    if (engine::AnimatedModel* animated = m_playRegistry->TryGet<engine::AnimatedModel>(m_playPlayerEntity)) {
+        const float moveMagnitude = std::min(glm::length(glm::vec2(input.moveForward, input.moveRight)), 1.0f);
+        const float speed = moveMagnitude * (input.sprint ? m_playPlayerController->runSpeed : m_playPlayerController->walkSpeed);
+        animated->controller.SetParameter("Speed", speed);
+    }
+
+    m_playPlayerController->Update(*m_playRegistry, input, dt);
+    if (Transform* transform = m_playRegistry->TryGet<Transform>(m_playPlayerEntity)) {
+        transform->position = m_playPlayerController->CapsulePosition();
+        transform->rotation = m_playPlayerController->CapsuleRotation();
+    }
+
+    m_camera.SetPosition(m_playPlayerController->CameraPosition());
+    m_camera.LookAt(m_playPlayerController->CameraTarget());
+}
+
+engine::ScriptInputState EditorApp::CapturePlayScriptInput(bool inputEnabled)
+{
+    engine::ScriptInputState input;
+    input.enabled = inputEnabled;
+    input.physicsEvents = &m_playPhysics.Events();
+    input.animationEvents = &m_playAnimationEvents;
+
+    engine::Window& window = GetWindow();
+    for (int key = GLFW_KEY_SPACE; key <= GLFW_KEY_LAST; ++key) {
+        const bool down = window.IsKeyPressed(key);
+        const bool wasDown = m_scriptKeyPrev[key];
+        m_scriptKeyPrev[key] = down;
+        if (!inputEnabled) {
+            continue;
+        }
+        if (down) {
+            input.keysDown.insert(key);
+        }
+        if (down && !wasDown) {
+            input.keysPressed.insert(key);
+        }
+    }
+
+    if (window.Native()) {
+        for (int button = GLFW_MOUSE_BUTTON_1; button <= GLFW_MOUSE_BUTTON_LAST; ++button) {
+            const bool down = glfwGetMouseButton(window.Native(), button) == GLFW_PRESS;
+            const bool wasDown = m_scriptMousePrev[button];
+            m_scriptMousePrev[button] = down;
+            if (!inputEnabled) {
+                continue;
+            }
+            if (down) {
+                input.mouseButtonsDown.insert(button);
+            }
+            if (down && !wasDown) {
+                input.mouseButtonsPressed.insert(button);
+            }
+        }
+    }
+
+    if (inputEnabled) {
+        input.mouseDeltaX = window.MouseDeltaX();
+        input.mouseDeltaY = window.MouseDeltaY();
+    }
+    return input;
+}
+
+void EditorApp::StepPlayPhysics(float dt, bool inputEnabled)
 {
     m_physicsStepsLastFrame = 0;
     m_physicsEventEnterCount = 0;
     m_physicsEventStayCount = 0;
     m_physicsEventExitCount = 0;
+    m_physicsActionCount = 0;
     if (m_mode != EditorMode::Play || !m_playRegistry) {
         m_physicsStepRequested = false;
         return;
@@ -2359,8 +3293,13 @@ void EditorApp::StepPlayPhysics(float dt)
 
     const float step = std::max(m_physicsFixedTimestep, 0.0001f);
     if (m_physicsStepRequested) {
+        const engine::ScriptInputState scriptInput = CapturePlayScriptInput(inputEnabled);
+        UpdatePlayPlayerController(step, inputEnabled);
+        engine::UpdateScripts(*m_playRegistry, step, &scriptInput);
         engine::ecs::UpdateGameplay(*m_playRegistry, step);
+        engine::UpdateHealth(*m_playRegistry);
         engine::ecs::UpdateRuntimeMotion(*m_playRegistry, step);
+        m_playAnimationEvents.clear();
         m_playPhysics.Step(*m_playRegistry, step);
         CapturePlayPhysicsEvents();
         m_physicsStepRequested = false;
@@ -2369,13 +3308,23 @@ void EditorApp::StepPlayPhysics(float dt)
     }
 
     if (m_physicsPaused) {
+        CapturePlayScriptInput(inputEnabled);
         return;
     }
 
     m_physicsAccumulator += std::min(dt, 0.25f);
+    engine::ScriptInputState scriptInput;
+    bool scriptInputCaptured = false;
     constexpr int kMaxPhysicsStepsPerFrame = 5;
     while (m_physicsAccumulator >= step && m_physicsStepsLastFrame < kMaxPhysicsStepsPerFrame) {
+        if (!scriptInputCaptured) {
+            scriptInput = CapturePlayScriptInput(inputEnabled);
+            scriptInputCaptured = true;
+        }
+        UpdatePlayPlayerController(step, inputEnabled);
+        engine::UpdateScripts(*m_playRegistry, step);
         engine::ecs::UpdateGameplay(*m_playRegistry, step);
+        engine::UpdateHealth(*m_playRegistry);
         engine::ecs::UpdateRuntimeMotion(*m_playRegistry, step);
         m_playPhysics.Step(*m_playRegistry, step);
         CapturePlayPhysicsEvents();
@@ -2405,6 +3354,13 @@ void EditorApp::CapturePlayPhysicsEvents()
     };
 
     for (const engine::CollisionEvent& event : m_playPhysics.Events()) {
+        if (event.trigger
+            && (event.phase == engine::CollisionEvent::Phase::Enter
+                || event.phase == engine::CollisionEvent::Phase::Exit)) {
+            ApplyPlayTriggerAction(event.a, event.b, event.phase);
+            ApplyPlayTriggerAction(event.b, event.a, event.phase);
+        }
+
         switch (event.phase) {
         case engine::CollisionEvent::Phase::Enter:
             ++m_physicsEventEnterCount;
@@ -2435,6 +3391,8 @@ void EditorApp::CapturePlayPhysicsEvents()
                 EditorViewport::PhysicsEventGuide guide;
                 guide.a = transformA->position;
                 guide.b = transformB->position;
+                guide.objectA = row.objectA;
+                guide.objectB = row.objectB;
                 guide.phase = row.phase;
                 guide.trigger = row.trigger;
                 m_physicsEventGuides.push_back(guide);

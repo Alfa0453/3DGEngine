@@ -2,10 +2,13 @@
 
 #include "engine/ecs/Components.h"
 #include "engine/ecs/Registry.h"
+#include "engine/gameplay/GameplayComponents.h"
+#include "engine/gameplay/Script.h"
 #include "engine/graphics/DayNightCycle.h"
 #include "engine/graphics/Mesh.h"
 #include "engine/physics/PhysicsComponents.h"
 
+#include <algorithm>
 #include <fstream>
 #include <sstream>
 
@@ -79,11 +82,11 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
     std::string magic;
     int version = 0;
     in >> magic >> version;
-    if (magic != "3DGRuntimeScene" || version < 1 || version > 12) {
+    if (magic != "3DGRuntimeScene" || version < 1 || version > 21) {
         if (error) {
             *error = "Runtime scene file has an unknown format: "
                 + magic + " " + std::to_string(version)
-                + " (expected 3DGRuntimeScene 1..12).";
+                + " (expected 3DGRuntimeScene 1..21).";
         }
         return false;
     }
@@ -199,6 +202,143 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                 entity.materialPath.clear();
             }
         }
+        if (version >= 17) {
+            int skeletalModel = 0;
+            int animationAutoplay = 1;
+            int animationLoop = 1;
+            record >> skeletalModel
+                   >> entity.animationClipIndex
+                   >> entity.animationClipName
+                   >> animationAutoplay
+                   >> animationLoop
+                   >> entity.animationSpeed;
+            entity.skeletalModel = skeletalModel != 0;
+            entity.animationClipIndex = std::max(entity.animationClipIndex, 0);
+            if (entity.animationClipName == "-") {
+                entity.animationClipName.clear();
+            }
+            entity.animationAutoplay = animationAutoplay != 0;
+            entity.animationLoop = animationLoop != 0;
+            entity.animationSpeed = std::max(entity.animationSpeed, 0.0f);
+        }
+        if (version >= 18) {
+            int animationLocomotionEnabled = 0;
+            record >> animationLocomotionEnabled
+                   >> entity.animationIdleClipIndex
+                   >> entity.animationIdleClipName
+                   >> entity.animationWalkClipIndex
+                   >> entity.animationWalkClipName
+                   >> entity.animationRunClipIndex
+                   >> entity.animationRunClipName
+                   >> entity.animationWalkAt
+                   >> entity.animationRunAt;
+            entity.animationLocomotionEnabled = animationLocomotionEnabled != 0;
+            entity.animationIdleClipIndex = std::max(entity.animationIdleClipIndex, 0);
+            entity.animationWalkClipIndex = std::max(entity.animationWalkClipIndex, 0);
+            entity.animationRunClipIndex = std::max(entity.animationRunClipIndex, 0);
+            if (entity.animationIdleClipName == "-") {
+                entity.animationIdleClipName.clear();
+            }
+            if (entity.animationWalkClipName == "-") {
+                entity.animationWalkClipName.clear();
+            }
+            if (entity.animationRunClipName == "-") {
+                entity.animationRunClipName.clear();
+            }
+            entity.animationWalkAt = std::max(entity.animationWalkAt, 0.0f);
+            entity.animationRunAt = std::max(entity.animationRunAt, entity.animationWalkAt);
+        }
+        if (version >= 19) {
+            std::size_t eventCount = 0;
+            record >> eventCount;
+            for (std::size_t i = 0; i < eventCount; ++i) {
+                AnimationEventDesc event;
+                record >> event.clipIndex
+                       >> event.time
+                       >> event.name;
+                event.clipIndex = std::max(event.clipIndex, 0);
+                event.time = std::max(event.time, 0.0f);
+                if (event.name == "-") {
+                    event.name.clear();
+                }
+                entity.animationEvents.push_back(event);
+            }
+        }
+        if (version >= 20) {
+            std::size_t profileCount = 0;
+            record >> profileCount;
+            for (std::size_t i = 0; i < profileCount; ++i) {
+                AnimationActionProfileDesc profile;
+                record >> profile.name
+                       >> profile.clipIndex
+                       >> profile.clipName
+                       >> profile.maskRootBone
+                       >> profile.fadeIn
+                       >> profile.fadeOut
+                       >> profile.speed;
+                if (profile.name == "-") {
+                    profile.name.clear();
+                }
+                if (profile.clipName == "-") {
+                    profile.clipName.clear();
+                }
+                if (profile.maskRootBone == "-") {
+                    profile.maskRootBone.clear();
+                }
+                profile.clipIndex = std::max(profile.clipIndex, 0);
+                profile.fadeIn = std::max(profile.fadeIn, 0.0f);
+                profile.fadeOut = std::max(profile.fadeOut, 0.0f);
+                profile.speed = std::max(profile.speed, 0.0f);
+                entity.animationActionProfiles.push_back(profile);
+            }
+        }
+        if (version >= 21) {
+            std::size_t stateCount = 0;
+            record >> stateCount;
+            for (std::size_t i = 0; i < stateCount; ++i) {
+                AnimationStateDesc state;
+                int loop = 1;
+                record >> state.name
+                       >> state.clipIndex
+                       >> state.clipName
+                       >> loop
+                       >> state.speed;
+                if (state.name == "-") {
+                    state.name.clear();
+                }
+                if (state.clipName == "-") {
+                    state.clipName.clear();
+                }
+                state.clipIndex = std::max(state.clipIndex, 0);
+                state.loop = loop != 0;
+                state.speed = std::max(state.speed, 0.0f);
+                entity.animationStates.push_back(state);
+            }
+
+            std::size_t transitionCount = 0;
+            record >> transitionCount;
+            for (std::size_t i = 0; i < transitionCount; ++i) {
+                AnimationTransitionDesc transition;
+                record >> transition.fromState
+                       >> transition.toState
+                       >> transition.parameter
+                       >> transition.compare
+                       >> transition.threshold
+                       >> transition.fade;
+                if (transition.fromState == "-") {
+                    transition.fromState.clear();
+                }
+                if (transition.toState == "-") {
+                    transition.toState.clear();
+                }
+                if (transition.parameter == "-") {
+                    transition.parameter.clear();
+                }
+                transition.compare = std::clamp(transition.compare, 0, 3);
+                transition.fade = std::max(transition.fade, 0.0f);
+                entity.animationTransitions.push_back(transition);
+            }
+        }
         if (version >= 3) {
             record >> entity.linearVelocity.x >> entity.linearVelocity.y >> entity.linearVelocity.z
                    >> entity.angularVelocityAxis.x >> entity.angularVelocityAxis.y >> entity.angularVelocityAxis.z
@@ -235,7 +375,11 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             }
             record >> colliderEnabled
                    >> colliderShape
-                   >> entity.collider.radius
+                   >> entity.collider.radius;
+            if (version >= 13) {
+                record >> entity.collider.halfHeight;
+            }
+            record
                    >> entity.collider.halfExtents.x >> entity.collider.halfExtents.y >> entity.collider.halfExtents.z
                    >> entity.collider.planeNormal.x >> entity.collider.planeNormal.y >> entity.collider.planeNormal.z
                    >> entity.collider.planeOffset
@@ -253,6 +397,8 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                 entity.collider.shape = ecs::ColliderShape::Plane;
             } else if (colliderShape == static_cast<int>(ecs::ColliderShape::Box)) {
                 entity.collider.shape = ecs::ColliderShape::Box;
+            } else if (colliderShape == static_cast<int>(ecs::ColliderShape::Capsule)) {
+                entity.collider.shape = ecs::ColliderShape::Capsule;
             } else {
                 entity.collider.shape = ecs::ColliderShape::Sphere;
             }
@@ -272,6 +418,57 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                    >> entity.mover.speed
                    >> entity.mover.phase;
             entity.moverEnabled = moverEnabled != 0;
+        }
+        if (version >= 16) {
+            int healthEnabled = 0;
+            int healthAlive = entity.health.alive ? 1 : 0;
+            record >> healthEnabled
+                   >> entity.health.hp
+                   >> entity.health.maxHp
+                   >> healthAlive;
+            entity.healthEnabled = healthEnabled != 0;
+            entity.health.maxHp = std::max(entity.health.maxHp, 1.0f);
+            entity.health.hp = std::clamp(entity.health.hp, 0.0f, entity.health.maxHp);
+            entity.health.alive = healthAlive != 0 && entity.health.hp > 0.0f;
+            entity.health.justDied = false;
+        }
+        if (version >= 14) {
+            int scriptEnabled = 0;
+            record >> scriptEnabled
+                   >> entity.scriptClassName
+                   >> entity.scriptPath;
+            if (entity.scriptClassName == "-") {
+                entity.scriptClassName.clear();
+            }
+            if (entity.scriptPath == "-") {
+                entity.scriptPath.clear();
+            }
+            entity.scriptEnabled = scriptEnabled != 0;
+            if (version >= 15) {
+                std::size_t scriptFieldCount = 0;
+                record >> scriptFieldCount;
+                for (std::size_t i = 0; i < scriptFieldCount; ++i) {
+                    ScriptField field;
+                    int fieldType = 0;
+                    record >> field.name >> fieldType >> field.value;
+                    if (field.name == "-") {
+                        field.name.clear();
+                    }
+                    if (field.value == "-") {
+                        field.value.clear();
+                    }
+                    if (fieldType == static_cast<int>(ScriptField::Type::Int)) {
+                        field.type = ScriptField::Type::Int;
+                    } else if (fieldType == static_cast<int>(ScriptField::Type::Bool)) {
+                        field.type = ScriptField::Type::Bool;
+                    } else if (fieldType == static_cast<int>(ScriptField::Type::String)) {
+                        field.type = ScriptField::Type::String;
+                    } else {
+                        field.type = ScriptField::Type::Float;
+                    }
+                    entity.scriptFields.push_back(field);
+                }
+            }
         }
 
         if (!record) {
@@ -304,6 +501,7 @@ bool RuntimeSceneLoader::Instantiate(const Scene &scene, ecs::Registry &registry
         }
 
         const ecs::Entity entity = registry.Create();
+        registry.Add<ecs::RuntimeName>(entity, ecs::RuntimeName{desc.name});
         registry.Add<ecs::Transform>(entity, ecs::Transform{
             desc.position,
             desc.scale,
@@ -313,6 +511,95 @@ bool RuntimeSceneLoader::Instantiate(const Scene &scene, ecs::Registry &registry
             mesh,
             desc.color
         });
+        if (!desc.modelPath.empty() && desc.skeletalModel) {
+            std::vector<ecs::SkinnedModelAsset::Notify> notifies;
+            notifies.reserve(desc.animationEvents.size());
+            for (const AnimationEventDesc& event : desc.animationEvents) {
+                if (event.name.empty()) {
+                    continue;
+                }
+                notifies.push_back(ecs::SkinnedModelAsset::Notify{
+                    event.clipIndex,
+                    event.time,
+                    event.name
+                });
+            }
+            std::vector<ecs::SkinnedModelAsset::ActionProfile> actionProfiles;
+            actionProfiles.reserve(desc.animationActionProfiles.size());
+            for (const AnimationActionProfileDesc& profile : desc.animationActionProfiles) {
+                if (profile.name.empty()) {
+                    continue;
+                }
+                actionProfiles.push_back(ecs::SkinnedModelAsset::ActionProfile{
+                    profile.name,
+                    profile.clipIndex,
+                    profile.clipName,
+                    profile.maskRootBone,
+                    profile.fadeIn,
+                    profile.fadeOut,
+                    profile.speed
+                });
+            }
+            std::vector<ecs::SkinnedModelAsset::AnimationState> states;
+            states.reserve(desc.animationStates.size());
+            for (const AnimationStateDesc& state : desc.animationStates) {
+                if (state.name.empty()) {
+                    continue;
+                }
+                states.push_back(ecs::SkinnedModelAsset::AnimationState{
+                    state.name,
+                    state.clipIndex,
+                    state.clipName,
+                    state.loop,
+                    state.speed
+                });
+            }
+            auto findState = [&](const std::string& name) {
+                for (std::size_t i = 0; i < states.size(); ++i) {
+                    if (states[i].name == name) {
+                        return static_cast<int>(i);
+                    }
+                }
+                return -1;
+            };
+            std::vector<ecs::SkinnedModelAsset::AnimationTransition> transitions;
+            transitions.reserve(desc.animationTransitions.size());
+            for (const AnimationTransitionDesc& transition : desc.animationTransitions) {
+                const int from = findState(transition.fromState);
+                const int to = findState(transition.toState);
+                if (from < 0 || to < 0 || from == to) {
+                    continue;
+                }
+                transitions.push_back(ecs::SkinnedModelAsset::AnimationTransition{
+                    from,
+                    to,
+                    transition.parameter,
+                    transition.compare,
+                    transition.threshold,
+                    transition.fade
+                });
+            }
+            registry.Add<ecs::SkinnedModelAsset>(entity, ecs::SkinnedModelAsset{
+                desc.modelPath,
+                desc.animationClipIndex,
+                desc.animationClipName,
+                desc.animationAutoplay,
+                desc.animationLoop,
+                desc.animationSpeed,
+                desc.animationLocomotionEnabled,
+                desc.animationIdleClipIndex,
+                desc.animationWalkClipIndex,
+                desc.animationRunClipIndex,
+                desc.animationIdleClipName,
+                desc.animationWalkClipName,
+                desc.animationRunClipName,
+                desc.animationWalkAt,
+                desc.animationRunAt,
+                std::move(notifies)
+            });
+        } else if (!desc.modelPath.empty()) {
+            registry.Add<ecs::ModelAsset>(entity, ecs::ModelAsset{desc.modelPath});
+        }
         if (!desc.modelPath.empty()) {
             registry.Add<ecs::ModelAsset>(entity, ecs::ModelAsset{desc.modelPath});
         }
@@ -320,11 +607,11 @@ bool RuntimeSceneLoader::Instantiate(const Scene &scene, ecs::Registry &registry
             registry.Add<ecs::MaterialAsset>(entity, ecs::MaterialAsset{desc.materialPath});
         }
 
-        if (glm::dot(desc.linearVelocity, desc.linearVelocity) > 0.0f) {
+        if (desc.linearVelocityEnabled) {
             registry.Add<ecs::LinearVelocity>(entity, ecs::LinearVelocity{desc.linearVelocity});
         }
 
-        if (desc.angularVelocityRadians != 0.0f &&
+        if (desc.angularVelocityEnabled &&
             glm::dot(desc.angularVelocityAxis, desc.angularVelocityAxis) > 0.0f) {
             registry.Add<ecs::AngularVelocity>(entity, ecs::AngularVelocity{
                 desc.angularVelocityAxis,
@@ -346,6 +633,17 @@ bool RuntimeSceneLoader::Instantiate(const Scene &scene, ecs::Registry &registry
             mover.initialized = true;
             registry.Add<ecs::Mover>(entity, mover);
         }
+        if (desc.healthEnabled) {
+            registry.Add<Health>(entity, desc.health);
+        }
+        if (desc.scriptEnabled && !desc.scriptClassName.empty()) {
+            NativeScriptComponent script;
+            script.enabled = true;
+            script.className = desc.scriptClassName;
+            script.sourcePath = desc.scriptPath;
+            script.fields = desc.scriptFields;
+            registry.Add<NativeScriptComponent>(entity, std::move(script));
+        }
 
         if (created) {
             created->push_back(entity);
@@ -363,6 +661,7 @@ bool RuntimeSceneLoader::Instantiate(const Scene &scene, ecs::Registry &registry
         }
 
         const ecs::Entity entity = registry.Create();
+        registry.Add<ecs::RuntimeName>(entity, ecs::RuntimeName{desc.name});
         registry.Add<ecs::Transform>(entity, ecs::Transform{
             desc.position,
             glm::vec3(1.0f),
@@ -376,6 +675,7 @@ bool RuntimeSceneLoader::Instantiate(const Scene &scene, ecs::Registry &registry
 
     if (scene.environment.driveSunLight && !environmentSunApplied) {
         const ecs::Entity entity = registry.Create();
+        registry.Add<ecs::RuntimeName>(entity, ecs::RuntimeName{"EnvironmentSun"});
         registry.Add<ecs::Transform>(entity, ecs::Transform{});
         registry.Add<ecs::Light>(entity, EnvironmentSunLight(scene.environment));
         if (created) {

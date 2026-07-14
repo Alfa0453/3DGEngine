@@ -4,6 +4,11 @@
 #include "engine/graphics/Shader.h"
 #include "engine/graphics/Camera.h"
 #include "engine/graphics/Texture.h"
+#include "engine/graphics/CascadedShadow.h"
+#include "engine/graphics/IBL.h"
+#include "engine/animation/AnimatedModel.h"
+#include "engine/ecs/Registry.h"
+#include "engine/ecs/Components.h"
 
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -12,6 +17,7 @@
 namespace engine {
 namespace {
 
+// Shared skinned vertex stage: blend up to four bone matrices, then model+VP.
 const char* kVert = R"GLSL(
 #version 330 core
 layout (location = 0) in vec3 aPos;
@@ -41,6 +47,7 @@ void main() {
 }
 )GLSL";
 
+// Phong fragment (standalone character demo).
 const char* kFrag = R"GLSL(
 #version 330 core
 in vec3 vWorldPos;
@@ -67,13 +74,139 @@ void main() {
     float diff = max(dot(N, L), 0.0);
     float spec = (diff > 0.0) ? pow(max(dot(N, H), 0.0), max(uShininess, 1.0)) : 0.0;
     vec3 color = uAmbient * base + uSunColor * (diff * base + spec * uSpecular) + uEmissive;
-    color = color / (color + vec3(1.0));      // Reinhard tone map
-    color = pow(color, vec3(1.0 / 2.2));       // gamma
+    color = color / (color + vec3(1.0));
+    color = pow(color, vec3(1.0 / 2.2));
     FragColor = vec4(color, 1.0);
 }
 )GLSL";
 
-// Skinned depth-only shader for shadow maps (position + bones only, empty frag).
+// Cook-Torrance fragment matching PbrRenderer's sun + cascade shadows +
+// ambient/IBL + fog (no clustered/spot/area lights -- characters use the sun).
+const char* kPbrFrag = R"GLSL(
+#version 330 core
+const float PI = 3.14159265359;
+in vec3 vWorldPos;
+in vec3 vNormal;
+in vec2 vUV;
+out vec4 FragColor;
+uniform vec3  uViewPos;
+uniform vec3  uAlbedo;
+uniform float uMetallic;
+uniform float uRoughness;
+uniform float uAO;
+uniform vec3  uEmissive;
+uniform int   uHasAlbedoMap;
+uniform sampler2D uAlbedoMap;
+uniform vec3  uSunDir;
+uniform vec3  uSunColor;
+uniform vec3  uAmbient;
+uniform sampler2DArray uCascadeMaps;
+uniform mat4  uCascadeVP[4];
+uniform float uCascadeSplits[4];
+uniform mat4  uView;
+uniform float uShadowSoftness;
+uniform int   uHasShadow;
+uniform int   uUseIBL;
+uniform samplerCube uIrradiance;
+uniform samplerCube uPrefilter;
+uniform sampler2D   uBrdfLUT;
+uniform float uMaxReflectionLod;
+uniform int   uApplyTonemap;
+uniform int   uFogEnabled;
+uniform vec3  uFogColor;
+uniform float uFogDensity;
+uniform float uFogHeight;
+uniform float uFogHeightFalloff;
+float DistributionGGX(vec3 N, vec3 H, float r) {
+    float a = r*r; float a2 = a*a; float NdotH = max(dot(N,H),0.0);
+    float d = (NdotH*NdotH)*(a2-1.0)+1.0; return a2/(PI*d*d);
+}
+float GeometrySchlickGGX(float NdotV, float r) {
+    float k = (r+1.0)*(r+1.0)/8.0; return NdotV/(NdotV*(1.0-k)+k);
+}
+float GeometrySmith(vec3 N, vec3 V, vec3 L, float r) {
+    return GeometrySchlickGGX(max(dot(N,V),0.0),r)*GeometrySchlickGGX(max(dot(N,L),0.0),r);
+}
+vec3 FresnelSchlick(float c, vec3 F0) { return F0+(1.0-F0)*pow(clamp(1.0-c,0.0,1.0),5.0); }
+vec3 FresnelSchlickRough(float c, vec3 F0, float r) {
+    return F0 + (max(vec3(1.0-r), F0) - F0) * pow(clamp(1.0-c,0.0,1.0),5.0);
+}
+float ShadowFactor(float NdotL) {
+    float depth = abs((uView * vec4(vWorldPos, 1.0)).z);
+    int layer = 3;
+    for (int i = 0; i < 4; ++i) { if (depth < uCascadeSplits[i]) { layer = i; break; } }
+    vec4 lp = uCascadeVP[layer] * vec4(vWorldPos, 1.0);
+    vec3 p = lp.xyz / lp.w * 0.5 + 0.5;
+    if (p.z > 1.0) return 0.0;
+    float cur = p.z;
+    float bias = max(0.0025 * (1.0 - NdotL), 0.0008);
+    vec2 texel = 1.0 / vec2(textureSize(uCascadeMaps, 0).xy);
+    float blockerSum = 0.0; int blockers = 0;
+    for (int x = -2; x <= 2; ++x) for (int y = -2; y <= 2; ++y) {
+        float d = texture(uCascadeMaps, vec3(p.xy + vec2(x, y) * texel * uShadowSoftness, float(layer))).r;
+        if (d < cur - bias) { blockerSum += d; ++blockers; }
+    }
+    if (blockers == 0) return 0.0;
+    float avgBlocker = blockerSum / float(blockers);
+    float penumbra = (cur - avgBlocker) * uShadowSoftness * 300.0;
+    float radius = clamp(penumbra, 1.0, 16.0);
+    float s = 0.0;
+    for (int x = -2; x <= 2; ++x) for (int y = -2; y <= 2; ++y) {
+        float d = texture(uCascadeMaps, vec3(p.xy + vec2(x, y) * texel * radius, float(layer))).r;
+        s += (cur - bias > d) ? 1.0 : 0.0;
+    }
+    return s / 25.0;
+}
+vec3 Lighting(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 albedo, vec3 F0, float m, float r) {
+    vec3 H = normalize(V+L);
+    float NDF = DistributionGGX(N,H,r);
+    float G = GeometrySmith(N,V,L,r);
+    vec3 F = FresnelSchlick(max(dot(H,V),0.0),F0);
+    vec3 spec = (NDF*G*F)/(4.0*max(dot(N,V),0.0)*max(dot(N,L),0.0)+0.0001);
+    vec3 kD = (vec3(1.0)-F)*(1.0-m);
+    return (kD*albedo/PI+spec)*radiance*max(dot(N,L),0.0);
+}
+void main() {
+    vec3 albedo = uAlbedo;
+    if (uHasAlbedoMap == 1) albedo *= texture(uAlbedoMap, vUV).rgb;
+    float metallic = uMetallic, roughness = uRoughness, ao = uAO;
+    vec3 N = normalize(vNormal);
+    vec3 V = normalize(uViewPos - vWorldPos);
+    vec3 F0 = mix(vec3(0.04), albedo, metallic);
+    vec3 Ls = normalize(-uSunDir);
+    float sunNdotL = max(dot(N, Ls), 0.0);
+    float shadow = (uHasShadow == 1) ? ShadowFactor(sunNdotL) : 0.0;
+    vec3 Lo = (1.0 - shadow) * Lighting(N, V, Ls, uSunColor, albedo, F0, metallic, roughness);
+    vec3 ambient;
+    if (uUseIBL == 1) {
+        vec3 F = FresnelSchlickRough(max(dot(N,V),0.0), F0, roughness);
+        vec3 kD = (vec3(1.0)-F)*(1.0-metallic);
+        vec3 irradiance = texture(uIrradiance, N).rgb;
+        vec3 diffuse = irradiance * albedo;
+        vec3 R = reflect(-V, N);
+        vec3 prefiltered = textureLod(uPrefilter, R, roughness*uMaxReflectionLod).rgb;
+        vec2 brdf = texture(uBrdfLUT, vec2(max(dot(N,V),0.0), roughness)).rg;
+        vec3 specular = prefiltered * (F*brdf.x + brdf.y);
+        ambient = (kD*diffuse + specular) * ao;
+    } else {
+        ambient = uAmbient*albedo*ao;
+    }
+    vec3 color = ambient + Lo + uEmissive;
+    if (uFogEnabled == 1) {
+        float dist = length(uViewPos - vWorldPos);
+        float distFog = 1.0 - exp(-dist * uFogDensity);
+        float heightF = clamp(exp(-(vWorldPos.y - uFogHeight) * uFogHeightFalloff), 0.0, 1.0);
+        float fog = clamp(distFog * heightF, 0.0, 1.0);
+        color = mix(color, uFogColor, fog);
+    }
+    if (uApplyTonemap == 1) {
+        color = color/(color+vec3(1.0));
+        color = pow(color, vec3(1.0/2.2));
+    }
+    FragColor = vec4(color, 1.0);
+}
+)GLSL";
+
 const char* kDepthVert = R"GLSL(
 #version 330 core
 layout (location = 0) in vec3 aPos;
@@ -96,10 +229,19 @@ const char* kDepthFrag = R"GLSL(
 void main() {}
 )GLSL";
 
+void UploadBones(Shader& sh, const std::vector<glm::mat4>& bones) {
+    const std::size_t n = (bones.size() < static_cast<std::size_t>(SkinnedRenderer::kMaxBones))
+                          ? bones.size() : static_cast<std::size_t>(SkinnedRenderer::kMaxBones);
+    for (std::size_t i = 0; i < n; ++i)
+        sh.SetMat4("uBones[" + std::to_string(i) + "]", bones[i]);
+}
+
 } // namespace
 
 SkinnedRenderer::SkinnedRenderer()
-    : m_shader(std::make_unique<Shader>(kVert, kFrag)) {}
+    : m_shader(std::make_unique<Shader>(kVert, kFrag)),
+      m_pbr(std::make_unique<Shader>(kVert, kPbrFrag)),
+      m_depth(std::make_unique<Shader>(kDepthVert, kDepthFrag)) {}
 
 SkinnedRenderer::~SkinnedRenderer() = default;
 
@@ -116,11 +258,7 @@ void SkinnedRenderer::Draw(const SkinnedModel& model,
     m_shader->SetVec3("uSunDir", sunDir);
     m_shader->SetVec3("uSunColor", sunColor);
     m_shader->SetVec3("uAmbient", ambient);
-
-    const std::size_t n = (bones.size() < static_cast<std::size_t>(kMaxBones))
-                          ? bones.size() : static_cast<std::size_t>(kMaxBones);
-    for (std::size_t i = 0; i < n; ++i)
-        m_shader->SetMat4("uBones[" + std::to_string(i) + "]", bones[i]);
+    UploadBones(*m_shader, bones);
 
     const auto& mats = model.Materials();
     const auto& texs = model.Textures();
@@ -148,17 +286,98 @@ void SkinnedRenderer::Draw(const SkinnedModel& model,
     }
 }
 
+void SkinnedRenderer::DrawScene(ecs::Registry& reg, const Camera& camera, float aspect,
+                                const SkinnedLighting& lit) {
+    if (!lit.cascade || !lit.ibl) return;   // both textures are required (avoids sampler aliasing)
+
+    m_pbr->Bind();
+    m_pbr->SetMat4("uViewProj", camera.ProjectionMatrix(aspect) * camera.ViewMatrix());
+    m_pbr->SetMat4("uView", camera.ViewMatrix());
+    m_pbr->SetVec3("uViewPos", camera.Position());
+    m_pbr->SetVec3("uSunDir", lit.sunDir);
+    m_pbr->SetVec3("uSunColor", lit.sunColor);
+    m_pbr->SetVec3("uAmbient", lit.ambient);
+    m_pbr->SetInt("uApplyTonemap", lit.tonemap ? 1 : 0);
+    m_pbr->SetFloat("uShadowSoftness", lit.shadowSoftness);
+
+    // Sun (cascade) shadows -- same texture array + matrices the static PBR pass built.
+    lit.cascade->BindArray(4);
+    m_pbr->SetInt("uCascadeMaps", 4);
+    m_pbr->SetInt("uHasShadow", 1);
+    for (int i = 0; i < CascadedShadow::kCascades; ++i) {
+        const std::string ix = "[" + std::to_string(i) + "]";
+        m_pbr->SetMat4("uCascadeVP" + ix, lit.cascade->CascadeVP(i));
+        m_pbr->SetFloat("uCascadeSplits" + ix, lit.cascade->SplitDepth(i));
+    }
+    // Image-based ambient.
+    lit.ibl->Bind(5, 6, 7);
+    m_pbr->SetInt("uUseIBL", 1);
+    m_pbr->SetInt("uIrradiance", 5);
+    m_pbr->SetInt("uPrefilter", 6);
+    m_pbr->SetInt("uBrdfLUT", 7);
+    m_pbr->SetFloat("uMaxReflectionLod", lit.ibl->MaxReflectionLod());
+    // Fog.
+    m_pbr->SetInt("uFogEnabled", lit.fog ? 1 : 0);
+    m_pbr->SetVec3("uFogColor", lit.fogColor);
+    m_pbr->SetFloat("uFogDensity", lit.fogDensity);
+    m_pbr->SetFloat("uFogHeight", lit.fogHeight);
+    m_pbr->SetFloat("uFogHeightFalloff", lit.fogHeightFalloff);
+
+    reg.view<ecs::Transform, AnimatedModel>().each([&](ecs::Entity, ecs::Transform& t, AnimatedModel& am) {
+        if (!am.model || am.pose.empty()) return;
+        m_pbr->SetMat4("uModel", t.Model());
+        UploadBones(*m_pbr, am.pose);
+
+        // An albedo override (a shared palette atlas, say) applies to every submesh.
+        if (am.albedoOverride) { am.albedoOverride->Bind(0); m_pbr->SetInt("uAlbedoMap", 0); }
+
+        const auto& mats = am.model->Materials();
+        const auto& texs = am.model->Textures();
+        for (const SubMesh& sm : am.model->SubMeshes()) {
+            glm::vec3 diffuse(0.8f), emissive(0.0f);
+            int diffuseMap = -1;
+            if (sm.material >= 0 && sm.material < static_cast<int>(mats.size())) {
+                const Material& m = mats[static_cast<std::size_t>(sm.material)];
+                diffuse = m.diffuse; emissive = m.emissive; diffuseMap = m.diffuseMap;
+            }
+            m_pbr->SetVec3("uAlbedo", am.albedoOverride ? am.tint : (diffuse * am.tint));
+            m_pbr->SetFloat("uMetallic", am.metallic);
+            m_pbr->SetFloat("uRoughness", am.roughness);
+            m_pbr->SetFloat("uAO", 1.0f);
+            m_pbr->SetVec3("uEmissive", emissive);
+            if (am.albedoOverride) {
+                m_pbr->SetInt("uHasAlbedoMap", 1);              // override bound above
+            } else if (diffuseMap >= 0 && diffuseMap < static_cast<int>(texs.size()) && texs[static_cast<std::size_t>(diffuseMap)]) {
+                texs[static_cast<std::size_t>(diffuseMap)]->Bind(0);
+                m_pbr->SetInt("uAlbedoMap", 0);
+                m_pbr->SetInt("uHasAlbedoMap", 1);
+            } else {
+                m_pbr->SetInt("uHasAlbedoMap", 0);
+            }
+            sm.mesh.Draw();
+        }
+    });
+}
+
 void SkinnedRenderer::DrawDepth(const SkinnedModel& model,
                                 const std::vector<glm::mat4>& bones,
                                 const glm::mat4& modelMatrix, const glm::mat4& lightVP) {
     m_depth->Bind();
     m_depth->SetMat4("uLightVP", lightVP);
     m_depth->SetMat4("uModel", modelMatrix);
-    const std::size_t n = (bones.size() < static_cast<std::size_t>(kMaxBones))
-                          ? bones.size() : static_cast<std::size_t>(kMaxBones);
-    for (std::size_t i = 0; i < n; ++i)
-        m_depth->SetMat4("uBones[" + std::to_string(i) + "]", bones[i]);
+    UploadBones(*m_depth, bones);
     for (const SubMesh& sm : model.SubMeshes()) sm.mesh.Draw();
+}
+
+void SkinnedRenderer::DrawSceneDepth(ecs::Registry& reg, const glm::mat4& lightVP) {
+    m_depth->Bind();
+    m_depth->SetMat4("uLightVP", lightVP);
+    reg.view<ecs::Transform, AnimatedModel>().each([&](ecs::Entity, ecs::Transform& t, AnimatedModel& am) {
+        if (!am.model || am.pose.empty() || !am.castShadow) return;
+        m_depth->SetMat4("uModel", t.Model());
+        UploadBones(*m_depth, am.pose);
+        for (const SubMesh& sm : am.model->SubMeshes()) sm.mesh.Draw();
+    });
 }
 
 } // namespace engine

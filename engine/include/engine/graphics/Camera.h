@@ -36,6 +36,7 @@ public:
 
     const glm::vec3& Position() const { return m_position; }
     const glm::vec3& Front() const { return m_front; }
+    
 
     // Lens settings, freely adjustable.
     float fov       = 45.0f;   // vertical field of view, in degrees

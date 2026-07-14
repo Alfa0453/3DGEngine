@@ -12,6 +12,7 @@ add_library(engine STATIC
     src/graphics/Renderer.cpp
     src/graphics/Texture.cpp
     src/graphics/TextRenderer.cpp
+    src/graphics/ParticleRenderer.cpp
     src/graphics/ParticleSystem.cpp
     src/graphics/Primitives.cpp
     src/graphics/ModelDraw.cpp
@@ -36,21 +37,30 @@ add_library(engine STATIC
     src/graphics/IBL.cpp
     src/graphics/SSAO.cpp
     src/graphics/SSR.cpp
+    src/graphics/Terrain.cpp
     src/scene/RuntimeSceneLoader.cpp
     src/assets/RuntimeAssetManager.cpp
     src/assets/MaterialAssetLoader.cpp
     src/ui/ImGuiLayer.cpp
+    src/ui/UI.cpp
+    src/ui/UiBehavior.cpp
     src/ecs/Ecs.cpp
     src/audio/AudioEngine.cpp
     src/audio/miniaudio_impl.c
     src/physics/PhysicsWorld.cpp
     src/physics/CharacterController.cpp
     src/animation/Animator.cpp
+    src/animation/AnimationController.cpp
+    src/animation/AnimatedModel.cpp
     src/ai/AStar.cpp
     src/ai/Perception.cpp
     src/ai/Steering.cpp
     src/ai/AiAgent.cpp
+    src/ai/NavMesh.cpp
+    src/ai/NavMeshBuilder.cpp
     src/gameplay/PlayerController.cpp
+    src/gameplay/GameplaySystems.cpp
+    src/gameplay/Script.cpp
 )
 
 # PUBLIC headers live under include/ so consumers write:  #include <engine/...>

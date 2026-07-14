@@ -8,25 +8,40 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstddef>
 #include <cstdio>
+#include <fstream>
 #include <filesystem>
+#include <sstream>
 #include <string>
 #include <vector>
 
 namespace {
 
 std::array<char, 128> g_objectNameBuffer{};
+std::array<char, 128> g_scriptClassBuffer{};
 engine::ecs::Entity g_objectNameEntity = engine::ecs::kNull;
+engine::ecs::Entity g_scriptEntity = engine::ecs::kNull;
+int g_scriptTemplateIndex = 0;
 ImGuiTextFilter g_hierarchyFilter;
 
 const char* PrimitiveName(EditorScene::Primitive primitive) {
-    return primitive == EditorScene::Primitive::Plane ? "Plane" : "Cube";
+    if (primitive == EditorScene::Primitive::Plane) {
+        return "Plane";
+    }
+    if (primitive == EditorScene::Primitive::Sphere) {
+        return "Sphere";
+    }
+    return "Cube";
 }
 
 const char* ObjectTypeName(const EditorScene::Object& object) {
     if (object.light) {
         return "Light";
+    }
+    if (object.skeletalModel) {
+        return "Skeletal Model";
     }
     return object.modelAssetPath.empty() ? PrimitiveName(object.primitive) : "Model";
 }
@@ -85,6 +100,312 @@ const char* ColliderShapeName(engine::ecs::ColliderShape shape) {
     case engine::ecs::ColliderShape::Plane: return "Plane";
     }
     return "Unknown";
+}
+
+const char* TriggerActionModeName(EditorScene::TriggerActionMode mode) {
+    switch (mode) {
+    case EditorScene::TriggerActionMode::None: return "None";
+    case EditorScene::TriggerActionMode::Enable: return "Enable";
+    case EditorScene::TriggerActionMode::Disable: return "Disable";
+    case EditorScene::TriggerActionMode::Toggle: return "Toggle";
+    }
+    return "None";
+}
+
+const char* ScriptFieldTypeName(EditorScene::ScriptField::Type type) {
+    switch (type) {
+    case EditorScene::ScriptField::Type::Float: return "Float";
+    case EditorScene::ScriptField::Type::Int: return "Int";
+    case EditorScene::ScriptField::Type::Bool: return "Bool";
+    case EditorScene::ScriptField::Type::String: return "String";
+    }
+    return "Float";
+}
+
+EditorScene::ScriptField::Type ScriptFieldTypeFromIndex(int index) {
+    switch (index) {
+    case 1: return EditorScene::ScriptField::Type::Int;
+    case 2: return EditorScene::ScriptField::Type::Bool;
+    case 3: return EditorScene::ScriptField::Type::String;
+    default: return EditorScene::ScriptField::Type::Float;
+    }
+}
+
+int ScriptFieldTypeIndex(EditorScene::ScriptField::Type type) {
+    switch (type) {
+    case EditorScene::ScriptField::Type::Float: return 0;
+    case EditorScene::ScriptField::Type::Int: return 1;
+    case EditorScene::ScriptField::Type::Bool: return 2;
+    case EditorScene::ScriptField::Type::String: return 3;
+    }
+    return 0;
+}
+
+enum class ScriptTemplate {
+    Empty = 0,
+    PlayerMovement = 1,
+    DoorOpener = 2,
+    Pickup = 3,
+    DamageZone = 4
+};
+
+ScriptTemplate ScriptTemplateFromIndex(int index) {
+    switch (index) {
+    case 1: return ScriptTemplate::PlayerMovement;
+    case 2: return ScriptTemplate::DoorOpener;
+    case 3: return ScriptTemplate::Pickup;
+    case 4: return ScriptTemplate::DamageZone;
+    default: return ScriptTemplate::Empty;
+    }
+}
+
+std::vector<EditorScene::ScriptField> DefaultFieldsForTemplate(ScriptTemplate scriptTemplate) {
+    using Field = EditorScene::ScriptField;
+    std::vector<Field> fields;
+    auto add = [&fields](const char* name, Field::Type type, const char* value) {
+        Field field;
+        field.name = name;
+        field.type = type;
+        field.value = value;
+        fields.push_back(field);
+    };
+
+    switch (scriptTemplate) {
+    case ScriptTemplate::PlayerMovement:
+        add("speed", Field::Type::Float, "4.0");
+        break;
+    case ScriptTemplate::DoorOpener:
+        add("target", Field::Type::String, "Door");
+        add("speed", Field::Type::Float, "2.0");
+        add("height", Field::Type::Float, "3.0");
+        break;
+    case ScriptTemplate::Pickup:
+        add("interactKey", Field::Type::String, "E");
+        break;
+    case ScriptTemplate::DamageZone:
+        add("target", Field::Type::String, "PlayerStart");
+        add("damagePerSecond", Field::Type::Float, "10.0");
+        break;
+    case ScriptTemplate::Empty:
+        break;
+    }
+    return fields;
+}
+
+std::string ScriptTemplateDescription(ScriptTemplate scriptTemplate) {
+    switch (scriptTemplate) {
+    case ScriptTemplate::PlayerMovement: return "Moves this object with WASD using the `speed` field.";
+    case ScriptTemplate::DoorOpener: return "Moves a named target upward while E is held.";
+    case ScriptTemplate::Pickup: return "Destroys this object when E is pressed.";
+    case ScriptTemplate::DamageZone: return "Damages a named Health target every update.";
+    case ScriptTemplate::Empty: return "Blank script with helper comments.";
+    }
+    return "Blank script with helper comments.";
+}
+
+void WriteTemplateUpdateBody(std::ostringstream& source, ScriptTemplate scriptTemplate) {
+    switch (scriptTemplate) {
+    case ScriptTemplate::PlayerMovement:
+        source << "    const float speed = GetFieldFloat(\"speed\", 4.0f);\n"
+               << "    auto* transform = Transform();\n"
+               << "    if (!transform) {\n"
+               << "        return;\n"
+               << "    }\n"
+               << "    glm::vec3 move(0.0f);\n"
+               << "    if (IsKeyDown('W')) move.z -= 1.0f;\n"
+               << "    if (IsKeyDown('S')) move.z += 1.0f;\n"
+               << "    if (IsKeyDown('A')) move.x -= 1.0f;\n"
+               << "    if (IsKeyDown('D')) move.x += 1.0f;\n"
+               << "    if (glm::length(move) > 0.0f) {\n"
+               << "        transform->position += glm::normalize(move) * speed * dt;\n"
+               << "    }\n";
+        break;
+    case ScriptTemplate::DoorOpener:
+        source << "    const std::string targetName = GetFieldString(\"target\", \"Door\");\n"
+               << "    const float speed = GetFieldFloat(\"speed\", 2.0f);\n"
+               << "    const float height = GetFieldFloat(\"height\", 3.0f);\n"
+               << "    auto* target = FindTransform(targetName);\n"
+               << "    if (!target || !IsKeyDown('E')) {\n"
+               << "        return;\n"
+               << "    }\n"
+               << "    if (target->position.y < height) {\n"
+               << "        target->position.y = std::min(height, target->position.y + speed * dt);\n"
+               << "    }\n";
+        break;
+    case ScriptTemplate::Pickup:
+        source << "    if (WasKeyPressed('E')) {\n"
+               << "        DestroySelf();\n"
+               << "    }\n";
+        break;
+    case ScriptTemplate::DamageZone:
+        source << "    const std::string targetName = GetFieldString(\"target\", \"PlayerStart\");\n"
+               << "    const float damage = GetFieldFloat(\"damagePerSecond\", 10.0f) * dt;\n"
+               << "    const engine::ecs::Entity target = FindObject(targetName);\n"
+               << "    if (target == engine::ecs::kNull) {\n"
+               << "        return;\n"
+               << "    }\n"
+               << "    if (!IsTriggerTouching(target)) {\n"
+               << "        return;\n"
+               << "    }\n"
+               << "    if (auto* health = TryGet<engine::Health>(target)) {\n"
+               << "        health->Damage(damage);\n"
+               << "    }\n";
+        break;
+    case ScriptTemplate::Empty:
+        source << "    (void)dt;\n"
+               << "    // Called every Play-mode update.\n"
+               << "    // Helpers: GetFieldFloat(\"speed\", 1.0f), IsKeyDown(key), WasKeyPressed(key), Transform(), FindObject(\"Door\"), DestroySelf().\n";
+        break;
+    }
+}
+
+bool DrawTriggerActionModeCombo(const char* label, EditorScene::TriggerActionMode* mode) {
+    bool changed = false;
+    if (ImGui::BeginCombo(label, TriggerActionModeName(*mode))) {
+        const EditorScene::TriggerActionMode modes[] = {
+            EditorScene::TriggerActionMode::None,
+            EditorScene::TriggerActionMode::Enable,
+            EditorScene::TriggerActionMode::Disable,
+            EditorScene::TriggerActionMode::Toggle
+        };
+        for (EditorScene::TriggerActionMode candidate : modes) {
+            const bool selected = candidate == *mode;
+            if (ImGui::Selectable(TriggerActionModeName(candidate), selected)) {
+                *mode = candidate;
+                changed = true;
+            }
+            if (selected) {
+                ImGui::SetItemDefaultFocus();
+            }
+        }
+        ImGui::EndCombo();
+    }
+    return changed;
+}
+
+std::string SanitizeScriptClassName(const std::string& raw) {
+    std::string result;
+    result.reserve(raw.size());
+    for (char ch : raw) {
+        const unsigned char u = static_cast<unsigned char>(ch);
+        if (std::isalnum(u) || ch == '_') {
+            result.push_back(ch);
+        }
+    }
+    if (result.empty()) {
+        return {};
+    }
+    if (std::isdigit(static_cast<unsigned char>(result.front()))) {
+        result.insert(result.begin(), '_');
+    }
+    return result;
+}
+
+std::filesystem::path ScriptRootFor(const EditorDockspace::Context& context) {
+    if (context.assets && !context.assets->RootPath().empty()) {
+        const std::filesystem::path assetRoot(context.assets->RootPath());
+        const std::filesystem::path parent = assetRoot.parent_path();
+        return (parent.empty() ? std::filesystem::path("Game") : parent / "Game") / "Scripts";
+    }
+    return std::filesystem::path("Game") / "Scripts";
+}
+
+bool WriteTextFile(const std::filesystem::path& path, const std::string& text, std::string* error) {
+    std::ofstream out(path);
+    if (!out) {
+        if (error) {
+            *error = "Could not write " + path.string();
+        }
+        return false;
+    }
+    out << text;
+    return true;
+}
+
+bool CreateScriptFiles(const EditorDockspace::Context& context,
+                       const std::string& className,
+                       ScriptTemplate scriptTemplate,
+                       std::string* scriptPath,
+                       std::string* error) {
+    const std::filesystem::path scriptRoot = ScriptRootFor(context);
+    std::error_code ec;
+    std::filesystem::create_directories(scriptRoot, ec);
+    if (ec) {
+        if (error) {
+            *error = "Could not create script folder: " + ec.message();
+        }
+        return false;
+    }
+
+    const std::filesystem::path headerPath = scriptRoot / (className + ".h");
+    const std::filesystem::path sourcePath = scriptRoot / (className + ".cpp");
+    const std::filesystem::path docsRoot = scriptRoot / "docs";
+    std::filesystem::create_directories(docsRoot, ec);
+    if (ec) {
+        if (error) {
+            *error = "Could not create script docs folder: " + ec.message();
+        }
+        return false;
+    }
+    const std::filesystem::path docPath = docsRoot / (className + ".md");
+
+    if (!std::filesystem::exists(headerPath)) {
+        std::ostringstream header;
+        header << "#pragma once\n\n"
+               << "#include <engine/gameplay/Script.h>\n\n"
+               << "class " << className << " : public engine::Script {\n"
+               << "public:\n"
+               << "    void OnCreate() override;\n"
+               << "    void OnUpdate(float dt) override;\n"
+               << "};\n\n"
+               << "void Register" << className << "Script();\n";
+        if (!WriteTextFile(headerPath, header.str(), error)) {
+            return false;
+        }
+    }
+
+    if (!std::filesystem::exists(sourcePath)) {
+        std::ostringstream source;
+        source << "#include \"" << className << ".h\"\n\n"
+               << "#include <engine/ecs/Entity.h>\n"
+               << "#include <engine/gameplay/GameplayComponents.h>\n"
+               << "#include <engine/gameplay/Script.h>\n\n"
+               << "#include <algorithm>\n"
+               << "#include <glm/geometric.hpp>\n"
+               << "#include <memory>\n\n"
+               << "void " << className << "::OnCreate() {\n"
+               << "    // Called when the object enters Play mode.\n"
+               << "    // Example: if (auto* transform = Transform()) { transform->position.y += 1.0f; }\n"
+               << "}\n\n"
+               << "void " << className << "::OnUpdate(float dt) {\n";
+        WriteTemplateUpdateBody(source, scriptTemplate);
+        source << "}\n\n"
+               << "void Register" << className << "Script() {\n"
+               << "    engine::ScriptRegistry::Instance().Register(\"" << className << "\", [] {\n"
+               << "        return std::make_unique<" << className << ">();\n"
+               << "    });\n"
+               << "}\n";
+        if (!WriteTextFile(sourcePath, source.str(), error)) {
+            return false;
+        }
+    }
+
+    if (!std::filesystem::exists(docPath)) {
+        std::ostringstream doc;
+        doc << "# " << className << "\n\n"
+            << "## What It Does\n\n"
+            << "Gameplay script template generated by the editor. " << ScriptTemplateDescription(scriptTemplate) << " It derives from `engine::Script` so it can be attached to a scene object and run in Play mode after registration.\n\n"
+            << "## How To Use It\n\n"
+            << "Use `OnCreate()` for one-time setup when the object enters Play mode. Use `OnUpdate(float dt)` for fixed-step behavior. Call `Register" << className << "Script()` from your game startup before entering Play mode so `ScriptRegistry` can construct the script from its class name. Common helpers include `GetFieldFloat()`, `GetFieldInt()`, `GetFieldBool()`, `GetFieldString()`, `Self()`, `Transform()`, `FindObject()`, `FindTransform()`, `IsKeyDown()`, `WasKeyPressed()`, `MouseDeltaX()`, and `DestroySelf()`.\n";
+        if (!WriteTextFile(docPath, doc.str(), error)) {
+            return false;
+        }
+    }
+
+    if (scriptPath) {
+        *scriptPath = (std::filesystem::path("Game") / "Scripts" / (className + ".cpp")).string();
+    }
+    return true;
 }
 
 struct ScenePhysicsStatus {
@@ -453,7 +774,8 @@ void DrawPhysicsStatus(EditorDockspace::Context& context, bool* open) {
     ImGui::Text("Events: %d enter, %d stay, %d exit",
         context.physicsEventEnterCount,
         context.physicsEventStayCount,
-        context.physicsEventExitCount);
+        context.physicsEventExitCount,
+        context.physicsActionCount);
 
     if (ImGui::CollapsingHeader("World Physics", ImGuiTreeNodeFlags_DefaultOpen)) {
         if (ImGui::BeginTable("PhysicsWorldStatus", 2, ImGuiTableFlags_BordersInnerV)) {
@@ -618,12 +940,15 @@ void DrawPhysicsStatus(EditorDockspace::Context& context, bool* open) {
         static bool selectedOnly = false;
         static bool triggersOnly = false;
         static bool enterExitOnly = false;
+        static bool actionsOnly = false;
 
         ImGui::Checkbox("Selected Only##PhysicsEvents", &selectedOnly);
         ImGui::SameLine();
         ImGui::Checkbox("Triggers Only##PhysicsEvents", &triggersOnly);
         ImGui::SameLine();
         ImGui::Checkbox("Enter/Exit Only##PhysicsEvents", &enterExitOnly);
+        ImGui::SameLine();
+        ImGui::Checkbox("Actions Only##PhysicsEvents", &actionsOnly);
 
         std::string selectedName;
         if (context.scene) {
@@ -650,12 +975,688 @@ void DrawPhysicsStatus(EditorDockspace::Context& context, bool* open) {
                 if (enterExitOnly && row.phase == 1) {
                     continue;
                 }
+                if (actionsOnly && !row.action) {
+                    continue;
+                }
 
                 ImGui::TextUnformatted(row.text.c_str());
                 ++visibleRows;
             }
             if (visibleRows == 0) {
                 ImGui::TextUnformatted("No events match the active filters.");
+            }
+            ImGui::EndChild();
+        }
+    }
+
+    ImGui::End();
+}
+
+void DrawGameplayDebug(EditorDockspace::Context& context, bool* open) {
+    if (!ImGui::Begin(EditorPanels::Name(EditorPanels::Panel::GameplayDebug), open)) {
+        ImGui::End();
+        return;
+    }
+
+    const EditorDockspace::GameplayDebugState& debug = context.gameplayDebug;
+    ImGui::Text("Mode: %s", context.playMode ? "Play" : "Edit");
+    if (!debug.hasSelection) {
+        ImGui::TextUnformatted("No object selected.");
+        ImGui::End();
+        return;
+    }
+
+    ImGui::Text("Selected: %s", debug.selectedName.c_str());
+    if (!context.playMode) {
+        ImGui::TextUnformatted("Enter Play mode to inspect runtime script and Health state.");
+    } else if (!debug.playEntityFound) {
+        ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.30f, 1.0f),
+            "Selected object was not found in the Play registry.");
+    }
+
+    if (ImGui::CollapsingHeader("Health", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (!debug.hasHealth) {
+            ImGui::TextUnformatted("No runtime Health component.");
+        } else {
+            ImGui::Text("HP: %.2f / %.2f", debug.health, debug.maxHealth);
+            ImGui::Text("Alive: %s", debug.healthAlive ? "Yes" : "No");
+            ImGui::Text("Just Died: %s", debug.healthJustDied ? "Yes" : "No");
+            const float fraction = debug.maxHealth > 0.0f ? debug.health / debug.maxHealth : 0.0f;
+            ImGui::ProgressBar(std::clamp(fraction, 0.0f, 1.0f), ImVec2(-1.0f, 0.0f));
+        }
+    }
+
+    if (ImGui::CollapsingHeader("Script", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (!debug.hasScript) {
+            ImGui::TextUnformatted("No runtime NativeScriptComponent.");
+        } else {
+            ImGui::Text("Class: %s", debug.scriptClassName.empty() ? "-" : debug.scriptClassName.c_str());
+            ImGui::Text("Path: %s", debug.scriptPath.empty() ? "-" : debug.scriptPath.c_str());
+            ImGui::Text("Enabled: %s", debug.scriptEnabled ? "Yes" : "No");
+            ImGui::Text("Created: %s", debug.scriptCreated ? "Yes" : "No");
+            ImGui::Text("Missing Factory: %s", debug.scriptMissingFactory ? "Yes" : "No");
+            ImGui::Text("Fields: %d authored, %d runtime",
+                debug.authoredFieldCount,
+                debug.runtimeFieldCount);
+            if (debug.scriptMissingFactory) {
+                ImGui::TextColored(ImVec4(1.0f, 0.42f, 0.34f, 1.0f),
+                    "Register this script class before entering Play mode.");
+            }
+        }
+    }
+
+    if (ImGui::CollapsingHeader("Trigger Contacts", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (!context.playMode) {
+            ImGui::TextUnformatted("Trigger contact counts are available in Play mode.");
+        } else {
+            ImGui::Text("Touching/Stay: %d", debug.selectedTriggerTouchCount);
+            ImGui::Text("Entered: %d", debug.selectedTriggerEnterCount);
+            ImGui::Text("Exited: %d", debug.selectedTriggerExitCount);
+            ImGui::TextUnformatted("Counts come from the most recent physics event rows.");
+        }
+    }
+
+    ImGui::End();
+}
+
+void DrawAnimationPreview(EditorDockspace::Context& context, bool* open) {
+    if (!ImGui::Begin(EditorPanels::Name(EditorPanels::Panel::AnimationPreview), open)) {
+        ImGui::End();
+        return;
+    }
+
+    const EditorDockspace::AnimationPreviewState& state = context.animationPreview;
+    if (!state.hasSelection) {
+        ImGui::TextUnformatted("No object selected.");
+        ImGui::End();
+        return;
+    }
+
+    ImGui::Text("Object: %s", state.selectedName.c_str());
+    ImGui::Text("Mode: %s", state.playMode ? "Play" : "Edit");
+    if (!state.skeletalModel) {
+        ImGui::TextUnformatted("Selected object is not marked as a skeletal model.");
+        ImGui::End();
+        return;
+    }
+
+    ImGui::TextWrapped("Model: %s", state.modelPath.empty() ? "-" : state.modelPath.c_str());
+    if (!state.loadError.empty()) {
+        ImGui::TextWrapped("Load error: %s", state.loadError.c_str());
+        ImGui::End();
+        return;
+    }
+    if (!state.modelLoaded) {
+        ImGui::TextUnformatted("Skeletal model is not loaded yet.");
+        ImGui::End();
+        return;
+    }
+
+    if (!state.playMode && context.scene) {
+        if (ImGui::CollapsingHeader("Preview Controls", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (ImGui::Button(state.autoplay ? "Pause" : "Play")) {
+                context.scene->SetSelectedAnimationSettings(true,
+                    state.defaultClipIndex,
+                    state.defaultClipName,
+                    !state.autoplay,
+                    state.loop,
+                    state.playbackSpeed);
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Reset") && context.animationPreviewTime) {
+                *context.animationPreviewTime = 0.0f;
+            }
+
+            if (!state.clips.empty()) {
+                int selectedClip = std::clamp(state.defaultClipIndex, 0, static_cast<int>(state.clips.size() - 1));
+                const std::string currentClipName = state.defaultClipName.empty()
+                    ? state.clips[static_cast<std::size_t>(selectedClip)].name
+                    : state.defaultClipName;
+                if (ImGui::BeginCombo("Preview Clip", currentClipName.empty() ? "(unnamed)" : currentClipName.c_str())) {
+                    for (std::size_t i = 0; i < state.clips.size(); ++i) {
+                        const std::string label = state.clips[i].name.empty()
+                            ? ("Clip " + std::to_string(i))
+                            : state.clips[i].name;
+                        const bool selected = static_cast<int>(i) == selectedClip;
+                        if (ImGui::Selectable(label.c_str(), selected)) {
+                            context.scene->SetSelectedAnimationSettings(true,
+                                static_cast<int>(i),
+                                state.clips[i].name,
+                                state.autoplay,
+                                state.loop,
+                                state.playbackSpeed);
+                            if (context.animationPreviewTime) {
+                                *context.animationPreviewTime = 0.0f;
+                            }
+                        }
+                        if (selected) {
+                            ImGui::SetItemDefaultFocus();
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+
+                float scrubTime = state.previewTime;
+                const float maxTime = std::max(state.previewDuration, 0.001f);
+                if (ImGui::SliderFloat("Time", &scrubTime, 0.0f, maxTime, "%.2f s")
+                    && context.animationPreviewTime) {
+                    *context.animationPreviewTime = scrubTime;
+                }
+                ImGui::Text("Duration: %.2f s", state.previewDuration);
+            }
+        }
+    }
+
+    if (ImGui::CollapsingHeader("Authored", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Text("Default Clip: %d %s", state.defaultClipIndex,
+            state.defaultClipName.empty() ? "" : state.defaultClipName.c_str());
+        ImGui::Text("Autoplay: %s", state.autoplay ? "Yes" : "No");
+        ImGui::SameLine();
+        ImGui::Text("Loop: %s", state.loop ? "Yes" : "No");
+        ImGui::Text("Speed: %.2f", state.playbackSpeed);
+        ImGui::Separator();
+        ImGui::Text("Locomotion: %s", state.locomotionEnabled ? "Enabled" : "Disabled");
+        if (state.locomotionEnabled) {
+            ImGui::Text("Idle: %d %s", state.idleClipIndex, state.idleClipName.c_str());
+            ImGui::Text("Walk: %d %s", state.walkClipIndex, state.walkClipName.c_str());
+            ImGui::Text("Run: %d %s", state.runClipIndex, state.runClipName.c_str());
+            ImGui::Text("Walk At: %.2f", state.walkAt);
+            ImGui::SameLine();
+            ImGui::Text("Run At: %.2f", state.runAt);
+        }
+    }
+
+    if (ImGui::CollapsingHeader("Action Test", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (state.clips.empty()) {
+            ImGui::TextUnformatted("No animation clips found.");
+        } else if (!context.animationActionClip
+            || !context.animationActionFadeIn
+            || !context.animationActionFadeOut
+            || !context.animationActionSpeed) {
+            ImGui::TextUnformatted("Action test controls are unavailable.");
+        } else {
+            *context.animationActionClip = std::clamp(
+                *context.animationActionClip,
+                0,
+                static_cast<int>(state.clips.size() - 1));
+
+            const int actionClip = *context.animationActionClip;
+            const std::string currentActionClipName = state.clips[static_cast<std::size_t>(actionClip)].name.empty()
+                ? ("Clip " + std::to_string(actionClip))
+                : state.clips[static_cast<std::size_t>(actionClip)].name;
+            if (ImGui::BeginCombo("Action Clip", currentActionClipName.c_str())) {
+                for (std::size_t i = 0; i < state.clips.size(); ++i) {
+                    const std::string label = state.clips[i].name.empty()
+                        ? ("Clip " + std::to_string(i))
+                        : state.clips[i].name;
+                    const bool selected = static_cast<int>(i) == actionClip;
+                    if (ImGui::Selectable(label.c_str(), selected)) {
+                        *context.animationActionClip = static_cast<int>(i);
+                    }
+                    if (selected) {
+                        ImGui::SetItemDefaultFocus();
+                    }
+                }
+                ImGui::EndCombo();
+            }
+
+            ImGui::DragFloat("Fade In", context.animationActionFadeIn, 0.01f, 0.0f, 5.0f, "%.2f s");
+            ImGui::DragFloat("Fade Out", context.animationActionFadeOut, 0.01f, 0.0f, 5.0f, "%.2f s");
+            ImGui::DragFloat("Speed", context.animationActionSpeed, 0.01f, 0.0f, 5.0f, "%.2f");
+            if (context.animationActionMaskRoot && context.animationActionMaskRootSize > 0) {
+                ImGui::InputText("Mask Root Bone",
+                    context.animationActionMaskRoot,
+                    context.animationActionMaskRootSize);
+                if (!state.bones.empty()) {
+                    const char* currentMask = context.animationActionMaskRoot[0] == '\0'
+                        ? "Full Body"
+                        : context.animationActionMaskRoot;
+                    if (ImGui::BeginCombo("Pick Mask Bone", currentMask)) {
+                        if (ImGui::Selectable("Full Body", context.animationActionMaskRoot[0] == '\0')) {
+                            context.animationActionMaskRoot[0] = '\0';
+                        }
+                        for (const EditorDockspace::AnimationPreviewState::BoneInfo& bone : state.bones) {
+                            std::string label(static_cast<std::size_t>(std::max(bone.depth, 0)) * 2, ' ');
+                            label += bone.name.empty() ? "(unnamed)" : bone.name;
+                            const bool selected = bone.name == context.animationActionMaskRoot;
+                            if (ImGui::Selectable(label.c_str(), selected)) {
+                                std::snprintf(context.animationActionMaskRoot,
+                                    context.animationActionMaskRootSize,
+                                    "%s",
+                                    bone.name.c_str());
+                            }
+                            if (selected) {
+                                ImGui::SetItemDefaultFocus();
+                            }
+                        }
+                        ImGui::EndCombo();
+                    }
+                }
+            }
+            *context.animationActionFadeIn = std::max(*context.animationActionFadeIn, 0.0f);
+            *context.animationActionFadeOut = std::max(*context.animationActionFadeOut, 0.0f);
+            *context.animationActionSpeed = std::max(*context.animationActionSpeed, 0.0f);
+
+            if (ImGui::Button("Play Action")) {
+                context.animationActionRequested = true;
+            }
+            ImGui::SameLine();
+            ImGui::Text("Status: %s", state.actionPlaying ? "Playing" : "Idle");
+        }
+    }
+
+    if (ImGui::CollapsingHeader("State Graph", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (state.playMode || !context.scene) {
+            ImGui::TextUnformatted("State graphs are edited in Edit mode.");
+        } else if (state.clips.empty()) {
+            ImGui::TextUnformatted("No animation clips found.");
+        } else {
+            std::vector<EditorScene::AnimationStateNode> states = state.states;
+            std::vector<EditorScene::AnimationStateTransition> transitions = state.transitions;
+            bool changed = false;
+            int removeState = -1;
+            int removeTransition = -1;
+
+            ImGui::Text("States: %zu", states.size());
+            for (std::size_t i = 0; i < states.size(); ++i) {
+                EditorScene::AnimationStateNode& node = states[i];
+                ImGui::PushID(static_cast<int>(i));
+                std::array<char, 96> nameBuffer{};
+                std::snprintf(nameBuffer.data(), nameBuffer.size(), "%s", node.name.c_str());
+                if (ImGui::InputText("State", nameBuffer.data(), nameBuffer.size())) {
+                    node.name = nameBuffer.data();
+                    changed = true;
+                }
+
+                node.clipIndex = std::clamp(node.clipIndex, 0, static_cast<int>(state.clips.size() - 1));
+                const std::string currentClip = node.clipName.empty()
+                    ? (state.clips[static_cast<std::size_t>(node.clipIndex)].name.empty()
+                        ? ("Clip " + std::to_string(node.clipIndex))
+                        : state.clips[static_cast<std::size_t>(node.clipIndex)].name)
+                    : node.clipName;
+                if (ImGui::BeginCombo("Clip", currentClip.empty() ? "(unnamed)" : currentClip.c_str())) {
+                    for (std::size_t clip = 0; clip < state.clips.size(); ++clip) {
+                        const std::string label = state.clips[clip].name.empty()
+                            ? ("Clip " + std::to_string(clip))
+                            : state.clips[clip].name;
+                        const bool selectedClip = static_cast<int>(clip) == node.clipIndex;
+                        if (ImGui::Selectable(label.c_str(), selectedClip)) {
+                            node.clipIndex = static_cast<int>(clip);
+                            node.clipName = state.clips[clip].name;
+                            changed = true;
+                        }
+                        if (selectedClip) {
+                            ImGui::SetItemDefaultFocus();
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                if (ImGui::Checkbox("Loop", &node.loop)) {
+                    changed = true;
+                }
+                if (ImGui::DragFloat("Speed", &node.speed, 0.01f, 0.0f, 5.0f, "%.2f")) {
+                    node.speed = std::max(node.speed, 0.0f);
+                    changed = true;
+                }
+                if (ImGui::Button("Remove State")) {
+                    removeState = static_cast<int>(i);
+                }
+                ImGui::Separator();
+                ImGui::PopID();
+            }
+
+            if (removeState >= 0) {
+                const std::string removedName = states[static_cast<std::size_t>(removeState)].name;
+                states.erase(states.begin() + removeState);
+                transitions.erase(std::remove_if(transitions.begin(), transitions.end(),
+                    [&](const EditorScene::AnimationStateTransition& transition) {
+                        return transition.fromState == removedName || transition.toState == removedName;
+                    }), transitions.end());
+                changed = true;
+            }
+
+            if (ImGui::Button("Add State")) {
+                const int clip = std::clamp(state.defaultClipIndex, 0, static_cast<int>(state.clips.size() - 1));
+                states.push_back(EditorScene::AnimationStateNode{
+                    "State",
+                    clip,
+                    state.clips[static_cast<std::size_t>(clip)].name,
+                    true,
+                    1.0f
+                });
+                changed = true;
+            }
+
+            ImGui::Separator();
+            ImGui::Text("Transitions: %zu", transitions.size());
+            const char* compareLabels[] = {">=", "<", "==", "!="};
+            for (std::size_t i = 0; i < transitions.size(); ++i) {
+                EditorScene::AnimationStateTransition& transition = transitions[i];
+                ImGui::PushID(10000 + static_cast<int>(i));
+
+                auto drawStateCombo = [&](const char* label, std::string& value) {
+                    const char* current = value.empty() ? "-" : value.c_str();
+                    if (ImGui::BeginCombo(label, current)) {
+                        for (const EditorScene::AnimationStateNode& node : states) {
+                            const bool selectedNode = node.name == value;
+                            if (ImGui::Selectable(node.name.empty() ? "(unnamed)" : node.name.c_str(), selectedNode)) {
+                                value = node.name;
+                                changed = true;
+                            }
+                            if (selectedNode) {
+                                ImGui::SetItemDefaultFocus();
+                            }
+                        }
+                        ImGui::EndCombo();
+                    }
+                };
+
+                drawStateCombo("From", transition.fromState);
+                drawStateCombo("To", transition.toState);
+
+                std::array<char, 64> parameterBuffer{};
+                std::snprintf(parameterBuffer.data(), parameterBuffer.size(), "%s", transition.parameter.c_str());
+                if (ImGui::InputText("Parameter", parameterBuffer.data(), parameterBuffer.size())) {
+                    transition.parameter = parameterBuffer.data();
+                    changed = true;
+                }
+
+                int compare = static_cast<int>(transition.compare);
+                compare = std::clamp(compare, 0, 3);
+                if (ImGui::BeginCombo("Compare", compareLabels[compare])) {
+                    for (int c = 0; c < 4; ++c) {
+                        const bool selectedCompare = c == compare;
+                        if (ImGui::Selectable(compareLabels[c], selectedCompare)) {
+                            transition.compare = static_cast<EditorScene::AnimationStateTransition::Compare>(c);
+                            changed = true;
+                        }
+                        if (selectedCompare) {
+                            ImGui::SetItemDefaultFocus();
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                if (ImGui::DragFloat("Threshold", &transition.threshold, 0.01f, -1000.0f, 1000.0f, "%.2f")) {
+                    changed = true;
+                }
+                if (ImGui::DragFloat("Fade", &transition.fade, 0.01f, 0.0f, 5.0f, "%.2f s")) {
+                    transition.fade = std::max(transition.fade, 0.0f);
+                    changed = true;
+                }
+                if (ImGui::Button("Remove Transition")) {
+                    removeTransition = static_cast<int>(i);
+                }
+                ImGui::Separator();
+                ImGui::PopID();
+            }
+
+            if (removeTransition >= 0) {
+                transitions.erase(transitions.begin() + removeTransition);
+                changed = true;
+            }
+            if (ImGui::Button("Add Transition")) {
+                const std::string from = states.empty() ? std::string() : states.front().name;
+                const std::string to = states.size() > 1 ? states[1].name : from;
+                transitions.push_back(EditorScene::AnimationStateTransition{
+                    from,
+                    to,
+                    "Speed",
+                    EditorScene::AnimationStateTransition::Compare::GreaterOrEqual,
+                    0.0f,
+                    0.2f
+                });
+                changed = true;
+            }
+
+            if (changed) {
+                context.scene->SetSelectedAnimationStateGraph(states, transitions);
+            }
+        }
+    }
+
+    if (ImGui::CollapsingHeader("Action Profiles", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (state.playMode || !context.scene) {
+            ImGui::TextUnformatted("Action profiles are edited in Edit mode.");
+        } else if (state.clips.empty()) {
+            ImGui::TextUnformatted("No animation clips found.");
+        } else {
+            std::vector<EditorScene::AnimationActionProfile> edited = state.actionProfiles;
+            bool changed = false;
+            int removeIndex = -1;
+
+            for (std::size_t i = 0; i < edited.size(); ++i) {
+                EditorScene::AnimationActionProfile& profile = edited[i];
+                ImGui::PushID(static_cast<int>(i));
+
+                std::array<char, 96> nameBuffer{};
+                std::snprintf(nameBuffer.data(), nameBuffer.size(), "%s", profile.name.c_str());
+                if (ImGui::InputText("Name", nameBuffer.data(), nameBuffer.size())) {
+                    profile.name = nameBuffer.data();
+                    changed = true;
+                }
+
+                profile.clipIndex = std::clamp(profile.clipIndex, 0, static_cast<int>(state.clips.size() - 1));
+                const std::string currentClipName = profile.clipName.empty()
+                    ? (state.clips[static_cast<std::size_t>(profile.clipIndex)].name.empty()
+                        ? ("Clip " + std::to_string(profile.clipIndex))
+                        : state.clips[static_cast<std::size_t>(profile.clipIndex)].name)
+                    : profile.clipName;
+                if (ImGui::BeginCombo("Clip", currentClipName.empty() ? "(unnamed)" : currentClipName.c_str())) {
+                    for (std::size_t clip = 0; clip < state.clips.size(); ++clip) {
+                        const std::string label = state.clips[clip].name.empty()
+                            ? ("Clip " + std::to_string(clip))
+                            : state.clips[clip].name;
+                        const bool selected = static_cast<int>(clip) == profile.clipIndex;
+                        if (ImGui::Selectable(label.c_str(), selected)) {
+                            profile.clipIndex = static_cast<int>(clip);
+                            profile.clipName = state.clips[clip].name;
+                            changed = true;
+                        }
+                        if (selected) {
+                            ImGui::SetItemDefaultFocus();
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+
+                std::array<char, 128> maskBuffer{};
+                std::snprintf(maskBuffer.data(), maskBuffer.size(), "%s", profile.maskRootBone.c_str());
+                if (ImGui::InputText("Mask Root", maskBuffer.data(), maskBuffer.size())) {
+                    profile.maskRootBone = maskBuffer.data();
+                    changed = true;
+                }
+                if (!state.bones.empty()) {
+                    const char* currentMask = profile.maskRootBone.empty() ? "Full Body" : profile.maskRootBone.c_str();
+                    if (ImGui::BeginCombo("Pick Bone", currentMask)) {
+                        if (ImGui::Selectable("Full Body", profile.maskRootBone.empty())) {
+                            profile.maskRootBone.clear();
+                            changed = true;
+                        }
+                        for (const EditorDockspace::AnimationPreviewState::BoneInfo& bone : state.bones) {
+                            std::string label(static_cast<std::size_t>(std::max(bone.depth, 0)) * 2, ' ');
+                            label += bone.name.empty() ? "(unnamed)" : bone.name;
+                            const bool selected = bone.name == profile.maskRootBone;
+                            if (ImGui::Selectable(label.c_str(), selected)) {
+                                profile.maskRootBone = bone.name;
+                                changed = true;
+                            }
+                            if (selected) {
+                                ImGui::SetItemDefaultFocus();
+                            }
+                        }
+                        ImGui::EndCombo();
+                    }
+                }
+
+                if (ImGui::DragFloat("Fade In", &profile.fadeIn, 0.01f, 0.0f, 5.0f, "%.2f s")) {
+                    profile.fadeIn = std::max(profile.fadeIn, 0.0f);
+                    changed = true;
+                }
+                if (ImGui::DragFloat("Fade Out", &profile.fadeOut, 0.01f, 0.0f, 5.0f, "%.2f s")) {
+                    profile.fadeOut = std::max(profile.fadeOut, 0.0f);
+                    changed = true;
+                }
+                if (ImGui::DragFloat("Speed", &profile.speed, 0.01f, 0.0f, 5.0f, "%.2f")) {
+                    profile.speed = std::max(profile.speed, 0.0f);
+                    changed = true;
+                }
+
+                if (ImGui::Button("Remove Profile")) {
+                    removeIndex = static_cast<int>(i);
+                }
+                ImGui::Separator();
+                ImGui::PopID();
+            }
+
+            if (removeIndex >= 0) {
+                edited.erase(edited.begin() + removeIndex);
+                changed = true;
+            }
+
+            if (ImGui::Button("Add Profile")) {
+                const int clip = context.animationActionClip
+                    ? std::clamp(*context.animationActionClip, 0, static_cast<int>(state.clips.size() - 1))
+                    : std::clamp(state.defaultClipIndex, 0, static_cast<int>(state.clips.size() - 1));
+                edited.push_back(EditorScene::AnimationActionProfile{
+                    "ActionProfile",
+                    clip,
+                    state.clips[static_cast<std::size_t>(clip)].name,
+                    context.animationActionMaskRoot ? std::string(context.animationActionMaskRoot) : std::string(),
+                    context.animationActionFadeIn ? *context.animationActionFadeIn : 0.08f,
+                    context.animationActionFadeOut ? *context.animationActionFadeOut : 0.15f,
+                    context.animationActionSpeed ? *context.animationActionSpeed : 1.0f
+                });
+                changed = true;
+            }
+
+            if (changed) {
+                context.scene->SetSelectedAnimationActionProfiles(edited);
+            }
+            if (edited.empty()) {
+                ImGui::TextUnformatted("No action profiles authored for this object.");
+            }
+        }
+    }
+
+    if (ImGui::CollapsingHeader("Events", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (state.playMode || !context.scene) {
+            ImGui::TextUnformatted("Animation events are edited in Edit mode.");
+        } else {
+            std::vector<EditorScene::AnimationEvent> edited = state.events;
+            bool changed = false;
+            int removeIndex = -1;
+
+            for (std::size_t i = 0; i < edited.size(); ++i) {
+                EditorScene::AnimationEvent& event = edited[i];
+                ImGui::PushID(static_cast<int>(i));
+
+                int clipIndex = event.clipIndex;
+                if (ImGui::InputInt("Clip", &clipIndex)) {
+                    event.clipIndex = std::max(clipIndex, 0);
+                    changed = true;
+                }
+
+                float eventTime = event.time;
+                if (ImGui::DragFloat("Time", &eventTime, 0.01f, 0.0f, 10000.0f, "%.2f s")) {
+                    event.time = std::max(eventTime, 0.0f);
+                    changed = true;
+                }
+
+                std::array<char, 96> nameBuffer{};
+                std::snprintf(nameBuffer.data(), nameBuffer.size(), "%s", event.name.c_str());
+                if (ImGui::InputText("Name", nameBuffer.data(), nameBuffer.size())) {
+                    event.name = nameBuffer.data();
+                    changed = true;
+                }
+
+                if (ImGui::Button("Remove")) {
+                    removeIndex = static_cast<int>(i);
+                }
+                ImGui::Separator();
+                ImGui::PopID();
+            }
+
+            if (removeIndex >= 0) {
+                edited.erase(edited.begin() + removeIndex);
+                changed = true;
+            }
+
+            if (ImGui::Button("Add Event")) {
+                edited.push_back(EditorScene::AnimationEvent{
+                    std::max(state.defaultClipIndex, 0),
+                    std::max(state.previewTime, 0.0f),
+                    "Event"
+                });
+                changed = true;
+            }
+
+            if (changed) {
+                context.scene->SetSelectedAnimationEvents(edited);
+            }
+
+            if (edited.empty()) {
+                ImGui::TextUnformatted("No events authored for this object.");
+            }
+        }
+    }
+
+    if (ImGui::CollapsingHeader("Runtime", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (!state.playMode) {
+            ImGui::TextUnformatted("Enter Play mode to inspect live animation state.");
+        } else if (!state.runtimeAnimated) {
+            ImGui::TextUnformatted("Selected runtime entity has no AnimatedModel component.");
+        } else {
+            ImGui::Text("State: %s", state.currentState.c_str());
+            ImGui::Text("States: %zu", state.stateCount);
+            ImGui::Text("Parameter: %.2f", state.parameter);
+            ImGui::Text("Current Clip: %d", state.currentClip);
+            ImGui::Text("Current Time: %.2f s", state.currentTime);
+            if (state.previousClip >= 0) {
+                ImGui::Text("Previous Clip: %d", state.previousClip);
+                ImGui::Text("Previous Time: %.2f s", state.previousTime);
+            }
+            ImGui::Text("Blend: %.2f", state.blend);
+            ImGui::Text("Pose Bones: %zu", state.poseBones);
+        }
+    }
+
+    if (ImGui::CollapsingHeader("Clips", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (state.clips.empty()) {
+            ImGui::TextUnformatted("No animation clips found.");
+        } else {
+            for (std::size_t i = 0; i < state.clips.size(); ++i) {
+                const auto& clip = state.clips[i];
+                ImGui::Text("%zu: %s", i, clip.name.empty() ? "(unnamed)" : clip.name.c_str());
+                ImGui::SameLine();
+                ImGui::TextDisabled("%.2f s", clip.durationSeconds);
+            }
+        }
+    }
+
+    if (ImGui::CollapsingHeader("Skeleton")) {
+        if (state.bones.empty()) {
+            ImGui::TextUnformatted("No skeleton bones found.");
+        } else {
+            ImGui::Text("Bones: %zu", state.bones.size());
+            ImGui::Separator();
+            ImGui::BeginChild("AnimationSkeletonBones", ImVec2(0.0f, 220.0f), true);
+            for (std::size_t i = 0; i < state.bones.size(); ++i) {
+                const auto& bone = state.bones[i];
+                std::string label(static_cast<std::size_t>(std::max(bone.depth, 0)) * 2, ' ');
+                label += std::to_string(i);
+                label += ": ";
+                label += bone.name.empty() ? "(unnamed)" : bone.name;
+                if (context.animationActionMaskRoot
+                    && context.animationActionMaskRootSize > 0
+                    && ImGui::Selectable(label.c_str(), bone.name == context.animationActionMaskRoot)) {
+                    std::snprintf(context.animationActionMaskRoot,
+                        context.animationActionMaskRootSize,
+                        "%s",
+                        bone.name.c_str());
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Parent: %d", bone.parent);
+                }
             }
             ImGui::EndChild();
         }
@@ -893,6 +1894,138 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
         }
     }
 
+    if (!selected->modelAssetPath.empty()
+        && ImGui::CollapsingHeader("Animation", ImGuiTreeNodeFlags_DefaultOpen)) {
+        bool skeletalModel = selected->skeletalModel;
+        int clipIndex = selected->animationClipIndex;
+        bool autoplay = selected->animationAutoplay;
+        bool loop = selected->animationLoop;
+        float speed = selected->animationSpeed;
+        bool locomotionEnabled = selected->animationLocomotionEnabled;
+        int idleClipIndex = selected->animationIdleClipIndex;
+        int walkClipIndex = selected->animationWalkClipIndex;
+        int runClipIndex = selected->animationRunClipIndex;
+        float walkAt = selected->animationWalkAt;
+        float runAt = selected->animationRunAt;
+        std::array<char, 96> clipName{};
+        std::array<char, 96> idleClipName{};
+        std::array<char, 96> walkClipName{};
+        std::array<char, 96> runClipName{};
+        std::snprintf(clipName.data(), clipName.size(), "%s", selected->animationClipName.c_str());
+        std::snprintf(idleClipName.data(), idleClipName.size(), "%s", selected->animationIdleClipName.c_str());
+        std::snprintf(walkClipName.data(), walkClipName.size(), "%s", selected->animationWalkClipName.c_str());
+        std::snprintf(runClipName.data(), runClipName.size(), "%s", selected->animationRunClipName.c_str());
+        const engine::SkinnedModel* inspectedModel = nullptr;
+
+        bool changed = false;
+        changed |= ImGui::Checkbox("Skeletal Model", &skeletalModel);
+        if (skeletalModel && context.runtimeAssets) {
+            std::string error;
+            inspectedModel = context.runtimeAssets->LoadSkinnedModel(selected->modelAssetPath, &error);
+            if (inspectedModel) {
+                const auto& animations = inspectedModel->Animations();
+                if (!animations.empty()) {
+                    clipIndex = std::clamp(clipIndex, 0, static_cast<int>(animations.size() - 1));
+                    const std::string currentName = clipName[0] != '\0'
+                        ? std::string(clipName.data())
+                        : animations[static_cast<std::size_t>(clipIndex)].name;
+                    if (ImGui::BeginCombo("Default Clip", currentName.c_str())) {
+                        for (std::size_t i = 0; i < animations.size(); ++i) {
+                            const std::string label = animations[i].name.empty()
+                                ? ("Clip " + std::to_string(i))
+                                : animations[i].name;
+                            const bool selectedClip = static_cast<int>(i) == clipIndex;
+                            if (ImGui::Selectable(label.c_str(), selectedClip)) {
+                                clipIndex = static_cast<int>(i);
+                                std::snprintf(clipName.data(), clipName.size(), "%s", animations[i].name.c_str());
+                                changed = true;
+                            }
+                            if (selectedClip) {
+                                ImGui::SetItemDefaultFocus();
+                            }
+                        }
+                        ImGui::EndCombo();
+                    }
+                    ImGui::Text("Clips: %zu | Bones: %zu", animations.size(), inspectedModel->BoneCount());
+                } else {
+                    ImGui::TextUnformatted("This skeletal model has no animation clips.");
+                    changed |= ImGui::InputInt("Default Clip Index", &clipIndex);
+                    changed |= ImGui::InputText("Default Clip Name", clipName.data(), clipName.size());
+                }
+            } else {
+                ImGui::TextWrapped("Could not inspect clips: %s", error.c_str());
+                changed |= ImGui::InputInt("Default Clip Index", &clipIndex);
+                changed |= ImGui::InputText("Default Clip Name", clipName.data(), clipName.size());
+            }
+        } else {
+            changed |= ImGui::InputInt("Default Clip Index", &clipIndex);
+            changed |= ImGui::InputText("Default Clip Name", clipName.data(), clipName.size());
+        }
+        changed |= ImGui::Checkbox("Autoplay", &autoplay);
+        ImGui::SameLine();
+        changed |= ImGui::Checkbox("Loop", &loop);
+        changed |= ImGui::DragFloat("Playback Speed", &speed, 0.05f, 0.0f, 10.0f);
+
+        if (skeletalModel && inspectedModel && !inspectedModel->Animations().empty()
+            && ImGui::TreeNodeEx("Locomotion States", ImGuiTreeNodeFlags_DefaultOpen)) {
+            const auto& animations = inspectedModel->Animations();
+            auto drawClipCombo = [&](const char* label, int& index, std::array<char, 96>& nameBuffer) {
+                index = std::clamp(index, 0, static_cast<int>(animations.size() - 1));
+                const std::string currentName = nameBuffer[0] != '\0'
+                    ? std::string(nameBuffer.data())
+                    : animations[static_cast<std::size_t>(index)].name;
+                bool comboChanged = false;
+                if (ImGui::BeginCombo(label, currentName.c_str())) {
+                    for (std::size_t i = 0; i < animations.size(); ++i) {
+                        const std::string item = animations[i].name.empty()
+                            ? ("Clip " + std::to_string(i))
+                            : animations[i].name;
+                        const bool selectedClip = static_cast<int>(i) == index;
+                        if (ImGui::Selectable(item.c_str(), selectedClip)) {
+                            index = static_cast<int>(i);
+                            std::snprintf(nameBuffer.data(), nameBuffer.size(), "%s", animations[i].name.c_str());
+                            comboChanged = true;
+                        }
+                        if (selectedClip) {
+                            ImGui::SetItemDefaultFocus();
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                return comboChanged;
+            };
+
+            bool locomotionChanged = false;
+            locomotionChanged |= ImGui::Checkbox("Use Locomotion", &locomotionEnabled);
+            locomotionChanged |= drawClipCombo("Idle", idleClipIndex, idleClipName);
+            locomotionChanged |= drawClipCombo("Walk", walkClipIndex, walkClipName);
+            locomotionChanged |= drawClipCombo("Run", runClipIndex, runClipName);
+            locomotionChanged |= ImGui::DragFloat("Walk At", &walkAt, 0.05f, 0.0f, 100.0f, "%.2f");
+            locomotionChanged |= ImGui::DragFloat("Run At", &runAt, 0.05f, 0.0f, 100.0f, "%.2f");
+            if (locomotionChanged) {
+                context.scene->SetSelectedAnimationLocomotion(locomotionEnabled,
+                    idleClipIndex,
+                    idleClipName.data(),
+                    walkClipIndex,
+                    walkClipName.data(),
+                    runClipIndex,
+                    runClipName.data(),
+                    walkAt,
+                    runAt);
+            }
+            ImGui::TreePop();
+        }
+
+        if (changed) {
+            context.scene->SetSelectedAnimationSettings(skeletalModel,
+                clipIndex,
+                clipName.data(),
+                autoplay,
+                loop,
+                speed);
+        }
+    }
+
     if (selected->light) {
         if (ImGui::CollapsingHeader("Light", ImGuiTreeNodeFlags_DefaultOpen)) {
             engine::ecs::Light light = selected->lightData;
@@ -1054,7 +2187,7 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
         if (colliderEnabled) {
             engine::ecs::Collider collider = selected->collider;
             int shapeIndex = ColliderShapeIndex(collider.shape);
-            const char* shapes[] = {"Sphere", "Box", "Plane"};
+            const char* shapes[] = {"Sphere", "Box", "Plane", "Capsule"};
             if (ImGui::Combo("Collider Shape", &shapeIndex, shapes, 3)) {
                 collider.shape = ColliderShapeFromIndex(shapeIndex);
                 context.scene->SetSelectedCollider(collider);
@@ -1065,6 +2198,13 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                 }
             } else if (collider.shape == engine::ecs::ColliderShape::Box) {
                 if (ImGui::DragFloat3("Half Extents", &collider.halfExtents.x, 0.02f, 0.001f, 1000.0f)) {
+                    context.scene->SetSelectedCollider(collider);
+                }
+            } else if (collider.shape == engine::ecs::ColliderShape::Capsule) {
+                bool changed = false;
+                changed |= ImGui::DragFloat("Radius", &collider.radius, 0.02f, 0.001f, 1000.0f);
+                changed |= ImGui::DragFloat("Half Height", &collider.halfHeight, 0.02f, 0.0f, 1000.0f);
+                if (changed) {
                     context.scene->SetSelectedCollider(collider);
                 }
             } else {
@@ -1239,6 +2379,238 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                 mover.phase = 0.0f;
                 mover.initialized = false;
                 context.scene->SetSelectedMover(mover);
+            }
+        }
+
+        bool playerEnabled = selected->playerControllerEnabled;
+        if (ImGui::Checkbox("Player Controller", &playerEnabled)) {
+            context.scene->SetSelectedPlayerControllerEnabled(playerEnabled);
+        }
+        if (playerEnabled) {
+            EditorScene::PlayerControllerSettings player = selected->playerController;
+            bool changed = false;
+            changed |= ImGui::Checkbox("First Person", &player.firstPerson);
+            changed |= ImGui::DragFloat("Walk Speed", &player.walkSpeed, 0.05f, 0.0f, 100.0f);
+            changed |= ImGui::DragFloat("Run Speed", &player.runSpeed, 0.05f, 0.0f, 100.0f);
+            changed |= ImGui::DragFloat("Jump Speed", &player.jumpSpeed, 0.05f, 0.0f, 100.0f);
+            changed |= ImGui::DragFloat("Look Sensitivity", &player.lookSensitivity, 0.005f, 0.001f, 10.0f);
+            changed |= ImGui::DragFloat("Capsule Radius", &player.capsuleRadius, 0.01f, 0.01f, 100.0f);
+            changed |= ImGui::DragFloat("Capsule Height", &player.capsuleHeight, 0.01f, 0.02f, 100.0f);
+            changed |= ImGui::DragFloat("Eye Height", &player.eyeHeight, 0.01f, 0.0f, 100.0f);
+            changed |= ImGui::DragFloat("Camera Distance", &player.cameraDistance, 0.05f, 0.0f, 100.0f);
+            changed |= ImGui::DragFloat("Camera Target Height", &player.cameraTargetHeight, 0.01f, 0.0f, 100.0f);
+            changed |= ImGui::DragFloat("Max Slope", &player.maxSlopeDegrees, 0.5f, 0.0f, 89.0f);
+            changed |= ImGui::DragFloat("Step Height", &player.stepHeight, 0.01f, 0.0f, 10.0f);
+            player.capsuleHeight = std::max(player.capsuleHeight, player.capsuleRadius * 2.0f);
+            if (changed) {
+                context.scene->SetSelectedPlayerController(player);
+            }
+        }
+
+        bool healthEnabled = selected->healthEnabled;
+        if (ImGui::Checkbox("Health", &healthEnabled)) {
+            context.scene->SetSelectedHealthEnabled(healthEnabled);
+        }
+        if (healthEnabled) {
+            engine::Health health = selected->health;
+            bool changed = false;
+            changed |= ImGui::DragFloat("HP", &health.hp, 1.0f, 0.0f, 100000.0f);
+            changed |= ImGui::DragFloat("Max HP", &health.maxHp, 1.0f, 1.0f, 100000.0f);
+            changed |= ImGui::Checkbox("Alive", &health.alive);
+            if (ImGui::Button("Full Health")) {
+                health.Reset(std::max(health.maxHp, 1.0f));
+                changed = true;
+            }
+            if (changed) {
+                context.scene->SetSelectedHealth(health);
+            }
+        }
+        
+        ImGui::Separator();
+        if (g_scriptEntity != selected->entity) {
+            std::snprintf(g_scriptClassBuffer.data(),
+                g_scriptClassBuffer.size(),
+                "%s",
+                selected->scriptClassName.empty() ? "NewObjectScript" : selected->scriptClassName.c_str());
+            g_scriptEntity = selected->entity;
+        }
+
+        bool scriptEnabled = selected->scriptEnabled;
+        if (ImGui::Checkbox("Script Enabled", &scriptEnabled)) {
+            if (!context.scene->SetSelectedScriptEnabled(scriptEnabled) && context.log) {
+                context.log->Warning("Script toggle failed: add a script class first or unlock the object");
+            }
+        }
+
+        ImGui::InputText("Script Class", g_scriptClassBuffer.data(), g_scriptClassBuffer.size());
+        ImGui::Text("Script Path: %s", selected->scriptPath.empty() ? "-" : selected->scriptPath.c_str());
+        const char* scriptTemplates[] = {"Empty", "Player Movement", "Door Opener", "Pickup", "Damage Zone"};
+        ImGui::Combo("Template", &g_scriptTemplateIndex, scriptTemplates, 5);
+
+        if (ImGui::Button("Create Script")) {
+            const std::string className = SanitizeScriptClassName(g_scriptClassBuffer.data());
+            if (className.empty()) {
+                if (context.log) {
+                    context.log->Warning("Script create failed: enter a class name");
+                }
+            } else {
+                const ScriptTemplate scriptTemplate = ScriptTemplateFromIndex(g_scriptTemplateIndex);
+                std::string scriptPath;
+                std::string error;
+                if (CreateScriptFiles(context, className, scriptTemplate, &scriptPath, &error)) {
+                    context.scene->SetSelectedScript(className, scriptPath, true);
+                    context.scene->SetSelectedScriptFields(DefaultFieldsForTemplate(scriptTemplate));
+                    std::snprintf(g_scriptClassBuffer.data(), g_scriptClassBuffer.size(), "%s", className.c_str());
+                    if (context.assets) {
+                        std::string refreshError;
+                        context.assets->Refresh(context.assets->RootPath(), &refreshError);
+                    }
+                    if (context.log) {
+                        context.log->Info("Created script: " + scriptPath);
+                    }
+                } else if (context.log) {
+                    context.log->Error("Script create failed: " + error);
+                }
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Attach")) {
+            const std::string className = SanitizeScriptClassName(g_scriptClassBuffer.data());
+            if (className.empty()) {
+                if (context.log) {
+                    context.log->Warning("Script attach failed: enter a class name");
+                }
+            } else {
+                const std::filesystem::path storedPath = std::filesystem::path("Game") / "Scripts" / (className + ".cpp");
+                if (context.scene->SetSelectedScript(className, storedPath.string(), true)) {
+                    if (context.log) {
+                        context.log->Info("Attached script: " + className);
+                    }
+                } else if (context.log) {
+                    context.log->Warning("Script attach failed: selected object is locked");
+                }
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Remove")) {
+            if (context.scene->SetSelectedScript(std::string(), std::string(), false)) {
+                std::snprintf(g_scriptClassBuffer.data(), g_scriptClassBuffer.size(), "%s", "NewObjectScript");
+                if (context.log) {
+                    context.log->Info("Removed script from selected object");
+                }
+            } else if (context.log) {
+                context.log->Warning("Script remove failed: selected object is locked");
+            }
+        }
+
+        if (ImGui::Button("Add Field")) {
+            if (!context.scene->AddSelectedScriptField() && context.log) {
+                context.log->Warning("Script field add failed: selected object is locked");
+            }
+        }
+
+        for (std::size_t i = 0; i < selected->scriptFields.size(); ++i) {
+            const EditorScene::ScriptField& sourceField = selected->scriptFields[i];
+            EditorScene::ScriptField field = sourceField;
+            ImGui::PushID(static_cast<int>(i));
+            ImGui::Separator();
+
+            std::array<char, 64> nameBuffer{};
+            std::array<char, 128> valueBuffer{};
+            std::snprintf(nameBuffer.data(), nameBuffer.size(), "%s", field.name.c_str());
+            std::snprintf(valueBuffer.data(), valueBuffer.size(), "%s", field.value.c_str());
+
+            bool changed = false;
+            if (ImGui::InputText("Field", nameBuffer.data(), nameBuffer.size())) {
+                field.name = SanitizeScriptClassName(nameBuffer.data());
+                changed = true;
+            }
+
+            int typeIndex = ScriptFieldTypeIndex(field.type);
+            const char* fieldTypes[] = {"Float", "Int", "Bool", "String"};
+            if (ImGui::Combo("Type", &typeIndex, fieldTypes, 4)) {
+                field.type = ScriptFieldTypeFromIndex(typeIndex);
+                if (field.type == EditorScene::ScriptField::Type::Bool
+                    && field.value != "0"
+                    && field.value != "1") {
+                    field.value = "0";
+                }
+                changed = true;
+            }
+
+            if (field.type == EditorScene::ScriptField::Type::Bool) {
+                bool value = field.value == "1" || field.value == "true" || field.value == "True";
+                if (ImGui::Checkbox("Value", &value)) {
+                    field.value = value ? "1" : "0";
+                    changed = true;
+                }
+            } else if (ImGui::InputText("Value", valueBuffer.data(), valueBuffer.size())) {
+                field.value = valueBuffer.data();
+                if (field.value.empty()) {
+                    field.value = field.type == EditorScene::ScriptField::Type::String ? "-" : "0";
+                }
+                changed = true;
+            }
+
+            if (changed) {
+                context.scene->SetSelectedScriptField(i, field);
+            }
+
+            if (ImGui::Button("Remove Field")) {
+                context.scene->RemoveSelectedScriptField(i);
+                ImGui::PopID();
+                break;
+            }
+            ImGui::PopID();
+        }
+
+        if (selected->colliderEnabled && selected->collider.isTrigger) {
+            ImGui::Separator();
+            std::string targetName = selected->triggerTargetName;
+            EditorScene::TriggerActionMode enterMoverAction = selected->triggerEnterMoverAction;
+            EditorScene::TriggerActionMode enterRotatorAction = selected->triggerEnterRotatorAction;
+            EditorScene::TriggerActionMode exitMoverAction = selected->triggerExitMoverAction;
+            EditorScene::TriggerActionMode exitRotatorAction = selected->triggerExitRotatorAction;
+            const char* preview = targetName.empty() ? "None" : targetName.c_str();
+            if (ImGui::BeginCombo("Trigger Target", preview)) {
+                if (ImGui::Selectable("None", targetName.empty())) {
+                    targetName.clear();
+                    context.scene->SetSelectedTriggerAction(targetName,
+                        enterMoverAction,
+                        enterRotatorAction,
+                        exitMoverAction,
+                        exitRotatorAction);
+                }
+                for (const EditorScene::Object& object : context.scene->Objects()) {
+                    if (object.name == selected->name) {
+                        continue;
+                    }
+                    const bool isSelectedTarget = object.name == targetName;
+                    if (ImGui::Selectable(object.name.c_str(), isSelectedTarget)) {
+                        targetName = object.name;
+                        context.scene->SetSelectedTriggerAction(targetName,
+                            enterMoverAction,
+                            enterRotatorAction,
+                            exitMoverAction,
+                            exitRotatorAction);
+                    }
+                    if (isSelectedTarget) {
+                        ImGui::SetItemDefaultFocus();
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            bool changed = false;
+            changed |= DrawTriggerActionModeCombo("Enter Mover", &enterMoverAction);
+            changed |= DrawTriggerActionModeCombo("Enter Rotator", &enterRotatorAction);
+            changed |= DrawTriggerActionModeCombo("Exit Mover", &exitMoverAction);
+            changed |= DrawTriggerActionModeCombo("Exit Rotator", &exitRotatorAction);
+            if (changed) {
+                context.scene->SetSelectedTriggerAction(targetName,
+                    enterMoverAction,
+                    enterRotatorAction,
+                    exitMoverAction,
+                    exitRotatorAction);
             }
         }
     }
@@ -1609,6 +2981,27 @@ bool EditorDockspace::Draw(Context& context) {
                 }
                 ImGui::EndMenu();
             }
+            if (ImGui::BeginMenu("Gameplay")) {
+                if (ImGui::MenuItem("Player Start")) {
+                    context.addPlayerStartRequested = true;
+                }
+                if (ImGui::MenuItem("Door")) {
+                    context.addDoorRequested = true;
+                }
+                if (ImGui::MenuItem("Pickup")) {
+                    context.addPickupRequested = true;
+                }
+                if (ImGui::MenuItem("Damage Zone")) {
+                    context.addDamageZoneRequested = true;
+                }
+                if (ImGui::MenuItem("Moving Platform")) {
+                    context.addMovingPlatformRequested = true;
+                }
+                if (ImGui::MenuItem("Trigger Mover Test")) {
+                    context.addTriggerMoverTestRequested = true;
+                }
+                ImGui::EndMenu();
+            }
             if (ImGui::BeginMenu("Lights")) {
                 if (ImGui::MenuItem("Directional Light")) {
                     context.addDirectionalLightRequested = true;
@@ -1709,6 +3102,12 @@ bool EditorDockspace::Draw(Context& context) {
             break;
         case EditorPanels::Panel::PhysicsStatus:
             DrawPhysicsStatus(context, &open);
+            break;
+        case EditorPanels::Panel::GameplayDebug:
+            DrawGameplayDebug(context, &open);
+            break;
+        case EditorPanels::Panel::AnimationPreview:
+            DrawAnimationPreview(context, &open);
             break;
         case EditorPanels::Panel::Count:
             break;

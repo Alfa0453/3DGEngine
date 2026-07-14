@@ -43,6 +43,51 @@ void FlipRows(image::Image& im) {
                          im.rgba.begin() + static_cast<std::ptrdiff_t>((im.height - 1 - y) * row));
 }
 
+// Build one Animation from an aiAnimation, remapping channels onto `boneIndex`
+// (bone name -> index in `skel`). If stripRootMotion, the skeleton root bone's
+// translation is frozen to its first key so a locomotion clip stays in place.
+Animation BuildClip(const aiAnimation* a, const Skeleton& skel,
+                    const std::map<std::string, int>& boneIndex,
+                    bool stripRootMotion, const std::string& nameOverride) {
+    Animation anim;
+    anim.name           = nameOverride.empty() ? std::string(a->mName.C_Str()) : nameOverride;
+    anim.duration       = static_cast<float>(a->mDuration);
+    anim.ticksPerSecond = (a->mTicksPerSecond > 0.0) ? static_cast<float>(a->mTicksPerSecond) : 25.0f;
+    anim.channels.resize(skel.bones.size());
+    for (unsigned c = 0; c < a->mNumChannels; ++c) {
+        const aiNodeAnim* ch = a->mChannels[c];
+        const auto it = boneIndex.find(ch->mNodeName.C_Str());
+        if (it == boneIndex.end()) continue;
+        BoneChannel& bc = anim.channels[static_cast<std::size_t>(it->second)];
+        for (unsigned k = 0; k < ch->mNumPositionKeys; ++k) {
+            const aiVectorKey& key = ch->mPositionKeys[k];
+            bc.positions.push_back({ static_cast<float>(key.mTime), { key.mValue.x, key.mValue.y, key.mValue.z } });
+        }
+        for (unsigned k = 0; k < ch->mNumRotationKeys; ++k) {
+            const aiQuatKey& key = ch->mRotationKeys[k];
+            bc.rotations.push_back({ static_cast<float>(key.mTime), glm::quat(key.mValue.w, key.mValue.x, key.mValue.y, key.mValue.z) });
+        }
+        for (unsigned k = 0; k < ch->mNumScalingKeys; ++k) {
+            const aiVectorKey& key = ch->mScalingKeys[k];
+            bc.scales.push_back({ static_cast<float>(key.mTime), { key.mValue.x, key.mValue.y, key.mValue.z } });
+        }
+    }
+    if (stripRootMotion) {
+        // Freeze translation on the skeleton root (a bone named "root" if present,
+        // else the first parentless bone) -> removes locomotion drift.
+        int rootIdx = -1;
+        const auto rit = boneIndex.find("root");
+        if (rit != boneIndex.end()) rootIdx = rit->second;
+        else for (std::size_t i = 0; i < skel.bones.size(); ++i)
+            if (skel.bones[i].parent < 0) { rootIdx = static_cast<int>(i); break; }
+        if (rootIdx >= 0 && rootIdx < static_cast<int>(anim.channels.size())) {
+            auto& pos = anim.channels[static_cast<std::size_t>(rootIdx)].positions;
+            if (!pos.empty()) { const glm::vec3 first = pos.front().value; for (auto& kf : pos) kf.value = first; }
+        }
+    }
+    return anim;
+}
+
 } // namespace
 
 SkinnedModel SkinnedModel::FromFile(const std::string& path) {
@@ -200,36 +245,34 @@ SkinnedModel SkinnedModel::FromFile(const std::string& path) {
     }
     model.m_min = mn; model.m_max = mx;
 
-    // Animation clips.
-    for (unsigned ai = 0; ai < scene->mNumAnimations; ++ai) {
-        const aiAnimation* a = scene->mAnimations[ai];
-        Animation anim;
-        anim.name           = a->mName.C_Str();
-        anim.duration       = static_cast<float>(a->mDuration);
-        anim.ticksPerSecond = (a->mTicksPerSecond > 0.0) ? static_cast<float>(a->mTicksPerSecond) : 25.0f;
-        anim.channels.resize(model.m_skeleton.bones.size());
-        for (unsigned c = 0; c < a->mNumChannels; ++c) {
-            const aiNodeAnim* ch = a->mChannels[c];
-            const auto it = boneIndex.find(ch->mNodeName.C_Str());
-            if (it == boneIndex.end()) continue;
-            BoneChannel& bc = anim.channels[static_cast<std::size_t>(it->second)];
-            for (unsigned k = 0; k < ch->mNumPositionKeys; ++k) {
-                const aiVectorKey& key = ch->mPositionKeys[k];
-                bc.positions.push_back({ static_cast<float>(key.mTime), { key.mValue.x, key.mValue.y, key.mValue.z } });
-            }
-            for (unsigned k = 0; k < ch->mNumRotationKeys; ++k) {
-                const aiQuatKey& key = ch->mRotationKeys[k];
-                bc.rotations.push_back({ static_cast<float>(key.mTime), glm::quat(key.mValue.w, key.mValue.x, key.mValue.y, key.mValue.z) });
-            }
-            for (unsigned k = 0; k < ch->mNumScalingKeys; ++k) {
-                const aiVectorKey& key = ch->mScalingKeys[k];
-                bc.scales.push_back({ static_cast<float>(key.mTime), { key.mValue.x, key.mValue.y, key.mValue.z } });
-            }
-        }
-        model.m_animations.push_back(std::move(anim));
-    }
+    // Animation clips embedded in this file (if any).
+    for (unsigned ai = 0; ai < scene->mNumAnimations; ++ai)
+        model.m_animations.push_back(BuildClip(scene->mAnimations[ai], model.m_skeleton, boneIndex, false, ""));
 
     return model;
+}
+
+std::size_t SkinnedModel::AddAnimationsFromFile(const std::string& path,
+                                                bool stripRootMotion,
+                                                const std::string& nameOverride) {
+    Assimp::Importer importer;
+    // Clip-only files need no mesh post-processing; keep the node tree intact.
+    const aiScene* scene = importer.ReadFile(path, aiProcess_LimitBoneWeights);
+    if (!scene || !scene->mRootNode)
+        throw std::runtime_error("SkinnedModel: failed to load animation '" + path + "': " + importer.GetErrorString());
+
+    // Map this model's existing skeleton bone names -> indices.
+    std::map<std::string, int> boneIndex;
+    for (std::size_t i = 0; i < m_skeleton.bones.size(); ++i)
+        boneIndex[m_skeleton.bones[i].name] = static_cast<int>(i);
+
+    std::size_t added = 0;
+    for (unsigned ai = 0; ai < scene->mNumAnimations; ++ai) {
+        const std::string nm = (scene->mNumAnimations == 1) ? nameOverride : std::string();
+        m_animations.push_back(BuildClip(scene->mAnimations[ai], m_skeleton, boneIndex, stripRootMotion, nm));
+        ++added;
+    }
+    return added;
 }
 
 } // namespace engine

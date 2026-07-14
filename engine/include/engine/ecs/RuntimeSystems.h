@@ -2,9 +2,11 @@
 
 #include "engine/ecs/Components.h"
 #include "engine/ecs/Registry.h"
+#include "engine/physics/PhysicsComponents.h"
 
 #include <glm/gtc/quaternion.hpp>
 #include <glm/geometric.hpp>
+#include <cmath>
 
 namespace engine {
 namespace ecs {
@@ -37,7 +39,7 @@ inline void UpdateRuntimeMotion(Registry& registry, float dt) {
 
 inline void UpdateGameplay(Registry& registry, float dt) {
     registry.view<Transform, Mover>().each(
-        [dt](Entity, Transform& transform, Mover& mover) {
+        [&registry, dt](Entity entity, Transform& transform, Mover& mover) {
             if (mover.speed == 0.0f || mover.distance == 0.0f || glm::dot(mover.axis, mover.axis) == 0.0f) {
                 return;
             }
@@ -47,8 +49,21 @@ inline void UpdateGameplay(Registry& registry, float dt) {
             }
 
             mover.phase += mover.speed * dt;
-            transform.position = mover.origin
-                + glm::normalize(mover.axis) * std::sin(mover.phase) * mover.distance;
+            const glm::vec3 axis = glm::normalize(mover.axis);
+            const glm::vec3 target = mover.origin + axis * std::sin(mover.phase) * mover.distance;
+
+            if (RigidBody* body = registry.TryGet<RigidBody>(entity)) {
+                if (body->invMass > 0.0f) {
+                    const glm::vec3 desiredVelocity = axis * std::cos(mover.phase) * mover.distance * mover.speed;
+                    const glm::vec3 correctionVelocity = (target - transform.position) * 6.0f;
+                    body->velocity = desiredVelocity + correctionVelocity;
+                    body->sleeping = false;
+                    body->sleepTimer = 0.0f;
+                    return;
+                }
+            }
+
+            transform.position = target;
         }
     );
 

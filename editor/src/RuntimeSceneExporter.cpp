@@ -44,7 +44,7 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         return false;
     }
 
-    out << "3DGRuntimeScene 12\n";
+    out << "3DGRuntimeScene 21\n";
     out << "# Runtime export from 3DGEditor. Editor-only flags are omitted.\n";
     const EditorScene::Environment& environment = scene.GetEnvironment();
     out << "environment "
@@ -103,6 +103,55 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
             << renderer->color.r << ' ' << renderer->color.g << ' ' << renderer->color.b << ' '
             << StoredPath(object.modelAssetPath) << ' '
             << StoredPath(object.materialAssetPath) << ' '
+            << (object.skeletalModel ? 1 : 0) << ' '
+            << object.animationClipIndex << ' '
+            << StoredPath(object.animationClipName) << ' '
+            << (object.animationAutoplay ? 1 : 0) << ' '
+            << (object.animationLoop ? 1 : 0) << ' '
+            << object.animationSpeed << ' '
+            << (object.animationLocomotionEnabled ? 1 : 0) << ' '
+            << object.animationIdleClipIndex << ' '
+            << StoredPath(object.animationIdleClipName) << ' '
+            << object.animationWalkClipIndex << ' '
+            << StoredPath(object.animationWalkClipName) << ' '
+            << object.animationRunClipIndex << ' '
+            << StoredPath(object.animationRunClipName) << ' '
+            << object.animationWalkAt << ' '
+            << object.animationRunAt << ' '
+            << object.animationEvents.size() << ' ';
+        for (const EditorScene::AnimationEvent& event : object.animationEvents) {
+            out << event.clipIndex << ' '
+                << event.time << ' '
+                << StoredPath(event.name) << ' ';
+        }
+        out << object.animationActionProfiles.size() << ' ';
+        for (const EditorScene::AnimationActionProfile& profile : object.animationActionProfiles) {
+            out << StoredPath(profile.name) << ' '
+                << profile.clipIndex << ' '
+                << StoredPath(profile.clipName) << ' '
+                << StoredPath(profile.maskRootBone) << ' '
+                << profile.fadeIn << ' '
+                << profile.fadeOut << ' '
+                << profile.speed << ' ';
+        }
+        out << object.animationStates.size() << ' ';
+        for (const EditorScene::AnimationStateNode& state : object.animationStates) {
+            out << StoredPath(state.name) << ' '
+                << state.clipIndex << ' '
+                << StoredPath(state.clipName) << ' '
+                << (state.loop ? 1 : 0) << ' '
+                << state.speed << ' ';
+        }
+        out << object.animationTransitions.size() << ' ';
+        for (const EditorScene::AnimationStateTransition& transition : object.animationTransitions) {
+            out << StoredPath(transition.fromState) << ' '
+                << StoredPath(transition.toState) << ' '
+                << StoredPath(transition.parameter) << ' '
+                << static_cast<int>(transition.compare) << ' '
+                << transition.threshold << ' '
+                << transition.fade << ' ';
+        }
+        out
             << object.linearVelocity.x << ' ' << object.linearVelocity.y << ' ' << object.linearVelocity.z << ' '
             << object.angularVelocityAxis.x << ' ' << object.angularVelocityAxis.y << ' ' << object.angularVelocityAxis.z << ' '
             << object.angularVelocityRadians << ' '
@@ -118,6 +167,7 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
             << (object.colliderEnabled ? 1 : 0) << ' '
             << static_cast<int>(object.collider.shape) << ' '
             << object.collider.radius << ' '
+            << object.collider.halfHeight << ' '
             << object.collider.halfExtents.x << ' ' << object.collider.halfExtents.y << ' ' << object.collider.halfExtents.z << ' '
             << object.collider.planeNormal.x << ' ' << object.collider.planeNormal.y << ' ' << object.collider.planeNormal.z << ' '
             << object.collider.planeOffset << ' '
@@ -131,7 +181,22 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
             << object.mover.axis.x << ' ' << object.mover.axis.y << ' ' << object.mover.axis.z << ' '
             << object.mover.distance << ' '
             << object.mover.speed << ' '
-            << object.mover.phase << '\n';
+            << object.mover.phase << ' '
+            << (object.healthEnabled ? 1 : 0) << ' '
+            << object.health.hp << ' '
+            << object.health.maxHp << ' '
+            << (object.health.alive ? 1 : 0) << ' '
+            << (object.scriptEnabled ? 1 : 0) << ' '
+            << StoredPath(object.scriptClassName) << ' '
+            << StoredPath(object.scriptPath) << ' '
+            << object.scriptFields.size();
+        for (const EditorScene::ScriptField& field : object.scriptFields) {
+            out << ' '
+                << StoredPath(field.name) << ' '
+                << static_cast<int>(field.type) << ' '
+                << StoredPath(field.value);
+        }
+        out << '\n';
     }
 
     return true;

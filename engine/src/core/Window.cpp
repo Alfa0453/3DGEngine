@@ -161,6 +161,18 @@ bool Window::IsKeyPressed(int key) const
 bool Window::IsMouseButtonPressed(int button) const {
     return glfwGetMouseButton(m_window, button) == GLFW_PRESS;
 }
+
+float Window::MouseX() const {
+    double x, y;
+    glfwGetCursorPos(m_window, &x, &y);
+    return static_cast<float>(x);
+}
+
+float Window::MouseY() const {
+    double x, y;
+    glfwGetCursorPos(m_window, &x, &y);
+    return static_cast<float>(y);
+}
 void Window::SetCursorCaptured(bool captured)
 {
     glfwSetInputMode(m_window, GLFW_CURSOR,

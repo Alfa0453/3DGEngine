@@ -2,6 +2,8 @@
 
 #include "engine/ecs/Entity.h"
 #include "engine/ecs/Components.h"
+#include "engine/gameplay/GameplayComponents.h"
+#include "engine/gameplay/Script.h"
 #include "engine/physics/PhysicsComponents.h"
 
 #include <glm/glm.hpp>
@@ -20,6 +22,39 @@ class Registry;
 
 class RuntimeSceneLoader {
 public:
+    struct AnimationEventDesc {
+        int clipIndex = 0;
+        float time = 0.0f;
+        std::string name;
+    };
+
+    struct AnimationActionProfileDesc {
+        std::string name;
+        int clipIndex = 0;
+        std::string clipName;
+        std::string maskRootBone;
+        float fadeIn = 0.08f;
+        float fadeOut = 0.15f;
+        float speed = 1.0f;
+    };
+
+    struct AnimationStateDesc {
+        std::string name;
+        int clipIndex = 0;
+        std::string clipName;
+        bool loop = true;
+        float speed = 1.0f;
+    };
+
+    struct AnimationTransitionDesc {
+        std::string fromState;
+        std::string toState;
+        std::string parameter = "Speed";
+        int compare = 0;
+        float threshold = 0.0f;
+        float fade = 0.2f;
+    };
+
     struct EntityDesc {
         std::string primitive;
         std::string name;
@@ -29,6 +64,25 @@ public:
         glm::vec3 color{1.0f};
         std::string modelPath;
         std::string materialPath;
+        bool skeletalModel = false;
+        int animationClipIndex = 0;
+        std::string animationClipName;
+        bool animationAutoplay = true;
+        bool animationLoop = true;
+        float animationSpeed = 1.0f;
+        bool animationLocomotionEnabled = false;
+        int animationIdleClipIndex = 0;
+        int animationWalkClipIndex = 0;
+        int animationRunClipIndex = 0;
+        std::string animationIdleClipName;
+        std::string animationWalkClipName;
+        std::string animationRunClipName;
+        float animationWalkAt = 0.15f;
+        float animationRunAt = 3.0f;
+        std::vector<AnimationEventDesc> animationEvents;
+        std::vector<AnimationActionProfileDesc> animationActionProfiles;
+        std::vector<AnimationStateDesc> animationStates;
+        std::vector<AnimationTransitionDesc> animationTransitions;
         bool linearVelocityEnabled = false;
         bool angularVelocityEnabled = false;
         glm::vec3 linearVelocity{0.0f};
@@ -42,6 +96,12 @@ public:
         engine::ecs::Rotator rotator;
         bool moverEnabled = false;
         engine::ecs::Mover mover;
+        bool healthEnabled = false;
+        engine::Health health;
+        bool scriptEnabled = false;
+        std::string scriptClassName;
+        std::string scriptPath;
+        std::vector<ScriptField> scriptFields;
     };
 
     struct Scene {

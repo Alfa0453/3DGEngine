@@ -12,6 +12,8 @@ public:
         Console,
         MaterialMaker,
         PhysicsStatus,
+        GameplayDebug,
+        AnimationPreview,
         Count
     };
 

@@ -1,7 +1,9 @@
 #include "engine/assets/RuntimeAssetManager.h"
 
+#include "engine/animation/AnimatedModel.h"
 #include "engine/ecs/Components.h"
 
+#include <algorithm>
 #include <exception>
 #include <filesystem>
 #include <utility>
@@ -34,6 +36,30 @@ const Model* RuntimeAssetManager::LoadModel(const std::string &path, std::string
         auto model = std::make_unique<Model>(Model::FromFile(path));
         const Model* result = model.get();
         m_models.emplace(path, std::move(model));
+        SetError(error, std::string{});
+        return result;
+    } catch (const std::exception& ex) {
+        SetError(error, ex.what());
+        return nullptr;
+    }
+}
+
+const SkinnedModel* RuntimeAssetManager::LoadSkinnedModel(const std::string& path, std::string* error) {
+    if (path.empty()) {
+        SetError(error, "RuntimeAssetManager: skinned model path is empty");
+        return nullptr;
+    }
+
+    const auto existing = m_skinnedModels.find(path);
+    if (existing != m_skinnedModels.end()) {
+        SetError(error, std::string{});
+        return existing->second.get();
+    }
+
+    try {
+        auto model = std::make_unique<SkinnedModel>(SkinnedModel::FromFile(path));
+        const SkinnedModel* result = model.get();
+        m_skinnedModels.emplace(path, std::move(model));
         SetError(error, std::string{});
         return result;
     } catch (const std::exception& ex) {
@@ -95,6 +121,11 @@ const Model *RuntimeAssetManager::FindModel(const std::string &path) const
     const auto found = m_models.find(path);
     return found == m_models.end() ? nullptr : found->second.get();
 }
+
+const SkinnedModel* RuntimeAssetManager::FindSkinnedModel(const std::string& path) const {
+    const auto found = m_skinnedModels.find(path);
+    return found == m_skinnedModels.end() ? nullptr : found->second.get();
+}
 const Texture *RuntimeAssetManager::FindTexture(const std::string &path) const
 {
     const auto found = m_textures.find(path);
@@ -123,6 +154,92 @@ RuntimeAssetManager::ResolveReport RuntimeAssetManager::ResolveRegistryAssets(ec
             ++report.modelsLoaded;
         }
         registry.Add<ecs::LoadedModelAsset>(entity, ecs::LoadedModelAsset{model});
+        ++report.modelsAssigned;
+    });
+
+    registry.view<ecs::SkinnedModelAsset>().each([&](ecs::Entity entity, ecs::SkinnedModelAsset& asset) {
+        const bool wasCached = FindSkinnedModel(asset.path) != nullptr;
+        std::string error;
+        const SkinnedModel* model = LoadSkinnedModel(asset.path, &error);
+        if (!model) {
+            report.errors.push_back(error);
+            return;
+        }
+
+        if (!wasCached) {
+            ++report.modelsLoaded;
+        }
+
+        auto resolveClip = [&](int fallback, const std::string& name) {
+            int clip = fallback;
+            if (!name.empty()) {
+                const auto& animations = model->Animations();
+                for (std::size_t i = 0; i < animations.size(); ++i) {
+                    if (animations[i].name == name) {
+                        clip = static_cast<int>(i);
+                        break;
+                    }
+                }
+            }
+            return std::clamp(clip, 0, static_cast<int>(model->AnimationCount() - 1));
+        };
+
+        AnimatedModel animated;
+        animated.SetModel(model);
+        for (const ecs::SkinnedModelAsset::Notify& notify : asset.notifies) {
+            if (notify.name.empty()) {
+                continue;
+            }
+            animated.events.push_back(AnimEvent{
+                std::max(notify.clipIndex, 0),
+                std::max(notify.time, 0.0f),
+                notify.name
+            });
+        }
+        if (model->AnimationCount() > 0 && asset.autoplay) {
+            if (!asset.states.empty()) {
+                for (const ecs::SkinnedModelAsset::AnimationState& state : asset.states) {
+                    const int clip = resolveClip(state.clipIndex, state.clipName);
+                    animated.controller.AddState(engine::AnimationController::State{
+                        state.name.empty() ? std::string("State") : state.name,
+                        clip,
+                        state.loop,
+                        std::max(state.speed, 0.0f)
+                    });
+                }
+                for (const ecs::SkinnedModelAsset::AnimationTransition& transition : asset.transitions) {
+                    animated.controller.AddTransition(engine::AnimationController::Transition{
+                        transition.from,
+                        transition.to,
+                        transition.parameter,
+                        static_cast<engine::AnimationController::Transition::Compare>(
+                            std::clamp(transition.compare, 0, 3)),
+                        transition.threshold,
+                        std::max(transition.fade, 0.0f)
+                    });
+                }
+            } else if (asset.locomotionEnabled) {
+                const int idle = resolveClip(asset.idleClipIndex, asset.idleClipName);
+                const int walk = resolveClip(asset.walkClipIndex, asset.walkClipName);
+                const int run = resolveClip(asset.runClipIndex, asset.runClipName);
+                animated.controller = AnimationController::Locomotion(
+                    idle,
+                    walk,
+                    run,
+                    std::max(asset.walkAt, 0.0f),
+                    std::max(asset.runAt, asset.walkAt),
+                    0.2f);
+            } else {
+                const int clip = resolveClip(asset.clipIndex, asset.clipName);
+                animated.controller.AddState(engine::AnimationController::State{
+                    asset.clipName.empty() ? std::string("Default") : asset.clipName,
+                    clip,
+                    asset.loop,
+                    std::max(asset.speed, 0.0f)
+                });
+            }
+        }
+        registry.Add<AnimatedModel>(entity, std::move(animated));
         ++report.modelsAssigned;
     });
 
@@ -190,6 +307,7 @@ RuntimeAssetManager::ResolveReport RuntimeAssetManager::ResolveRegistryAssets(ec
 void RuntimeAssetManager::Clear()
 {
     m_models.clear();
+    m_skinnedModels.clear();
     m_textures.clear();
     m_materials.clear();
 }

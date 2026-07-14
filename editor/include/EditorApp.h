@@ -3,6 +3,7 @@
 #include <engine/core/Application.h>
 #include <engine/core/Config.h>
 #include <engine/assets/RuntimeAssetManager.h>
+#include <engine/animation/AnimatedModel.h>
 #include <engine/ecs/Components.h>
 #include <engine/ecs/Registry.h>
 #include <engine/graphics/Camera.h>
@@ -15,10 +16,13 @@
 #include <engine/graphics/ProceduralSky.h>
 #include <engine/graphics/Renderer.h>
 #include <engine/graphics/Shader.h>
+#include <engine/graphics/SkinnedRenderer.h>
 #include <engine/graphics/SSAO.h>
 #include <engine/graphics/SSR.h>
 #include <engine/graphics/TextRenderer.h>
+#include <engine/gameplay/PlayerController.h>
 #include <engine/physics/PhysicsComponents.h>
+#include <engine/gameplay/Script.h>
 #include <engine/physics/PhysicsWorld.h>
 #include <engine/ui/ImGuiLayer.h>
 #include <MaterialMaker/MaterialMakerPanel.h>
@@ -41,9 +45,11 @@
 
 #include <glm/glm.hpp>
 
+#include <array>
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 class EditorApp final : public engine::Application {
 public:
@@ -68,12 +74,34 @@ private:
         LoadScene
     };
 
+    struct PlayTriggerAction {
+        engine::ecs::Entity target = engine::ecs::kNull;
+        EditorScene::TriggerActionMode enterMoverAction = EditorScene::TriggerActionMode::None;
+        EditorScene::TriggerActionMode enterRotatorAction = EditorScene::TriggerActionMode::None;
+        EditorScene::TriggerActionMode exitMoverAction = EditorScene::TriggerActionMode::None;
+        EditorScene::TriggerActionMode exitRotatorAction = EditorScene::TriggerActionMode::None;
+        engine::ecs::Mover mover;
+        engine::ecs::Rotator rotator;
+    };
+
+    struct AnimationPreviewAction {
+        engine::ecs::Entity entity = engine::ecs::kNull;
+        int clip = 0;
+        float time = 0.0f;
+        float fadeIn = 0.08f;
+        float fadeOut = 0.15f;
+        float speed = 1.0f;
+        bool active = false;
+    };
+
     void DrawEditModeModels(const glm::mat4& viewProj);
     void DrawSelectionOutline(const glm::mat4& viewProj);
     void DrawEditorOverlay();
     void DrawMaterialMakerPanel();
     void DrawMaterialMakerTools(bool materialSaved);
     void DrawDirtyScenePrompt();
+    EditorDockspace::GameplayDebugState BuildGameplayDebugState();
+    EditorDockspace::AnimationPreviewState BuildAnimationPreviewState();
     void DrawAssetOverlay(float x, float y, const glm::vec3& text, const glm::vec3& muted);
     void DrawLogOverlay(float x, float y, const glm::vec3& text, const glm::vec3& muted);
     void HandleGlobalShortcuts(engine::Window& window);
@@ -101,6 +129,12 @@ private:
     void AddDynamicCube();
     void AddStaticFloor();
     void AddTriggerVolume();
+    void AddPlayerStart();
+    void AddGameplayDoor();
+    void AddGameplayPickup();
+    void AddGameplayDamageZone();
+    void AddGameplayMovingPlatform();
+    void AddGameplayTriggerMoverTest();
     void CycleSelectedColor();
     void SetSelectedPrimitive(EditorScene::Primitive primitive);
     void ToggleSelectedVisible();
@@ -126,10 +160,21 @@ private:
     void LoadSceneFromPath(const std::string& path);
     void ExportRuntimeScene();
     void ValidateRuntimeScene();
+    void TriggerAnimationPreviewAction();
     void EnterPlayMode();
     void ExitPlayMode();
     bool BuildPlayRuntimePreview(std::string* error);
-    void StepPlayPhysics(float dt);
+    void ConfigurePlayPlayerController(const std::unordered_map<std::string, engine::ecs::Entity>& playEntitiesByName);
+    void BuildPlayTriggerActions(const std::unordered_map<std::string, engine::ecs::Entity>& playEntitiesByName);
+    void ApplyPlayTriggerAction(engine::ecs::Entity trigger, engine::ecs::Entity other, engine::CollisionEvent::Phase phase);
+    void PushPlayTriggerActionRow(const std::string& triggerName,
+                              const std::string& targetName,
+                              const std::string& componentName,
+                              bool enabled,
+                              engine::CollisionEvent::Phase phase);
+    void UpdatePlayPlayerController(float dt, bool inputEnabled);
+    engine::ScriptInputState CapturePlayScriptInput(bool inputEnabled);
+    void StepPlayPhysics(float dt, bool inputEnabled);
     void CapturePlayPhysicsEvents();
     bool Pressed(int key);
 
@@ -157,6 +202,7 @@ private:
     std::optional<engine::Mesh>          m_sphere;
     std::optional<engine::Shader>        m_shader;
     std::optional<engine::Shader>        m_modelShader;
+    std::optional<engine::SkinnedRenderer> m_skinnedRenderer;
     std::optional<engine::Shader>        m_outlineShader;
     std::optional<engine::PbrRenderer>   m_pbrRenderer;
     std::optional<engine::PostProcess>   m_postProcess;
@@ -174,6 +220,8 @@ private:
     engine::PhysicsWorld m_playPhysics;
     std::optional<engine::ecs::Registry> m_playRegistry;
     std::optional<engine::RuntimeAssetManager> m_playAssets;
+    std::optional<engine::PlayerController> m_playPlayerController;
+    engine::ecs::Entity m_playPlayerEntity = engine::ecs::kNull;
     bool m_physicsPaused = false;
     bool m_physicsStepRequested = false;
     float m_physicsFixedTimestep = 1.0f / 60.0f;
@@ -182,13 +230,16 @@ private:
     int m_physicsEventEnterCount = 0;
     int m_physicsEventStayCount = 0;
     int m_physicsEventExitCount = 0;
+    int m_physicsActionCount = 0;
     std::vector<EditorDockspace::PhysicsEventRow> m_physicsEventRows;
     std::vector<EditorViewport::PhysicsEventGuide> m_physicsEventGuides;
+    std::vector<engine::ScriptAnimationEvent> m_playAnimationEvents;
     bool m_showPhysicsEventGuides = true;
     bool m_physicsEventGuidesSelectedOnly = false;
     bool m_physicsEventGuidesTriggersOnly = false;
     bool m_physicsEventGuidesEnterExitOnly = false;
     std::unordered_map<engine::ecs::Entity, std::string> m_playEntityNames;
+    std::unordered_map<engine::ecs::Entity, PlayTriggerAction> m_playTriggerActions;
 
     float m_fps = 60.0f;
     float m_elapsed = 0.0f;
@@ -201,7 +252,15 @@ private:
     bool m_dirtyScenePromptQueued = false;
     std::array<char, 260> m_scenePathDraft{};
     std::unordered_map<int, bool> m_keyPrev;
+    std::unordered_map<int, bool> m_scriptKeyPrev;
+    std::unordered_map<int, bool> m_scriptMousePrev;
     std::unordered_map<std::string, bool> m_editModelLoadErrors;
     std::unordered_map<std::string, bool> m_editTextureLoadErrors;
-    std::unordered_map<std::string, bool> m_editMaterialLoadErrors;
+    std::unordered_map<engine::ecs::Entity, float> m_animationPreviewTimes;
+    AnimationPreviewAction m_animationPreviewAction;
+    int m_animationActionClip = 0;
+    float m_animationActionFadeIn = 0.08f;
+    float m_animationActionFadeOut = 0.15f;
+    float m_animationActionSpeed = 1.0f;
+    std::array<char, 128> m_animationActionMaskRoot{};
 };
