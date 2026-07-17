@@ -14,6 +14,14 @@ public:
         PhysicsStatus,
         GameplayDebug,
         AnimationPreview,
+        Gizmo,
+        CameraManager,
+        BehaviorGraph,
+        AudioEditor,
+        AudioMixer,
+        ParticleEditor,
+        ShaderEditor,
+        Hud,
         Count
     };
 
@@ -28,6 +36,8 @@ public:
 
 private:
     static constexpr int kPanelCount = static_cast<int>(Panel::Count);
-    static constexpr std::array<bool, kPanelCount> kDefaultOpen{{true, true, false, true, true, false}};
+    static constexpr std::array<bool, kPanelCount> kDefaultOpen{{
+        true, true, false, true, true, false, false, false, false, true, true, false, false, false, false, false, false
+    }};
     std::array<bool, kPanelCount> m_open{kDefaultOpen};      
 };

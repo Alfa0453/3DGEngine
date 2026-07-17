@@ -46,12 +46,9 @@ renders.
 - The previous framebuffer binding and viewport are saved and restored around the
   off-screen render, so the editor and ImGui keep drawing to the right target.
 
-**Status.** Written against the current engine headers; **not yet compiled** here
-(needs a local `cmake --build`, since it pulls in ImGui, GL and Assimp). Build the
-`3DGEditor` target and open the Material Maker panel to verify.
+**Status.** Integrated and compiled as part of the `3DGEditor` target.
 
-**Known follow-ups within M1.** Texture maps are not yet fed into the preview (the
-sphere shows the scalar material only) — that is M2. `ImTextureID` is assumed to be
+**M1 follow-up status.** Texture maps are fed into the preview by M2. `ImTextureID` is assumed to be
 the default `void*`; if the project configures it as `ImU64`, the cast in
 `DrawPreview` still holds (C-style cast), but confirm on first build.
 
@@ -75,8 +72,7 @@ Built on top of the M1 preview.
 
 The render path now takes a `MaterialPreview::Settings` struct (size, camera yaw/
 pitch, shape, channel, env time/rotation, light intensity, ground, background)
-instead of loose arguments. Written against the current headers; **not compiled
-here** — build the `3DGEditor` target to verify.
+instead of loose arguments and is compiled with `3DGEditor`.
 
 ## M2 — Texture maps in the preview, with thumbnails (implemented)
 
@@ -98,11 +94,9 @@ The three map slots now load and render.
 - Engine: added a one-line `engine::Texture::ID()` accessor (like `Mesh::Vao()`) so
   the thumbnail can be drawn with `ImGui::Image`.
 
-**Known limitation.** Primitive meshes (sphere/cube/plane) carry no tangents, so the
-**normal map** preview is approximate on them — albedo and metal/rough are exact.
-Debug channel views still show scalar values (they use the unlit shader, which does
-not sample maps). Both are candidates for a small follow-up. Written against the
-current headers; **not compiled here** — build `3DGEditor` to verify.
+**Current behavior.** Normal mapping derives the tangent frame from position/UV
+derivatives, matching the engine PBR shader without stored tangents. Debug channel
+views sample the assigned albedo, normal, and ORM textures alongside scalar values.
 
 ## M3 — Project-relative texture paths (implemented)
 
@@ -152,26 +146,23 @@ Rough" buttons, path entry is already well covered.
 **Emissive Strength** slider (0–20×) beside the 0–1 emissive colour; the effective
 emissive = colour × strength is baked into the value the preview shows, the exported
 C++ initializer, and the `.3dgmat` "emissive" field the engine consumes — so a
-material can now glow above 1 and bloom. (On reload the baked HDR value comes back as
-the colour with strength 1; keeping a separate strength through a round-trip would
-need an extra JSON field and is a minor follow-up.) **Not compiled here.**
+material can now glow above 1 and bloom. Material format v2 also stores the authoring
+colour and strength separately, so save/load round-trips preserve both values.
 
 ## M6 — Metal/rough channel packer (implemented)
 
 New `TexturePacker` (`TexturePacker.h` / `.cpp`): `PackMetalRoughAO(metallic,
-roughness, ao, output)` decodes separate grayscale PNG/JPG sources (via the engine's
+roughness, ao, output)` decodes separate grayscale PNG/JPG/TGA sources (via the engine's
 `engine::image` decoders), reads each from its red channel, and writes one **ORM**
 texture — **R = AO, G = roughness, B = metallic** (glTF convention) — as an
-uncompressed 32-bit TGA the engine loads natively. Metallic/roughness are required
-and must share a size; AO is optional (channel filled with 255 when absent).
+uncompressed 32-bit TGA the engine loads natively. At least one channel is required;
+missing channels are filled with 255 and all provided sources must share a size.
 
 The panel adds a **"Pack Metal/Rough (ORM)"** section (in the texture controls): paste
 the metallic / roughness / (optional) AO source paths, click **Pack ORM →
 Metal/Rough**, and the packed `<name>_ORM.tga` is written to the output folder and
 assigned to the material's metal/rough slot automatically. Errors (size mismatch,
-unsupported format, write failure) surface in the status line. **Not compiled here** —
-build `3DGEditor` to verify. (TGA sources aren't decoded as inputs yet — PNG/JPG
-only; adding a TGA reader is a minor follow-up.)
+unsupported format, write failure) surface in the status line.
 
 ## M7 — Material library and presets
 
@@ -207,7 +198,9 @@ base-colour / normal / metal-rough texture maps resolved to absolute paths again
 model's directory (embedded textures are skipped). `CountModelMaterials` reports how
 many a file has. The panel adds an **"Import from Model"** section: paste a model
 path, choose a material index, click **Import Material**. Assimp is already linked
-transitively through `engine`. **Not compiled here** — build `3DGEditor` to verify.
+transitively through `engine`. Combined and separate metallic/roughness/AO sources
+are normalized into engine ORM, and available clearcoat, transmission, IOR,
+thickness, anisotropy, sheen, opacity, and displacement properties are imported.
 
 ## Smaller polish
 
@@ -219,4 +212,21 @@ transitively through `engine`. **Not compiled here** — build `3DGEditor` to ve
 - ~~Add a dirty / unsaved-changes indicator.~~ **Implemented:** the panel keeps a
   `m_savedSnapshot` of the last saved/loaded material and shows amber
   **"* Unsaved changes"** vs. green "No unsaved changes" (field-wise `SameMaterial`
-  compare); the snapshot resets on Save / Load / Reset. **Not compiled here.**
+  compare); the snapshot resets on Save / Load / Reset.
+
+## M10 — Advanced surface model (implemented)
+
+Material format v3 and `engine::ecs::PbrMaterial` now support:
+
+- opaque, alpha-masked, and sorted transparent rendering;
+- opacity and alpha cutoff, including masked shadow casting;
+- UV tiling, offset, and rotation shared by all material maps;
+- adjustable normal strength and height-map parallax;
+- dielectric specular level, clearcoat and clearcoat roughness;
+- transmission, index of refraction, and thickness;
+- anisotropy direction, sheen colour/roughness, and subsurface tint/strength.
+
+Advanced surfaces automatically use the per-object rendering path; default opaque
+materials continue to use the existing instanced batches. The Material Maker exposes
+all controls, a height-map slot, validation hints, and Glass, Car Paint, Velvet, and
+Skin/Wax quick setups. The Debug editor build and an OpenGL startup smoke test pass.

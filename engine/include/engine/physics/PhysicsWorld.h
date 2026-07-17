@@ -29,6 +29,36 @@ struct ContactManifold {
     float     penetration = 0.0f;
     int       count = 0;            // number of contact points (1..4)
     glm::vec3 points[4]{};          // world-space contact points (for torque)
+
+    // Solver state (accumulated over the step's iterations; warm-started from the
+    // previous step so stacks settle without relying on damping).
+    glm::vec3 tangent1{0.0f}, tangent2{0.0f};   // friction basis (shared by all points)
+    float     normalImpulse[4]{};               // accumulated normal impulse per point
+    float     tangentImpulse[4][2]{};           // accumulated friction impulse per point/axis
+    float     restBias[4]{};                    // restitution velocity target per point
+    std::uint64_t key = 0;                      // entity-pair key (warm-start lookup)
+
+    // Constants precomputed ONCE per step (positions/inertia are frozen during the
+    // velocity solve), so the per-iteration loop does only dot products + impulse
+    // accumulation -- no mat3 rebuilds. This is the bulk of the solver cost.
+    glm::vec3 rA[4]{}, rB[4]{};                  // contact offsets from each centre
+    float     normalMass[4]{};                   // 1 / effective mass along the normal
+    float     tangentMass[4][2]{};               // 1 / effective mass along each tangent
+    float     invMassA = 0.0f, invMassB = 0.0f;  // cached inverse masses
+    glm::mat3 invIA{0.0f}, invIB{0.0f};          // cached world inverse inertia
+    float     friction = 0.0f;                   // combined Coulomb coefficient
+};
+
+// Persistent per-pair contact impulses, matched to this step's points by nearest
+// position, so the solver can warm-start (seed) the accumulated impulses.
+struct ContactCachePoint {
+    glm::vec3 point{0.0f};
+    float     normalImpulse = 0.0f;
+    float     tangentImpulse[2] = {0.0f, 0.0f};
+};
+struct ContactCache {
+    int              count = 0;
+    ContactCachePoint pts[4]{};
 };
 
 // A ray for scene queries. direction is normalized by Raycast if needed.
@@ -49,12 +79,21 @@ struct RaycastHit {
 // A collision/overlap event emitted by a step. Enter on the first step a pair
 // touches, Stay while they keep touching, Exit on the step they separate.
 // trigger is true when either collider is a trigger (overlap-only) volume.
+//
+// For solid (non-trigger) Enter/Stay events, point/normal/impulse describe the
+// contact: 'point' is the average world contact point, 'normal' points from a
+// toward b, and 'impulse' is the total normal impulse applied this step (a proxy
+// for impact strength -- use it to scale hit sounds, damage, or effects). These
+// are zero for trigger events and Exit events.
 struct CollisionEvent {
     enum class Phase { Enter, Stay, Exit };
     ecs::Entity a = ecs::kNull;
     ecs::Entity b = ecs::kNull;
     Phase       phase = Phase::Enter;
     bool        trigger = false;
+    glm::vec3   point{0.0f};
+    glm::vec3   normal{0.0f};
+    float       impulse = 0.0f;
 };
 
 // A constraint between two bodies' centres, or between one body and a fixed world
@@ -108,7 +147,31 @@ public:
     // Cast a ray through all colliders and return the closest hit within
     // maxDistance (sphere / plane / box). direction need not be pre-normalized.
     RaycastHit Raycast(ecs::Registry& registry, const Ray& ray,
-                       float maxDistance = 1.0e30f) const;
+                       float maxDistance = 1.0e30f,
+                       std::uint32_t layerMask = 0xFFFFFFFFu) const;
+
+    // Sweep a sphere from start to end and return the earliest solid collider.
+    // Trigger volumes and the optional ignored entity are skipped. This is useful
+    // for camera booms and other obstruction tests that need volume, not a thin ray.
+    RaycastHit SphereCast(ecs::Registry& registry,
+                          const glm::vec3& start,
+                          const glm::vec3& end,
+                          float radius,
+                          ecs::Entity ignored = ecs::kNull,
+                          std::uint32_t layerMask = 0xFFFFFFFFu) const;
+
+    // Collect every collider overlapping a world-space sphere (AoE queries:
+    // explosions, detection). Trigger volumes are included. Filtered by layerMask.
+    std::vector<ecs::Entity> OverlapSphere(ecs::Registry& registry,
+                                           const glm::vec3& center, float radius,
+                                           std::uint32_t layerMask = 0xFFFFFFFFu) const;
+
+    // Apply a radial impulse to dynamic bodies within 'radius' of 'center',
+    // scaled by 1 - dist/radius (linear falloff). Wakes sleeping bodies. Handy for
+    // explosions. strength is the peak impulse magnitude at the centre.
+    void ApplyRadialImpulse(ecs::Registry& registry, const glm::vec3& center,
+                            float radius, float strength,
+                            std::uint32_t layerMask = 0xFFFFFFFFu) const;
 
     // Enter/Stay/Exit events generated by the most recent Step (both solid
     // contacts and trigger overlaps). Valid until the next Step.
@@ -178,6 +241,7 @@ private:
     std::vector<std::int64_t>               m_keys;
     std::unordered_map<std::int64_t, std::vector<int>> m_grid;
     std::unordered_map<std::uint64_t, bool> m_touchingNow;
+    std::unordered_map<std::uint64_t, ContactCache> m_contactCache;  // warm-start impulses
 };
 
 } // namespace engine

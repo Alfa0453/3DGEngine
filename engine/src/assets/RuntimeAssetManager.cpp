@@ -2,6 +2,7 @@
 
 #include "engine/animation/AnimatedModel.h"
 #include "engine/ecs/Components.h"
+#include "engine/assets/ShaderGraphCompiler.h"
 
 #include <algorithm>
 #include <exception>
@@ -115,6 +116,54 @@ const RuntimeMaterialAsset* RuntimeAssetManager::LoadMaterial(const std::string&
     m_materials.emplace(path, std::move(material));
     SetError(error, std::string{});
     return result;
+}
+
+const Shader* RuntimeAssetManager::LoadShader(
+    const std::string& path, bool skinned, std::string* error)
+{
+    if (path.empty()) {
+        SetError(error, "RuntimeAssetManager: shader path is empty");
+        return nullptr;
+    }
+    auto asset = m_shaderAssets.find(path);
+    if (asset == m_shaderAssets.end()) {
+        ShaderAsset loaded;
+        std::string loadError;
+        if (!LoadShaderAsset(path, &loaded, &loadError)) {
+            SetError(error, loadError);
+            return nullptr;
+        }
+        asset = m_shaderAssets.emplace(path, std::move(loaded)).first;
+    }
+    const std::string variant =
+        asset->second.domain == ShaderDomain::Surface
+            ? (skinned ? "surface_skinned" : "surface_static")
+            : asset->second.domain == ShaderDomain::PostProcess
+                ? "post_process"
+                : asset->second.domain == ShaderDomain::Particle
+                    ? "particle"
+                    : "unlit";
+    const GeneratedShaderSource generated =
+        GenerateShaderSource(
+            asset->second,
+            asset->second.domain == ShaderDomain::Surface && skinned);
+    if (!generated.success) {
+        SetError(error, generated.issues.empty()
+            ? "Shader graph generation failed."
+            : generated.issues.front().message);
+        return nullptr;
+    }
+    m_shaderPrograms.CompileOrReload(
+        path, variant, asset->second, generated.vertex, generated.fragment, {path});
+    const Shader* shader = m_shaderPrograms.Find(path, variant);
+    const ShaderCompileReport* report = m_shaderPrograms.LastReport(path, variant);
+    if ((!report || !report->success) && !shader) {
+        SetError(error, report && !report->diagnostics.empty()
+            ? report->diagnostics.front().message : "Shader compilation failed.");
+        return nullptr;
+    }
+    SetError(error, {});
+    return shader;
 }
 const Model *RuntimeAssetManager::FindModel(const std::string &path) const
 {
@@ -307,6 +356,29 @@ RuntimeAssetManager::ResolveReport RuntimeAssetManager::ResolveRegistryAssets(ec
             if (!material->metalRoughMapPath.empty()) {
                 loaded.metalRoughMap = LoadTexture(material->metalRoughMapPath, &error);
             }
+            if (!material->heightMapPath.empty()) {
+                loaded.heightMap = LoadTexture(material->heightMapPath, &error);
+            }
+            if (!material->shaderPath.empty()) {
+                loaded.shader = LoadShader(material->shaderPath, false, &error);
+                loaded.skinnedShader = LoadShader(material->shaderPath, true, &error);
+                if (!loaded.shader)
+                    report.errors.push_back(error);
+                for (const RuntimeShaderParameter& parameter : material->shaderParameters)
+                    loaded.shaderParameters[parameter.name] = parameter.value;
+                for (const RuntimeShaderParameter& parameter : material->shaderParameters)
+                    loaded.shaderParameterTypes[parameter.name] = parameter.type;
+                for (const RuntimeShaderParameter& parameter : material->shaderParameters) {
+                    if (parameter.type != static_cast<int>(ShaderValueType::Texture2D)
+                        || parameter.value.empty()) continue;
+                    const Texture* texture = LoadTexture(parameter.value, &error);
+                    if (texture) loaded.shaderTextures[parameter.name] = texture;
+                    else report.errors.push_back(error);
+                }
+                for (const auto& overrideValue : asset.parameterOverrides)
+                    loaded.shaderParameters[overrideValue.first] =
+                        overrideValue.second;
+            }
             ++report.materialsAssigned;
         } else {
             const bool wasCached = FindTexture(materialPath) != nullptr;
@@ -326,6 +398,7 @@ RuntimeAssetManager::ResolveReport RuntimeAssetManager::ResolveRegistryAssets(ec
         loaded.material.albedoMap = loaded.albedoMap;
         loaded.material.normalMap = loaded.normalMap;
         loaded.material.metalRoughMap = loaded.metalRoughMap;
+        loaded.material.heightMap = loaded.heightMap;
         registry.Add<ecs::LoadedMaterialAsset>(entity, loaded);
     });
 
@@ -337,6 +410,8 @@ void RuntimeAssetManager::Clear()
     m_skinnedModels.clear();
     m_textures.clear();
     m_materials.clear();
+    m_shaderPrograms.Clear();
+    m_shaderAssets.clear();
 }
 
 } // namespace engine

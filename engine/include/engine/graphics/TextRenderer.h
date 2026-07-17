@@ -4,6 +4,7 @@
 
 #include <memory>
 #include <string>
+#include <unordered_map>
 
 namespace engine {
 class Shader;
@@ -36,6 +37,18 @@ public:
     // Draw a solid filled rectangle (pixels). Handy for dim overlays and bars.
     void FillRect(float x, float y, float w, float h, const glm::vec3& color, float alpha);
 
+    // Draw an RGBA texture (by GL id) as a rectangle (pixels), tinted by
+    // tint*alpha. Used for HUD image widgets. Rebinds the font atlas afterward.
+    void Image(unsigned int textureId, float x, float y, float w, float h,
+               const glm::vec3& tint, float alpha);
+
+    // Draw a HUD rectangle through a compiled Unlit/UI shader graph.
+    void CustomRect(Shader& shader, unsigned int textureId,
+                    float x, float y, float w, float h, const glm::vec4& color,
+                    const std::unordered_map<std::string, std::string>& parameters,
+                    const std::unordered_map<std::string, int>& parameterTypes,
+                    const std::unordered_map<std::string, const Texture*>& textures);
+
     void End();
 
     // Pixel width a string occupies at the given scale (monospace).
@@ -48,6 +61,7 @@ private:
     unsigned int m_vbo = 0;
     std::unique_ptr<Shader> m_shader;   // built from inline GLSL
     std::unique_ptr<Texture> m_atlas;   // 128x48 font atlas (16x6 cells)
+    glm::mat4 m_projection{1.0f};
 };
 
 } // namespace engine

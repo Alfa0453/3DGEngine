@@ -1,8 +1,24 @@
 # Material Maker — change summary & build/verify checklist
 
-A run of improvements was made to the Material Maker in this session. **None of it
-has been compiled yet** (the work was done without a local toolchain). This file is
-the hand-off: what changed, how to build it, and what to check.
+A repair and cleanup pass was completed on 2026-07-14 and verified by building the
+`3DGEditor` Debug target. Material format v2 preserves emissive authoring values;
+model imports normalize texture channels into engine ORM; preview failures fall back
+safely; debug views sample maps; texture changes reload; saves are atomic; and the
+runtime now consumes ORM ambient occlusion. Version 1 materials remain loadable.
+
+The material system was subsequently expanded to format v3 with opaque, masked, and
+transparent blend modes; opacity/cutoff; UV tiling, offset, and rotation; normal
+strength; height-map parallax; specular level; clearcoat; transmission, IOR, and
+thickness; anisotropy; sheen; and subsurface controls. Advanced materials use the
+per-object renderer while ordinary materials retain instanced batching. Transparent
+objects are sorted and blended, masked objects cast alpha-tested shadows, and glTF
+PBR extension factors are imported when Assimp exposes them. Versions 1 and 2 remain
+loadable.
+
+The built-in PNG decoder now accepts non-interlaced 16-bit grayscale, RGB,
+grayscale-alpha, and RGBA images and rounds their samples to the engine's 8-bit RGBA
+GPU format. Material Maker displays detailed decoder failures instead of only a
+generic thumbnail error.
 
 Full per-feature rationale is in `ROADMAP.md`.
 
@@ -13,7 +29,7 @@ Full per-feature rationale is in `ROADMAP.md`.
 | File | Purpose |
 |------|---------|
 | `include/MaterialMaker/MaterialPreview.h`, `src/MaterialPreview.cpp` | Live offscreen **PBR preview** (sphere/cube/plane) via `PbrRenderer` + `IBL` into a `Framebuffer`; **channel views** (albedo/metallic/roughness/normals/AO) through an embedded unlit shader; **environment rig** (time-of-day, rotate, light, ground+shadow, background); **texture-map cache** (`AcquireMap`/`ResolveMap`). |
-| `include/MaterialMaker/TexturePacker.h`, `src/TexturePacker.cpp` | **ORM channel packer**: combine separate metallic/roughness/AO PNG/JPG into one `R=AO,G=roughness,B=metallic` TGA. |
+| `include/MaterialMaker/TexturePacker.h`, `src/TexturePacker.cpp` | **ORM channel packer**: normalize separate or combined PNG/JPG/TGA sources into one `R=AO,G=roughness,B=metallic` TGA. |
 | `include/MaterialMaker/ModelMaterialImport.h`, `src/ModelMaterialImport.cpp` | **Import a material from a model** (glTF/OBJ/FBX) via Assimp. |
 | `ROADMAP.md` | The improvement roadmap / milestone log. |
 
@@ -72,12 +88,9 @@ macros and the `ImTextureID` cast — both are noted with fixes.
 2. **`ImTextureID` cast** (`MaterialMakerPanel.cpp`, `MaterialPreview.cpp` thumbnails):
    assumes the default `void*`. If your ImGui config uses `ImU64`, the C-style
    `(ImTextureID)(std::intptr_t)tex` still works; just confirm.
-3. **Normal maps on primitives**: the sphere/cube/plane carry no tangents, so
-   tangent-space normal mapping is approximate in the preview (albedo/metal-rough are
-   exact). Not a bug — a fidelity limit; fix = add tangents to primitives or a
-   derivative-based TBN in the shader.
-4. **TexturePacker inputs**: PNG/JPG only (uses `engine::image` decoders); TGA sources
-   aren't decoded as inputs yet.
+3. **Normal maps on primitives**: preview and engine shaders derive the tangent frame
+   from position/UV derivatives, so stored mesh tangents are not required.
+4. **TexturePacker inputs**: PNG/JPG and uncompressed 24/32-bit TGA are supported.
 
 ## Not done (candidates for later)
 

@@ -14,6 +14,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <sstream>
 
 #include <glad/glad.h>
 #include <glm/gtc/matrix_transform.hpp>
@@ -26,9 +28,49 @@ using engine::ecs::Entity;
 using engine::ecs::Transform;
 using engine::ecs::MeshPBR;
 using engine::ecs::Light;
+using engine::ecs::PbrMaterial;
 
 namespace engine {
 namespace {
+
+std::vector<float> ParameterNumbers(std::string value) {
+    std::replace(value.begin(), value.end(), ',', ' ');
+    std::replace(value.begin(), value.end(), '(', ' ');
+    std::replace(value.begin(), value.end(), ')', ' ');
+    std::istringstream input(value);
+    std::vector<float> values;
+    float number = 0.0f;
+    while (input >> number) values.push_back(number);
+    return values;
+}
+
+void UploadCustomParameters(Shader& shader, const MeshPBR& mesh) {
+    int textureUnit = 18;
+    for (const auto& entry : mesh.shaderParameters) {
+        const std::string uniform = "u_" + entry.first;
+        const auto type = mesh.shaderParameterTypes.find(entry.first);
+        const int valueType = type == mesh.shaderParameterTypes.end() ? 0 : type->second;
+        if (valueType == 7) {
+            const auto texture = mesh.shaderTextures.find(entry.first);
+            if (texture != mesh.shaderTextures.end() && texture->second) {
+                texture->second->Bind(static_cast<unsigned int>(textureUnit));
+                shader.SetInt(uniform, textureUnit++);
+            }
+            continue;
+        }
+        const std::vector<float> values = ParameterNumbers(entry.second);
+        if (valueType == 1 || valueType == 2)
+            shader.SetInt(uniform, entry.second == "true" ? 1
+                : values.empty() ? 0 : static_cast<int>(values[0]));
+        else if (valueType == 3 && values.size() >= 2)
+            shader.SetVec2(uniform, glm::vec2(values[0], values[1]));
+        else if (valueType == 4 && values.size() >= 3)
+            shader.SetVec3(uniform, glm::vec3(values[0], values[1], values[2]));
+        else if ((valueType == 5 || valueType == 6) && values.size() >= 4)
+            shader.SetVec4(uniform, glm::vec4(values[0], values[1], values[2], values[3]));
+        else shader.SetFloat(uniform, values.empty() ? 0.0f : values[0]);
+    }
+}
 
 const char* kPbrVert = R"GLSL(
 #version 330 core
@@ -88,12 +130,34 @@ uniform float uMetallic;
 uniform float uRoughness;
 uniform float uAO;
 uniform vec3  uEmissive;
+uniform int uBlendMode;
+uniform float uOpacity;
+uniform float uAlphaCutoff;
+uniform vec2 uUvScale;
+uniform vec2 uUvOffset;
+uniform float uUvRotation;
+uniform float uNormalStrength;
+uniform float uHeightScale;
+uniform float uClearcoat;
+uniform float uClearcoatRoughness;
+uniform float uTransmission;
+uniform float uIor;
+uniform float uThickness;
+uniform float uAnisotropy;
+uniform float uAnisotropyRotation;
+uniform vec3 uSheenColor;
+uniform float uSheenRoughness;
+uniform float uSpecularLevel;
+uniform float uSubsurface;
+uniform vec3 uSubsurfaceColor;
 uniform int uHasAlbedoMap;
 uniform int uHasNormalMap;
 uniform int uHasMetalRoughMap;
+uniform int uHasHeightMap;
 uniform sampler2D uAlbedoMap;
 uniform sampler2D uNormalMap;
 uniform sampler2D uMetalRoughMap;
+uniform sampler2D uHeightMap;
 uniform vec3  uSunDir;
 uniform vec3  uSunColor;
 uniform vec3  uAmbient;
@@ -123,6 +187,7 @@ uniform mat4  uCascadeVP[4];
 uniform float uCascadeSplits[4];
 uniform mat4  uView;
 uniform float uShadowSoftness;
+uniform int   uSunShadow;   // 0 disables the directional (sun) shadow
 uniform samplerCube uPointCube[4];
 uniform int uNumPointShadows;
 uniform int uApplyTonemap;
@@ -205,6 +270,11 @@ float ShadowFactor(float NdotL) {
     }
     return s / 25.0;
 }
+// Filmic ACES tone map (Narkowicz fit) -- punchier + more saturated than Reinhard.
+vec3 ACES(vec3 x) {
+    const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
 vec3 Lighting(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 albedo, vec3 F0, float m, float r) {
     vec3 H = normalize(V+L);
     float NDF = DistributionGGX(N,H,r);
@@ -252,29 +322,71 @@ mat3 CotangentFrame(vec3 N, vec3 p, vec2 uv) {
     float invmax = inversesqrt(max(dot(T, T), dot(B, B)));
     return mat3(T * invmax, B * invmax, N);
 }
+vec2 TransformUV(vec2 uv) {
+    float a = radians(uUvRotation); float c = cos(a), s = sin(a);
+    vec2 p = uv * uUvScale - vec2(0.5);
+    return mat2(c, -s, s, c) * p + vec2(0.5) + uUvOffset;
+}
+vec2 ParallaxUV(vec2 uv, vec3 viewTS) {
+    if (uHasHeightMap == 0 || uHeightScale <= 0.00001) return uv;
+    const float layers = 16.0;
+    float layerDepth = 1.0 / layers, depth = 0.0;
+    vec2 delta = (viewTS.xy / max(abs(viewTS.z), 0.08)) * uHeightScale / layers;
+    vec2 current = uv;
+    for (int i = 0; i < 16; ++i) {
+        if (depth >= 1.0 - texture(uHeightMap, current).r) break;
+        current -= delta; depth += layerDepth;
+    }
+    return current;
+}
+vec3 ClearcoatSpecular(vec3 N, vec3 V, vec3 L, vec3 radiance) {
+    vec3 H = normalize(V + L);
+    float r = max(uClearcoatRoughness, 0.02);
+    float D = DistributionGGX(N, H, r);
+    float G = GeometrySmith(N, V, L, r);
+    vec3 F = FresnelSchlick(max(dot(H, V), 0.0), vec3(0.04));
+    return uClearcoat * D * G * F * radiance * max(dot(N, L), 0.0) /
+           (4.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0) + 0.0001);
+}
 void main() {
+    vec3 baseN = normalize(vNormal);
+    vec3 V = normalize(uViewPos-vWorldPos);
+    vec2 uv = TransformUV(vUV);
+    mat3 baseTbn = CotangentFrame(baseN, vWorldPos, uv);
+    uv = ParallaxUV(uv, transpose(baseTbn) * V);
     vec3 albedo = (uInstanced == 1) ? vIAlbedo : uAlbedo;
-    if (uHasAlbedoMap == 1) albedo *= texture(uAlbedoMap, vUV).rgb;
+    vec4 albedoSample = (uHasAlbedoMap == 1) ? texture(uAlbedoMap, uv) : vec4(1.0);
+    albedoSample.rgb = pow(albedoSample.rgb, vec3(2.2));   // sRGB texture -> linear
+    albedo *= albedoSample.rgb;
+    float opacity = (uInstanced == 1) ? 1.0 : uOpacity * albedoSample.a;
+    if (uBlendMode == 1 && opacity < uAlphaCutoff) discard;
     float metallic = (uInstanced == 1) ? vIMRA.x : uMetallic;
     float roughness = (uInstanced == 1) ? vIMRA.y : uRoughness;
     float ao = (uInstanced == 1) ? vIMRA.z : uAO;
     if (uHasMetalRoughMap == 1) {
-        vec3 mr = texture(uMetalRoughMap, vUV).rgb;
+        vec3 mr = texture(uMetalRoughMap, uv).rgb;
+        ao         *= mr.r;
         roughness *= mr.g;
         metallic  *= mr.b;
     }
-    vec3 N = normalize(vNormal);
+    vec3 N = baseN;
     if (uHasNormalMap == 1) {
-        vec3 tn = texture(uNormalMap, vUV).rgb * 2.0 - 1.0;
-        N = normalize(CotangentFrame(normalize(vNormal), vWorldPos, vUV) * tn);
+        vec3 tn = texture(uNormalMap, uv).rgb * 2.0 - 1.0;
+        tn.xy *= uNormalStrength;
+        N = normalize(CotangentFrame(baseN, vWorldPos, uv) * normalize(tn));
     }
-    vec3 V = normalize(uViewPos-vWorldPos);
-    vec3 F0 = mix(vec3(0.04), albedo, metallic);
+    if (uInstanced == 0 && abs(uAnisotropy) > 0.001) {
+        float direction = cos(radians(uAnisotropyRotation));
+        float alignment = abs(dot(normalize(baseTbn[0] * direction + baseTbn[1] * sqrt(max(0.0, 1.0-direction*direction))), V));
+        roughness = clamp(roughness * (1.0 - 0.45 * uAnisotropy * alignment), 0.02, 1.0);
+    }
+    vec3 F0 = mix(vec3(0.08 * uSpecularLevel), albedo, metallic);
     vec3 Lo = vec3(0.0);
     vec3 Ls = normalize(-uSunDir);
     float sunNdotL = max(dot(N,Ls),0.0);
-    float shadow = ShadowFactor(sunNdotL);
+    float shadow = (uSunShadow == 1) ? ShadowFactor(sunNdotL) : 0.0;
     Lo += (1.0-shadow)*Lighting(N,V,Ls,uSunColor,albedo,F0,metallic,roughness);
+    if (uInstanced == 0) Lo += (1.0-shadow)*ClearcoatSpecular(N,V,Ls,uSunColor);
     ivec2 tile = ivec2(gl_FragCoord.xy / (uScreenSize / vec2(TILE_COUNT)));
     tile = clamp(tile, ivec2(0), TILE_COUNT - ivec2(1));
     int tbase = (tile.y * TILE_COUNT.x + tile.x) * TILE_STRIDE;
@@ -291,6 +403,7 @@ void main() {
         vec3 contrib = Lighting(N, V, L, radiance, albedo, F0, metallic, roughness);
         if (li < uNumPointShadows) contrib *= (1.0 - PointShadowFactor(li, -d));
         Lo += contrib;
+        if (uInstanced == 0) Lo += ClearcoatSpecular(N, V, L, radiance);
     }
     vec3 ambient;
     if (uUseIBL == 1) {
@@ -303,11 +416,27 @@ void main() {
         vec2 brdf = texture(uBrdfLUT, vec2(max(dot(N,V),0.0), roughness)).rg;
         vec3 specular = prefiltered * (F*brdf.x + brdf.y);
         ambient = (kD*diffuse + specular) * ao;
+        if (uInstanced == 0 && uTransmission > 0.0) {
+            vec3 refracted = refract(-V, N, 1.0 / max(uIor, 1.0));
+            vec3 transmitted = textureLod(uPrefilter, refracted, roughness*uMaxReflectionLod).rgb;
+            transmitted *= exp(-uThickness * max(vec3(0.02), vec3(1.0) - uSubsurfaceColor));
+            ambient = mix(ambient, transmitted, uTransmission);
+        }
+        if (uInstanced == 0 && uClearcoat > 0.0) {
+            vec3 Rc = reflect(-V, N);
+            ambient += uClearcoat * textureLod(uPrefilter, Rc, uClearcoatRoughness*uMaxReflectionLod).rgb * 0.04;
+        }
     } else {
         ambient = uAmbient*albedo*ao;
     }
     if (uUseSSAO == 1) ambient *= texture(uSsaoMap, gl_FragCoord.xy / uScreenSize).r;
     vec3 color = ambient + Lo + ((uInstanced == 1) ? vIEmissive : uEmissive);
+    if (uInstanced == 0) {
+        float rim = pow(1.0 - max(dot(N, V), 0.0), mix(5.0, 2.0, uSheenRoughness));
+        color += uSheenColor * rim;
+        float back = pow(max(dot(V, -Ls), 0.0), 2.0) * (1.0 - max(dot(N, Ls), 0.0));
+        color += uSubsurface * uSubsurfaceColor * albedo * (0.15 + back) * uSunColor;
+    }
 
     if (uFogEnabled == 1) {
         float dist = length(uViewPos - vWorldPos);
@@ -318,10 +447,11 @@ void main() {
     }
 
     if (uApplyTonemap == 1) {
-        color = color/(color+vec3(1.0));
-        color = pow(color, vec3(1.0/2.2));
+        color = ACES(color);                     // filmic tone map (was Reinhard)
+        color = pow(color, vec3(1.0/2.2));       // linear -> sRGB
     }
-    FragColor = vec4(color,1.0);
+    float outputAlpha = opacity * (1.0 - 0.85 * uTransmission);
+    FragColor = vec4(color, (uBlendMode == 2) ? outputAlpha : 1.0);
 }
 )GLSL";
 
@@ -381,9 +511,12 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
         }
     });
 
-    // Cascaded directional (sun) shadow pass.
-    m_cascade.Generate(reg, camera, aspect, sunDir, 60.0f, opt.shadowCasters);
-    glViewport(0, 0, screenWidth, screenHeight);
+    // Cascaded directional (sun) shadow pass (skipped when the sun shadow is off).
+    if (opt.directionalShadows) {
+        const float shadowFar = std::max(opt.shadowDistance, camera.nearPlane + 1.0f);
+        m_cascade.Generate(reg, camera, aspect, sunDir, shadowFar, opt.shadowCasters);
+        glViewport(0, 0, screenWidth, screenHeight);
+    }
 
     int numPointShadows = 0;
     if (opt.pointShadows && !ppos.empty()) {
@@ -418,6 +551,7 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
     m_pbr->SetInt("uCascadeMaps", 4);
     m_pbr->SetMat4("uView", view);
     m_pbr->SetFloat("uShadowSoftness", opt.shadowSoftness);
+    m_pbr->SetInt("uSunShadow", opt.directionalShadows ? 1 : 0);
     for (int i = 0; i < CascadedShadow::kCascades; ++i) {
         const std::string ix = "[" + std::to_string(i) + "]";
         m_pbr->SetMat4("uCascadeVP" + ix, m_cascade.CascadeVP(i));
@@ -481,12 +615,26 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
     // to per-object draws. Instancing collapses N draw calls to ~one per mesh.
     std::unordered_map<const Mesh*, std::vector<float>> batches;
     std::vector<std::pair<Transform*, MeshPBR*>> textured;
+    std::vector<std::pair<Transform*, MeshPBR*>> custom;
     reg.view<Transform, MeshPBR>().each([&](Entity, Transform& t, MeshPBR& m) {
         if (!m.mesh) return;
         if (opt.frustumCull &&
             !SphereInFrustum(frustum, t.position, 0.5f * glm::length(t.scale)))
             return;                                   // off-screen: skip it
-        if (m.material.albedoMap || m.material.normalMap || m.material.metalRoughMap || !opt.instancing) {
+        if (m.customShader) {
+            custom.emplace_back(&t, &m);
+            return;
+        }
+        const PbrMaterial defaults;
+        const bool advanced = m.material.blendMode != PbrMaterial::BlendMode::Opaque ||
+            m.material.opacity != defaults.opacity || m.material.uvScale != defaults.uvScale ||
+            m.material.uvOffset != defaults.uvOffset || m.material.uvRotation != defaults.uvRotation ||
+            m.material.normalStrength != defaults.normalStrength || m.material.heightScale != defaults.heightScale ||
+            m.material.clearcoat != defaults.clearcoat || m.material.transmission != defaults.transmission ||
+            m.material.anisotropy != defaults.anisotropy || m.material.sheenColor != defaults.sheenColor ||
+            m.material.specularLevel != defaults.specularLevel || m.material.subsurface != defaults.subsurface;
+        if (m.material.albedoMap || m.material.normalMap || m.material.metalRoughMap ||
+            m.material.heightMap || advanced || !opt.instancing) {
             textured.emplace_back(&t, &m);   // textured, or instancing disabled -> per-object
             return;
         }
@@ -497,6 +645,16 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
         v.push_back(m.material.albedo.x); v.push_back(m.material.albedo.y); v.push_back(m.material.albedo.z);
         v.push_back(m.material.metallic); v.push_back(m.material.roughness); v.push_back(m.material.ao);
         v.push_back(m.material.emissive.x); v.push_back(m.material.emissive.y); v.push_back(m.material.emissive.z);
+    });
+
+    std::stable_sort(textured.begin(), textured.end(), [&](const auto& a, const auto& b) {
+        const bool at = a.second->material.blendMode == PbrMaterial::BlendMode::Transparent;
+        const bool bt = b.second->material.blendMode == PbrMaterial::BlendMode::Transparent;
+        if (at != bt) return !at;
+        if (!at) return false;
+        const glm::vec3 da = a.first->position - camera.Position();
+        const glm::vec3 db = b.first->position - camera.Position();
+        return glm::dot(da, da) > glm::dot(db, db);
     });
 
     // Textured entities: per-object (uInstanced = 0).
@@ -515,11 +673,31 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
         m_pbr->SetFloat("uRoughness", m.material.roughness);
         m_pbr->SetFloat("uAO", m.material.ao);
         m_pbr->SetVec3("uEmissive", m.material.emissive);
+        m_pbr->SetInt("uBlendMode", static_cast<int>(m.material.blendMode));
+        m_pbr->SetFloat("uOpacity", m.material.opacity);
+        m_pbr->SetFloat("uAlphaCutoff", m.material.alphaCutoff);
+        m_pbr->SetVec2("uUvScale", m.material.uvScale); m_pbr->SetVec2("uUvOffset", m.material.uvOffset);
+        m_pbr->SetFloat("uUvRotation", m.material.uvRotation);
+        m_pbr->SetFloat("uNormalStrength", m.material.normalStrength); m_pbr->SetFloat("uHeightScale", m.material.heightScale);
+        m_pbr->SetFloat("uClearcoat", m.material.clearcoat); m_pbr->SetFloat("uClearcoatRoughness", m.material.clearcoatRoughness);
+        m_pbr->SetFloat("uTransmission", m.material.transmission); m_pbr->SetFloat("uIor", m.material.ior);
+        m_pbr->SetFloat("uThickness", m.material.thickness); m_pbr->SetFloat("uAnisotropy", m.material.anisotropy);
+        m_pbr->SetFloat("uAnisotropyRotation", m.material.anisotropyRotation);
+        m_pbr->SetVec3("uSheenColor", m.material.sheenColor); m_pbr->SetFloat("uSheenRoughness", m.material.sheenRoughness);
+        m_pbr->SetFloat("uSpecularLevel", m.material.specularLevel); m_pbr->SetFloat("uSubsurface", m.material.subsurface);
+        m_pbr->SetVec3("uSubsurfaceColor", m.material.subsurfaceColor);
         bindMap(m.material.albedoMap,     0, "uHasAlbedoMap",     "uAlbedoMap");
         bindMap(m.material.normalMap,     1, "uHasNormalMap",     "uNormalMap");
         bindMap(m.material.metalRoughMap, 2, "uHasMetalRoughMap", "uMetalRoughMap");
+        bindMap(m.material.heightMap,    17, "uHasHeightMap",     "uHeightMap");
+        if (m.material.blendMode == PbrMaterial::BlendMode::Transparent) {
+            glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDepthMask(GL_FALSE);
+        } else {
+            glDisable(GL_BLEND); glDepthMask(GL_TRUE);
+        }
         m.mesh->Draw();
     }
+    glDisable(GL_BLEND); glDepthMask(GL_TRUE);
 
     // Instanced batches (uInstanced = 1, no textures).
     if (!batches.empty()) {
@@ -527,6 +705,14 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
         m_pbr->SetInt("uHasAlbedoMap", 0);
         m_pbr->SetInt("uHasNormalMap", 0);
         m_pbr->SetInt("uHasMetalRoughMap", 0);
+        m_pbr->SetInt("uHasHeightMap", 0);
+        m_pbr->SetInt("uBlendMode", 0); m_pbr->SetFloat("uOpacity", 1.0f);
+        m_pbr->SetVec2("uUvScale", glm::vec2(1.0f)); m_pbr->SetVec2("uUvOffset", glm::vec2(0.0f));
+        m_pbr->SetFloat("uUvRotation", 0.0f); m_pbr->SetFloat("uNormalStrength", 1.0f);
+        m_pbr->SetFloat("uHeightScale", 0.0f); m_pbr->SetFloat("uClearcoat", 0.0f);
+        m_pbr->SetFloat("uTransmission", 0.0f); m_pbr->SetFloat("uAnisotropy", 0.0f);
+        m_pbr->SetVec3("uSheenColor", glm::vec3(0.0f)); m_pbr->SetFloat("uSpecularLevel", 0.5f);
+        m_pbr->SetFloat("uSubsurface", 0.0f);
         const GLsizei stride = 25 * static_cast<GLsizei>(sizeof(float));
         for (auto& kv : batches) {
             const Mesh* mesh = kv.first;
@@ -561,6 +747,39 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
         glBindVertexArray(0);
         m_pbr->SetInt("uInstanced", 0);
     }
+
+    // Custom graph shaders are deliberately per-object. This preserves normal
+    // PBR batching and keeps experimental programs isolated from shared state.
+    std::stable_sort(custom.begin(), custom.end(), [&](const auto& a, const auto& b) {
+        const bool at = a.second->material.blendMode == PbrMaterial::BlendMode::Transparent;
+        const bool bt = b.second->material.blendMode == PbrMaterial::BlendMode::Transparent;
+        if (at != bt) return !at;
+        const glm::vec3 da = a.first->position - camera.Position();
+        const glm::vec3 db = b.first->position - camera.Position();
+        return at && glm::dot(da, da) > glm::dot(db, db);
+    });
+    for (const auto& item : custom) {
+        const Transform& transform = *item.first;
+        const MeshPBR& mesh = *item.second;
+        Shader& shader = *const_cast<Shader*>(mesh.customShader);
+        shader.Bind();
+        shader.SetMat4("uViewProjection", camera.ProjectionMatrix(aspect) * camera.ViewMatrix());
+        shader.SetMat4("uModel", transform.Model());
+        shader.SetVec3("uLightDirection", sunDir);
+        shader.SetFloat("uLightIntensity", std::max({sunColor.x, sunColor.y, sunColor.z}));
+        shader.SetVec4("uObjectColor",
+            glm::vec4(mesh.material.albedo, mesh.material.opacity));
+        UploadCustomParameters(shader, mesh);
+        if (mesh.material.blendMode == PbrMaterial::BlendMode::Transparent) {
+            glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDepthMask(GL_FALSE);
+        } else {
+            glDisable(GL_BLEND); glDepthMask(GL_TRUE);
+        }
+        mesh.mesh->Draw();
+    }
+    glDisable(GL_BLEND);
+    glDepthMask(GL_TRUE);
 }
 
 } // namespace engine

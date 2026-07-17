@@ -5,7 +5,129 @@ a complete, headless-tested AI toolkit; **the editor currently exposes none of i
 This roadmap turns that toolkit into something you can author on a scene object and
 watch run in Play mode.
 
-Status: **planning** (nothing here is built yet).
+Status: **M1–M7 implemented**. The editor now exposes the whole engine AI toolkit:
+authorable patrol/chase agents, perception, nav (grid + navmesh), debug overlays,
+and a data-driven behaviour-tree node editor.
+
+- **M7 (done):** a visual behaviour-tree authoring panel + a data-driven runtime.
+  - *Engine runtime.* New `engine/ai/BehaviorGraph.{h,cpp}`: an `AgentContext`
+    blackboard, a fixed serializable node vocabulary (`BtNodeType`: Sequence/Selector/
+    Inverter/Succeeder/Repeat/SeesTarget/TargetWithin/Chase/Patrol/MoveToTarget/Wait/
+    Idle), a `BehaviorGraph` (node list + root), and `BuildBehaviorTree()` that binds
+    each data node to a built-in over the existing `BehaviorTree<AgentContext>`. Plus
+    `Save/LoadBehaviorGraph` (`.btgraph` text files). Also fixed a latent
+    `Selector::Tick` fall-off-the-end bug in `BehaviorTree.h`.
+  - *Editor panel.* New `BehaviorGraphPanel` (`editor/…/BehaviorGraphPanel.{h,cpp}`):
+    a hand-rolled ImGui node canvas (draggable nodes, bezier links, drag-from-pin to
+    wire children, per-node param inspector, pan, Save/Load) — no third-party node-
+    editor dependency. Registered as the `BehaviorGraph` panel (F11 / View menu).
+  - *Authoring + play.* `EditorScene::Object` gained `navAgentBrainAsset` (scene v40);
+    the inspector's AI Agent section takes a `.btgraph` via drag-drop. At Play,
+    `BuildPlayAgents` loads the graph and `UpdateAI` ticks a `BehaviorTree<AgentContext>`
+    (a `PlayAgent::useGraph` branch) instead of the built-in `AiAgent`; the debug
+    overlay reads the graph agent's blackboard.
+
+- **M7 attachments (done):** nodes now carry Unreal-style **attached decorators**
+  (gates/result-modifiers: See-Target, Target-Within, Inverter, Succeeder, Repeat) and
+  **services** (background ticks: Repath). They render as bars on the node, are added
+  from the inspector, serialize in `.btgraph` v2 (v1 still loads), and compile into the
+  runtime by wrapping the node (decorators outermost, services inside, node innermost).
+- **Pin-drop creation (done):** dragging a node's output pin onto empty space (or
+  right-clicking the canvas) opens a categorized create menu (Composite / Task /
+  Condition / Decorator) and auto-links the new node.
+
+- **M7 scripting (done):** author your own tasks/decorators/services in C++.
+  `engine/ai/BtScript.{h,cpp}` adds a `BtScript` base (`OnEnter` / `Tick`->status /
+  `Check`->bool / `OnExit`) + a `BtScriptRegistry` (register by name). New node roles
+  `ScriptTask` (leaf), `ScriptDecorator` (attachment gate), `ScriptService` (attachment
+  tick) bind to a registered class by name — picked from a combo in the inspector.
+  `AgentContext` now also carries `registry` / `self` / `targetEntity`, so a script can
+  reach any ECS component, not just the steering blackboard. Graphs serialize the
+  script names in `.btgraph` v3 (v1/v2 still load). `RegisterExampleBtScripts()`
+  ships StrafeTarget (task), FaceTarget (service), NearTarget (decorator) as templates.
+
+- **M7 blackboard (done):** `engine/ai/Blackboard.h` — a typed named key-value store
+  (Bool/Int/Float/Vec3/String/Entity, `SetX`/`GetX(key,default)`/`HasX`) held on
+  `AgentContext` as `c.blackboard`, shared by every node and script for the play
+  session. Graphs author initial keys/values (`BehaviorGraph::blackboard`, edited in
+  the panel's "Blackboard" section, serialized in `.btgraph` v4) which seed the live
+  blackboard at Play via `SeedBlackboard()`. Scripts read/write it to coordinate.
+
+- **M7 blackboard nodes (done):** no-code blackboard access — `Set Bool` / `Set Float`
+  tasks and `Check Bool?` / `Compare Float?` conditions (usable standalone or as
+  decorator attachments), with the key chosen from the blackboard schema in a dropdown
+  and the value/threshold as the node param. Serialized in `.btgraph` v5. Lets you
+  branch on blackboard state without writing C++.
+
+- **M7 richer library (done):** added tasks Flee, Wander; decorators Cooldown (block
+  after success), Time Limit (fail if it runs too long), Random Chance (probabilistic
+  gate); and a Float-below condition. No new fields/format bump (reuse param/key).
+
+- **M7 subtrees (done):** a `Subtree` node runs another `.btgraph` in place. Its asset
+  path is stored in the node's `script` field (no format change). `BuildBehaviorTree`
+  takes an optional `SubtreeResolver` callback; the editor supplies one that loads +
+  caches referenced graphs (`m_playBtGraphCache`), and the recursive builder switches
+  into the sub-graph. Depth-capped to break reference cycles.
+
+- **M7 live debugger (done):** each top-level node is wrapped in a `ProbeNode` that
+  records its per-tick status into `AgentContext::nodeStatus`; the host clears that
+  buffer each frame before ticking. During Play the panel colours node borders
+  (yellow running / green success / red failure) for the first graph agent and shows
+  a live blackboard watch (`Blackboard::Snapshot()`). Node indices line up as long as
+  the panel is showing the graph that agent is running.
+
+- **M7 observer aborts (done):** `Selector` and `Sequence` now track the child left
+  Running last tick and call `Reset()` on it when a different branch takes over, so a
+  preempted subtree starts clean (timers/latches/path scratch cleared) instead of
+  carrying stale state. Combined with the tree's existing reactivity (higher-priority
+  branches preempt, conditional decorators abort a running branch when their condition
+  flips), this gives full UE-style abort behaviour. Limitation: a preempted script
+  task's `OnExit` doesn't fire (context-free `Reset`); its state still resets. A
+  `Reset(Ctx&)` upgrade would close that if needed.
+
+The four requested directions (richer library, subtrees, live debugger, observer
+aborts) are all implemented. The AI/BT system is feature-complete for authoring,
+extension, debugging, and reactive behaviour.
+
+- **M6 (done):** both halves now shipped.
+  - *Navmesh agent (engine change).* `ai::AiAgent` gained a second
+    `Update(dt, target, seesTarget, const NavMesh&)` overload. Its brain was
+    refactored into one private `Step(dt, target, seesTarget, Planner)` shared by
+    the `NavGrid` and `NavMesh` overloads (the `NavGrid` overload plans with
+    `AStar::FindPathWorld`, the `NavMesh` overload with `NavMesh::FindPath`), so both
+    stay behaviourally identical. Non-breaking: the old grid `Update` is unchanged.
+  - *Editor bake + toggle.* `EditorApp::BakePlayNavMesh` rasterizes the same static
+    box/sphere/capsule colliders into `NavObstacle`s and calls
+    `NavMeshBuilder::Build`. A **"AI: Use Navmesh"** checkbox (Scene Debug panel,
+    `m_useNavMesh`) routes `UpdateAI` and the bake through the navmesh path; off, it
+    stays on the grid. Applied on the next Play.
+  - *Overlay.* `EditorViewport::DrawNavMeshOverlay` outlines the walkable polygons
+    (blue), shown in Play when navmesh mode is on; the red grid overlay shows when
+    it's off. `EditorViewport::DrawNavGridOverlay` (blocked cells, capped 4000) still
+    covers the grid path.
+- **"Show AI debug" + "Use Navmesh" toggles (done):** `m_showAiDebug` and
+  `m_useNavMesh` are now `Checkbox`es in the dockspace Scene Debug panel (via
+  `DockspaceContext::showAiDebug` / `useNavMesh`), matching the physics-guide toggle.
+
+- **M5 (done):** `EditorViewport::DrawAiAgentDebugGuides` — in Play mode each agent
+  gets a floating state-coloured marker (green patrol / red chase / amber search,
+  brighter when it sees its target) and its live A* path drawn as segments + a goal
+  marker. Fed from `m_playAgents` (`GetState`/`SeesTarget`/`Path`), gated by
+  `m_showAiDebug` (default on).
+
+- **M4 (done):** `EditorViewport::DrawNavAgentGuides` draws the selected agent's
+  patrol path (markers + looped segments) and, when it has a chase target, its vision
+  cone boundary rays — using the existing guide shader + cube mesh, called from the
+  edit-mode render. Cone direction comes from the object's authored rotation.
+
+- **M1 (done):** `NavAgent` component on `EditorScene::Object` (enabled, patrol points,
+  speed, force, reach, repath), serialized (scene v37), inspector "AI Agent" section,
+  and a play-loop `UpdateAI` that drives patrol via `ai::AiAgent` (writes Position/
+  Facing to the Transform).
+- **M2 (done):** chase target + vision cone (scene v38); `CanSee` line-of-sight in
+  `UpdateAI`; `BakePlayNavGrid` rasterizes static box/sphere colliders into a
+  `NavGrid` so chase/search A* works. Note: agents self-occlude if they carry a large
+  collider — keep the agent's collider small (the eye is offset up+forward to help).
 
 ---
 

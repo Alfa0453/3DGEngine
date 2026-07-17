@@ -4,8 +4,26 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdarg>
+#include <cstdio>
 
 namespace engine {
+
+// TEMPORARY terrain crash tracing. Writes to its OWN file (terrain_engine.log) so it
+// can never collide with the editor's separately-held terrain_debug.log handle. If this
+// file stays empty after a crash while terrain_debug.log grows, the engine library was
+// NOT rebuilt -- do a full/clean rebuild so this translation unit is recompiled.
+static void TerrainTrace(const char* fmt, ...) {
+    static std::FILE* file = std::fopen("D:/C++_Projects/3DGEngine/terrain_engine.log", "a");
+    if (!file) return;
+    std::va_list args;
+    va_start(args, fmt);
+    std::vfprintf(file, fmt, args);
+    va_end(args);
+    std::fputc('\n', file);
+    std::fflush(file);
+}
+
 namespace {
 
 // Hash-based value noise. Deterministic 2D integer hash -> [0,1).
@@ -133,14 +151,71 @@ std::vector<unsigned char> BuildTerrainAlbedo(const Heightmap& hm, int texRes) {
 }
 
 void Terrain::Generate(int res, float size, const glm::vec3& origin,
-                       float maxHeight, unsigned seed) {
-    m_hm = GenerateFbmHeightmap(res, size, origin, maxHeight, seed);
+                       float maxHeight, unsigned seed, int octaves, float baseFrequency) {
+    TerrainTrace("  Terrain::Generate: fbm... res=%d oct=%d freq=%.3f", res, octaves, baseFrequency);
+    Heightmap hm = GenerateFbmHeightmap(res, size, origin, maxHeight, seed, octaves, baseFrequency);
+    TerrainTrace("  Terrain::Generate: fbm done h=%zu", hm.h.size());
+    SetHeightmap(hm);
+    TerrainTrace("  Terrain::Generate: SetHeightmap returned");
+}
+
+void Terrain::SetHeightmap(const Heightmap& hm) {
+    const bool sameTopology = m_mesh.has_value() && m_hm.res == hm.res;   // m_hm is still the old one
+    TerrainTrace("  SetHeightmap: begin sameTopology=%d oldRes=%d newRes=%d", sameTopology ? 1 : 0, m_hm.res, hm.res);
+    m_hm = hm;
     std::vector<float> vv; std::vector<std::uint32_t> ii;
     BuildTerrainMeshData(m_hm, vv, ii);
-    m_mesh.emplace(vv, ii, VertexLayout{ {3}, {3}, {2} });
+    TerrainTrace("  SetHeightmap: meshData vv=%zu ii=%zu", vv.size(), ii.size());
+    if (sameTopology) {
+        m_mesh->UpdateVertices(vv);   // in-place VBO update (indices/topology unchanged)
+        TerrainTrace("  SetHeightmap: UpdateVertices done");
+    } else {
+        m_mesh.emplace(vv, ii, VertexLayout{ {3}, {3}, {2} });
+        TerrainTrace("  SetHeightmap: mesh emplace done");
+    }
+    RebuildAlbedo();
+    TerrainTrace("  SetHeightmap: RebuildAlbedo done");
+}
+
+void Terrain::SetPaint(const std::vector<std::uint8_t>& paint) {
+    m_paint = paint;
+    RebuildAlbedo();
+}
+
+void Terrain::RebuildAlbedo() {
     const int texRes = 256;
-    const std::vector<unsigned char> px = BuildTerrainAlbedo(m_hm, texRes);
-    m_albedo.emplace(px.data(), texRes, texRes);
+    std::vector<unsigned char> px = BuildTerrainAlbedo(m_hm, texRes);   // height/slope base
+    const int res = m_hm.res;
+    if (!m_paint.empty() && static_cast<int>(m_paint.size()) == res * res && res > 1) {
+        // Layer colours (index 1..5). Overlaid where the nearest vertex is painted.
+        static const glm::vec3 kLayer[6] = {
+            {0.0f, 0.0f, 0.0f},           // 0 unused (auto)
+            {0.30f, 0.50f, 0.20f},        // 1 grass
+            {0.50f, 0.48f, 0.45f},        // 2 rock
+            {0.45f, 0.33f, 0.20f},        // 3 dirt
+            {0.90f, 0.92f, 0.95f},        // 4 snow
+            {0.80f, 0.72f, 0.50f},        // 5 sand
+        };
+        for (int ty = 0; ty < texRes; ++ty) {
+            const int j = ty * (res - 1) / (texRes - 1);
+            for (int tx = 0; tx < texRes; ++tx) {
+                const int i = tx * (res - 1) / (texRes - 1);
+                const std::uint8_t layer = m_paint[static_cast<std::size_t>(j) * res + i];
+                if (layer == 0 || layer > 5) continue;
+                const glm::vec3& c = kLayer[layer];
+                const std::size_t idx = (static_cast<std::size_t>(ty) * texRes + tx) * 4;
+                px[idx + 0] = static_cast<unsigned char>(c.r * 255.0f);
+                px[idx + 1] = static_cast<unsigned char>(c.g * 255.0f);
+                px[idx + 2] = static_cast<unsigned char>(c.b * 255.0f);
+                px[idx + 3] = 255;
+            }
+        }
+    }
+    if (m_albedo.has_value() && m_albedo->Width() == texRes && m_albedo->Height() == texRes) {
+        m_albedo->Update(px.data(), texRes, texRes);   // in-place, no new GL texture
+    } else {
+        m_albedo.emplace(px.data(), texRes, texRes);
+    }
 }
 
 } // namespace engine

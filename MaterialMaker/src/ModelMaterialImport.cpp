@@ -6,6 +6,8 @@
 #include <assimp/postprocess.h>
 
 #include <filesystem>
+#include <algorithm>
+#include <cctype>
 #include <system_error>
 
 namespace material_maker {
@@ -43,6 +45,13 @@ const aiScene* Read(Assimp::Importer& importer, const std::string& path, std::st
         return nullptr;
     }
     return scene;
+}
+
+bool IsGltf(const std::string& path) {
+    std::string extension = std::filesystem::path(path).extension().string();
+    std::transform(extension.begin(), extension.end(), extension.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return extension == ".gltf" || extension == ".glb";
 }
 
 } // namespace
@@ -92,6 +101,7 @@ ModelImportResult ImportMaterialFromModel(const std::string& modelPath, int mate
     aiColor3D diffuse;
     if (am->Get(AI_MATKEY_BASE_COLOR, base) == AI_SUCCESS) {
         doc.albedo = {base.r, base.g, base.b};
+        doc.opacity = base.a;
     } else if (am->Get(AI_MATKEY_COLOR_DIFFUSE, diffuse) == AI_SUCCESS) {
         doc.albedo = {diffuse.r, diffuse.g, diffuse.b};
     }
@@ -109,6 +119,20 @@ ModelImportResult ImportMaterialFromModel(const std::string& modelPath, int mate
     if (am->Get(AI_MATKEY_COLOR_EMISSIVE, emissive) == AI_SUCCESS) {
         doc.emissive = {emissive.r, emissive.g, emissive.b};
     }
+    float value = 0.0f;
+    if (am->Get(AI_MATKEY_OPACITY, value) == AI_SUCCESS) doc.opacity *= value;
+    if (am->Get(AI_MATKEY_REFRACTI, value) == AI_SUCCESS) doc.ior = value;
+    if (am->Get(AI_MATKEY_CLEARCOAT_FACTOR, value) == AI_SUCCESS) doc.clearcoat = value;
+    if (am->Get(AI_MATKEY_CLEARCOAT_ROUGHNESS_FACTOR, value) == AI_SUCCESS) doc.clearcoatRoughness = value;
+    if (am->Get(AI_MATKEY_TRANSMISSION_FACTOR, value) == AI_SUCCESS) doc.transmission = value;
+    if (am->Get(AI_MATKEY_VOLUME_THICKNESS_FACTOR, value) == AI_SUCCESS) doc.thickness = value;
+    if (am->Get(AI_MATKEY_ANISOTROPY_FACTOR, value) == AI_SUCCESS) doc.anisotropy = value;
+    if (am->Get(AI_MATKEY_SHEEN_ROUGHNESS_FACTOR, value) == AI_SUCCESS) doc.sheenRoughness = value;
+    if (am->Get(AI_MATKEY_SPECULAR_FACTOR, value) == AI_SUCCESS) doc.specularLevel = value;
+    aiColor3D sheen;
+    if (am->Get(AI_MATKEY_SHEEN_COLOR_FACTOR, sheen) == AI_SUCCESS)
+        doc.sheenColor = {sheen.r, sheen.g, sheen.b};
+    if (doc.opacity < 0.999f || doc.transmission > 0.0f) doc.blendMode = 2;
 
     // Texture maps (external only; embedded are skipped).
     doc.albedoMap = TexturePath(am, aiTextureType_BASE_COLOR, modelDir);
@@ -119,12 +143,23 @@ ModelImportResult ImportMaterialFromModel(const std::string& modelPath, int mate
     if (doc.normalMap.empty()) {
         doc.normalMap = TexturePath(am, aiTextureType_HEIGHT, modelDir);   // OBJ bump
     }
-    doc.metalRoughMap = TexturePath(am, aiTextureType_METALNESS, modelDir);
-    if (doc.metalRoughMap.empty()) {
-        doc.metalRoughMap = TexturePath(am, aiTextureType_DIFFUSE_ROUGHNESS, modelDir);
+    doc.heightMap = TexturePath(am, aiTextureType_DISPLACEMENT, modelDir);
+    result.metallicMap = TexturePath(am, aiTextureType_METALNESS, modelDir);
+    result.roughnessMap = TexturePath(am, aiTextureType_DIFFUSE_ROUGHNESS, modelDir);
+    result.aoMap = TexturePath(am, aiTextureType_AMBIENT_OCCLUSION, modelDir);
+    if (result.aoMap.empty()) {
+        result.aoMap = TexturePath(am, aiTextureType_LIGHTMAP, modelDir);
     }
-    if (doc.metalRoughMap.empty()) {
-        doc.metalRoughMap = TexturePath(am, aiTextureType_UNKNOWN, modelDir);   // glTF packs ORM here
+
+    // Assimp reports a glTF metallic-roughness texture in both semantic slots.
+    // Only pass it through directly when both slots resolve to the same file;
+    // separate grayscale inputs must be channel-packed by the panel.
+    if (!result.metallicMap.empty() && result.metallicMap == result.roughnessMap) {
+        result.combinedMetalRoughMap = result.metallicMap;
+        result.metallicMap.clear();
+        result.roughnessMap.clear();
+    } else if (result.metallicMap.empty() && result.roughnessMap.empty() && IsGltf(modelPath)) {
+        result.combinedMetalRoughMap = TexturePath(am, aiTextureType_UNKNOWN, modelDir);
     }
 
     *out = doc;

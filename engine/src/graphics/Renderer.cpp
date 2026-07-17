@@ -21,4 +21,11 @@ void Renderer::Draw(const Mesh& mesh) const {
     mesh.Draw();
 }
 
+void Renderer::SetMultisample(bool enabled) const {
+    // Only has an effect when the default framebuffer was created multisampled
+    // (see Window's GLFW_SAMPLES hint).
+    if (enabled) glEnable(GL_MULTISAMPLE);
+    else         glDisable(GL_MULTISAMPLE);
+}
+
 } // namespace engine

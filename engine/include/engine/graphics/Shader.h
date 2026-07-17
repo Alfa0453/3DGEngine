@@ -1,13 +1,37 @@
 #pragma once
 
+#include <memory>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 // Forward declarations of GLM types only — keeps the full (heavy) GLM headers
 // out of this header. The .cpp includes the real <glm/glm.hpp>.
 #include <glm/fwd.hpp>
 
 namespace engine {
+
+enum class ShaderStage {
+    Vertex,
+    Fragment,
+    Link,
+    File,
+    Unknown
+};
+
+struct ShaderDiagnostic {
+    enum class Severity { Info, Warning, Error };
+
+    Severity severity = Severity::Error;
+    ShaderStage stage = ShaderStage::Unknown;
+    int line = 0;
+    std::string message;
+};
+
+struct ShaderCompileReport {
+    bool success = false;
+    std::vector<ShaderDiagnostic> diagnostics;
+};
 
 // Compiles a vertex + fragment shader into a linked GPU program and owns its
 // lifetime (RAII). Because it owns an OpenGL program object, it is move-only:
@@ -31,6 +55,17 @@ public:
     // missing or fails to compile/link.
     static Shader FromFiles(const std::string& vertexPath, const std::string& fragmentPath);
 
+    // Editor-friendly alternatives: never throw, and preserve the driver's
+    // diagnostics so callers can display them without terminating a frame.
+    static std::unique_ptr<Shader> TryCompile(
+        const std::string& vertexSrc,
+        const std::string& fragmentSrc,
+        ShaderCompileReport& report);
+    static std::unique_ptr<Shader> TryFromFiles(
+        const std::string& vertexPath,
+        const std::string& fragmentPath,
+        ShaderCompileReport& report);
+
     void Bind() const;  // make this the active program (glUseProgram)
     void Unbind() const;  // unbind any program
 
@@ -40,6 +75,7 @@ public:
     void SetFloat(const std::string& name, float value);
     void SetVec2(const std::string& name, const glm::vec2& value);
     void SetVec3(const std::string& name, const glm::vec3& value);
+    void SetVec4(const std::string& name, const glm::vec4& value);
     void SetMat3(const std::string& name, const glm::mat3& value);
     void SetMat4(const std::string& name, const glm::mat4& value);
 

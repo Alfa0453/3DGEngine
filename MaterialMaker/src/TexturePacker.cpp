@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <exception>
 #include <fstream>
+#include <filesystem>
 #include <stdexcept>
 #include <vector>
 
@@ -21,7 +22,42 @@ std::string LowerExt(const std::string& path) {
     return e;
 }
 
-// Decode a PNG or JPG source to RGBA (top row first). Throws on anything else.
+engine::image::Image DecodeTGA(const std::string& path) {
+    std::ifstream file(path, std::ios::binary);
+    unsigned char header[18]{};
+    file.read(reinterpret_cast<char*>(header), sizeof(header));
+    const int width = header[12] | (header[13] << 8);
+    const int height = header[14] | (header[15] << 8);
+    const int channels = header[16] / 8;
+    if (!file || header[2] != 2 || width <= 0 || height <= 0 ||
+        (channels != 3 && channels != 4)) {
+        throw std::runtime_error("unsupported or invalid TGA: " + path);
+    }
+    file.seekg(header[0], std::ios::cur);
+    std::vector<unsigned char> raw(static_cast<std::size_t>(width) * height * channels);
+    file.read(reinterpret_cast<char*>(raw.data()), static_cast<std::streamsize>(raw.size()));
+    if (!file) throw std::runtime_error("truncated TGA: " + path);
+
+    engine::image::Image image;
+    image.width = width;
+    image.height = height;
+    image.rgba.resize(static_cast<std::size_t>(width) * height * 4);
+    const bool topOrigin = (header[17] & 0x20) != 0;
+    for (int y = 0; y < height; ++y) {
+        const int sourceY = topOrigin ? y : height - 1 - y;
+        for (int x = 0; x < width; ++x) {
+            const std::size_t s = (static_cast<std::size_t>(sourceY) * width + x) * channels;
+            const std::size_t d = (static_cast<std::size_t>(y) * width + x) * 4;
+            image.rgba[d + 0] = raw[s + 2];
+            image.rgba[d + 1] = raw[s + 1];
+            image.rgba[d + 2] = raw[s + 0];
+            image.rgba[d + 3] = channels == 4 ? raw[s + 3] : 255;
+        }
+    }
+    return image;
+}
+
+// Decode a supported source to RGBA (top row first).
 engine::image::Image DecodeAny(const std::string& path) {
     const std::string ext = LowerExt(path);
     if (ext == "png") {
@@ -30,7 +66,10 @@ engine::image::Image DecodeAny(const std::string& path) {
     if (ext == "jpg" || ext == "jpeg") {
         return engine::image::DecodeJPEG(path);
     }
-    throw std::runtime_error("unsupported source format (use PNG or JPG): " + path);
+    if (ext == "tga") {
+        return DecodeTGA(path);
+    }
+    throw std::runtime_error("unsupported source format (use PNG, JPG or TGA): " + path);
 }
 
 // Red channel at (x, y) — grayscale maps store the value in every channel.
@@ -67,44 +106,95 @@ PackResult PackMetalRoughAO(const std::string& metallicPath, const std::string& 
                             const std::string& aoPath, const std::string& outputPath) {
     PackResult result;
     try {
-        if (metallicPath.empty() || roughnessPath.empty()) {
-            result.error = "metallic and roughness sources are required.";
+        if (metallicPath.empty() && roughnessPath.empty() && aoPath.empty()) {
+            result.error = "at least one ORM source is required.";
             return result;
         }
-        const engine::image::Image metal = DecodeAny(metallicPath);
-        const engine::image::Image rough = DecodeAny(roughnessPath);
-        if (metal.width != rough.width || metal.height != rough.height) {
-            result.error = "metallic and roughness images must have the same size.";
-            return result;
-        }
-
+        const bool hasMetal = !metallicPath.empty();
+        const bool hasRough = !roughnessPath.empty();
         const bool hasAo = !aoPath.empty();
-        engine::image::Image ao;
-        if (hasAo) {
-            ao = DecodeAny(aoPath);
-            if (ao.width != metal.width || ao.height != metal.height) {
-                result.error = "AO image must match the metallic/roughness size.";
-                return result;
-            }
+        engine::image::Image metal, rough, ao;
+        if (hasMetal) metal = DecodeAny(metallicPath);
+        if (hasRough) rough = DecodeAny(roughnessPath);
+        if (hasAo) ao = DecodeAny(aoPath);
+        const engine::image::Image& reference = hasMetal ? metal : (hasRough ? rough : ao);
+        const int w = reference.width;
+        const int h = reference.height;
+        if (w <= 0 || h <= 0 || w > 65535 || h > 65535) {
+            result.error = "ORM source dimensions are invalid or exceed the TGA limit.";
+            return result;
         }
-
-        const int w = metal.width;
-        const int h = metal.height;
+        auto matches = [&](const engine::image::Image& image) {
+            return image.width == w && image.height == h;
+        };
+        if ((hasMetal && !matches(metal)) || (hasRough && !matches(rough)) ||
+            (hasAo && !matches(ao))) {
+            result.error = "all provided ORM images must have the same size.";
+            return result;
+        }
         std::vector<unsigned char> out(static_cast<std::size_t>(w) * h * 4);
         for (int y = 0; y < h; ++y) {
             const int fileRow = h - 1 - y;   // TGA is written bottom-up
             for (int x = 0; x < w; ++x) {
                 const std::size_t d = (static_cast<std::size_t>(fileRow) * w + x) * 4;
-                out[d + 0] = Red(metal, x, y);                 // B = metallic
-                out[d + 1] = Red(rough, x, y);                 // G = roughness
+                out[d + 0] = hasMetal ? Red(metal, x, y) : 255; // B = metallic
+                out[d + 1] = hasRough ? Red(rough, x, y) : 255; // G = roughness
                 out[d + 2] = hasAo ? Red(ao, x, y) : 255;      // R = ambient occlusion
                 out[d + 3] = 255;                              // A
             }
         }
 
+        const std::filesystem::path parent = std::filesystem::path(outputPath).parent_path();
+        if (!parent.empty()) std::filesystem::create_directories(parent);
         if (!WriteTGA32(outputPath, w, h, out, &result.error)) {
             return result;
         }
+        result.ok = true;
+        result.outputPath = outputPath;
+        return result;
+    } catch (const std::exception& e) {
+        result.error = e.what();
+        return result;
+    }
+}
+
+PackResult PackCombinedMetalRoughAO(const std::string& combinedPath,
+                                    const std::string& aoPath,
+                                    const std::string& outputPath) {
+    PackResult result;
+    try {
+        if (combinedPath.empty()) {
+            result.error = "a combined metallic-roughness source is required.";
+            return result;
+        }
+        const engine::image::Image combined = DecodeAny(combinedPath);
+        const bool hasAo = !aoPath.empty();
+        engine::image::Image ao;
+        if (hasAo) ao = DecodeAny(aoPath);
+        const int w = combined.width, h = combined.height;
+        if (w <= 0 || h <= 0 || w > 65535 || h > 65535) {
+            result.error = "ORM source dimensions are invalid or exceed the TGA limit.";
+            return result;
+        }
+        if (hasAo && (ao.width != w || ao.height != h)) {
+            result.error = "AO image must match the combined metallic-roughness size.";
+            return result;
+        }
+        std::vector<unsigned char> out(static_cast<std::size_t>(w) * h * 4);
+        for (int y = 0; y < h; ++y) {
+            const int fileRow = h - 1 - y;
+            for (int x = 0; x < w; ++x) {
+                const std::size_t s = (static_cast<std::size_t>(y) * w + x) * 4;
+                const std::size_t d = (static_cast<std::size_t>(fileRow) * w + x) * 4;
+                out[d + 0] = combined.rgba[s + 2];             // B = metallic
+                out[d + 1] = combined.rgba[s + 1];             // G = roughness
+                out[d + 2] = hasAo ? Red(ao, x, y) : 255;      // R = AO
+                out[d + 3] = 255;
+            }
+        }
+        const std::filesystem::path parent = std::filesystem::path(outputPath).parent_path();
+        if (!parent.empty()) std::filesystem::create_directories(parent);
+        if (!WriteTGA32(outputPath, w, h, out, &result.error)) return result;
         result.ok = true;
         result.outputPath = outputPath;
         return result;

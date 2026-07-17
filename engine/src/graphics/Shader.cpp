@@ -5,6 +5,7 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/type_ptr.hpp>     // glm::value_ptr — raw float* into a vec/mat
 
+#include <cctype>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
@@ -25,6 +26,50 @@ std::string ReadFile(const std::string &path)
     std::ostringstream ss;
     ss << file.rdbuf();
     return ss.str();
+}
+
+ShaderStage StageFromMessage(const std::string& message)
+{
+    if (message.find("vertex compile") != std::string::npos) return ShaderStage::Vertex;
+    if (message.find("fragment compile") != std::string::npos) return ShaderStage::Fragment;
+    if (message.find("program link") != std::string::npos) return ShaderStage::Link;
+    if (message.find("cannot open file") != std::string::npos) return ShaderStage::File;
+    return ShaderStage::Unknown;
+}
+
+int LineFromDriverMessage(const std::string& message)
+{
+    // Common driver formats include "0(17)" and "0:17". Treat this as a
+    // best-effort hint; the full original message is always retained.
+    for (std::size_t i = 0; i + 2 < message.size(); ++i)
+    {
+        if (message[i] != '(' && message[i] != ':') continue;
+        std::size_t begin = i + 1;
+        std::size_t end = begin;
+        while (end < message.size()
+            && std::isdigit(static_cast<unsigned char>(message[end])))
+        {
+            ++end;
+        }
+        if (end > begin)
+        {
+            try { return std::stoi(message.substr(begin, end - begin)); }
+            catch (...) { return 0; }
+        }
+    }
+    return 0;
+}
+
+void SetFailureReport(ShaderCompileReport& report, const std::string& message)
+{
+    report.success = false;
+    report.diagnostics.clear();
+    report.diagnostics.push_back({
+        ShaderDiagnostic::Severity::Error,
+        StageFromMessage(message),
+        LineFromDriverMessage(message),
+        message
+    });
 }
 
 }   // anonymous namespace
@@ -64,8 +109,19 @@ unsigned int Shader::CompileStage(unsigned int type, const std::string &src)
 
 Shader::Shader(const std::string &vertexSrc, const std::string &fragmentSrc)
 {
-    const unsigned int vertexShader = CompileStage(GL_VERTEX_SHADER, vertexSrc);
-    const unsigned int fragmentShader = CompileStage(GL_FRAGMENT_SHADER, fragmentSrc);
+    unsigned int vertexShader = 0;
+    unsigned int fragmentShader = 0;
+    try
+    {
+        vertexShader = CompileStage(GL_VERTEX_SHADER, vertexSrc);
+        fragmentShader = CompileStage(GL_FRAGMENT_SHADER, fragmentSrc);
+    }
+    catch (...)
+    {
+        if (vertexShader) glDeleteShader(vertexShader);
+        if (fragmentShader) glDeleteShader(fragmentShader);
+        throw;
+    }
 
     // Link the two stages into one program that the GPU can run.
     m_id = glCreateProgram();
@@ -129,6 +185,51 @@ Shader Shader::FromFiles(const std::string &vertexPath, const std::string &fragm
     return Shader(ReadFile(vertexPath), ReadFile(fragmentPath));
 }
 
+std::unique_ptr<Shader> Shader::TryCompile(
+    const std::string& vertexSrc,
+    const std::string& fragmentSrc,
+    ShaderCompileReport& report)
+{
+    try
+    {
+        auto shader = std::make_unique<Shader>(vertexSrc, fragmentSrc);
+        report.success = true;
+        report.diagnostics.clear();
+        return shader;
+    }
+    catch (const std::exception& error)
+    {
+        SetFailureReport(report, error.what());
+        return nullptr;
+    }
+    catch (...)
+    {
+        SetFailureReport(report, "Shader: unknown compile failure");
+        return nullptr;
+    }
+}
+
+std::unique_ptr<Shader> Shader::TryFromFiles(
+    const std::string& vertexPath,
+    const std::string& fragmentPath,
+    ShaderCompileReport& report)
+{
+    try
+    {
+        return TryCompile(ReadFile(vertexPath), ReadFile(fragmentPath), report);
+    }
+    catch (const std::exception& error)
+    {
+        SetFailureReport(report, error.what());
+        return nullptr;
+    }
+    catch (...)
+    {
+        SetFailureReport(report, "Shader: unknown file loading failure");
+        return nullptr;
+    }
+}
+
 void Shader::Bind() const
 {
     glUseProgram(m_id);
@@ -153,6 +254,10 @@ void Shader::SetVec2(const std::string &name, const glm::vec2 &value)
 void Shader::SetVec3(const std::string &name, const glm::vec3 &value)
 {
     glUniform3fv(UniformLocation(name), 1, glm::value_ptr(value));
+}
+void Shader::SetVec4(const std::string &name, const glm::vec4 &value)
+{
+    glUniform4fv(UniformLocation(name), 1, glm::value_ptr(value));
 }
 void Shader::SetMat3(const std::string &name, const glm::mat3 &value)
 {

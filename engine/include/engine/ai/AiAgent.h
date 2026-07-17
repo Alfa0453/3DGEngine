@@ -6,10 +6,13 @@
 
 #include <glm/glm.hpp>
 
+#include <functional>
 #include <vector>
 
 namespace engine {
 namespace ai {
+
+class NavMesh;
 
 // A ready-made AI controller: it packages steering, pathfinding and a simple
 // patrol / chase / search brain so a game doesn't have to wire the pieces by
@@ -38,7 +41,16 @@ public:
     // the agent can see it right now (from ai::CanSee or a custom check).
     void Update(float dt, const glm::vec3& targetPos, bool seesTarget, const NavGrid& grid);
 
+    // Same brain, but chase/search paths are planned on a NavMesh (funnel-smoothed,
+    // corner-cutting-free) instead of a grid. Patrol is identical (steering-only).
+    void Update(float dt, const glm::vec3& targetPos, bool seesTarget, const NavMesh& mesh);
+
 private:
+    // The transition/action brain shared by both overloads. 'plan' returns a
+    // world-space waypoint list from start to goal on whatever nav source is used.
+    using Planner = std::function<std::vector<glm::vec3>(const glm::vec3&, const glm::vec3&)>;
+    void Step(float dt, const glm::vec3& targetPos, bool seesTarget, const Planner& plan);
+
     State       m_state = State::Patrol;
     std::size_t m_patrolIndex = 0;
     std::vector<glm::vec3> m_path;

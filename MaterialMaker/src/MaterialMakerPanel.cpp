@@ -3,6 +3,7 @@
 #include "MaterialMaker/MaterialPreview.h"
 #include "MaterialMaker/TexturePacker.h"
 #include "MaterialMaker/ModelMaterialImport.h"
+#include <engine/assets/ShaderAsset.h>
 
 #include <imgui.h>
 
@@ -89,16 +90,7 @@ constexpr int kPresetCount = static_cast<int>(sizeof(kPresets) / sizeof(kPresets
 
 // Field-wise equality, for the unsaved-changes indicator.
 bool SameMaterial(const MaterialDocument& a, const MaterialDocument& b) {
-    return a.name == b.name &&
-           a.albedo == b.albedo &&
-           a.metallic == b.metallic &&
-           a.roughness == b.roughness &&
-           a.ao == b.ao &&
-           a.emissive == b.emissive &&
-           a.emissiveStrength == b.emissiveStrength &&
-           a.albedoMap == b.albedoMap &&
-           a.normalMap == b.normalMap &&
-           a.metalRoughMap == b.metalRoughMap;
+    return ToJson(a) == ToJson(b);
 }
 
 } // namespace
@@ -130,9 +122,11 @@ bool MaterialMakerPanel::DrawContent() {
     ImGui::Separator();
     DrawPresetControls();
     DrawSurfaceControls();
+    DrawAdvancedControls();
     DrawValidation();
     ImGui::Separator();
     DrawTextureControls();
+    DrawShaderControls();
     ImGui::Separator();
     DrawExportControls();
     ImGui::Separator();
@@ -156,15 +150,19 @@ bool MaterialMakerPanel::LoadFromFile(const std::string& path) {
 
     m_material = loaded;
     m_savedSnapshot = m_material;
+    m_hasSavedSnapshot = true;
     m_lastSavedPath = path;
     m_outputDirectory = std::filesystem::path(path).parent_path().string();
+    m_libraryScanned = false;
     SyncBuffersFromMaterial();
     m_status = "Loaded " + path;
     return true;
 }
 
 void MaterialMakerPanel::SetOutputDirectory(const std::string& outputDirectory) {
+    if (m_outputDirectory == outputDirectory) return;
     m_outputDirectory = outputDirectory;
+    m_libraryScanned = false;
     CopyToBuffer(m_outputDirectoryBuffer, sizeof(m_outputDirectoryBuffer), m_outputDirectory);
 }
 
@@ -181,6 +179,60 @@ void MaterialMakerPanel::SetNormalMap(const std::string& path) {
 void MaterialMakerPanel::SetMetalRoughMap(const std::string& path) {
     m_material.metalRoughMap = path;
     CopyToBuffer(m_metalRoughMapBuffer, sizeof(m_metalRoughMapBuffer), m_material.metalRoughMap);
+}
+
+void MaterialMakerPanel::SetHeightMap(const std::string& path) {
+    m_material.heightMap = path;
+    CopyToBuffer(m_heightMapBuffer, sizeof(m_heightMapBuffer), m_material.heightMap);
+}
+
+bool MaterialMakerPanel::SetShaderAsset(const std::string& path) {
+    engine::ShaderAsset shader;
+    std::string error;
+    if (!engine::LoadShaderAsset(path, &shader, &error)) {
+        m_status = "Shader load failed: " + error;
+        return false;
+    }
+    m_material.shaderPath = path;
+    m_material.shaderParameters.clear();
+    for (const auto& source : shader.parameters) {
+        ShaderParameterDocument parameter;
+        parameter.name = source.name;
+        parameter.type = static_cast<int>(source.type);
+        parameter.value = source.defaultValue;
+        m_material.shaderParameters.push_back(std::move(parameter));
+    }
+    CopyToBuffer(m_shaderPathBuffer, sizeof(m_shaderPathBuffer), path);
+    m_status = "Loaded shader parameters from " + path;
+    return true;
+}
+
+void MaterialMakerPanel::DrawShaderControls() {
+    if (!ImGui::CollapsingHeader("Custom Shader", ImGuiTreeNodeFlags_DefaultOpen)) return;
+    if (ImGui::InputText("Shader Asset", m_shaderPathBuffer, sizeof(m_shaderPathBuffer)))
+        m_material.shaderPath = m_shaderPathBuffer;
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Load"))
+        SetShaderAsset(m_shaderPathBuffer);
+    ImGui::TextDisabled("Exposed graph parameters become material-instance values.");
+    for (auto& parameter : m_material.shaderParameters) {
+        ImGui::PushID(parameter.name.c_str());
+        std::array<char, 256> value{};
+        std::snprintf(value.data(), value.size(), "%s", parameter.value.c_str());
+        if (parameter.type == static_cast<int>(engine::ShaderValueType::Bool)) {
+            bool enabled = parameter.value == "1" || parameter.value == "true";
+            if (ImGui::Checkbox(parameter.name.c_str(), &enabled))
+                parameter.value = enabled ? "true" : "false";
+        } else if (ImGui::InputText(parameter.name.c_str(), value.data(), value.size())) {
+            parameter.value = value.data();
+        }
+        ImGui::PopID();
+    }
+    if (!m_material.shaderPath.empty() && ImGui::Button("Clear Custom Shader")) {
+        m_material.shaderPath.clear();
+        m_material.shaderParameters.clear();
+        m_shaderPathBuffer[0] = '\0';
+    }
 }
 
 void MaterialMakerPanel::ApplyPreset(int index) {
@@ -223,6 +275,10 @@ void MaterialMakerPanel::DrawValidation() {
     if (m_material.metallic > 0.1f && m_material.metallic < 0.9f) warn("Partial metallic: real surfaces are usually 0 or 1.");
     if (m_material.roughness < 0.04f) warn("Roughness near 0 can alias/sparkle; keep a small floor.");
     if (m_material.metallic > 0.9f && maxC < 0.30f) warn("Metal base colour is dark; metal reflectance (F0) is usually bright.");
+    if (m_material.transmission > 0.0f && m_material.blendMode != 2)
+        warn("Transmission is most useful with Transparent blend mode.");
+    if (!m_material.heightMap.empty() && m_material.heightScale <= 0.0f)
+        warn("Height map is assigned but parallax strength is zero.");
     if (!any) {
         ImGui::TextColored(ImVec4(0.45f, 0.82f, 0.58f, 1.0f), "PBR: looks physically plausible.");
     }
@@ -237,15 +293,92 @@ void MaterialMakerPanel::DrawSurfaceControls() {
     ImGui::SliderFloat("Metallic", &m_material.metallic, 0.0f, 1.0f, "%.2f");
     ImGui::SliderFloat("Roughness", &m_material.roughness, 0.02f, 1.0f, "%.2f");
     ImGui::SliderFloat("AO", &m_material.ao, 0.0f, 1.0f, "%.2f");
-    ImGui::ColorEdit3("Emissive", m_material.emissive.data(), ImGuiColorEditFlags_Float);
+    ImGui::ColorEdit3("Emissive", m_material.emissive.data(),
+                      ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR);
     ImGui::SliderFloat("Emissive Strength", &m_material.emissiveStrength, 0.0f, 20.0f, "%.2fx");
 
-    for (float& channel : m_material.emissive) channel = Clamp01(channel);
+    for (float& channel : m_material.emissive) channel = std::max(0.0f, channel);
     m_material.emissiveStrength = std::max(0.0f, m_material.emissiveStrength);
     for (float& channel : m_material.albedo) channel = Clamp01(channel);
     m_material.metallic = Clamp01(m_material.metallic);
     m_material.roughness = std::max(0.02f, Clamp01(m_material.roughness));
     m_material.ao = Clamp01(m_material.ao);
+}
+
+void MaterialMakerPanel::DrawAdvancedControls() {
+    if (!ImGui::CollapsingHeader("Advanced Surface")) return;
+    ImGui::TextDisabled("Quick setups:");
+    if (ImGui::Button("Glass")) {
+        m_material.blendMode = 2; m_material.opacity = 0.18f; m_material.transmission = 1.0f;
+        m_material.ior = 1.5f; m_material.roughness = 0.08f; m_material.metallic = 0.0f;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Car Paint")) {
+        m_material.blendMode = 0; m_material.clearcoat = 1.0f;
+        m_material.clearcoatRoughness = 0.08f; m_material.metallic = 0.0f;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Velvet")) {
+        m_material.sheenColor = m_material.albedo; m_material.sheenRoughness = 0.7f;
+        m_material.roughness = 0.8f; m_material.metallic = 0.0f;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Skin/Wax")) {
+        m_material.subsurface = 0.65f; m_material.subsurfaceColor = {1.0f, 0.25f, 0.18f};
+        m_material.roughness = 0.48f; m_material.metallic = 0.0f;
+    }
+    const char* modes[] = {"Opaque", "Masked", "Transparent"};
+    ImGui::Combo("Blend Mode", &m_material.blendMode, modes, IM_ARRAYSIZE(modes));
+    if (m_material.blendMode != 0)
+        ImGui::TextDisabled("Opacity is multiplied by the albedo texture's alpha channel.");
+    ImGui::SliderFloat("Opacity", &m_material.opacity, 0.0f, 1.0f, "%.2f");
+    if (m_material.blendMode == 1)
+        ImGui::SliderFloat("Alpha Cutoff", &m_material.alphaCutoff, 0.0f, 1.0f, "%.2f");
+
+    if (ImGui::TreeNode("UV Transform")) {
+        ImGui::DragFloat2("Tiling", m_material.uvScale.data(), 0.02f, 0.01f, 100.0f, "%.2f");
+        ImGui::DragFloat2("Offset", m_material.uvOffset.data(), 0.01f, -100.0f, 100.0f, "%.2f");
+        ImGui::SliderFloat("Rotation", &m_material.uvRotation, -180.0f, 180.0f, "%.0f deg");
+        ImGui::TreePop();
+    }
+    if (ImGui::TreeNode("Surface Detail")) {
+        ImGui::SliderFloat("Normal Strength", &m_material.normalStrength, 0.0f, 4.0f, "%.2f");
+        ImGui::SliderFloat("Height / Parallax", &m_material.heightScale, 0.0f, 0.12f, "%.3f");
+        ImGui::TreePop();
+    }
+    if (ImGui::TreeNode("Coating and Specular")) {
+        ImGui::SliderFloat("Specular Level", &m_material.specularLevel, 0.0f, 1.0f, "%.2f");
+        ImGui::SliderFloat("Clearcoat", &m_material.clearcoat, 0.0f, 1.0f, "%.2f");
+        ImGui::SliderFloat("Clearcoat Roughness", &m_material.clearcoatRoughness, 0.02f, 1.0f, "%.2f");
+        ImGui::SliderFloat("Anisotropy", &m_material.anisotropy, -1.0f, 1.0f, "%.2f");
+        ImGui::SliderFloat("Anisotropy Rotation", &m_material.anisotropyRotation, -180.0f, 180.0f, "%.0f deg");
+        ImGui::TreePop();
+    }
+    if (ImGui::TreeNode("Transmission")) {
+        ImGui::TextDisabled("Uses environment refraction; choose Transparent for glass-like blending.");
+        ImGui::SliderFloat("Transmission", &m_material.transmission, 0.0f, 1.0f, "%.2f");
+        ImGui::SliderFloat("Index of Refraction", &m_material.ior, 1.0f, 2.5f, "%.2f");
+        ImGui::SliderFloat("Thickness", &m_material.thickness, 0.0f, 10.0f, "%.2f");
+        ImGui::TreePop();
+    }
+    if (ImGui::TreeNode("Sheen and Subsurface")) {
+        ImGui::ColorEdit3("Sheen Color", m_material.sheenColor.data());
+        ImGui::SliderFloat("Sheen Roughness", &m_material.sheenRoughness, 0.02f, 1.0f, "%.2f");
+        ImGui::SliderFloat("Subsurface", &m_material.subsurface, 0.0f, 1.0f, "%.2f");
+        ImGui::ColorEdit3("Subsurface Color", m_material.subsurfaceColor.data());
+        ImGui::TreePop();
+    }
+    m_material.blendMode = std::max(0, std::min(2, m_material.blendMode));
+    m_material.opacity = Clamp01(m_material.opacity); m_material.alphaCutoff = Clamp01(m_material.alphaCutoff);
+    m_material.normalStrength = std::max(0.0f, m_material.normalStrength);
+    m_material.heightScale = std::max(0.0f, m_material.heightScale);
+    m_material.clearcoat = Clamp01(m_material.clearcoat);
+    m_material.clearcoatRoughness = std::max(0.02f, Clamp01(m_material.clearcoatRoughness));
+    m_material.transmission = Clamp01(m_material.transmission);
+    m_material.ior = std::max(1.0f, m_material.ior); m_material.thickness = std::max(0.0f, m_material.thickness);
+    m_material.anisotropy = std::max(-1.0f, std::min(1.0f, m_material.anisotropy));
+    m_material.sheenRoughness = std::max(0.02f, Clamp01(m_material.sheenRoughness));
+    m_material.specularLevel = Clamp01(m_material.specularLevel); m_material.subsurface = Clamp01(m_material.subsurface);
 }
 
 void MaterialMakerPanel::DrawTextureControls() {
@@ -310,6 +443,7 @@ void MaterialMakerPanel::DrawTextureControls() {
             ImGui::Text("%d x %d", info.width, info.height);
         } else {
             ImGui::TextColored(ImVec4(0.90f, 0.40f, 0.35f, 1.0f), "could not decode image");
+            if (!info.error.empty()) ImGui::TextWrapped("%s", info.error.c_str());
         }
     };
 
@@ -344,6 +478,16 @@ void MaterialMakerPanel::DrawTextureControls() {
         pasteTexturePath(m_material.metalRoughMap, m_metalRoughMapBuffer, sizeof(m_metalRoughMapBuffer), "Metal/Rough");
     }
     showThumbnail(m_material.metalRoughMap);
+
+    if (ImGui::InputText("Height Map", m_heightMapBuffer, sizeof(m_heightMapBuffer))) {
+        m_material.heightMap = m_heightMapBuffer;
+    }
+    acceptTextureDrop(m_material.heightMap, m_heightMapBuffer, sizeof(m_heightMapBuffer));
+    ImGui::SameLine();
+    if (ImGui::Button("Paste##height")) {
+        pasteTexturePath(m_material.heightMap, m_heightMapBuffer, sizeof(m_heightMapBuffer), "Height");
+    }
+    showThumbnail(m_material.heightMap);
 
     DrawOrmPacker();
 }
@@ -407,6 +551,9 @@ void MaterialMakerPanel::DrawModelImport() {
         if (!picked.empty() && std::filesystem::is_regular_file(picked, ec)) {
             m_importModelPath = picked;
             m_importMaterialIndex = 0;
+            std::string countError;
+            m_importMaterialCount = CountModelMaterials(picked, &countError);
+            if (m_importMaterialCount == 0) m_status = "Import: " + countError;
         } else {
             m_status = "Import: clipboard is not a valid file path.";
         }
@@ -415,9 +562,14 @@ void MaterialMakerPanel::DrawModelImport() {
     ImGui::TextWrapped("%s", m_importModelPath.empty() ? "(none)" : m_importModelPath.c_str());
 
     ImGui::SetNextItemWidth(120.0f);
-    ImGui::InputInt("Material index", &m_importMaterialIndex);
+    ImGui::SliderInt("Material index", &m_importMaterialIndex, 0,
+                     std::max(0, m_importMaterialCount - 1));
     if (m_importMaterialIndex < 0) {
         m_importMaterialIndex = 0;
+    }
+    if (m_importMaterialCount > 0) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("%d material(s)", m_importMaterialCount);
     }
 
     if (ImGui::Button("Import Material") && !m_importModelPath.empty()) {
@@ -425,11 +577,38 @@ void MaterialMakerPanel::DrawModelImport() {
             ImportMaterialFromModel(m_importModelPath, m_importMaterialIndex, &m_material);
         if (result.ok) {
             m_material.emissiveStrength = 1.0f;
+            m_importMaterialCount = result.materialCount;
+            bool packFailed = false;
+            if (!result.combinedMetalRoughMap.empty()) {
+                const std::string outPath =
+                    (std::filesystem::path(m_outputDirectory) /
+                     (SanitizeFileStem(m_material.name) + "_ORM.tga")).string();
+                const PackResult packed = PackCombinedMetalRoughAO(
+                    result.combinedMetalRoughMap, result.aoMap, outPath);
+                if (packed.ok) m_material.metalRoughMap = packed.outputPath;
+                else {
+                    packFailed = true;
+                    m_status = "Imported values, but ORM normalization failed: " + packed.error;
+                }
+            } else if (m_material.metalRoughMap.empty() &&
+                (!result.metallicMap.empty() || !result.roughnessMap.empty() || !result.aoMap.empty())) {
+                const std::string outPath =
+                    (std::filesystem::path(m_outputDirectory) /
+                     (SanitizeFileStem(m_material.name) + "_ORM.tga")).string();
+                const PackResult packed = PackMetalRoughAO(
+                    result.metallicMap, result.roughnessMap, result.aoMap, outPath);
+                if (packed.ok) {
+                    m_material.metalRoughMap = packed.outputPath;
+                } else {
+                    packFailed = true;
+                    m_status = "Imported values, but ORM packing failed: " + packed.error;
+                }
+            }
             SyncBuffersFromMaterial();
             char line[96];
             std::snprintf(line, sizeof(line), "Imported material %d of %d.",
                           m_importMaterialIndex, result.materialCount);
-            m_status = line;
+            if (!packFailed) m_status = line;
         } else {
             m_status = "Import failed: " + result.error;
         }
@@ -496,7 +675,7 @@ void MaterialMakerPanel::DrawLibraryControls() {
 }
 
 void MaterialMakerPanel::DrawExportControls() {
-    if (SameMaterial(m_material, m_savedSnapshot)) {
+    if (m_hasSavedSnapshot && SameMaterial(m_material, m_savedSnapshot)) {
         ImGui::TextColored(ImVec4(0.45f, 0.82f, 0.58f, 1.0f), "No unsaved changes");
     } else {
         ImGui::TextColored(ImVec4(0.95f, 0.80f, 0.35f, 1.0f), "* Unsaved changes");
@@ -518,6 +697,7 @@ void MaterialMakerPanel::DrawExportControls() {
 
     if (ImGui::InputText("Output Folder", m_outputDirectoryBuffer, sizeof(m_outputDirectoryBuffer))) {
         m_outputDirectory = m_outputDirectoryBuffer;
+        m_libraryScanned = false;
     }
 
     if (!m_status.empty()) {
@@ -551,6 +731,8 @@ void MaterialMakerPanel::Reset() {
 
     SyncBuffersFromMaterial();
     m_savedSnapshot = m_material;
+    m_hasSavedSnapshot = false;
+    m_lastSavedPath.clear();
     m_status = "Ready.";
 }
 
@@ -560,6 +742,8 @@ void MaterialMakerPanel::SyncBuffersFromMaterial() {
     CopyToBuffer(m_albedoMapBuffer, sizeof(m_albedoMapBuffer), m_material.albedoMap);
     CopyToBuffer(m_normalMapBuffer, sizeof(m_normalMapBuffer), m_material.normalMap);
     CopyToBuffer(m_metalRoughMapBuffer, sizeof(m_metalRoughMapBuffer), m_material.metalRoughMap);
+    CopyToBuffer(m_heightMapBuffer, sizeof(m_heightMapBuffer), m_material.heightMap);
+    CopyToBuffer(m_shaderPathBuffer, sizeof(m_shaderPathBuffer), m_material.shaderPath);
 }
 
 void MaterialMakerPanel::DrawPreview() {
@@ -577,8 +761,7 @@ void MaterialMakerPanel::DrawPreview() {
         side = static_cast<int>(std::min(ImGui::GetContentRegionAvail().x, 260.0f));
         if (side < 64) side = 64;
 
-        // Build the engine material from the document's scalar fields. (Texture
-        // maps are a follow-up milestone step; see the roadmap.)
+        // Build the same scalar material and texture bindings used by the engine.
         engine::ecs::PbrMaterial pbr;
         pbr.albedo    = glm::vec3(m_material.albedo[0], m_material.albedo[1], m_material.albedo[2]);
         pbr.metallic  = m_material.metallic;
@@ -587,6 +770,19 @@ void MaterialMakerPanel::DrawPreview() {
         const float es = m_material.emissiveStrength;
         pbr.emissive  = glm::vec3(m_material.emissive[0] * es, m_material.emissive[1] * es,
                                   m_material.emissive[2] * es);
+        pbr.blendMode = static_cast<engine::ecs::PbrMaterial::BlendMode>(m_material.blendMode);
+        pbr.opacity = m_material.opacity; pbr.alphaCutoff = m_material.alphaCutoff;
+        pbr.uvScale = glm::vec2(m_material.uvScale[0], m_material.uvScale[1]);
+        pbr.uvOffset = glm::vec2(m_material.uvOffset[0], m_material.uvOffset[1]);
+        pbr.uvRotation = m_material.uvRotation; pbr.normalStrength = m_material.normalStrength;
+        pbr.heightScale = m_material.heightScale; pbr.clearcoat = m_material.clearcoat;
+        pbr.clearcoatRoughness = m_material.clearcoatRoughness; pbr.transmission = m_material.transmission;
+        pbr.ior = m_material.ior; pbr.thickness = m_material.thickness;
+        pbr.anisotropy = m_material.anisotropy; pbr.anisotropyRotation = m_material.anisotropyRotation;
+        pbr.sheenColor = glm::vec3(m_material.sheenColor[0], m_material.sheenColor[1], m_material.sheenColor[2]);
+        pbr.sheenRoughness = m_material.sheenRoughness; pbr.specularLevel = m_material.specularLevel;
+        pbr.subsurface = m_material.subsurface;
+        pbr.subsurfaceColor = glm::vec3(m_material.subsurfaceColor[0], m_material.subsurfaceColor[1], m_material.subsurfaceColor[2]);
 
         MaterialPreview::Settings s;
         s.size           = side;
@@ -594,14 +790,15 @@ void MaterialMakerPanel::DrawPreview() {
         s.pitchDeg       = m_previewPitch;
         s.shape          = static_cast<MaterialPreview::Shape>(m_previewShape);
         s.channel        = static_cast<MaterialPreview::Channel>(m_previewChannel);
-        s.envTime        = m_previewEnv;
-        s.envYawDeg      = m_previewEnvYaw;
+        s.envTime        = m_previewEnvApplied;
+        s.envYawDeg      = m_previewEnvYawApplied;
         s.lightIntensity = m_previewLight;
         s.groundPlane    = m_previewGround;
         s.background     = glm::vec3(m_previewBg[0], m_previewBg[1], m_previewBg[2]);
         s.albedoMapPath     = m_material.albedoMap;
         s.normalMapPath     = m_material.normalMap;
         s.metalRoughMapPath = m_material.metalRoughMap;
+        s.heightMapPath     = m_material.heightMap;
 
         texture = m_preview->Render(pbr, s);
     }
@@ -629,7 +826,9 @@ void MaterialMakerPanel::DrawPreview() {
 
         if (ImGui::TreeNode("Environment")) {
             ImGui::SliderFloat("Time of day", &m_previewEnv, 0.0f, 1.0f, "%.2f");
+            if (ImGui::IsItemDeactivatedAfterEdit()) m_previewEnvApplied = m_previewEnv;
             ImGui::SliderFloat("Rotate", &m_previewEnvYaw, -180.0f, 180.0f, "%.0f deg");
+            if (ImGui::IsItemDeactivatedAfterEdit()) m_previewEnvYawApplied = m_previewEnvYaw;
             ImGui::SliderFloat("Light", &m_previewLight, 0.0f, 3.0f, "%.2f");
             ImGui::Checkbox("Ground + shadow", &m_previewGround);
             ImGui::ColorEdit3("Background", m_previewBg, ImGuiColorEditFlags_NoInputs);
@@ -638,6 +837,11 @@ void MaterialMakerPanel::DrawPreview() {
         return;
     }
 
+    if (m_preview && !m_preview->LastError().empty()) {
+        ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.35f, 1.0f),
+                           "Live preview unavailable: %s", m_preview->LastError().c_str());
+        if (ImGui::Button("Retry Live Preview")) m_preview->Retry();
+    }
     DrawApproxPreview();
 }
 
@@ -703,7 +907,8 @@ void MaterialMakerPanel::DrawApproxPreview() {
     std::snprintf(line, sizeof(line), "AO %.2f", m_material.ao);
     drawList->AddText(ImVec2(info.x, info.y + 72.0f), ColorU32(0.70f, 0.75f, 0.82f), line);
 
-    const bool hasAnyMap = !m_material.albedoMap.empty() || !m_material.normalMap.empty() || !m_material.metalRoughMap.empty();
+    const bool hasAnyMap = !m_material.albedoMap.empty() || !m_material.normalMap.empty() ||
+                           !m_material.metalRoughMap.empty() || !m_material.heightMap.empty();
     drawList->AddText(ImVec2(info.x, info.y + 108.0f),
         hasAnyMap ? ColorU32(0.45f, 0.82f, 0.58f) : ColorU32(0.60f, 0.64f, 0.70f),
         hasAnyMap ? "Maps assigned" : "No maps");
@@ -717,7 +922,9 @@ bool MaterialMakerPanel::Save() {
     if (SaveMaterialFile(m_material, m_outputDirectory, &m_lastSavedPath, &error)) {
         m_status = "Saved " + m_lastSavedPath;
         m_savedSnapshot = m_material;
+        m_hasSavedSnapshot = true;
         m_savedThisFrame = true;
+        RefreshLibrary();
         return true;
     }
     m_status = "Save failed: " + error;

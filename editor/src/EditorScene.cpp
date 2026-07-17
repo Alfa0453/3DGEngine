@@ -2,7 +2,9 @@
 
 #include <engine/graphics/Mesh.h>
 
+#include <algorithm>
 #include <fstream>
+#include <iomanip>
 #include <sstream>
 #include <cstddef>
 #include <filesystem>
@@ -17,11 +19,23 @@ using engine::ecs::Transform;
 
 namespace {
 
+// TEMPORARY terrain crash tracing (shares terrain_debug.log with EditorApp.cpp).
+void TerrainTrace(const std::string& msg) {
+    std::ofstream f("D:/C++_Projects/3DGEngine/terrain_debug.log", std::ios::app);
+    if (f.is_open()) { f << msg << std::endl; }
+}
+
 const char* PrimitiveName(EditorScene::Primitive primitive) {
     switch (primitive) {
     case EditorScene::Primitive::Plane: return "Plane";
     case EditorScene::Primitive::Cube: return "Cube";
     case EditorScene::Primitive::Sphere: return "Sphere";
+    case EditorScene::Primitive::Capsule: return "Capsule";
+    case EditorScene::Primitive::Cylinder: return "Cylinder";
+    case EditorScene::Primitive::Cone: return "Cone";
+    case EditorScene::Primitive::Pyramid: return "Pyramid";
+    case EditorScene::Primitive::Torus: return "Torus";
+    case EditorScene::Primitive::Staircase: return "Staircase";
     }
     return "Cube";
 }
@@ -67,7 +81,23 @@ bool ParsePrimitive(const std::string& value, EditorScene::Primitive* primitive)
     }
     if (value == "Sphere") {
         *primitive = EditorScene::Primitive::Sphere;
+        return true;
     }
+    if (value == "Capsule") {
+        *primitive = EditorScene::Primitive::Capsule;
+        return true;
+    }
+    if (value == "Cylinder") {
+        *primitive = EditorScene::Primitive::Cylinder;
+        return true;
+    }
+    if (value == "Cone") {
+        *primitive = EditorScene::Primitive::Cone;
+        return true;
+    }
+    if (value == "Pyramid") { *primitive = EditorScene::Primitive::Pyramid; return true; }
+    if (value == "Torus") { *primitive = EditorScene::Primitive::Torus; return true; }
+    if (value == "Staircase") { *primitive = EditorScene::Primitive::Staircase; return true; }
     return false;
 }
 
@@ -82,6 +112,14 @@ EditorScene::TriggerActionMode TriggerActionModeFromInt(int value) {
     default:
         return EditorScene::TriggerActionMode::None;
     }
+}
+
+engine::ecs::AudioAction AudioActionFromInt(int value) {
+    if (value >= static_cast<int>(engine::ecs::AudioAction::None)
+        && value <= static_cast<int>(engine::ecs::AudioAction::Stop)) {
+        return static_cast<engine::ecs::AudioAction>(value);
+    }
+    return engine::ecs::AudioAction::None;
 }
 
 const char* PhysicsJointTypeName(EditorScene::PhysicsJoint::Type type) {
@@ -105,7 +143,21 @@ bool ParsePhysicsJointType(const std::string& value, EditorScene::PhysicsJoint::
 }
 
 const engine::Mesh& MeshFor(EditorScene::Primitive primitive, const engine::Mesh& cube,
-                            const engine::Mesh& plane, const engine::Mesh& sphere){
+                            const engine::Mesh& plane, const engine::Mesh& sphere,
+                            const engine::Mesh& capsule, const engine::Mesh& cylinder,
+                            const engine::Mesh& cone, const engine::Mesh& pyramid,
+                            const engine::Mesh& torus, const engine::Mesh& staircase){
+    if (primitive == EditorScene::Primitive::Staircase) return staircase;
+    if (primitive == EditorScene::Primitive::Torus) return torus;
+    if (primitive == EditorScene::Primitive::Pyramid) return pyramid;
+    if (primitive == EditorScene::Primitive::Cone)
+        return cone;
+    if (primitive == EditorScene::Primitive::Cylinder)
+        return cylinder;
+    if (primitive == EditorScene::Primitive::Capsule)
+    {
+        return capsule;
+    }
     if (primitive == EditorScene::Primitive::Sphere)
     {
         return sphere;
@@ -134,7 +186,9 @@ const char* StoredPath(const std::string& path) {
 
 } // namespace
 
-void EditorScene::BuildDefault(const engine::Mesh & cube, const engine::Mesh & plane, const engine::Mesh & sphere)
+void EditorScene::BuildDefault(const engine::Mesh & cube, const engine::Mesh & plane, const engine::Mesh & sphere,
+                               const engine::Mesh &, const engine::Mesh &, const engine::Mesh &,
+                               const engine::Mesh &, const engine::Mesh &, const engine::Mesh &)
 {
     Clear();
 
@@ -177,7 +231,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         return false;
     }
 
-    out << "3DGEditorScene 36\n";
+    out << "3DGEditorScene 76\n";
     out << "environment "
         << m_environment.timeOfDay << ' '
         << m_environment.skyLightIntensity << ' '
@@ -214,7 +268,60 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         << m_environment.physicsSleepAngularVelocity << ' '
         << m_environment.physicsTimeToSleep << ' '
         << (m_environment.showPhysicsGuides ? 1 : 0) << ' '
-        << (m_environment.selectedPhysicsGuideOnly ? 1 : 0) << '\n';
+        << (m_environment.selectedPhysicsGuideOnly ? 1 : 0) << ' '
+        << (m_environment.msaa ? 1 : 0) << ' '
+        << (m_environment.fxaa ? 1 : 0) << ' '
+        << m_environment.renderScale << ' '
+        << (m_environment.hudAsset.empty() ? std::string("~") : m_environment.hudAsset) << '\n';
+    for (const Environment::PostProcessEffect& effect :
+         m_environment.postProcessEffects) {
+        out << "post_effect "
+            << std::quoted(effect.shaderPath) << ' '
+            << (effect.enabled ? 1 : 0) << ' '
+            << effect.parameters.size();
+        for (const Environment::PostProcessParameter& parameter :
+             effect.parameters) {
+            out << ' ' << std::quoted(parameter.name)
+                << ' ' << parameter.type
+                << ' ' << std::quoted(parameter.value);
+        }
+        out << '\n';
+    }
+    for (const CameraPreset& camera : m_cameraPresets) {
+        out << "camera "
+            << std::quoted(camera.name) << ' '
+            << camera.position.x << ' ' << camera.position.y << ' ' << camera.position.z << ' '
+            << camera.target.x << ' ' << camera.target.y << ' ' << camera.target.z << ' '
+            << camera.fov << ' ' << camera.nearPlane << ' ' << camera.farPlane << ' '
+            << camera.blendDuration << ' ' << camera.blendEasing << ' '
+            << (camera.primary ? 1 : 0) << ' '
+            << (camera.useInPlay ? 1 : 0) << '\n';
+    }
+    for (const CameraSequence& sequence : m_cameraSequences) {
+        out << "camera_sequence "
+            << std::quoted(sequence.name) << ' '
+            << (sequence.loop ? 1 : 0) << ' '
+            << sequence.shots.size();
+        for (const CameraSequenceShot& shot : sequence.shots) {
+            out << ' ' << std::quoted(shot.cameraName)
+                << ' ' << shot.travelDuration
+                << ' ' << shot.holdDuration
+                << ' ' << shot.easing
+                << ' ' << shot.pathMode
+                << ' ' << std::quoted(shot.eventName.empty() ? std::string("-") : shot.eventName);
+        }
+        out << ' ' << sequence.cues.size();
+        for (const CinematicCue& cue : sequence.cues) {
+            out << ' ' << static_cast<int>(cue.type)
+                << ' ' << cue.time
+                << ' ' << std::quoted(cue.name.empty() ? std::string("-") : cue.name)
+                << ' ' << std::quoted(cue.assetPath.empty() ? std::string("-") : cue.assetPath)
+                << ' ' << std::quoted(cue.targetObject.empty() ? std::string("-") : cue.targetObject)
+                << ' ' << std::quoted(cue.animationClip.empty() ? std::string("-") : cue.animationClip)
+                << ' ' << cue.volume;
+        }
+        out << '\n';
+    }
     for (const Object& object : m_objects) {
         const Transform* transform = m_registry.TryGet<Transform>(object.entity);
         const MeshRenderer* renderer = m_registry.TryGet<MeshRenderer>(object.entity);
@@ -329,12 +436,19 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
             << (object.colliderEnabled ? 1 : 0) << ' '
             << static_cast<int>(object.collider.shape) << ' '
             << object.collider.radius << ' '
+            << object.collider.halfHeight << ' '
+            << object.collider.majorRadius << ' '
+            << object.collider.minorRadius << ' '
+            << object.collider.steps << ' '
             << object.collider.halfExtents.x << ' ' << object.collider.halfExtents.y << ' ' << object.collider.halfExtents.z << ' '
             << object.collider.planeNormal.x << ' ' << object.collider.planeNormal.y << ' ' << object.collider.planeNormal.z << ' '
             << object.collider.planeOffset << ' '
             << object.collider.restitution << ' '
             << object.collider.friction << ' '
             << (object.collider.isTrigger ? 1 : 0) << ' '
+            << (object.rigidBody.kinematic ? 1 : 0) << ' '
+            << object.collider.layer << ' '
+            << object.collider.mask << ' '
             << (object.rotatorEnabled ? 1 : 0) << ' '
             << object.rotator.axis.x << ' ' << object.rotator.axis.y << ' ' << object.rotator.axis.z << ' '
             << object.rotator.radiansPerSecond << ' '
@@ -361,6 +475,29 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
             << object.playerController.cameraTargetHeight << ' '
             << object.playerController.maxSlopeDegrees << ' '
             << object.playerController.stepHeight << ' '
+            << (object.playerController.cameraCollision ? 1 : 0) << ' '
+            << object.playerController.cameraProbeRadius << ' '
+            << object.playerController.cameraCollisionPadding << ' '
+            << object.playerController.cameraReturnSpeed << ' '
+            << (object.playerController.shoulderCamera ? 1 : 0) << ' '
+            << object.playerController.shoulderOffset << ' '
+            << object.playerController.shoulderSwitchSpeed << ' '
+            << (object.playerController.rightShoulder ? 1 : 0) << ' '
+            << (object.playerController.lockOnEnabled ? 1 : 0) << ' '
+            << object.playerController.lockOnRange << ' '
+            << object.playerController.lockOnViewAngle << ' '
+            << object.playerController.lockOnTargetHeight << ' '
+            << object.playerController.lockOnTrackingSpeed << ' '
+            << StoredPath(object.triggerCameraSequenceName) << ' '
+            << static_cast<int>(object.triggerEnterCameraAction) << ' '
+            << static_cast<int>(object.triggerExitCameraAction) << ' '
+            << (object.triggerCameraLockInput ? 1 : 0) << ' '
+            << (object.triggerCameraSkippable ? 1 : 0) << ' '
+            << (object.cameraZoneEnabled ? 1 : 0) << ' '
+            << StoredPath(object.cameraZonePresetName) << ' '
+            << (object.cameraZoneRestoreOnExit ? 1 : 0) << ' '
+            << object.cameraZonePriority << ' '
+            << object.cameraZoneReturnBlend << ' '
             << (object.healthEnabled ? 1 : 0) << ' '
             << object.health.hp << ' '
             << object.health.maxHp << ' '
@@ -375,7 +512,163 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
                 << static_cast<int>(field.type) << ' '
                 << StoredPath(field.value);
         }
+        // NavAgent (scene version 37+).
+        out << ' ' << (object.navAgentEnabled ? 1 : 0) << ' '
+            << object.navAgentSpeed << ' '
+            << object.navAgentMaxForce << ' '
+            << object.navAgentReachRadius << ' '
+            << object.navAgentRepathInterval << ' '
+            << object.patrolPoints.size();
+        for (const glm::vec3& p : object.patrolPoints) {
+            out << ' ' << p.x << ' ' << p.y << ' ' << p.z;
+        }
+        // NavAgent perception/target (scene version 38+).
+        out << ' ' << StoredPath(object.navAgentTargetName) << ' '
+            << object.navAgentVisionRange << ' '
+            << object.navAgentVisionHalfAngle;
+        // NavAgent behaviour-tree asset (scene version 40+).
+        out << ' ' << StoredPath(object.navAgentBrainAsset);
+        // Editor-authored navigation bake bounds (scene version 41+).
+        out << ' ' << (object.navMeshBoundsVolume ? 1 : 0);
+        // Audio Source authoring data (scene version 42+).
+        out << ' ' << (object.audioSourceEnabled ? 1 : 0)
+            << ' ' << StoredPath(object.audioAssetPath)
+            << ' ' << object.audioVolume
+            << ' ' << object.audioPitch
+            << ' ' << (object.audioSpatial ? 1 : 0)
+            << ' ' << (object.audioLoop ? 1 : 0)
+            << ' ' << (object.audioAutoplay ? 1 : 0)
+            << ' ' << object.audioMinDistance
+            << ' ' << object.audioMaxDistance
+            << ' ' << object.audioRolloff;
+        // NavAgent faction targeting (scene version 43+).
+        out << ' ' << object.navAgentTeam
+            << ' ' << (object.navAgentAutoTarget ? 1 : 0);
+        // Trigger-driven Audio Source transport (scene version 44+).
+        out << ' ' << static_cast<int>(object.triggerEnterAudioAction)
+            << ' ' << static_cast<int>(object.triggerExitAudioAction);
+        // Audio mixer routing (scene version 45+).
+        out << ' ' << static_cast<int>(object.audioBus);
+        // Directional/spatial audio controls (scene version 72+).
+        out << ' ' << object.audioDopplerFactor
+            << ' ' << object.audioConeInnerAngle
+            << ' ' << object.audioConeOuterAngle
+            << ' ' << object.audioConeOuterGain
+            << ' ' << object.audioOcclusion
+            << ' ' << object.audioPriority;
+        // Particle System authoring data (scene version 46+).
+        const engine::EmitterConfig& particle = object.particleConfig;
+        out << ' ' << (object.particleSystemEnabled ? 1 : 0)
+            << ' ' << particle.rate << ' ' << particle.maxParticles
+            << ' ' << static_cast<int>(particle.shape) << ' ' << particle.shapeRadius
+            << ' ' << particle.direction.x << ' ' << particle.direction.y << ' ' << particle.direction.z
+            << ' ' << particle.coneAngleDeg
+            << ' ' << particle.speedMin << ' ' << particle.speedMax
+            << ' ' << particle.lifeMin << ' ' << particle.lifeMax
+            << ' ' << particle.gravity.x << ' ' << particle.gravity.y << ' ' << particle.gravity.z
+            << ' ' << particle.drag
+            << ' ' << particle.startColor.r << ' ' << particle.startColor.g
+            << ' ' << particle.startColor.b << ' ' << particle.startColor.a
+            << ' ' << particle.endColor.r << ' ' << particle.endColor.g
+            << ' ' << particle.endColor.b << ' ' << particle.endColor.a
+            << ' ' << particle.startSize << ' ' << particle.endSize
+            << ' ' << static_cast<int>(particle.blend)
+            << ' ' << (object.particleAutoplay ? 1 : 0)
+            << ' ' << (object.particleLoop ? 1 : 0)
+            << ' ' << object.particleDuration
+            << ' ' << object.particleStartDelay
+            << ' ' << object.particleSimulationSpeed
+            << ' ' << (object.particleLocalSpace ? 1 : 0)
+            << ' ' << object.particleBurstCount
+            << ' ' << object.particleBurstInterval
+            << ' ' << (object.particlePrewarm ? 1 : 0)
+            << ' ' << particle.rotationMinDeg << ' ' << particle.rotationMaxDeg
+            << ' ' << particle.angularVelocityMinDeg << ' ' << particle.angularVelocityMaxDeg
+            << ' ' << (particle.useSizeCurve ? 1 : 0)
+            << ' ' << (particle.useColorCurve ? 1 : 0);
+        for (float key : particle.sizeCurve) out << ' ' << key;
+        for (float key : particle.colorCurve) out << ' ' << key;
+        out << ' ' << std::quoted(particle.texturePath.empty() ? std::string("-") : particle.texturePath)
+            << ' ' << particle.textureColumns << ' ' << particle.textureRows
+            << ' ' << particle.textureFps << ' ' << (particle.textureLoop ? 1 : 0)
+            << ' ' << std::quoted(object.particleAssetPath.empty() ? std::string("-")
+                                                                  : object.particleAssetPath)
+            << ' ' << (object.particleAssetOverride ? 1 : 0)
+            << ' ' << (particle.cullingEnabled ? 1 : 0)
+            << ' ' << particle.boundsRadius
+            << ' ' << static_cast<int>(object.triggerEnterParticleAction)
+            << ' ' << static_cast<int>(object.triggerExitParticleAction)
+            << ' ' << (particle.collisionEnabled ? 1 : 0)
+            << ' ' << static_cast<int>(particle.collisionResponse)
+            << ' ' << particle.collisionRadius << ' ' << particle.collisionBounce
+            << ' ' << particle.collisionFriction << ' ' << particle.collisionLifetimeLoss
+            << ' ' << (particle.trailsEnabled ? 1 : 0) << ' ' << particle.trailSegments
+            << ' ' << particle.trailLength << ' ' << particle.trailWidth << ' ' << particle.trailOpacity;
+        out << ' ' << object.particleEffectLayers.size();
+        for (const engine::ParticleEffectLayer& layer : object.particleEffectLayers) {
+            out << ' ' << std::quoted(layer.name) << ' ' << std::quoted(layer.assetPath)
+                << ' ' << (layer.enabled ? 1 : 0)
+                << ' ' << layer.offset.x << ' ' << layer.offset.y << ' ' << layer.offset.z;
+        }
+        out << ' ' << static_cast<int>(particle.renderMode) << ' '
+            << static_cast<int>(particle.meshShape) << ' '
+            << std::quoted(particle.meshPath.empty() ? std::string("-") : particle.meshPath)
+            << ' ' << particle.meshScale << ' ' << (particle.meshAlignToVelocity ? 1 : 0)
+            << ' ' << static_cast<int>(particle.simulationBackend)
+            << ' ' << particle.modules.size();
+        for (const engine::ParticleModule& module : particle.modules) {
+            out << ' ' << static_cast<int>(module.type) << ' '
+                << (engine::SupportsDuplicateParticleModules(module.type) ? (module.enabled ? 1 : 0)
+                    : (engine::IsParticleModuleEnabled(particle, module.type) ? 1 : 0))
+                << ' ' << module.instanceId << ' ' << std::quoted(module.name)
+                << ' ' << (module.parametersInitialized ? 1 : 0)
+                << ' ' << module.vectorValue.x << ' ' << module.vectorValue.y
+                << ' ' << module.vectorValue.z << ' ' << module.valueA
+                << ' ' << module.valueB << ' ' << module.valueC << ' ' << module.valueD
+                << ' ' << module.colorValueA.r << ' ' << module.colorValueA.g
+                << ' ' << module.colorValueA.b << ' ' << module.colorValueA.a
+                << ' ' << module.colorValueB.r << ' ' << module.colorValueB.g
+                << ' ' << module.colorValueB.b << ' ' << module.colorValueB.a;
+            for (float key : module.curveValues) out << ' ' << key;
+            out << ' ' << (module.curveEnabled ? 1 : 0) << ' ' << static_cast<int>(module.stage);
+        }
         out << '\n';
+    }
+
+    for (const Object& object : m_objects) {
+        if (object.materialParameterOverrides.empty()) continue;
+        out << "material_overrides " << std::quoted(object.name) << ' '
+            << object.materialParameterOverrides.size();
+        for (const auto& overrideValue : object.materialParameterOverrides)
+            out << ' ' << std::quoted(overrideValue.first)
+                << ' ' << std::quoted(overrideValue.second);
+        out << '\n';
+    }
+
+    // Terrain records (own line, keyed by object name; applied after the object loads).
+    for (const Object& object : m_objects) {
+        if (!object.isTerrain) continue;
+        out << "terrain " << object.name << ' '
+            << object.terrainRes << ' ' << object.terrainSize << ' '
+            << object.terrainMaxHeight << ' ' << object.terrainSeed << ' '
+            << object.terrainOctaves << ' ' << object.terrainFrequency << ' '
+            << object.terrainHeights.size();
+        for (float h : object.terrainHeights) out << ' ' << h;
+        out << ' ' << object.terrainPaint.size();
+        for (unsigned char p : object.terrainPaint) out << ' ' << static_cast<int>(p);
+        out << '\n';
+    }
+
+    // Water records (own line, keyed by object name; applied after the object loads).
+    for (const Object& object : m_objects) {
+        if (!object.isWater) continue;
+        out << "water " << object.name << ' '
+            << object.waterSize << ' ' << object.waterResolution << ' ' << object.waterLevel << ' '
+            << object.waterShallow.r << ' ' << object.waterShallow.g << ' ' << object.waterShallow.b << ' '
+            << object.waterDeep.r << ' ' << object.waterDeep.g << ' ' << object.waterDeep.b << ' '
+            << object.waterReflection.r << ' ' << object.waterReflection.g << ' ' << object.waterReflection.b << ' '
+            << object.waterTransparency << ' ' << object.waterFresnel << ' '
+            << object.waterSpecular << ' ' << object.waterShininess << '\n';
     }
 
     for (const PhysicsJoint& joint : m_joints) {
@@ -400,7 +693,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
     return true;
 }
 
-bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, const engine::Mesh & plane, const engine::Mesh & sphere, std::string * error)
+bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, const engine::Mesh & plane, const engine::Mesh & sphere, const engine::Mesh & capsule, const engine::Mesh & cylinder, const engine::Mesh & cone, const engine::Mesh & pyramid, const engine::Mesh & torus, const engine::Mesh & staircase, std::string * error)
 {
     std::ifstream in(path);
     if (!in) {
@@ -411,7 +704,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
     std::string magic;
     int version = 0;
     in >> magic >> version;
-    if (magic != "3DGEditorScene" ||(version < 1 || version > 36)) {
+    if (magic != "3DGEditorScene" ||(version < 1 || version > 76)) {
         if (error) *error = "Scene file has an unknown format.";
         return false;
     }
@@ -420,6 +713,42 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
 
     std::string recordType;
     while (in >> recordType) {
+        if (recordType == "post_effect" && version >= 74) {
+            Environment::PostProcessEffect effect;
+            int enabled = 1;
+            std::size_t parameterCount = 0;
+            in >> std::quoted(effect.shaderPath) >> enabled >> parameterCount;
+            effect.enabled = enabled != 0;
+            for (std::size_t i = 0; i < parameterCount; ++i) {
+                Environment::PostProcessParameter parameter;
+                in >> std::quoted(parameter.name)
+                   >> parameter.type
+                   >> std::quoted(parameter.value);
+                effect.parameters.push_back(std::move(parameter));
+            }
+            if (!in) {
+                if (error) *error =
+                    "Scene file contains an invalid post-process effect record.";
+                Clear();
+                return false;
+            }
+            m_environment.postProcessEffects.push_back(std::move(effect));
+            continue;
+        }
+        if (recordType == "material_overrides") {
+            std::string objectName;
+            std::size_t count = 0;
+            in >> std::quoted(objectName) >> count;
+            auto object = std::find_if(m_objects.begin(), m_objects.end(),
+                [&](const Object& candidate) { return candidate.name == objectName; });
+            for (std::size_t i = 0; i < count; ++i) {
+                std::string name, value;
+                in >> std::quoted(name) >> std::quoted(value);
+                if (object != m_objects.end())
+                    object->materialParameterOverrides[name] = value;
+            }
+            continue;
+        }
         if (recordType == "environment") {
             if (version < 8) {
                 std::string rest;
@@ -491,6 +820,20 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                 in >> showPhysicsGuides
                    >> selectedPhysicsGuideOnly;
             }
+            if (version >= 61) {
+                int msaa = 1, fxaa = 1;
+                in >> msaa >> fxaa;
+                m_environment.msaa = msaa != 0;
+                m_environment.fxaa = fxaa != 0;
+            }
+            if (version >= 63) {
+                in >> m_environment.renderScale;
+            }
+            if (version >= 73) {
+                std::string hudTok;
+                in >> hudTok;
+                m_environment.hudAsset = (hudTok == "~") ? std::string() : hudTok;
+            }
             if (!in) {
                 if (error) *error = "Scene file contains an invalid environment record.";
                 Clear();
@@ -510,6 +853,107 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             m_environment.physicsAllowSleeping = physicsAllowSleeping != 0;
             m_environment.showPhysicsGuides = showPhysicsGuides != 0;
             m_environment.selectedPhysicsGuideOnly = selectedPhysicsGuideOnly != 0;
+            continue;
+        }
+
+        if (recordType == "camera") {
+            CameraPreset camera;
+            int primary = 0;
+            int useInPlay = 0;
+            in >> std::quoted(camera.name)
+               >> camera.position.x >> camera.position.y >> camera.position.z
+               >> camera.target.x >> camera.target.y >> camera.target.z
+               >> camera.fov >> camera.nearPlane >> camera.farPlane;
+            if (version >= 65) {
+                in >> camera.blendDuration >> camera.blendEasing;
+            }
+            in >> primary >> useInPlay;
+            if (!in) {
+                if (error) *error = "Scene file contains an invalid camera record.";
+                Clear();
+                return false;
+            }
+            camera.name = camera.name.empty() ? "Camera" : camera.name;
+            camera.fov = std::clamp(camera.fov, 10.0f, 120.0f);
+            camera.nearPlane = std::max(camera.nearPlane, 0.001f);
+            camera.farPlane = std::max(camera.farPlane, camera.nearPlane + 0.01f);
+            camera.blendDuration = std::max(camera.blendDuration, 0.0f);
+            camera.blendEasing = std::clamp(camera.blendEasing, 0, 3);
+            camera.primary = primary != 0;
+            camera.useInPlay = useInPlay != 0;
+            if (camera.primary) {
+                for (CameraPreset& existing : m_cameraPresets) existing.primary = false;
+            }
+            m_cameraPresets.push_back(std::move(camera));
+            continue;
+        }
+
+        if (recordType == "camera_sequence" && version >= 68) {
+            CameraSequence sequence;
+            int loop = 0;
+            std::size_t shotCount = 0;
+            in >> std::quoted(sequence.name) >> loop >> shotCount;
+            if (!in || shotCount > 1024) {
+                if (error) *error = "Scene file contains an invalid camera sequence.";
+                Clear();
+                return false;
+            }
+            sequence.name = sequence.name.empty() ? "Camera Sequence" : sequence.name;
+            sequence.loop = loop != 0;
+            sequence.shots.reserve(shotCount);
+            for (std::size_t i = 0; i < shotCount; ++i) {
+                CameraSequenceShot shot;
+                in >> std::quoted(shot.cameraName)
+                   >> shot.travelDuration >> shot.holdDuration >> shot.easing;
+                if (version >= 70) {
+                    in >> shot.pathMode >> std::quoted(shot.eventName);
+                    if (shot.eventName == "-") shot.eventName.clear();
+                }
+                if (!in) {
+                    if (error) *error = "Scene file contains an invalid camera sequence shot.";
+                    Clear();
+                    return false;
+                }
+                shot.travelDuration = std::max(shot.travelDuration, 0.0f);
+                shot.holdDuration = std::max(shot.holdDuration, 0.0f);
+                shot.easing = std::clamp(shot.easing, 0, 3);
+                shot.pathMode = std::clamp(shot.pathMode, 0, 1);
+                sequence.shots.push_back(std::move(shot));
+            }
+            if (version >= 71) {
+                std::size_t cueCount = 0;
+                in >> cueCount;
+                if (!in || cueCount > 4096) {
+                    if (error) *error = "Scene file contains invalid cinematic cues.";
+                    Clear();
+                    return false;
+                }
+                sequence.cues.reserve(cueCount);
+                for (std::size_t i = 0; i < cueCount; ++i) {
+                    CinematicCue cue;
+                    int type = 0;
+                    in >> type >> cue.time
+                       >> std::quoted(cue.name)
+                       >> std::quoted(cue.assetPath)
+                       >> std::quoted(cue.targetObject)
+                       >> std::quoted(cue.animationClip)
+                       >> cue.volume;
+                    if (!in) {
+                        if (error) *error = "Scene file contains an invalid cinematic cue.";
+                        Clear();
+                        return false;
+                    }
+                    cue.type = static_cast<CinematicCueType>(std::clamp(type, 0, 2));
+                    cue.time = std::max(cue.time, 0.0f);
+                    cue.volume = std::max(cue.volume, 0.0f);
+                    if (cue.name == "-") cue.name.clear();
+                    if (cue.assetPath == "-") cue.assetPath.clear();
+                    if (cue.targetObject == "-") cue.targetObject.clear();
+                    if (cue.animationClip == "-") cue.animationClip.clear();
+                    sequence.cues.push_back(std::move(cue));
+                }
+            }
+            m_cameraSequences.push_back(std::move(sequence));
             continue;
         }
 
@@ -592,6 +1036,64 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             continue;
         }
 
+        if (recordType == "terrain") {
+            std::string name;
+            int res = 128, seed = 1337, octaves = 5;
+            float size = 64.0f, maxHeight = 8.0f, frequency = 2.0f;
+            std::size_t hcount = 0;
+            in >> name >> res >> size >> maxHeight >> seed >> octaves >> frequency >> hcount;
+            std::vector<float> heights(hcount);
+            for (std::size_t k = 0; k < hcount; ++k) in >> heights[k];
+            std::size_t pcount = 0;
+            in >> pcount;
+            std::vector<unsigned char> paint(pcount);
+            for (std::size_t k = 0; k < pcount; ++k) { int v = 0; in >> v; paint[k] = static_cast<unsigned char>(v); }
+            for (Object& obj : m_objects) {
+                if (obj.name == name) {
+                    obj.isTerrain = true;
+                    obj.terrainRes = res;
+                    obj.terrainSize = size;
+                    obj.terrainMaxHeight = maxHeight;
+                    obj.terrainSeed = seed;
+                    obj.terrainOctaves = octaves;
+                    obj.terrainFrequency = frequency;
+                    obj.terrainHeights = std::move(heights);
+                    obj.terrainPaint = std::move(paint);
+                    break;
+                }
+            }
+            continue;
+        }
+
+        if (recordType == "water") {
+            std::string name;
+            float size = 80.0f, level = 0.0f, transparency = 0.72f, fresnel = 4.0f, spec = 1.2f, shininess = 220.0f;
+            int res = 160;
+            glm::vec3 shallow(0.0f), deep(0.0f), refl(0.0f);
+            in >> name >> size >> res >> level
+               >> shallow.r >> shallow.g >> shallow.b
+               >> deep.r >> deep.g >> deep.b
+               >> refl.r >> refl.g >> refl.b
+               >> transparency >> fresnel >> spec >> shininess;
+            for (Object& obj : m_objects) {
+                if (obj.name == name) {
+                    obj.isWater = true;
+                    obj.waterSize = size;
+                    obj.waterResolution = res;
+                    obj.waterLevel = level;
+                    obj.waterShallow = shallow;
+                    obj.waterDeep = deep;
+                    obj.waterReflection = refl;
+                    obj.waterTransparency = transparency;
+                    obj.waterFresnel = fresnel;
+                    obj.waterSpecular = spec;
+                    obj.waterShininess = shininess;
+                    break;
+                }
+            }
+            continue;
+        }
+
         if (recordType != "object") {
             std::string rest;
             std::getline(in, rest);
@@ -651,9 +1153,23 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         int triggerEnterRotatorAction = 0;
         int triggerExitMoverAction = 0;
         int triggerExitRotatorAction = 0;
+        int triggerEnterAudioAction = 0;
+        int triggerExitAudioAction = 0;
+        int triggerEnterParticleAction = 0;
+        int triggerExitParticleAction = 0;
+        std::string triggerCameraSequenceName;
+        int triggerEnterCameraAction = 0;
+        int triggerExitCameraAction = 0;
+        int triggerCameraLockInput = 1;
+        int triggerCameraSkippable = 1;
         int playerControllerEnabled = 0;
         int playerFirstPerson = 0;
         PlayerControllerSettings playerController;
+        int cameraZoneEnabled = 0;
+        std::string cameraZonePresetName;
+        int cameraZoneRestoreOnExit = 1;
+        int cameraZonePriority = 0;
+        float cameraZoneReturnBlend = 0.35f;
         int healthEnabled = 0;
         engine::Health health;
         int healthAlive = health.alive ? 1 : 0;
@@ -661,6 +1177,52 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         std::string scriptClassName;
         std::string scriptPath;
         std::vector<ScriptField> scriptFields;
+        int navAgentEnabled = 0;
+        float navAgentSpeed = 3.0f;
+        float navAgentMaxForce = 20.0f;
+        float navAgentReachRadius = 0.6f;
+        float navAgentRepathInterval = 0.3f;
+        std::vector<glm::vec3> patrolPoints;
+        std::string navAgentTargetName;
+        float navAgentVisionRange = 12.0f;
+        float navAgentVisionHalfAngle = 45.0f;
+        std::string navAgentBrainAsset;
+        int navAgentTeam = 0;
+        int navAgentAutoTarget = 0;
+        int navMeshBoundsVolume = 0;
+        int audioSourceEnabled = 0;
+        std::string audioAssetPath;
+        int audioBus = static_cast<int>(engine::AudioBus::SFX);
+        int particleSystemEnabled = 0;
+        engine::EmitterConfig particleConfig;
+        std::vector<engine::ParticleEffectLayer> particleEffectLayers;
+        int particleShape = static_cast<int>(particleConfig.shape);
+        int particleBlend = static_cast<int>(particleConfig.blend);
+        int particleAutoplay = 1;
+        int particleLoop = 1;
+        int particlePrewarm = 0;
+        float particleDuration = 5.0f;
+        float particleStartDelay = 0.0f;
+        float particleSimulationSpeed = 1.0f;
+        int particleLocalSpace = 1;
+        int particleBurstCount = 0;
+        float particleBurstInterval = 0.0f;
+        std::string particleAssetPath;
+        int particleAssetOverride = 0;
+        float audioVolume = 1.0f;
+        float audioPitch = 1.0f;
+        int audioSpatial = 1;
+        int audioLoop = 0;
+        int audioAutoplay = 0;
+        float audioMinDistance = 1.0f;
+        float audioMaxDistance = 40.0f;
+        float audioRolloff = 1.0f;
+        float audioDopplerFactor = 1.0f;
+        float audioConeInnerAngle = 360.0f;
+        float audioConeOuterAngle = 360.0f;
+        float audioConeOuterGain = 1.0f;
+        float audioOcclusion = 0.0f;
+        int audioPriority = 50;
 
         in >> primitiveName >> name
            >> transform.position.x >> transform.position.y >> transform.position.z
@@ -872,8 +1434,8 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             in >> colliderEnabled
                >> colliderShape
                >> collider.radius;
-            if (version >= 24) {
-                in >> collider.halfHeight;
+            if (version >= 39) {
+                in >> collider.halfHeight >> collider.majorRadius >> collider.minorRadius >> collider.steps;
             }
             in
                >> collider.halfExtents.x >> collider.halfExtents.y >> collider.halfExtents.z
@@ -887,13 +1449,16 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             rigidBody.ccd = rigidBodyCcd != 0;
             rigidBody.freezeRotation = version >= 17 && rigidBodyFreezeRotation != 0;
             collider.isTrigger = colliderTrigger != 0;
-            if (colliderShape == static_cast<int>(engine::ecs::ColliderShape::Plane)) {
-                collider.shape = engine::ecs::ColliderShape::Plane;
-            } else if (colliderShape == static_cast<int>(engine::ecs::ColliderShape::Box)) {
-                collider.shape = engine::ecs::ColliderShape::Box;
-            } else {
-                collider.shape = engine::ecs::ColliderShape::Sphere;
+            if (version >= 75) {
+                int kinematic = 0;
+                in >> kinematic >> collider.layer >> collider.mask;
+                rigidBody.kinematic = kinematic != 0;
             }
+            if (colliderShape >= static_cast<int>(engine::ecs::ColliderShape::Sphere)
+                && colliderShape <= static_cast<int>(engine::ecs::ColliderShape::Staircase))
+                collider.shape = static_cast<engine::ecs::ColliderShape>(colliderShape);
+            else
+                collider.shape = engine::ecs::ColliderShape::Sphere;
         }
         if (version >= 19) {
             in >> rotatorEnabled
@@ -941,6 +1506,39 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                >> playerController.cameraTargetHeight
                >> playerController.maxSlopeDegrees
                >> playerController.stepHeight;
+            if (version >= 64) {
+                in >> playerController.cameraCollision
+                   >> playerController.cameraProbeRadius
+                   >> playerController.cameraCollisionPadding
+                   >> playerController.cameraReturnSpeed;
+            }
+            if (version >= 67) {
+                in >> playerController.shoulderCamera
+                   >> playerController.shoulderOffset
+                   >> playerController.shoulderSwitchSpeed
+                   >> playerController.rightShoulder
+                   >> playerController.lockOnEnabled
+                   >> playerController.lockOnRange
+                   >> playerController.lockOnViewAngle
+                   >> playerController.lockOnTargetHeight
+                   >> playerController.lockOnTrackingSpeed;
+            }
+            if (version >= 69) {
+                in >> triggerCameraSequenceName
+                   >> triggerEnterCameraAction
+                   >> triggerExitCameraAction
+                   >> triggerCameraLockInput
+                   >> triggerCameraSkippable;
+                if (triggerCameraSequenceName == "-") triggerCameraSequenceName.clear();
+            }
+            if (version >= 66) {
+                in >> cameraZoneEnabled
+                   >> cameraZonePresetName
+                   >> cameraZoneRestoreOnExit
+                   >> cameraZonePriority
+                   >> cameraZoneReturnBlend;
+                if (cameraZonePresetName == "-") cameraZonePresetName.clear();
+            }
             playerController.firstPerson = playerFirstPerson != 0;
         }
         if (version >= 28) {
@@ -988,13 +1586,212 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             }
         }
 
+        if (version >= 37) {
+            in >> navAgentEnabled >> navAgentSpeed >> navAgentMaxForce
+               >> navAgentReachRadius >> navAgentRepathInterval;
+            std::size_t patrolCount = 0;
+            in >> patrolCount;
+            for (std::size_t i = 0; i < patrolCount; ++i) {
+                glm::vec3 p(0.0f);
+                in >> p.x >> p.y >> p.z;
+                patrolPoints.push_back(p);
+            }
+        }
+        if (version >= 38) {
+            in >> navAgentTargetName >> navAgentVisionRange >> navAgentVisionHalfAngle;
+            if (navAgentTargetName == "-") {
+                navAgentTargetName.clear();
+            }
+        }
+        if (version >= 40) {
+            in >> navAgentBrainAsset;
+            if (navAgentBrainAsset == "-") {
+                navAgentBrainAsset.clear();
+            }
+        }
+        if (version >= 41) {
+            in >> navMeshBoundsVolume;
+        }
+        if (version >= 42) {
+            in >> audioSourceEnabled >> audioAssetPath >> audioVolume >> audioPitch
+               >> audioSpatial >> audioLoop >> audioAutoplay
+               >> audioMinDistance >> audioMaxDistance >> audioRolloff;
+            if (audioAssetPath == "-") audioAssetPath.clear();
+        }
+        if (version >= 43) {
+            in >> navAgentTeam >> navAgentAutoTarget;
+        }
+        if (version >= 44) {
+            in >> triggerEnterAudioAction >> triggerExitAudioAction;
+        }
+        if (version >= 45) {
+            in >> audioBus;
+        }
+        if (version >= 72) {
+            in >> audioDopplerFactor >> audioConeInnerAngle >> audioConeOuterAngle
+               >> audioConeOuterGain >> audioOcclusion >> audioPriority;
+        }
+        if (version >= 46) {
+            in >> particleSystemEnabled
+               >> particleConfig.rate >> particleConfig.maxParticles
+               >> particleShape >> particleConfig.shapeRadius
+               >> particleConfig.direction.x >> particleConfig.direction.y >> particleConfig.direction.z
+               >> particleConfig.coneAngleDeg
+               >> particleConfig.speedMin >> particleConfig.speedMax
+               >> particleConfig.lifeMin >> particleConfig.lifeMax
+               >> particleConfig.gravity.x >> particleConfig.gravity.y >> particleConfig.gravity.z
+               >> particleConfig.drag
+               >> particleConfig.startColor.r >> particleConfig.startColor.g
+               >> particleConfig.startColor.b >> particleConfig.startColor.a
+               >> particleConfig.endColor.r >> particleConfig.endColor.g
+               >> particleConfig.endColor.b >> particleConfig.endColor.a
+               >> particleConfig.startSize >> particleConfig.endSize
+               >> particleBlend
+               >> particleAutoplay >> particleLoop
+               >> particleDuration >> particleStartDelay >> particleSimulationSpeed
+               >> particleLocalSpace >> particleBurstCount >> particleBurstInterval;
+            if (version >= 47) in >> particlePrewarm;
+            if (version >= 48) {
+                int useSizeCurve = 0, useColorCurve = 0, textureLoop = 1;
+                in >> particleConfig.rotationMinDeg >> particleConfig.rotationMaxDeg
+                   >> particleConfig.angularVelocityMinDeg >> particleConfig.angularVelocityMaxDeg
+                   >> useSizeCurve >> useColorCurve;
+                for (float& key : particleConfig.sizeCurve) in >> key;
+                for (float& key : particleConfig.colorCurve) in >> key;
+                in >> std::quoted(particleConfig.texturePath) >> particleConfig.textureColumns
+                   >> particleConfig.textureRows >> particleConfig.textureFps >> textureLoop;
+                if (particleConfig.texturePath == "-") particleConfig.texturePath.clear();
+                particleConfig.useSizeCurve = useSizeCurve != 0;
+                particleConfig.useColorCurve = useColorCurve != 0;
+                particleConfig.textureLoop = textureLoop != 0;
+            }
+            if (version >= 49) {
+                in >> std::quoted(particleAssetPath) >> particleAssetOverride;
+                if (particleAssetPath == "-") particleAssetPath.clear();
+            }
+            if (version >= 50) {
+                int cullingEnabled = 1;
+                in >> cullingEnabled >> particleConfig.boundsRadius;
+                particleConfig.cullingEnabled = cullingEnabled != 0;
+                particleConfig.boundsRadius = std::max(particleConfig.boundsRadius, 0.01f);
+            }
+            if (version >= 51) {
+                in >> triggerEnterParticleAction >> triggerExitParticleAction;
+            }
+            if (version >= 52) {
+                int collisionEnabled = 0;
+                int collisionResponse = 0;
+                in >> collisionEnabled >> collisionResponse >> particleConfig.collisionRadius
+                   >> particleConfig.collisionBounce >> particleConfig.collisionFriction
+                   >> particleConfig.collisionLifetimeLoss;
+                particleConfig.collisionEnabled = collisionEnabled != 0;
+                particleConfig.collisionResponse = static_cast<engine::ParticleCollisionResponse>(
+                    std::clamp(collisionResponse, 0, 1));
+                particleConfig.collisionRadius = std::max(particleConfig.collisionRadius, 0.0f);
+                particleConfig.collisionBounce = std::max(particleConfig.collisionBounce, 0.0f);
+                particleConfig.collisionFriction = std::clamp(particleConfig.collisionFriction, 0.0f, 1.0f);
+                particleConfig.collisionLifetimeLoss = std::clamp(
+                    particleConfig.collisionLifetimeLoss, 0.0f, 1.0f);
+            }
+            if (version >= 53) {
+                int trailsEnabled = 0;
+                in >> trailsEnabled >> particleConfig.trailSegments >> particleConfig.trailLength
+                   >> particleConfig.trailWidth >> particleConfig.trailOpacity;
+                particleConfig.trailsEnabled = trailsEnabled != 0;
+                particleConfig.trailSegments = std::clamp(particleConfig.trailSegments, 2, 16);
+                particleConfig.trailLength = std::max(particleConfig.trailLength, 0.001f);
+                particleConfig.trailWidth = std::max(particleConfig.trailWidth, 0.0f);
+                particleConfig.trailOpacity = std::clamp(particleConfig.trailOpacity, 0.0f, 1.0f);
+            }
+            if (version >= 54) {
+                std::size_t layerCount = 0;
+                in >> layerCount;
+                layerCount = std::min<std::size_t>(layerCount, 64);
+                particleEffectLayers.reserve(layerCount);
+                for (std::size_t layerIndex = 0; layerIndex < layerCount; ++layerIndex) {
+                    engine::ParticleEffectLayer layer;
+                    int layerEnabled = 1;
+                    in >> std::quoted(layer.name) >> std::quoted(layer.assetPath) >> layerEnabled
+                       >> layer.offset.x >> layer.offset.y >> layer.offset.z;
+                    layer.enabled = layerEnabled != 0;
+                    particleEffectLayers.push_back(std::move(layer));
+                }
+            }
+            if (version >= 55) {
+                int renderMode = 0, meshShape = 0, align = 1;
+                in >> renderMode >> meshShape >> std::quoted(particleConfig.meshPath)
+                   >> particleConfig.meshScale >> align;
+                particleConfig.renderMode = static_cast<engine::ParticleRenderMode>(
+                    std::clamp(renderMode, 0, 1));
+                particleConfig.meshShape = static_cast<engine::ParticleMeshShape>(
+                    std::clamp(meshShape, 0, 4));
+                particleConfig.meshAlignToVelocity = align != 0;
+                if (particleConfig.meshPath == "-") particleConfig.meshPath.clear();
+                particleConfig.meshScale = std::max(particleConfig.meshScale, 0.001f);
+            }
+            if (version >= 56) {
+                int backend = 0;
+                in >> backend;
+                particleConfig.simulationBackend = static_cast<engine::ParticleSimulationBackend>(
+                    std::clamp(backend, 0, 2));
+            }
+            if (version >= 57) {
+                std::size_t moduleCount = 0;
+                in >> moduleCount;
+                if (moduleCount > 32) { if (error) *error = "Particle module stack is too large."; Clear(); return false; }
+                particleConfig.modules.clear();
+                for (std::size_t moduleIndex = 0; moduleIndex < moduleCount; ++moduleIndex) {
+                    int type = 0, enabledValue = 1;
+                    in >> type >> enabledValue;
+                    engine::ParticleModule module;
+                    module.type = static_cast<engine::ParticleModuleType>(std::clamp(type, 0,
+                        static_cast<int>(engine::ParticleModuleType::Renderer)));
+                    module.enabled = enabledValue != 0;
+                    if (version >= 58) {
+                        int initialized = 0;
+                        in >> module.instanceId >> std::quoted(module.name) >> initialized
+                           >> module.vectorValue.x >> module.vectorValue.y
+                           >> module.vectorValue.z >> module.valueA;
+                        if (version >= 59) in >> module.valueB >> module.valueC >> module.valueD;
+                        if (version >= 60) {
+                            int curveEnabled = 0;
+                            in >> module.colorValueA.r >> module.colorValueA.g
+                               >> module.colorValueA.b >> module.colorValueA.a
+                               >> module.colorValueB.r >> module.colorValueB.g
+                               >> module.colorValueB.b >> module.colorValueB.a;
+                            for (float& key : module.curveValues) in >> key;
+                            in >> curveEnabled;
+                            module.curveEnabled = curveEnabled != 0;
+                        }
+                        if (version >= 62) {
+                            int stage = 0;
+                            in >> stage;
+                            module.stage = static_cast<engine::ParticleModuleStage>(std::clamp(stage, 0, 2));
+                        }
+                        module.parametersInitialized = initialized != 0;
+                    }
+                    if (type >= 0 && type <= static_cast<int>(engine::ParticleModuleType::Renderer))
+                        particleConfig.modules.push_back(std::move(module));
+                }
+                engine::NormalizeParticleModuleStack(particleConfig, version >= 60);
+            } else {
+                engine::NormalizeParticleModuleStack(particleConfig, false);
+            }
+            particleShape = std::clamp(particleShape,
+                static_cast<int>(engine::EmitShape::Point), static_cast<int>(engine::EmitShape::Cone));
+            particleBlend = std::clamp(particleBlend,
+                static_cast<int>(engine::ParticleBlend::Additive), static_cast<int>(engine::ParticleBlend::Alpha));
+            particleConfig.shape = static_cast<engine::EmitShape>(particleShape);
+            particleConfig.blend = static_cast<engine::ParticleBlend>(particleBlend);
+        }
+
         if (!in || !ParsePrimitive(primitiveName, &primitive)) {
             if (error) *error = "Scene file contains an invalid object record.";
             Clear();
             return false;
         }
 
-        CreateObject(name, primitive, MeshFor(primitive, cube, plane, sphere), transform, color);
+        CreateObject(name, primitive, MeshFor(primitive, cube, plane, sphere, capsule, cylinder, cone, pyramid, torus, staircase), transform, color);
         m_objects.back().visible = visible != 0;
         m_objects.back().locked = locked != 0;
         m_objects.back().modelAssetPath = modelAssetPath;
@@ -1037,14 +1834,88 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         m_objects.back().triggerEnterRotatorAction = TriggerActionModeFromInt(triggerEnterRotatorAction);
         m_objects.back().triggerExitMoverAction = TriggerActionModeFromInt(triggerExitMoverAction);
         m_objects.back().triggerExitRotatorAction = TriggerActionModeFromInt(triggerExitRotatorAction);
+        m_objects.back().triggerEnterAudioAction = AudioActionFromInt(triggerEnterAudioAction);
+        m_objects.back().triggerExitAudioAction = AudioActionFromInt(triggerExitAudioAction);
+        m_objects.back().triggerEnterParticleAction = static_cast<engine::ParticleAction>(
+            std::clamp(triggerEnterParticleAction, 0, static_cast<int>(engine::ParticleAction::Clear)));
+        m_objects.back().triggerExitParticleAction = static_cast<engine::ParticleAction>(
+            std::clamp(triggerExitParticleAction, 0, static_cast<int>(engine::ParticleAction::Clear)));
+        m_objects.back().triggerCameraSequenceName = triggerCameraSequenceName;
+        m_objects.back().triggerEnterCameraAction =
+            static_cast<CameraSequenceTriggerAction>(std::clamp(triggerEnterCameraAction, 0, 3));
+        m_objects.back().triggerExitCameraAction =
+            static_cast<CameraSequenceTriggerAction>(std::clamp(triggerExitCameraAction, 0, 3));
+        m_objects.back().triggerCameraLockInput = triggerCameraLockInput != 0;
+        m_objects.back().triggerCameraSkippable = triggerCameraSkippable != 0;
         m_objects.back().playerControllerEnabled = playerControllerEnabled != 0;
+        playerController.cameraDistance = std::max(playerController.cameraDistance, 0.0f);
+        playerController.cameraProbeRadius = std::max(playerController.cameraProbeRadius, 0.0f);
+        playerController.cameraCollisionPadding = std::max(playerController.cameraCollisionPadding, 0.0f);
+        playerController.cameraReturnSpeed = std::max(playerController.cameraReturnSpeed, 0.0f);
+        playerController.shoulderOffset = std::max(playerController.shoulderOffset, 0.0f);
+        playerController.shoulderSwitchSpeed = std::max(playerController.shoulderSwitchSpeed, 0.0f);
+        playerController.lockOnRange = std::max(playerController.lockOnRange, 0.0f);
+        playerController.lockOnViewAngle = std::clamp(playerController.lockOnViewAngle, 0.0f, 180.0f);
+        playerController.lockOnTrackingSpeed = std::max(playerController.lockOnTrackingSpeed, 0.0f);
         m_objects.back().playerController = playerController;
+        m_objects.back().cameraZoneEnabled = cameraZoneEnabled != 0;
+        m_objects.back().cameraZonePresetName = cameraZonePresetName;
+        m_objects.back().cameraZoneRestoreOnExit = cameraZoneRestoreOnExit != 0;
+        m_objects.back().cameraZonePriority = cameraZonePriority;
+        m_objects.back().cameraZoneReturnBlend = std::max(cameraZoneReturnBlend, 0.0f);
         m_objects.back().healthEnabled = healthEnabled != 0;
         m_objects.back().health = health;
         m_objects.back().scriptEnabled = scriptEnabled != 0;
         m_objects.back().scriptClassName = scriptClassName;
         m_objects.back().scriptPath = scriptPath;
         m_objects.back().scriptFields = scriptFields;
+        m_objects.back().navAgentEnabled = navAgentEnabled != 0;
+        m_objects.back().navAgentSpeed = navAgentSpeed;
+        m_objects.back().navAgentMaxForce = navAgentMaxForce;
+        m_objects.back().navAgentReachRadius = navAgentReachRadius;
+        m_objects.back().navAgentRepathInterval = navAgentRepathInterval;
+        m_objects.back().patrolPoints = patrolPoints;
+        m_objects.back().navAgentTargetName = navAgentTargetName;
+        m_objects.back().navAgentVisionRange = navAgentVisionRange;
+        m_objects.back().navAgentVisionHalfAngle = navAgentVisionHalfAngle;
+        m_objects.back().navAgentBrainAsset = navAgentBrainAsset;
+        m_objects.back().navAgentTeam = navAgentTeam;
+        m_objects.back().navAgentAutoTarget = navAgentAutoTarget != 0;
+        m_objects.back().navMeshBoundsVolume = navMeshBoundsVolume != 0;
+        m_objects.back().audioSourceEnabled = audioSourceEnabled != 0;
+        m_objects.back().audioAssetPath = audioAssetPath;
+        audioBus = std::clamp(audioBus, static_cast<int>(engine::AudioBus::Master),
+                              static_cast<int>(engine::AudioBus::Ambient));
+        m_objects.back().audioBus = static_cast<engine::AudioBus>(audioBus);
+        m_objects.back().particleSystemEnabled = particleSystemEnabled != 0;
+        m_objects.back().particleConfig = particleConfig;
+        m_objects.back().particleAutoplay = particleAutoplay != 0;
+        m_objects.back().particleLoop = particleLoop != 0;
+        m_objects.back().particlePrewarm = particlePrewarm != 0;
+        m_objects.back().particleDuration = std::max(particleDuration, 0.0f);
+        m_objects.back().particleStartDelay = std::max(particleStartDelay, 0.0f);
+        m_objects.back().particleSimulationSpeed = std::max(particleSimulationSpeed, 0.0f);
+        m_objects.back().particleLocalSpace = particleLocalSpace != 0;
+        m_objects.back().particleBurstCount = std::max(particleBurstCount, 0);
+        m_objects.back().particleBurstInterval = std::max(particleBurstInterval, 0.0f);
+        m_objects.back().particleAssetPath = particleAssetPath;
+        m_objects.back().particleAssetOverride = particleAssetOverride != 0;
+        m_objects.back().particleEffectLayers = std::move(particleEffectLayers);
+        m_objects.back().audioVolume = std::clamp(audioVolume, 0.0f, 4.0f);
+        m_objects.back().audioPitch = std::clamp(audioPitch, 0.01f, 4.0f);
+        m_objects.back().audioSpatial = audioSpatial != 0;
+        m_objects.back().audioLoop = audioLoop != 0;
+        m_objects.back().audioAutoplay = audioAutoplay != 0;
+        m_objects.back().audioMinDistance = std::max(audioMinDistance, 0.01f);
+        m_objects.back().audioMaxDistance = std::max(audioMaxDistance, m_objects.back().audioMinDistance);
+        m_objects.back().audioRolloff = std::max(audioRolloff, 0.0f);
+        m_objects.back().audioDopplerFactor = std::max(audioDopplerFactor, 0.0f);
+        m_objects.back().audioConeInnerAngle = std::clamp(audioConeInnerAngle, 0.0f, 360.0f);
+        m_objects.back().audioConeOuterAngle = std::clamp(audioConeOuterAngle,
+            m_objects.back().audioConeInnerAngle, 360.0f);
+        m_objects.back().audioConeOuterGain = std::clamp(audioConeOuterGain, 0.0f, 1.0f);
+        m_objects.back().audioOcclusion = std::clamp(audioOcclusion, 0.0f, 1.0f);
+        m_objects.back().audioPriority = std::clamp(audioPriority, 0, 100);
     }
 
     m_selectedIndex = m_objects.empty() ? -1 : 0;
@@ -1246,28 +2117,41 @@ void EditorScene::EndTransformEdit()
     m_transformEditOpen = false;
 }
 
-bool EditorScene::Undo(const engine::Mesh & cube, const engine::Mesh & plane, const engine::Mesh & sphere)
+void EditorScene::BeginParticleEdit()
+{
+    if (!m_particleEditOpen && SelectedObject()) {
+        PushUndoSnapshot();
+        m_particleEditOpen = true;
+    }
+}
+
+void EditorScene::EndParticleEdit()
+{
+    m_particleEditOpen = false;
+}
+
+bool EditorScene::Undo(const engine::Mesh & cube, const engine::Mesh & plane, const engine::Mesh & sphere, const engine::Mesh & capsule, const engine::Mesh & cylinder, const engine::Mesh & cone, const engine::Mesh & pyramid, const engine::Mesh & torus, const engine::Mesh & staircase)
 {
     if (m_undoStack.empty()) {
         return false;
     }
 
     m_redoStack.push_back(CaptureSnapshot());
-    RestoreSnapshot(m_undoStack.back(), cube, plane, sphere);
+    RestoreSnapshot(m_undoStack.back(), cube, plane, sphere, capsule, cylinder, cone, pyramid, torus, staircase);
     m_undoStack.pop_back();
     m_dirty = true;
     m_transformEditOpen = false;
     return true;
 }
 
-bool EditorScene::Redo(const engine::Mesh & cube, const engine::Mesh & plane, const engine::Mesh & sphere)
+bool EditorScene::Redo(const engine::Mesh & cube, const engine::Mesh & plane, const engine::Mesh & sphere, const engine::Mesh & capsule, const engine::Mesh & cylinder, const engine::Mesh & cone, const engine::Mesh & pyramid, const engine::Mesh & torus, const engine::Mesh & staircase)
 {
     if (m_redoStack.empty()) {
         return false;
     }
 
     m_undoStack.push_back(CaptureSnapshot());
-    RestoreSnapshot(m_redoStack.back(), cube, plane, sphere);
+    RestoreSnapshot(m_redoStack.back(), cube, plane, sphere, capsule, cylinder, cone, pyramid, torus, staircase);
     m_redoStack.pop_back();
     m_dirty = true;
     m_transformEditOpen = false;
@@ -1279,9 +2163,9 @@ EditorScene::Snapshot EditorScene::CreateSnapshot()
     return CaptureSnapshot();
 }
 
-void EditorScene::RestoreFromSnapshot(const Snapshot &snapshot, const engine::Mesh &cube, const engine::Mesh &plane, const engine::Mesh &sphere)
+void EditorScene::RestoreFromSnapshot(const Snapshot &snapshot, const engine::Mesh &cube, const engine::Mesh &plane, const engine::Mesh &sphere, const engine::Mesh &capsule, const engine::Mesh &cylinder, const engine::Mesh &cone, const engine::Mesh &pyramid, const engine::Mesh &torus, const engine::Mesh &staircase)
 {
-    RestoreSnapshot(snapshot, cube, plane, sphere);
+    RestoreSnapshot(snapshot, cube, plane, sphere, capsule, cylinder, cone, pyramid, torus, staircase);
     ClearHistory();
     m_dirty = false;
 }
@@ -1323,7 +2207,73 @@ void EditorScene::AddSphere(const engine::Mesh & sphere)
     transform.scale = glm::vec3(0.9f);
 
     const glm::vec3 color(0.68f, 0.27f, 0.31f);
-    CreateObject("Plane_" + std::to_string(m_nextCubeNumber++), Primitive::Sphere, sphere, transform, color);
+    CreateObject("Sphere_" + std::to_string(m_nextCubeNumber++), Primitive::Sphere, sphere, transform, color);
+    m_selectedIndex = static_cast<int>(m_objects.size()) - 1;
+    m_dirty = true;
+}
+
+void EditorScene::AddCapsule(const engine::Mesh & capsule)
+{
+    PushUndoSnapshot();
+
+    Transform transform;
+    transform.position = glm::vec3(0.0f, 0.9f, 0.0f);
+
+    const glm::vec3 color(0.27f, 0.48f, 0.78f);
+    CreateObject("Capsule_" + std::to_string(m_nextCubeNumber++), Primitive::Capsule, capsule, transform, color);
+    m_selectedIndex = static_cast<int>(m_objects.size()) - 1;
+    m_dirty = true;
+}
+
+void EditorScene::AddCylinder(const engine::Mesh & cylinder)
+{
+    Transform transform;
+    transform.position.y = 0.5f;
+    AddConfiguredPrimitive(Primitive::Cylinder, cylinder, transform, nullptr);
+}
+
+void EditorScene::AddCone(const engine::Mesh & cone)
+{
+    Transform transform;
+    transform.position.y = 0.5f;
+    AddConfiguredPrimitive(Primitive::Cone, cone, transform, nullptr);
+}
+
+void EditorScene::AddNavMeshBoundsVolume(const engine::Mesh& cube)
+{
+    PushUndoSnapshot();
+    Transform transform;
+    transform.position = glm::vec3(0.0f, 1.0f, 0.0f);
+    transform.scale = glm::vec3(20.0f, 2.0f, 20.0f);
+    const std::string name = "NavMeshBoundsVolume_" + std::to_string(m_nextCubeNumber++);
+    CreateObject(name, Primitive::Cube, cube, transform, glm::vec3(0.12f, 0.55f, 0.95f));
+    m_objects.back().navMeshBoundsVolume = true;
+    m_selectedIndex = static_cast<int>(m_objects.size()) - 1;
+    m_dirty = true;
+}
+
+void EditorScene::AddConfiguredPrimitive(Primitive primitive, const engine::Mesh& mesh,
+                                         const Transform& transform, const Collider* collider,
+                                         const std::string& requestedName)
+{
+    PushUndoSnapshot();
+
+    const glm::vec3 color = primitive == Primitive::Plane ? glm::vec3(0.34f, 0.37f, 0.41f)
+        : primitive == Primitive::Sphere ? glm::vec3(0.68f, 0.27f, 0.31f)
+        : primitive == Primitive::Capsule ? glm::vec3(0.27f, 0.48f, 0.78f)
+        : primitive == Primitive::Cylinder ? glm::vec3(0.26f, 0.62f, 0.55f)
+        : primitive == Primitive::Cone ? glm::vec3(0.72f, 0.42f, 0.18f)
+        : primitive == Primitive::Pyramid ? glm::vec3(0.72f, 0.58f, 0.20f)
+        : primitive == Primitive::Torus ? glm::vec3(0.48f, 0.32f, 0.72f)
+        : primitive == Primitive::Staircase ? glm::vec3(0.48f, 0.50f, 0.54f)
+        : glm::vec3(0.78f, 0.48f, 0.18f);
+    const std::string generatedName = std::string(PrimitiveName(primitive)) + "_" + std::to_string(m_nextCubeNumber++);
+    const std::string& name = requestedName.empty() ? generatedName : requestedName;
+    CreateObject(name, primitive, mesh, transform, color);
+    if (collider) {
+        m_objects.back().colliderEnabled = true;
+        m_objects.back().collider = *collider;
+    }
     m_selectedIndex = static_cast<int>(m_objects.size()) - 1;
     m_dirty = true;
 }
@@ -1562,6 +2512,20 @@ bool EditorScene::SetSelectedMaterialAsset(const std::string &path)
 
     PushUndoSnapshot();
     selected.materialAssetPath = path;
+    selected.materialParameterOverrides.clear();
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedMaterialParameterOverride(
+    const std::string& name, const std::string& value)
+{
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())
+        || name.empty()) return false;
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) return false;
+    PushUndoSnapshot();
+    selected.materialParameterOverrides[name] = value;
     m_dirty = true;
     return true;
 }
@@ -1853,6 +2817,27 @@ bool EditorScene::SetSelectedColliderEnabled(bool enabled)
         if (selected.primitive == Primitive::Plane && selected.modelAssetPath.empty()) {
             selected.collider = Collider::MakePlane(glm::vec3(0.0f, 1.0f, 0.0f),
                 transform ? transform->position.y : 0.0f);
+        } else if (selected.primitive == Primitive::Sphere && selected.modelAssetPath.empty() && transform) {
+            selected.collider = Collider::MakeSphere(
+                std::max({transform->scale.x, transform->scale.y, transform->scale.z}) * 0.5f);
+        } else if (selected.primitive == Primitive::Capsule && selected.modelAssetPath.empty() && transform) {
+            const float radius = 0.4f * std::max(transform->scale.x, transform->scale.z);
+            selected.collider = Collider::MakeCapsuleFromHeight(radius,
+                std::max(1.8f * transform->scale.y, radius * 2.0f));
+        } else if (selected.primitive == Primitive::Cylinder && selected.modelAssetPath.empty() && transform) {
+            const float radius = 0.5f * std::max(transform->scale.x, transform->scale.z);
+            selected.collider = Collider::MakeCylinder(radius, transform->scale.y);
+        } else if (selected.primitive == Primitive::Cone && selected.modelAssetPath.empty() && transform) {
+            selected.collider = Collider::MakeCone(
+                0.5f * std::max(transform->scale.x, transform->scale.z), transform->scale.y);
+        } else if (selected.primitive == Primitive::Pyramid && selected.modelAssetPath.empty() && transform) {
+            selected.collider = Collider::MakePyramid(transform->scale * 0.5f);
+        } else if (selected.primitive == Primitive::Torus && selected.modelAssetPath.empty() && transform) {
+            const float radialScale = std::max(transform->scale.x, transform->scale.z);
+            selected.collider = Collider::MakeTorus(0.35f * radialScale,
+                0.15f * std::max(radialScale, transform->scale.y));
+        } else if (selected.primitive == Primitive::Staircase && selected.modelAssetPath.empty() && transform) {
+            selected.collider = Collider::MakeStaircase(transform->scale * 0.5f, 6);
         } else if (transform) {
             selected.collider = Collider::MakeBox(glm::vec3(
                 std::max(transform->scale.x * 0.5f, 0.001f),
@@ -1957,7 +2942,11 @@ bool EditorScene::SetSelectedTriggerAction(const std::string& targetName,
                                            TriggerActionMode enterMoverAction,
                                            TriggerActionMode enterRotatorAction,
                                            TriggerActionMode exitMoverAction,
-                                           TriggerActionMode exitRotatorAction) {
+                                           TriggerActionMode exitRotatorAction,
+                                           engine::ecs::AudioAction enterAudioAction,
+                                           engine::ecs::AudioAction exitAudioAction,
+                                           engine::ParticleAction enterParticleAction,
+                                           engine::ParticleAction exitParticleAction) {
     if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
         return false;
     }
@@ -1970,7 +2959,11 @@ bool EditorScene::SetSelectedTriggerAction(const std::string& targetName,
         && selected.triggerEnterMoverAction == enterMoverAction
         && selected.triggerEnterRotatorAction == enterRotatorAction
         && selected.triggerExitMoverAction == exitMoverAction
-        && selected.triggerExitRotatorAction == exitRotatorAction) {
+        && selected.triggerExitRotatorAction == exitRotatorAction
+        && selected.triggerEnterAudioAction == enterAudioAction
+        && selected.triggerEnterParticleAction == enterParticleAction
+        && selected.triggerExitAudioAction == exitAudioAction
+        && selected.triggerExitParticleAction == exitParticleAction) {
         return false;
     }
 
@@ -1980,6 +2973,37 @@ bool EditorScene::SetSelectedTriggerAction(const std::string& targetName,
     selected.triggerEnterRotatorAction = enterRotatorAction;
     selected.triggerExitMoverAction = exitMoverAction;
     selected.triggerExitRotatorAction = exitRotatorAction;
+    selected.triggerEnterAudioAction = enterAudioAction;
+    selected.triggerExitAudioAction = exitAudioAction;
+    selected.triggerEnterParticleAction = enterParticleAction;
+    selected.triggerExitParticleAction = exitParticleAction;
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedTriggerCameraSequence(
+    const std::string& sequenceName,
+    CameraSequenceTriggerAction enterAction,
+    CameraSequenceTriggerAction exitAction,
+    bool lockInput, bool skippable) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) return false;
+    if (selected.triggerCameraSequenceName == sequenceName
+        && selected.triggerEnterCameraAction == enterAction
+        && selected.triggerExitCameraAction == exitAction
+        && selected.triggerCameraLockInput == lockInput
+        && selected.triggerCameraSkippable == skippable) {
+        return false;
+    }
+    PushUndoSnapshot();
+    selected.triggerCameraSequenceName = sequenceName;
+    selected.triggerEnterCameraAction = enterAction;
+    selected.triggerExitCameraAction = exitAction;
+    selected.triggerCameraLockInput = lockInput;
+    selected.triggerCameraSkippable = skippable;
     m_dirty = true;
     return true;
 }
@@ -2017,10 +3041,42 @@ bool EditorScene::SetSelectedPlayerController(const PlayerControllerSettings& se
     }
 
     PushUndoSnapshot();
+    PlayerControllerSettings safe = settings;
+    safe.cameraDistance = std::max(safe.cameraDistance, 0.0f);
+    safe.cameraProbeRadius = std::max(safe.cameraProbeRadius, 0.0f);
+    safe.cameraCollisionPadding = std::max(safe.cameraCollisionPadding, 0.0f);
+    safe.cameraReturnSpeed = std::max(safe.cameraReturnSpeed, 0.0f);
+    safe.shoulderOffset = std::max(safe.shoulderOffset, 0.0f);
+    safe.shoulderSwitchSpeed = std::max(safe.shoulderSwitchSpeed, 0.0f);
+    safe.lockOnRange = std::max(safe.lockOnRange, 0.0f);
+    safe.lockOnViewAngle = std::clamp(safe.lockOnViewAngle, 0.0f, 180.0f);
+    safe.lockOnTrackingSpeed = std::max(safe.lockOnTrackingSpeed, 0.0f);
     selected.playerControllerEnabled = true;
-    selected.playerController = settings;
+    selected.playerController = safe;
     selected.colliderEnabled = true;
-    selected.collider = engine::ecs::Collider::MakeCapsuleFromHeight(settings.capsuleRadius, settings.capsuleHeight);
+    selected.collider = engine::ecs::Collider::MakeCapsuleFromHeight(safe.capsuleRadius, safe.capsuleHeight);
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedCameraZone(bool enabled, const std::string& presetName,
+                                        bool restoreOnExit, int priority, float returnBlend) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) return false;
+
+    PushUndoSnapshot();
+    selected.cameraZoneEnabled = enabled;
+    selected.cameraZonePresetName = presetName;
+    selected.cameraZoneRestoreOnExit = restoreOnExit;
+    selected.cameraZonePriority = priority;
+    selected.cameraZoneReturnBlend = std::max(returnBlend, 0.0f);
+    if (enabled) {
+        selected.colliderEnabled = true;
+        selected.collider.isTrigger = true;
+    }
     m_dirty = true;
     return true;
 }
@@ -2100,6 +3156,178 @@ bool EditorScene::SetSelectedScript(const std::string& className, const std::str
     return true;
 }
 
+bool EditorScene::SetSelectedAudioSource(bool enabled, const std::string& path,
+                                         float volume, float pitch, bool spatial,
+                                         bool loop, bool autoplay, float minDistance,
+                                         float maxDistance, float rolloff,
+                                         engine::AudioBus bus, float dopplerFactor,
+                                         float coneInnerAngle, float coneOuterAngle,
+                                         float coneOuterGain, float occlusion, int priority) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) return false;
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) return false;
+    const float safeVolume = std::clamp(volume, 0.0f, 4.0f);
+    const float safePitch = std::clamp(pitch, 0.01f, 4.0f);
+    const float safeMin = std::max(minDistance, 0.01f);
+    const float safeMax = std::max(maxDistance, safeMin);
+    const float safeRolloff = std::max(rolloff, 0.0f);
+    const float safeDoppler = std::max(dopplerFactor, 0.0f);
+    const float safeConeInner = std::clamp(coneInnerAngle, 0.0f, 360.0f);
+    const float safeConeOuter = std::clamp(coneOuterAngle, safeConeInner, 360.0f);
+    const float safeConeGain = std::clamp(coneOuterGain, 0.0f, 1.0f);
+    const float safeOcclusion = std::clamp(occlusion, 0.0f, 1.0f);
+    const int safePriority = std::clamp(priority, 0, 100);
+    if (selected.audioSourceEnabled == enabled && selected.audioAssetPath == path
+        && selected.audioVolume == safeVolume && selected.audioPitch == safePitch
+        && selected.audioSpatial == spatial && selected.audioLoop == loop
+        && selected.audioAutoplay == autoplay && selected.audioMinDistance == safeMin
+        && selected.audioMaxDistance == safeMax && selected.audioRolloff == safeRolloff
+        && selected.audioBus == bus && selected.audioDopplerFactor == safeDoppler
+        && selected.audioConeInnerAngle == safeConeInner
+        && selected.audioConeOuterAngle == safeConeOuter
+        && selected.audioConeOuterGain == safeConeGain
+        && selected.audioOcclusion == safeOcclusion
+        && selected.audioPriority == safePriority) return false;
+    PushUndoSnapshot();
+    selected.audioSourceEnabled = enabled;
+    selected.audioAssetPath = path;
+    selected.audioVolume = safeVolume;
+    selected.audioPitch = safePitch;
+    selected.audioSpatial = spatial;
+    selected.audioLoop = loop;
+    selected.audioAutoplay = autoplay;
+    selected.audioMinDistance = safeMin;
+    selected.audioMaxDistance = safeMax;
+    selected.audioRolloff = safeRolloff;
+    selected.audioBus = bus;
+    selected.audioDopplerFactor = safeDoppler;
+    selected.audioConeInnerAngle = safeConeInner;
+    selected.audioConeOuterAngle = safeConeOuter;
+    selected.audioConeOuterGain = safeConeGain;
+    selected.audioOcclusion = safeOcclusion;
+    selected.audioPriority = safePriority;
+    m_dirty = true;
+    return true;
+}
+
+void EditorScene::AddParticleSystem(const engine::Mesh& placeholderMesh,
+                                    const Transform& transform,
+                                    const std::string& assetPath,
+                                    const engine::ParticleSystemComponent& settings) {
+    PushUndoSnapshot();
+    CreateObject("ParticleSystem_" + std::to_string(m_nextCubeNumber++), Primitive::Cube,
+                 placeholderMesh, transform, glm::vec3(0.35f, 0.55f, 1.0f));
+    m_selectedIndex = static_cast<int>(m_objects.size()) - 1;
+    m_objects.back().visible = false;
+    m_particleEditOpen = true;
+    SetSelectedParticleSystem(true, settings);
+    m_particleEditOpen = false;
+    m_objects.back().particleAssetPath = assetPath;
+    m_objects.back().particleAssetOverride = false;
+    m_dirty = true;
+}
+
+bool EditorScene::SetSelectedParticleSystem(bool enabled,
+                                             const engine::ParticleSystemComponent& settings) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) return false;
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) return false;
+    if (!m_particleEditOpen) PushUndoSnapshot();
+    selected.particleSystemEnabled = enabled;
+    selected.particleConfig = settings.config;
+    selected.particleConfig.rate = std::max(selected.particleConfig.rate, 0.0f);
+    selected.particleConfig.maxParticles = std::max(selected.particleConfig.maxParticles, 1);
+    selected.particleConfig.shapeRadius = std::max(selected.particleConfig.shapeRadius, 0.0f);
+    if (selected.particleConfig.speedMin > selected.particleConfig.speedMax)
+        std::swap(selected.particleConfig.speedMin, selected.particleConfig.speedMax);
+    selected.particleConfig.lifeMin = std::max(selected.particleConfig.lifeMin, 0.001f);
+    selected.particleConfig.lifeMax = std::max(selected.particleConfig.lifeMax,
+                                                selected.particleConfig.lifeMin);
+    selected.particleConfig.drag = std::max(selected.particleConfig.drag, 0.0f);
+    selected.particleConfig.startSize = std::max(selected.particleConfig.startSize, 0.0f);
+    selected.particleConfig.endSize = std::max(selected.particleConfig.endSize, 0.0f);
+    if (selected.particleConfig.rotationMinDeg > selected.particleConfig.rotationMaxDeg)
+        std::swap(selected.particleConfig.rotationMinDeg, selected.particleConfig.rotationMaxDeg);
+    if (selected.particleConfig.angularVelocityMinDeg > selected.particleConfig.angularVelocityMaxDeg)
+        std::swap(selected.particleConfig.angularVelocityMinDeg,
+                  selected.particleConfig.angularVelocityMaxDeg);
+    for (float& key : selected.particleConfig.sizeCurve) key = std::clamp(key, 0.0f, 1.0f);
+    for (float& key : selected.particleConfig.colorCurve) key = std::clamp(key, 0.0f, 1.0f);
+    selected.particleConfig.textureColumns = std::max(selected.particleConfig.textureColumns, 1);
+    selected.particleConfig.textureRows = std::max(selected.particleConfig.textureRows, 1);
+    selected.particleConfig.textureFps = std::max(selected.particleConfig.textureFps, 0.0f);
+    selected.particleConfig.boundsRadius = std::max(selected.particleConfig.boundsRadius, 0.01f);
+    selected.particleConfig.collisionRadius = std::max(selected.particleConfig.collisionRadius, 0.0f);
+    selected.particleConfig.collisionBounce = std::max(selected.particleConfig.collisionBounce, 0.0f);
+    selected.particleConfig.collisionFriction = std::clamp(selected.particleConfig.collisionFriction, 0.0f, 1.0f);
+    selected.particleConfig.collisionLifetimeLoss = std::clamp(
+        selected.particleConfig.collisionLifetimeLoss, 0.0f, 1.0f);
+    selected.particleConfig.trailSegments = std::clamp(selected.particleConfig.trailSegments, 2, 16);
+    selected.particleConfig.trailLength = std::max(selected.particleConfig.trailLength, 0.001f);
+    selected.particleConfig.trailWidth = std::max(selected.particleConfig.trailWidth, 0.0f);
+    selected.particleConfig.trailOpacity = std::clamp(selected.particleConfig.trailOpacity, 0.0f, 1.0f);
+    selected.particleConfig.meshScale = std::max(selected.particleConfig.meshScale, 0.001f);
+    selected.particleAutoplay = settings.autoplay;
+    selected.particleLoop = settings.loop;
+    selected.particlePrewarm = settings.prewarm;
+    selected.particleDuration = std::max(settings.duration, 0.0f);
+    selected.particleStartDelay = std::max(settings.startDelay, 0.0f);
+    selected.particleSimulationSpeed = std::max(settings.simulationSpeed, 0.0f);
+    selected.particleLocalSpace = settings.localSpace;
+    selected.particleBurstCount = std::max(settings.burstCount, 0);
+    selected.particleBurstInterval = std::max(settings.burstInterval, 0.0f);
+    if (!selected.particleAssetPath.empty()) selected.particleAssetOverride = true;
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedParticleAsset(const std::string& path,
+                                            const engine::ParticleSystemComponent& settings,
+                                            bool instanceOverride) {
+    if (!SetSelectedParticleSystem(true, settings)) return false;
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    selected.particleAssetPath = path;
+    selected.particleAssetOverride = instanceOverride;
+    return true;
+}
+
+int EditorScene::RefreshParticleAssetInstances(const std::string& path,
+                                                const engine::ParticleSystemComponent& settings) {
+    if (path.empty()) return 0;
+    bool hasTarget = false;
+    for (const Object& object : m_objects)
+        if (object.particleAssetPath == path && !object.particleAssetOverride) { hasTarget = true; break; }
+    if (!hasTarget) return 0;
+    PushUndoSnapshot();
+    int refreshed = 0;
+    const int oldSelection = m_selectedIndex;
+    const bool oldParticleEdit = m_particleEditOpen;
+    for (std::size_t i = 0; i < m_objects.size(); ++i) {
+        Object& object = m_objects[i];
+        if (object.particleAssetPath != path || object.particleAssetOverride) continue;
+        m_selectedIndex = static_cast<int>(i);
+        m_particleEditOpen = true;
+        SetSelectedParticleSystem(true, settings);
+        object.particleAssetOverride = false;
+        ++refreshed;
+    }
+    m_particleEditOpen = oldParticleEdit;
+    m_selectedIndex = oldSelection;
+    return refreshed;
+}
+
+bool EditorScene::SetSelectedParticleEffectLayers(
+    const std::vector<engine::ParticleEffectLayer>& layers) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) return false;
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) return false;
+    PushUndoSnapshot();
+    selected.particleEffectLayers = layers;
+    if (selected.particleEffectLayers.size() > 64) selected.particleEffectLayers.resize(64);
+    m_dirty = true;
+    return true;
+}
+
 bool EditorScene::SetSelectedScriptEnabled(bool enabled) {
     if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
         return false;
@@ -2112,6 +3340,191 @@ bool EditorScene::SetSelectedScriptEnabled(bool enabled) {
 
     PushUndoSnapshot();
     selected.scriptEnabled = enabled && !selected.scriptClassName.empty();
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedNavAgent(bool enabled, float speed, float maxForce,
+                                      float reachRadius, float repathInterval,
+                                      const std::string& targetName, float visionRange,
+                                      float visionHalfAngle) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) {
+        return false;
+    }
+    PushUndoSnapshot();
+    selected.navAgentEnabled = enabled;
+    selected.navAgentSpeed = std::max(speed, 0.0f);
+    selected.navAgentMaxForce = std::max(maxForce, 0.0f);
+    selected.navAgentReachRadius = std::max(reachRadius, 0.05f);
+    selected.navAgentRepathInterval = std::max(repathInterval, 0.05f);
+    selected.navAgentTargetName = targetName;
+    selected.navAgentVisionRange = std::max(visionRange, 0.0f);
+    selected.navAgentVisionHalfAngle = std::clamp(visionHalfAngle, 1.0f, 180.0f);
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedNavAgentBrain(const std::string& brainAsset) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) {
+        return false;
+    }
+    PushUndoSnapshot();
+    selected.navAgentBrainAsset = brainAsset;
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedNavAgentTeam(int team, bool autoTarget) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) {
+        return false;
+    }
+    PushUndoSnapshot();
+    selected.navAgentTeam = team;
+    selected.navAgentAutoTarget = autoTarget;
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedTerrain(bool enabled, int res, float size, float maxHeight,
+                                     int seed, int octaves, float frequency) {
+    TerrainTrace("SetSelectedTerrain: begin enabled=" + std::to_string(enabled ? 1 : 0) +
+                 " selIndex=" + std::to_string(m_selectedIndex) +
+                 " objs=" + std::to_string(m_objects.size()));
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) {
+        return false;
+    }
+    PushUndoSnapshot();
+    TerrainTrace("SetSelectedTerrain: snapshot pushed entity=" + std::to_string(static_cast<unsigned>(selected.entity)));
+    selected.isTerrain = enabled;
+    selected.terrainRes = std::clamp(res, 8, 512);
+    selected.terrainSize = std::max(size, 1.0f);
+    selected.terrainMaxHeight = std::max(maxHeight, 0.0f);
+    selected.terrainSeed = seed;
+    selected.terrainOctaves = std::clamp(octaves, 1, 10);
+    selected.terrainFrequency = std::max(frequency, 0.1f);
+    selected.terrainHeights.clear();   // params changed -> regenerate from noise (discard sculpt)
+    selected.terrainPaint.clear();
+
+    // The terrain mesh bakes `size` into its own vertices (local span [0, size]), and the
+    // height query / sculpt brush map world->terrain-local coordinates assuming that same
+    // unscaled span. If the object keeps the source plane's non-unit scale (e.g. 3,1,3) the
+    // rendered terrain ends up 3x oversized while the brush still expects [0, size], so sculpt
+    // clicks land outside the heightmap and the selection outline no longer covers the mesh.
+    // Normalising the transform scale to 1 keeps render, outline, height query and sculpt in
+    // the same coordinate space.
+    if (enabled) {
+        engine::ecs::Transform* t = m_registry.TryGet<engine::ecs::Transform>(selected.entity);
+        TerrainTrace(std::string("SetSelectedTerrain: transform ") + (t ? "found, normalising scale" : "MISSING"));
+        if (t) {
+            t->scale = glm::vec3(1.0f);
+        }
+    }
+    m_dirty = true;
+    TerrainTrace("SetSelectedTerrain: end ok");
+    return true;
+}
+
+bool EditorScene::SetSelectedWater(float size, int resolution, float level,
+                                   const glm::vec3& shallow, const glm::vec3& deep,
+                                   const glm::vec3& reflection, float transparency,
+                                   float fresnel, float specular, float shininess) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) {
+        return false;
+    }
+    PushUndoSnapshot();
+    selected.isWater = true;
+    selected.waterSize = std::max(size, 1.0f);
+    selected.waterResolution = std::clamp(resolution, 8, 512);
+    selected.waterLevel = level;
+    selected.waterShallow = shallow;
+    selected.waterDeep = deep;
+    selected.waterReflection = reflection;
+    selected.waterTransparency = std::clamp(transparency, 0.0f, 1.0f);
+    selected.waterFresnel = std::max(fresnel, 0.1f);
+    selected.waterSpecular = std::max(specular, 0.0f);
+    selected.waterShininess = std::max(shininess, 1.0f);
+
+    // Keep the object's plane (the opaque "bed") matched to the water patch: scale it
+    // to the water size and sit it at the surface level, so the animated surface has a
+    // bed exactly its own footprint.
+    if (engine::ecs::Transform* t = m_registry.TryGet<engine::ecs::Transform>(selected.entity)) {
+        t->scale = glm::vec3(selected.waterSize, 1.0f, selected.waterSize);
+        t->position.y = selected.waterLevel;
+    }
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedTerrainPaint(std::vector<unsigned char> paint) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) {
+        return false;
+    }
+    selected.terrainPaint = std::move(paint);
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedTerrainHeights(std::vector<float> heights) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) {
+        return false;
+    }
+    selected.terrainHeights = std::move(heights);   // per-stroke; no undo snapshot (avoids spam)
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::AddSelectedPatrolPoint(const glm::vec3& point) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) {
+        return false;
+    }
+    PushUndoSnapshot();
+    selected.patrolPoints.push_back(point);
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::ClearSelectedPatrolPoints() {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked || selected.patrolPoints.empty()) {
+        return false;
+    }
+    PushUndoSnapshot();
+    selected.patrolPoints.clear();
     m_dirty = true;
     return true;
 }
@@ -2149,6 +3562,7 @@ bool EditorScene::AddSelectedScriptField() {
     field.value = "1.0";
     selected.scriptFields.push_back(field);
     m_dirty = true;
+    return true;
 }
 
 bool EditorScene::SetSelectedScriptField(std::size_t index, const ScriptField& field) {
@@ -2227,6 +3641,161 @@ bool EditorScene::RemovePhysicsJoint(std::size_t index)
     return true;
 }
 
+const EditorScene::CameraPreset* EditorScene::PrimaryCameraPreset() const
+{
+    const auto it = std::find_if(m_cameraPresets.begin(), m_cameraPresets.end(),
+        [](const CameraPreset& camera) { return camera.primary; });
+    return it == m_cameraPresets.end() ? nullptr : &*it;
+}
+
+std::size_t EditorScene::AddCameraPreset(const CameraPreset& source)
+{
+    PushUndoSnapshot();
+    CameraPreset preset = source;
+    preset.name = preset.name.empty()
+        ? "Camera_" + std::to_string(m_cameraPresets.size() + 1)
+        : preset.name;
+    preset.fov = std::clamp(preset.fov, 10.0f, 120.0f);
+    preset.nearPlane = std::max(preset.nearPlane, 0.001f);
+    preset.farPlane = std::max(preset.farPlane, preset.nearPlane + 0.01f);
+    preset.blendDuration = std::max(preset.blendDuration, 0.0f);
+    preset.blendEasing = std::clamp(preset.blendEasing, 0, 3);
+    if (preset.primary) {
+        for (CameraPreset& camera : m_cameraPresets) camera.primary = false;
+    }
+    m_cameraPresets.push_back(std::move(preset));
+    m_dirty = true;
+    return m_cameraPresets.size() - 1;
+}
+
+bool EditorScene::SetCameraPreset(std::size_t index, const CameraPreset& source)
+{
+    if (index >= m_cameraPresets.size()) return false;
+    PushUndoSnapshot();
+    const std::string previousName = m_cameraPresets[index].name;
+    CameraPreset preset = source;
+    preset.name = preset.name.empty() ? "Camera" : preset.name;
+    preset.fov = std::clamp(preset.fov, 10.0f, 120.0f);
+    preset.nearPlane = std::max(preset.nearPlane, 0.001f);
+    preset.farPlane = std::max(preset.farPlane, preset.nearPlane + 0.01f);
+    preset.blendDuration = std::max(preset.blendDuration, 0.0f);
+    preset.blendEasing = std::clamp(preset.blendEasing, 0, 3);
+    if (preset.primary) {
+        for (std::size_t i = 0; i < m_cameraPresets.size(); ++i) {
+            if (i != index) m_cameraPresets[i].primary = false;
+        }
+    }
+    if (preset.name != previousName) {
+        for (CameraSequence& sequence : m_cameraSequences) {
+            for (CameraSequenceShot& shot : sequence.shots) {
+                if (shot.cameraName == previousName) shot.cameraName = preset.name;
+            }
+        }
+        for (Object& object : m_objects) {
+            if (object.cameraZonePresetName == previousName) {
+                object.cameraZonePresetName = preset.name;
+            }
+        }
+    }
+    m_cameraPresets[index] = std::move(preset);
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::RemoveCameraPreset(std::size_t index)
+{
+    if (index >= m_cameraPresets.size()) return false;
+    PushUndoSnapshot();
+    m_cameraPresets.erase(m_cameraPresets.begin() + static_cast<std::ptrdiff_t>(index));
+    m_dirty = true;
+    return true;
+}
+
+std::size_t EditorScene::DuplicateCameraPreset(std::size_t index)
+{
+    if (index >= m_cameraPresets.size()) return static_cast<std::size_t>(-1);
+    PushUndoSnapshot();
+    CameraPreset copy = m_cameraPresets[index];
+    copy.name += " Copy";
+    copy.primary = false;
+    copy.useInPlay = false;
+    m_cameraPresets.push_back(std::move(copy));
+    m_dirty = true;
+    return m_cameraPresets.size() - 1;
+}
+
+bool EditorScene::SetPrimaryCameraPreset(std::size_t index)
+{
+    if (index >= m_cameraPresets.size()) return false;
+    PushUndoSnapshot();
+    for (std::size_t i = 0; i < m_cameraPresets.size(); ++i) {
+        m_cameraPresets[i].primary = i == index;
+    }
+    m_dirty = true;
+    return true;
+}
+
+std::size_t EditorScene::AddCameraSequence(const CameraSequence& source)
+{
+    PushUndoSnapshot();
+    CameraSequence sequence = source;
+    sequence.name = sequence.name.empty()
+        ? "Sequence_" + std::to_string(m_cameraSequences.size() + 1)
+        : sequence.name;
+    for (CameraSequenceShot& shot : sequence.shots) {
+        shot.travelDuration = std::max(shot.travelDuration, 0.0f);
+        shot.holdDuration = std::max(shot.holdDuration, 0.0f);
+        shot.easing = std::clamp(shot.easing, 0, 3);
+        shot.pathMode = std::clamp(shot.pathMode, 0, 1);
+    }
+    for (CinematicCue& cue : sequence.cues) {
+        cue.time = std::max(cue.time, 0.0f);
+        cue.volume = std::max(cue.volume, 0.0f);
+    }
+    m_cameraSequences.push_back(std::move(sequence));
+    m_dirty = true;
+    return m_cameraSequences.size() - 1;
+}
+
+bool EditorScene::SetCameraSequence(std::size_t index, const CameraSequence& source)
+{
+    if (index >= m_cameraSequences.size()) return false;
+    PushUndoSnapshot();
+    const std::string previousName = m_cameraSequences[index].name;
+    CameraSequence sequence = source;
+    sequence.name = sequence.name.empty() ? "Camera Sequence" : sequence.name;
+    for (CameraSequenceShot& shot : sequence.shots) {
+        shot.travelDuration = std::max(shot.travelDuration, 0.0f);
+        shot.holdDuration = std::max(shot.holdDuration, 0.0f);
+        shot.easing = std::clamp(shot.easing, 0, 3);
+        shot.pathMode = std::clamp(shot.pathMode, 0, 1);
+    }
+    for (CinematicCue& cue : sequence.cues) {
+        cue.time = std::max(cue.time, 0.0f);
+        cue.volume = std::max(cue.volume, 0.0f);
+    }
+    if (sequence.name != previousName) {
+        for (Object& object : m_objects) {
+            if (object.triggerCameraSequenceName == previousName) {
+                object.triggerCameraSequenceName = sequence.name;
+            }
+        }
+    }
+    m_cameraSequences[index] = std::move(sequence);
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::RemoveCameraSequence(std::size_t index)
+{
+    if (index >= m_cameraSequences.size()) return false;
+    PushUndoSnapshot();
+    m_cameraSequences.erase(
+        m_cameraSequences.begin() + static_cast<std::ptrdiff_t>(index));
+    m_dirty = true;
+    return true;
+}
+
 bool EditorScene::ToggleSelectVisible()
 {
     if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
@@ -2253,7 +3822,7 @@ bool EditorScene::ToggleSelectedLocked()
     return true;
 }
 
-bool EditorScene::DuplicateSelected(const engine::Mesh & cube, const engine::Mesh & plane, const engine::Mesh& sphere)
+bool EditorScene::DuplicateSelected(const engine::Mesh & cube, const engine::Mesh & plane, const engine::Mesh& sphere, const engine::Mesh& capsule, const engine::Mesh& cylinder, const engine::Mesh& cone, const engine::Mesh& pyramid, const engine::Mesh& torus, const engine::Mesh& staircase)
 {
     const Object* selected = SelectedObject();
     if (!selected) {
@@ -2274,10 +3843,12 @@ bool EditorScene::DuplicateSelected(const engine::Mesh & cube, const engine::Mes
 
     duplicateTransform.position += glm::vec3(0.8f, 0.0f, 0.8f);
 
-    const engine::Mesh& mesh = MeshFor(selectedCopy.primitive, cube, plane, sphere);
+    const engine::Mesh& mesh = MeshFor(selectedCopy.primitive, cube, plane, sphere, capsule, cylinder, cone, pyramid, torus, staircase);
     CreateObject(selectedCopy.name + "_Copy", selectedCopy.primitive, mesh, duplicateTransform, duplicateColor);
     m_objects.back().modelAssetPath = selectedCopy.modelAssetPath;
     m_objects.back().materialAssetPath = selectedCopy.materialAssetPath;
+    m_objects.back().materialParameterOverrides =
+        selectedCopy.materialParameterOverrides;
     m_objects.back().skeletalModel = selectedCopy.skeletalModel;
     m_objects.back().animationClipIndex = selectedCopy.animationClipIndex;
     m_objects.back().animationClipName = selectedCopy.animationClipName;
@@ -2299,6 +3870,7 @@ bool EditorScene::DuplicateSelected(const engine::Mesh & cube, const engine::Mes
     m_objects.back().animationParameters = selectedCopy.animationParameters;
     m_objects.back().animationTransitions = selectedCopy.animationTransitions;
     m_objects.back().light = selectedCopy.light;
+    m_objects.back().navMeshBoundsVolume = selectedCopy.navMeshBoundsVolume;
     m_objects.back().lightData = selectedCopy.lightData;
     if (selectedCopy.light) {
         m_registry.Add<Light>(m_objects.back().entity, selectedCopy.lightData);
@@ -2321,14 +3893,80 @@ bool EditorScene::DuplicateSelected(const engine::Mesh & cube, const engine::Mes
     m_objects.back().triggerEnterRotatorAction = selectedCopy.triggerEnterRotatorAction;
     m_objects.back().triggerExitMoverAction = selectedCopy.triggerExitMoverAction;
     m_objects.back().triggerExitRotatorAction = selectedCopy.triggerExitRotatorAction;
+    m_objects.back().triggerEnterAudioAction = selectedCopy.triggerEnterAudioAction;
+    m_objects.back().triggerExitAudioAction = selectedCopy.triggerExitAudioAction;
+    m_objects.back().triggerEnterParticleAction = selectedCopy.triggerEnterParticleAction;
+    m_objects.back().triggerExitParticleAction = selectedCopy.triggerExitParticleAction;
+    m_objects.back().triggerCameraSequenceName = selectedCopy.triggerCameraSequenceName;
+    m_objects.back().triggerEnterCameraAction = selectedCopy.triggerEnterCameraAction;
+    m_objects.back().triggerExitCameraAction = selectedCopy.triggerExitCameraAction;
+    m_objects.back().triggerCameraLockInput = selectedCopy.triggerCameraLockInput;
+    m_objects.back().triggerCameraSkippable = selectedCopy.triggerCameraSkippable;
     m_objects.back().playerControllerEnabled = selectedCopy.playerControllerEnabled;
     m_objects.back().playerController = selectedCopy.playerController;
+    m_objects.back().cameraZoneEnabled = selectedCopy.cameraZoneEnabled;
+    m_objects.back().cameraZonePresetName = selectedCopy.cameraZonePresetName;
+    m_objects.back().cameraZoneRestoreOnExit = selectedCopy.cameraZoneRestoreOnExit;
+    m_objects.back().cameraZonePriority = selectedCopy.cameraZonePriority;
+    m_objects.back().cameraZoneReturnBlend = selectedCopy.cameraZoneReturnBlend;
     m_objects.back().healthEnabled = selectedCopy.healthEnabled;
     m_objects.back().health = selectedCopy.health;
     m_objects.back().scriptEnabled = selectedCopy.scriptEnabled;
     m_objects.back().scriptClassName = selectedCopy.scriptClassName;
     m_objects.back().scriptPath = selectedCopy.scriptPath;
     m_objects.back().scriptFields = selectedCopy.scriptFields;
+    m_objects.back().audioSourceEnabled = selectedCopy.audioSourceEnabled;
+    m_objects.back().audioAssetPath = selectedCopy.audioAssetPath;
+    m_objects.back().audioBus = selectedCopy.audioBus;
+    m_objects.back().audioVolume = selectedCopy.audioVolume;
+    m_objects.back().audioPitch = selectedCopy.audioPitch;
+    m_objects.back().audioSpatial = selectedCopy.audioSpatial;
+    m_objects.back().audioLoop = selectedCopy.audioLoop;
+    m_objects.back().audioAutoplay = selectedCopy.audioAutoplay;
+    m_objects.back().audioMinDistance = selectedCopy.audioMinDistance;
+    m_objects.back().audioMaxDistance = selectedCopy.audioMaxDistance;
+    m_objects.back().audioRolloff = selectedCopy.audioRolloff;
+    m_objects.back().audioDopplerFactor = selectedCopy.audioDopplerFactor;
+    m_objects.back().audioConeInnerAngle = selectedCopy.audioConeInnerAngle;
+    m_objects.back().audioConeOuterAngle = selectedCopy.audioConeOuterAngle;
+    m_objects.back().audioConeOuterGain = selectedCopy.audioConeOuterGain;
+    m_objects.back().audioOcclusion = selectedCopy.audioOcclusion;
+    m_objects.back().audioPriority = selectedCopy.audioPriority;
+    m_objects.back().particleSystemEnabled = selectedCopy.particleSystemEnabled;
+    m_objects.back().particleConfig = selectedCopy.particleConfig;
+    m_objects.back().particleAutoplay = selectedCopy.particleAutoplay;
+    m_objects.back().particleLoop = selectedCopy.particleLoop;
+    m_objects.back().particlePrewarm = selectedCopy.particlePrewarm;
+    m_objects.back().particleDuration = selectedCopy.particleDuration;
+    m_objects.back().particleStartDelay = selectedCopy.particleStartDelay;
+    m_objects.back().particleSimulationSpeed = selectedCopy.particleSimulationSpeed;
+    m_objects.back().particleLocalSpace = selectedCopy.particleLocalSpace;
+    m_objects.back().particleBurstCount = selectedCopy.particleBurstCount;
+    m_objects.back().particleBurstInterval = selectedCopy.particleBurstInterval;
+    m_objects.back().particleAssetPath = selectedCopy.particleAssetPath;
+    m_objects.back().particleAssetOverride = selectedCopy.particleAssetOverride;
+    m_objects.back().particleEffectLayers = selectedCopy.particleEffectLayers;
+    m_objects.back().navAgentEnabled = selectedCopy.navAgentEnabled;
+    m_objects.back().patrolPoints = selectedCopy.patrolPoints;
+    m_objects.back().navAgentSpeed = selectedCopy.navAgentSpeed;
+    m_objects.back().navAgentMaxForce = selectedCopy.navAgentMaxForce;
+    m_objects.back().navAgentReachRadius = selectedCopy.navAgentReachRadius;
+    m_objects.back().navAgentRepathInterval = selectedCopy.navAgentRepathInterval;
+    m_objects.back().navAgentTargetName = selectedCopy.navAgentTargetName;
+    m_objects.back().navAgentVisionRange = selectedCopy.navAgentVisionRange;
+    m_objects.back().navAgentVisionHalfAngle = selectedCopy.navAgentVisionHalfAngle;
+    m_objects.back().navAgentBrainAsset = selectedCopy.navAgentBrainAsset;
+    m_objects.back().navAgentTeam = selectedCopy.navAgentTeam;
+    m_objects.back().navAgentAutoTarget = selectedCopy.navAgentAutoTarget;
+    m_objects.back().isTerrain = selectedCopy.isTerrain;
+    m_objects.back().terrainRes = selectedCopy.terrainRes;
+    m_objects.back().terrainSize = selectedCopy.terrainSize;
+    m_objects.back().terrainMaxHeight = selectedCopy.terrainMaxHeight;
+    m_objects.back().terrainSeed = selectedCopy.terrainSeed;
+    m_objects.back().terrainOctaves = selectedCopy.terrainOctaves;
+    m_objects.back().terrainFrequency = selectedCopy.terrainFrequency;
+    m_objects.back().terrainHeights = selectedCopy.terrainHeights;
+    m_objects.back().terrainPaint = selectedCopy.terrainPaint;
     m_selectedIndex = static_cast<int>(m_objects.size()) - 1;
     m_dirty = true;
     return true;
@@ -2373,6 +4011,10 @@ EditorScene::Snapshot EditorScene::CaptureSnapshot()
     Snapshot snapshot;
     snapshot.selectedIndex = m_selectedIndex;
     snapshot.nextCubeNumber = m_nextCubeNumber;
+    snapshot.joints = m_joints;
+    snapshot.cameraPresets = m_cameraPresets;
+    snapshot.cameraSequences = m_cameraSequences;
+    snapshot.environment = m_environment;
 
     for (const Object& object : m_objects) {
         const Transform* transform = m_registry.TryGet<Transform>(object.entity);
@@ -2391,19 +4033,31 @@ EditorScene::Snapshot EditorScene::CaptureSnapshot()
     return snapshot;
 }
 
-void EditorScene::RestoreSnapshot(const Snapshot & snapshot, const engine::Mesh & cube, const engine::Mesh & plane, const engine::Mesh& sphere)
+void EditorScene::RestoreSnapshot(const Snapshot & snapshot, const engine::Mesh & cube, const engine::Mesh & plane, const engine::Mesh& sphere, const engine::Mesh& capsule, const engine::Mesh& cylinder, const engine::Mesh& cone, const engine::Mesh& pyramid, const engine::Mesh& torus, const engine::Mesh& staircase)
 {
     m_registry = engine::ecs::Registry{};
     m_objects.clear();
 
     for (const ObjectSnapshot& objectSnapshot : snapshot.objects) {
         Entity entity = m_registry.Create();
-        const engine::Mesh& mesh = MeshFor(objectSnapshot.object.primitive, cube, plane, sphere);
+        const Object& snapObject = objectSnapshot.object;
+        // Lights render with a gizmo mesh (sphere for directional/point/spot, cube for area),
+        // not their stored primitive (always Cube). Match what AddXLight uses so restoring a
+        // snapshot doesn't turn the light gizmo into a plain cube.
+        const engine::Mesh& mesh = snapObject.light
+            ? (snapObject.lightData.type == Light::Type::Area ? cube : sphere)
+            : MeshFor(snapObject.primitive, cube, plane, sphere, capsule, cylinder, cone, pyramid, torus, staircase);
         m_registry.Add<Transform>(entity, objectSnapshot.transform);
         m_registry.Add<MeshRenderer>(entity, MeshRenderer{&mesh, objectSnapshot.color});
 
-        Object object = objectSnapshot.object;
+        Object object = snapObject;
         object.entity = entity;
+        // Re-add the Light component so the light still casts in edit mode after
+        // exiting Play (and after undo/redo). Without this only object.light/lightData
+        // survive, but TryGetLight() returns null and edit-mode lighting goes dark.
+        if (object.light) {
+            m_registry.Add<Light>(entity, object.lightData);
+        }
         m_objects.push_back(object);
     }
 
@@ -2412,6 +4066,10 @@ void EditorScene::RestoreSnapshot(const Snapshot & snapshot, const engine::Mesh 
         m_selectedIndex = m_objects.empty() ? -1 : static_cast<int>(m_objects.size()) -1;
     }
     m_nextCubeNumber = snapshot.nextCubeNumber;
+    m_joints = snapshot.joints;
+    m_cameraPresets = snapshot.cameraPresets;
+    m_cameraSequences = snapshot.cameraSequences;
+    m_environment = snapshot.environment;
 }
 
 void EditorScene::PushUndoSnapshot()
@@ -2425,16 +4083,21 @@ void EditorScene::ClearHistory()
     m_undoStack.clear();
     m_redoStack.clear();
     m_transformEditOpen = false;
+    m_particleEditOpen = false;
 }
 
 void EditorScene::Clear()
 {
     m_registry = engine::ecs::Registry{};
     m_objects.clear();
+    m_joints.clear();
+    m_cameraPresets.clear();
+    m_cameraSequences.clear();
     m_undoStack.clear();
     m_redoStack.clear();
     m_selectedIndex = -1;
     m_nextCubeNumber = 1;
     m_dirty = false;
     m_transformEditOpen = false;
+    m_particleEditOpen = false;
 }

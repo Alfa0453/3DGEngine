@@ -16,6 +16,9 @@
 namespace engine {
     
 namespace ecs { class Registry; }
+class RuntimeAudioSystem;
+class CameraShake;
+class CameraDirector;
 
 struct ScriptAnimationEvent {
     ecs::Entity entity = ecs::kNull;
@@ -27,6 +30,9 @@ struct ScriptContext {
     ecs::Entity entity = ecs::kNull;
     std::vector<ecs::Entity>* destroyQueue = nullptr;
     const struct ScriptInputState* input = nullptr;
+    RuntimeAudioSystem* audio = nullptr;
+    CameraShake* cameraShake = nullptr;
+    CameraDirector* cameraDirector = nullptr;
 };
 
 struct ScriptInputState {
@@ -61,6 +67,8 @@ public:
     virtual void OnUpdate(float dt) { (void)dt; }       // once per rendered frame (variable dt)
     virtual void OnFixedUpdate(float dt) { (void)dt; }  // per physics step (fixed dt)
     virtual void OnDestroy() {}                          // once, before the entity/script is destroyed
+    // Runtime-system hook. Games normally use SetTimer/Delay below instead.
+    void TickTimers(float dt);
 
     void SetContext(ScriptContext context) { m_context = context; }
 
@@ -76,6 +84,20 @@ protected:
     ecs::Transform* FindTransform(const std::string& name);
     void DestroySelf();
     void Destroy(ecs::Entity entity);
+    ecs::Entity SpawnEmpty(const std::string& name, const glm::vec3& position = glm::vec3(0.0f));
+    ecs::Entity SpawnFromObject(const std::string& prototypeName,
+                                const glm::vec3& position);
+    void RequestSceneLoad(const std::string& runtimeScenePath);
+    bool SaveValue(const std::string& key, const std::string& value);
+    std::string LoadValue(const std::string& key,
+                          const std::string& fallback = {}) const;
+    bool SaveCheckpoint(const std::string& name, const glm::vec3& position);
+    bool LoadCheckpoint(const std::string& name, glm::vec3* position) const;
+    int SetTimer(float seconds, std::function<void()> callback, bool repeat = false);
+    int Delay(float seconds, std::function<void()> callback) {
+        return SetTimer(seconds, std::move(callback), false);
+    }
+    void ClearTimer(int timerId);
     bool IsKeyDown(int key) const;
     bool WasKeyPressed(int key) const;
     bool IsMouseButtonDown(int button) const;
@@ -112,6 +134,84 @@ protected:
     float GetAnimationParameter(const std::string& name, float fallback = 0.0f) const;
     bool GetAnimationBool(const std::string& name, bool fallback = false) const;
     bool IsAnimationActionPlaying() const;
+    bool IsAnimationMovementLocked() const;
+    bool PlayAudio(bool restart = false);
+    bool PlayAudio(ecs::Entity entity, bool restart = false);
+    bool PauseAudio();
+    bool PauseAudio(ecs::Entity entity);
+    bool ResumeAudio();
+    bool ResumeAudio(ecs::Entity entity);
+    bool StopAudio();
+    bool StopAudio(ecs::Entity entity);
+    bool SeekAudio(float seconds);
+    bool SeekAudio(ecs::Entity entity, float seconds);
+    bool IsAudioPlaying() const;
+    bool IsAudioPlaying(ecs::Entity entity) const;
+    bool IsAudioPaused() const;
+    bool IsAudioPaused(ecs::Entity entity) const;
+    float AudioCursorSeconds() const;
+    float AudioCursorSeconds(ecs::Entity entity) const;
+    bool SetAudioVolume(float volume);
+    bool SetAudioVolume(ecs::Entity entity, float volume);
+    bool SetAudioPitch(float pitch);
+    bool SetAudioPitch(ecs::Entity entity, float pitch);
+    bool SetAudioLooping(bool looping);
+    bool SetAudioLooping(ecs::Entity entity, bool looping);
+    bool SetAudioSpatial(bool spatial);
+    bool SetAudioSpatial(ecs::Entity entity, bool spatial);
+    bool SetAudioBus(AudioBus bus);
+    bool SetAudioBus(ecs::Entity entity, AudioBus bus);
+    bool ApplyAudioSnapshot(AudioSnapshotPreset preset, float transitionSeconds = 0.25f);
+    bool SetDialogueDucking(bool enabled);
+    bool PlayAudioCue(const std::string& path, bool spatial = true);
+    bool LoadAdaptiveMusic(const std::string& path);
+    bool SetMusicState(const std::string& stateName, bool synchronizeToBeat = true);
+    bool SetAudioAttenuation(float minDistance, float maxDistance, float rolloff);
+    bool SetAudioAttenuation(ecs::Entity entity, float minDistance,
+                             float maxDistance, float rolloff);
+    bool SetAudioDoppler(float factor);
+    bool SetAudioDoppler(ecs::Entity entity, float factor);
+    bool SetAudioCone(float innerDegrees, float outerDegrees, float outerGain);
+    bool SetAudioCone(ecs::Entity entity, float innerDegrees,
+                      float outerDegrees, float outerGain);
+    bool SetAudioOcclusion(float amount);
+    bool SetAudioOcclusion(ecs::Entity entity, float amount);
+    bool SetAudioPriority(int priority);
+    bool SetAudioPriority(ecs::Entity entity, int priority);
+    bool PlayParticles(bool restart = false);
+    bool PlayParticles(ecs::Entity entity, bool restart = false);
+    bool StopParticles(bool clear = false);
+    bool StopParticles(ecs::Entity entity, bool clear = false);
+    bool RestartParticles();
+    bool RestartParticles(ecs::Entity entity);
+    bool BurstParticles(int count = 0);
+    bool BurstParticles(ecs::Entity entity, int count = 0);
+    bool ClearParticles();
+    bool ClearParticles(ecs::Entity entity);
+    bool SetParticlesEnabled(bool enabled);
+    bool SetParticlesEnabled(ecs::Entity entity, bool enabled);
+    bool SetParticleRate(float particlesPerSecond);
+    bool SetParticleRate(ecs::Entity entity, float particlesPerSecond);
+    bool SetParticleSpeed(float simulationSpeed);
+    bool SetParticleSpeed(ecs::Entity entity, float simulationSpeed);
+    bool AreParticlesPlaying() const;
+    bool AreParticlesPlaying(ecs::Entity entity) const;
+    int ParticleCount() const;
+    int ParticleCount(ecs::Entity entity) const;
+    bool ShakeCamera(float intensity = 1.0f, float duration = 0.35f,
+                     float frequency = 18.0f);
+    bool ShakeCameraAdvanced(float translationAmplitude, float rotationDegrees,
+                             float duration = 0.35f, float frequency = 18.0f,
+                             float fovAmplitude = 0.0f);
+    bool PlayCameraSequence(const std::string& name, bool lockInput = true,
+                            bool skippable = true);
+    bool StopCameraSequence();
+    bool SkipCameraSequence();
+    bool IsCameraSequencePlaying(const std::string& name = {}) const;
+    bool WasCameraSequenceFinished(const std::string& name) const;
+    bool WasCameraSequenceSkipped(const std::string& name) const;
+    bool WasCameraSequenceEvent(const std::string& sequenceName,
+                                const std::string& eventName) const;
     std::string GetFieldString(const std::string& name, const std::string& fallback = {}) const;
     float GetFieldFloat(const std::string& name, float fallback = 0.0f) const;
     int GetFieldInt(const std::string& name, int fallback = 0) const;
@@ -160,7 +260,17 @@ protected:
     }
 
 private:
+    struct Timer {
+        int id = 0;
+        float remaining = 0.0f;
+        float interval = 0.0f;
+        bool repeat = false;
+        bool cancelled = false;
+        std::function<void()> callback;
+    };
     ScriptContext m_context;
+    std::vector<Timer> m_timers;
+    int m_nextTimerId = 1;
 };
 
 struct NativeScriptComponent {
@@ -188,14 +298,22 @@ private:
 };
 
 // Per-frame update: creates instances, calls OnCreate once, then OnUpdate(dt).
-void UpdateScripts(ecs::Registry& registry, float dt, const ScriptInputState* input = nullptr);
+void UpdateScripts(ecs::Registry& registry, float dt, const ScriptInputState* input = nullptr,
+                   RuntimeAudioSystem* audio = nullptr, CameraShake* cameraShake = nullptr,
+                   CameraDirector* cameraDirector = nullptr);
 
 // Per-physics-step update: calls OnFixedUpdate(dt) on already-created scripts. Call
 // this from the fixed-timestep loop; instance creation stays in UpdateScripts.
-void FixedUpdateScripts(ecs::Registry& registry, float dt, const ScriptInputState* input = nullptr);
+void FixedUpdateScripts(ecs::Registry& registry, float dt, const ScriptInputState* input = nullptr,
+                        RuntimeAudioSystem* audio = nullptr, CameraShake* cameraShake = nullptr,
+                        CameraDirector* cameraDirector = nullptr);
 
 // Calls OnDestroy() on every live script and releases the instances. Call when
 // leaving Play mode or unloading the scene so scripts can clean up.
 void ShutdownScripts(ecs::Registry& registry);
+
+// Scene requests are queued by scripts and consumed by the runtime host after the
+// current script update, avoiding registry destruction from inside a callback.
+std::string ConsumeScriptSceneLoadRequest();
 
 } // namespace engine

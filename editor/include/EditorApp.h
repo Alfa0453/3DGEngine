@@ -4,14 +4,24 @@
 #include <engine/core/Config.h>
 #include <engine/assets/RuntimeAssetManager.h>
 #include <engine/animation/AnimatedModel.h>
+#include <engine/ai/AiAgent.h>
+#include <engine/ai/NavMesh.h>
+#include <engine/audio/AudioEngine.h>
+#include <engine/audio/RuntimeAudioSystem.h>
+#include <engine/ai/BehaviorGraph.h>
 #include <engine/ecs/Components.h>
 #include <engine/ecs/Registry.h>
 #include <engine/graphics/Camera.h>
+#include <engine/graphics/CameraBlend.h>
+#include <engine/graphics/CameraShake.h>
+#include <engine/graphics/CameraSequence.h>
 #include <engine/graphics/DayNightCycle.h>
 #include <engine/graphics/IBL.h>
 #include <engine/graphics/Mesh.h>
 #include <engine/graphics/Model.h>
 #include <engine/graphics/PbrRenderer.h>
+#include <engine/graphics/ParticleRenderer.h>
+#include <engine/graphics/RuntimeParticleSystem.h>
 #include <engine/graphics/PostProcess.h>
 #include <engine/graphics/ProceduralSky.h>
 #include <engine/graphics/Renderer.h>
@@ -19,13 +29,21 @@
 #include <engine/graphics/SkinnedRenderer.h>
 #include <engine/graphics/SSAO.h>
 #include <engine/graphics/SSR.h>
+#include <engine/graphics/Terrain.h>
+#include <engine/graphics/Water.h>
+#include <engine/graphics/GpuProfiler.h>
 #include <engine/graphics/TextRenderer.h>
 #include <engine/gameplay/PlayerController.h>
+#include <engine/gameplay/CameraDirector.h>
 #include <engine/physics/PhysicsComponents.h>
 #include <engine/gameplay/Script.h>
 #include <engine/physics/PhysicsWorld.h>
 #include <engine/ui/ImGuiLayer.h>
 #include <MaterialMaker/MaterialMakerPanel.h>
+#include "BehaviorGraphPanel.h"
+#include "ParticleEditorPanel.h"
+#include "ShaderEditorPanel.h"
+#include "HudEditorPanel.h"
 
 #include "EditorAssets.h"
 #include "EditorContentController.h"
@@ -49,6 +67,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 class EditorApp final : public engine::Application {
@@ -80,8 +99,44 @@ private:
         EditorScene::TriggerActionMode enterRotatorAction = EditorScene::TriggerActionMode::None;
         EditorScene::TriggerActionMode exitMoverAction = EditorScene::TriggerActionMode::None;
         EditorScene::TriggerActionMode exitRotatorAction = EditorScene::TriggerActionMode::None;
+        std::string cameraSequenceName;
+        EditorScene::CameraSequenceTriggerAction enterCameraAction =
+            EditorScene::CameraSequenceTriggerAction::None;
+        EditorScene::CameraSequenceTriggerAction exitCameraAction =
+            EditorScene::CameraSequenceTriggerAction::None;
+        bool cameraLockInput = true;
+        bool cameraSkippable = true;
         engine::ecs::Mover mover;
         engine::ecs::Rotator rotator;
+    };
+
+    // A play-mode AI agent: a runtime brain bound to a play-registry entity.
+    struct PlayAgent {
+        engine::ecs::Entity entity = engine::ecs::kNull;
+        engine::ecs::Entity targetEntity = engine::ecs::kNull;   // chase target (M2)
+        std::string         name;                                // scene object name (debug label)
+        int                 team = 0;                            // faction id (0 = neutral)
+        bool                autoTarget = false;                  // acquire nearest hostile each tick
+        engine::ai::AiAgent brain;                               // built-in patrol/chase/search
+        // M7: optional data-driven behaviour tree. When useGraph is set, 'tree' + 'ctx'
+        // drive the agent instead of 'brain'.
+        bool                                              useGraph = false;
+        engine::ai::AgentContext                          ctx;
+        engine::ai::BehaviorTree<engine::ai::AgentContext> tree;
+    };
+
+    struct PlayAudioSource {
+        engine::ecs::Entity entity = engine::ecs::kNull;
+        engine::AudioEngine::SourceHandle source = engine::AudioEngine::InvalidSource;
+        std::string name;
+        bool spatial = true;
+    };
+
+    struct PlayCameraZone {
+        std::string presetName;
+        bool restoreOnExit = true;
+        int priority = 0;
+        float returnBlend = 0.35f;
     };
 
     struct AnimationPreviewAction {
@@ -99,6 +154,14 @@ private:
     void DrawSelectionOutline(const glm::mat4& viewProj);
     void DrawEditorOverlay();
     void DrawMaterialMakerPanel();
+    void DrawBehaviorGraphPanel();
+    void DrawParticleEditorPanel();
+    void DrawShaderEditorPanel();
+    void DrawHudEditorPanel();
+    void DrawPlayHud();
+    void SyncHudFromScene();   // load the scene's referenced .hud into m_hud
+    void ScanHudImages();      // recursively list content-folder images for the picker
+    unsigned int HudTextureId(const std::string& relPath);  // resolve HUD image -> GL texture id
     void DrawMaterialMakerTools(bool materialSaved);
     void DrawDirtyScenePrompt();
     EditorDockspace::GameplayDebugState BuildGameplayDebugState();
@@ -106,8 +169,8 @@ private:
     void DrawAssetOverlay(float x, float y, const glm::vec3& text, const glm::vec3& muted);
     void DrawLogOverlay(float x, float y, const glm::vec3& text, const glm::vec3& muted);
     void HandleGlobalShortcuts(engine::Window& window);
-    void HandleAssetShortcuts(engine::Window& window, bool controlDown);
-    void HandleEditorCommandShortcuts(engine::Window& window, bool controlDown);
+    void HandleAssetShortcuts(engine::Window&, bool controlDown);
+    void HandleEditorCommandShortcuts(engine::Window&, bool controlDown);
     void DrawPlayScene(const glm::mat4& viewProj);
     void DrawEditScene(const glm::mat4& viewProj);
     void UpdateEnvironmentIbl(const EditorScene::Environment& environment,
@@ -120,6 +183,10 @@ private:
     void HandleMouseAssetDrag();
     void HandleMouseViewportSelection();
     void HandleMouseViewportGizmo();
+    void HandleTerrainSculpt();
+    void AddTerrainMeshes(engine::ecs::Registry& pbrRegistry);   // shared edit + play terrain draw
+    float TerrainSurfaceY(float worldX, float worldZ, bool& over);  // walkable height query
+    float WaterSurfaceY(float worldX, float worldZ, bool& over);     // wave height for buoyancy
     void BeginAssetDrag();
     void DropPayloadOnScene();
     glm::vec3 SceneDropPosition();
@@ -129,9 +196,18 @@ private:
     void AddCube();
     void AddPlane();
     void AddSphere();
+    void AddCapsule();
+    void AddConfiguredPrimitive(EditorScene::Primitive primitive,
+                                const engine::ecs::Transform& transform,
+                                const engine::ecs::Collider* collider,
+                                const std::string& name = {});
     void AddDynamicCube();
     void AddStaticFloor();
+    void AddTerrain();
+    void AddWater();
+    void DrawWaterBodies(const engine::Camera& camera, float aspect);   // transparent water pass
     void AddTriggerVolume();
+    void AddNavMeshBoundsVolume();
     void AddPlayerStart();
     void AddGameplayDoor();
     void AddGameplayPickup();
@@ -169,6 +245,10 @@ private:
     bool BuildPlayRuntimePreview(std::string* error);
     void ConfigurePlayPlayerController(const std::unordered_map<std::string, engine::ecs::Entity>& playEntitiesByName);
     void BuildPlayTriggerActions(const std::unordered_map<std::string, engine::ecs::Entity>& playEntitiesByName);
+    void BuildPlayCameraZones(const std::unordered_map<std::string, engine::ecs::Entity>& playEntitiesByName);
+    void ApplyPlayCameraZoneEvent(engine::ecs::Entity trigger, engine::ecs::Entity other,
+                                  engine::CollisionEvent::Phase phase);
+    void RefreshPlayCameraZone();
     void ApplyPlayTriggerAction(engine::ecs::Entity trigger, engine::ecs::Entity other, engine::CollisionEvent::Phase phase);
     void PushPlayTriggerActionRow(const std::string& triggerName,
                               const std::string& targetName,
@@ -176,7 +256,28 @@ private:
                               bool enabled,
                               engine::CollisionEvent::Phase phase);
     void UpdatePlayPlayerController(float dt, bool inputEnabled);
-    engine::ScriptInputState CapturePlayScriptInput(bool inputEnabled);
+    engine::ecs::Entity FindBestPlayLockTarget();
+    void UpdatePlayLockOn(bool inputEnabled);
+    void ApplyManagedPlayCamera();
+    void BeginCameraBlend(const EditorScene::CameraPreset& preset);
+    void UpdateCameraBlend(float dt);
+    void RestoreCameraBeforeShake();
+    void UpdateCameraShake(float dt);
+    void StartCameraSequence(const EditorScene::CameraSequence& sequence,
+                             bool lockInput = false, bool skippable = true);
+    void UpdateCameraSequence(float dt);
+    void ProcessCameraDirectorCommands();
+    void SkipActiveCameraSequence();
+    void ExecuteCinematicCues(float previousTime, float currentTime, bool wrapped);
+    void ExecuteCinematicCue(const EditorScene::CinematicCue& cue);
+    void BuildPlayAgents(const std::unordered_map<std::string, engine::ecs::Entity>& playEntitiesByName);
+    void BuildPlayAudioSources();
+    void UpdatePlayAudioSources();
+    void BakePlayNavGrid();
+    void BakePlayNavMesh();
+    void BakeEditorNavMesh();
+    void UpdateAI(float dt);
+    engine::ScriptInputState CapturePlayScriptInput(bool inputEnabled, bool includeFrameEdges);
     void StepPlayPhysics(float dt, bool inputEnabled);
     void CapturePlayPhysicsEvents();
     bool Pressed(int key);
@@ -184,6 +285,13 @@ private:
     engine::Config&       m_config;
     engine::Renderer      m_renderer;
     engine::Camera        m_camera{ glm::vec3(0.0f, 3.0f, 8.0f) };
+    engine::CameraBlend   m_cameraBlend;
+    engine::CameraShake   m_cameraShake;
+    engine::CameraSequencePlayer m_cameraSequence;
+    engine::CameraDirector m_cameraDirector;
+    std::vector<EditorScene::CinematicCue> m_activeCinematicCues;
+    bool m_cameraSequencePaused = false;
+    std::optional<engine::CameraPose> m_cameraBeforeShake;
     EditorAssets          m_assets;
     EditorDockspace       m_dockspace;
     EditorDragDrop        m_dragDrop;
@@ -198,34 +306,79 @@ private:
     EditorContentController m_content;
     EditorTransformController m_transformController;
     EditorViewport        m_viewport;
+    engine::AudioEngine   m_audio;
+    engine::RuntimeAudioSystem m_runtimeAudio;
 
     std::optional<engine::Mesh>          m_cube;
     std::optional<engine::Mesh>          m_cone;
     std::optional<engine::Mesh>          m_plane;
     std::optional<engine::Mesh>          m_sphere;
+    std::optional<engine::Mesh>          m_capsule;
+    std::optional<engine::Mesh>          m_cylinder;
+    std::optional<engine::Mesh>          m_pyramid;
+    std::optional<engine::Mesh>          m_torus;
+    std::optional<engine::Mesh>          m_staircase;
     std::optional<engine::Shader>        m_shader;
     std::optional<engine::Shader>        m_modelShader;
     std::optional<engine::SkinnedRenderer> m_skinnedRenderer;
     std::optional<engine::Shader>        m_outlineShader;
     std::optional<engine::Shader>        m_skinnedOutlineShader;
     std::optional<engine::PbrRenderer>   m_pbrRenderer;
+    std::optional<engine::ParticleRenderer> m_particleRenderer;
     std::optional<engine::PostProcess>   m_postProcess;
     std::optional<engine::ProceduralSky> m_sky;
     std::optional<engine::IBL>           m_ibl;
     std::optional<engine::SSAO>          m_ssao;
     std::optional<engine::SSR>           m_ssr;
+    // Cached generated terrain per object; regenerated when the object's params change.
+    struct TerrainCache {
+        engine::Terrain terrain;
+        int   res = 0;
+        float size = 0.0f, maxHeight = 0.0f, frequency = 0.0f;
+        int   seed = 0, octaves = 0;
+    };
+    std::unordered_map<engine::ecs::Entity, TerrainCache> m_terrains;
+    std::unordered_map<engine::ecs::Entity, engine::Water> m_waters;   // one Water per water object
+    bool  m_terrainSculpt = false;        // sculpt mode active (paints the selected terrain)
+    int   m_terrainSculptMode = 0;        // 0 raise, 1 lower, 2 smooth, 3 flatten, 4 paint
+    int   m_terrainPaintLayer = 1;        // 0 auto/erase, 1 grass, 2 rock, 3 dirt, 4 snow, 5 sand
+    float m_terrainBrushRadius = 5.0f;
+    float m_terrainBrushStrength = 6.0f;
     std::optional<engine::TextRenderer>  m_text;
     engine::ImGuiLayer                   m_imgui;
+    engine::GpuProfiler                  m_gpuProfiler;   // per-pass GPU timings
+    bool                                 m_showProfiler = true;
+    double                               m_cpuFrameMs = 0.0;   // CPU cost of OnRender
+    double                               m_cpuSceneMs = 0.0;   // CPU cost of scene submission
+    double                               m_cpuUiMs = 0.0;      // CPU cost of building the UI
+    int                                  m_renderW = 0;        // 3D render target width (render scale)
+    int                                  m_renderH = 0;        // 3D render target height
     material_maker::MaterialMakerPanel   m_materialMaker;
+    BehaviorGraphPanel                   m_behaviorGraph;
+    ParticleEditorPanel                  m_particleEditor;
+    ShaderEditorPanel                    m_shaderEditor;
+    HudEditorPanel                       m_hudPanel;
+    engine::HudDocument                  m_hud;              // active HUD document (in memory)
+    std::string                          m_hudPath;          // last saved/loaded .hud path
+    std::unordered_map<std::string, float>       m_hudFloats;   // named numeric HUD values
+    std::unordered_map<std::string, std::string> m_hudStrings;  // named text HUD values
+    bool                                 m_hudMousePrev = false; // left-click edge for HUD buttons
+    std::vector<std::string>             m_hudImageChoices;      // content-folder images for the picker
 
     EditorMode       m_mode = EditorMode::Edit;
     std::optional<EditorScene::Snapshot> m_editSnapshot;
+    std::optional<engine::Camera> m_editCameraBeforePlay;
     engine::RuntimeAssetManager m_editAssets;
     engine::PhysicsWorld m_playPhysics;
     std::optional<engine::ecs::Registry> m_playRegistry;
     std::optional<engine::RuntimeAssetManager> m_playAssets;
     std::optional<engine::PlayerController> m_playPlayerController;
     engine::ecs::Entity m_playPlayerEntity = engine::ecs::kNull;
+    engine::ecs::Entity m_playLockTarget = engine::ecs::kNull;
+    bool m_playLockTogglePrev = false;
+    bool m_playMouseCaptured = false;   // Play mode: cursor locked -> mouse look w/o holding RMB
+    bool m_playCursorTogglePrev = false; // edge detector for the ESC free/recapture toggle
+    bool m_cinematicSkipPrev = false;
     bool m_physicsPaused = false;
     bool m_physicsStepRequested = false;
     float m_physicsFixedTimestep = 1.0f / 60.0f;
@@ -239,11 +392,31 @@ private:
     std::vector<EditorViewport::PhysicsEventGuide> m_physicsEventGuides;
     std::vector<engine::ScriptAnimationEvent> m_playAnimationEvents;
     bool m_showPhysicsEventGuides = true;
+    bool m_showAiDebug = true;
+    bool m_showParticleDebug = true;
+    bool m_showCameraRails = true;
+    bool m_particleDebugSelectedOnly = true;
+    bool m_particleDebugShapes = true;
+    bool m_particleDebugDirections = true;
+    bool m_particleDebugBounds = true;
+    bool m_particleDebugCullingState = true;
     bool m_physicsEventGuidesSelectedOnly = false;
     bool m_physicsEventGuidesTriggersOnly = false;
     bool m_physicsEventGuidesEnterExitOnly = false;
     std::unordered_map<engine::ecs::Entity, std::string> m_playEntityNames;
     std::unordered_map<engine::ecs::Entity, PlayTriggerAction> m_playTriggerActions;
+    std::unordered_map<engine::ecs::Entity, PlayCameraZone> m_playCameraZones;
+    std::unordered_set<engine::ecs::Entity> m_playCameraZonesInside;
+    engine::ecs::Entity m_activePlayCameraZone = engine::ecs::kNull;
+    std::optional<EditorScene::CameraPreset> m_playCameraOverride;
+    std::vector<PlayAgent> m_playAgents;
+    std::vector<PlayAudioSource> m_playAudioSources;
+    engine::ai::NavGrid m_playNavGrid;   // used by chase/search (M2); patrol needs none
+    engine::ai::NavMesh m_playNavMesh;   // funnel-smoothed nav source (M6) when m_useNavMesh
+    bool m_useNavMesh = false;           // route chase/search through the navmesh agent overload
+    std::unordered_map<std::string, engine::ai::BehaviorGraph> m_playBtGraphCache;  // subtree assets
+    engine::ai::NavMesh m_editorNavMesh;
+    bool m_showNavigationPreview = false;
 
     float m_fps = 60.0f;
     float m_elapsed = 0.0f;

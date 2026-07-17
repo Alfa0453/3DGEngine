@@ -4,6 +4,7 @@
 #include "engine/graphics/Shader.h"
 #include "engine/ecs/Registry.h"
 #include "engine/ecs/Components.h"
+#include "engine/graphics/Texture.h"
 
 #include <glad/glad.h>
 #include <glm/gtc/type_ptr.hpp>
@@ -28,13 +29,14 @@ void ShadowCasterBatch::Build(ecs::Registry &reg)
     std::unordered_map<const Mesh*, std::vector<float>> groups;
     reg.view<Transform, MeshPBR>().each([&](Entity, Transform& t, MeshPBR& m) {
         if (!m.mesh) return;
+        if (m.material.blendMode == ecs::PbrMaterial::BlendMode::Transparent) return;
         const glm::vec3& e = m.material.emissive;
         if (e.x > 0.0f || e.y > 0.0f || e.z > 0.0f) return;    // skip light gizmos
         const glm::mat4 model = t.Model();
         // Textured meshes carry a tangent at location 3, which would clash with the
         // instance attributes -- draw those per-object instead.
-        if (m.material.albedoMap || m.material.normalMap || m.material.metalRoughMap) {
-            m_textured.emplace_back(m.mesh, model);
+        if (m.material.albedoMap || m.material.normalMap || m.material.metalRoughMap || m.material.heightMap) {
+            m_textured.push_back({m.mesh, model, &m.material});
             return;
         }
         std::vector<float>& v = groups[m.mesh];
@@ -63,6 +65,8 @@ void ShadowCasterBatch::Draw(Shader &sh)
 {
     if (!m_records.empty()) {
         sh.SetInt("uInstanced", 1);
+        sh.SetInt("uAlphaMasked", 0);
+        sh.SetInt("uHasAlbedoMap", 0);
         const GLsizei stride = 16 * static_cast<GLsizei>(sizeof(float));
         for (const Record& r : m_records) {
             glBindVertexArray(r.mesh->Vao());
@@ -89,8 +93,18 @@ void ShadowCasterBatch::Draw(Shader &sh)
     if (!m_textured.empty()) {
         sh.SetInt("uInstanced", 0);
         for (const auto& pr : m_textured) {
-            sh.SetMat4("uModel", pr.second);
-            pr.first->Draw();
+            sh.SetMat4("uModel", pr.model);
+            const bool masked = pr.material && pr.material->blendMode == ecs::PbrMaterial::BlendMode::Masked;
+            sh.SetInt("uAlphaMasked", masked ? 1 : 0);
+            sh.SetFloat("uAlphaCutoff", pr.material ? pr.material->alphaCutoff : 0.5f);
+            sh.SetFloat("uOpacity", pr.material ? pr.material->opacity : 1.0f);
+            sh.SetVec2("uUvScale", pr.material ? pr.material->uvScale : glm::vec2(1.0f));
+            sh.SetVec2("uUvOffset", pr.material ? pr.material->uvOffset : glm::vec2(0.0f));
+            sh.SetFloat("uUvRotation", pr.material ? pr.material->uvRotation : 0.0f);
+            const bool hasMap = pr.material && pr.material->albedoMap;
+            sh.SetInt("uHasAlbedoMap", hasMap ? 1 : 0); sh.SetInt("uAlbedoMap", 0);
+            if (hasMap) pr.material->albedoMap->Bind(0);
+            pr.mesh->Draw();
         }
     }
 }

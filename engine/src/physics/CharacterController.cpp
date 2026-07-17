@@ -71,6 +71,53 @@ Pen CapsuleVsCollider(const glm::vec3& p0, const glm::vec3& p1, float r, const T
         }
         return out;
     }
+    auto consider = [&](const Pen& p) {
+        if (p.hit && (!out.hit || p.depth > out.depth)) out = p;
+    };
+    if (c.shape == ColliderShape::Cylinder) {
+        const Collider proxy = Collider::MakeCapsule(c.radius,
+            std::max(c.halfHeight - c.radius, 0.0f));
+        return CapsuleVsCollider(p0, p1, r, t, proxy);
+    }
+    if (c.shape == ColliderShape::Torus) {
+        constexpr int segments = 20;
+        for (int i = 0; i < segments; ++i) {
+            const float a = 6.28318530718f * static_cast<float>(i) / segments;
+            Transform piece = t;
+            piece.position += t.rotation * glm::vec3(
+                std::cos(a) * c.majorRadius, 0.0f, std::sin(a) * c.majorRadius);
+            consider(CapsuleVsCollider(p0, p1, r, piece, Collider::MakeSphere(c.minorRadius)));
+        }
+        return out;
+    }
+    if (c.shape == ColliderShape::Staircase) {
+        const int steps = glm::clamp(c.steps, 1, 32);
+        const float slice = c.halfExtents.z * 2.0f / steps;
+        for (int i = 0; i < steps; ++i) {
+            const float height = c.halfExtents.y * 2.0f * static_cast<float>(i + 1) / steps;
+            const glm::vec3 ext(c.halfExtents.x, height * 0.5f, slice * 0.5f);
+            Transform piece = t;
+            piece.position += t.rotation * glm::vec3(0.0f, -c.halfExtents.y + ext.y,
+                -c.halfExtents.z + slice * (static_cast<float>(i) + 0.5f));
+            consider(CapsuleVsCollider(p0, p1, r, piece, Collider::MakeBox(ext)));
+        }
+        return out;
+    }
+    if (c.shape == ColliderShape::Cone || c.shape == ColliderShape::Pyramid) {
+        constexpr int layers = 12;
+        for (int i = 0; i < layers; ++i) {
+            const float y0 = -c.halfExtents.y + (2.0f * c.halfExtents.y * i) / layers;
+            const float y1 = -c.halfExtents.y + (2.0f * c.halfExtents.y * (i + 1)) / layers;
+            const float fraction = std::max(1.0f - static_cast<float>(i + 1) / layers, 0.02f);
+            const float x = (c.shape == ColliderShape::Cone ? c.radius : c.halfExtents.x) * fraction;
+            const float z = (c.shape == ColliderShape::Cone ? c.radius : c.halfExtents.z) * fraction;
+            Transform piece = t;
+            piece.position += t.rotation * glm::vec3(0.0f, (y0 + y1) * 0.5f, 0.0f);
+            consider(CapsuleVsCollider(p0, p1, r, piece,
+                Collider::MakeBox(glm::vec3(x, (y1 - y0) * 0.5f, z))));
+        }
+        return out;
+    }
     // Box (OBB): approximate by the capsule's closest segment point to the box.
     const glm::mat3 R = glm::mat3_cast(t.rotation);
     const glm::vec3 ax[3] = { R[0], R[1], R[2] };

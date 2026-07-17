@@ -46,15 +46,35 @@ std::vector<unsigned char> BuildTerrainAlbedo(const Heightmap& hm, int texRes = 
 class Terrain {
 public:
     void Generate(int res, float size, const glm::vec3& origin,
-                  float maxHeight, unsigned seed);
+                  float maxHeight, unsigned seed,
+                  int octaves = 5, float baseFrequency = 2.0f);
+
+    // Replace the heights (e.g. after sculpting) and rebuild the mesh + albedo.
+    // Needs a live GL context, like Generate.
+    void SetHeightmap(const Heightmap& hm);
+
+    // Per-vertex paint layer (0 = auto height/slope colour, else a fixed layer:
+    // 1 grass, 2 rock, 3 dirt, 4 snow, 5 sand). Rebuilds only the albedo. Sized
+    // res*res (row-major); empty clears painting. Needs a live GL context.
+    void SetPaint(const std::vector<std::uint8_t>& paint);
+    const std::vector<std::uint8_t>& Paint() const { return m_paint; }
 
     float HeightAt(float x, float z) const { return m_hm.HeightAt(x, z); }
     const Heightmap& Map()   const { return m_hm; }
+    // GetMesh()/Albedo() dereference the optionals; callers must check Ready() (or
+    // HasMesh()/HasAlbedo()) first, otherwise these are undefined behaviour when the
+    // terrain hasn't been generated yet.
+    bool HasMesh()   const { return m_mesh.has_value(); }
+    bool HasAlbedo() const { return m_albedo.has_value(); }
+    bool Ready()     const { return m_mesh.has_value() && m_albedo.has_value(); }
     const engine::Mesh& GetMesh() const { return *m_mesh; }
     const Texture&   Albedo() const { return *m_albedo; }
 
 private:
+    void RebuildAlbedo();   // height/slope base + paint-layer overlay
+
     Heightmap m_hm;
+    std::vector<std::uint8_t>   m_paint;   // res*res; 0 = auto
     std::optional<engine::Mesh> m_mesh;
     std::optional<Texture>      m_albedo;
 };

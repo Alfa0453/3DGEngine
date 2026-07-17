@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <functional>
 #include <memory>
 #include <utility>
@@ -48,15 +49,23 @@ class Sequence : public BtNode<Ctx> {    // succeed only if ALL children succeed
 public:
     explicit Sequence(std::vector<std::unique_ptr<BtNode<Ctx>>> kids) : m_kids(std::move(kids)) {}
     BtStatus Tick(Ctx& c, float dt) override {
-        for (auto& k : m_kids) {
-            const BtStatus s = k->Tick(c, dt);
-            if (s != BtStatus::Success) return s;   // Failure or Running stops the sequence
+        for (std::size_t i = 0; i < m_kids.size(); ++i) {
+            const BtStatus s = m_kids[i]->Tick(c, dt);
+            if (s != BtStatus::Success) {   // Failure or Running stops the sequence
+                // If a later child was left Running last tick and we bailed earlier
+                // this tick, that child was abandoned -- reset it so it starts clean.
+                if (m_active >= 0 && m_active != static_cast<int>(i)) m_kids[m_active]->Reset();
+                m_active = (s == BtStatus::Running) ? static_cast<int>(i) : -1;
+                return s;
+            }
         }
+        if (m_active >= 0) { m_kids[m_active]->Reset(); m_active = -1; }
         return BtStatus::Success;
     }
-    void Reset() override { for (auto& k : m_kids) k->Reset(); }
+    void Reset() override { for (auto& k : m_kids) k->Reset(); m_active = -1; }
 private:
     std::vector<std::unique_ptr<BtNode<Ctx>>> m_kids;
+    int m_active = -1;   // index of the child left Running last tick, or -1
 };
 
 template <class Ctx>
@@ -64,13 +73,23 @@ class Selector : public BtNode<Ctx> {   // succeed if ANY child succeeds (first 
 public:
     explicit Selector(std::vector<std::unique_ptr<BtNode<Ctx>>> kids) : m_kids(std::move(kids)) {}
     BtStatus Tick(Ctx& c, float dt) override {
-        for (auto& k : m_kids) {
-            const BtStatus s = k->Tick(c, dt);
-            if (s != BtStatus::Failure) return s;   // Success or Running wins
+        for (std::size_t i = 0; i < m_kids.size(); ++i) {
+            const BtStatus s = m_kids[i]->Tick(c, dt);
+            if (s != BtStatus::Failure) {   // Success or Running wins
+                // A higher-priority child took over; if a different child was left
+                // Running last tick it's now preempted -- reset it so it starts clean.
+                if (m_active >= 0 && m_active != static_cast<int>(i)) m_kids[m_active]->Reset();
+                m_active = (s == BtStatus::Running) ? static_cast<int>(i) : -1;
+                return s;
+            }
         }
+        if (m_active >= 0) { m_kids[m_active]->Reset(); m_active = -1; }
+        return BtStatus::Failure;   // every child failed
     }
+    void Reset() override { for (auto& k : m_kids) k->Reset(); m_active = -1; }
 private:
     std::vector<std::unique_ptr<BtNode<Ctx>>> m_kids;
+    int m_active = -1;   // index of the child left Running last tick, or -1
 };
 
 template <class Ctx>

@@ -27,10 +27,16 @@ void Framebuffer::Create() {
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_colorTex, 0);
 
     if (m_hasDepth) {
-        glGenRenderbuffers(1, &m_depthRbo);
-        glBindRenderbuffer(GL_RENDERBUFFER, m_depthRbo);
-        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, m_width, m_height);
-        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, m_depthRbo);
+        glGenTextures(1, &m_depthTex);
+        glBindTexture(GL_TEXTURE_2D, m_depthTex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH24_STENCIL8, m_width, m_height,
+                     0, GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
+                               GL_TEXTURE_2D, m_depthTex, 0);
     }
 
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
@@ -43,23 +49,23 @@ Framebuffer::~Framebuffer() { Release(); }
 
 void Framebuffer::Release() {
     if (m_colorTex) glDeleteTextures(1, &m_colorTex);
-    if (m_depthRbo) glDeleteRenderbuffers(1, &m_depthRbo);
+    if (m_depthTex) glDeleteTextures(1, &m_depthTex);
     if (m_fbo)      glDeleteFramebuffers(1, &m_fbo);
-    m_colorTex = 0; m_depthRbo = 0; m_fbo = 0;
+    m_colorTex = 0; m_depthTex = 0; m_fbo = 0;
 }
 
 Framebuffer::Framebuffer(Framebuffer&& o) noexcept
-    : m_fbo(o.m_fbo), m_colorTex(o.m_colorTex), m_depthRbo(o.m_depthRbo),
+    : m_fbo(o.m_fbo), m_colorTex(o.m_colorTex), m_depthTex(o.m_depthTex),
       m_width(o.m_width), m_height(o.m_height), m_format(o.m_format), m_hasDepth(o.m_hasDepth) {
-    o.m_fbo = 0; o.m_colorTex = 0; o.m_depthRbo = 0;
+    o.m_fbo = 0; o.m_colorTex = 0; o.m_depthTex = 0;
 }
 
 Framebuffer& Framebuffer::operator=(Framebuffer&& o) noexcept {
     if (this != &o) {
         Release();
-        m_fbo = o.m_fbo; m_colorTex = o.m_colorTex; m_depthRbo = o.m_depthRbo;
+        m_fbo = o.m_fbo; m_colorTex = o.m_colorTex; m_depthTex = o.m_depthTex;
         m_width = o.m_width; m_height = o.m_height; m_format = o.m_format; m_hasDepth = o.m_hasDepth;
-        o.m_fbo = 0; o.m_colorTex = 0; o.m_depthRbo = 0;
+        o.m_fbo = 0; o.m_colorTex = 0; o.m_depthTex = 0;
     }
     return *this;
 }
@@ -77,6 +83,11 @@ void Framebuffer::BindDefault(int screenWidth, int screenHeight) {
 void Framebuffer::BindColorTexture(unsigned int unit) const {
     glActiveTexture(GL_TEXTURE0 + unit);
     glBindTexture(GL_TEXTURE_2D, m_colorTex);
+}
+
+void Framebuffer::BindDepthTexture(unsigned int unit) const {
+    glActiveTexture(GL_TEXTURE0 + unit);
+    glBindTexture(GL_TEXTURE_2D, m_depthTex);
 }
 
 void Framebuffer::Resize(int width, int height) {

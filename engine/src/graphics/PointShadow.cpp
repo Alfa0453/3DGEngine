@@ -18,6 +18,7 @@ namespace {
 const char* kVert = R"GLSL(
 #version 330 core
 layout (location = 0) in vec3 aPos;
+layout (location = 2) in vec2 aUV;
 layout (location = 3) in vec4 aIModel0;
 layout (location = 4) in vec4 aIModel1;
 layout (location = 5) in vec4 aIModel2;
@@ -26,19 +27,26 @@ uniform int  uInstanced;
 uniform mat4 uModel;
 uniform mat4 uLightVP;
 out vec3 vWorld;
+out vec2 vUV;
 void main() {
     mat4 model = (uInstanced == 1) ? mat4(aIModel0, aIModel1, aIModel2, aIModel3) : uModel;
     vec4 w = model * vec4(aPos, 1.0);
     vWorld = w.xyz;
+    vUV = aUV;
     gl_Position = uLightVP * w;
 }
 )GLSL";
 
 const char* kFrag = R"GLSL(
 #version 330 core
-in vec3 vWorld; out float FragColor;
+in vec3 vWorld; in vec2 vUV; out float FragColor;
 uniform vec3 uLightPos;
-void main() { FragColor = length(vWorld - uLightPos); }
+uniform int uAlphaMasked; uniform int uHasAlbedoMap; uniform float uAlphaCutoff; uniform float uOpacity;
+uniform vec2 uUvScale, uUvOffset; uniform float uUvRotation; uniform sampler2D uAlbedoMap;
+void main() { if (uAlphaMasked == 1) { float a=radians(uUvRotation); vec2 p=vUV*uUvScale-0.5;
+vec2 uv=mat2(cos(a),-sin(a),sin(a),cos(a))*p+0.5+uUvOffset;
+float alpha=uOpacity*((uHasAlbedoMap==1)?texture(uAlbedoMap,uv).a:1.0); if(alpha<uAlphaCutoff) discard; }
+FragColor = length(vWorld - uLightPos); }
 )GLSL";
 
 } // namespace

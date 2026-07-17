@@ -14,6 +14,8 @@ public:
         Shader,
         Audio,
         Scene,
+        Particle,
+        ParticleEffect,
         Other
     };
 

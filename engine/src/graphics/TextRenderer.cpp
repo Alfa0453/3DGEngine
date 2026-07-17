@@ -6,10 +6,21 @@
 #include <glad/glad.h>
 #include <glm/gtc/matrix_transform.hpp>
 
+#include <sstream>
 #include <vector>
 
 namespace engine {
 namespace {
+
+std::vector<float> ParseValues(const std::string& text) {
+    std::string normalized = text;
+    for (char& c : normalized) if (c == ',' || c == '(' || c == ')') c = ' ';
+    std::istringstream input(normalized);
+    std::vector<float> values;
+    float value = 0.0f;
+    while (input >> value) values.push_back(value);
+    return values;
+}
 
 // Auto-generated 8x8 bitmap font, ASCII 32..126 (LiberationMono-Bold).
 // Row-major; bit 7 (0x80) = leftmost pixel.
@@ -135,7 +146,13 @@ uniform sampler2D uText;
 uniform vec3 uColor;
 uniform float uSolid;   // 1 = solid fill (ignore the atlas), 0 = sampled glyph
 uniform float uAlpha;   // alpha used by the solid-fill path
+uniform float uImage;   // 1 = sample the bound texture as an RGBA image (tinted by uColor*uAlpha)
 void main() {
+    if (uImage > 0.5) {
+        vec4 t = texture(uText, vUV);
+        FragColor = vec4(t.rgb * uColor, t.a * uAlpha);
+        return;
+    }
     if (uSolid > 0.5) { FragColor = vec4(uColor, uAlpha); return; }
     float a = texture(uText, vUV).a;    // glyph coverage is in the alpha channel
     if (a < 0.01) discard;
@@ -198,15 +215,16 @@ float TextRenderer::Measure(const std::string& text, float scale) const {
 
 void TextRenderer::Begin(int screenWidth, int screenHeight) {
     // Pixel-space projection: (0,0) top-left, y increasing downward.
-    const glm::mat4 proj = glm::ortho(0.0f, static_cast<float>(screenWidth), static_cast<float>(screenHeight), 0.0f);
+    m_projection = glm::ortho(0.0f, static_cast<float>(screenWidth), static_cast<float>(screenHeight), 0.0f);
     glDisable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
     m_shader->Bind();
-    m_shader->SetMat4("uProj", proj);
+    m_shader->SetMat4("uProj", m_projection);
     m_shader->SetInt("uText", 0);
     m_shader->SetFloat("uSolid", 0.0f);
+    m_shader->SetFloat("uImage", 0.0f);
     m_atlas->Bind(0);
 }
 
@@ -277,14 +295,98 @@ void TextRenderer::FillRect(float x, float y, float w, float h, const glm::vec3&
         verts.push_back(v[2]); verts.push_back(v[3]);
     }
     m_shader->SetFloat("uSolid", 1.0f);
-    m_shader->SetVec3("uColot", color);
+    m_shader->SetVec3("uColor", color);
     m_shader->SetFloat("uAlpha", alpha);
     glBindVertexArray(m_vao);
     glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
-    glBufferData(GL_ARRAY_BUFFER, 
+    glBufferData(GL_ARRAY_BUFFER,
                  static_cast<GLsizeiptr>(verts.size()* sizeof(float)),
                  verts.data(), GL_DYNAMIC_DRAW);
     glDrawArrays(GL_TRIANGLES, 0, 6);
+    m_shader->SetFloat("uSolid", 0.0f);
+}
+
+void TextRenderer::Image(unsigned int textureId, float x, float y, float w, float h,
+                         const glm::vec3& tint, float alpha) {
+    // Screen top-left should map to the image's top. File textures are stored
+    // bottom-up for GL, so the top vertices sample v=1 and the bottom v=0.
+    const float q[6][4] = {
+        {x,     y,     0.0f, 1.0f}, {x + w, y,     1.0f, 1.0f}, {x + w, y + h, 1.0f, 0.0f},
+        {x + w, y + h, 1.0f, 0.0f}, {x,     y + h, 0.0f, 0.0f}, {x,     y,     0.0f, 1.0f},
+    };
+    std::vector<float> verts;
+    verts.reserve(6 * 4);
+    for (const auto& v : q) {
+        verts.push_back(v[0]); verts.push_back(v[1]);
+        verts.push_back(v[2]); verts.push_back(v[3]);
+    }
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, textureId);
+    m_shader->SetInt("uText", 0);
+    m_shader->SetFloat("uImage", 1.0f);
+    m_shader->SetVec3("uColor", tint);
+    m_shader->SetFloat("uAlpha", alpha);
+    glBindVertexArray(m_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
+    glBufferData(GL_ARRAY_BUFFER,
+                 static_cast<GLsizeiptr>(verts.size() * sizeof(float)),
+                 verts.data(), GL_DYNAMIC_DRAW);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+
+    // Restore state so later Text()/FillRect() use the font atlas again.
+    m_shader->SetFloat("uImage", 0.0f);
+    m_atlas->Bind(0);
+}
+
+void TextRenderer::CustomRect(
+    Shader& shader, unsigned int textureId, float x, float y, float w, float h,
+    const glm::vec4& color,
+    const std::unordered_map<std::string, std::string>& parameters,
+    const std::unordered_map<std::string, int>& parameterTypes,
+    const std::unordered_map<std::string, const Texture*>& textures) {
+    const float q[6][4] = {
+        {x, y, 0.0f, 1.0f}, {x + w, y, 1.0f, 1.0f}, {x + w, y + h, 1.0f, 0.0f},
+        {x + w, y + h, 1.0f, 0.0f}, {x, y + h, 0.0f, 0.0f}, {x, y, 0.0f, 1.0f},
+    };
+    shader.Bind();
+    shader.SetMat4("uProjection", m_projection);
+    shader.SetVec4("uWidgetColor", color);
+    shader.SetInt("uUseWidgetTexture", textureId != 0 ? 1 : 0);
+    shader.SetInt("uWidgetTexture", 0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, textureId);
+
+    int unit = 1;
+    for (const auto& [name, value] : parameters) {
+        const auto values = ParseValues(value);
+        const auto typeIt = parameterTypes.find(name);
+        const int type = typeIt == parameterTypes.end() ? 0 : typeIt->second;
+        if (values.empty()) continue;
+        if (type == 1 || type == 2) shader.SetInt(name, static_cast<int>(values[0]));
+        else if (type == 3 && values.size() >= 2) shader.SetVec2(name, glm::vec2(values[0], values[1]));
+        else if (type == 4 && values.size() >= 3) shader.SetVec3(name, glm::vec3(values[0], values[1], values[2]));
+        else if ((type == 5 || type == 6) && values.size() >= 4)
+            shader.SetVec4(name, glm::vec4(values[0], values[1], values[2], values[3]));
+        else shader.SetFloat(name, values[0]);
+    }
+    for (const auto& [name, texture] : textures) {
+        if (!texture) continue;
+        texture->Bind(unit);
+        shader.SetInt(name, unit++);
+    }
+
+    glBindVertexArray(m_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(q), q, GL_DYNAMIC_DRAW);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+
+    m_shader->Bind();
+    m_shader->SetMat4("uProj", m_projection);
+    m_shader->SetInt("uText", 0);
+    m_shader->SetFloat("uSolid", 0.0f);
+    m_shader->SetFloat("uImage", 0.0f);
+    m_atlas->Bind(0);
 }
 
 } // namespace engine

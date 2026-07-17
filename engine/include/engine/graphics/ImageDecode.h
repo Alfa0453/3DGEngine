@@ -13,9 +13,9 @@ struct Image {
     std::vector<unsigned char> rgba;    // width*height*4 bytes
 };
 
-// Decode a PNG file to RGBA. Supports 8-bit non-interlaced PNGs of every colour
-// type (grayscale, RGB, palette, grayscale+alpha, RGBA), including a palette
-// tRNS alpha chunk. Throws std::runtime_error on anything unsupported/corrupt.
+// Decode a non-interlaced PNG to 8-bit RGBA. Supports 16/8-bit grayscale, RGB,
+// grayscale+alpha and RGBA, plus 1/2/4/8-bit palette images and palette tRNS.
+// Sixteen-bit samples are rounded to 8-bit for GPU upload.
 Image DecodePNG(const std::string& path);
 Image DecodePNGFromMemeory(const unsigned char* data, std::size_t size);
 

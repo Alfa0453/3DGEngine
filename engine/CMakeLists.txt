@@ -8,12 +8,17 @@ add_library(engine STATIC
     src/core/Paths.cpp
     src/graphics/Shader.cpp
     src/graphics/Camera.cpp
+    src/graphics/CameraBlend.cpp
+    src/graphics/CameraShake.cpp
+    src/graphics/CameraSequence.cpp
     src/graphics/Mesh.cpp
     src/graphics/Renderer.cpp
     src/graphics/Texture.cpp
     src/graphics/TextRenderer.cpp
     src/graphics/ParticleRenderer.cpp
     src/graphics/ParticleSystem.cpp
+    src/graphics/GpuParticleSystem.cpp
+    src/graphics/RuntimeParticleSystem.cpp
     src/graphics/Primitives.cpp
     src/graphics/ModelDraw.cpp
     src/graphics/Model.cpp
@@ -38,14 +43,24 @@ add_library(engine STATIC
     src/graphics/SSAO.cpp
     src/graphics/SSR.cpp
     src/graphics/Terrain.cpp
+    src/graphics/Water.cpp
+    src/graphics/GpuProfiler.cpp
     src/scene/RuntimeSceneLoader.cpp
     src/assets/RuntimeAssetManager.cpp
     src/assets/MaterialAssetLoader.cpp
+    src/assets/ParticleAsset.cpp
+    src/assets/ShaderAsset.cpp
+    src/assets/ShaderGraphCompiler.cpp
+    src/assets/RuntimeShaderManager.cpp
     src/ui/ImGuiLayer.cpp
     src/ui/UI.cpp
     src/ui/UiBehavior.cpp
+    src/ui/Hud.cpp
     src/ecs/Ecs.cpp
     src/audio/AudioEngine.cpp
+    src/audio/AudioAsset.cpp
+    src/audio/RuntimeAudioSystem.cpp
+    src/audio/AudioEditing.cpp
     src/audio/miniaudio_impl.c
     src/physics/PhysicsWorld.cpp
     src/physics/CharacterController.cpp
@@ -58,8 +73,12 @@ add_library(engine STATIC
     src/ai/AiAgent.cpp
     src/ai/NavMesh.cpp
     src/ai/NavMeshBuilder.cpp
+    src/ai/BehaviorGraph.cpp
+    src/ai/BtScript.cpp
     src/gameplay/PlayerController.cpp
+    src/gameplay/CameraDirector.cpp
     src/gameplay/GameplaySystems.cpp
+    src/gameplay/GameMode.cpp
     src/gameplay/Script.cpp
 )
 

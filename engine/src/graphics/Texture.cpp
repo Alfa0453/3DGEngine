@@ -171,4 +171,13 @@ void Texture::Bind(unsigned int unit) const {
     glBindTexture(GL_TEXTURE_2D, m_id);
 }
 
+void Texture::Update(const unsigned char* rgbaPixels, int width, int height) {
+    if (!m_id || width != m_width || height != m_height) {
+        return;   // size must match the existing texture
+    }
+    glBindTexture(GL_TEXTURE_2D, m_id);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgbaPixels);
+    glGenerateMipmap(GL_TEXTURE_2D);   // keep mip chain consistent
+}
+
 } // namespace engine

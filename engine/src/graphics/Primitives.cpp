@@ -6,6 +6,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <algorithm>
 #include <vector>
 
 
@@ -323,6 +324,108 @@ Mesh Capsule(float radius, float height, int segments)
             const std::uint32_t k2 = k1 + cols;
             idx.insert(idx.end(), { k1, k2, k1 + 1, k1 + 1, k2, k2 + 1 });
         }
+    }
+    return Mesh(v, idx, PNT());
+}
+
+Mesh Pyramid()
+{
+    const glm::vec3 apex(0.0f, 0.5f, 0.0f);
+    const glm::vec3 corners[] = {
+        {-0.5f, -0.5f, -0.5f}, {0.5f, -0.5f, -0.5f},
+        {0.5f, -0.5f, 0.5f}, {-0.5f, -0.5f, 0.5f}
+    };
+    std::vector<float> v;
+    std::vector<std::uint32_t> idx;
+    auto triangle = [&](const glm::vec3& a, const glm::vec3& b, const glm::vec3& c) {
+        const glm::vec3 n = glm::normalize(glm::cross(b - a, c - a));
+        const std::uint32_t start = static_cast<std::uint32_t>(v.size() / 8);
+        const glm::vec2 uv[] = {{0.0f, 0.0f}, {1.0f, 0.0f}, {0.5f, 1.0f}};
+        const glm::vec3 points[] = {a, b, c};
+        for (int i = 0; i < 3; ++i) {
+            v.insert(v.end(), {points[i].x, points[i].y, points[i].z,
+                               n.x, n.y, n.z, uv[i].x, uv[i].y});
+        }
+        idx.insert(idx.end(), {start, start + 1, start + 2});
+    };
+    triangle(corners[0], corners[1], corners[2]);
+    triangle(corners[0], corners[2], corners[3]);
+    triangle(corners[0], apex, corners[1]);
+    triangle(corners[1], apex, corners[2]);
+    triangle(corners[2], apex, corners[3]);
+    triangle(corners[3], apex, corners[0]);
+    return Mesh(v, idx, PNT());
+}
+
+Mesh Torus(float majorRadius, float minorRadius, int majorSegments, int minorSegments)
+{
+    majorRadius = std::max(majorRadius, 0.001f);
+    minorRadius = std::max(minorRadius, 0.001f);
+    majorSegments = std::max(majorSegments, 3);
+    minorSegments = std::max(minorSegments, 3);
+    const float twoPi = glm::two_pi<float>();
+    std::vector<float> v;
+    std::vector<std::uint32_t> idx;
+    for (int i = 0; i <= majorSegments; ++i) {
+        const float u = static_cast<float>(i) / majorSegments;
+        const float a = u * twoPi;
+        const float ca = std::cos(a), sa = std::sin(a);
+        for (int j = 0; j <= minorSegments; ++j) {
+            const float t = static_cast<float>(j) / minorSegments;
+            const float b = t * twoPi;
+            const float cb = std::cos(b), sb = std::sin(b);
+            const glm::vec3 normal(ca * cb, sb, sa * cb);
+            const float ring = majorRadius + minorRadius * cb;
+            v.insert(v.end(), {ring * ca, minorRadius * sb, ring * sa,
+                               normal.x, normal.y, normal.z, u, t});
+        }
+    }
+    const std::uint32_t cols = static_cast<std::uint32_t>(minorSegments + 1);
+    for (int i = 0; i < majorSegments; ++i) {
+        for (int j = 0; j < minorSegments; ++j) {
+            const std::uint32_t a = static_cast<std::uint32_t>(i) * cols + static_cast<std::uint32_t>(j);
+            const std::uint32_t b = a + cols;
+            idx.insert(idx.end(), {a, b, a + 1, a + 1, b, b + 1});
+        }
+    }
+    return Mesh(v, idx, PNT());
+}
+
+Mesh Staircase(int steps)
+{
+    steps = std::max(steps, 1);
+    std::vector<float> v;
+    std::vector<std::uint32_t> idx;
+    auto appendBox = [&](const glm::vec3& minimum, const glm::vec3& maximum) {
+        const glm::vec3 center = (minimum + maximum) * 0.5f;
+        const glm::vec3 half = (maximum - minimum) * 0.5f;
+        const glm::vec3 normals[] = {{0,0,1},{0,0,-1},{-1,0,0},{1,0,0},{0,-1,0},{0,1,0}};
+        const glm::vec3 face[6][4] = {
+            {{-1,-1,1},{1,-1,1},{1,1,1},{-1,1,1}},
+            {{1,-1,-1},{-1,-1,-1},{-1,1,-1},{1,1,-1}},
+            {{-1,-1,-1},{-1,-1,1},{-1,1,1},{-1,1,-1}},
+            {{1,-1,1},{1,-1,-1},{1,1,-1},{1,1,1}},
+            {{-1,-1,-1},{1,-1,-1},{1,-1,1},{-1,-1,1}},
+            {{-1,1,1},{1,1,1},{1,1,-1},{-1,1,-1}}
+        };
+        for (int f = 0; f < 6; ++f) {
+            const std::uint32_t start = static_cast<std::uint32_t>(v.size() / 8);
+            for (int p = 0; p < 4; ++p) {
+                const glm::vec3 pos = center + face[f][p] * half;
+                const float u = (p == 1 || p == 2) ? 1.0f : 0.0f;
+                const float texV = p >= 2 ? 1.0f : 0.0f;
+                v.insert(v.end(), {pos.x, pos.y, pos.z, normals[f].x, normals[f].y,
+                                   normals[f].z, u, texV});
+            }
+            idx.insert(idx.end(), {start, start + 1, start + 2, start + 2, start + 3, start});
+        }
+    };
+    const float depth = 1.0f / steps;
+    for (int i = 0; i < steps; ++i) {
+        const float z0 = -0.5f + depth * i;
+        const float z1 = z0 + depth;
+        const float y1 = -0.5f + static_cast<float>(i + 1) / steps;
+        appendBox(glm::vec3(-0.5f, -0.5f, z0), glm::vec3(0.5f, y1, z1));
     }
     return Mesh(v, idx, PNT());
 }

@@ -49,6 +49,12 @@ public:
         bool        spotShadows  = true;  // perspective shadows for spotlights
         bool        directionalShadows = true; // cascaded shadows for the directional sun
         float       shadowSoftness = 2.5f; // PCSS sun-shadow softness (light size)
+        // How far from the camera the sun's cascaded shadows reach (view units).
+        // Beyond this, geometry no longer casts/receives sun shadows -- raise it if
+        // shadows "pop in" only near the player (they follow the camera). Larger
+        // values spread the same shadow-map resolution over more area, so bump the
+        // shadow map size too (PbrRenderer ctor) if they get soft.
+        float       shadowDistance = 140.0f;
 
         // Distance + height fog (applied to lit geometry in linear HDR).
         bool      fog = false;

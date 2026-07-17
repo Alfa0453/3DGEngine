@@ -35,12 +35,13 @@ Window::Window(const WindowProps& props) {
         }
     }
 
-    // Request an OpenGL 3.3 Core profile context. "Core" drops the old
-    // fixed-function pipeline and forces the modern shader-based API.
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+    // Prefer OpenGL 4.3 for compute-backed particle simulation. Machines that
+    // cannot create it transparently fall back to the engine's 3.3 baseline.
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     glfwWindowHint(GLFW_STENCIL_BITS, 8);
+    glfwWindowHint(GLFW_SAMPLES, 4);   // 4x MSAA on the default framebuffer (edge anti-aliasing)
 #ifdef __APPLE__
     // macOS only grants a Core context when forward-compatibility is set.
     glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
@@ -48,6 +49,18 @@ Window::Window(const WindowProps& props) {
 
     // ---- Create the window ----------------------------------------------
     m_window = glfwCreateWindow(m_data.width, m_data.height, m_data.title.c_str(), nullptr, nullptr);
+    if (!m_window) {
+        glfwDefaultWindowHints();
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+        glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+        glfwWindowHint(GLFW_STENCIL_BITS, 8);
+        glfwWindowHint(GLFW_SAMPLES, 4);   // 4x MSAA (edge anti-aliasing)
+#ifdef __APPLE__
+        glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
+#endif
+        m_window = glfwCreateWindow(m_data.width, m_data.height, m_data.title.c_str(), nullptr, nullptr);
+    }
     if (!m_window) {
         if (s_windowCount == 0) glfwTerminate();
         throw std::runtime_error("Failed to create GLFW window");
@@ -67,6 +80,8 @@ Window::Window(const WindowProps& props) {
 
     std::cout << "OpenGL " << glGetString(GL_VERSION)
               << " | "      << glGetString(GL_RENDERER) << '\n';
+
+    glEnable(GL_MULTISAMPLE);   // use the multisampled default framebuffer (MSAA)
 
     // ---- Wire up callbacks ----------------------------------------------
     // Stash a pointer to m_data so static callbacks can read/write our state.

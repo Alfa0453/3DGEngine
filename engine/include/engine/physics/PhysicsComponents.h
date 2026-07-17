@@ -3,6 +3,7 @@
 #include <glm/glm.hpp>
 
 #include <algorithm>
+#include <cstdint>
 
 namespace engine {
 namespace ecs {
@@ -20,6 +21,12 @@ struct RigidBody {
     glm::vec3 accumForce{0.0f};
     float     invMass    = 1.0f;
     bool      useGravity = true;
+
+    // Kinematic: moved only by its own velocity (set by script/animation), never
+    // by gravity, forces, or contacts -- but it DOES push dynamic bodies it hits
+    // (infinite mass, but its velocity is felt at contacts). Use for moving
+    // platforms, elevators, doors. It never sleeps while it has velocity.
+    bool      kinematic  = false;
 
     bool      allowSleep = true;
     bool      sleeping   = false;   // solver-managed
@@ -90,7 +97,17 @@ struct RigidBody {
     }
 };
 
-enum class ColliderShape { Sphere, Plane, Box, Capsule };
+enum class ColliderShape {
+    Sphere,
+    Plane,
+    Box,
+    Capsule,
+    Cylinder,
+    Cone,
+    Pyramid,
+    Torus,
+    Staircase
+};
 
 // The collision shape attached to an entity (positioned by its Transform). A
 // Plane is an infinite half-space defined in world space by a normal and offset
@@ -105,9 +122,20 @@ struct Collider {
     glm::vec3     planeNormal{0.0f, 1.0f, 0.0f};  // Plane
     float         planeOffset = 0.0f;             // Plane
     float         halfHeight  = 0.5f;             // Capsule: half-length of the central segment
+    float         majorRadius = 0.35f;            // Torus: centre to tube centre
+    float         minorRadius = 0.15f;            // Torus: tube radius
+    int           steps       = 6;                // Staircase: number of collision steps
     float         restitution = 0.4f;             // material: bounciness
     float         friction    = 0.5f;             // material: Coulomb coefficient
     bool          isTrigger   = false;            // overlap-only: detected but never resolved
+
+    // Collision filtering: two colliders interact only if each one's mask
+    // includes the other's layer bit -- (A.mask & B.layer) && (B.mask & A.layer).
+    // Default: layer 0 (bit 1), collides with everything. Put the player, enemies,
+    // props, projectiles, etc. on different layers and mask out the pairs you
+    // don't want to test (cheaper broad phase + no unwanted contacts/triggers).
+    std::uint32_t layer = 0x00000001u;            // this collider's layer bit(s)
+    std::uint32_t mask  = 0xFFFFFFFFu;            // which layers this collider hits
 
     static Collider MakeSphere(float r) { Collider c; c.shape = ColliderShape::Sphere; c.radius = r; return c; }
     static Collider MakePlane(const glm::vec3& n, float off) {
@@ -122,6 +150,27 @@ struct Collider {
     }
     static Collider MakeCapsuleFromHeight(float r, float totalHeight) {
         return MakeCapsule(r, std::max(0.0f, totalHeight * 0.5f - r));
+    }
+    static Collider MakeCylinder(float r, float totalHeight) {
+        Collider c; c.shape = ColliderShape::Cylinder; c.radius = r;
+        c.halfHeight = std::max(totalHeight * 0.5f, 0.0f);
+        c.halfExtents = glm::vec3(r, c.halfHeight, r); return c;
+    }
+    static Collider MakeCone(float r, float totalHeight) {
+        Collider c = MakeCylinder(r, totalHeight); c.shape = ColliderShape::Cone; return c;
+    }
+    static Collider MakePyramid(const glm::vec3& halfExtents) {
+        Collider c = MakeBox(halfExtents); c.shape = ColliderShape::Pyramid; return c;
+    }
+    static Collider MakeTorus(float major, float minor) {
+        Collider c; c.shape = ColliderShape::Torus;
+        c.majorRadius = std::max(major, 0.0f); c.minorRadius = std::max(minor, 0.0f);
+        const float outer = c.majorRadius + c.minorRadius;
+        c.halfExtents = glm::vec3(outer, c.minorRadius, outer); return c;
+    }
+    static Collider MakeStaircase(const glm::vec3& halfExtents, int stepCount) {
+        Collider c = MakeBox(halfExtents); c.shape = ColliderShape::Staircase;
+        c.steps = std::max(stepCount, 1); return c;
     }
 };
 

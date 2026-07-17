@@ -415,6 +415,8 @@ const char *EditorAssets::TypeName(Type type)
         case Type::Shader: return "Shader";
         case Type::Audio: return "Audio";
         case Type::Scene: return "Scene";
+        case Type::Particle: return "Particle";
+        case Type::ParticleEffect: return "Particle Effect";
         case Type::Other: return "Other";
     }
     return "Other";
@@ -431,14 +433,23 @@ EditorAssets::Type EditorAssets::ClassifyExtension(const std::string &extension)
     if (extension == ".png" || extension == ".jpg" || extension == ".jpeg" || extension == ".tga") {
         return Type::Texture;
     }
-    if (extension == ".vert" || extension == ".frag" || extension == ".glsl") {
+    if (extension == ".vert" || extension == ".frag" || extension == ".glsl"
+        || extension == ".3dgshader") {
         return Type::Shader;
     }
-    if (extension == ".wav" || extension == ".ogg" || extension == ".mp3") {
+    if (extension == ".wav" || extension == ".ogg" || extension == ".mp3"
+        || extension == ".flac" || extension == ".3dgaudio"
+        || extension == ".3dgmusic" || extension == ".3dgmixer") {
         return Type::Audio;
     }
     if (extension == ".scene") {
         return Type::Scene;
+    }
+    if (extension == ".particle") {
+        return Type::Particle;
+    }
+    if (extension == ".particlefx") {
+        return Type::ParticleEffect;
     }
     return Type::Other;
 }

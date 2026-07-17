@@ -5,6 +5,7 @@
 #include "engine/ecs/Components.h"   // Transform
 
 #include <glm/glm.hpp>
+#include <glm/gtc/constants.hpp>
 #include <glm/gtc/quaternion.hpp>    // mat3_cast
 
 #include <algorithm>
@@ -37,6 +38,19 @@ std::uint64_t PairKey(Entity a, Entity b) {
     return (std::uint64_t(a) << 32) | std::uint64_t(b);
 }
 
+// Collision filtering: each side's mask must include the other's layer bit(s).
+bool LayersCollide(const Collider& a, const Collider& b) {
+    return (a.mask & b.layer) != 0u && (b.mask & a.layer) != 0u;
+}
+
+// Build an orthonormal friction basis (t1, t2) perpendicular to the contact
+// normal n. Deterministic so warm-started tangent impulses stay consistent.
+void BuildTangents(const glm::vec3& n, glm::vec3& t1, glm::vec3& t2) {
+    if (std::fabs(n.x) >= 0.577f) t1 = glm::normalize(glm::vec3(n.y, -n.x, 0.0f));
+    else                          t1 = glm::normalize(glm::vec3(0.0f, n.z, -n.y));
+    t2 = glm::cross(n, t1);
+}
+
 struct Contact {
     bool      hit = false;
     glm::vec3 normal{0.0f};   // points from A toward B
@@ -53,8 +67,10 @@ struct OBB {
 };
 
 // Sleeping bodies act as immovable (invMass 0, zero velocity) until woken.
+// Kinematic bodies are immovable too (infinite mass) -- they push but aren't
+// pushed -- yet velOf() still reports their velocity so they impart momentum.
 float invMassOf(const Body& b) {
-    if (!b.rb || b.rb->sleeping) return 0.0f;
+    if (!b.rb || b.rb->sleeping || b.rb->kinematic) return 0.0f;
     return b.rb->invMass;
 }
 glm::vec3 velOf(const Body& b) {
@@ -68,7 +84,7 @@ glm::vec3 AngVelOf(const Body& b) {
     return (b.rb && !b.rb->sleeping) ? b.rb->angularVelocity : glm::vec3(0.0f);
 }
 glm::mat3 InvIWorld(const Body& b) {
-    if (!b.rb || b.rb->sleeping) return glm::mat3(0.0f);
+    if (!b.rb || b.rb->sleeping || b.rb->kinematic) return glm::mat3(0.0f);
     const glm::mat3 R = glm::mat3_cast(b.t->rotation);
     return R * b.rb->invInertiaLocal * glm::transpose(R);
 }
@@ -81,7 +97,12 @@ int priority(ColliderShape s) {
         case ColliderShape::Sphere:  return 0;
         case ColliderShape::Capsule: return 1;
         case ColliderShape::Box:     return 2;
-        case ColliderShape::Plane:   return 3;
+        case ColliderShape::Cylinder:return 3;
+        case ColliderShape::Cone:    return 4;
+        case ColliderShape::Pyramid: return 5;
+        case ColliderShape::Torus:   return 6;
+        case ColliderShape::Staircase:return 7;
+        case ColliderShape::Plane:   return 8;
     }
     return 0;
 }
@@ -91,6 +112,10 @@ glm::mat3 InertiaFor(const Collider& c, float mass) {
     if (c.shape == ColliderShape::Box)     return RigidBody::SolidBoxInvInertia(mass, c.halfExtents);
     if (c.shape == ColliderShape::Sphere)  return RigidBody::SolidSphereInvInertia(mass, c.radius);
     if (c.shape == ColliderShape::Capsule) return RigidBody::CapsuleInvInertia(mass, c.radius, c.halfHeight);
+    if (c.shape == ColliderShape::Cylinder || c.shape == ColliderShape::Cone
+        || c.shape == ColliderShape::Pyramid || c.shape == ColliderShape::Torus
+        || c.shape == ColliderShape::Staircase)
+        return RigidBody::SolidBoxInvInertia(mass, c.halfExtents);
     return glm::mat3(0.0f);
 }
 
@@ -379,9 +404,118 @@ Contact CapsuleBox(const glm::vec3& p0, const glm::vec3& p1, float r, const OBB&
     return ct;
 }
 
+bool CompositeShape(ColliderShape shape) {
+    return shape == ColliderShape::Cylinder || shape == ColliderShape::Cone
+        || shape == ColliderShape::Pyramid || shape == ColliderShape::Torus
+        || shape == ColliderShape::Staircase;
+}
+
+// Complex colliders are decomposed into supported convex pieces for narrow-phase
+// collision. This gives first-class engine behavior while keeping the existing,
+// stable sphere/box/capsule contact solvers and manifolds.
+struct ProxySet {
+    static constexpr int Capacity = 32;
+    std::array<Transform, Capacity> transforms{};
+    std::array<Collider, Capacity> colliders{};
+    std::array<Body, Capacity> bodies{};
+    int count = 0;
+};
+
+void AddProxy(ProxySet& set, const Body& parent, const glm::vec3& localCenter,
+              const glm::quat& localRotation, const Collider& collider) {
+    if (set.count >= ProxySet::Capacity) return;
+    const int i = set.count++;
+    set.transforms[i] = *parent.t;
+    set.transforms[i].position = parent.t->position + parent.t->rotation * localCenter;
+    set.transforms[i].rotation = glm::normalize(parent.t->rotation * localRotation);
+    set.transforms[i].scale = glm::vec3(1.0f);
+    set.colliders[i] = collider;
+    set.bodies[i] = Body{parent.e, &set.transforms[i], &set.colliders[i], nullptr};
+}
+
+void BuildProxies(const Body& body, ProxySet& set) {
+    const Collider& c = *body.c;
+    if (!CompositeShape(c.shape)) {
+        AddProxy(set, body, glm::vec3(0.0f), glm::quat(1.0f, 0.0f, 0.0f, 0.0f), c);
+        return;
+    }
+
+    if (c.shape == ColliderShape::Cylinder) {
+        // A capsule contained inside the finite cylinder: no collision extends
+        // beyond the flat caps, while the curved side remains radial.
+        AddProxy(set, body, glm::vec3(0.0f), glm::quat(1.0f, 0.0f, 0.0f, 0.0f),
+            Collider::MakeCapsule(c.radius, std::max(c.halfHeight - c.radius, 0.0f)));
+        return;
+    }
+
+    if (c.shape == ColliderShape::Torus) {
+        constexpr int segments = 20;
+        for (int i = 0; i < segments; ++i) {
+            const float a = glm::two_pi<float>() * static_cast<float>(i) / segments;
+            AddProxy(set, body,
+                glm::vec3(std::cos(a) * c.majorRadius, 0.0f, std::sin(a) * c.majorRadius),
+                glm::quat(1.0f, 0.0f, 0.0f, 0.0f), Collider::MakeSphere(c.minorRadius));
+        }
+        return;
+    }
+
+    if (c.shape == ColliderShape::Staircase) {
+        const int steps = glm::clamp(c.steps, 1, ProxySet::Capacity);
+        const float slice = (c.halfExtents.z * 2.0f) / steps;
+        for (int i = 0; i < steps; ++i) {
+            const float height = (c.halfExtents.y * 2.0f) * static_cast<float>(i + 1) / steps;
+            const glm::vec3 ext(c.halfExtents.x, height * 0.5f, slice * 0.5f);
+            const glm::vec3 center(0.0f, -c.halfExtents.y + ext.y,
+                -c.halfExtents.z + slice * (static_cast<float>(i) + 0.5f));
+            AddProxy(set, body, center, glm::quat(1.0f, 0.0f, 0.0f, 0.0f), Collider::MakeBox(ext));
+        }
+        return;
+    }
+
+    // Cone and pyramid are convex tapered volumes represented by thin box
+    // slices. Pyramid slices are exact square cross-sections; cone slices use
+    // the same conservative square profile supported by the current OBB solver.
+    constexpr int layers = 12;
+    for (int i = 0; i < layers; ++i) {
+        const float y0 = -c.halfExtents.y + (2.0f * c.halfExtents.y * i) / layers;
+        const float y1 = -c.halfExtents.y + (2.0f * c.halfExtents.y * (i + 1)) / layers;
+        const float fraction = std::max(1.0f - static_cast<float>(i + 1) / layers, 0.02f);
+        const float x = (c.shape == ColliderShape::Cone ? c.radius : c.halfExtents.x) * fraction;
+        const float z = (c.shape == ColliderShape::Cone ? c.radius : c.halfExtents.z) * fraction;
+        AddProxy(set, body, glm::vec3(0.0f, (y0 + y1) * 0.5f, 0.0f),
+            glm::quat(1.0f, 0.0f, 0.0f, 0.0f),
+            Collider::MakeBox(glm::vec3(x, (y1 - y0) * 0.5f, z)));
+    }
+}
+
+Contact Detect(const Body& A, const Body& B);
+
+Contact DetectComposite(const Body& A, const Body& B) {
+    ProxySet a, b;
+    BuildProxies(A, a);
+    BuildProxies(B, b);
+    Contact best;
+    for (int i = 0; i < a.count; ++i) {
+        for (int j = 0; j < b.count; ++j) {
+            Body* pa = &a.bodies[i];
+            Body* pb = &b.bodies[j];
+            bool swapped = false;
+            if (priority(pa->c->shape) > priority(pb->c->shape)) {
+                std::swap(pa, pb);
+                swapped = true;
+            }
+            Contact hit = Detect(*pa, *pb);
+            if (swapped && hit.hit) hit.normal = -hit.normal;
+            if (hit.hit && (!best.hit || hit.penetration > best.penetration)) best = hit;
+        }
+    }
+    return best;
+}
+
 // Dispatch by the (canonically ordered) shape pair.
 Contact Detect(const Body& A, const Body& B) {
     const auto sa = A.c->shape, sb = B.c->shape;
+    if (CompositeShape(sa) || CompositeShape(sb)) return DetectComposite(A, B);
     if (sa == ColliderShape::Sphere && sb == ColliderShape::Sphere)
         return SphereSphere(A.t->position, A.c->radius, B.t->position, B.c->radius);
     if (sa == ColliderShape::Sphere && sb == ColliderShape::Box)
@@ -411,58 +545,112 @@ Contact Detect(const Body& A, const Body& B) {
     return Contact{};
 }
 
-void ResolveContact(Body& A, Body& B, const ContactManifold& man,
-                    float restitutionThreshold, float wakeSpeed) {
-    const glm::vec3 n = man.normal;
-    {   // a fast-closing contact wakes either sleeper first
-        const glm::vec3 rv0 = velOf(B) - velOf(A);
-        if (glm::dot(rv0, n) < -wakeSpeed) { Wake(A); Wake(B); }
-    }
-    const float imA = invMassOf(A), imB = invMassOf(B);
-    const float imSum = imA + imB;
-    if (imSum <= 0.0f) return;                       // both static or asleep
+// Apply an impulse P at contact point k, using the manifold's cached inverse
+// masses/inertia + offsets (no mat3 rebuilds in the hot loop).
+inline void ApplyImpulse(const ContactManifold& m, Body& A, Body& B, int k, const glm::vec3& P) {
+    if (A.rb) { A.rb->velocity -= P * m.invMassA; A.rb->angularVelocity -= m.invIA * glm::cross(m.rA[k], P); }
+    if (B.rb) { B.rb->velocity += P * m.invMassB; B.rb->angularVelocity += m.invIB * glm::cross(m.rB[k], P); }
+}
 
-    const glm::mat3 IA = InvIWorld(A), IB = InvIWorld(B);
+// Effective inverse mass of a contact along dir, from cached inverse inertia.
+inline float EffectiveMass(const ContactManifold& m, int k, const glm::vec3& dir) {
+    const glm::vec3 raxd = glm::cross(m.rA[k], dir), rbxd = glm::cross(m.rB[k], dir);
+    return m.invMassA + m.invMassB
+        + glm::dot(glm::cross(m.invIA * raxd, m.rA[k]) + glm::cross(m.invIB * rbxd, m.rB[k]), dir);
+}
+
+// Prepare a manifold ONCE per step: wake fast-closing sleepers, cache inverse
+// mass/inertia + contact offsets + effective masses + friction basis, capture the
+// restitution target, and warm-start from last step's cached impulses.
+void PrepareManifold(ContactManifold& m, Body& A, Body& B,
+                     float restitutionThreshold,
+                     const std::unordered_map<std::uint64_t, ContactCache>& cache) {
+    const glm::vec3 n = m.normal;
+    BuildTangents(n, m.tangent1, m.tangent2);
+
+    // Cache the constants used every iteration (built once here).
+    m.invMassA = invMassOf(A); m.invMassB = invMassOf(B);
+    m.invIA = InvIWorld(A);     m.invIB = InvIWorld(B);
+    m.friction = std::sqrt(A.c->friction * B.c->friction);
+
     const glm::vec3 cA = A.t->position, cB = B.t->position;
     const float e0 = std::min(A.c->restitution, B.c->restitution);
-    const float mu = std::sqrt(A.c->friction * B.c->friction);
-    const int   cnt = man.count;
-    if (cnt <= 0) return;
-    const float share = 1.0f / static_cast<float>(cnt);   // split load across points
 
-    for (int k = 0; k < cnt; ++k) {
-        const glm::vec3 p  = man.points[k];
-        const glm::vec3 rA = p - cA, rB = p - cB;
+    const auto it = cache.find(m.key);
+    const ContactCache* seed = (it != cache.end()) ? &it->second : nullptr;
 
-        // Relative velocity AT the contact point (linear + omega x r).
-        glm::vec3 relVel = (velOf(B) + glm::cross(AngVelOf(B), rB))
-                         - (velOf(A) + glm::cross(AngVelOf(A), rA));
+    for (int k = 0; k < m.count; ++k) {
+        const glm::vec3 p  = m.points[k];
+        m.rA[k] = p - cA; m.rB[k] = p - cB;
+
+        // Effective masses (constant during the velocity solve).
+        const float kN = EffectiveMass(m, k, n);
+        m.normalMass[k] = (kN > 1e-12f) ? 1.0f / kN : 0.0f;
+        const glm::vec3 axes[2] = { m.tangent1, m.tangent2 };
+        for (int ax = 0; ax < 2; ++ax) {
+            const float kT = EffectiveMass(m, k, axes[ax]);
+            m.tangentMass[k][ax] = (kT > 1e-12f) ? 1.0f / kT : 0.0f;
+        }
+
+        const glm::vec3 relVel = (velOf(B) + glm::cross(AngVelOf(B), m.rB[k]))
+                               - (velOf(A) + glm::cross(AngVelOf(A), m.rA[k]));
         const float vn = glm::dot(relVel, n);
-        if (vn >= 0.0f) continue;                    // separating at this point
+        m.restBias[k] = (-vn > restitutionThreshold) ? (-e0 * vn) : 0.0f;
 
-        // Effective mass along the normal, including the angular contribution.
-        const glm::vec3 raxn = glm::cross(rA, n), rbxn = glm::cross(rB, n);
-        const float kN = imSum + glm::dot(glm::cross(IA * raxn, rA) + glm::cross(IB * rbxn, rB), n);
-        const float e  = (-vn > restitutionThreshold) ? e0 : 0.0f;
-        const float j  = (-(1.0f + e) * vn / kN) * share;
-        const glm::vec3 P = j * n;
-        if (A.rb) { A.rb->velocity -= P * imA; A.rb->angularVelocity -= IA * glm::cross(rA, P); }
-        if (B.rb) { B.rb->velocity += P * imB; B.rb->angularVelocity += IB * glm::cross(rB, P); }
+        // Warm start: inherit impulses from the nearest cached point of this pair.
+        float Pn = 0.0f, Pt1 = 0.0f, Pt2 = 0.0f;
+        if (seed) {
+            float best = 0.04f * 0.04f; int bi = -1;   // 4cm match tolerance
+            for (int c = 0; c < seed->count; ++c) {
+                const glm::vec3 d = seed->pts[c].point - p;
+                const float d2 = glm::dot(d, d);
+                if (d2 < best) { best = d2; bi = c; }
+            }
+            if (bi >= 0) { Pn = seed->pts[bi].normalImpulse;
+                           Pt1 = seed->pts[bi].tangentImpulse[0];
+                           Pt2 = seed->pts[bi].tangentImpulse[1]; }
+        }
+        m.normalImpulse[k] = Pn;
+        m.tangentImpulse[k][0] = Pt1;
+        m.tangentImpulse[k][1] = Pt2;
+        ApplyImpulse(m, A, B, k, Pn * n + Pt1 * m.tangent1 + Pt2 * m.tangent2);
+    }
+}
 
-        // Coulomb friction along the tangent at the contact point.
-        relVel = (velOf(B) + glm::cross(AngVelOf(B), rB))
-               - (velOf(A) + glm::cross(AngVelOf(A), rA));
-        glm::vec3 tangent = relVel - glm::dot(relVel, n) * n;
-        if (glm::dot(tangent, tangent) > 1e-8f) {
-            tangent = glm::normalize(tangent);
-            const glm::vec3 raxt = glm::cross(rA, tangent), rbxt = glm::cross(rB, tangent);
-            const float kT = imSum + glm::dot(glm::cross(IA * raxt, rA) + glm::cross(IB * rbxt, rB), tangent);
-            float jt = (-glm::dot(relVel, tangent) / kT) * share;
-            const float jmax = std::fabs(j) * mu;
-            jt = std::clamp(jt, -jmax, jmax);
-            const glm::vec3 Pt = jt * tangent;
-            if (A.rb) { A.rb->velocity -= Pt * imA; A.rb->angularVelocity -= IA * glm::cross(rA, Pt); }
-            if (B.rb) { B.rb->velocity += Pt * imB; B.rb->angularVelocity += IB * glm::cross(rB, Pt); }
+// One velocity-solver iteration: normal impulse (clamped >= 0) then two-axis
+// Coulomb friction (clamped to mu * accumulated normal impulse). Uses only cached
+// constants + cheap dot/cross products -- no mat3 rebuilds.
+void SolveManifoldVelocity(ContactManifold& m, Body& A, Body& B) {
+    const glm::vec3 n = m.normal;
+    const glm::vec3 axes[2] = { m.tangent1, m.tangent2 };
+
+    for (int k = 0; k < m.count; ++k) {
+        const glm::vec3& rA = m.rA[k];
+        const glm::vec3& rB = m.rB[k];
+
+        // Normal impulse (accumulated + clamped to stay pushing).
+        {
+            const glm::vec3 relVel = (velOf(B) + glm::cross(AngVelOf(B), rB))
+                                   - (velOf(A) + glm::cross(AngVelOf(A), rA));
+            const float vn = glm::dot(relVel, n);
+            float dPn = (-vn + m.restBias[k]) * m.normalMass[k];
+            const float old = m.normalImpulse[k];
+            m.normalImpulse[k] = std::max(old + dPn, 0.0f);
+            dPn = m.normalImpulse[k] - old;
+            ApplyImpulse(m, A, B, k, dPn * n);
+        }
+
+        // Friction along each tangent axis, clamped to the Coulomb cone.
+        const float maxF = m.friction * m.normalImpulse[k];
+        for (int ax = 0; ax < 2; ++ax) {
+            const glm::vec3 relVel = (velOf(B) + glm::cross(AngVelOf(B), rB))
+                                   - (velOf(A) + glm::cross(AngVelOf(A), rA));
+            const float vt = glm::dot(relVel, axes[ax]);
+            float dPt = -vt * m.tangentMass[k][ax];
+            const float old = m.tangentImpulse[k][ax];
+            m.tangentImpulse[k][ax] = std::clamp(old + dPt, -maxF, maxF);
+            dPt = m.tangentImpulse[k][ax] - old;
+            ApplyImpulse(m, A, B, k, dPt * axes[ax]);
         }
     }
 }
@@ -805,6 +993,18 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
     // 1) Integrate (semi-implicit Euler): velocity first, then position. A body
     //    with CCD enabled sweeps its motion and clamps to the first impact.
     reg.view<Transform, RigidBody>().each([&](Entity e, Transform& t, RigidBody& rb) {
+        if (rb.kinematic) {
+            // Driven purely by its own (scripted/animated) velocity: no gravity,
+            // forces, damping, CCD, or sleep -- but it moves and can push dynamics.
+            t.position += rb.velocity * dt;
+            if (!rb.freezeRotation && glm::dot(rb.angularVelocity, rb.angularVelocity) > 0.0f) {
+                const glm::quat wq(0.0f, rb.angularVelocity.x, rb.angularVelocity.y, rb.angularVelocity.z);
+                t.rotation = glm::normalize(t.rotation + 0.5f * wq * t.rotation * dt);
+            }
+            rb.accumForce = glm::vec3(0.0f); rb.accumTorque = glm::vec3(0.0f);
+            rb.sleeping = false; rb.sleepTimer = 0.0f;
+            return;
+        }
         if (rb.invMass <= 0.0f) { rb.accumForce = glm::vec3(0.0f); rb.accumTorque = glm::vec3(0.0f); return; }
         if (rb.sleeping)          { rb.accumForce = glm::vec3(0.0f); rb.accumTorque = glm::vec3(0.0f); return; }
         glm::vec3 accel = rb.accumForce * rb.invMass;
@@ -911,6 +1111,7 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
         SolverBody* A = &m_bodies[pr.first];
         SolverBody* B = &m_bodies[pr.second];
         if (priority(A->c->shape) > priority(B->c->shape)) std::swap(A, B);
+        if (!LayersCollide(*A->c, *B->c)) continue;    // collision layer/mask filter
         if (Inactive(*A) && Inactive(*B)) {
             const std::uint64_t key = PairKey(A->e, B->e);
             if (m_touching.find(key) != m_touching.end())
@@ -929,11 +1130,18 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
             m.penetration = ct.penetration;
             m.count = ct.count;
             for (int pi = 0; pi < ct.count; ++pi) m.points[pi] = ct.points[pi];
+            m.key = PairKey(A->e, B->e);
             m_manifolds.push_back(m);
         }
     }
 
-    // 5) Emit Enter/Stay/Exit events by diffing against last step.
+    // 5) Emit Enter/Stay/Exit events by diffing against last step. Solid contacts
+    //    carry contact point + normal now; the impulse is filled in after the solve.
+    std::unordered_map<std::uint64_t, int> manifoldOf;    // pair key -> manifold index
+    for (int mi = 0; mi < static_cast<int>(m_manifolds.size()); ++mi)
+        manifoldOf[m_manifolds[mi].key] = mi;
+    std::unordered_map<std::uint64_t, int> eventOf;       // pair key -> event index (solids)
+
     m_events.clear();
     for (const auto& kv : m_touchingNow) {
         const bool was = (m_touching.find(kv.first) != m_touching.end());
@@ -942,6 +1150,16 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
         ev.b = Entity(kv.first & 0xFFFFFFFFu);
         ev.phase = was ? CollisionEvent::Phase::Stay : CollisionEvent::Phase::Enter;
         ev.trigger = kv.second;
+        const auto mit = manifoldOf.find(kv.first);
+        if (mit != manifoldOf.end()) {
+            const ContactManifold& m = m_manifolds[mit->second];
+            ev.normal = m.normal;
+            glm::vec3 avg(0.0f);
+            for (int k = 0; k < m.count; ++k) avg += m.points[k];
+            if (m.count > 0) avg /= static_cast<float>(m.count);
+            ev.point = avg;
+            eventOf[kv.first] = static_cast<int>(m_events.size());   // impulse filled after solve
+        }
         m_events.push_back(ev);
     }
     for (const auto& kv : m_touching) {
@@ -956,17 +1174,44 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
     }
     m_touching.swap(m_touchingNow);   // m_touching = this step; old cleared next step
 
-    // 6) Velocity solve: sequential impulses over the cached manifolds (re-solved
-    //    each iteration, no re-detection) plus rigid distance joints.
+    // 6) Velocity solve: warm-started, accumulating sequential impulses over the
+    //    cached manifolds (normal + 2-axis Coulomb friction), plus the joints.
     const float wakeSpeed = sleepLinearVelocity * 2.0f;
+    // Wake pass first: a fast-closing contact wakes either sleeper, so the prepare
+    // pass below caches every body's inverse mass/inertia in its final awake state.
+    for (ContactManifold& m : m_manifolds) {
+        Body& A = m_bodies[m.a]; Body& B = m_bodies[m.b];
+        if (glm::dot(velOf(B) - velOf(A), m.normal) < -wakeSpeed) { Wake(A); Wake(B); }
+    }
+    for (ContactManifold& m : m_manifolds)
+        PrepareManifold(m, m_bodies[m.a], m_bodies[m.b], restitutionThreshold, m_contactCache);
     for (int iter = 0; iter < solverIterations; ++iter) {
-        for (const ContactManifold& m : m_manifolds)
-            ResolveContact(m_bodies[m.a], m_bodies[m.b], m, restitutionThreshold, wakeSpeed);
+        for (ContactManifold& m : m_manifolds)
+            SolveManifoldVelocity(m, m_bodies[m.a], m_bodies[m.b]);
         for (const Joint& j : m_joints) {
             if (j.type == Joint::Type::Distance) SolveDistance(reg, j);
             else if (j.type == Joint::Type::Ball)  SolveBall(reg, j);
             else if (j.type == Joint::Type::Hinge) SolveHinge(reg, j);
         }
+    }
+
+    // 6b) Store this step's impulses for next step's warm start, and fill each
+    //     solid collision event's impulse (sum of normal impulses = impact force).
+    m_contactCache.clear();
+    for (const ContactManifold& m : m_manifolds) {
+        ContactCache cc;
+        cc.count = m.count;
+        float total = 0.0f;
+        for (int k = 0; k < m.count; ++k) {
+            cc.pts[k].point = m.points[k];
+            cc.pts[k].normalImpulse = m.normalImpulse[k];
+            cc.pts[k].tangentImpulse[0] = m.tangentImpulse[k][0];
+            cc.pts[k].tangentImpulse[1] = m.tangentImpulse[k][1];
+            total += m.normalImpulse[k];
+        }
+        m_contactCache[m.key] = cc;
+        const auto eit = eventOf.find(m.key);        // O(1) instead of scanning m_events
+        if (eit != eventOf.end()) m_events[eit->second].impulse = total;
     }
 
     // 7) One positional-correction pass from the cached penetrations.
@@ -978,7 +1223,7 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
         const float thresh2  = sleepLinearVelocity * sleepLinearVelocity;
         const float aThresh2 = sleepAngularVelocity * sleepAngularVelocity;
         reg.view<Transform, RigidBody>().each([&](Entity, Transform&, RigidBody& rb) {
-            if (rb.invMass <= 0.0f) return;
+            if (rb.invMass <= 0.0f || rb.kinematic) return;
             if (!rb.allowSleep) { rb.sleeping = false; rb.sleepTimer = 0.0f; return; }
             if (rb.sleeping) return;
             const bool slow = glm::dot(rb.velocity, rb.velocity) < thresh2
@@ -1105,7 +1350,8 @@ float RayCapsule(const glm::vec3& o, const glm::vec3& d,
 
 } // namespace
 
-RaycastHit PhysicsWorld::Raycast(ecs::Registry& reg, const Ray& ray, float maxDistance) const {
+RaycastHit PhysicsWorld::Raycast(ecs::Registry& reg, const Ray& ray, float maxDistance,
+                                 std::uint32_t layerMask) const {
     RaycastHit best;
     best.distance = maxDistance;
     const float len2 = glm::dot(ray.direction, ray.direction);
@@ -1113,6 +1359,7 @@ RaycastHit PhysicsWorld::Raycast(ecs::Registry& reg, const Ray& ray, float maxDi
     const glm::vec3 d = ray.direction / std::sqrt(len2);
 
     reg.view<Transform, Collider>().each([&](Entity e, Transform& t, Collider& c) {
+        if ((c.layer & layerMask) == 0u) return;    // filtered out by the query mask
         glm::vec3 n(0.0f);
         float hitT = -1.0f;
         if (c.shape == ColliderShape::Sphere) {
@@ -1123,6 +1370,33 @@ RaycastHit PhysicsWorld::Raycast(ecs::Registry& reg, const Ray& ray, float maxDi
             const glm::vec3 up = glm::mat3_cast(t.rotation) * glm::vec3(0.0f, 1.0f, 0.0f);
             const glm::vec3 h  = up * c.halfHeight;
             hitT = RayCapsule(ray.origin, d, t.position - h, t.position + h, c.radius, n);
+        } else if (CompositeShape(c.shape)) {
+            Body parent{e, &t, &c, nullptr};
+            ProxySet proxies;
+            BuildProxies(parent, proxies);
+            for (int i = 0; i < proxies.count; ++i) {
+                const Transform& pt = proxies.transforms[i];
+                const Collider& pc = proxies.colliders[i];
+                glm::vec3 pieceNormal(0.0f);
+                float pieceT = -1.0f;
+                if (pc.shape == ColliderShape::Sphere) {
+                    pieceT = RaySphere(ray.origin, d, pt.position, pc.radius, pieceNormal);
+                } else if (pc.shape == ColliderShape::Capsule) {
+                    const glm::vec3 up = glm::mat3_cast(pt.rotation) * glm::vec3(0.0f, 1.0f, 0.0f);
+                    const glm::vec3 h = up * pc.halfHeight;
+                    pieceT = RayCapsule(ray.origin, d, pt.position - h, pt.position + h, pc.radius, pieceNormal);
+                } else {
+                    OBB piece; piece.center = pt.position;
+                    const glm::mat3 R = glm::mat3_cast(pt.rotation);
+                    piece.axis[0] = R[0]; piece.axis[1] = R[1]; piece.axis[2] = R[2];
+                    piece.ext = pc.halfExtents;
+                    pieceT = RayBox(ray.origin, d, piece, pieceNormal);
+                }
+                if (pieceT >= 0.0f && (hitT < 0.0f || pieceT < hitT)) {
+                    hitT = pieceT;
+                    n = pieceNormal;
+                }
+            }
         } else { // Box
             OBB o; o.center = t.position;
             const glm::mat3 R = glm::mat3_cast(t.rotation);
@@ -1141,6 +1415,124 @@ RaycastHit PhysicsWorld::Raycast(ecs::Registry& reg, const Ray& ray, float maxDi
 
     if (!best.hit) best.distance = 0.0f;
     return best;
+}
+
+RaycastHit PhysicsWorld::SphereCast(ecs::Registry& reg,
+                                    const glm::vec3& start,
+                                    const glm::vec3& end,
+                                    float radius,
+                                    Entity ignored,
+                                    std::uint32_t layerMask) const {
+    RaycastHit result;
+    const glm::vec3 travel = end - start;
+    const float distance = glm::length(travel);
+    if (distance < 1e-6f) return result;
+
+    float bestToi = 1.0f;
+    glm::vec3 bestNormal(0.0f);
+    Entity bestEntity = ecs::kNull;
+    const float sweepRadius = std::max(radius, 0.0f);
+
+    reg.view<Transform, Collider>().each([&](Entity entity, Transform& transform, Collider& collider) {
+        if (entity == ignored || collider.isTrigger) return;
+        if ((collider.layer & layerMask) == 0u) return;    // filtered out by the query mask
+
+        float toi = 1.0f;
+        glm::vec3 normal(0.0f);
+        if (collider.shape == ColliderShape::Plane) {
+            toi = SweptSpherePlane(start, end, sweepRadius,
+                                   collider.planeNormal, collider.planeOffset, normal);
+        } else if (collider.shape == ColliderShape::Sphere) {
+            toi = SweptSphereSphere(start, end, sweepRadius,
+                                    transform.position, collider.radius, normal);
+        } else {
+            OBB box;
+            box.center = transform.position;
+            const glm::mat3 rotation = glm::mat3_cast(transform.rotation);
+            box.axis[0] = rotation[0];
+            box.axis[1] = rotation[1];
+            box.axis[2] = rotation[2];
+            box.ext = collider.halfExtents;
+            if (collider.shape == ColliderShape::Capsule) {
+                box.ext = glm::vec3(collider.radius,
+                                    collider.radius + collider.halfHeight,
+                                    collider.radius);
+            }
+            toi = SweptSphereBox(start, end, sweepRadius, box, normal);
+        }
+
+        if (toi < bestToi) {
+            bestToi = toi;
+            bestNormal = normal;
+            bestEntity = entity;
+        }
+    });
+
+    if (bestEntity == ecs::kNull) return result;
+    result.hit = true;
+    result.entity = bestEntity;
+    result.distance = distance * bestToi;
+    result.point = start + travel * bestToi;
+    result.normal = bestNormal;
+    return result;
+}
+
+std::vector<ecs::Entity> PhysicsWorld::OverlapSphere(ecs::Registry& reg,
+                                                     const glm::vec3& center, float radius,
+                                                     std::uint32_t layerMask) const {
+    std::vector<ecs::Entity> hits;
+    const float r = std::max(radius, 0.0f);
+    reg.view<Transform, Collider>().each([&](Entity e, Transform& t, Collider& c) {
+        if ((c.layer & layerMask) == 0u) return;
+        // Overlap the query sphere (radius r) against the collider by closest-point.
+        bool overlap = false;
+        if (c.shape == ColliderShape::Sphere) {
+            const glm::vec3 d = t.position - center;
+            overlap = glm::dot(d, d) <= (r + c.radius) * (r + c.radius);
+        } else if (c.shape == ColliderShape::Plane) {
+            overlap = std::fabs(glm::dot(c.planeNormal, center) - c.planeOffset) <= r;
+        } else if (c.shape == ColliderShape::Capsule) {
+            const glm::vec3 up = glm::mat3_cast(t.rotation) * glm::vec3(0.0f, 1.0f, 0.0f);
+            const glm::vec3 h = up * c.halfHeight;
+            const glm::vec3 cp = ClosestOnSeg(t.position - h, t.position + h, center);
+            const glm::vec3 d = center - cp;
+            overlap = glm::dot(d, d) <= (r + c.radius) * (r + c.radius);
+        } else {
+            // Box (and composite shapes conservatively via their world AABB): closest
+            // point on the OBB to the query centre.
+            OBB o; o.center = t.position;
+            const glm::mat3 R = glm::mat3_cast(t.rotation);
+            o.axis[0] = R[0]; o.axis[1] = R[1]; o.axis[2] = R[2];
+            o.ext = c.halfExtents;
+            const glm::vec3 dloc = center - o.center;
+            glm::vec3 local(glm::dot(dloc, o.axis[0]), glm::dot(dloc, o.axis[1]), glm::dot(dloc, o.axis[2]));
+            const glm::vec3 clamped = glm::clamp(local, -o.ext, o.ext);
+            const glm::vec3 closest = o.center
+                + clamped[0] * o.axis[0] + clamped[1] * o.axis[1] + clamped[2] * o.axis[2];
+            const glm::vec3 d = center - closest;
+            overlap = glm::dot(d, d) <= r * r;
+        }
+        if (overlap) hits.push_back(e);
+    });
+    return hits;
+}
+
+void PhysicsWorld::ApplyRadialImpulse(ecs::Registry& reg, const glm::vec3& center,
+                                      float radius, float strength,
+                                      std::uint32_t layerMask) const {
+    if (radius <= 0.0f) return;
+    reg.view<Transform, RigidBody>().each([&](Entity e, Transform& t, RigidBody& rb) {
+        if (rb.invMass <= 0.0f || rb.kinematic) return;
+        if (const Collider* c = reg.TryGet<Collider>(e))
+            if ((c->layer & layerMask) == 0u) return;
+        const glm::vec3 d = t.position - center;
+        const float dist = glm::length(d);
+        if (dist > radius) return;
+        const glm::vec3 dir = (dist > 1e-4f) ? d / dist : glm::vec3(0.0f, 1.0f, 0.0f);
+        const float falloff = 1.0f - dist / radius;
+        rb.velocity += dir * (strength * falloff * rb.invMass);
+        rb.sleeping = false; rb.sleepTimer = 0.0f;
+    });
 }
 
 } // namespace engine

@@ -75,6 +75,10 @@ struct AnimatedModel {
     void PlayAction(int clip, std::vector<float> mask = {}, std::vector<AnimEvent> events = {},
                     float fadeIn = 0.1f, float fadeOut = 0.2f, float speed = 1.0f);
     bool ActionPlaying() const { return action.active; }
+    // Full-body actions behave like non-layered montages: gameplay locomotion is
+    // held until the clip finishes. A non-empty bone mask is layered and does not
+    // block movement, allowing upper-body actions while walking or running.
+    bool BlocksMovement() const { return action.active && action.mask.empty(); }
 };
 
 // Advance every AnimatedModel's controller (+ action layer) by dt and recompute its

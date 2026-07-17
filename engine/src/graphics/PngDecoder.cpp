@@ -97,7 +97,7 @@ std::vector<unsigned char> Inflate(const unsigned char* data, std::size_t len) {
             for (int i = 0;   i < 144; ++i) ll[i] = 8;
             for (int i = 144; i < 256; ++i) ll[i] = 9;
             for (int i = 256; i < 280; ++i) ll[i] = 7;
-            for (int i = 288; i < 288; ++i) ll[i] = 8;
+            for (int i = 280; i < 288; ++i) ll[i] = 8;
             lit.build(ll);
             dist.build(std::vector<int>(30, 5));
         } else if (type == 2) {                             // dynamic Huffman
@@ -181,32 +181,33 @@ Image DecodePNGFromMemeory(const unsigned char* data, std::size_t size) {
     while (pos + 8 <= buf.size()) {
         const std::uint32_t len = be32(&buf[pos]);
         const char* type = reinterpret_cast<const char*>(&buf[pos + 4]);
-        const std::size_t data = pos + 8;
-        if (data + len > buf.size()) throw std::runtime_error("PNG: truncated chunk");
+        const std::size_t chunkData = pos + 8;
+        if (chunkData + len > buf.size()) throw std::runtime_error("PNG: truncated chunk");
 
         if (std::string(type, 4) == "IHDR") {
-            width     = static_cast<int>(be32(&buf[data]));
-            height    = static_cast<int>(be32(&buf[data + 4]));
-            bitDepth  = buf[data + 8];
-            colorType = buf[data + 9];
-            interlace = buf[data + 12];
+            width     = static_cast<int>(be32(&buf[chunkData]));
+            height    = static_cast<int>(be32(&buf[chunkData + 4]));
+            bitDepth  = buf[chunkData + 8];
+            colorType = buf[chunkData + 9];
+            interlace = buf[chunkData + 12];
         } else if (std::string(type, 4) == "PLTE") {
-            palette.assign(buf.begin() + data, buf.begin() + data + len);
+            palette.assign(buf.begin() + chunkData, buf.begin() + chunkData + len);
         } else if (std::string(type, 4) == "tRNS") {
-            trns.assign(buf.begin() + data, buf.begin() + data + len);
+            trns.assign(buf.begin() + chunkData, buf.begin() + chunkData + len);
         } else if (std::string(type, 4) == "IDAT") {
-            idat.insert(idat.end(), buf.begin() + data, buf.begin() + data + len);
+            idat.insert(idat.end(), buf.begin() + chunkData, buf.begin() + chunkData + len);
         } else if (std::string(type, 4) == "IEND") {
             break;
         }
-        pos = data + len + 4;   // skip data + CRC
+        pos = chunkData + len + 4;   // skip data + CRC
     }
 
     if (width <= 0 || height <= 0) throw std::runtime_error("PNG: bad dimensions");
     const bool packedOk = (colorType == 0 || colorType == 3) &&
                           (bitDepth == 1 || bitDepth == 2 || bitDepth == 4);
-    if (!(bitDepth == 8 || packedOk))
-        throw std::runtime_error("PNG: unsurpported bit deph (need 8, or 1/2/4 for gray/palette)");
+    const bool sixteenBitOk = bitDepth == 16 && colorType != 3;
+    if (!(bitDepth == 8 || sixteenBitOk || packedOk))
+        throw std::runtime_error("PNG: unsupported bit depth (supports 16/8-bit, or 1/2/4-bit gray/palette)");
     if (interlace != 0) throw std::runtime_error("PNG: interlaced PNG not supported");
     if (idat.size() < 2) throw std::runtime_error("PNG: missing image data");
 
@@ -255,16 +256,25 @@ Image DecodePNGFromMemeory(const unsigned char* data, std::size_t size) {
         }
     }
 
-    // Expand to RGBA. sampleAt reads one channel value at pixel x, unpacking
-    // sub-byte samples for 1/2/4-bit gray/palette images.
+    // Expand to RGBA. PNG stores 16-bit samples most-significant byte first.
+    // Filtering has already reconstructed both bytes, so sampleAt combines them
+    // before the value is rounded down to the engine's 8-bit texture format.
     auto sampleAt = [&](const unsigned char* row, int x, int ch) -> int {
         if (bitDepth == 8) return row[static_cast<std::size_t>(x) * channels + ch];
+        if (bitDepth == 16) {
+            const std::size_t offset = (static_cast<std::size_t>(x) * channels + ch) * 2;
+            return (static_cast<int>(row[offset]) << 8) | row[offset + 1];
+        }
         const int bitPos = x * bitDepth;                 // channels == 1 when packed
         const int byte   = row[bitPos / 8];
         const int shift  = 8 - bitDepth - (bitPos % 8);
         return (byte >> shift) & ((1 << bitDepth) - 1);
     };
     const int maxVal = (1 << bitDepth) - 1;
+    auto toByte = [&](int sample) -> unsigned char {
+        if (bitDepth == 8) return static_cast<unsigned char>(sample);
+        return static_cast<unsigned char>((sample * 255 + maxVal / 2) / maxVal);
+    };
 
     Image img;
     img.width  = width;
@@ -278,24 +288,23 @@ Image DecodePNGFromMemeory(const unsigned char* data, std::size_t size) {
             switch (colorType) {
             case 0: {   // grayscale (any supported depth)
                 const int s0 = sampleAt(row, x, 0);
-                const int v  = (bitDepth == 8) ? s0 : s0 * 255 / maxVal;
-                r = g = b = static_cast<unsigned char>(v);
+                r = g = b = toByte(s0);
                 break;
             }
-            case 2: {   // RGB (8-bit)
-                r = row[static_cast<std::size_t>(x) * 3];
-                g = row[static_cast<std::size_t>(x) * 3 + 1];
-                b = row[static_cast<std::size_t>(x) * 3 + 2];
+            case 2: {   // RGB (8/16-bit)
+                r = toByte(sampleAt(row, x, 0));
+                g = toByte(sampleAt(row, x, 1));
+                b = toByte(sampleAt(row, x, 2));
                 break;
             }
-            case 4: {   // grayscale + alpha (8-bit)
-                r = g = b = row[static_cast<std::size_t>(x) * 2];
-                a = row[static_cast<std::size_t>(x) * 2 + 1];
+            case 4: {   // grayscale + alpha (8/16-bit)
+                r = g = b = toByte(sampleAt(row, x, 0));
+                a = toByte(sampleAt(row, x, 1));
                 break;
             }
-            case 6: {   // RGBA (8-bit)
-                const unsigned char* p = &row[static_cast<std::size_t>(x) * 4];
-                r = p[0]; g = p[1]; b = p[2]; a = p[3];
+            case 6: {   // RGBA (8/16-bit)
+                r = toByte(sampleAt(row, x, 0)); g = toByte(sampleAt(row, x, 1));
+                b = toByte(sampleAt(row, x, 2)); a = toByte(sampleAt(row, x, 3));
                 break;
             }
             case 3: {   // palette index (any supported depth)

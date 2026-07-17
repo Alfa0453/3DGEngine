@@ -16,8 +16,8 @@ namespace ecs { class Registry; }
 
 // Lighting context for the PBR skinned pass -- mirrors the subset of
 // PbrRenderer::Options that skinned characters use, so they match the world.
-// `cascade` and `ibl` are REQUIRED by DrawScene (they come from the PBR pass) so
-// the shadow-array and IBL cubemap samplers are always bound to valid textures.
+// `cascade` is required by DrawScene and comes from the PBR pass. `ibl` is
+// optional so animated objects continue to render in environments with IBL off.
 struct SkinnedLighting {
     glm::vec3 sunDir{0.0f, -1.0f, 0.0f};
     glm::vec3 sunColor{1.0f};

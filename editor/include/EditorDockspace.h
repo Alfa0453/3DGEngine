@@ -9,10 +9,17 @@
 #include "EditorScene.h"
 
 #include <engine/assets/RuntimeAssetManager.h>
+#include <engine/audio/AudioEngine.h>
+#include <engine/graphics/CameraShake.h>
 
 #include <cstddef>
+#include <array>
 #include <string>
 #include <vector>
+
+namespace engine {
+class Camera;
+}
 
 class EditorDockspace {
 public:
@@ -136,6 +143,27 @@ public:
         const EditorProject* project = nullptr;
         EditorLog* log = nullptr;
         EditorGizmo* gizmo = nullptr;
+        engine::Camera* camera = nullptr;
+        bool cameraBlendRequested = false;
+        EditorScene::CameraPreset cameraBlendPreset;
+        bool cameraShakeRequested = false;
+        bool cameraShakeStopRequested = false;
+        bool cameraShakeActive = false;
+        engine::CameraShakeSettings cameraShakeSettings;
+        bool cameraSequencePlayRequested = false;
+        bool cameraSequenceStopRequested = false;
+        bool cameraSequenceActive = false;
+        bool cameraSequenceInputLocked = false;
+        bool cameraSequenceSkippable = false;
+        std::string cameraSequenceActiveName;
+        EditorScene::CameraSequence cameraSequence;
+        bool* showCameraRails = nullptr;
+        float cameraSequenceTime = 0.0f;
+        float cameraSequenceDuration = 0.0f;
+        bool cameraSequencePaused = false;
+        bool cameraSequencePauseToggleRequested = false;
+        bool cameraSequenceSeekRequested = false;
+        float cameraSequenceSeekTime = 0.0f;
         const char* modeName = "Edit";
         bool playMode = false;
         bool physicsPaused = false;
@@ -152,13 +180,36 @@ public:
         GameplayDebugState gameplayDebug;
         AnimationPreviewState animationPreview;
         bool* showPhysicsEventGuides = nullptr;
+        bool* showAiDebug = nullptr;
+        bool* useNavMesh = nullptr;
+        bool*  terrainSculpt = nullptr;
+        int*   terrainSculptMode = nullptr;
+        int*   terrainPaintLayer = nullptr;
+        float* terrainBrushRadius = nullptr;
+        float* terrainBrushStrength = nullptr;
+        bool* showNavigationPreview = nullptr;
+        bool* showParticleDebug = nullptr;
+        bool* particleDebugSelectedOnly = nullptr;
+        bool* particleDebugShapes = nullptr;
+        bool* particleDebugDirections = nullptr;
+        bool* particleDebugBounds = nullptr;
+        bool* particleDebugCullingState = nullptr;
+        int navigationPreviewPolygons = 0;
+        bool rebuildNavigationPreviewRequested = false;
         bool* physicsEventGuidesSelectedOnly = nullptr;
         bool* physicsEventGuidesTriggersOnly = nullptr;
         bool* physicsEventGuidesEnterExitOnly = nullptr;
         bool clearPhysicsEventGuidesRequested = false;
+        bool vsync = false;                  // current window vsync (filled by the app)
+        bool vsyncChangeRequested = false;   // set by the World Settings checkbox
         char* scenePathBuffer = nullptr;
         std::size_t scenePathBufferSize = 0;
         float fps = 0.0f;
+        int particleDrawCalls = 0;
+        int particleCulledEmitters = 0;
+        std::size_t particleRenderedCount = 0;
+        double particleCpuMilliseconds = 0.0;
+        double particleGpuMilliseconds = 0.0;
         float* animationPreviewTime = nullptr;
         int* animationActionClip = nullptr;
         float* animationActionFadeIn = nullptr;
@@ -167,6 +218,40 @@ public:
         char* animationActionMaskRoot = nullptr;
         std::size_t animationActionMaskRootSize = 0;
         bool animationActionRequested = false;
+        bool audioAvailable = false;
+        bool previewAudioRequested = false;
+        bool stopAudioPreviewRequested = false;
+        std::string previewAudioPath;
+        float previewAudioVolume = 1.0f;
+        float previewAudioPitch = 1.0f;
+        bool previewAudioSpatial = false;
+        bool previewAudioLoop = false;
+        float previewAudioMinDistance = 1.0f;
+        float previewAudioMaxDistance = 40.0f;
+        float previewAudioRolloff = 1.0f;
+        engine::AudioBus previewAudioBus = engine::AudioBus::SFX;
+        std::array<float, static_cast<std::size_t>(engine::AudioBus::Count)> audioBusVolumes{};
+        std::array<bool, static_cast<std::size_t>(engine::AudioBus::Count)> audioBusMuted{};
+        std::array<engine::AudioBusEffects, static_cast<std::size_t>(engine::AudioBus::Count)> audioBusEffects{};
+        engine::AudioSnapshotPreset activeAudioSnapshot = engine::AudioSnapshotPreset::Default;
+        engine::AudioSnapshotPreset requestedAudioSnapshot = engine::AudioSnapshotPreset::Default;
+        bool audioSnapshotRequested = false;
+        float audioSnapshotTransition = 0.25f;
+        bool dialogueDucking = true;
+        engine::AudioEngine::DebugStats audioDebugStats{};
+        engine::AudioEngine::DeviceInfo audioDeviceInfo{};
+        std::size_t audioMaxVoices = 64;
+        bool audioMaxVoicesChanged = false;
+        bool saveAudioMixerPresetRequested = false;
+        bool loadAudioMixerPresetRequested = false;
+        std::array<char, 320> audioMixerPresetPath{};
+        bool selectedRuntimeAudioAvailable = false;
+        bool selectedRuntimeAudioPlaying = false;
+        bool selectedRuntimeAudioPaused = false;
+        float selectedRuntimeAudioCursor = 0.0f;
+        bool runtimeAudioRestartRequested = false;
+        bool runtimeAudioPauseResumeRequested = false;
+        bool runtimeAudioStopRequested = false;
         std::unordered_map<std::string, float>* animationPreviewParameters = nullptr;
         bool sceneDirty = false;
         bool viewportDropRequested = false;
@@ -181,12 +266,23 @@ public:
         bool undoRequested = false;
         bool redoRequested = false;
         int recentSceneRequested = -1;
+        std::string sceneAssetOpenRequested;
         bool addCubeRequested = false;
         bool addPlaneRequested = false;
         bool addSphereRequested = false;
+        bool addCapsuleRequested = false;
+        bool addConfiguredPrimitiveRequested = false;
+        EditorScene::Primitive configuredPrimitive = EditorScene::Primitive::Cube;
+        std::string configuredPrimitiveName;
+        engine::ecs::Transform configuredPrimitiveTransform;
+        bool configuredPrimitiveColliderEnabled = false;
+        engine::ecs::Collider configuredPrimitiveCollider;
         bool addDynamicCubeRequested = false;
         bool addStaticFloorRequested = false;
+        bool addTerrainRequested = false;
+        bool addWaterRequested = false;
         bool addTriggerVolumeRequested = false;
+        bool addNavMeshBoundsVolumeRequested = false;
         bool addPlayerStartRequested = false;
         bool addDoorRequested = false;
         bool addPickupRequested = false;

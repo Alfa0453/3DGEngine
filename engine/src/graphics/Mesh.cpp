@@ -71,6 +71,12 @@ void Mesh::Draw() const
     glBindVertexArray(m_vao);
     glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(m_indexCount), GL_UNSIGNED_INT, nullptr);
 }
+void Mesh::UpdateVertices(const std::vector<float>& vertices)
+{
+    glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
+    glBufferSubData(GL_ARRAY_BUFFER, 0,
+                    static_cast<GLsizeiptr>(vertices.size() * sizeof(float)), vertices.data());
+}
 void Mesh::Release()
 {
     // glDelete* ignore 0, but guarding makes the intent explicit.

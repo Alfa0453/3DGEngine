@@ -44,6 +44,18 @@ void ParticleDemoApp::OnInit() {
     m_ibl->Generate([&](const glm::mat4& v, const glm::mat4& p) { m_sky->Draw(v, p, m_sample, false); });
 
     BuildScene();
+    if (engine::IsGpuParticleConfigurationSupported(m_magic.cfg)) {
+        m_gpuMagic = std::make_unique<engine::GpuParticleEmitter>();
+        if (m_gpuMagic->Prepare(m_magic.cfg)) {
+            m_gpuMagic->Reset(m_magic.cfg, m_magic.position);
+            engine::ParticleCollisionShape ground;
+            ground.type = engine::ParticleCollisionShape::Type::Plane;
+            ground.normal = glm::vec3(0, 1, 0);
+            ground.offset = 0.0f;
+            m_gpuMagic->Prewarm(m_magic.cfg, m_magic.position, 2.0f, 24, 0.5f,
+                std::vector<engine::ParticleCollisionShape>{ground});
+        } else m_gpuMagic.reset();
+    }
     GetWindow().SetCursorCaptured(false);
 }
 
@@ -83,6 +95,24 @@ void ParticleDemoApp::BuildScene() {
     m_magic.cfg.startColor = glm::vec4(0.3f, 1.4f, 2.2f, 1.0f);
     m_magic.cfg.endColor   = glm::vec4(1.6f, 0.3f, 2.0f, 0.0f);
     m_magic.cfg.startSize = 0.22f; m_magic.cfg.endSize = 0.02f;
+    m_magic.cfg.useSizeCurve = true;
+    m_magic.cfg.sizeCurve = {{0.0f, 1.0f, 0.55f, 1.0f}};
+    m_magic.cfg.useColorCurve = true;
+    m_magic.cfg.colorCurve = {{0.0f, 0.18f, 0.75f, 1.0f}};
+    m_magic.cfg.collisionEnabled = true;
+    m_magic.cfg.collisionRadius = 0.03f;
+    m_magic.cfg.collisionBounce = 0.55f;
+    m_magic.cfg.collisionFriction = 0.12f;
+    m_magic.cfg.trailsEnabled = true;
+    m_magic.cfg.trailSegments = 10;
+    m_magic.cfg.trailLength = 1.4f;
+    m_magic.cfg.trailWidth = 0.09f;
+    m_magic.cfg.trailOpacity = 0.7f;
+    m_magic.cfg.renderMode = engine::ParticleRenderMode::Mesh;
+    m_magic.cfg.meshShape = engine::ParticleMeshShape::Model;
+    m_magic.cfg.meshPath = "assets/models/MagicStaffs/Staff01SM.FBX";
+    m_magic.cfg.meshScale = 0.025f;
+    m_magic.cfg.meshAlignToVelocity = true;
     m_magic.cfg.blend = ParticleBlend::Additive;
 
     // Fire on the left pedestal: orange -> red, additive.
@@ -144,7 +174,19 @@ void ParticleDemoApp::OnUpdate(float dt) {
     m_camPitch = glm::clamp(m_camPitch, 0.05f, 1.4f);
     m_camDist  = glm::clamp(m_camDist, 4.0f, 40.0f);
 
-    m_magic.Update(dt);
+    if (m_gpuMagic) {
+        m_gpuMagicSpawn += m_magic.cfg.rate * std::max(dt, 0.0f);
+        const int spawn = static_cast<int>(m_gpuMagicSpawn);
+        m_gpuMagicSpawn -= static_cast<float>(spawn);
+        engine::ParticleCollisionShape ground;
+        ground.type = engine::ParticleCollisionShape::Type::Plane;
+        ground.normal = glm::vec3(0, 1, 0);
+        ground.offset = 0.0f;
+        m_gpuMagic->Update(m_magic.cfg, m_magic.position, glm::vec3(0.0f), false, dt, spawn,
+                           std::vector<engine::ParticleCollisionShape>{ground});
+    } else {
+        m_magic.Update(dt);
+    }
     m_fire.Update(dt);
     m_smoke.Update(dt);
     m_sparks.Update(dt);
@@ -173,7 +215,8 @@ void ParticleDemoApp::OnRender() {
 
     // Particles into the HDR buffer (after opaques + sky) -> bloom picks up the glow.
     m_particles->Draw(m_smoke, cam, aspect);   // alpha first
-    m_particles->Draw(m_magic, cam, aspect);
+    if (m_gpuMagic) m_gpuMagic->Draw(m_magic.cfg, cam, aspect);
+    else m_particles->Draw(m_magic, cam, aspect);
     m_particles->Draw(m_fire,  cam, aspect);
     m_particles->Draw(m_sparks, cam, aspect);
 
@@ -182,7 +225,8 @@ void ParticleDemoApp::OnRender() {
     const int ww = w.Width(), hh = w.Height();
     m_text->Begin(ww, hh);
     char buf[128];
-    const std::size_t total = m_magic.Alive() + m_fire.Alive() + m_smoke.Alive() + m_sparks.Alive();
+    const std::size_t magicAlive = m_gpuMagic ? m_gpuMagic->Alive() : m_magic.Alive();
+    const std::size_t total = magicAlive + m_fire.Alive() + m_smoke.Alive() + m_sparks.Alive();
     std::snprintf(buf, sizeof(buf), "PARTICLES   live %zu   %.0f fps", total, m_fps);
     m_text->Text(buf, 24.0f, 22.0f, 2.0f, glm::vec3(1.0f));
     m_text->Text("SPACE spark burst   arrows orbit   Z/X zoom   Esc quit",

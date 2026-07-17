@@ -1,5 +1,7 @@
 #include "EditorApp.h"
 
+#include <engine/core/HighPerformanceGPU.h>
+
 #include <engine/core/Config.h>
 
 int main() {

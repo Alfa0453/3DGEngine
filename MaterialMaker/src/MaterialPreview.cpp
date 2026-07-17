@@ -9,8 +9,11 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <exception>
+#include <filesystem>
+#include <stdexcept>
 #include <utility>
 
 namespace material_maker {
@@ -29,12 +32,17 @@ const char* kDebugVert = R"GLSL(
 #version 330 core
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec2 aUV;
 uniform mat4 uModel;
 uniform mat4 uViewProj;
 out vec3 vNormal;
+out vec3 vPosition;
+out vec2 vUV;
 void main() {
     vNormal = mat3(uModel) * aNormal;
-    gl_Position = uViewProj * uModel * vec4(aPos, 1.0);
+    vPosition = vec3(uModel * vec4(aPos, 1.0));
+    vUV = aUV;
+    gl_Position = uViewProj * vec4(vPosition, 1.0);
 }
 )GLSL";
 
@@ -42,22 +50,97 @@ void main() {
 const char* kDebugFrag = R"GLSL(
 #version 330 core
 in vec3 vNormal;
+in vec3 vPosition;
+in vec2 vUV;
 uniform int   uChannel;
 uniform vec3  uAlbedo;
 uniform float uMetallic;
 uniform float uRoughness;
 uniform float uAo;
+uniform vec2 uUvScale;
+uniform vec2 uUvOffset;
+uniform float uUvRotation;
+uniform float uNormalStrength;
+uniform int uHasAlbedoMap;
+uniform int uHasNormalMap;
+uniform int uHasMetalRoughMap;
+uniform sampler2D uAlbedoMap;
+uniform sampler2D uNormalMap;
+uniform sampler2D uMetalRoughMap;
 out vec4 FragColor;
+mat3 cotangentFrame(vec3 N, vec3 p, vec2 uv) {
+    vec3 dp1 = dFdx(p), dp2 = dFdy(p);
+    vec2 duv1 = dFdx(uv), duv2 = dFdy(uv);
+    vec3 dp2perp = cross(dp2, N), dp1perp = cross(N, dp1);
+    vec3 T = dp2perp * duv1.x + dp1perp * duv2.x;
+    vec3 B = dp2perp * duv1.y + dp1perp * duv2.y;
+    float invmax = inversesqrt(max(dot(T, T), dot(B, B)));
+    return mat3(T * invmax, B * invmax, N);
+}
 void main() {
+    float angle = radians(uUvRotation);
+    vec2 centered = vUV * uUvScale - vec2(0.5);
+    vec2 uv = mat2(cos(angle), -sin(angle), sin(angle), cos(angle)) * centered + vec2(0.5) + uUvOffset;
+    vec3 albedo = uAlbedo;
+    if (uHasAlbedoMap == 1) albedo *= texture(uAlbedoMap, uv).rgb;
+    vec3 mr = (uHasMetalRoughMap == 1) ? texture(uMetalRoughMap, uv).rgb : vec3(1.0);
+    vec3 normal = normalize(vNormal);
+    if (uHasNormalMap == 1) {
+        vec3 tangentNormal = texture(uNormalMap, uv).rgb * 2.0 - 1.0;
+        tangentNormal.xy *= uNormalStrength;
+        normal = normalize(cotangentFrame(normal, vPosition, uv) * normalize(tangentNormal));
+    }
     vec3 c;
-    if      (uChannel == 0) c = uAlbedo;
-    else if (uChannel == 1) c = vec3(uMetallic);
-    else if (uChannel == 2) c = vec3(uRoughness);
-    else if (uChannel == 3) c = vec3(uAo);
-    else                    c = normalize(vNormal) * 0.5 + 0.5;
+    if      (uChannel == 0) c = albedo;
+    else if (uChannel == 1) c = vec3(uMetallic * mr.b);
+    else if (uChannel == 2) c = vec3(uRoughness * mr.g);
+    else if (uChannel == 3) c = vec3(uAo * mr.r);
+    else                    c = normal * 0.5 + 0.5;
     FragColor = vec4(c, 1.0);
 }
+
 )GLSL";
+
+struct GLStateGuard {
+    GLint framebuffer = 0, viewport[4]{}, program = 0, vao = 0, arrayBuffer = 0, activeTexture = 0;
+    GLint depthFunc = GL_LESS;
+    GLfloat clearColor[4]{};
+    GLboolean depthMask = GL_TRUE;
+    GLboolean depth = GL_FALSE, blend = GL_FALSE, cull = GL_FALSE, scissor = GL_FALSE;
+    std::array<GLint, 24> texture2D{}, texture2DArray{}, textureCube{};
+    GLStateGuard() {
+        glGetIntegerv(GL_FRAMEBUFFER_BINDING, &framebuffer); glGetIntegerv(GL_VIEWPORT, viewport);
+        glGetIntegerv(GL_CURRENT_PROGRAM, &program); glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &vao);
+        glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &arrayBuffer);
+        glGetIntegerv(GL_ACTIVE_TEXTURE, &activeTexture); glGetIntegerv(GL_DEPTH_FUNC, &depthFunc);
+        glGetFloatv(GL_COLOR_CLEAR_VALUE, clearColor); glGetBooleanv(GL_DEPTH_WRITEMASK, &depthMask);
+        depth = glIsEnabled(GL_DEPTH_TEST); blend = glIsEnabled(GL_BLEND);
+        cull = glIsEnabled(GL_CULL_FACE); scissor = glIsEnabled(GL_SCISSOR_TEST);
+        for (std::size_t i = 0; i < texture2D.size(); ++i) {
+            glActiveTexture(GL_TEXTURE0 + static_cast<GLenum>(i));
+            glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture2D[i]);
+            glGetIntegerv(GL_TEXTURE_BINDING_2D_ARRAY, &texture2DArray[i]);
+            glGetIntegerv(GL_TEXTURE_BINDING_CUBE_MAP, &textureCube[i]);
+        }
+    }
+    ~GLStateGuard() {
+        for (std::size_t i = 0; i < texture2D.size(); ++i) {
+            glActiveTexture(GL_TEXTURE0 + static_cast<GLenum>(i));
+            glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(texture2D[i]));
+            glBindTexture(GL_TEXTURE_2D_ARRAY, static_cast<GLuint>(texture2DArray[i]));
+            glBindTexture(GL_TEXTURE_CUBE_MAP, static_cast<GLuint>(textureCube[i]));
+        }
+        glActiveTexture(static_cast<GLenum>(activeTexture)); glUseProgram(static_cast<GLuint>(program));
+        glBindVertexArray(static_cast<GLuint>(vao));
+        glBindBuffer(GL_ARRAY_BUFFER, static_cast<GLuint>(arrayBuffer));
+        glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(framebuffer));
+        glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+        glClearColor(clearColor[0], clearColor[1], clearColor[2], clearColor[3]);
+        glDepthFunc(static_cast<GLenum>(depthFunc)); glDepthMask(depthMask);
+        Set(GL_DEPTH_TEST, depth); Set(GL_BLEND, blend); Set(GL_CULL_FACE, cull); Set(GL_SCISSOR_TEST, scissor);
+    }
+    static void Set(GLenum capability, GLboolean enabled) { enabled ? glEnable(capability) : glDisable(capability); }
+};
 
 int ChannelUniform(MaterialPreview::Channel ch) {
     switch (ch) {
@@ -144,10 +227,22 @@ MaterialPreview::MapInfo MaterialPreview::AcquireMap(const std::string& path) {
     if (path.empty()) {
         return MapInfo{};
     }
+    std::error_code ec;
+    const bool exists = std::filesystem::is_regular_file(path, ec);
+    const auto writeTime = exists ? std::filesystem::last_write_time(path, ec)
+                                  : std::filesystem::file_time_type{};
+    ec.clear();
+    const std::uintmax_t fileSize = exists ? std::filesystem::file_size(path, ec) : 0;
     auto it = m_textures.find(path);
-    if (it == m_textures.end()) {
+    const bool stale = it == m_textures.end() || it->second->exists != exists ||
+                       it->second->writeTime != writeTime || it->second->fileSize != fileSize;
+    if (stale) {
         auto cached = std::make_unique<CachedTexture>();
+        cached->exists = exists;
+        cached->writeTime = writeTime;
+        cached->fileSize = fileSize;
         try {
+            if (!exists) throw std::runtime_error("Texture file does not exist: " + path);
             cached->texture.emplace(path, /*smooth=*/true);
             cached->info.textureId = cached->texture->ID();
             cached->info.width     = cached->texture->Width();
@@ -157,7 +252,8 @@ MaterialPreview::MapInfo MaterialPreview::AcquireMap(const std::string& path) {
             cached->info.ok    = false;
             cached->info.error = e.what();
         }
-        it = m_textures.emplace(path, std::move(cached)).first;
+        if (it == m_textures.end()) it = m_textures.emplace(path, std::move(cached)).first;
+        else it->second = std::move(cached);
     }
     return it->second->info;
 }
@@ -190,10 +286,43 @@ void MaterialPreview::RenderChannel(const PbrMaterial& material, const Settings&
     m_debug->SetFloat("uMetallic", material.metallic);
     m_debug->SetFloat("uRoughness", material.roughness);
     m_debug->SetFloat("uAo", material.ao);
+    m_debug->SetVec2("uUvScale", material.uvScale); m_debug->SetVec2("uUvOffset", material.uvOffset);
+    m_debug->SetFloat("uUvRotation", material.uvRotation);
+    m_debug->SetFloat("uNormalStrength", material.normalStrength);
+    const engine::Texture* albedo = ResolveMap(settings.albedoMapPath);
+    const engine::Texture* normal = ResolveMap(settings.normalMapPath);
+    const engine::Texture* metalRough = ResolveMap(settings.metalRoughMapPath);
+    m_debug->SetInt("uHasAlbedoMap", albedo ? 1 : 0);
+    m_debug->SetInt("uHasNormalMap", normal ? 1 : 0);
+    m_debug->SetInt("uHasMetalRoughMap", metalRough ? 1 : 0);
+    m_debug->SetInt("uAlbedoMap", 0); m_debug->SetInt("uNormalMap", 1); m_debug->SetInt("uMetalRoughMap", 2);
+    if (albedo) albedo->Bind(0);
+    if (normal) normal->Bind(1);
+    if (metalRough) metalRough->Bind(2);
     mesh->Draw();
 }
 
 unsigned int MaterialPreview::Render(const PbrMaterial& material, const Settings& settings) {
+    GLStateGuard state;
+    if (m_failed) return 0;
+    try {
+        const unsigned int result = RenderUnchecked(material, settings);
+        m_error.clear();
+        return result;
+    } catch (const std::exception& e) {
+        m_error = e.what();
+        m_failed = true;
+        m_ready = false;
+        return 0;
+    } catch (...) {
+        m_error = "Unknown OpenGL preview error.";
+        m_failed = true;
+        m_ready = false;
+        return 0;
+    }
+}
+
+unsigned int MaterialPreview::RenderUnchecked(const PbrMaterial& material, const Settings& settings) {
     EnsureInitialized();
     if (!m_ready) {
         return 0;
@@ -220,6 +349,7 @@ unsigned int MaterialPreview::Render(const PbrMaterial& material, const Settings
     mp.material.albedoMap     = ResolveMap(settings.albedoMapPath);
     mp.material.normalMap     = ResolveMap(settings.normalMapPath);
     mp.material.metalRoughMap = ResolveMap(settings.metalRoughMapPath);
+    mp.material.heightMap     = ResolveMap(settings.heightMapPath);
 
     // Drive the key light from the (rotated) environment sample.
     Light& sun = m_reg.Get<Light>(m_sun);
@@ -244,12 +374,6 @@ unsigned int MaterialPreview::Render(const PbrMaterial& material, const Settings
     cam.LookAt(glm::vec3(0.0f));
     const float aspect = 1.0f;
 
-    // Save prior framebuffer + viewport, render, restore.
-    GLint prevFbo = 0;
-    GLint prevViewport[4] = {0, 0, 0, 0};
-    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFbo);
-    glGetIntegerv(GL_VIEWPORT, prevViewport);
-
     m_fbo->Bind();
     glClearColor(settings.background.r, settings.background.g, settings.background.b, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -271,10 +395,17 @@ unsigned int MaterialPreview::Render(const PbrMaterial& material, const Settings
         RenderChannel(material, settings, viewProj);
     }
 
-    glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prevFbo));
-    glViewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3]);
-
     return m_fbo->ColorTexture();
+}
+
+void MaterialPreview::Retry() {
+    m_textures.clear();
+    m_debug.reset(); m_sky.reset(); m_ibl.reset(); m_pbr.reset(); m_fbo.reset();
+    m_groundMesh.reset(); m_plane.reset(); m_cube.reset(); m_sphere.reset();
+    m_reg = engine::ecs::Registry{};
+    m_object = m_sun = m_ground = engine::ecs::kNull;
+    m_ready = false; m_failed = false; m_error.clear();
+    m_envTime = -1.0f; m_envYaw = -1.0e9f; m_size = 0;
 }
 
 } // namespace material_maker

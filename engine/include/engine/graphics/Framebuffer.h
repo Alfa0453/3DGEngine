@@ -21,11 +21,13 @@ public:
     void Bind() const;                                  // bind + set viewport
     static void BindDefault(int sreenWidth, int screenHeight);
     void BindColorTexture(unsigned int unit) const;
+    void BindDepthTexture(unsigned int unit) const;
     void Resize(int width, int height);
 
     int Width()  const { return m_width; }
     int Height() const { return m_height; }
     unsigned int ColorTexture() const { return m_colorTex; }
+    unsigned int DepthTexture() const { return m_depthTex; }
     unsigned int FboId()        const { return m_fbo; }
 
 private:
@@ -34,7 +36,7 @@ private:
 
     unsigned int m_fbo      = 0;
     unsigned int m_colorTex = 0;
-    unsigned int m_depthRbo = 0;
+    unsigned int m_depthTex = 0;
     int          m_width    = 0;
     int          m_height   = 0;
     unsigned int m_format   = 0;

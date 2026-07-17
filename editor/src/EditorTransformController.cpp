@@ -9,6 +9,8 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 
+#include <cmath>
+
 void EditorTransformController::UpdateKeyboardShortcuts(engine::Window& window,
                                                         EditorScene& scene,
                                                         const EditorGizmo& gizmo,
@@ -66,38 +68,70 @@ void EditorTransformController::ApplyGizmoNudge(EditorScene& scene,
     switch (gizmo.CurrentMode()) {
     case EditorGizmo::Mode::Translate:
         if (const engine::ecs::Transform* transform = scene.SelectedTransform()) {
-            scene.MoveSelected((glm::mat3_cast(transform->rotation) * axis) * (amount * 2.0f));
+            const glm::vec3 directionAxis = gizmo.CurrentSpace() == EditorGizmo::Space::Local
+                ? glm::mat3_cast(transform->rotation) * axis : axis;
+            scene.MoveSelected(directionAxis * (amount * 2.0f));
         }
         break;
     case EditorGizmo::Mode::Rotate:
-        scene.RotateSelected(axis, amount * 90.0f);
+        if (const engine::ecs::Transform* transform = scene.SelectedTransform()) {
+            engine::ecs::Transform edited = *transform;
+            const glm::quat delta = glm::angleAxis(glm::radians(amount * 90.0f), glm::normalize(axis));
+            edited.rotation = glm::normalize(gizmo.CurrentSpace() == EditorGizmo::Space::Local
+                ? edited.rotation * delta : delta * edited.rotation);
+            scene.SetSelectedTransform(edited);
+        }
         break;
     case EditorGizmo::Mode::Scale:
-        scene.ScaleSelectedAxis(axis, 1.0f + amount);
+        if (gizmo.CurrentAxis() == EditorGizmo::Axis::All) scene.ScaleSelected(1.0f + amount);
+        else scene.ScaleSelectedAxis(axis, 1.0f + amount);
         break;
     }
 }
 
-void EditorTransformController::ApplyGizmoDrag(EditorScene& scene, const EditorGizmo& gizmo, float pixels) const {
-    const float amount = pixels * 0.01f;
+void EditorTransformController::ApplyGizmoDrag(EditorScene& scene, const EditorGizmo& gizmo, float pixels) {
     const glm::vec3 axis = gizmo.AxisVector();
+
+    auto snapped = [&](float delta, float increment) {
+        if (!gizmo.SnappingEnabled()) return delta;
+        m_dragRemainder += delta;
+        const float steps = std::trunc(m_dragRemainder / increment);
+        const float applied = steps * increment;
+        m_dragRemainder -= applied;
+        return applied;
+    };
 
     switch (gizmo.CurrentMode()) {
     case EditorGizmo::Mode::Translate:
         if (const engine::ecs::Transform* transform = scene.SelectedTransform()) {
-            scene.MoveSelected((glm::mat3_cast(transform->rotation) * axis) * amount);
+            const float amount = snapped(pixels * 0.01f, gizmo.TranslationSnap());
+            if (amount == 0.0f) break;
+            const glm::vec3 directionAxis = gizmo.CurrentSpace() == EditorGizmo::Space::Local
+                ? glm::mat3_cast(transform->rotation) * axis : axis;
+            scene.MoveSelected(directionAxis * amount);
         }
         break;
     case EditorGizmo::Mode::Rotate:
-        scene.RotateSelected(axis, pixels * 0.35f);
+        if (const engine::ecs::Transform* transform = scene.SelectedTransform()) {
+            const float degrees = snapped(pixels * 0.35f, gizmo.RotationSnap());
+            if (degrees == 0.0f) break;
+            engine::ecs::Transform edited = *transform;
+            const glm::quat delta = glm::angleAxis(glm::radians(degrees), glm::normalize(axis));
+            edited.rotation = glm::normalize(gizmo.CurrentSpace() == EditorGizmo::Space::Local
+                ? edited.rotation * delta : delta * edited.rotation);
+            scene.SetSelectedTransform(edited);
+        }
         break;
     case EditorGizmo::Mode::Scale:
         {
-            float factor = 1.0f + amount * 0.25f;
+            const float scaleDelta = snapped(pixels * 0.0025f, gizmo.ScaleSnap());
+            if (scaleDelta == 0.0f) break;
+            float factor = 1.0f + scaleDelta;
             if (factor < 0.05f) {
                 factor = 0.05f;
             }
-            scene.ScaleSelectedAxis(axis, factor);
+            if (gizmo.CurrentAxis() == EditorGizmo::Axis::All) scene.ScaleSelected(factor);
+            else scene.ScaleSelectedAxis(axis, factor);
         }
         break;
     }

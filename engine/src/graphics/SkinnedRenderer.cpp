@@ -13,9 +13,50 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 #include <string>
+#include <algorithm>
+#include <sstream>
 
 namespace engine {
 namespace {
+
+std::vector<float> ShaderParameterNumbers(std::string value) {
+    std::replace(value.begin(), value.end(), ',', ' ');
+    std::replace(value.begin(), value.end(), '(', ' ');
+    std::replace(value.begin(), value.end(), ')', ' ');
+    std::istringstream input(value);
+    std::vector<float> values;
+    float number = 0.0f;
+    while (input >> number) values.push_back(number);
+    return values;
+}
+
+void UploadMaterialShaderParameters(Shader& shader, const ecs::LoadedMaterialAsset& material) {
+    int textureUnit = 18;
+    for (const auto& entry : material.shaderParameters) {
+        const std::string uniform = "u_" + entry.first;
+        const auto type = material.shaderParameterTypes.find(entry.first);
+        const int valueType = type == material.shaderParameterTypes.end() ? 0 : type->second;
+        if (valueType == 7) {
+            const auto texture = material.shaderTextures.find(entry.first);
+            if (texture != material.shaderTextures.end() && texture->second) {
+                texture->second->Bind(static_cast<unsigned int>(textureUnit));
+                shader.SetInt(uniform, textureUnit++);
+            }
+            continue;
+        }
+        const auto values = ShaderParameterNumbers(entry.second);
+        if (valueType == 1 || valueType == 2)
+            shader.SetInt(uniform, entry.second == "true" ? 1
+                : values.empty() ? 0 : static_cast<int>(values[0]));
+        else if (valueType == 3 && values.size() >= 2)
+            shader.SetVec2(uniform, glm::vec2(values[0], values[1]));
+        else if (valueType == 4 && values.size() >= 3)
+            shader.SetVec3(uniform, glm::vec3(values[0], values[1], values[2]));
+        else if ((valueType == 5 || valueType == 6) && values.size() >= 4)
+            shader.SetVec4(uniform, glm::vec4(values[0], values[1], values[2], values[3]));
+        else shader.SetFloat(uniform, values.empty() ? 0.0f : values[0]);
+    }
+}
 
 // Shared skinned vertex stage: blend up to four bone matrices, then model+VP.
 const char* kVert = R"GLSL(
@@ -157,6 +198,10 @@ float ShadowFactor(float NdotL) {
     }
     return s / 25.0;
 }
+vec3 ACES(vec3 x) {
+    const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
 vec3 Lighting(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 albedo, vec3 F0, float m, float r) {
     vec3 H = normalize(V+L);
     float NDF = DistributionGGX(N,H,r);
@@ -168,7 +213,7 @@ vec3 Lighting(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 albedo, vec3 F0, float
 }
 void main() {
     vec3 albedo = uAlbedo;
-    if (uHasAlbedoMap == 1) albedo *= texture(uAlbedoMap, vUV).rgb;
+    if (uHasAlbedoMap == 1) albedo *= pow(texture(uAlbedoMap, vUV).rgb, vec3(2.2));  // sRGB -> linear
     float metallic = uMetallic, roughness = uRoughness, ao = uAO;
     vec3 N = normalize(vNormal);
     vec3 V = normalize(uViewPos - vWorldPos);
@@ -200,8 +245,8 @@ void main() {
         color = mix(color, uFogColor, fog);
     }
     if (uApplyTonemap == 1) {
-        color = color/(color+vec3(1.0));
-        color = pow(color, vec3(1.0/2.2));
+        color = ACES(color);                 // filmic tone map (was Reinhard)
+        color = pow(color, vec3(1.0/2.2));   // linear -> sRGB
     }
     FragColor = vec4(color, 1.0);
 }
@@ -288,7 +333,7 @@ void SkinnedRenderer::Draw(const SkinnedModel& model,
 
 void SkinnedRenderer::DrawScene(ecs::Registry& reg, const Camera& camera, float aspect,
                                 const SkinnedLighting& lit) {
-    if (!lit.cascade || !lit.ibl) return;   // both textures are required (avoids sampler aliasing)
+    if (!lit.cascade) return;
 
     m_pbr->Bind();
     m_pbr->SetMat4("uViewProj", camera.ProjectionMatrix(aspect) * camera.ViewMatrix());
@@ -309,13 +354,16 @@ void SkinnedRenderer::DrawScene(ecs::Registry& reg, const Camera& camera, float 
         m_pbr->SetMat4("uCascadeVP" + ix, lit.cascade->CascadeVP(i));
         m_pbr->SetFloat("uCascadeSplits" + ix, lit.cascade->SplitDepth(i));
     }
-    // Image-based ambient.
-    lit.ibl->Bind(5, 6, 7);
-    m_pbr->SetInt("uUseIBL", 1);
-    m_pbr->SetInt("uIrradiance", 5);
-    m_pbr->SetInt("uPrefilter", 6);
-    m_pbr->SetInt("uBrdfLUT", 7);
-    m_pbr->SetFloat("uMaxReflectionLod", lit.ibl->MaxReflectionLod());
+    // Image-based ambient is optional. The ambient term remains available when
+    // an editor environment deliberately disables IBL.
+    m_pbr->SetInt("uUseIBL", lit.ibl ? 1 : 0);
+    if (lit.ibl) {
+        lit.ibl->Bind(5, 6, 7);
+        m_pbr->SetInt("uIrradiance", 5);
+        m_pbr->SetInt("uPrefilter", 6);
+        m_pbr->SetInt("uBrdfLUT", 7);
+        m_pbr->SetFloat("uMaxReflectionLod", lit.ibl->MaxReflectionLod());
+    }
     // Fog.
     m_pbr->SetInt("uFogEnabled", lit.fog ? 1 : 0);
     m_pbr->SetVec3("uFogColor", lit.fogColor);
@@ -323,8 +371,27 @@ void SkinnedRenderer::DrawScene(ecs::Registry& reg, const Camera& camera, float 
     m_pbr->SetFloat("uFogHeight", lit.fogHeight);
     m_pbr->SetFloat("uFogHeightFalloff", lit.fogHeightFalloff);
 
-    reg.view<ecs::Transform, AnimatedModel>().each([&](ecs::Entity, ecs::Transform& t, AnimatedModel& am) {
+    reg.view<ecs::Transform, AnimatedModel>().each([&](ecs::Entity entity, ecs::Transform& t, AnimatedModel& am) {
         if (!am.model || am.pose.empty()) return;
+        if (const ecs::LoadedMaterialAsset* custom =
+                reg.TryGet<ecs::LoadedMaterialAsset>(entity);
+            custom && custom->skinnedShader) {
+            Shader& shader = *const_cast<Shader*>(custom->skinnedShader);
+            shader.Bind();
+            shader.SetMat4("uViewProjection",
+                camera.ProjectionMatrix(aspect) * camera.ViewMatrix());
+            shader.SetMat4("uModel", t.Model());
+            shader.SetVec3("uLightDirection", lit.sunDir);
+            shader.SetFloat("uLightIntensity",
+                std::max({lit.sunColor.x, lit.sunColor.y, lit.sunColor.z}));
+            shader.SetVec4("uObjectColor",
+                glm::vec4(custom->material.albedo, custom->material.opacity));
+            UploadBones(shader, am.pose);
+            UploadMaterialShaderParameters(shader, *custom);
+            for (const SubMesh& submesh : am.model->SubMeshes())
+                submesh.mesh.Draw();
+            return;
+        }
         m_pbr->SetMat4("uModel", t.Model());
         UploadBones(*m_pbr, am.pose);
 

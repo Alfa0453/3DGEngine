@@ -13,12 +13,14 @@
 #include <engine/graphics/IBL.h>
 #include <engine/graphics/ParticleSystem.h>
 #include <engine/graphics/ParticleRenderer.h>
+#include <engine/graphics/GpuParticleSystem.h>
 #include <engine/ecs/Registry.h>
 #include <engine/ecs/Components.h>
 
 #include <glm/glm.hpp>
 
 #include <optional>
+#include <memory>
 #include <vector>
 
 // Showcases the 3D particle system: several emitters (magic fountain, fire, smoke,
@@ -52,6 +54,8 @@ private:
     engine::DayNightCycle::Sample m_sample{};
 
     engine::ParticleEmitter m_magic, m_fire, m_smoke, m_sparks;
+    std::unique_ptr<engine::GpuParticleEmitter> m_gpuMagic;
+    float m_gpuMagicSpawn = 0.0f;
 
     float m_camYaw = 2.4f, m_camPitch = 0.35f, m_camDist = 12.0f;
     glm::vec3 m_camTarget{0.0f, 1.5f, 0.0f};

@@ -24,6 +24,8 @@ public:
     void SetAlbedoMap(const std::string& path);
     void SetNormalMap(const std::string& path);
     void SetMetalRoughMap(const std::string& path);
+    void SetHeightMap(const std::string& path);
+    bool SetShaderAsset(const std::string& path);
 
     const MaterialDocument& CurrentMaterial() const { return m_material; }
     const std::string& LastSavedPath() const { return m_lastSavedPath; }
@@ -33,7 +35,9 @@ private:
     void DrawPreview();          // live GL preview (falls back to the drawn one)
     void DrawApproxPreview();    // hand-drawn 2D approximation (fallback)
     void DrawSurfaceControls();
+    void DrawAdvancedControls();
     void DrawTextureControls();
+    void DrawShaderControls();
     void DrawOrmPacker();          // pack separate metal/rough/AO into one ORM texture
     void DrawExportControls();
     void DrawPresetControls();     // starter presets (incl. measured metals)
@@ -48,6 +52,7 @@ private:
 
     MaterialDocument m_material;
     MaterialDocument m_savedSnapshot;   // last saved/loaded state, for the dirty flag
+    bool m_hasSavedSnapshot = false;
     std::string m_outputDirectory;
     std::string m_lastSavedPath;
     std::string m_status;
@@ -62,15 +67,19 @@ private:
     float m_previewPitch   = 18.0f;
     float m_previewEnv     = 0.42f;   // DayNightCycle time-of-day for the lighting
     float m_previewEnvYaw  = 0.0f;    // rotate the environment / key light
+    float m_previewEnvApplied = 0.42f; // last slider values committed for IBL baking
+    float m_previewEnvYawApplied = 0.0f;
     float m_previewLight   = 1.0f;    // key-light intensity multiplier
     bool  m_previewGround  = false;   // ground plane + contact shadow
     float m_previewBg[3]   = {0.05f, 0.06f, 0.08f};
 
     char m_nameBuffer[128]{};
-    char m_outputDirectoryBuffer[260]{};
-    char m_albedoMapBuffer[260]{};
-    char m_normalMapBuffer[260]{};
-    char m_metalRoughMapBuffer[260]{};
+    char m_outputDirectoryBuffer[1024]{};
+    char m_albedoMapBuffer[1024]{};
+    char m_normalMapBuffer[1024]{};
+    char m_metalRoughMapBuffer[1024]{};
+    char m_heightMapBuffer[1024]{};
+    char m_shaderPathBuffer[1024]{};
 
     // ORM channel-packer source paths.
     std::string m_packMetallic;
@@ -84,6 +93,7 @@ private:
     // Import-from-model state.
     std::string m_importModelPath;
     int         m_importMaterialIndex = 0;
+    int         m_importMaterialCount = 0;
 };
 
 } // namespace material_maker

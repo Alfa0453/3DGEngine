@@ -27,12 +27,19 @@ add_executable(3DGEditor
     src/EditorMouseController.cpp
     src/EditorRuntimeController.cpp
     src/EditorTransformController.cpp
+    src/BehaviorGraphPanel.cpp
+    src/ParticleEditorPanel.cpp
+    src/ShaderEditorPanel.cpp
+    src/HudEditorPanel.cpp
+    src/ParticleAsset.cpp
+    src/GameBtScripts.cpp
 )
 
 target_include_directories(3DGEditor PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/btscripts
     ${CMAKE_SOURCE_DIR}/engine/include)
-target_link_libraries(3DGEditor PRIVATE engine MaterialMaker)
+target_link_libraries(3DGEditor PRIVATE engine MaterialMaker game)
 
 # Keep the editor in its own bin/editor subfolder, separate from other targets.
 set_target_properties(3DGEditor PROPERTIES

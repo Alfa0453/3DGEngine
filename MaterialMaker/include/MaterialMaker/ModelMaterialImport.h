@@ -9,6 +9,10 @@ namespace material_maker {
 struct ModelImportResult {
     bool        ok = false;
     int         materialCount = 0;
+    std::string metallicMap;
+    std::string roughnessMap;
+    std::string combinedMetalRoughMap;
+    std::string aoMap;
     std::string error;
 };
 

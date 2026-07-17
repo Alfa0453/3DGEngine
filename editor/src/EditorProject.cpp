@@ -1,13 +1,34 @@
 #include "EditorProject.h"
 
+#include <filesystem>
+
 void EditorProject::Load(engine::Config &config)
 {
     m_projectName = config.GetString("project.name", "Untitled Project");
-    m_assetRoot = config.GetString("project.asses", "Content");
+    const std::string legacyAssetRoot =
+        config.GetString("project.asses", "Content");
+    m_assetRoot = config.GetString("project.assets", legacyAssetRoot);
     if (m_assetRoot == "assets") {
         m_assetRoot = "Content";
     }
-    m_scenePath = config.GetString("project.scene", "editor.scene");
+    std::error_code ec;
+    std::filesystem::create_directories(ScenesRoot(), ec);
+
+    const std::string storedScene =
+        config.GetString("project.scene", "");
+    m_scenePath = storedScene.empty()
+        ? ResolveScenePath("Main.scene")
+        : ResolveScenePath(storedScene);
+    // Preserve a legacy root-level scene by copying it into the project Scenes
+    // folder the first time the organized layout is used.
+    if (!storedScene.empty()
+        && std::filesystem::path(storedScene).parent_path().empty()
+        && std::filesystem::exists(storedScene, ec)
+        && !std::filesystem::exists(m_scenePath, ec)) {
+        std::filesystem::copy_file(
+            storedScene, m_scenePath,
+            std::filesystem::copy_options::skip_existing, ec);
+    }
 
     m_recentScenes.clear();
     const int count = config.GetInt("project.recent.count", 0);
@@ -18,6 +39,31 @@ void EditorProject::Load(engine::Config &config)
         }
     }
     AddRecentScene(m_scenePath);
+}
+
+std::string EditorProject::ScenesRoot() const
+{
+    return (std::filesystem::path(m_assetRoot) / "Scenes").string();
+}
+
+std::string EditorProject::ResolveScenePath(const std::string& value) const
+{
+    std::filesystem::path path =
+        value.empty() ? std::filesystem::path("Main.scene")
+                      : std::filesystem::path(value);
+    if (path.extension() != ".scene") path.replace_extension(".scene");
+    if (path.is_absolute()) return path.lexically_normal().string();
+
+    const std::filesystem::path assetRoot(m_assetRoot);
+    const std::filesystem::path normalized = path.lexically_normal();
+    const std::string generic = normalized.generic_string();
+    const std::string assetPrefix = assetRoot.lexically_normal().generic_string() + "/";
+    if (generic.rfind(assetPrefix, 0) == 0)
+        return normalized.string();
+    if (!normalized.empty() && normalized.begin()->string() == "Scenes")
+        return (assetRoot / normalized).lexically_normal().string();
+    return (std::filesystem::path(ScenesRoot()) / normalized.filename())
+        .lexically_normal().string();
 }
 
 void EditorProject::Save(engine::Config &config) const

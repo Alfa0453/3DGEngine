@@ -39,5 +39,15 @@ Mesh Sphere(int segments = 16);
 // the smoothness (longitude bands around; latitude bands per cap).
 Mesh Capsule(float radius = 0.4f, float height = 1.8f, int segments = 16);
 
+// A square-based unit pyramid centred at the origin, height 1 and base 1x1.
+Mesh Pyramid();
+
+// A torus around the Y axis. Defaults fit inside a unit-wide bounding box.
+Mesh Torus(float majorRadius = 0.35f, float minorRadius = 0.15f,
+           int majorSegments = 32, int minorSegments = 12);
+
+// A unit staircase centred at the origin, rising along +Z.
+Mesh Staircase(int steps = 6);
+
 } // namespace primitives
 } // namespace engine

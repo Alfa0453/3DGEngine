@@ -28,6 +28,11 @@ public:
     // Bind the VAO and issue the indexed draw call.
     void Draw() const;
 
+    // Replace the interleaved vertex data in place (same layout + vertex count;
+    // indices unchanged). A cheap VBO sub-update -- used for live terrain sculpting
+    // instead of recreating the whole Mesh each stroke.
+    void UpdateVertices(const std::vector<float>& vertices);
+
     unsigned int IndexCount() const { return m_indexCount; }
 
     // The vertex array object, so callers can attach per-instance attributes for

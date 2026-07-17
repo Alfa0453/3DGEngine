@@ -12,6 +12,8 @@ public:
 
     const std::string& AssetRoot() const { return m_assetRoot; }
     const std::string& ScenePath() const { return m_scenePath; }
+    std::string ScenesRoot() const;
+    std::string ResolveScenePath(const std::string& path) const;
     const std::string& ProjectName() const { return m_projectName; }
     const std::vector<std::string>& RecentScenes() const { return m_recentScenes; }
 
@@ -24,6 +26,6 @@ private:
 
     std::string m_projectName = "Untitled Project";
     std::string m_assetRoot = "assets";
-    std::string m_scenePath = "editor.scene";
+    std::string m_scenePath = "Content/Scenes/Main.scene";
     std::vector<std::string> m_recentScenes;
 };

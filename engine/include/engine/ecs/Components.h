@@ -1,17 +1,21 @@
 #pragma once
 
+#include "engine/audio/AudioTypes.h"
 #include "engine/graphics/Mesh.h"
+#include "engine/graphics/ParticleSystem.h"
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
 
 #include <string>
+#include <unordered_map>
 
 namespace engine {
 
 class Model;     // non-owning loaded model pointers
 class Texture;   // non-owning material map pointers
+class Shader;
 
 namespace ecs{
 
@@ -57,16 +61,39 @@ struct MeshRenderer {
 // directly (a sphere grid sweeping metallic x roughness), and they could equally
 // be filled from a loaded model's maps.
 struct PbrMaterial {
+    enum class BlendMode { Opaque = 0, Masked = 1, Transparent = 2 };
+
     glm::vec3 albedo{0.8f, 0.8f, 0.8f}; // base colour
     float     metallic  = 0.0f;         // 0 = dielectric, 1 = metal
     float     roughness = 0.5f;         // 0 = mirror, 1 = fully rough
     float     ao        = 1.0f;         // ambient-occlusion factor
     glm::vec3 emissive{0.0f};           // self-illumination
+    float opacity = 1.0f;
+    float alphaCutoff = 0.5f;
+    BlendMode blendMode = BlendMode::Opaque;
+    glm::vec2 uvScale{1.0f};
+    glm::vec2 uvOffset{0.0f};
+    float uvRotation = 0.0f;            // degrees around UV centre
+    float normalStrength = 1.0f;
+    float heightScale = 0.0f;
+    float clearcoat = 0.0f;
+    float clearcoatRoughness = 0.1f;
+    float transmission = 0.0f;
+    float ior = 1.5f;
+    float thickness = 0.0f;
+    float anisotropy = 0.0f;
+    float anisotropyRotation = 0.0f;    // degrees in tangent space
+    glm::vec3 sheenColor{0.0f};
+    float sheenRoughness = 0.5f;
+    float specularLevel = 0.5f;
+    float subsurface = 0.0f;
+    glm::vec3 subsurfaceColor{1.0f};
 
     // Optional, non-owning texture maps. When set they modulate the values above.
     const Texture* albedoMap     = nullptr;   // RGB base colour
     const Texture* normalMap     = nullptr;   // tangent-space normals
     const Texture* metalRoughMap = nullptr;   // glTF ORM: G = roughness, B = metallic
+    const Texture* heightMap     = nullptr;   // grayscale displacement for parallax
 };
 
 // Drawable entity rendered through the PBR pipeline: geometry (referenced, not
@@ -74,6 +101,10 @@ struct PbrMaterial {
 struct MeshPBR {
     const Mesh* mesh = nullptr;
     PbrMaterial material;
+    const Shader* customShader = nullptr;
+    std::unordered_map<std::string, std::string> shaderParameters;
+    std::unordered_map<std::string, int> shaderParameterTypes;
+    std::unordered_map<std::string, const Texture*> shaderTextures;
 };
 
 // Runtime asset references imported from editor-authored scene files. These are
@@ -161,6 +192,46 @@ struct SkinnedModelAsset {
 struct MaterialAsset {
     std::string path;
     std::string albedoPath;
+    std::unordered_map<std::string, std::string> parameterOverrides;
+};
+
+// Authored sound attached to a runtime entity. Playback state is deliberately
+// kept outside the component so scenes remain serializable and registry clones
+// receive an independent voice when a RuntimeAudioSystem observes them.
+struct AudioSource {
+    std::string path;
+    AudioBus bus = AudioBus::SFX;
+    float volume = 1.0f;
+    float pitch = 1.0f;
+    bool spatial = true;
+    bool loop = false;
+    bool autoplay = true;
+    float minDistance = 1.0f;
+    float maxDistance = 30.0f;
+    float rolloff = 1.0f;
+    float dopplerFactor = 1.0f;
+    float coneInnerAngle = 360.0f;
+    float coneOuterAngle = 360.0f;
+    float coneOuterGain = 1.0f;
+    float occlusion = 0.0f;
+    int priority = 50;
+};
+
+enum class AudioAction {
+    None = 0,
+    Play = 1,
+    Restart = 2,
+    Pause = 3,
+    Resume = 4,
+    Stop = 5
+};
+
+// No-code collision event binding. The target is resolved through RuntimeName,
+// keeping the authored reference stable across scene serialization.
+struct TriggerAudioAction {
+    std::string targetName;
+    AudioAction onEnter = AudioAction::None;
+    AudioAction onExit = AudioAction::None;
 };
 
 struct LoadedMaterialAsset {
@@ -168,6 +239,12 @@ struct LoadedMaterialAsset {
     const Texture* albedoMap = nullptr;
     const Texture* normalMap = nullptr;
     const Texture* metalRoughMap = nullptr;
+    const Texture* heightMap = nullptr;
+    const Shader* shader = nullptr;
+    const Shader* skinnedShader = nullptr;
+    std::unordered_map<std::string, std::string> shaderParameters;
+    std::unordered_map<std::string, int> shaderParameterTypes;
+    std::unordered_map<std::string, const Texture*> shaderTextures;
 };
 
 // A light source. Point lights take their position from the entity's Transform;

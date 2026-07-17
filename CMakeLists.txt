@@ -13,6 +13,8 @@ project(3DGameEngine
     DESCRIPTION "A 3D game engine built from scratch with OpenGL"
     LANGUAGES  C CXX)
 
+include(CTest)
+
 # --- Global compiler settings ----------------------------------------------
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -22,8 +24,8 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)  # generate compile_commands.json for Inte
 # Optionally link the C/C++ runtime statically so a packaged build needs no
 # redistributable (Windows /MT). Off by default; turn on for distribution:
 #   cmake -S . -B build -DGAMEENGINE_STATIC_RUNTIME=ON
-option(GAMEENGINE_STATIC_RUNTIME "Statically link he C/C++ runtime" OFF)
-if(GAMEEGINE_STATIC_RUNTIME)
+option(GAMEENGINE_STATIC_RUNTIME "Statically link the C/C++ runtime" OFF)
+if(GAMEENGINE_STATIC_RUNTIME)
     if(MSVC)
         set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     else()
@@ -135,6 +137,7 @@ target_compile_definitions(imgui PUBLIC
 
 # --- Our libraries and executables -----------------------------------------
 add_subdirectory(engine)   # the reusable engine (static library)
+add_subdirectory(game)     # shared game module: your scripts, linked by editor + player
 #add_subdirectory(viewer)   # a model-viewer tool (loads + renders OBJ models)
 #add_subdirectory(scene)    # a PBR lighting + ECS scene demo (shadows, skybox)
 add_subdirectory(editor)
@@ -151,25 +154,37 @@ add_subdirectory(terraindemo)
 add_subdirectory(uidemo)
 add_subdirectory(prefabdemo)
 add_subdirectory(ecsgame)
+add_subdirectory(player)   # standalone runtime player (game mode) — see RUNTIME_ROADMAP.md
+
+if(BUILD_TESTING)
+    add_subdirectory(tests)
+endif()
 
 # ---------------------------------------------------------------------------
-# Packaging: `cmake --install build --prefix dist` stages a runnable folder,
-# and `cpack` (run in the build dir) zips it. See docs/PACKAGING.md.
-# ---------------------------------------------------------------------------
-# The executable sits at the package root; the game finds assets/ beside it
-# (engine::ExecutableDir()), so the layout must be:  <root>/game[.exe] + assets/
-#install(TARGETS breakout RUNTIME DESTINATION ".")
-#install(DIRECTORY breakout/assets/ DESTINATION "assets")
-#install(FILES breakout.cfg DESTINATION "." OPTIONAL)
-
-#set(CPACK_PACKAGE_NAME "Breakout")
-#set(CPACK_PACKAGE_VENDOR "3DGEngine")
-#set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
-#set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Breakout - a game built on 3DGEngine")
-#set(CPACK_PACKAGE_FILE_NAME "Breakout-${PROJECT_VERSION}-${CMAKE_SYSTEM_NAME}")
-#set(CPACK_PACKAGE_INSTALL_DIRECTORY "Breakout")
-#set(CPACK_GENERATOR "ZIP")                 # portable on every platform
-#if(UNIX AND NOT APPLE)
-#    list(APPEND CPACK_GENERATOR "TGZ")     # also a .tar.gz on Linux
-#endif()
-#include(CPack)
+# Packaging the standalone runtime player (the "game mode"). Stage a runnable
+# folder and zip it:
+#     cmake -S . -B build -DPLAYER_GAME_DIR=E:/path/to/exported_game
+#     cmake --build build --target player
+#     cmake --install build --prefix dist    # -> dist/player[.exe] + player.cfg + game/
+#     cd build && cpack                       # -> 3DGPlayer-<ver>-<os>.zip
+#
+# Only the `player` target has install() rules, so the package contains just the
+# player, its config, and the bundled game content (not the editor or demos).
+# The executable finds player.cfg + relative scenes beside it (engine::ExecutableDir()).
+set(CPACK_PACKAGE_NAME "3DGPlayer")
+set(CPACK_PACKAGE_VENDOR "3DGEngine")
+set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Standalone runtime player for 3DGEngine games")
+set(CPACK_PACKAGE_FILE_NAME "3DGPlayer-${PROJECT_VERSION}-${CMAKE_SYSTEM_NAME}")
+set(CPACK_PACKAGE_INSTALL_DIRECTORY "3DGPlayer")
+set(CPACK_GENERATOR "ZIP")                 # portable on every platform
+if(UNIX AND NOT APPLE)
+    list(APPEND CPACK_GENERATOR "TGZ")     # also a .tar.gz on Linux
+endif()
+# Package ONLY the player component, so the archive excludes the FetchContent
+# dependencies' own install rules (glfw/glm/etc). Component-install ON restricts
+# the archive to CPACK_COMPONENTS_ALL; the name override drops the component suffix.
+set(CPACK_COMPONENTS_ALL player)
+set(CPACK_ARCHIVE_COMPONENT_INSTALL ON)
+set(CPACK_ARCHIVE_PLAYER_FILE_NAME "3DGPlayer-${PROJECT_VERSION}-${CMAKE_SYSTEM_NAME}")
+include(CPack)

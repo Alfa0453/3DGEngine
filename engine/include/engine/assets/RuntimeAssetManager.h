@@ -2,6 +2,7 @@
 
 #include "engine/ecs/Registry.h"
 #include "engine/assets/MaterialAssetLoader.h"
+#include "engine/assets/RuntimeShaderManager.h"
 #include "engine/graphics/Model.h"
 #include "engine/graphics/SkinnedModel.h"
 #include "engine/graphics/Texture.h"
@@ -29,6 +30,8 @@ public:
     const SkinnedModel* LoadSkinnedModel(const std::string& path, std::string* error = nullptr);
     const Texture* LoadTexture(const std::string& path, std::string* error = nullptr);
     const RuntimeMaterialAsset* LoadMaterial(const std::string& path, std::string* error = nullptr);
+    const Shader* LoadShader(const std::string& path, bool skinned = false,
+                             std::string* error = nullptr);
 
     const Model* FindModel(const std::string& path) const;
     const SkinnedModel* FindSkinnedModel(const std::string& path) const;
@@ -43,6 +46,8 @@ private:
     std::unordered_map<std::string, std::unique_ptr<SkinnedModel>> m_skinnedModels;
     std::unordered_map<std::string, std::unique_ptr<Texture>> m_textures;
     std::unordered_map<std::string, std::unique_ptr<RuntimeMaterialAsset>> m_materials;
+    std::unordered_map<std::string, ShaderAsset> m_shaderAssets;
+    RuntimeShaderManager m_shaderPrograms;
 };
 
 } // namespace engine

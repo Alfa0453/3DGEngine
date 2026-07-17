@@ -16,6 +16,8 @@
 
 #include <memory>
 #include <optional>
+#include <filesystem>
+#include <cstdint>
 #include <string>
 #include <unordered_map>
 
@@ -46,10 +48,11 @@ public:
         float     lightIntensity = 1.0f;    // multiplier on the key light
         bool      groundPlane   = false;    // ground + contact shadow
         glm::vec3 background{0.05f, 0.06f, 0.08f};
-        // Texture-map file paths (empty = none). Applied in the Full PBR view.
+        // Texture-map file paths (empty = none). Applied in full and debug views.
         std::string albedoMapPath;
         std::string normalMapPath;
         std::string metalRoughMapPath;
+        std::string heightMapPath;
     };
 
     // Result of loading a texture map, for a thumbnail + status in the panel.
@@ -68,23 +71,32 @@ public:
     // Load (cached) a texture map and report its GL id / size / status, so the
     // panel can show a thumbnail. Must be called while a GL context is current.
     MapInfo AcquireMap(const std::string& path);
+    void Retry();
 
     bool Available() const { return m_ready; }
+    const std::string& LastError() const { return m_error; }
 
 private:
     struct CachedTexture {
         std::optional<engine::Texture> texture;
         MapInfo info;
+        std::filesystem::file_time_type writeTime{};
+        std::uintmax_t fileSize = 0;
+        bool exists = false;
     };
 
     void EnsureInitialized();
     void RegenerateEnvironment(float envTime, float envYawDeg);
     void RenderChannel(const engine::ecs::PbrMaterial& material,
                        const Settings& settings, const glm::mat4& viewProj);
+    unsigned int RenderUnchecked(const engine::ecs::PbrMaterial& material,
+                                 const Settings& settings);
     // Resolve a map path to a loaded texture pointer (nullptr if empty/failed).
     const engine::Texture* ResolveMap(const std::string& path);
 
     bool  m_ready   = false;
+    bool  m_failed  = false;
+    std::string m_error;
     float m_envTime = -1.0f;   // last environment time baked into the IBL
     float m_envYaw  = -1.0e9f; // last environment rotation baked into the IBL
     int   m_size    = 0;

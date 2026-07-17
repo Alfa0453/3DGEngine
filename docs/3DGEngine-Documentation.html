@@ -1,0 +1,616 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3DGEngine — Documentation</title>
+<!-- Markdown renderer (cdnjs only). Requires an internet connection when opened. -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+<style>
+  :root { --fg:#1f2430; --muted:#5c6472; --accent:#8a4dff; --code-bg:#f5f6fa; --border:#dfe2ea; }
+  * { box-sizing: border-box; }
+  body { margin: 0; color: var(--fg);
+         font: 15px/1.65 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; }
+  .page { max-width: 860px; margin: 0 auto; padding: 40px 48px 80px; }
+  h1,h2,h3,h4 { line-height: 1.25; font-weight: 700; }
+  h1 { font-size: 2.0rem; margin: 2.2em 0 .6em; padding-bottom:.25em; border-bottom: 3px solid var(--accent); }
+  h2 { font-size: 1.4rem; margin: 1.8em 0 .5em; padding-bottom:.2em; border-bottom: 1px solid var(--border); }
+  h3 { font-size: 1.12rem; margin: 1.4em 0 .4em; }
+  p, li { color: var(--fg); }
+  a { color: var(--accent); text-decoration: none; }
+  code { font-family: "SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;
+         font-size: .86em; background: var(--code-bg); padding: .12em .35em; border-radius: 4px; }
+  pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px;
+        padding: 14px 16px; overflow: auto; }
+  pre code { background: none; padding: 0; font-size: .82rem; line-height: 1.5;
+             white-space: pre-wrap; word-break: break-word; }   /* wrap wide code so nothing clips in the PDF */
+  table { border-collapse: collapse; width: 100%; margin: 1em 0; font-size: .92em; }
+  th, td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top; }
+  th { background: var(--code-bg); }
+  blockquote { margin: 1em 0; padding: .4em 1em; border-left: 4px solid var(--accent);
+               background: #faf7ff; color: var(--muted); }
+  hr { border: none; border-top: 1px solid var(--border); margin: 2.4em 0; }
+  .cover { text-align: center; padding: 22vh 0 0; }
+  .cover .t { font-size: 2.8rem; font-weight: 800; }
+  .cover .s { color: var(--muted); font-size: 1.15rem; margin-top: .4em; }
+  .cover .m { color: var(--muted); margin-top: 2.4em; font-size: .95rem; }
+  .toc { margin: 3em auto 0; max-width: 520px; }
+  .toc a { display:block; padding: 8px 0; border-bottom: 1px dashed var(--border); }
+  .note { background:#fff8e6; border:1px solid #f0d98a; border-radius:8px; padding:10px 14px;
+          margin: 18px 0; font-size:.92em; color:#6b5a1e; }
+  .doc { }
+  @media print {
+    .page { max-width: none; margin: 0; padding: 0 6mm; }
+    .no-print { display: none !important; }
+    .doc { page-break-before: always; }
+    .cover { page-break-after: always; padding-top: 30vh; }
+    pre, table, blockquote { page-break-inside: avoid; }
+    h1, h2, h3 { page-break-after: avoid; }
+    a { color: inherit; }
+  }
+  @page { size: A4; margin: 16mm; }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <div class="no-print note">
+    <strong>To save as PDF:</strong> press <kbd>Ctrl/Cmd&nbsp;+&nbsp;P</kbd> →
+    Destination <em>“Save as PDF”</em> → Save. Each document starts on a new page.
+    (This viewer renders the Markdown with marked.js from a CDN, so open it while online.)
+  </div>
+
+  <div class="cover">
+    <div class="t">3DGEngine</div>
+    <div class="s">Engine Manual &amp; Game Tutorials</div>
+    <div class="m">A from-scratch C++17 / OpenGL game engine<br>Reference manual · First-game tutorial · Fireball-spell tutorial</div>
+    <div class="toc no-print">
+      <a href="#doc-manual">1 &nbsp;·&nbsp; Engine Manual</a>
+      <a href="#doc-firstgame">2 &nbsp;·&nbsp; Tutorial — Build &amp; Ship Your First Game</a>
+      <a href="#doc-fireball">3 &nbsp;·&nbsp; Tutorial — A Fireball Spell (Editor + Scripts)</a>
+    </div>
+  </div>
+
+  <div class="doc" id="doc-manual"></div>
+  <div class="doc" id="doc-firstgame"></div>
+  <div class="doc" id="doc-fireball"></div>
+</div>
+
+<!-- ================= Embedded Markdown sources (raw text, not executed) ================= -->
+<script type="text/markdown" id="src-manual">
+# 3DGEngine — Engine Manual
+
+A from-scratch C++17 / OpenGL 3.3 game engine: a physically-based renderer, a
+data-oriented ECS, a deterministic physics solver, behaviour-tree AI, skeletal
+animation, audio, a full Dear ImGui editor, and a standalone runtime player that
+ships editor-authored scenes as a game.
+
+## 1. Architecture
+
+The project is a reusable **engine** static library plus executables that link it:
+`engine/` (the library), `editor/` (the Dear ImGui scene editor), `player/` (the
+standalone runtime player that ships a scene as a game), several focused demos, and
+`tests/`. The golden rule: **engine code never depends on editor code.** The editor and
+player both consume the engine; the player links *only* the engine (no ImGui). Gameplay
+lives in scripts and ECS systems, so the same simulation runs in the editor's Play mode
+and in the standalone player. Dependencies (GLFW, GLM, Assimp, Dear ImGui, GLAD) are
+fetched and built by CMake `FetchContent`.
+
+### Building
+
+```bash
+cmake -S . -B build
+cmake --build build        # executables land in build/bin/
+```
+
+Options: `-DGAMEENGINE_STATIC_RUNTIME=ON` (static C/C++ runtime, no redistributable);
+`-DPLAYER_GAME_DIR=<path>` (bundle exported game content beside the player).
+
+## 2. The application loop
+
+Every executable subclasses `engine::Application`, which owns the window and runs a
+fixed-timestep loop. Override only the hooks you need:
+
+```cpp
+class MyGame : public engine::Application {
+protected:
+    void OnInit()               override;   // load resources (GL context exists here)
+    void OnUpdate(float dt)     override;   // once per frame, variable dt: input, camera
+    void OnFixedUpdate(float h) override;   // 0+ times/frame at a FIXED step: physics, gameplay
+    void OnRender()             override;   // draw the frame
+    void OnShutdown()           override;
+};
+```
+
+Each frame: `OnUpdate(frameTime)` → accumulate → `OnFixedUpdate(h)` at the fixed step
+(default **1/120 s**) → `OnRender()`. Fixed-step physics/gameplay is deterministic and
+frame-rate independent; `InterpolationAlpha()` gives the render blend factor. Core types:
+`engine::Window`, `engine::Config` (`key = value`), `engine::ExecutableDir()`.
+
+## 3. The ECS
+
+State lives in an `engine::ecs::Registry`: entities are ids, components are structs,
+systems are free functions over the registry.
+
+```cpp
+engine::ecs::Entity e = reg.Create();
+reg.Add<Transform>(e, Transform{});
+reg.Add<MeshPBR>(e, MeshPBR{&mesh, material});
+reg.view<Transform, MeshPBR>().each([](Entity e, Transform& t, MeshPBR& m){ /* ... */ });
+if (Transform* t = reg.TryGet<Transform>(e)) t->position.y += 1.0f;
+reg.Has<Health>(e); reg.Get<Health>(e); reg.Remove<Collider>(e);
+```
+
+Core components: `Transform`, `MeshRenderer` (mesh + flat colour, authoring form),
+`MeshPBR` (mesh + `PbrMaterial`, render form), `Light`, `RuntimeName`, asset handles
+(`ModelAsset`, `SkinnedModelAsset`, `MaterialAsset`) and their resolved forms
+(`LoadedModelAsset`, `LoadedMaterialAsset`, `AnimatedModel`).
+
+## 4. Rendering
+
+A forward physically-based (Cook-Torrance) pipeline. **`engine::PbrRenderer`** draws
+`Transform + MeshPBR` entities plus `Light` entities in one call:
+
+```cpp
+engine::PbrRenderer::Options opt;
+opt.ambient = sample.ambient; opt.ibl = &ibl;
+opt.fog = true; opt.directionalShadows = true;
+opt.shadowCasters = [&](const glm::mat4& lightVP){ skinned.DrawSceneDepth(reg, lightVP); };
+pbr.Render(reg, camera, aspect, width, height, opt);
+```
+
+`PbrMaterial` is a full metallic-roughness material (albedo, metallic, roughness, ao,
+emissive, normal/metal-rough/height maps, clearcoat, transmission, sheen, blend mode).
+Lights: Directional, Point, Spot, Area. Other systems: **ProceduralSky + DayNightCycle**
+(analytic sky; `DayNightCycle::At(t)` → sun dir/colour, ambient), **IBL** (baked
+environment), cascaded/point/spot **shadows**, **PostProcess** (ACES tonemap, bloom,
+FXAA, render scale), **SSAO/SSR**, **SkinnedRenderer** (GPU-skinned characters),
+**RenderLoadedModels** (imported models), **Terrain** (fBm heightmap, walkable),
+particle rendering, and **TextRenderer** (2D overlays/HUD).
+
+## 5. Physics
+
+**`engine::PhysicsWorld::Step(registry, dt)`** integrates bodies, resolves contacts, and
+solves joints — call it from `OnFixedUpdate`.
+
+- **RigidBody** — velocity, `invMass` (0 = immovable), gravity, damping, **CCD**, full
+  angular dynamics, sleeping, and a **kinematic** mode (moved by its velocity, pushes
+  dynamics but is never pushed — moving platforms).
+- **Collider** — Sphere/Plane/Box/Capsule/Cylinder/Cone/Pyramid/Torus/Staircase; per-
+  surface restitution + friction; `isTrigger`; **collision layers/masks** (bitfields
+  filter which pairs interact).
+- **Solver** — warm-started accumulating sequential impulses with two-axis Coulomb
+  friction and a spatial-hash broad phase.
+- **Joints** — Distance/rope, Spring, Ball, Hinge.
+- **Queries** — Raycast, SphereCast, OverlapSphere, ApplyRadialImpulse (explosions).
+- **Contact events** — Enter/Stay/Exit per pair, with contact point, normal, impulse.
+- **CharacterController** — a kinematic capsule with slopes and step-up (basis of
+  `PlayerController`).
+
+## 6. Gameplay
+
+**Scripts.** Attach a `NativeScriptComponent` (by class name); write an `engine::Script`
+subclass (`OnCreate`/`OnUpdate`/`OnFixedUpdate`/`OnDestroy`). Register it:
+
+```cpp
+engine::ScriptRegistry::Instance().Register("Coin", []{ return std::make_unique<Coin>(); });
+```
+
+`UpdateScripts` / `FixedUpdateScripts` / `ShutdownScripts` drive them. Built-in systems:
+`UpdateGameplay` (Rotators + Movers), `UpdateHealth`, `UpdateRuntimeMotion`,
+`UpdateProjectiles`, `UpdateAttachments`.
+
+**PlayerController** — a ready-made first/third-person player (kinematic capsule,
+camera-relative movement, mouse-look, jump/sprint, spring-arm camera, shoulder, lock-on).
+Feed it `PlayerInput` each fixed step; read `CameraPosition()`/`CameraTarget()`.
+
+**GameMode** — a process-global game-rules singleton:
+
+```cpp
+engine::GameMode::Instance().AddScore(100);
+if (won) engine::GameMode::Instance().Win("Level Clear!");
+```
+
+It tracks `GameState` (Playing/Paused/GameOver/Victory), a score, a clock, and a built-in
+lose-on-player-death rule. The runtime calls `Update(reg, player, dt)`, freezes the sim
+once the state isn't Playing, and reads `State()`/`Score()`/`Message()` for the HUD.
+
+## 7. AI
+
+Data-driven **behaviour trees** (`.btgraph`) over an `AgentContext` with a typed
+**Blackboard**; composites, decorators, conditions, and native **script nodes**
+(`engine::ai::BtScriptRegistry`, built-ins via `RegisterExampleBtScripts()`). Plus
+`AiAgent` (patrol/chase/search), perception, steering, A* over a baked **NavGrid** or
+**NavMesh**, and faction targeting.
+
+## 8. Animation
+
+Skeletal animation with GPU skinning. An `AnimatedModel` holds the skinned model, pose,
+and an **AnimationController** — a state machine with parameters, transitions, 1-D blend
+spaces, root motion, layered action clips (upper-body masks), and animation events.
+`engine::UpdateAnimations(reg, dt)` advances controllers and fills bone matrices for the
+`SkinnedRenderer`.
+
+## 9. Audio
+
+`engine::AudioEngine` (miniaudio) + `engine::RuntimeAudioSystem`: `AudioSource`
+components play spatialised sounds; `TriggerAudioAction` plays on collision/trigger by
+consuming physics `Events()`. `PlayAt(path, pos, pitch, volume)` for positioned
+one-shots; `SetListener`, `SetAttenuation`, `SetMasterVolume`; `CreateSource()` handles
+for looping/moving/occluded sounds.
+
+## 10. Camera & cinematics
+
+`engine::Camera` with `CameraBlend`, `CameraShake`, `CameraSequence` (keyframed shots +
+timeline events), `CameraDirector` (gameplay vs cinematic cameras, input locking,
+skippable cutscenes), and cinematic cues.
+
+## 11. HUD & UI
+
+A data-driven, UMG-style HUD. A `HudDocument` is widgets — Text, Bar, Button, Image,
+Panel — placed by a 9-point anchor + pixel offset. Widgets bind to live values via a
+`HudContext` (health, named floats/strings like `score`/`time`/`gamestate`, images,
+button actions). `engine::DrawHud(text, doc, ctx, w, h)` draws it. Authored in the
+editor's **HUD Editor**; saved as a `.hud` file referenced by the scene.
+
+## 12. Assets
+
+`engine::RuntimeAssetManager` loads/caches models, textures, materials, shaders; and
+`ResolveRegistryAssets(registry)` resolves a scene's asset **references** into loaded GPU
+assets (`LoadedModelAsset`/`LoadedMaterialAsset`/`AnimatedModel`) in one pass. Materials
+(`.mat`) are authored in **Material Maker**; custom shaders in the **Shader Editor**.
+
+## 13. Scenes
+
+**`3DGEditorScene`** — the editor's rich save format. **`3DGRuntimeScene`** — the slimmer
+format the editor **exports** (F7). `RuntimeSceneLoader::Load()` + `Instantiate()`
+populate the registry (transforms, meshes, lights, physics, scripts, particles, audio,
+animation, player-controller settings, camera presets/sequences, HUD reference); then
+`ResolveRegistryAssets` turns references into render-ready assets.
+
+## 14. The editor
+
+`3DGEditor`: a viewport with gizmos, hierarchy/inspector, undo/redo, an asset browser,
+and panels — World Settings, Material Maker, Shader Editor, Behavior Graph, Particle
+Editor, HUD Editor, Camera Manager, Audio Editor/Mixer, a Profiler, and debug overlays.
+**Play mode** ticks the same engine systems the player uses; **Export** writes the
+runtime scene.
+
+## 15. The runtime player
+
+`player/` is a thin `engine::Application` that boots an exported scene and runs it with no
+editor — the "game mode." Scene selection: `player <scene>` or `player.scene` in
+`player.cfg`. Because scenes store scripts by class name, register game scripts in the
+shared **game module** (`game/`, linked by both the editor and the player) — put headers in
+`game/include/game/scripts/` and register them once in `game/src/GameModule.cpp`:
+
+```cpp
+void RegisterGameModule() {
+    engine::ScriptRegistry::Instance().Register("Coin", []{ return std::make_unique<Coin>(); });
+}
+```
+
+Develop it in Visual Studio (Open Folder → native CMake, or `cmake -G "Visual Studio 17
+2022"`), F5-debugging with breakpoints in your scripts.
+
+## 16. Packaging
+
+```bash
+cmake -S . -B build -DPLAYER_GAME_DIR=E:/path/to/exported_game -DGAMEENGINE_STATIC_RUNTIME=ON
+cmake --build build --target player
+cmake --install build --prefix dist --component player   # player[.exe] + player.cfg + game/
+cd build && cpack                                         # 3DGPlayer-<ver>-<os>.zip
+```
+
+Only the `player` component is packaged (not the editor/demos); the result is
+self-contained because the engine and dependencies are static libraries.
+
+## 17. Extending the engine
+
+New gameplay → an `engine::Script` (register it) or a component + system. New AI → a
+behaviour tree or a `BtScript`. New material/shader → Material Maker / Shader Editor.
+New game rules → drive `engine::GameMode` from scripts. See the tutorials that follow.
+</script>
+
+<script type="text/markdown" id="src-firstgame">
+# Tutorial — Build &amp; Ship Your First Game: "Coin Rush"
+
+Build a complete little game from an empty scene to a packaged, double-clickable
+executable: a third-person character collects coins in an arena while a patrolling enemy
+chases them. Collect all coins to **win**; let the enemy drain your health to zero and you
+**lose**. You'll touch every part of the pipeline: authoring, a player controller,
+gameplay scripts, behaviour-tree AI, a HUD, the `GameMode` rules layer, exporting, and
+packaging.
+
+## 0. Prerequisites
+
+Build and run the editor once, then make a `mygame/` content folder with `assets/`.
+
+```bash
+cmake -S . -B build
+cmake --build build --target 3DGEditor
+./build/bin/3DGEditor
+```
+
+## 1. The arena scene
+
+1. **File → New Scene.**
+2. **Add → Plane**, scale ~`(20,1,20)`, add a **Plane collider** (Physics section).
+3. Add four **Box** walls with **Box colliders** around the edge.
+4. **Add → Directional Light**; set a Time of Day + enable Sun Shadows in **World Settings**.
+5. **Save Scene** as `mygame/arena.3dgscene`.
+
+## 2. The player
+
+1. **Add → Player Start** (creates `PlayerStart` with a Player Controller).
+2. In the **Player Controller** section: third-person, Walk ~4, Run ~7, Jump ~5,
+   capsule 0.4/1.8; tune Camera Distance/Target Height.
+3. **Gameplay → Health** (100/100) — the lose condition.
+4. Press **Play (P)**: WASD, Space, Shift, V (view), mouse look.
+
+## 3. Coins
+
+1. **Add → Sphere**, scale ~0.4, emissive/yellow, name `Coin_1`.
+2. **Sphere Collider** with **Trigger** ticked.
+3. **Script** component, class name `Coin` (written in §5).
+4. Duplicate several (`Coin_2`, `Coin_3`, …) keeping the `Coin_` prefix + `Coin` script.
+
+## 4. The enemy
+
+1. **Add → Capsule** `Enemy`, red, **Capsule Collider**, **Health**.
+2. Optionally a **kinematic Rigid Body** (the AI drives it).
+3. In the **Behavior Graph**, build a Selector: **Chase** (player-in-range → MoveTo +
+   a damage service) else **Patrol** (cycle waypoints). Save `mygame/assets/enemy.btgraph`
+   and assign it to the enemy's **AI Brain**; set its team so it targets the player.
+
+## 5. The scripts
+
+**`Coin.h`** — add score and vanish when the player overlaps:
+
+```cpp
+#pragma once
+#include <engine/gameplay/Script.h>
+#include <engine/gameplay/GameMode.h>
+#include <engine/ecs/Components.h>
+
+class Coin : public engine::Script {
+public:
+    void OnUpdate(float) override {
+        engine::ecs::Entity player = FindByName("PlayerStart");
+        if (player == engine::ecs::kNull) return;
+        const glm::vec3 me     = Get<engine::ecs::Transform>().position;
+        const glm::vec3 target = Registry().Get<engine::ecs::Transform>(player).position;
+        if (glm::length(target - me) < 1.0f) {
+            engine::GameMode::Instance().AddScore(10);
+            Destroy();
+        }
+    }
+};
+```
+
+> The exact accessors (`Get<T>()`, `Registry()`, `FindByName()`, `Destroy()`) follow
+> `engine/gameplay/Script.h`'s `ScriptContext`. Using the coin's **trigger event** is a
+> cleaner alternative to the distance check.
+
+**`GoalTracker.h`** — win when no coins remain (attach to a `GameManager` object):
+
+```cpp
+#pragma once
+#include <engine/gameplay/Script.h>
+#include <engine/gameplay/GameMode.h>
+#include <engine/ecs/Components.h>
+
+class GoalTracker : public engine::Script {
+public:
+    void OnUpdate(float) override {
+        int coins = 0;
+        Registry().view<engine::ecs::RuntimeName>().each(
+            [&](engine::ecs::Entity, engine::ecs::RuntimeName& n){
+                if (n.value.rfind("Coin_", 0) == 0) ++coins;
+            });
+        if (coins == 0 && engine::GameMode::Instance().IsPlaying())
+            engine::GameMode::Instance().Win("All coins collected!");
+    }
+};
+```
+
+The lose condition is automatic: `GameMode` ends the run when the player's Health hits 0.
+
+## 6. The HUD
+
+In the **HUD Editor**: a **Bar** (Top-Left, Binding → Health Fraction); a **Text**
+(Top-Right, Named String `score`, text `Score: {}`); a timer **Text** (Named Float
+`time`, `Time {}`); optionally a **Button** (Restart Play). **Save** as
+`mygame/assets/hud.hud`, then **Use in Scene**.
+
+## 7. Win &amp; lose rules
+
+Both are wired: **lose** is automatic (player Health death → GameOver); **win** is the
+`GoalTracker` calling `Win(...)`. When the run ends, the runtime freezes the sim and shows
+a centred **VICTORY / GAME OVER** screen with the score and "Press R to restart".
+
+## 8. Playtest
+
+Press **Play**, collect coins (score ticks up, health bar reacts), confirm win/lose and
+`R` restart. Play-mode runs the same code the shipped game runs. (A "*scripts not
+registered*" HUD note is expected until §9 — register them in the editor's game-scripts
+hook too.)
+
+## 9. Register the scripts
+
+Put `Coin.h`/`GoalTracker.h` in `game/include/game/scripts/` and register them **once** in
+the shared game module — the editor and player both link it, so no per-target edits:
+
+```cpp
+// game/src/GameModule.cpp
+#include "game/GameModule.h"
+#include <engine/gameplay/Script.h>
+#include "game/scripts/Coin.h"
+#include "game/scripts/GoalTracker.h"
+#include <memory>
+void RegisterGameModule() {
+    auto& s = engine::ScriptRegistry::Instance();
+    s.Register("Coin",        []{ return std::make_unique<Coin>(); });
+    s.Register("GoalTracker", []{ return std::make_unique<GoalTracker>(); });
+}
+```
+
+## 10. Export the runtime scene
+
+**Export** (F7) → a `3DGRuntimeScene` with everything the player needs (transforms,
+meshes, physics, player-controller settings, scripts, the enemy brain, the HUD
+reference). Keep it beside `assets/`.
+
+## 11. Point the player at your scene
+
+`player.cfg` (beside the executable):
+
+```ini
+window.width = 1280
+window.height = 720
+window.vsync = true
+player.scene = game/arena.3dgscene
+```
+
+Dev run: `./build/bin/player mygame/arena.3dgscene` (run from the content root so asset
+paths resolve).
+
+## 12. Package &amp; ship
+
+```bash
+cmake -S . -B build -DPLAYER_GAME_DIR=E:/path/to/mygame -DGAMEENGINE_STATIC_RUNTIME=ON
+cmake --build build --target player
+cmake --install build --prefix dist --component player
+cd build && cpack
+```
+
+Result: `dist/player.exe` + `player.cfg` + `game/` (scene + assets + hud). Double-click
+`player.exe`: the arena loads, the HUD appears, coins collect, the enemy chases, and
+win/lose work — no editor in sight. `3DGPlayer-<ver>-<os>.zip` is your shippable build.
+
+## 13. Where to go next
+
+More enemies / smarter AI; juice (pickup particles, impact sounds, a coin Rotator);
+levels (export several scenes, switch via scripts + `GameMode`); polish (pause menu with
+HUD Buttons, settings, gamepad).
+</script>
+
+<script type="text/markdown" id="src-fireball">
+# Tutorial — "Ember": A Fireball Spell (Editor + Scripts)
+
+Build a spellcaster game **entirely in the editor**, with gameplay in **scripts** — no
+standalone C++ game loop. Author the scene, the player, and the fireball VFX in
+`3DGEditor`; write small `engine::Script` classes for casting and flight; play it in
+**Play mode**; then **export** and **package** it as a standalone game — the same
+pipeline as the first tutorial. The star is the engine's particle system, authored in the
+**Particle Editor** and spawned by a script.
+
+## 1. Arena &amp; mage
+
+New Scene → **Plane** ground (with a Plane collider) + a few **Box** walls (Box colliders)
+→ **Add → Player Start** (third-person Player Controller) → **Directional Light** + Sun
+Shadows in World Settings. Save as `mygame/arena.3dgscene`.
+
+## 2. Author the fireball VFX (Particle Editor)
+
+In the **Particle Editor**, tune a **fire** emitter: **Additive** blend; HDR Start Color
+`(3.6,1.7,0.35,1)` → End `(1.3,0.08,0,0)` (>1 blooms, alpha fades); Shape **Sphere**
+radius `0.13`; Speed `0.3–1.3`; Life `0.30–0.70`; Gravity `(0,1.2,0)` (upward = buoyant);
+Drag `2.2`; Size `0.28→0.03`; Rate `420`; Max `1500`. Save as `assets/fireball.particle`.
+Make a burst-only variant (`Rate 0`, bigger size, **Burst 90**) as `assets/explosion.particle`.
+
+## 3. Prototypes
+
+**Fireball:** Add → Sphere (~0.15, emissive), name it **`Fireball`**; add a **Particle
+System** component → `assets/fireball.particle` (autoplay); a **Sphere Collider** ticked
+**Trigger**; a **Script** → `FireballProjectile`. Move it out of sight (a template).
+**Explosion:** Sphere named **`Explosion`** with the burst effect + a **Script**
+`Despawn`. Add **Box** objects named `Target_1`, `Target_2`, … for the fireball to smash.
+
+## 4. Scripts
+
+`engine::Script` classes (see `engine/gameplay/Script.h` for the API used —
+`WasMouseButtonPressed`, `Transform()`, `Registry()`, `SpawnFromObject`,
+`Destroy`/`DestroySelf`, `Delay`, `PlayAudioCue`).
+
+**FireballCaster** (on the mage): on left-click, spawn a fireball in front and aim it.
+
+```cpp
+void FireballCaster::OnUpdate(float) {
+    if (!WasMouseButtonPressed(GLFW_MOUSE_BUTTON_LEFT)) return;
+    const engine::ecs::Transform* me = Transform(); if (!me) return;
+    const glm::vec3 fwd = me->rotation * glm::vec3(0,0,1);
+    engine::ecs::Entity fb = SpawnFromObject("Fireball",
+        me->position + glm::vec3(0,0.9f,0) + fwd * 0.6f);
+    if (auto* t = Registry()->TryGet<engine::ecs::Transform>(fb)) t->rotation = me->rotation;
+    PlayAudioCue("assets/sounds/whoosh.wav");
+}
+```
+
+**FireballProjectile** (on the fireball): fly forward; on a `Target_*` hit or max range,
+spawn `Explosion`, play impact, destroy the target and itself.
+
+```cpp
+void FireballProjectile::OnUpdate(float dt) {
+    engine::ecs::Transform* t = Transform(); if (!t) return;
+    const glm::vec3 fwd = t->rotation * glm::vec3(0,0,1);
+    t->position += fwd * (14.0f * dt); m_dist += 14.0f * dt;
+    engine::ecs::Entity hit = engine::ecs::kNull;
+    Registry()->view<engine::ecs::Transform, engine::ecs::RuntimeName>().each(
+        [&](engine::ecs::Entity e, engine::ecs::Transform& tt, engine::ecs::RuntimeName& n){
+            if (hit==engine::ecs::kNull && n.value.rfind("Target_",0)==0
+                && glm::length(tt.position - t->position) < 1.3f) hit = e; });
+    if (hit != engine::ecs::kNull || m_dist > 30.0f) {
+        SpawnFromObject("Explosion", t->position);
+        PlayAudioCue("assets/sounds/impact.wav");
+        if (hit != engine::ecs::kNull) Destroy(hit);
+        DestroySelf();
+    }
+}
+```
+
+**Despawn** (on the explosion): `void OnCreate() { Delay(1.0f, [this]{ DestroySelf(); }); }`
+
+## 5. Sound
+
+The scripts already trigger spatial one-shots via `PlayAudioCue("assets/sounds/whoosh.wav")`
+and `impact.wav` (drop the `.wav`s in `mygame/assets/sounds/`). Add a **Footsteps** script
+on the mage that `PlayAudioCue("footstep.wav")` on a timer while moving — or, with no code,
+use an **Audio Source** component (looping/positional) or a **Trigger Audio** component
+(sound on collision), both authored in the inspector.
+
+## 6. Playtest, export &amp; ship
+
+Press **Play**: move with WASD + mouse, **left-click** to cast; the fireball streaks out
+with a bloom-lit trail, pops `Target_` boxes, and bursts with a bang. Then **Export**
+(F7), register the classes **once** in the shared game module `game/src/GameModule.cpp`
+(`s.Register("FireballCaster", …)`, etc. — the editor and player both link it), and
+**package** exactly as in the first tutorial (`cmake --install … --component player` +
+`cpack`). Double-click `player.exe`: cast fireballs with no editor and no hand-written
+game loop.
+
+## 7. Next steps
+
+Impact **Point Light** on the Explosion prototype; hold-to-charge + homing (scale/steer
+the spawned fireball); a **cast animation** firing the spawn on a `WasAnimationEvent("cast")`;
+other spells (blue Alpha-blend ice bolt, grey smoke) on right-click; and **Health + score**
+on targets via `engine::GameMode::Instance().AddScore(...)`. Every VFX — explosions, magic,
+smoke, sparks — is a Particle-Editor effect spawned by a script.
+</script>
+
+<script>
+  (function () {
+    function render(srcId, outId) {
+      var src = document.getElementById(srcId).textContent;
+      document.getElementById(outId).innerHTML = window.marked
+        ? marked.parse(src)
+        : "<pre>" + src.replace(/[&<>]/g, function (c) {
+            return { "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]; }) + "</pre>";
+    }
+    render("src-manual", "doc-manual");
+    render("src-firstgame", "doc-firstgame");
+    render("src-fireball", "doc-fireball");
+  })();
+</script>
+</body>
+</html>

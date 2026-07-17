@@ -126,6 +126,18 @@ bool FindVec3(const std::string& text, const std::string& key, glm::vec3* value)
     return true;
 }
 
+bool FindVec2(const std::string& text, const std::string& key, glm::vec2* value) {
+    const std::string marker = "\"" + key + "\"";
+    std::size_t pos = text.find(marker);
+    if (pos == std::string::npos || (pos = text.find('[', pos + marker.size())) == std::string::npos) return false;
+    char* end = nullptr;
+    const char* start = text.c_str() + pos + 1;
+    const float x = std::strtof(start, &end); if (end == start) return false;
+    start = end + 1; const float y = std::strtof(start, &end); if (end == start) return false;
+    if (value) *value = glm::vec2(x, y);
+    return true;
+}
+
 std::string ResolveMapPath(const std::string& materialPath, const std::string& mapPath) {
     if (mapPath.empty()) {
         return {};
@@ -168,19 +180,64 @@ bool LoadMaterialAssetFile(const std::string& path, RuntimeMaterialAsset* materi
     FindFloat(text, "roughness", &loaded.material.roughness);
     FindFloat(text, "ao", &loaded.material.ao);
     FindVec3(text, "emissive", &loaded.material.emissive);
+    float blendMode = 0.0f;
+    if (FindFloat(text, "blendMode", &blendMode))
+        loaded.material.blendMode = static_cast<ecs::PbrMaterial::BlendMode>(static_cast<int>(blendMode));
+    FindFloat(text, "opacity", &loaded.material.opacity);
+    FindFloat(text, "alphaCutoff", &loaded.material.alphaCutoff);
+    FindVec2(text, "uvScale", &loaded.material.uvScale);
+    FindVec2(text, "uvOffset", &loaded.material.uvOffset);
+    FindFloat(text, "uvRotation", &loaded.material.uvRotation);
+    FindFloat(text, "normalStrength", &loaded.material.normalStrength);
+    FindFloat(text, "heightScale", &loaded.material.heightScale);
+    FindFloat(text, "clearcoat", &loaded.material.clearcoat);
+    FindFloat(text, "clearcoatRoughness", &loaded.material.clearcoatRoughness);
+    FindFloat(text, "transmission", &loaded.material.transmission);
+    FindFloat(text, "ior", &loaded.material.ior);
+    FindFloat(text, "thickness", &loaded.material.thickness);
+    FindFloat(text, "anisotropy", &loaded.material.anisotropy);
+    FindFloat(text, "anisotropyRotation", &loaded.material.anisotropyRotation);
+    FindVec3(text, "sheenColor", &loaded.material.sheenColor);
+    FindFloat(text, "sheenRoughness", &loaded.material.sheenRoughness);
+    FindFloat(text, "specularLevel", &loaded.material.specularLevel);
+    FindFloat(text, "subsurface", &loaded.material.subsurface);
+    FindVec3(text, "subsurfaceColor", &loaded.material.subsurfaceColor);
 
     std::string albedoMap;
     std::string normalMap;
     std::string metalRoughMap;
+    std::string heightMap;
     const std::size_t mapsStart = text.find("\"maps\"");
     if (mapsStart != std::string::npos) {
         FindStringFrom(text, "albedo", mapsStart, &albedoMap);
         FindStringFrom(text, "normal", mapsStart, &normalMap);
         FindStringFrom(text, "metalRough", mapsStart, &metalRoughMap);
+        FindStringFrom(text, "height", mapsStart, &heightMap);
     }
     loaded.albedoMapPath = ResolveMapPath(path, albedoMap);
     loaded.normalMapPath = ResolveMapPath(path, normalMap);
     loaded.metalRoughMapPath = ResolveMapPath(path, metalRoughMap);
+    loaded.heightMapPath = ResolveMapPath(path, heightMap);
+    std::string shaderPath;
+    if (FindString(text, "shader", &shaderPath))
+        loaded.shaderPath = ResolveMapPath(path, shaderPath);
+    std::size_t parameterCursor = 0;
+    while ((parameterCursor = text.find("\"parameterName\"", parameterCursor))
+           != std::string::npos) {
+        RuntimeShaderParameter parameter;
+        if (!FindStringFrom(text, "parameterName", parameterCursor, &parameter.name)
+            || !FindStringFrom(text, "parameterValue", parameterCursor, &parameter.value)) break;
+        const std::size_t typeKey = text.find("\"parameterType\"", parameterCursor);
+        const std::size_t colon = typeKey == std::string::npos
+            ? std::string::npos : text.find(':', typeKey);
+        if (colon == std::string::npos) break;
+        parameter.type = static_cast<int>(
+            std::strtol(text.c_str() + colon + 1, nullptr, 10));
+        if (parameter.type == 7)
+            parameter.value = ResolveMapPath(path, parameter.value);
+        loaded.shaderParameters.push_back(std::move(parameter));
+        parameterCursor = colon + 1;
+    }
 
     *material = loaded;
     if (error) {

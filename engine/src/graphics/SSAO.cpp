@@ -27,23 +27,37 @@ const char* kGeomVert = R"GLSL(
 layout (location = 0) in vec3 aPos;
 layout (location = 1) in vec3 aNormal;
 uniform mat4 uModel, uView, uProj;
+uniform mat4 uPreviousModel, uPreviousViewProjection;
 out vec3 vViewPos;
 out vec3 vViewNormal;
+out vec4 vCurrentClip;
+out vec4 vPreviousClip;
 void main() {
     mat4 mv = uView * uModel;
     vec4 vp = mv * vec4(aPos, 1.0);
     vViewPos = vp.xyz;
     vViewNormal = mat3(transpose(inverse(mv))) * aNormal;
-    gl_Position = uProj * vp;
+    vCurrentClip = uProj * vp;
+    vPreviousClip = uPreviousViewProjection * uPreviousModel * vec4(aPos, 1.0);
+    gl_Position = vCurrentClip;
 }
 )GLSL";
 const char* kGeomFrag = R"GLSL(
 #version 330 core
 layout (location = 0) out vec3 gPosition;
 layout (location = 1) out vec3 gNormal;
+layout (location = 2) out vec2 gVelocity;
 in vec3 vViewPos;
 in vec3 vViewNormal;
-void main() { gPosition = vViewPos; gNormal = normalize(vViewNormal); }
+in vec4 vCurrentClip;
+in vec4 vPreviousClip;
+void main() {
+    gPosition = vViewPos;
+    gNormal = normalize(vViewNormal);
+    vec2 current = vCurrentClip.xy / max(abs(vCurrentClip.w), 0.00001);
+    vec2 previous = vPreviousClip.xy / max(abs(vPreviousClip.w), 0.00001);
+    gVelocity = (current - previous) * 0.5;
+}
 )GLSL";
 
 const char* kQuadVert = R"GLSL(
@@ -156,10 +170,14 @@ void SSAO::CreateTargets() {
     glBindFramebuffer(GL_FRAMEBUFFER, m_gFbo);
     m_gPos    = MakeColorTex(m_width, m_height, GL_RGBA16F, GL_RGBA);
     m_gNormal = MakeColorTex(m_width, m_height, GL_RGBA16F, GL_RGBA);
+    m_gVelocity = MakeColorTex(m_width, m_height, GL_RG16F, GL_RG);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_gPos, 0);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, m_gNormal, 0);
-    const unsigned int bufs[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
-    glDrawBuffers(2, bufs);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, GL_TEXTURE_2D, m_gVelocity, 0);
+    const unsigned int bufs[3] = {
+        GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2
+    };
+    glDrawBuffers(3, bufs);
     glGenRenderbuffers(1, &m_gDepth);
     glBindRenderbuffer(GL_RENDERBUFFER, m_gDepth);
     glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, m_width, m_height);
@@ -180,8 +198,10 @@ void SSAO::CreateTargets() {
 }
 
 void SSAO::ReleaseTargets() {
-    unsigned int texs[] = {m_gPos, m_gNormal, m_ssaoTex, m_blurTex};
-    glDeleteTextures(4, texs);
+    unsigned int texs[] = {
+        m_gPos, m_gNormal, m_gVelocity, m_ssaoTex, m_blurTex
+    };
+    glDeleteTextures(5, texs);
     glDeleteRenderbuffers(1, &m_gDepth);
     unsigned int fbos[] = {m_gFbo, m_ssaoFbo, m_blurFbo};
     glDeleteFramebuffers(3, fbos);
@@ -203,6 +223,7 @@ void SSAO::Generate(ecs::Registry& reg, const Camera& camera, float aspect, int 
     Resize(width, height);
     const glm::mat4 view = camera.ViewMatrix();
     const glm::mat4 proj = camera.ProjectionMatrix(aspect);
+    const glm::mat4 viewProjection = proj * view;
 
     GLint prevFbo = 0;
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFbo);
@@ -214,11 +235,24 @@ void SSAO::Generate(ecs::Registry& reg, const Camera& camera, float aspect, int 
     m_geom.Bind();
     m_geom.SetMat4("uView", view);
     m_geom.SetMat4("uProj", proj);
-    reg.view<Transform, MeshPBR>().each([&](Entity, Transform& t, MeshPBR& m) {
+    m_geom.SetMat4("uPreviousViewProjection",
+        m_hasPreviousFrame ? m_previousViewProjection : viewProjection);
+    std::unordered_map<std::uint32_t, glm::mat4> currentModels;
+    reg.view<Transform, MeshPBR>().each([&](Entity entity, Transform& t, MeshPBR& m) {
         if (!m.mesh) return;
-        m_geom.SetMat4("uModel", t.Model());
+        const glm::mat4 model = t.Model();
+        const auto previous = m_previousModels.find(
+            static_cast<std::uint32_t>(entity));
+        m_geom.SetMat4("uModel", model);
+        m_geom.SetMat4("uPreviousModel",
+            m_hasPreviousFrame && previous != m_previousModels.end()
+                ? previous->second : model);
         m.mesh->Draw();
+        currentModels[static_cast<std::uint32_t>(entity)] = model;
     });
+    m_previousModels = std::move(currentModels);
+    m_previousViewProjection = viewProjection;
+    m_hasPreviousFrame = true;
 
     // 2. SSAO pass.
     glBindFramebuffer(GL_FRAMEBUFFER, m_ssaoFbo);

@@ -17,6 +17,7 @@ public:
 
     void Clear() const;                    // clear the colour + depth buffers
     void Draw(const Mesh& mesh) const;     // issue one indexed draw call
+    void SetMultisample(bool enabled) const;   // toggle MSAA on the default framebuffer
 
 private:
     glm::vec4 m_clearColor{0.06f, 0.07f, 0.09f, 1.0f};

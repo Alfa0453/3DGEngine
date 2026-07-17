@@ -17,6 +17,7 @@ class RuntimeAssetManager;
 class Shader;
 class SkinnedModel;
 class Texture;
+namespace ai { struct NavGrid; class NavMesh; }
 }
 
 class EditorViewport {
@@ -36,6 +37,15 @@ public:
         int type = 0; // 0 distance, 1 spring
         bool rope = false;
         bool enabled = true;
+    };
+
+    struct AiAgentGuide {
+        glm::vec3 position{0.0f};
+        glm::vec3 facing{0.0f, 0.0f, 1.0f};
+        std::vector<glm::vec3> path;   // current chase/search corridor
+        int  state = 0;                // 0 patrol, 1 chase, 2 search
+        bool seesTarget = false;
+        bool hasTarget = false;
     };
 
     bool ContainsPoint(float x, float y, int width, int height) const;
@@ -75,6 +85,73 @@ public:
                             const engine::Mesh& cube,
                             const std::vector<PhysicsJointGuide>& guides,
                             const glm::mat4& viewProj) const;
+
+    // Draws the selected AI agent's patrol path (markers + looped segments) and,
+    // when it has a chase target, its vision cone boundary rays.
+    void DrawNavAgentGuides(engine::Renderer& renderer,
+                            engine::Shader& shader,
+                            const engine::Mesh& cube,
+                            const EditorScene& scene,
+                            const glm::mat4& viewProj) const;
+
+    void DrawCameraSequenceGuides(engine::Renderer& renderer,
+                                  engine::Shader& shader,
+                                  const engine::Mesh& cube,
+                                  const EditorScene& scene,
+                                  const glm::mat4& viewProj) const;
+
+    void DrawNavMeshBoundsGuides(engine::Renderer& renderer,
+                                 engine::Shader& shader,
+                                 const engine::Mesh& cube,
+                                 const EditorScene& scene,
+                                 const glm::mat4& viewProj) const;
+
+    void DrawAudioSourceGuides(engine::Renderer& renderer,
+                               engine::Shader& shader,
+                               const engine::Mesh& cube,
+                               const EditorScene& scene,
+                               const glm::mat4& viewProj) const;
+
+    void DrawParticleSystemGuides(engine::Renderer& renderer,
+                                  engine::Shader& shader,
+                                  const engine::Mesh& cube,
+                                  const EditorScene& scene,
+                                  const glm::mat4& viewProj,
+                                  bool selectedOnly,
+                                  bool showShapes,
+                                  bool showDirections,
+                                  bool showBounds,
+                                  bool showCullingState) const;
+
+    // Play-mode overlay: per agent, a state-coloured marker (green patrol / red
+    // chase / amber search, brighter when it sees its target) and its live path.
+    void DrawAiAgentDebugGuides(engine::Renderer& renderer,
+                                engine::Shader& shader,
+                                const engine::Mesh& cube,
+                                const std::vector<AiAgentGuide>& guides,
+                                const glm::mat4& viewProj) const;
+
+    // Draws the blocked cells of the nav grid the agents actually path on (flat
+    // markers), so you can see what pathfinding avoids. Capped for large grids.
+    void DrawNavGridOverlay(engine::Renderer& renderer,
+                            engine::Shader& shader,
+                            const engine::Mesh& cube,
+                            const engine::ai::NavGrid& grid,
+                            const glm::mat4& viewProj) const;
+
+    // Draws the walkable polygons of a baked navmesh (outlines), so you can see the
+    // funnel-smoothed surface the navmesh agent paths on. Capped for large meshes.
+    void DrawNavMeshOverlay(engine::Renderer& renderer,
+                            engine::Shader& shader,
+                            const engine::Mesh& cube,
+                            const engine::ai::NavMesh& mesh,
+                            const glm::mat4& viewProj) const;
+
+    void DrawEditorNavMeshOverlay(engine::Renderer& renderer,
+                                  engine::Shader& shader,
+                                  const engine::Mesh& cube,
+                                  const engine::ai::NavMesh& mesh,
+                                  const glm::mat4& viewProj) const;
 
     void DrawSelectedModelOutline(engine::Renderer& renderer,
                                   engine::Shader& shader,

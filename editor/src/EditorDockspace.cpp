@@ -1,7 +1,12 @@
 #include "EditorDockspace.h"
+#include "ParticlePresets.h"
+#include "ParticleAsset.h"
 
 #include <engine/ecs/Components.h>
+#include <engine/audio/AudioEditing.h>
+#include <engine/graphics/Camera.h>
 #include <engine/graphics/SkinnedModel.h>
+#include <engine/assets/ShaderAsset.h>
 #include <engine/physics/PhysicsComponents.h>
 
 #include <glm/gtc/quaternion.hpp>
@@ -13,6 +18,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <filesystem>
 #include <sstream>
@@ -27,6 +33,104 @@ engine::ecs::Entity g_objectNameEntity = engine::ecs::kNull;
 engine::ecs::Entity g_scriptEntity = engine::ecs::kNull;
 int g_scriptTemplateIndex = 0;
 ImGuiTextFilter g_hierarchyFilter;
+std::array<char, 96> g_componentSearch{};
+bool g_componentPopupOpenRequested = false;
+int g_cameraPresetSelection = -1;
+std::array<char, 128> g_cameraPresetName{};
+int g_cameraPresetNameSelection = -1;
+int g_cameraSequenceSelection = -1;
+int g_cameraSequenceShotSelection = -1;
+int g_cameraSequenceCueSelection = -1;
+int g_cameraSequenceNameSelection = -1;
+std::array<char, 128> g_cameraSequenceName{};
+
+struct AudioEditorState {
+    engine::AudioBuffer buffer;
+    engine::AudioBuffer original;
+    engine::AudioBuffer undo;
+    engine::AudioBuffer clipboard;
+    std::vector<engine::AudioBuffer> undoStack;
+    std::vector<engine::AudioBuffer> redoStack;
+    std::string sourcePath;
+    std::array<char, 320> outputPath{};
+    float selectionStart = 0.0f;
+    float selectionEnd = 0.0f;
+    float gainDb = 0.0f;
+    float fadeInSeconds = 0.05f;
+    float fadeOutSeconds = 0.10f;
+    int generator = 0;
+    float generatorFrequency = 440.0f;
+    float generatorDuration = 1.0f;
+    float generatorAmplitude = 0.5f;
+    bool dirty = false;
+    float waveformZoom = 1.0f;
+    float waveformOffset = 0.0f;
+    engine::AudioCueAsset cue;
+    std::array<char, 320> cuePath{};
+    int selectedCueClip = -1;
+    engine::AdaptiveMusicAsset music;
+    std::array<char, 320> musicPath{};
+    int selectedMusicState = -1;
+};
+
+AudioEditorState g_audioEditor;
+
+enum class AddableComponent {
+    LinearVelocity,
+    AngularVelocity,
+    RigidBody,
+    Collider,
+    Rotator,
+    Mover,
+    PlayerController,
+    CameraZone,
+    Health,
+    NavAgent,
+    Script,
+    AudioSource,
+    ParticleSystem
+};
+
+struct ComponentCatalogEntry {
+    const char* name;
+    const char* category;
+    const char* description;
+    AddableComponent component;
+};
+
+constexpr ComponentCatalogEntry kComponentCatalog[] = {
+    {"Linear Velocity", "Motion", "Constant directional movement", AddableComponent::LinearVelocity},
+    {"Angular Velocity", "Motion", "Constant rotation around an axis", AddableComponent::AngularVelocity},
+    {"Rigid Body", "Physics", "Mass, gravity, velocity, and simulation", AddableComponent::RigidBody},
+    {"Collider", "Physics", "Collision shape fitted to this object", AddableComponent::Collider},
+    {"Rotator", "Gameplay", "Continuous configurable rotation", AddableComponent::Rotator},
+    {"Mover", "Gameplay", "Movement along an axis", AddableComponent::Mover},
+    {"Player Controller", "Gameplay", "Player movement and camera controls", AddableComponent::PlayerController},
+    {"Camera Zone", "Gameplay", "Blend to a saved camera inside a trigger volume", AddableComponent::CameraZone},
+    {"Health", "Gameplay", "Hit points and alive state", AddableComponent::Health},
+    {"Navigation Agent", "AI", "Patrol, perception, and chase behavior", AddableComponent::NavAgent},
+    {"Script", "Scripting", "Custom object behavior and exposed fields", AddableComponent::Script},
+    {"Audio Source", "Audio", "2D or spatial sound playback", AddableComponent::AudioSource},
+    {"Particle System", "Effects", "Animated billboard particle emitter", AddableComponent::ParticleSystem},
+};
+
+struct PrimitiveCreatorState {
+    EditorScene::Primitive type = EditorScene::Primitive::Cube;
+    std::array<char, 128> name{};
+    glm::vec3 position{0.0f, 0.5f, 0.0f};
+    glm::vec3 rotationDegrees{0.0f};
+    glm::vec3 dimensions{1.0f};
+    float radius = 0.5f;
+    float height = 1.0f;
+    int staircaseSteps = 6;
+    bool addCollider = true;
+    bool frameAfterCreate = true;
+    bool openRequested = false;
+};
+
+PrimitiveCreatorState g_primitiveCreator;
+bool g_creationPaletteOpenRequested = false;
+std::array<char, 96> g_creationSearch{};
 
 const char* PrimitiveName(EditorScene::Primitive primitive) {
     if (primitive == EditorScene::Primitive::Plane) {
@@ -35,10 +139,77 @@ const char* PrimitiveName(EditorScene::Primitive primitive) {
     if (primitive == EditorScene::Primitive::Sphere) {
         return "Sphere";
     }
+    if (primitive == EditorScene::Primitive::Capsule) {
+        return "Capsule";
+    }
+    if (primitive == EditorScene::Primitive::Cylinder) {
+        return "Cylinder";
+    }
+    if (primitive == EditorScene::Primitive::Cone) {
+        return "Cone";
+    }
+    if (primitive == EditorScene::Primitive::Pyramid) return "Pyramid";
+    if (primitive == EditorScene::Primitive::Torus) return "Torus";
+    if (primitive == EditorScene::Primitive::Staircase) return "Staircase";
     return "Cube";
 }
 
+void ResetPrimitiveCreator(EditorScene::Primitive type) {
+    g_primitiveCreator.type = type;
+    g_primitiveCreator.name.fill('\0');
+    g_primitiveCreator.rotationDegrees = glm::vec3(0.0f);
+    g_primitiveCreator.addCollider = true;
+    g_primitiveCreator.dimensions = glm::vec3(1.0f);
+    g_primitiveCreator.radius = type == EditorScene::Primitive::Capsule ? 0.4f : 0.5f;
+    g_primitiveCreator.height = type == EditorScene::Primitive::Capsule ? 1.8f : 1.0f;
+    g_primitiveCreator.staircaseSteps = 6;
+    if (type == EditorScene::Primitive::Torus) {
+        g_primitiveCreator.radius = 0.5f;
+        g_primitiveCreator.height = 0.3f;
+    }
+    if (type == EditorScene::Primitive::Staircase) {
+        g_primitiveCreator.dimensions = glm::vec3(2.0f, 1.0f, 3.0f);
+    }
+    if (type == EditorScene::Primitive::Plane) {
+        g_primitiveCreator.position = glm::vec3(0.0f);
+        g_primitiveCreator.dimensions = glm::vec3(3.0f, 1.0f, 3.0f);
+        g_primitiveCreator.addCollider = false;
+    } else {
+        g_primitiveCreator.position = glm::vec3(0.0f, g_primitiveCreator.height * 0.5f, 0.0f);
+    }
+    g_primitiveCreator.openRequested = true;
+}
+
+bool MatchesCreationSearch(const char* label, const char* category) {
+    std::string query(g_creationSearch.data());
+    if (query.empty()) return true;
+    std::string haystack = std::string(category) + " " + label;
+    std::transform(query.begin(), query.end(), query.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    std::transform(haystack.begin(), haystack.end(), haystack.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return haystack.find(query) != std::string::npos;
+}
+
+float PrimitiveGroundHeight() {
+    switch (g_primitiveCreator.type) {
+    case EditorScene::Primitive::Plane: return 0.0f;
+    case EditorScene::Primitive::Sphere: return g_primitiveCreator.radius;
+    case EditorScene::Primitive::Capsule:
+    case EditorScene::Primitive::Cylinder:
+    case EditorScene::Primitive::Cone: return g_primitiveCreator.height * 0.5f;
+    case EditorScene::Primitive::Torus: return g_primitiveCreator.height * 0.5f;
+    case EditorScene::Primitive::Cube:
+    case EditorScene::Primitive::Pyramid:
+    case EditorScene::Primitive::Staircase: return g_primitiveCreator.dimensions.y * 0.5f;
+    }
+    return 0.0f;
+}
+
 const char* ObjectTypeName(const EditorScene::Object& object) {
+    if (object.navMeshBoundsVolume) {
+        return "Nav Mesh Bounds Volume";
+    }
     if (object.light) {
         return "Light";
     }
@@ -83,6 +254,12 @@ int ColliderShapeIndex(engine::ecs::ColliderShape shape) {
     case engine::ecs::ColliderShape::Sphere: return 0;
     case engine::ecs::ColliderShape::Box: return 1;
     case engine::ecs::ColliderShape::Plane: return 2;
+    case engine::ecs::ColliderShape::Capsule: return 3;
+    case engine::ecs::ColliderShape::Cylinder: return 4;
+    case engine::ecs::ColliderShape::Cone: return 5;
+    case engine::ecs::ColliderShape::Pyramid: return 6;
+    case engine::ecs::ColliderShape::Torus: return 7;
+    case engine::ecs::ColliderShape::Staircase: return 8;
     }
     return 0;
 }
@@ -91,6 +268,12 @@ engine::ecs::ColliderShape ColliderShapeFromIndex(int index) {
     switch (index) {
     case 1: return engine::ecs::ColliderShape::Box;
     case 2: return engine::ecs::ColliderShape::Plane;
+    case 3: return engine::ecs::ColliderShape::Capsule;
+    case 4: return engine::ecs::ColliderShape::Cylinder;
+    case 5: return engine::ecs::ColliderShape::Cone;
+    case 6: return engine::ecs::ColliderShape::Pyramid;
+    case 7: return engine::ecs::ColliderShape::Torus;
+    case 8: return engine::ecs::ColliderShape::Staircase;
     default: return engine::ecs::ColliderShape::Sphere;
     }
 }
@@ -100,6 +283,12 @@ const char* ColliderShapeName(engine::ecs::ColliderShape shape) {
     case engine::ecs::ColliderShape::Sphere: return "Sphere";
     case engine::ecs::ColliderShape::Box: return "Box";
     case engine::ecs::ColliderShape::Plane: return "Plane";
+    case engine::ecs::ColliderShape::Capsule: return "Capsule";
+    case engine::ecs::ColliderShape::Cylinder: return "Cylinder";
+    case engine::ecs::ColliderShape::Cone: return "Cone";
+    case engine::ecs::ColliderShape::Pyramid: return "Pyramid";
+    case engine::ecs::ColliderShape::Torus: return "Torus";
+    case engine::ecs::ColliderShape::Staircase: return "Staircase";
     }
     return "Unknown";
 }
@@ -110,6 +299,64 @@ const char* TriggerActionModeName(EditorScene::TriggerActionMode mode) {
     case EditorScene::TriggerActionMode::Enable: return "Enable";
     case EditorScene::TriggerActionMode::Disable: return "Disable";
     case EditorScene::TriggerActionMode::Toggle: return "Toggle";
+    }
+    return "None";
+}
+
+const char* CameraSequenceTriggerActionName(
+    EditorScene::CameraSequenceTriggerAction action) {
+    switch (action) {
+    case EditorScene::CameraSequenceTriggerAction::Play: return "Play";
+    case EditorScene::CameraSequenceTriggerAction::Stop: return "Stop";
+    case EditorScene::CameraSequenceTriggerAction::Skip: return "Skip";
+    case EditorScene::CameraSequenceTriggerAction::None:
+    default: return "None";
+    }
+}
+
+bool DrawCameraSequenceTriggerActionCombo(
+    const char* label, EditorScene::CameraSequenceTriggerAction* action) {
+    bool changed = false;
+    if (ImGui::BeginCombo(label, CameraSequenceTriggerActionName(*action))) {
+        const EditorScene::CameraSequenceTriggerAction actions[] = {
+            EditorScene::CameraSequenceTriggerAction::None,
+            EditorScene::CameraSequenceTriggerAction::Play,
+            EditorScene::CameraSequenceTriggerAction::Stop,
+            EditorScene::CameraSequenceTriggerAction::Skip,
+        };
+        for (const auto candidate : actions) {
+            const bool selected = candidate == *action;
+            if (ImGui::Selectable(CameraSequenceTriggerActionName(candidate), selected)) {
+                *action = candidate;
+                changed = true;
+            }
+            if (selected) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+    return changed;
+}
+
+const char* AudioActionName(engine::ecs::AudioAction action) {
+    switch (action) {
+    case engine::ecs::AudioAction::None: return "None";
+    case engine::ecs::AudioAction::Play: return "Play";
+    case engine::ecs::AudioAction::Restart: return "Restart";
+    case engine::ecs::AudioAction::Pause: return "Pause";
+    case engine::ecs::AudioAction::Resume: return "Resume";
+    case engine::ecs::AudioAction::Stop: return "Stop";
+    }
+    return "None";
+}
+
+const char* ParticleActionName(engine::ParticleAction action) {
+    switch (action) {
+    case engine::ParticleAction::None: return "None";
+    case engine::ParticleAction::Play: return "Play";
+    case engine::ParticleAction::Restart: return "Restart";
+    case engine::ParticleAction::Stop: return "Stop";
+    case engine::ParticleAction::Burst: return "Burst";
+    case engine::ParticleAction::Clear: return "Clear";
     }
     return "None";
 }
@@ -285,6 +532,51 @@ bool DrawTriggerActionModeCombo(const char* label, EditorScene::TriggerActionMod
     return changed;
 }
 
+bool DrawAudioActionCombo(const char* label, engine::ecs::AudioAction* action) {
+    bool changed = false;
+    if (ImGui::BeginCombo(label, AudioActionName(*action))) {
+        const engine::ecs::AudioAction actions[] = {
+            engine::ecs::AudioAction::None,
+            engine::ecs::AudioAction::Play,
+            engine::ecs::AudioAction::Restart,
+            engine::ecs::AudioAction::Pause,
+            engine::ecs::AudioAction::Resume,
+            engine::ecs::AudioAction::Stop
+        };
+        for (const engine::ecs::AudioAction candidate : actions) {
+            const bool selected = candidate == *action;
+            if (ImGui::Selectable(AudioActionName(candidate), selected)) {
+                *action = candidate;
+                changed = true;
+            }
+            if (selected) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+    return changed;
+}
+
+bool DrawParticleActionCombo(const char* label, engine::ParticleAction* action) {
+    bool changed = false;
+    if (ImGui::BeginCombo(label, ParticleActionName(*action))) {
+        const engine::ParticleAction actions[] = {
+            engine::ParticleAction::None, engine::ParticleAction::Play,
+            engine::ParticleAction::Restart, engine::ParticleAction::Stop,
+            engine::ParticleAction::Burst, engine::ParticleAction::Clear
+        };
+        for (const engine::ParticleAction candidate : actions) {
+            const bool selected = candidate == *action;
+            if (ImGui::Selectable(ParticleActionName(candidate), selected)) {
+                *action = candidate;
+                changed = true;
+            }
+            if (selected) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+    return changed;
+}
+
 std::string SanitizeScriptClassName(const std::string& raw) {
     std::string result;
     result.reserve(raw.size());
@@ -398,7 +690,7 @@ bool CreateScriptFiles(const EditorDockspace::Context& context,
             << "## What It Does\n\n"
             << "Gameplay script template generated by the editor. " << ScriptTemplateDescription(scriptTemplate) << " It derives from `engine::Script` so it can be attached to a scene object and run in Play mode after registration.\n\n"
             << "## How To Use It\n\n"
-            << "Use `OnCreate()` for one-time setup when the object enters Play mode. Use `OnUpdate(float dt)` for fixed-step behavior. Call `Register" << className << "Script()` from your game startup before entering Play mode so `ScriptRegistry` can construct the script from its class name. Common helpers include `GetFieldFloat()`, `GetFieldInt()`, `GetFieldBool()`, `GetFieldString()`, `Self()`, `Transform()`, `FindObject()`, `FindTransform()`, `IsKeyDown()`, `WasKeyPressed()`, `MouseDeltaX()`, and `DestroySelf()`.\n";
+            << "Use `OnCreate()` for one-time setup when the object enters Play mode. Use `OnUpdate(float dt)` for fixed-step behavior. Call `Register" << className << "Script()` from your game startup before entering Play mode so `ScriptRegistry` can construct the script from its class name. Common helpers include `GetFieldFloat()`, `GetFieldInt()`, `GetFieldBool()`, `GetFieldString()`, `Self()`, `Transform()`, `FindObject()`, `FindTransform()`, `IsKeyDown()`, `WasKeyPressed()`, `PlayAudio()`, `StopAudio()`, `PlayParticles()`, `StopParticles()`, `RestartParticles()`, `BurstParticles()`, `SetParticleRate()`, `ShakeCamera()`, `PlayCameraSequence()`, `WasCameraSequenceEvent()`, `WasCameraSequenceFinished()`, and `DestroySelf()`. Pass an entity returned by `FindObject()` to control another object's Audio Source or Particle System.\n";
         if (!WriteTextFile(docPath, doc.str(), error)) {
             return false;
         }
@@ -421,6 +713,12 @@ struct ScenePhysicsStatus {
     std::size_t spheres = 0;
     std::size_t boxes = 0;
     std::size_t planes = 0;
+    std::size_t capsules = 0;
+    std::size_t cylinders = 0;
+    std::size_t cones = 0;
+    std::size_t pyramids = 0;
+    std::size_t toruses = 0;
+    std::size_t staircases = 0;
     std::size_t dynamicBodiesWithoutCollider = 0;
     std::size_t invalidColliders = 0;
     std::size_t joints = 0;
@@ -431,6 +729,8 @@ bool ColliderIsInvalid(const engine::ecs::Collider& collider) {
     case engine::ecs::ColliderShape::Sphere:
         return collider.radius <= 0.0f;
     case engine::ecs::ColliderShape::Box:
+    case engine::ecs::ColliderShape::Pyramid:
+    case engine::ecs::ColliderShape::Staircase:
         return collider.halfExtents.x <= 0.0f
             || collider.halfExtents.y <= 0.0f
             || collider.halfExtents.z <= 0.0f;
@@ -438,6 +738,13 @@ bool ColliderIsInvalid(const engine::ecs::Collider& collider) {
         return collider.planeNormal.x == 0.0f
             && collider.planeNormal.y == 0.0f
             && collider.planeNormal.z == 0.0f;
+    case engine::ecs::ColliderShape::Capsule:
+        return collider.radius <= 0.0f || collider.halfHeight < 0.0f;
+    case engine::ecs::ColliderShape::Cylinder:
+    case engine::ecs::ColliderShape::Cone:
+        return collider.radius <= 0.0f || collider.halfHeight <= 0.0f;
+    case engine::ecs::ColliderShape::Torus:
+        return collider.majorRadius <= 0.0f || collider.minorRadius <= 0.0f;
     }
 
     return true;
@@ -486,6 +793,12 @@ ScenePhysicsStatus CollectScenePhysicsStatus(const EditorScene& scene) {
         case engine::ecs::ColliderShape::Plane:
             ++status.planes;
             break;
+        case engine::ecs::ColliderShape::Capsule: ++status.capsules; break;
+        case engine::ecs::ColliderShape::Cylinder: ++status.cylinders; break;
+        case engine::ecs::ColliderShape::Cone: ++status.cones; break;
+        case engine::ecs::ColliderShape::Pyramid: ++status.pyramids; break;
+        case engine::ecs::ColliderShape::Torus: ++status.toruses; break;
+        case engine::ecs::ColliderShape::Staircase: ++status.staircases; break;
         }
     }
 
@@ -519,6 +832,41 @@ engine::ecs::Collider DefaultColliderForObject(const EditorScene::Object& object
         return collider;
     }
 
+    if (object.primitive == EditorScene::Primitive::Sphere && object.modelAssetPath.empty()) {
+        engine::ecs::Collider collider = engine::ecs::Collider::MakeSphere(0.5f);
+        collider.restitution = kDefaultRestitution;
+        return collider;
+    }
+
+    if (object.primitive == EditorScene::Primitive::Capsule && object.modelAssetPath.empty()) {
+        engine::ecs::Collider collider = engine::ecs::Collider::MakeCapsuleFromHeight(0.4f, 1.8f);
+        collider.restitution = kDefaultRestitution;
+        return collider;
+    }
+
+    if (object.primitive == EditorScene::Primitive::Cylinder && object.modelAssetPath.empty()) {
+        const float radius = transform ? 0.5f * std::max(transform->scale.x, transform->scale.z) : 0.5f;
+        const float height = transform ? transform->scale.y : 1.0f;
+        engine::ecs::Collider collider = engine::ecs::Collider::MakeCylinder(radius, height);
+        collider.restitution = kDefaultRestitution;
+        return collider;
+    }
+
+    if (object.modelAssetPath.empty() && transform) {
+        if (object.primitive == EditorScene::Primitive::Cone)
+            return engine::ecs::Collider::MakeCone(
+                0.5f * std::max(transform->scale.x, transform->scale.z), transform->scale.y);
+        if (object.primitive == EditorScene::Primitive::Pyramid)
+            return engine::ecs::Collider::MakePyramid(transform->scale * 0.5f);
+        if (object.primitive == EditorScene::Primitive::Torus) {
+            const float radialScale = std::max(transform->scale.x, transform->scale.z);
+            return engine::ecs::Collider::MakeTorus(0.35f * radialScale,
+                0.15f * std::max(radialScale, transform->scale.y));
+        }
+        if (object.primitive == EditorScene::Primitive::Staircase)
+            return engine::ecs::Collider::MakeStaircase(transform->scale * 0.5f, 6);
+    }
+
     engine::ecs::Collider collider = transform
         ? engine::ecs::Collider::MakeBox(glm::vec3(
               std::max(transform->scale.x * 0.5f, 0.001f),
@@ -527,6 +875,169 @@ engine::ecs::Collider DefaultColliderForObject(const EditorScene::Object& object
         : engine::ecs::Collider::MakeBox(glm::vec3(0.5f));
     collider.restitution = kDefaultRestitution;
     return collider;
+}
+
+bool HasComponent(const EditorScene::Object& object, AddableComponent component) {
+    switch (component) {
+    case AddableComponent::LinearVelocity: return object.linearVelocityEnabled;
+    case AddableComponent::AngularVelocity: return object.angularVelocityEnabled;
+    case AddableComponent::RigidBody: return object.rigidBodyEnabled;
+    case AddableComponent::Collider: return object.colliderEnabled;
+    case AddableComponent::Rotator: return object.rotatorEnabled;
+    case AddableComponent::Mover: return object.moverEnabled;
+    case AddableComponent::PlayerController: return object.playerControllerEnabled;
+    case AddableComponent::CameraZone: return object.cameraZoneEnabled;
+    case AddableComponent::Health: return object.healthEnabled;
+    case AddableComponent::NavAgent: return object.navAgentEnabled;
+    case AddableComponent::Script:
+        return object.scriptEnabled || !object.scriptClassName.empty() || !object.scriptPath.empty();
+    case AddableComponent::AudioSource: return object.audioSourceEnabled;
+    case AddableComponent::ParticleSystem: return object.particleSystemEnabled;
+    }
+    return false;
+}
+
+bool ComponentMatchesSearch(const ComponentCatalogEntry& entry) {
+    std::string query(g_componentSearch.data());
+    if (query.empty()) return true;
+    std::string haystack = std::string(entry.category) + " " + entry.name + " " + entry.description;
+    std::transform(query.begin(), query.end(), query.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    std::transform(haystack.begin(), haystack.end(), haystack.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return haystack.find(query) != std::string::npos;
+}
+
+bool AddComponent(EditorDockspace::Context& context, AddableComponent component) {
+    if (!context.scene) return false;
+    const EditorScene::Object* selected = context.scene->SelectedObject();
+    if (!selected || selected->locked || HasComponent(*selected, component)) return false;
+
+    bool added = false;
+    switch (component) {
+    case AddableComponent::LinearVelocity:
+        added = context.scene->SetSelectedLinearVelocityEnabled(true);
+        break;
+    case AddableComponent::AngularVelocity:
+        added = context.scene->SetSelectedAngularVelocityEnabled(true);
+        break;
+    case AddableComponent::RigidBody:
+        added = context.scene->SetSelectedRigidBody(engine::ecs::RigidBody::Dynamic(1.0f));
+        break;
+    case AddableComponent::Collider: {
+        const engine::ecs::Transform* transform = context.scene->TryGetTransform(selected->entity);
+        added = context.scene->SetSelectedCollider(DefaultColliderForObject(*selected, transform));
+        break;
+    }
+    case AddableComponent::Rotator:
+        added = context.scene->SetSelectedRotatorEnabled(true);
+        break;
+    case AddableComponent::Mover:
+        added = context.scene->SetSelectedMoverEnabled(true);
+        break;
+    case AddableComponent::PlayerController:
+        added = context.scene->SetSelectedPlayerControllerEnabled(true);
+        break;
+    case AddableComponent::CameraZone: {
+        const std::string preset = context.scene->CameraPresets().empty()
+            ? std::string()
+            : context.scene->CameraPresets().front().name;
+        added = context.scene->SetSelectedCameraZone(true, preset, true, 0, 0.35f);
+        break;
+    }
+    case AddableComponent::Health:
+        added = context.scene->SetSelectedHealthEnabled(true);
+        break;
+    case AddableComponent::NavAgent:
+        added = context.scene->SetSelectedNavAgent(true, 3.0f, 20.0f, 0.6f, 0.3f,
+            std::string(), 12.0f, 45.0f);
+        break;
+    case AddableComponent::Script:
+        added = context.scene->SetSelectedScript("NewObjectScript", std::string(), false);
+        break;
+    case AddableComponent::AudioSource:
+        added = context.scene->SetSelectedAudioSource(true, std::string(), 1.0f, 1.0f,
+            true, false, false, 1.0f, 40.0f, 1.0f);
+        break;
+    case AddableComponent::ParticleSystem: {
+        engine::ParticleSystemComponent settings;
+        added = context.scene->SetSelectedParticleSystem(true, settings);
+        break;
+    }
+    }
+    if (added && context.log) {
+        for (const ComponentCatalogEntry& entry : kComponentCatalog) {
+            if (entry.component == component) {
+                context.log->Info(std::string("Added ") + entry.name + " component to " + selected->name);
+                break;
+            }
+        }
+    }
+    return added;
+}
+
+void DrawComponentMenuItems(EditorDockspace::Context& context) {
+    const EditorScene::Object* selected = context.scene ? context.scene->SelectedObject() : nullptr;
+    const bool locked = !selected || selected->locked;
+    const char* currentCategory = nullptr;
+    for (const ComponentCatalogEntry& entry : kComponentCatalog) {
+        if (!currentCategory || std::string(currentCategory) != entry.category) {
+            if (currentCategory) ImGui::Separator();
+            currentCategory = entry.category;
+            ImGui::TextDisabled("%s", currentCategory);
+        }
+        const bool attached = selected && HasComponent(*selected, entry.component);
+        const std::string label = attached ? std::string(entry.name) + " (Added)" : entry.name;
+        if (ImGui::MenuItem(label.c_str(), nullptr, false, !locked && !attached)) {
+            AddComponent(context, entry.component);
+        }
+    }
+}
+
+void DrawAddComponentPopup(EditorDockspace::Context& context) {
+    if (g_componentPopupOpenRequested) {
+        g_componentSearch.fill('\0');
+        ImGui::OpenPopup("Add Component");
+        g_componentPopupOpenRequested = false;
+    }
+    ImGui::SetNextWindowSize(ImVec2(455.0f, 390.0f), ImGuiCond_Appearing);
+    if (!ImGui::BeginPopup("Add Component")) return;
+
+    const EditorScene::Object* selected = context.scene ? context.scene->SelectedObject() : nullptr;
+    ImGui::Text("Add Component to %s", selected ? selected->name.c_str() : "selection");
+    if (selected && selected->locked) ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.25f, 1.0f), "Unlock this object to add components.");
+    ImGui::SetNextItemWidth(-1.0f);
+    if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+    ImGui::InputTextWithHint("##ComponentSearch", "Search components...",
+        g_componentSearch.data(), g_componentSearch.size());
+    ImGui::Separator();
+
+    bool close = false;
+    ImGui::BeginChild("##ComponentResults", ImVec2(0.0f, 0.0f), false);
+    const char* currentCategory = nullptr;
+    for (const ComponentCatalogEntry& entry : kComponentCatalog) {
+        if (!ComponentMatchesSearch(entry)) continue;
+        if (!currentCategory || std::string(currentCategory) != entry.category) {
+            currentCategory = entry.category;
+            ImGui::Spacing();
+            ImGui::TextDisabled("%s", currentCategory);
+        }
+        const bool attached = selected && HasComponent(*selected, entry.component);
+        const bool disabled = !selected || selected->locked || attached;
+        ImGui::PushID(static_cast<int>(entry.component));
+        if (disabled) ImGui::BeginDisabled();
+        const std::string label = attached ? std::string(entry.name) + "   Added" : entry.name;
+        if (ImGui::Selectable(label.c_str(), false, 0, ImVec2(0.0f, 38.0f))) {
+            close = AddComponent(context, entry.component);
+        }
+        if (disabled) ImGui::EndDisabled();
+        ImGui::SameLine(190.0f);
+        ImGui::TextDisabled("%s", entry.description);
+        ImGui::PopID();
+    }
+    ImGui::EndChild();
+    if (close) ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
 }
 
 bool IsMaterialDocument(const std::filesystem::path& path) {
@@ -567,6 +1078,355 @@ std::vector<EditorAssets::Asset> FindMaterialAssets(const EditorAssets& assets) 
     return materials;
 }
 
+std::vector<EditorAssets::Asset> FindAudioAssets(const EditorAssets& assets) {
+    std::vector<EditorAssets::Asset> audio;
+    std::error_code ec;
+    const std::filesystem::path root = assets.RootPath();
+    if (!std::filesystem::exists(root, ec) || !std::filesystem::is_directory(root, ec)) return audio;
+    for (const std::filesystem::directory_entry& entry : std::filesystem::recursive_directory_iterator(root, ec)) {
+        if (ec) break;
+        if (!entry.is_regular_file(ec)) continue;
+        std::string extension = entry.path().extension().string();
+        std::transform(extension.begin(), extension.end(), extension.begin(),
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (extension != ".wav" && extension != ".flac" && extension != ".mp3" && extension != ".ogg") continue;
+        EditorAssets::Asset asset;
+        asset.relativePath = std::filesystem::relative(entry.path(), root, ec).string();
+        if (ec) continue;
+        std::replace(asset.relativePath.begin(), asset.relativePath.end(), '\\', '/');
+        asset.displayName = entry.path().filename().string();
+        asset.type = EditorAssets::Type::Audio;
+        audio.push_back(std::move(asset));
+    }
+    std::sort(audio.begin(), audio.end(), [](const auto& a, const auto& b) {
+        return a.relativePath < b.relativePath;
+    });
+    return audio;
+}
+
+bool IsEditableAudioPath(const std::string& path) {
+    std::string extension = std::filesystem::path(path).extension().string();
+    std::transform(extension.begin(), extension.end(), extension.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return extension == ".wav" || extension == ".flac" || extension == ".mp3" || extension == ".ogg";
+}
+
+void SetAudioEditorOutputPath(const std::string& source) {
+    const std::filesystem::path input(source);
+    const std::filesystem::path output = input.parent_path() / (input.stem().string() + "_edited.wav");
+    std::snprintf(g_audioEditor.outputPath.data(), g_audioEditor.outputPath.size(), "%s", output.string().c_str());
+}
+
+bool LoadAudioIntoEditor(const std::string& path, EditorLog* log) {
+    engine::AudioBuffer decoded;
+    std::string error;
+    if (!engine::DecodeAudioFile(path, &decoded, &error)) {
+        if (log) log->Error("Audio Editor: " + error + " " + path);
+        return false;
+    }
+    g_audioEditor.buffer = std::move(decoded);
+    g_audioEditor.original = g_audioEditor.buffer;
+    g_audioEditor.undo = {};
+    g_audioEditor.undoStack.clear();
+    g_audioEditor.redoStack.clear();
+    g_audioEditor.sourcePath = path;
+    g_audioEditor.selectionStart = 0.0f;
+    g_audioEditor.selectionEnd = g_audioEditor.buffer.DurationSeconds();
+    g_audioEditor.dirty = false;
+    SetAudioEditorOutputPath(path);
+    if (log) log->Info("Audio Editor loaded: " + path);
+    return true;
+}
+
+void PushAudioEditUndo() {
+    g_audioEditor.undo = g_audioEditor.buffer;
+    g_audioEditor.undoStack.push_back(g_audioEditor.buffer);
+    if (g_audioEditor.undoStack.size() > 32) g_audioEditor.undoStack.erase(g_audioEditor.undoStack.begin());
+    g_audioEditor.redoStack.clear();
+    g_audioEditor.dirty = true;
+}
+
+std::pair<std::size_t, std::size_t> AudioSelectionFrames() {
+    const engine::AudioBuffer& buffer = g_audioEditor.buffer;
+    const std::size_t frames = buffer.FrameCount();
+    const std::size_t begin = std::min(frames, static_cast<std::size_t>(
+        std::max(g_audioEditor.selectionStart, 0.0f) * buffer.sampleRate));
+    const std::size_t end = std::clamp(static_cast<std::size_t>(
+        std::max(g_audioEditor.selectionEnd, 0.0f) * buffer.sampleRate), begin, frames);
+    return {begin, end};
+}
+
+void DrawAudioWaveform(const engine::AudioBuffer& buffer) {
+    const ImVec2 size(ImGui::GetContentRegionAvail().x, 190.0f);
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    draw->AddRectFilled(origin, ImVec2(origin.x + size.x, origin.y + size.y), IM_COL32(15, 18, 24, 255));
+    draw->AddRect(origin, ImVec2(origin.x + size.x, origin.y + size.y), IM_COL32(65, 78, 96, 255));
+    ImGui::InvisibleButton("##AudioWaveform", size);
+    if (buffer.Empty() || size.x < 2.0f) return;
+
+    const float duration = buffer.DurationSeconds();
+    const float visibleDuration = duration / std::max(g_audioEditor.waveformZoom, 1.0f);
+    const float visibleStart = std::clamp(g_audioEditor.waveformOffset, 0.0f,
+        std::max(duration - visibleDuration, 0.0f));
+    const float visibleEnd = visibleStart + visibleDuration;
+    const auto timeToX = [&](float time) {
+        return origin.x + size.x * ((time - visibleStart) / std::max(visibleDuration, 0.0001f));
+    };
+    const float selectedX0 = std::clamp(timeToX(g_audioEditor.selectionStart), origin.x, origin.x + size.x);
+    const float selectedX1 = std::clamp(timeToX(g_audioEditor.selectionEnd), origin.x, origin.x + size.x);
+    draw->AddRectFilled(ImVec2(selectedX0, origin.y), ImVec2(selectedX1, origin.y + size.y), IM_COL32(35, 92, 130, 65));
+    const float centerY = origin.y + size.y * 0.5f;
+    draw->AddLine(ImVec2(origin.x, centerY), ImVec2(origin.x + size.x, centerY), IM_COL32(70, 80, 92, 255));
+    const std::size_t frames = buffer.FrameCount();
+    const std::size_t visibleFrameStart = std::min(frames,
+        static_cast<std::size_t>(visibleStart * buffer.sampleRate));
+    const std::size_t visibleFrameEnd = std::min(frames,
+        static_cast<std::size_t>(visibleEnd * buffer.sampleRate));
+    const std::size_t visibleFrames = std::max<std::size_t>(visibleFrameEnd - visibleFrameStart, 1);
+    const int columns = std::max(1, static_cast<int>(size.x));
+    for (int x = 0; x < columns; ++x) {
+        const std::size_t begin = visibleFrameStart
+            + visibleFrames * static_cast<std::size_t>(x) / columns;
+        const std::size_t end = std::max(begin + 1, visibleFrameStart
+            + visibleFrames * static_cast<std::size_t>(x + 1) / columns);
+        float minimum = 1.0f;
+        float maximum = -1.0f;
+        for (std::size_t frame = begin; frame < std::min(end, frames); ++frame) {
+            for (std::uint32_t channel = 0; channel < buffer.channels; ++channel) {
+                const float sample = buffer.samples[frame * buffer.channels + channel];
+                minimum = std::min(minimum, sample);
+                maximum = std::max(maximum, sample);
+            }
+        }
+        draw->AddLine(ImVec2(origin.x + x, centerY - maximum * (size.y * 0.46f)),
+            ImVec2(origin.x + x, centerY - minimum * (size.y * 0.46f)), IM_COL32(64, 205, 226, 255));
+    }
+    draw->AddLine(ImVec2(selectedX0, origin.y), ImVec2(selectedX0, origin.y + size.y), IM_COL32(255, 205, 80, 255), 2.0f);
+    draw->AddLine(ImVec2(selectedX1, origin.y), ImVec2(selectedX1, origin.y + size.y), IM_COL32(255, 205, 80, 255), 2.0f);
+    static float dragAnchor = 0.0f;
+    if (ImGui::IsItemActivated()) {
+        const float normalized = std::clamp((ImGui::GetIO().MousePos.x - origin.x) / size.x, 0.0f, 1.0f);
+        dragAnchor = visibleStart + normalized * visibleDuration;
+        g_audioEditor.selectionStart = dragAnchor;
+        g_audioEditor.selectionEnd = dragAnchor;
+    }
+    if (ImGui::IsItemActive()) {
+        const float normalized = std::clamp((ImGui::GetIO().MousePos.x - origin.x) / size.x, 0.0f, 1.0f);
+        const float cursor = visibleStart + normalized * visibleDuration;
+        g_audioEditor.selectionStart = std::min(dragAnchor, cursor);
+        g_audioEditor.selectionEnd = std::max(dragAnchor, cursor);
+    }
+}
+
+void GenerateAudioEditorClip() {
+    constexpr std::uint32_t sampleRate = 44100;
+    const float duration = std::clamp(g_audioEditor.generatorDuration, 0.05f, 30.0f);
+    const std::size_t frames = static_cast<std::size_t>(duration * sampleRate);
+    engine::AudioBuffer generated;
+    generated.sampleRate = sampleRate;
+    generated.channels = 1;
+    generated.samples.resize(frames);
+    std::uint32_t noise = 0x12345678u;
+    for (std::size_t i = 0; i < frames; ++i) {
+        const float phase = 6.28318530718f * g_audioEditor.generatorFrequency * static_cast<float>(i) / sampleRate;
+        float sample = 0.0f;
+        if (g_audioEditor.generator == 0) sample = std::sin(phase);
+        else if (g_audioEditor.generator == 1) sample = std::sin(phase) >= 0.0f ? 1.0f : -1.0f;
+        else {
+            noise = noise * 1664525u + 1013904223u;
+            sample = static_cast<float>((noise >> 8) & 0x00FFFFFFu) / 8388607.5f - 1.0f;
+        }
+        generated.samples[i] = sample * std::clamp(g_audioEditor.generatorAmplitude, 0.0f, 1.0f);
+    }
+    g_audioEditor.buffer = generated;
+    g_audioEditor.original = generated;
+    g_audioEditor.undo = {};
+    g_audioEditor.undoStack.clear();
+    g_audioEditor.redoStack.clear();
+    g_audioEditor.sourcePath.clear();
+    g_audioEditor.selectionStart = 0.0f;
+    g_audioEditor.selectionEnd = duration;
+    g_audioEditor.dirty = true;
+}
+
+void EnsureAudioAssetOutputPaths(EditorDockspace::Context& context) {
+    if (g_audioEditor.cuePath[0] == '\0') {
+        const std::filesystem::path root = context.assets
+            ? std::filesystem::path(context.assets->RootPath()) : std::filesystem::path("Content");
+        const std::string path = (root / "Audio" / "new_cue.3dgaudio").string();
+        std::snprintf(g_audioEditor.cuePath.data(), g_audioEditor.cuePath.size(), "%s", path.c_str());
+    }
+    if (g_audioEditor.musicPath[0] == '\0') {
+        const std::filesystem::path root = context.assets
+            ? std::filesystem::path(context.assets->RootPath()) : std::filesystem::path("Content");
+        const std::string path = (root / "Audio" / "adaptive_music.3dgmusic").string();
+        std::snprintf(g_audioEditor.musicPath.data(), g_audioEditor.musicPath.size(), "%s", path.c_str());
+    }
+}
+
+std::string SelectedAudioAssetPath(EditorDockspace::Context& context) {
+    if (!context.assets) return {};
+    const EditorAssets::Asset* selected = context.assets->SelectedAsset();
+    const std::string path = context.assets->SelectedAssetFullPath();
+    return selected && IsEditableAudioPath(path) ? path : std::string{};
+}
+
+void RefreshAudioAssets(EditorDockspace::Context& context) {
+    if (!context.assets) return;
+    std::string ignored;
+    context.assets->Refresh(context.assets->RootPath(), &ignored);
+}
+
+void DrawAudioCueAuthoring(EditorDockspace::Context& context) {
+    EnsureAudioAssetOutputPaths(context);
+    engine::AudioCueAsset& cue = g_audioEditor.cue;
+    if (!ImGui::CollapsingHeader("Gameplay Audio Cue", ImGuiTreeNodeFlags_DefaultOpen)) return;
+    ImGui::TextDisabled("Reusable randomized, sequential, or layered gameplay sound.");
+    const char* modes[] = {"Random", "Sequence", "Layered"};
+    int mode = static_cast<int>(cue.mode);
+    if (ImGui::Combo("Playback Mode", &mode, modes, 3))
+        cue.mode = static_cast<engine::AudioCueMode>(mode);
+    int bus = static_cast<int>(cue.bus);
+    if (ImGui::BeginCombo("Cue Bus", engine::AudioBusName(cue.bus))) {
+        for (int i = static_cast<int>(engine::AudioBus::Music);
+             i <= static_cast<int>(engine::AudioBus::Ambient); ++i) {
+            if (ImGui::Selectable(engine::AudioBusName(static_cast<engine::AudioBus>(i)), i == bus)) {
+                bus = i;
+                cue.bus = static_cast<engine::AudioBus>(i);
+            }
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::DragFloatRange2("Volume Variation", &cue.volumeMin, &cue.volumeMax,
+        0.01f, 0.0f, 2.0f, "%.2f", "%.2f");
+    ImGui::DragFloatRange2("Pitch Variation", &cue.pitchMin, &cue.pitchMax,
+        0.01f, 0.1f, 4.0f, "%.2f", "%.2f");
+    ImGui::DragFloat("Cooldown", &cue.cooldownSeconds, 0.01f, 0.0f, 60.0f, "%.2f s");
+    ImGui::SliderInt("Max Instances", &cue.maxInstances, 1, 64);
+    ImGui::SliderInt("Priority", &cue.priority, 0, 100);
+    ImGui::Checkbox("Spatial Cue", &cue.spatial);
+    ImGui::SameLine();
+    ImGui::Checkbox("Avoid Immediate Repeat", &cue.noImmediateRepeat);
+
+    if (ImGui::Button("Add Selected Audio Clip")) {
+        const std::string path = SelectedAudioAssetPath(context);
+        if (!path.empty()) {
+            cue.clips.push_back({path});
+            g_audioEditor.selectedCueClip = static_cast<int>(cue.clips.size()) - 1;
+        } else if (context.log) {
+            context.log->Warning("Audio Cue: select a WAV, FLAC, MP3, or OGG asset first");
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Remove Clip") && g_audioEditor.selectedCueClip >= 0
+        && g_audioEditor.selectedCueClip < static_cast<int>(cue.clips.size())) {
+        cue.clips.erase(cue.clips.begin() + g_audioEditor.selectedCueClip);
+        g_audioEditor.selectedCueClip = std::min(g_audioEditor.selectedCueClip,
+            static_cast<int>(cue.clips.size()) - 1);
+    }
+    ImGui::BeginChild("##CueClips", ImVec2(0.0f, 110.0f), true);
+    for (std::size_t i = 0; i < cue.clips.size(); ++i) {
+        const std::string label = std::to_string(i + 1) + ". "
+            + std::filesystem::path(cue.clips[i].path).filename().string();
+        if (ImGui::Selectable(label.c_str(), g_audioEditor.selectedCueClip == static_cast<int>(i)))
+            g_audioEditor.selectedCueClip = static_cast<int>(i);
+    }
+    ImGui::EndChild();
+    if (g_audioEditor.selectedCueClip >= 0
+        && g_audioEditor.selectedCueClip < static_cast<int>(cue.clips.size())) {
+        engine::AudioCueClip& clip = cue.clips[static_cast<std::size_t>(g_audioEditor.selectedCueClip)];
+        ImGui::TextWrapped("%s", clip.path.c_str());
+        ImGui::DragFloat("Weight", &clip.weight, 0.05f, 0.0f, 100.0f);
+        ImGui::DragFloat("Clip Volume", &clip.volume, 0.01f, 0.0f, 4.0f);
+        ImGui::DragFloat("Clip Pitch", &clip.pitch, 0.01f, 0.1f, 4.0f);
+        ImGui::DragFloat("Layer Delay", &clip.delaySeconds, 0.01f, 0.0f, 30.0f, "%.2f s");
+    }
+    ImGui::InputText("Cue Asset", g_audioEditor.cuePath.data(), g_audioEditor.cuePath.size());
+    if (ImGui::Button("Save Cue")) {
+        std::string error;
+        if (engine::SaveAudioCue(g_audioEditor.cuePath.data(), cue, &error)) {
+            RefreshAudioAssets(context);
+            if (context.log) context.log->Info("Saved audio cue: " + std::string(g_audioEditor.cuePath.data()));
+        } else if (context.log) context.log->Error("Audio Cue: " + error);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Load Cue")) {
+        std::string error;
+        if (!engine::LoadAudioCue(g_audioEditor.cuePath.data(), &cue, &error)) {
+            if (context.log) context.log->Error("Audio Cue: " + error);
+        } else {
+            g_audioEditor.selectedCueClip = cue.clips.empty() ? -1 : 0;
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Preview Cue")) {
+        context.previewAudioRequested = true;
+        context.previewAudioPath = g_audioEditor.cuePath.data();
+        context.previewAudioSpatial = cue.spatial;
+    }
+}
+
+void DrawAdaptiveMusicAuthoring(EditorDockspace::Context& context) {
+    if (!ImGui::CollapsingHeader("Adaptive Music", ImGuiTreeNodeFlags_DefaultOpen)) return;
+    engine::AdaptiveMusicAsset& music = g_audioEditor.music;
+    if (ImGui::Button("Add Music State")) {
+        engine::AdaptiveMusicState state;
+        state.name = "State " + std::to_string(music.states.size() + 1);
+        const std::string selected = SelectedAudioAssetPath(context);
+        if (!selected.empty()) state.stems.push_back(selected);
+        music.states.push_back(std::move(state));
+        g_audioEditor.selectedMusicState = static_cast<int>(music.states.size()) - 1;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Remove State") && g_audioEditor.selectedMusicState >= 0
+        && g_audioEditor.selectedMusicState < static_cast<int>(music.states.size())) {
+        music.states.erase(music.states.begin() + g_audioEditor.selectedMusicState);
+        g_audioEditor.selectedMusicState = std::min(g_audioEditor.selectedMusicState,
+            static_cast<int>(music.states.size()) - 1);
+    }
+    if (ImGui::BeginCombo("Music State",
+        g_audioEditor.selectedMusicState >= 0
+            && g_audioEditor.selectedMusicState < static_cast<int>(music.states.size())
+        ? music.states[static_cast<std::size_t>(g_audioEditor.selectedMusicState)].name.c_str()
+        : "Select state...")) {
+        for (std::size_t i = 0; i < music.states.size(); ++i)
+            if (ImGui::Selectable(music.states[i].name.c_str(),
+                    g_audioEditor.selectedMusicState == static_cast<int>(i)))
+                g_audioEditor.selectedMusicState = static_cast<int>(i);
+        ImGui::EndCombo();
+    }
+    if (g_audioEditor.selectedMusicState >= 0
+        && g_audioEditor.selectedMusicState < static_cast<int>(music.states.size())) {
+        auto& state = music.states[static_cast<std::size_t>(g_audioEditor.selectedMusicState)];
+        ImGui::DragFloat("BPM", &state.bpm, 0.5f, 1.0f, 400.0f);
+        ImGui::SliderFloat("Music Volume", &state.volume, 0.0f, 2.0f);
+        ImGui::DragFloat("Crossfade", &state.crossfadeSeconds, 0.05f, 0.0f, 30.0f, "%.2f s");
+        if (ImGui::Button("Add Selected Stem")) {
+            const std::string selected = SelectedAudioAssetPath(context);
+            if (!selected.empty()) state.stems.push_back(selected);
+        }
+        for (std::size_t i = 0; i < state.stems.size(); ++i)
+            ImGui::BulletText("%s", std::filesystem::path(state.stems[i]).filename().string().c_str());
+    }
+    ImGui::InputText("Music Asset", g_audioEditor.musicPath.data(), g_audioEditor.musicPath.size());
+    if (ImGui::Button("Save Adaptive Music")) {
+        std::string error;
+        if (engine::SaveAdaptiveMusic(g_audioEditor.musicPath.data(), music, &error))
+            RefreshAudioAssets(context);
+        else if (context.log) context.log->Error("Adaptive Music: " + error);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Load Adaptive Music")) {
+        std::string error;
+        if (!engine::LoadAdaptiveMusic(g_audioEditor.musicPath.data(), &music, &error)) {
+            if (context.log) context.log->Error("Adaptive Music: " + error);
+        } else {
+            g_audioEditor.selectedMusicState = music.states.empty() ? -1 : 0;
+        }
+    }
+}
+
 ImVec4 LogColor(EditorLog::Level level) {
     switch (level) {
     case EditorLog::Level::Info: return ImVec4(0.78f, 0.84f, 0.92f, 1.0f);
@@ -576,7 +1436,7 @@ ImVec4 LogColor(EditorLog::Level level) {
     return ImVec4(0.78f, 0.84f, 0.92f, 1.0f);
 }
 
-void DrawWorldSettings(EditorScene& scene, bool* open) {
+void DrawWorldSettings(EditorScene& scene, EditorDockspace::Context& context, bool* open) {
     if (!ImGui::Begin(EditorPanels::Name(EditorPanels::Panel::WorldSettings), open)) {
         ImGui::End();
         return;
@@ -651,6 +1511,9 @@ void DrawWorldSettings(EditorScene& scene, bool* open) {
             environment.ssaoBias = defaults.ssaoBias;
             environment.ssr = defaults.ssr;
             environment.ssrIntensity = defaults.ssrIntensity;
+            environment.msaa = defaults.msaa;
+            environment.fxaa = defaults.fxaa;
+            environment.renderScale = defaults.renderScale;
             changed = true;
         }
         changed |= ImGui::Checkbox("IBL", &environment.ibl);
@@ -659,6 +1522,147 @@ void DrawWorldSettings(EditorScene& scene, bool* open) {
         changed |= ImGui::DragFloat("SSAO Bias", &environment.ssaoBias, 0.001f, 0.0f, 0.2f, "%.3f");
         changed |= ImGui::Checkbox("SSR", &environment.ssr);
         changed |= ImGui::DragFloat("SSR Intensity", &environment.ssrIntensity, 0.01f, 0.0f, 2.0f, "%.2f");
+        ImGui::Separator();
+        ImGui::TextUnformatted("Anti-aliasing");
+        changed |= ImGui::Checkbox("MSAA (4x, direct view)", &environment.msaa);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Multisample AA on the main view. Active when SSR is off.");
+        }
+        changed |= ImGui::Checkbox("FXAA (post, SSR view)", &environment.fxaa);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Post-process edge AA. Active when SSR is on.");
+        }
+        changed |= ImGui::SliderFloat("Render Scale", &environment.renderScale, 0.25f, 1.0f, "%.2fx");
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Render the 3D scene at this fraction of window resolution, then "
+                              "upscale. Cuts fill-rate GPU cost. Ignored while SSR or SSAO is on.");
+        }
+        ImGui::Separator();
+        ImGui::TextUnformatted("Display");
+        if (ImGui::Checkbox("VSync", &context.vsync)) {
+            context.vsyncChangeRequested = true;   // applied by the app (window setting)
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Cap the frame rate to the monitor refresh. Off = uncapped (see Profiler).");
+        }
+    }
+
+    if (ImGui::CollapsingHeader(
+            "Post Process Shader Stack", ImGuiTreeNodeFlags_DefaultOpen)) {
+        const EditorAssets::Asset* selected =
+            context.assets ? context.assets->SelectedAsset() : nullptr;
+        const bool selectedShader =
+            selected && selected->type == EditorAssets::Type::Shader;
+        if (!selectedShader) ImGui::BeginDisabled();
+        if (ImGui::Button("Add Selected Shader") && context.assets) {
+            const std::string path = context.assets->SelectedAssetFullPath();
+            engine::ShaderAsset shader;
+            std::string loadError;
+            if (!engine::LoadShaderAsset(path, &shader, &loadError)) {
+                if (context.log)
+                    context.log->Error("Post Process: " + loadError);
+            } else if (shader.domain != engine::ShaderDomain::PostProcess) {
+                if (context.log)
+                    context.log->Warning(
+                        "Only Post Process shader assets can be added to this stack.");
+            } else {
+                EditorScene::Environment::PostProcessEffect effect;
+                effect.shaderPath = path;
+                for (const engine::ShaderParameter& reflected :
+                     shader.parameters) {
+                    effect.parameters.push_back({
+                        reflected.name,
+                        static_cast<int>(reflected.type),
+                        reflected.defaultValue
+                    });
+                }
+                environment.postProcessEffects.push_back(std::move(effect));
+                changed = true;
+            }
+        }
+        if (!selectedShader) ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::TextDisabled("Effects run top to bottom before bloom and tone mapping.");
+
+        int moveFrom = -1;
+        int moveTo = -1;
+        int remove = -1;
+        for (std::size_t i = 0; i < environment.postProcessEffects.size(); ++i) {
+            auto& effect = environment.postProcessEffects[i];
+            ImGui::PushID(static_cast<int>(i));
+            const std::string label =
+                std::to_string(i + 1) + ". "
+                + std::filesystem::path(effect.shaderPath).filename().string();
+            const bool expanded = ImGui::TreeNodeEx(
+                "Effect", ImGuiTreeNodeFlags_DefaultOpen, "%s", label.c_str());
+            ImGui::SameLine();
+            changed |= ImGui::Checkbox("Enabled", &effect.enabled);
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Up") && i > 0) {
+                moveFrom = static_cast<int>(i);
+                moveTo = static_cast<int>(i - 1);
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Down")
+                && i + 1 < environment.postProcessEffects.size()) {
+                moveFrom = static_cast<int>(i);
+                moveTo = static_cast<int>(i + 1);
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Remove"))
+                remove = static_cast<int>(i);
+            if (expanded) {
+                ImGui::TextDisabled("%s", effect.shaderPath.c_str());
+                for (auto& parameter : effect.parameters) {
+                    ImGui::PushID(parameter.name.c_str());
+                    if (parameter.type
+                        == static_cast<int>(engine::ShaderValueType::Bool)) {
+                        bool value = parameter.value == "true"
+                            || parameter.value == "1";
+                        if (ImGui::Checkbox(parameter.name.c_str(), &value)) {
+                            parameter.value = value ? "true" : "false";
+                            changed = true;
+                        }
+                    } else if (parameter.type
+                               == static_cast<int>(
+                                   engine::ShaderValueType::Float)) {
+                        float value = std::strtof(
+                            parameter.value.c_str(), nullptr);
+                        if (ImGui::DragFloat(
+                                parameter.name.c_str(), &value, 0.01f)) {
+                            parameter.value = std::to_string(value);
+                            changed = true;
+                        }
+                    } else {
+                        std::array<char, 384> value{};
+                        std::snprintf(
+                            value.data(), value.size(), "%s",
+                            parameter.value.c_str());
+                        if (ImGui::InputText(
+                                parameter.name.c_str(), value.data(),
+                                value.size())) {
+                            parameter.value = value.data();
+                            changed = true;
+                        }
+                    }
+                    ImGui::PopID();
+                }
+                ImGui::TreePop();
+            }
+            ImGui::PopID();
+        }
+        if (moveFrom >= 0 && moveTo >= 0) {
+            std::swap(environment.postProcessEffects[
+                          static_cast<std::size_t>(moveFrom)],
+                      environment.postProcessEffects[
+                          static_cast<std::size_t>(moveTo)]);
+            changed = true;
+        }
+        if (remove >= 0) {
+            environment.postProcessEffects.erase(
+                environment.postProcessEffects.begin() + remove);
+            changed = true;
+        }
     }
 
     if (ImGui::CollapsingHeader("Shadows", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -846,6 +1850,12 @@ void DrawPhysicsStatus(EditorDockspace::Context& context, bool* open) {
             DrawStatusRow("Sphere Colliders", status.spheres);
             DrawStatusRow("Box Colliders", status.boxes);
             DrawStatusRow("Plane Colliders", status.planes);
+            DrawStatusRow("Capsule Colliders", status.capsules);
+            DrawStatusRow("Cylinder Colliders", status.cylinders);
+            DrawStatusRow("Cone Colliders", status.cones);
+            DrawStatusRow("Pyramid Colliders", status.pyramids);
+            DrawStatusRow("Torus Colliders", status.toruses);
+            DrawStatusRow("Stair Colliders", status.staircases);
             DrawStatusRow("Joints", status.joints);
             ImGui::EndTable();
         }
@@ -881,12 +1891,24 @@ void DrawPhysicsStatus(EditorDockspace::Context& context, bool* open) {
                 ImGui::Text("Shape: %s", ColliderShapeName(selected->collider.shape));
                 if (selected->collider.shape == engine::ecs::ColliderShape::Sphere) {
                     ImGui::Text("Radius: %.3f", selected->collider.radius);
-                } else if (selected->collider.shape == engine::ecs::ColliderShape::Box) {
+                } else if (selected->collider.shape == engine::ecs::ColliderShape::Box
+                    || selected->collider.shape == engine::ecs::ColliderShape::Pyramid
+                    || selected->collider.shape == engine::ecs::ColliderShape::Staircase) {
                     ImGui::Text("Half Extents: %.3f, %.3f, %.3f",
                         selected->collider.halfExtents.x,
                         selected->collider.halfExtents.y,
                         selected->collider.halfExtents.z);
-                } else {
+                    if (selected->collider.shape == engine::ecs::ColliderShape::Staircase)
+                        ImGui::Text("Steps: %d", selected->collider.steps);
+                } else if (selected->collider.shape == engine::ecs::ColliderShape::Capsule
+                    || selected->collider.shape == engine::ecs::ColliderShape::Cylinder
+                    || selected->collider.shape == engine::ecs::ColliderShape::Cone) {
+                    ImGui::Text("Radius / Half Height: %.3f / %.3f",
+                        selected->collider.radius, selected->collider.halfHeight);
+                } else if (selected->collider.shape == engine::ecs::ColliderShape::Torus) {
+                    ImGui::Text("Major / Minor Radius: %.3f / %.3f",
+                        selected->collider.majorRadius, selected->collider.minorRadius);
+                } else if (selected->collider.shape == engine::ecs::ColliderShape::Plane) {
                     ImGui::Text("Plane: %.3f, %.3f, %.3f / %.3f",
                         selected->collider.planeNormal.x,
                         selected->collider.planeNormal.y,
@@ -927,6 +1949,30 @@ void DrawPhysicsStatus(EditorDockspace::Context& context, bool* open) {
     if (ImGui::CollapsingHeader("Scene Debug", ImGuiTreeNodeFlags_DefaultOpen)) {
         if (context.showPhysicsEventGuides) {
             ImGui::Checkbox("Event Guides", context.showPhysicsEventGuides);
+        }
+        if (context.showAiDebug) {
+            ImGui::Checkbox("AI Debug", context.showAiDebug);
+        }
+        if (context.useNavMesh) {
+            ImGui::Checkbox("AI: Use Navmesh", context.useNavMesh);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Route chase/search paths through the funnel-smoothed "
+                                  "navmesh instead of the grid (applied on next Play).");
+            }
+        }
+        if (context.showNavigationPreview) {
+            if (ImGui::Checkbox("Show Navigation Areas", context.showNavigationPreview)
+                && *context.showNavigationPreview) {
+                context.rebuildNavigationPreviewRequested = true;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Rebuild Navigation")) {
+                context.rebuildNavigationPreviewRequested = true;
+            }
+            ImGui::Text("Walkable polygons: %d", context.navigationPreviewPolygons);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Green areas are locations the AI can navigate to. Rebuild after changing bounds or colliders.");
+            }
         }
         if (context.physicsEventGuidesSelectedOnly) {
             ImGui::Checkbox("Selected Events Only", context.physicsEventGuidesSelectedOnly);
@@ -1759,6 +2805,8 @@ void DrawAnimationPreview(EditorDockspace::Context& context, bool* open) {
         if (state.playMode || !context.scene) {
             ImGui::TextUnformatted("Animation events are edited in Edit mode.");
         } else {
+            ImGui::TextWrapped("Audio commands: Audio.Play, Audio.Restart:SourceName, "
+                               "Audio.Pause:SourceName, Audio.Resume:SourceName, Audio.Stop:SourceName");
             std::vector<EditorScene::AnimationEvent> edited = state.events;
             bool changed = false;
             int removeIndex = -1;
@@ -2018,6 +3066,13 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
         }
     }
 
+    if (!selected->navMeshBoundsVolume) {
+        if (ImGui::Button("+ Add Component", ImVec2(-1.0f, 30.0f))) {
+            g_componentPopupOpenRequested = true;
+        }
+        DrawAddComponentPopup(context);
+    }
+
     if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
         const engine::ecs::Transform* transform = context.scene->TryGetTransform(selected->entity);
         if (transform) {
@@ -2060,6 +3115,20 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
         } else {
             ImGui::TextUnformatted("No transform component.");
         }
+    }
+
+    if (selected->navMeshBoundsVolume) {
+        if (ImGui::CollapsingHeader("Navigation Bounds", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::TextWrapped("This editor-only volume defines the region baked into the navigation grid and nav mesh. Scale and move it to cover the playable area.");
+            if (const engine::ecs::Transform* transform = context.scene->TryGetTransform(selected->entity)) {
+                ImGui::Text("Bounds size: %.2f x %.2f x %.2f",
+                    std::abs(transform->scale.x), std::abs(transform->scale.y), std::abs(transform->scale.z));
+                ImGui::Text("Navigation floor: %.2f", transform->position.y - std::abs(transform->scale.y) * 0.5f);
+            }
+            ImGui::TextDisabled("The volume is excluded from runtime rendering and collision.");
+        }
+        ImGui::End();
+        return;
     }
 
     if (ImGui::CollapsingHeader("Rendering", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -2107,6 +3176,52 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                     ImGui::TextUnformatted("No .3dgmat files found.");
                 }
                 ImGui::EndCombo();
+            }
+        }
+        if (context.runtimeAssets && !selected->materialAssetPath.empty()
+            && std::filesystem::path(selected->materialAssetPath).extension() == ".3dgmat") {
+            std::string materialError;
+            const engine::RuntimeMaterialAsset* material =
+                context.runtimeAssets->LoadMaterial(
+                    selected->materialAssetPath, &materialError);
+            if (material && !material->shaderPath.empty()
+                && ImGui::TreeNode("Material Instance Overrides")) {
+                ImGui::TextDisabled("Shader: %s", material->shaderPath.c_str());
+                for (const engine::RuntimeShaderParameter& parameter :
+                     material->shaderParameters) {
+                    const auto authored =
+                        selected->materialParameterOverrides.find(parameter.name);
+                    std::string value = authored == selected->materialParameterOverrides.end()
+                        ? parameter.value : authored->second;
+                    bool changed = false;
+                    ImGui::PushID(parameter.name.c_str());
+                    if (parameter.type == static_cast<int>(engine::ShaderValueType::Bool)) {
+                        bool enabled = value == "true" || value == "1";
+                        if (ImGui::Checkbox(parameter.name.c_str(), &enabled)) {
+                            value = enabled ? "true" : "false";
+                            changed = true;
+                        }
+                    } else if (parameter.type == static_cast<int>(engine::ShaderValueType::Float)) {
+                        float number = std::strtof(value.c_str(), nullptr);
+                        if (ImGui::DragFloat(parameter.name.c_str(), &number, 0.01f)) {
+                            value = std::to_string(number);
+                            changed = true;
+                        }
+                    } else {
+                        std::array<char, 256> buffer{};
+                        std::snprintf(buffer.data(), buffer.size(), "%s", value.c_str());
+                        if (ImGui::InputText(parameter.name.c_str(),
+                                             buffer.data(), buffer.size())) {
+                            value = buffer.data();
+                            changed = true;
+                        }
+                    }
+                    if (changed)
+                        context.scene->SetSelectedMaterialParameterOverride(
+                            parameter.name, value);
+                    ImGui::PopID();
+                }
+                ImGui::TreePop();
             }
         }
     }
@@ -2280,6 +3395,377 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
         }
     }
 
+    if (selected->audioSourceEnabled) {
+        if (ImGui::CollapsingHeader("Audio Source", ImGuiTreeNodeFlags_DefaultOpen)) {
+            bool enabled = selected->audioSourceEnabled;
+            std::string path = selected->audioAssetPath;
+            float volume = selected->audioVolume;
+            float pitch = selected->audioPitch;
+            bool spatial = selected->audioSpatial;
+            bool loop = selected->audioLoop;
+            bool autoplay = selected->audioAutoplay;
+            float minDistance = selected->audioMinDistance;
+            float maxDistance = selected->audioMaxDistance;
+            float rolloff = selected->audioRolloff;
+            float dopplerFactor = selected->audioDopplerFactor;
+            float coneInnerAngle = selected->audioConeInnerAngle;
+            float coneOuterAngle = selected->audioConeOuterAngle;
+            float coneOuterGain = selected->audioConeOuterGain;
+            float occlusion = selected->audioOcclusion;
+            int priority = selected->audioPriority;
+            engine::AudioBus bus = selected->audioBus;
+            bool changed = false;
+
+            changed |= ImGui::Checkbox("Enabled##AudioSource", &enabled);
+            const char* preview = path.empty() ? "Select audio asset..." : path.c_str();
+            if (ImGui::BeginCombo("Audio Clip", preview)) {
+                if (ImGui::Selectable("None", path.empty())) { path.clear(); changed = true; }
+                if (context.assets) {
+                    const std::vector<EditorAssets::Asset> audioAssets = FindAudioAssets(*context.assets);
+                    for (const EditorAssets::Asset& asset : audioAssets) {
+                        const std::string fullPath = (std::filesystem::path(context.assets->RootPath()) / asset.relativePath).string();
+                        const bool current = path == fullPath;
+                        if (ImGui::Selectable(asset.relativePath.c_str(), current)) {
+                            path = fullPath;
+                            changed = true;
+                        }
+                        if (current) ImGui::SetItemDefaultFocus();
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::Button("Drop audio asset here", ImVec2(-1.0f, 0.0f));
+            if (ImGui::BeginDragDropTarget()) {
+                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("3DGEDITOR_ASSET")) {
+                    const std::string dropped(static_cast<const char*>(payload->Data));
+                    std::string extension = std::filesystem::path(dropped).extension().string();
+                    std::transform(extension.begin(), extension.end(), extension.begin(),
+                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                    if (extension == ".wav" || extension == ".flac" || extension == ".mp3" || extension == ".ogg") {
+                        path = dropped;
+                        changed = true;
+                    }
+                }
+                ImGui::EndDragDropTarget();
+            }
+            changed |= ImGui::SliderFloat("Volume", &volume, 0.0f, 2.0f, "%.2f");
+            changed |= ImGui::SliderFloat("Pitch", &pitch, 0.25f, 4.0f, "%.2f");
+            if (ImGui::BeginCombo("Mixer Bus", engine::AudioBusName(bus))) {
+                for (int i = static_cast<int>(engine::AudioBus::Master);
+                     i <= static_cast<int>(engine::AudioBus::Ambient); ++i) {
+                    const engine::AudioBus candidate = static_cast<engine::AudioBus>(i);
+                    const bool current = candidate == bus;
+                    if (ImGui::Selectable(engine::AudioBusName(candidate), current)) {
+                        bus = candidate;
+                        changed = true;
+                    }
+                    if (current) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+            changed |= ImGui::Checkbox("Spatial (3D)", &spatial);
+            ImGui::SameLine();
+            changed |= ImGui::Checkbox("Loop", &loop);
+            ImGui::SameLine();
+            changed |= ImGui::Checkbox("Autoplay", &autoplay);
+            if (spatial) {
+                changed |= ImGui::DragFloat("Min Distance", &minDistance, 0.1f, 0.01f, 10000.0f);
+                changed |= ImGui::DragFloat("Max Distance", &maxDistance, 0.25f, 0.01f, 10000.0f);
+                maxDistance = std::max(maxDistance, minDistance);
+                changed |= ImGui::DragFloat("Rolloff", &rolloff, 0.05f, 0.0f, 20.0f);
+                changed |= ImGui::DragFloat("Doppler", &dopplerFactor, 0.05f, 0.0f, 10.0f);
+                changed |= ImGui::SliderFloat("Cone Inner", &coneInnerAngle, 0.0f, 360.0f, "%.0f deg");
+                changed |= ImGui::SliderFloat("Cone Outer", &coneOuterAngle,
+                    coneInnerAngle, 360.0f, "%.0f deg");
+                changed |= ImGui::SliderFloat("Cone Outer Gain", &coneOuterGain, 0.0f, 1.0f);
+                changed |= ImGui::SliderFloat("Occlusion", &occlusion, 0.0f, 1.0f);
+                ImGui::TextDisabled("Inner and outer attenuation ranges are shown in the viewport.");
+            }
+            changed |= ImGui::SliderInt("Voice Priority", &priority, 0, 100);
+            if (changed) {
+                context.scene->SetSelectedAudioSource(enabled, path, volume, pitch, spatial,
+                    loop, autoplay, minDistance, maxDistance, rolloff, bus,
+                    dopplerFactor, coneInnerAngle, coneOuterAngle, coneOuterGain,
+                    occlusion, priority);
+            }
+
+            const bool canPreview = context.audioAvailable && !path.empty();
+            if (!canPreview) ImGui::BeginDisabled();
+            if (ImGui::Button("Preview")) {
+                context.previewAudioRequested = true;
+                context.previewAudioPath = path;
+                context.previewAudioVolume = volume;
+                context.previewAudioPitch = pitch;
+                context.previewAudioSpatial = spatial;
+                context.previewAudioLoop = loop;
+                context.previewAudioMinDistance = minDistance;
+                context.previewAudioMaxDistance = maxDistance;
+                context.previewAudioRolloff = rolloff;
+                context.previewAudioBus = bus;
+            }
+            if (!canPreview) ImGui::EndDisabled();
+            ImGui::SameLine();
+            if (ImGui::Button("Stop Preview")) context.stopAudioPreviewRequested = true;
+            if (!context.audioAvailable) {
+                ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.25f, 1.0f), "No audio device is available.");
+            }
+            if (context.playMode) {
+                ImGui::Separator();
+                ImGui::TextUnformatted("Runtime Transport");
+                if (!context.selectedRuntimeAudioAvailable) ImGui::BeginDisabled();
+                if (ImGui::Button("Restart##RuntimeAudio")) context.runtimeAudioRestartRequested = true;
+                ImGui::SameLine();
+                const char* pauseLabel = context.selectedRuntimeAudioPaused
+                    ? "Resume##RuntimeAudio" : "Pause##RuntimeAudio";
+                if (ImGui::Button(pauseLabel)) context.runtimeAudioPauseResumeRequested = true;
+                ImGui::SameLine();
+                if (ImGui::Button("Stop##RuntimeAudio")) context.runtimeAudioStopRequested = true;
+                if (!context.selectedRuntimeAudioAvailable) ImGui::EndDisabled();
+                ImGui::Text("State: %s  |  %.2f s",
+                    context.selectedRuntimeAudioPlaying ? "Playing"
+                    : context.selectedRuntimeAudioPaused ? "Paused" : "Stopped",
+                    context.selectedRuntimeAudioCursor);
+            }
+            if (ImGui::Button("Remove Audio Source")) {
+                context.scene->SetSelectedAudioSource(false, path, volume, pitch, spatial,
+                    loop, autoplay, minDistance, maxDistance, rolloff, bus,
+                    dopplerFactor, coneInnerAngle, coneOuterAngle, coneOuterGain,
+                    occlusion, priority);
+            }
+        }
+    }
+
+    if (selected->particleSystemEnabled) {
+        if (ImGui::CollapsingHeader("Particle System", ImGuiTreeNodeFlags_DefaultOpen)) {
+            engine::ParticleSystemComponent settings;
+            settings.config = selected->particleConfig;
+            settings.autoplay = selected->particleAutoplay;
+            settings.loop = selected->particleLoop;
+            settings.prewarm = selected->particlePrewarm;
+            settings.duration = selected->particleDuration;
+            settings.startDelay = selected->particleStartDelay;
+            settings.simulationSpeed = selected->particleSimulationSpeed;
+            settings.localSpace = selected->particleLocalSpace;
+            settings.burstCount = selected->particleBurstCount;
+            settings.burstInterval = selected->particleBurstInterval;
+            bool enabled = selected->particleSystemEnabled;
+            bool changed = false;
+
+            ImGui::Text("Asset: %s%s", selected->particleAssetPath.empty()
+                ? "(none - instance settings)" : selected->particleAssetPath.c_str(),
+                selected->particleAssetOverride ? " (overridden)" : "");
+            ImGui::Button("Drop .particle asset here", ImVec2(-1.0f, 0.0f));
+            if (ImGui::BeginDragDropTarget()) {
+                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("3DGEDITOR_ASSET")) {
+                    const char* path = static_cast<const char*>(payload->Data);
+                    if (path && std::filesystem::path(path).extension() == ".particle") {
+                        engine::ParticleSystemComponent loaded;
+                        std::string error;
+                        if (particle_asset::Load(path, &loaded, &error))
+                            context.scene->SetSelectedParticleAsset(path, loaded, false);
+                        else if (context.log) context.log->Error("Particle asset: " + error);
+                    }
+                }
+                ImGui::EndDragDropTarget();
+            }
+
+            changed |= ImGui::Checkbox("Enabled##ParticleSystem", &enabled);
+            if (ImGui::TreeNodeEx("Playback", ImGuiTreeNodeFlags_DefaultOpen)) {
+                changed |= ImGui::Checkbox("Autoplay##Particles", &settings.autoplay);
+                ImGui::SameLine();
+                changed |= ImGui::Checkbox("Loop##Particles", &settings.loop);
+                ImGui::SameLine();
+                changed |= ImGui::Checkbox("Prewarm##Particles", &settings.prewarm);
+                ImGui::SameLine();
+                changed |= ImGui::Checkbox("Local Space", &settings.localSpace);
+                int simulationBackend = static_cast<int>(settings.config.simulationBackend);
+                const char* simulationBackends[] = {"Auto", "CPU", "GPU Compute"};
+                if (ImGui::Combo("Simulation Backend##Particles", &simulationBackend,
+                                 simulationBackends, 3)) {
+                    settings.config.simulationBackend =
+                        static_cast<engine::ParticleSimulationBackend>(simulationBackend);
+                    changed = true;
+                }
+                ImGui::TextDisabled("GPU compute requires OpenGL 4.3 and a supported feature set.");
+                changed |= ImGui::DragFloat("Duration", &settings.duration, 0.1f, 0.0f, 10000.0f, "%.2f s");
+                changed |= ImGui::DragFloat("Start Delay", &settings.startDelay, 0.05f, 0.0f, 10000.0f, "%.2f s");
+                changed |= ImGui::DragFloat("Simulation Speed", &settings.simulationSpeed, 0.05f, 0.0f, 20.0f, "%.2fx");
+                ImGui::TreePop();
+            }
+            if (ImGui::TreeNodeEx("Emission", ImGuiTreeNodeFlags_DefaultOpen)) {
+                changed |= ImGui::DragFloat("Rate", &settings.config.rate, 1.0f, 0.0f, 100000.0f, "%.1f /s");
+                changed |= ImGui::DragInt("Maximum", &settings.config.maxParticles, 10.0f, 1, 1000000);
+                changed |= ImGui::DragInt("Burst Count", &settings.burstCount, 1.0f, 0, 1000000);
+                changed |= ImGui::DragFloat("Burst Interval", &settings.burstInterval, 0.05f, 0.0f, 10000.0f, "%.2f s");
+                ImGui::TreePop();
+            }
+            if (ImGui::TreeNodeEx("Shape", ImGuiTreeNodeFlags_DefaultOpen)) {
+                int shape = static_cast<int>(settings.config.shape);
+                const char* shapes[] = {"Point", "Sphere", "Cone"};
+                if (ImGui::Combo("Emit Shape", &shape, shapes, 3)) {
+                    settings.config.shape = static_cast<engine::EmitShape>(shape);
+                    changed = true;
+                }
+                changed |= ImGui::DragFloat("Shape Radius", &settings.config.shapeRadius, 0.01f, 0.0f, 10000.0f);
+                changed |= ImGui::DragFloat3("Direction##Particles", &settings.config.direction.x, 0.02f);
+                if (settings.config.shape == engine::EmitShape::Cone)
+                    changed |= ImGui::DragFloat("Cone Angle", &settings.config.coneAngleDeg, 0.5f, 0.0f, 180.0f, "%.1f deg");
+                ImGui::TreePop();
+            }
+            if (ImGui::TreeNodeEx("Motion", ImGuiTreeNodeFlags_DefaultOpen)) {
+                changed |= ImGui::DragFloatRange2("Speed", &settings.config.speedMin,
+                    &settings.config.speedMax, 0.05f, -10000.0f, 10000.0f, "Min %.2f", "Max %.2f");
+                changed |= ImGui::DragFloatRange2("Lifetime", &settings.config.lifeMin,
+                    &settings.config.lifeMax, 0.05f, 0.001f, 10000.0f, "Min %.2f", "Max %.2f");
+                changed |= ImGui::DragFloat3("Gravity##Particles", &settings.config.gravity.x, 0.05f);
+                changed |= ImGui::DragFloat("Drag##Particles", &settings.config.drag, 0.02f, 0.0f, 1000.0f);
+                ImGui::TreePop();
+            }
+            if (ImGui::TreeNodeEx("Collision", ImGuiTreeNodeFlags_DefaultOpen)) {
+                changed |= ImGui::Checkbox("Enable Particle Collision", &settings.config.collisionEnabled);
+                if (settings.config.collisionEnabled) {
+                    int response = static_cast<int>(settings.config.collisionResponse);
+                    const char* responses[] = {"Bounce", "Kill"};
+                    if (ImGui::Combo("Response", &response, responses, 2)) {
+                        settings.config.collisionResponse =
+                            static_cast<engine::ParticleCollisionResponse>(response);
+                        changed = true;
+                    }
+                    changed |= ImGui::DragFloat("Collision Radius", &settings.config.collisionRadius,
+                        0.005f, 0.0f, 100.0f);
+                    if (settings.config.collisionResponse == engine::ParticleCollisionResponse::Bounce) {
+                        changed |= ImGui::SliderFloat("Bounce", &settings.config.collisionBounce, 0.0f, 2.0f);
+                        changed |= ImGui::SliderFloat("Collision Friction", &settings.config.collisionFriction, 0.0f, 1.0f);
+                        changed |= ImGui::SliderFloat("Lifetime Loss", &settings.config.collisionLifetimeLoss, 0.0f, 1.0f, "%.0f%%");
+                    }
+                    ImGui::TextDisabled("Plane, sphere and box are exact; other colliders use their bounds.");
+                }
+                ImGui::TreePop();
+            }
+            if (ImGui::TreeNodeEx("Trails / Ribbons", ImGuiTreeNodeFlags_DefaultOpen)) {
+                changed |= ImGui::Checkbox("Enable Trails", &settings.config.trailsEnabled);
+                if (settings.config.trailsEnabled) {
+                    changed |= ImGui::SliderInt("Trail Segments", &settings.config.trailSegments, 2, 16);
+                    changed |= ImGui::DragFloat("Trail Length", &settings.config.trailLength, 0.05f, 0.001f, 1000.0f);
+                    changed |= ImGui::DragFloat("Trail Width", &settings.config.trailWidth, 0.01f, 0.0f, 100.0f);
+                    changed |= ImGui::SliderFloat("Trail Opacity", &settings.config.trailOpacity, 0.0f, 1.0f);
+                    ImGui::TextDisabled("Ribbons face the camera and taper along the motion history.");
+                }
+                ImGui::TreePop();
+            }
+            if (ImGui::TreeNodeEx("Renderer", ImGuiTreeNodeFlags_DefaultOpen)) {
+                int renderMode = static_cast<int>(settings.config.renderMode);
+                const char* renderModes[] = {"Billboard", "Mesh"};
+                if (ImGui::Combo("Render Mode##Particles", &renderMode, renderModes, 2)) {
+                    settings.config.renderMode = static_cast<engine::ParticleRenderMode>(renderMode);
+                    changed = true;
+                }
+                if (settings.config.renderMode == engine::ParticleRenderMode::Mesh) {
+                    int meshShape = static_cast<int>(settings.config.meshShape);
+                    const char* meshShapes[] = {"Cube", "Sphere", "Cone", "Cylinder", "Model Asset"};
+                    if (ImGui::Combo("Particle Mesh", &meshShape, meshShapes, 5)) {
+                        settings.config.meshShape = static_cast<engine::ParticleMeshShape>(meshShape);
+                        changed = true;
+                    }
+                    changed |= ImGui::DragFloat("Mesh Scale##Particles", &settings.config.meshScale,
+                                                0.01f, 0.001f, 1000.0f);
+                    changed |= ImGui::Checkbox("Align To Velocity##Particles",
+                                               &settings.config.meshAlignToVelocity);
+                    if (settings.config.meshShape == engine::ParticleMeshShape::Model) {
+                        std::array<char, 512> particleMesh{};
+                        std::snprintf(particleMesh.data(), particleMesh.size(), "%s",
+                                      settings.config.meshPath.c_str());
+                        if (ImGui::InputText("Model Asset##Particles", particleMesh.data(),
+                                             particleMesh.size())) {
+                            settings.config.meshPath = particleMesh.data(); changed = true;
+                        }
+                        if (ImGui::BeginDragDropTarget()) {
+                            if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("3DGEDITOR_ASSET")) {
+                                const char* path = static_cast<const char*>(payload->Data);
+                                if (path && *path) { settings.config.meshPath = path; changed = true; }
+                            }
+                            ImGui::EndDragDropTarget();
+                        }
+                        ImGui::TextDisabled("Drag a model from Assets. Failed models fall back to a cube.");
+                    }
+                }
+                ImGui::TreePop();
+            }
+            if (ImGui::TreeNodeEx("Appearance", ImGuiTreeNodeFlags_DefaultOpen)) {
+                changed |= ImGui::ColorEdit4("Start Color", &settings.config.startColor.x,
+                    ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR);
+                changed |= ImGui::ColorEdit4("End Color", &settings.config.endColor.x,
+                    ImGuiColorEditFlags_Float | ImGuiColorEditFlags_HDR);
+                changed |= ImGui::DragFloat("Start Size", &settings.config.startSize, 0.01f, 0.0f, 10000.0f);
+                changed |= ImGui::DragFloat("End Size", &settings.config.endSize, 0.01f, 0.0f, 10000.0f);
+                changed |= ImGui::DragFloatRange2("Start Rotation", &settings.config.rotationMinDeg,
+                    &settings.config.rotationMaxDeg, 1.0f, -360.0f, 360.0f, "Min %.0f", "Max %.0f");
+                changed |= ImGui::DragFloatRange2("Rotation Speed", &settings.config.angularVelocityMinDeg,
+                    &settings.config.angularVelocityMaxDeg, 1.0f, -2000.0f, 2000.0f, "Min %.0f", "Max %.0f");
+                int blend = static_cast<int>(settings.config.blend);
+                const char* blends[] = {"Additive", "Alpha"};
+                if (ImGui::Combo("Blend", &blend, blends, 2)) {
+                    settings.config.blend = static_cast<engine::ParticleBlend>(blend);
+                    changed = true;
+                }
+                changed |= ImGui::Checkbox("Size Curve##Particles", &settings.config.useSizeCurve);
+                if (settings.config.useSizeCurve)
+                    changed |= ImGui::SliderFloat4("Size Keys", settings.config.sizeCurve.data(), 0.0f, 1.0f, "%.2f");
+                changed |= ImGui::Checkbox("Color Curve##Particles", &settings.config.useColorCurve);
+                if (settings.config.useColorCurve)
+                    changed |= ImGui::SliderFloat4("Color Keys", settings.config.colorCurve.data(), 0.0f, 1.0f, "%.2f");
+
+                std::array<char, 512> particleTexture{};
+                std::snprintf(particleTexture.data(), particleTexture.size(), "%s",
+                              settings.config.texturePath.c_str());
+                if (ImGui::InputText("Texture##Particles", particleTexture.data(), particleTexture.size())) {
+                    settings.config.texturePath = particleTexture.data(); changed = true;
+                }
+                if (ImGui::BeginDragDropTarget()) {
+                    if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("3DGEDITOR_ASSET")) {
+                        const char* path = static_cast<const char*>(payload->Data);
+                        if (path && *path) { settings.config.texturePath = path; changed = true; }
+                    }
+                    ImGui::EndDragDropTarget();
+                }
+                changed |= ImGui::DragInt("Texture Columns", &settings.config.textureColumns, 1.0f, 1, 64);
+                changed |= ImGui::DragInt("Texture Rows", &settings.config.textureRows, 1.0f, 1, 64);
+                changed |= ImGui::DragFloat("Texture FPS", &settings.config.textureFps, 0.5f, 0.0f, 240.0f);
+                changed |= ImGui::Checkbox("Loop Flipbook", &settings.config.textureLoop);
+                changed |= ImGui::Checkbox("Frustum Culling", &settings.config.cullingEnabled);
+                changed |= ImGui::DragFloat("Bounds Radius", &settings.config.boundsRadius,
+                                            0.05f, 0.01f, 10000.0f);
+                ImGui::TreePop();
+            }
+            ImGui::TextUnformatted("Presets:");
+            ImGui::SameLine();
+            for (int i = 0; i < 5; ++i) {
+                if (i > 0) ImGui::SameLine();
+                const auto preset = static_cast<ParticlePreset>(i);
+                if (ImGui::SmallButton(ParticlePresetName(preset))) {
+                    settings = MakeParticlePreset(preset);
+                    enabled = true;
+                    context.scene->SetSelectedParticleSystem(true, settings);
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Reset")) {
+                settings = engine::ParticleSystemComponent{};
+                enabled = true;
+                context.scene->SetSelectedParticleSystem(true, settings);
+            }
+            if (changed) {
+                if (ImGui::IsAnyItemActive()) context.scene->BeginParticleEdit();
+                context.scene->SetSelectedParticleSystem(enabled, settings);
+            }
+            if (!ImGui::IsAnyItemActive()) context.scene->EndParticleEdit();
+            for (const std::string& warning : ValidateParticleSettings(settings))
+                ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.2f, 1.0f), "! %s", warning.c_str());
+            if (ImGui::Button("Remove Particle System"))
+                context.scene->SetSelectedParticleSystem(false, settings);
+        }
+    }
+
     if (ImGui::CollapsingHeader("Runtime Components", ImGuiTreeNodeFlags_DefaultOpen)) {
         bool linearVelocityEnabled = selected->linearVelocityEnabled;
         if (ImGui::Checkbox("LinearVelocity", &linearVelocityEnabled)) {
@@ -2369,6 +3855,22 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                         collider.radius = std::max(std::max(s.x, s.z) * 0.5f, 0.001f);
                         collider.halfHeight = std::max(s.y * 0.5f - collider.radius, 0.0f);
                         break;
+                    case engine::ecs::ColliderShape::Cylinder:
+                    case engine::ecs::ColliderShape::Cone:
+                        collider.radius = std::max(std::max(s.x, s.z) * 0.5f, 0.001f);
+                        collider.halfHeight = std::max(s.y * 0.5f, 0.001f);
+                        collider.halfExtents = glm::vec3(collider.radius, collider.halfHeight, collider.radius);
+                        break;
+                    case engine::ecs::ColliderShape::Pyramid:
+                    case engine::ecs::ColliderShape::Staircase:
+                        collider.halfExtents = glm::max(s * 0.5f, glm::vec3(0.001f));
+                        break;
+                    case engine::ecs::ColliderShape::Torus:
+                        collider.minorRadius = std::max(s.y * 0.5f, 0.001f);
+                        collider.majorRadius = std::max(std::max(s.x, s.z) * 0.5f - collider.minorRadius, 0.001f);
+                        collider.halfExtents = glm::vec3(collider.majorRadius + collider.minorRadius,
+                            collider.minorRadius, collider.majorRadius + collider.minorRadius);
+                        break;
                     case engine::ecs::ColliderShape::Plane:
                     default:
                         break;   // plane offset tracks position, not scale
@@ -2425,6 +3927,12 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                 }
                 context.scene->SetSelectedRigidBody(rigidBody);
             }
+            if (ImGui::Checkbox("Kinematic", &rigidBody.kinematic)) {
+                context.scene->SetSelectedRigidBody(rigidBody);
+            }
+            if (rigidBody.kinematic && ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Moved by its velocity only (script/animation). Pushes dynamics; never pushed, never sleeps.");
+            }
         }
 
         bool colliderEnabled = selected->colliderEnabled;
@@ -2434,8 +3942,8 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
         if (colliderEnabled) {
             engine::ecs::Collider collider = selected->collider;
             int shapeIndex = ColliderShapeIndex(collider.shape);
-            const char* shapes[] = {"Sphere", "Box", "Plane", "Capsule"};
-            if (ImGui::Combo("Collider Shape", &shapeIndex, shapes, 3)) {
+            const char* shapes[] = {"Sphere", "Box", "Plane", "Capsule", "Cylinder", "Cone", "Pyramid", "Torus", "Staircase"};
+            if (ImGui::Combo("Collider Shape", &shapeIndex, shapes, 9)) {
                 collider.shape = ColliderShapeFromIndex(shapeIndex);
                 context.scene->SetSelectedCollider(collider);
             }
@@ -2454,7 +3962,31 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                 if (changed) {
                     context.scene->SetSelectedCollider(collider);
                 }
-            } else {
+            } else if (collider.shape == engine::ecs::ColliderShape::Cylinder
+                || collider.shape == engine::ecs::ColliderShape::Cone) {
+                bool changed = false;
+                changed |= ImGui::DragFloat("Radius", &collider.radius, 0.02f, 0.001f, 1000.0f);
+                changed |= ImGui::DragFloat("Half Height", &collider.halfHeight, 0.02f, 0.001f, 1000.0f);
+                if (changed) {
+                    collider.halfExtents = glm::vec3(collider.radius, collider.halfHeight, collider.radius);
+                    context.scene->SetSelectedCollider(collider);
+                }
+            } else if (collider.shape == engine::ecs::ColliderShape::Pyramid
+                || collider.shape == engine::ecs::ColliderShape::Staircase) {
+                bool changed = ImGui::DragFloat3("Half Extents", &collider.halfExtents.x, 0.02f, 0.001f, 1000.0f);
+                if (collider.shape == engine::ecs::ColliderShape::Staircase)
+                    changed |= ImGui::DragInt("Steps", &collider.steps, 0.1f, 1, 32);
+                if (changed) context.scene->SetSelectedCollider(collider);
+            } else if (collider.shape == engine::ecs::ColliderShape::Torus) {
+                bool changed = false;
+                changed |= ImGui::DragFloat("Major Radius", &collider.majorRadius, 0.02f, 0.001f, 1000.0f);
+                changed |= ImGui::DragFloat("Minor Radius", &collider.minorRadius, 0.02f, 0.001f, 1000.0f);
+                if (changed) {
+                    const float outer = collider.majorRadius + collider.minorRadius;
+                    collider.halfExtents = glm::vec3(outer, collider.minorRadius, outer);
+                    context.scene->SetSelectedCollider(collider);
+                }
+            } else if (collider.shape == engine::ecs::ColliderShape::Plane) {
                 if (ImGui::DragFloat3("Plane Normal", &collider.planeNormal.x, 0.02f)) {
                     context.scene->SetSelectedCollider(collider);
                 }
@@ -2470,6 +4002,23 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             }
             if (ImGui::Checkbox("Trigger##ColliderMode", &collider.isTrigger)) {
                 context.scene->SetSelectedCollider(collider);
+            }
+
+            // Collision filtering. Layer = which group this collider is in; Mask =
+            // which groups it collides with. Edited as bitfields (0..31 checkboxes
+            // would be noisy, so expose the raw hex-ish integers).
+            int layer = static_cast<int>(collider.layer);
+            int mask  = static_cast<int>(collider.mask);
+            if (ImGui::InputInt("Layer bits", &layer, 1, 16)) {
+                collider.layer = static_cast<std::uint32_t>(std::max(layer, 0));
+                context.scene->SetSelectedCollider(collider);
+            }
+            if (ImGui::InputInt("Collides-with mask", &mask, 1, 16)) {
+                collider.mask = static_cast<std::uint32_t>(std::max(mask, 0));
+                context.scene->SetSelectedCollider(collider);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Bitfields: two colliders touch only if each side's mask includes the other's layer bit.");
             }
         }
 
@@ -2646,11 +4195,99 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             changed |= ImGui::DragFloat("Eye Height", &player.eyeHeight, 0.01f, 0.0f, 100.0f);
             changed |= ImGui::DragFloat("Camera Distance", &player.cameraDistance, 0.05f, 0.0f, 100.0f);
             changed |= ImGui::DragFloat("Camera Target Height", &player.cameraTargetHeight, 0.01f, 0.0f, 100.0f);
+            if (!player.firstPerson && ImGui::TreeNodeEx("Camera Collision",
+                    ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_SpanAvailWidth)) {
+                changed |= ImGui::Checkbox("Collision Enabled", &player.cameraCollision);
+                ImGui::BeginDisabled(!player.cameraCollision);
+                changed |= ImGui::DragFloat("Probe Radius", &player.cameraProbeRadius,
+                                            0.01f, 0.0f, 5.0f);
+                changed |= ImGui::DragFloat("Wall Padding", &player.cameraCollisionPadding,
+                                            0.005f, 0.0f, 2.0f);
+                changed |= ImGui::DragFloat("Return Speed", &player.cameraReturnSpeed,
+                                            0.1f, 0.0f, 100.0f);
+                ImGui::TextDisabled("Retracts immediately; Return Speed smooths recovery.");
+                ImGui::EndDisabled();
+                ImGui::TreePop();
+            }
+            if (!player.firstPerson && ImGui::TreeNodeEx("Shoulder Camera",
+                    ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_SpanAvailWidth)) {
+                changed |= ImGui::Checkbox("Shoulder Camera Enabled", &player.shoulderCamera);
+                ImGui::BeginDisabled(!player.shoulderCamera);
+                changed |= ImGui::DragFloat("Shoulder Offset", &player.shoulderOffset,
+                                            0.01f, 0.0f, 5.0f);
+                changed |= ImGui::DragFloat("Shoulder Switch Speed", &player.shoulderSwitchSpeed,
+                                            0.1f, 0.0f, 100.0f);
+                changed |= ImGui::Checkbox("Start On Right Shoulder", &player.rightShoulder);
+                ImGui::TextDisabled("Press Q in Play mode to switch shoulders.");
+                ImGui::EndDisabled();
+                ImGui::TreePop();
+            }
+            if (!player.firstPerson && ImGui::TreeNodeEx("Lock-On Targeting",
+                    ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_SpanAvailWidth)) {
+                changed |= ImGui::Checkbox("Lock-On Enabled", &player.lockOnEnabled);
+                ImGui::BeginDisabled(!player.lockOnEnabled);
+                changed |= ImGui::DragFloat("Lock-On Range", &player.lockOnRange,
+                                            0.25f, 0.0f, 1000.0f);
+                changed |= ImGui::SliderFloat("Acquisition View Angle", &player.lockOnViewAngle,
+                                              0.0f, 180.0f, "%.1f deg");
+                changed |= ImGui::DragFloat("Target Height", &player.lockOnTargetHeight,
+                                            0.01f, -100.0f, 100.0f);
+                changed |= ImGui::DragFloat("Tracking Speed", &player.lockOnTrackingSpeed,
+                                            0.1f, 0.0f, 100.0f);
+                ImGui::TextDisabled("Press T in Play mode to lock or release a living Health target.");
+                ImGui::EndDisabled();
+                ImGui::TreePop();
+            }
             changed |= ImGui::DragFloat("Max Slope", &player.maxSlopeDegrees, 0.5f, 0.0f, 89.0f);
             changed |= ImGui::DragFloat("Step Height", &player.stepHeight, 0.01f, 0.0f, 10.0f);
             player.capsuleHeight = std::max(player.capsuleHeight, player.capsuleRadius * 2.0f);
             if (changed) {
                 context.scene->SetSelectedPlayerController(player);
+            }
+        }
+
+        bool cameraZoneEnabled = selected->cameraZoneEnabled;
+        if (ImGui::Checkbox("Camera Zone", &cameraZoneEnabled)) {
+            context.scene->SetSelectedCameraZone(
+                cameraZoneEnabled,
+                selected->cameraZonePresetName,
+                selected->cameraZoneRestoreOnExit,
+                selected->cameraZonePriority,
+                selected->cameraZoneReturnBlend);
+        }
+        if (cameraZoneEnabled) {
+            std::string presetName = selected->cameraZonePresetName;
+            bool restoreOnExit = selected->cameraZoneRestoreOnExit;
+            int priority = selected->cameraZonePriority;
+            float returnBlend = selected->cameraZoneReturnBlend;
+            bool changed = false;
+
+            const char* preview = presetName.empty() ? "Choose camera..." : presetName.c_str();
+            if (ImGui::BeginCombo("Zone Camera", preview)) {
+                for (const EditorScene::CameraPreset& camera : context.scene->CameraPresets()) {
+                    const bool selectedCamera = camera.name == presetName;
+                    if (ImGui::Selectable(camera.name.c_str(), selectedCamera)) {
+                        presetName = camera.name;
+                        changed = true;
+                    }
+                    if (selectedCamera) ImGui::SetItemDefaultFocus();
+                }
+                if (context.scene->CameraPresets().empty()) {
+                    ImGui::TextDisabled("Create a camera in Camera Manager first.");
+                }
+                ImGui::EndCombo();
+            }
+            changed |= ImGui::Checkbox("Restore Camera On Exit", &restoreOnExit);
+            changed |= ImGui::DragInt("Zone Priority", &priority, 1.0f, -1000, 1000);
+            changed |= ImGui::DragFloat("Exit Blend", &returnBlend, 0.05f, 0.0f, 30.0f, "%.2f s");
+            if (!selected->colliderEnabled || !selected->collider.isTrigger) {
+                ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.2f, 1.0f),
+                                   "Camera Zone requires a trigger collider.");
+                if (ImGui::Button("Configure Trigger Collider")) changed = true;
+            }
+            if (changed) {
+                context.scene->SetSelectedCameraZone(
+                    true, presetName, restoreOnExit, priority, returnBlend);
             }
         }
 
@@ -2818,6 +4455,10 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             EditorScene::TriggerActionMode enterRotatorAction = selected->triggerEnterRotatorAction;
             EditorScene::TriggerActionMode exitMoverAction = selected->triggerExitMoverAction;
             EditorScene::TriggerActionMode exitRotatorAction = selected->triggerExitRotatorAction;
+            engine::ecs::AudioAction enterAudioAction = selected->triggerEnterAudioAction;
+            engine::ecs::AudioAction exitAudioAction = selected->triggerExitAudioAction;
+            engine::ParticleAction enterParticleAction = selected->triggerEnterParticleAction;
+            engine::ParticleAction exitParticleAction = selected->triggerExitParticleAction;
             const char* preview = targetName.empty() ? "None" : targetName.c_str();
             if (ImGui::BeginCombo("Trigger Target", preview)) {
                 if (ImGui::Selectable("None", targetName.empty())) {
@@ -2826,7 +4467,11 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                         enterMoverAction,
                         enterRotatorAction,
                         exitMoverAction,
-                        exitRotatorAction);
+                        exitRotatorAction,
+                        enterAudioAction,
+                        exitAudioAction,
+                        enterParticleAction,
+                        exitParticleAction);
                 }
                 for (const EditorScene::Object& object : context.scene->Objects()) {
                     if (object.name == selected->name) {
@@ -2839,7 +4484,11 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                             enterMoverAction,
                             enterRotatorAction,
                             exitMoverAction,
-                            exitRotatorAction);
+                            exitRotatorAction,
+                            enterAudioAction,
+                            exitAudioAction,
+                            enterParticleAction,
+                            exitParticleAction);
                     }
                     if (isSelectedTarget) {
                         ImGui::SetItemDefaultFocus();
@@ -2852,13 +4501,269 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             changed |= DrawTriggerActionModeCombo("Enter Rotator", &enterRotatorAction);
             changed |= DrawTriggerActionModeCombo("Exit Mover", &exitMoverAction);
             changed |= DrawTriggerActionModeCombo("Exit Rotator", &exitRotatorAction);
+            changed |= DrawAudioActionCombo("Enter Audio", &enterAudioAction);
+            changed |= DrawAudioActionCombo("Exit Audio", &exitAudioAction);
+            changed |= DrawParticleActionCombo("Enter Particles", &enterParticleAction);
+            changed |= DrawParticleActionCombo("Exit Particles", &exitParticleAction);
+            if ((enterAudioAction != engine::ecs::AudioAction::None
+                 || exitAudioAction != engine::ecs::AudioAction::None)
+                && !targetName.empty()) {
+                const EditorScene::Object* targetObject = nullptr;
+                for (const EditorScene::Object& object : context.scene->Objects()) {
+                    if (object.name == targetName) { targetObject = &object; break; }
+                }
+                if (!targetObject || !targetObject->audioSourceEnabled) {
+                    ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.25f, 1.0f),
+                        "Target has no Audio Source component.");
+                }
+            }
+            if ((enterParticleAction != engine::ParticleAction::None
+                 || exitParticleAction != engine::ParticleAction::None)
+                && !targetName.empty()) {
+                const EditorScene::Object* targetObject = nullptr;
+                for (const EditorScene::Object& object : context.scene->Objects()) {
+                    if (object.name == targetName) { targetObject = &object; break; }
+                }
+                if (!targetObject || !targetObject->particleSystemEnabled) {
+                    ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.25f, 1.0f),
+                        "Target has no Particle System component.");
+                }
+            }
             if (changed) {
                 context.scene->SetSelectedTriggerAction(targetName,
                     enterMoverAction,
                     enterRotatorAction,
                     exitMoverAction,
-                    exitRotatorAction);
+                    exitRotatorAction,
+                    enterAudioAction,
+                    exitAudioAction,
+                    enterParticleAction,
+                    exitParticleAction);
             }
+
+            ImGui::Separator();
+            ImGui::TextUnformatted("Cinematic Trigger");
+            std::string sequenceName = selected->triggerCameraSequenceName;
+            auto enterCameraAction = selected->triggerEnterCameraAction;
+            auto exitCameraAction = selected->triggerExitCameraAction;
+            bool lockInput = selected->triggerCameraLockInput;
+            bool skippable = selected->triggerCameraSkippable;
+            bool cameraChanged = false;
+            const char* sequencePreview = sequenceName.empty()
+                ? "Choose sequence..." : sequenceName.c_str();
+            if (ImGui::BeginCombo("Cinematic Sequence", sequencePreview)) {
+                if (ImGui::Selectable("None", sequenceName.empty())) {
+                    sequenceName.clear();
+                    cameraChanged = true;
+                }
+                for (const EditorScene::CameraSequence& sequence
+                     : context.scene->CameraSequences()) {
+                    const bool isSelected = sequence.name == sequenceName;
+                    if (ImGui::Selectable(sequence.name.c_str(), isSelected)) {
+                        sequenceName = sequence.name;
+                        cameraChanged = true;
+                    }
+                    if (isSelected) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+            cameraChanged |= DrawCameraSequenceTriggerActionCombo(
+                "Enter Cinematic", &enterCameraAction);
+            cameraChanged |= DrawCameraSequenceTriggerActionCombo(
+                "Exit Cinematic", &exitCameraAction);
+            cameraChanged |= ImGui::Checkbox("Lock Player Input", &lockInput);
+            cameraChanged |= ImGui::Checkbox("Allow Enter To Skip", &skippable);
+            if (cameraChanged) {
+                context.scene->SetSelectedTriggerCameraSequence(
+                    sequenceName, enterCameraAction, exitCameraAction,
+                    lockInput, skippable);
+            }
+            if ((enterCameraAction == EditorScene::CameraSequenceTriggerAction::Play
+                 || exitCameraAction == EditorScene::CameraSequenceTriggerAction::Play)
+                && sequenceName.empty()) {
+                ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.25f, 1.0f),
+                                   "Choose a sequence for the Play action.");
+            }
+        }
+    }
+
+    if (ImGui::CollapsingHeader("AI Agent", ImGuiTreeNodeFlags_DefaultOpen)) {
+        bool  enabled  = selected->navAgentEnabled;
+        float speed    = selected->navAgentSpeed;
+        float maxForce = selected->navAgentMaxForce;
+        float reach    = selected->navAgentReachRadius;
+        float repath   = selected->navAgentRepathInterval;
+        std::string targetName = selected->navAgentTargetName;
+        float visionRange = selected->navAgentVisionRange;
+        float visionHalfAngle = selected->navAgentVisionHalfAngle;
+        bool changed = false;
+        changed |= ImGui::Checkbox("Nav Agent", &enabled);
+        if (enabled) {
+            changed |= ImGui::DragFloat("Speed", &speed, 0.05f, 0.0f, 50.0f, "%.2f");
+            changed |= ImGui::DragFloat("Max Force", &maxForce, 0.1f, 0.0f, 200.0f, "%.1f");
+            changed |= ImGui::DragFloat("Reach Radius", &reach, 0.02f, 0.05f, 10.0f, "%.2f");
+            changed |= ImGui::DragFloat("Repath (s)", &repath, 0.02f, 0.05f, 5.0f, "%.2f");
+
+            // Chase target: an object the agent pursues when it can see it.
+            const char* targetPreview = targetName.empty() ? "None (patrol only)" : targetName.c_str();
+            if (ImGui::BeginCombo("Chase Target", targetPreview)) {
+                if (ImGui::Selectable("None (patrol only)", targetName.empty())) {
+                    targetName.clear();
+                    changed = true;
+                }
+                for (const EditorScene::Object& object : context.scene->Objects()) {
+                    if (object.name == selected->name) {
+                        continue;
+                    }
+                    const bool isTarget = object.name == targetName;
+                    if (ImGui::Selectable(object.name.c_str(), isTarget)) {
+                        targetName = object.name;
+                        changed = true;
+                    }
+                    if (isTarget) {
+                        ImGui::SetItemDefaultFocus();
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            if (!targetName.empty()) {
+                changed |= ImGui::DragFloat("Vision Range", &visionRange, 0.1f, 0.0f, 100.0f, "%.1f");
+                changed |= ImGui::DragFloat("Vision Half-Angle", &visionHalfAngle, 0.5f, 1.0f, 180.0f, "%.0f deg");
+            }
+
+            // Faction targeting: team id + auto-acquire nearest hostile.
+            int  team = selected->navAgentTeam;
+            bool autoTarget = selected->navAgentAutoTarget;
+            bool teamChanged = false;
+            teamChanged |= ImGui::DragInt("Team (0 = neutral)", &team, 0.1f, 0, 32);
+            teamChanged |= ImGui::Checkbox("Auto-target nearest hostile", &autoTarget);
+            if (autoTarget) {
+                ImGui::TextDisabled("Chases the nearest agent on a different non-zero team.");
+            }
+            if (teamChanged) {
+                context.scene->SetSelectedNavAgentTeam(team, autoTarget);
+            }
+        }
+        if (changed) {
+            context.scene->SetSelectedNavAgent(enabled, speed, maxForce, reach, repath,
+                                               targetName, visionRange, visionHalfAngle);
+        }
+        if (enabled) {
+            ImGui::Text("Patrol points: %d", static_cast<int>(selected->patrolPoints.size()));
+            if (ImGui::Button("Add Waypoint (object pos)")) {
+                if (const engine::ecs::Transform* t = context.scene->TryGetTransform(selected->entity)) {
+                    context.scene->AddSelectedPatrolPoint(t->position);
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Clear Waypoints")) {
+                context.scene->ClearSelectedPatrolPoints();
+            }
+            ImGui::TextDisabled("Move the object between adds to build a patrol loop, then Play.");
+
+            // Behaviour-tree brain: an optional .btgraph asset that overrides the
+            // built-in patrol/chase/search brain at Play time. Author it in the
+            // Behavior Graph panel (F11), then drag it here from the Content browser.
+            ImGui::Separator();
+            const std::string& brain = selected->navAgentBrainAsset;
+            ImGui::Text("Brain: %s", brain.empty() ? "Built-in (patrol/chase/search)" : brain.c_str());
+            ImGui::Button(brain.empty() ? "Drop .btgraph here" : "Replace brain (drop .btgraph)");
+            if (ImGui::BeginDragDropTarget()) {
+                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("3DGEDITOR_ASSET")) {
+                    const std::string dropped(static_cast<const char*>(payload->Data),
+                                              static_cast<std::size_t>(payload->DataSize));
+                    const std::string trimmed = dropped.c_str();   // stop at first NUL if padded
+                    if (trimmed.size() >= 9 && trimmed.substr(trimmed.size() - 9) == ".btgraph") {
+                        context.scene->SetSelectedNavAgentBrain(trimmed);
+                    }
+                }
+                ImGui::EndDragDropTarget();
+            }
+            if (!brain.empty()) {
+                ImGui::SameLine();
+                if (ImGui::Button("Clear Brain")) {
+                    context.scene->SetSelectedNavAgentBrain(std::string());
+                }
+            }
+        }
+    }
+
+    // Terrain controls only appear for terrain objects (created via Add > Terrain),
+    // so an ordinary mesh can't be accidentally converted into terrain.
+    if (selected->isTerrain && ImGui::CollapsingHeader("Terrain", ImGuiTreeNodeFlags_DefaultOpen)) {
+        int   res = selected->terrainRes;
+        float size = selected->terrainSize;
+        float maxHeight = selected->terrainMaxHeight;
+        int   seed = selected->terrainSeed;
+        int   octaves = selected->terrainOctaves;
+        float frequency = selected->terrainFrequency;
+        bool changed = false;
+        {
+            changed |= ImGui::DragInt("Resolution", &res, 1.0f, 8, 512);
+            changed |= ImGui::DragFloat("Size (m)", &size, 0.5f, 1.0f, 2000.0f, "%.1f");
+            changed |= ImGui::DragFloat("Max Height", &maxHeight, 0.1f, 0.0f, 500.0f, "%.1f");
+            changed |= ImGui::DragInt("Seed", &seed, 1.0f, 0, 1000000);
+            changed |= ImGui::DragInt("Octaves", &octaves, 0.1f, 1, 10);
+            changed |= ImGui::DragFloat("Frequency", &frequency, 0.05f, 0.1f, 16.0f, "%.2f");
+            if (ImGui::Button("Randomize Seed")) {
+                seed = static_cast<int>((static_cast<unsigned>(seed) * 1103515245u + 12345u) & 0x7fffffffu);
+                changed = true;
+            }
+            ImGui::TextDisabled("Regenerates on change. Positioned by the object's Transform; "
+                                "grass/rock/snow colouring is by height + slope.");
+
+            // Sculpting: brush tools that edit the heightmap directly in the viewport.
+            if (context.terrainSculpt && context.terrainSculptMode &&
+                context.terrainBrushRadius && context.terrainBrushStrength) {
+                ImGui::Separator();
+                ImGui::Checkbox("Sculpt mode (left-drag in viewport)", context.terrainSculpt);
+                if (*context.terrainSculpt) {
+                    const char* modes[] = {"Raise", "Lower", "Smooth", "Flatten", "Paint"};
+                    ImGui::Combo("Brush", context.terrainSculptMode, modes, IM_ARRAYSIZE(modes));
+                    if (*context.terrainSculptMode == 4 && context.terrainPaintLayer) {
+                        const char* layers[] = {"Erase (auto)", "Grass", "Rock", "Dirt", "Snow", "Sand"};
+                        ImGui::Combo("Layer", context.terrainPaintLayer, layers, IM_ARRAYSIZE(layers));
+                    }
+                    ImGui::DragFloat("Brush Radius", context.terrainBrushRadius, 0.1f, 0.5f, 100.0f, "%.1f");
+                    if (*context.terrainSculptMode != 4) {
+                        ImGui::DragFloat("Brush Strength", context.terrainBrushStrength, 0.1f, 0.1f, 50.0f, "%.1f");
+                    }
+                    ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f),
+                                       "Editing: object selection/move is paused.");
+                }
+            }
+        }
+        if (changed) {
+            context.scene->SetSelectedTerrain(true, res, size, maxHeight, seed, octaves, frequency);
+        }
+    }
+
+    if (selected->isWater && ImGui::CollapsingHeader("Water", ImGuiTreeNodeFlags_DefaultOpen)) {
+        float size = selected->waterSize;
+        int   res = selected->waterResolution;
+        float level = selected->waterLevel;
+        glm::vec3 shallow = selected->waterShallow;
+        glm::vec3 deep = selected->waterDeep;
+        glm::vec3 refl = selected->waterReflection;
+        float transparency = selected->waterTransparency;
+        float fresnel = selected->waterFresnel;
+        float spec = selected->waterSpecular;
+        float shininess = selected->waterShininess;
+        bool changed = false;
+        changed |= ImGui::DragFloat("Size (m)", &size, 0.5f, 1.0f, 4000.0f, "%.1f");
+        changed |= ImGui::DragInt("Resolution", &res, 1.0f, 8, 512);
+        changed |= ImGui::DragFloat("Surface Level (Y)", &level, 0.05f, -1000.0f, 1000.0f, "%.2f");
+        changed |= ImGui::ColorEdit3("Shallow", &shallow.x);
+        changed |= ImGui::ColorEdit3("Deep", &deep.x);
+        changed |= ImGui::ColorEdit3("Reflection (sky)", &refl.x);
+        changed |= ImGui::DragFloat("Transparency", &transparency, 0.01f, 0.0f, 1.0f, "%.2f");
+        changed |= ImGui::DragFloat("Fresnel Power", &fresnel, 0.05f, 0.1f, 12.0f, "%.2f");
+        changed |= ImGui::DragFloat("Specular", &spec, 0.02f, 0.0f, 8.0f, "%.2f");
+        changed |= ImGui::DragFloat("Shininess", &shininess, 1.0f, 1.0f, 1000.0f, "%.0f");
+        ImGui::TextDisabled("Animated Gerstner waves. Centre = object Transform XZ; level = calm Y.");
+        if (changed) {
+            context.scene->SetSelectedWater(size, res, level, shallow, deep, refl,
+                                            transparency, fresnel, spec, shininess);
         }
     }
 
@@ -2998,6 +4903,13 @@ void DrawAssets(EditorDockspace::Context& context, bool* open) {
         if (ImGui::Selectable(label, selected)) {
             context.assets->SelectIndex(i);
         }
+        if (ImGui::IsItemHovered()
+            && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)
+            && asset.type == EditorAssets::Type::Scene) {
+            context.sceneAssetOpenRequested =
+                (std::filesystem::path(context.assets->RootPath())
+                    / asset.relativePath).string();
+        }
 
         if (context.dragDrop && ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
             context.assets->SelectIndex(i);
@@ -3046,16 +4958,1200 @@ void DrawConsole(EditorDockspace::Context& context, bool* open) {
     ImGui::End();
 }
 
-void DrawGizmoToolbar(EditorDockspace::Context& context) {
+void DrawAudioEditor(EditorDockspace::Context& context, bool* open) {
+    if (!ImGui::Begin(EditorPanels::Name(EditorPanels::Panel::AudioEditor), open)) {
+        ImGui::End();
+        return;
+    }
+
+    DrawAudioCueAuthoring(context);
+    DrawAdaptiveMusicAuthoring(context);
+    ImGui::Separator();
+
+    if (ImGui::CollapsingHeader("Create Sound", ImGuiTreeNodeFlags_DefaultOpen)) {
+        const char* generators[] = {"Sine Tone", "Square Tone", "Noise"};
+        ImGui::Combo("Generator", &g_audioEditor.generator, generators, 3);
+        if (g_audioEditor.generator != 2) {
+            ImGui::DragFloat("Frequency", &g_audioEditor.generatorFrequency, 1.0f, 20.0f, 20000.0f, "%.0f Hz");
+        }
+        ImGui::DragFloat("Duration", &g_audioEditor.generatorDuration, 0.05f, 0.05f, 30.0f, "%.2f s");
+        ImGui::SliderFloat("Amplitude", &g_audioEditor.generatorAmplitude, 0.0f, 1.0f, "%.2f");
+        if (ImGui::Button("Generate New Clip")) {
+            GenerateAudioEditorClip();
+            if (context.assets) {
+                const std::filesystem::path output = std::filesystem::path(context.assets->RootPath())
+                    / "Audio" / "generated_sound.wav";
+                std::snprintf(g_audioEditor.outputPath.data(), g_audioEditor.outputPath.size(), "%s", output.string().c_str());
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Load Selected Audio")) {
+            if (context.assets) {
+                const EditorAssets::Asset* selected = context.assets->SelectedAsset();
+                const std::string path = context.assets->SelectedAssetFullPath();
+                if (selected && IsEditableAudioPath(path)) LoadAudioIntoEditor(path, context.log);
+                else if (context.log) context.log->Warning("Audio Editor: select an audio asset first");
+            }
+        }
+        ImGui::Button("Drop audio clip here", ImVec2(-1.0f, 0.0f));
+        if (ImGui::BeginDragDropTarget()) {
+            if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("3DGEDITOR_ASSET")) {
+                const std::string path(static_cast<const char*>(payload->Data));
+                if (IsEditableAudioPath(path)) LoadAudioIntoEditor(path, context.log);
+            }
+            ImGui::EndDragDropTarget();
+        }
+    }
+
+    if (g_audioEditor.buffer.Empty()) {
+        ImGui::Separator();
+        ImGui::TextDisabled("Generate a sound or load an audio asset to begin editing.");
+        ImGui::End();
+        return;
+    }
+
+    ImGui::Separator();
+    ImGui::Text("%s%s", g_audioEditor.sourcePath.empty() ? "Generated Clip" : g_audioEditor.sourcePath.c_str(),
+        g_audioEditor.dirty ? " *" : "");
+    ImGui::Text("%.2f seconds  |  %u Hz  |  %u channel%s  |  %d frames",
+        g_audioEditor.buffer.DurationSeconds(), g_audioEditor.buffer.sampleRate,
+        g_audioEditor.buffer.channels, g_audioEditor.buffer.channels == 1 ? "" : "s",
+        static_cast<int>(g_audioEditor.buffer.FrameCount()));
+    DrawAudioWaveform(g_audioEditor.buffer);
+
+    const float duration = g_audioEditor.buffer.DurationSeconds();
+    ImGui::SliderFloat("Waveform Zoom", &g_audioEditor.waveformZoom, 1.0f, 32.0f, "%.1fx",
+                       ImGuiSliderFlags_Logarithmic);
+    const float visibleDuration = duration / std::max(g_audioEditor.waveformZoom, 1.0f);
+    ImGui::SliderFloat("Waveform Scroll", &g_audioEditor.waveformOffset, 0.0f,
+        std::max(duration - visibleDuration, 0.001f), "%.2f s");
+    g_audioEditor.selectionStart = std::clamp(g_audioEditor.selectionStart, 0.0f, duration);
+    g_audioEditor.selectionEnd = std::clamp(g_audioEditor.selectionEnd, g_audioEditor.selectionStart, duration);
+    ImGui::DragFloatRange2("Selection", &g_audioEditor.selectionStart, &g_audioEditor.selectionEnd,
+        0.01f, 0.0f, duration, "Start %.2f s", "End %.2f s");
+    const auto [selectionBegin, selectionEnd] = AudioSelectionFrames();
+    const bool validSelection = selectionEnd > selectionBegin;
+
+    if (ImGui::CollapsingHeader("Edit", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (!validSelection) ImGui::BeginDisabled();
+        if (ImGui::Button("Trim to Selection")) {
+            PushAudioEditUndo();
+            const std::size_t channels = g_audioEditor.buffer.channels;
+            std::vector<float> trimmed(g_audioEditor.buffer.samples.begin() + selectionBegin * channels,
+                g_audioEditor.buffer.samples.begin() + selectionEnd * channels);
+            g_audioEditor.buffer.samples = std::move(trimmed);
+            g_audioEditor.selectionStart = 0.0f;
+            g_audioEditor.selectionEnd = g_audioEditor.buffer.DurationSeconds();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Reverse Selection")) {
+            PushAudioEditUndo();
+            const std::size_t channels = g_audioEditor.buffer.channels;
+            for (std::size_t left = selectionBegin, right = selectionEnd - 1; left < right; ++left, --right) {
+                for (std::size_t channel = 0; channel < channels; ++channel)
+                    std::swap(g_audioEditor.buffer.samples[left * channels + channel],
+                              g_audioEditor.buffer.samples[right * channels + channel]);
+            }
+        }
+        if (ImGui::Button("Copy")) {
+            const std::size_t channels = g_audioEditor.buffer.channels;
+            g_audioEditor.clipboard = {};
+            g_audioEditor.clipboard.channels = g_audioEditor.buffer.channels;
+            g_audioEditor.clipboard.sampleRate = g_audioEditor.buffer.sampleRate;
+            g_audioEditor.clipboard.samples.assign(
+                g_audioEditor.buffer.samples.begin() + selectionBegin * channels,
+                g_audioEditor.buffer.samples.begin() + selectionEnd * channels);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cut")) {
+            const std::size_t channels = g_audioEditor.buffer.channels;
+            g_audioEditor.clipboard = {};
+            g_audioEditor.clipboard.channels = g_audioEditor.buffer.channels;
+            g_audioEditor.clipboard.sampleRate = g_audioEditor.buffer.sampleRate;
+            g_audioEditor.clipboard.samples.assign(
+                g_audioEditor.buffer.samples.begin() + selectionBegin * channels,
+                g_audioEditor.buffer.samples.begin() + selectionEnd * channels);
+            PushAudioEditUndo();
+            g_audioEditor.buffer.samples.erase(
+                g_audioEditor.buffer.samples.begin() + selectionBegin * channels,
+                g_audioEditor.buffer.samples.begin() + selectionEnd * channels);
+            g_audioEditor.selectionEnd = g_audioEditor.selectionStart;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Delete")) {
+            const std::size_t channels = g_audioEditor.buffer.channels;
+            PushAudioEditUndo();
+            g_audioEditor.buffer.samples.erase(
+                g_audioEditor.buffer.samples.begin() + selectionBegin * channels,
+                g_audioEditor.buffer.samples.begin() + selectionEnd * channels);
+            g_audioEditor.selectionEnd = g_audioEditor.selectionStart;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Silence")) {
+            PushAudioEditUndo();
+            std::fill(g_audioEditor.buffer.samples.begin()
+                    + selectionBegin * g_audioEditor.buffer.channels,
+                g_audioEditor.buffer.samples.begin()
+                    + selectionEnd * g_audioEditor.buffer.channels, 0.0f);
+        }
+        if (!g_audioEditor.clipboard.Empty()
+            && g_audioEditor.clipboard.channels == g_audioEditor.buffer.channels
+            && g_audioEditor.clipboard.sampleRate == g_audioEditor.buffer.sampleRate) {
+            if (ImGui::Button("Paste at Selection Start")) {
+                PushAudioEditUndo();
+                const auto at = g_audioEditor.buffer.samples.begin()
+                    + selectionBegin * g_audioEditor.buffer.channels;
+                g_audioEditor.buffer.samples.insert(at, g_audioEditor.clipboard.samples.begin(),
+                    g_audioEditor.clipboard.samples.end());
+            }
+        }
+        ImGui::DragFloat("Gain", &g_audioEditor.gainDb, 0.1f, -60.0f, 24.0f, "%.1f dB");
+        if (ImGui::Button("Apply Gain")) {
+            PushAudioEditUndo();
+            const float gain = std::pow(10.0f, g_audioEditor.gainDb / 20.0f);
+            for (std::size_t i = selectionBegin * g_audioEditor.buffer.channels;
+                 i < selectionEnd * g_audioEditor.buffer.channels; ++i)
+                g_audioEditor.buffer.samples[i] = std::clamp(g_audioEditor.buffer.samples[i] * gain, -1.0f, 1.0f);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Normalize")) {
+            float peak = 0.0f;
+            for (std::size_t i = selectionBegin * g_audioEditor.buffer.channels;
+                 i < selectionEnd * g_audioEditor.buffer.channels; ++i)
+                peak = std::max(peak, std::abs(g_audioEditor.buffer.samples[i]));
+            if (peak > 0.000001f) {
+                PushAudioEditUndo();
+                const float gain = 0.98f / peak;
+                for (std::size_t i = selectionBegin * g_audioEditor.buffer.channels;
+                     i < selectionEnd * g_audioEditor.buffer.channels; ++i)
+                    g_audioEditor.buffer.samples[i] *= gain;
+            }
+        }
+        ImGui::DragFloat("Fade In", &g_audioEditor.fadeInSeconds, 0.01f, 0.0f, duration, "%.2f s");
+        ImGui::DragFloat("Fade Out", &g_audioEditor.fadeOutSeconds, 0.01f, 0.0f, duration, "%.2f s");
+        if (ImGui::Button("Apply Fades")) {
+            PushAudioEditUndo();
+            const std::size_t channels = g_audioEditor.buffer.channels;
+            const std::size_t fadeInFrames = std::min(selectionEnd - selectionBegin,
+                static_cast<std::size_t>(g_audioEditor.fadeInSeconds * g_audioEditor.buffer.sampleRate));
+            const std::size_t fadeOutFrames = std::min(selectionEnd - selectionBegin,
+                static_cast<std::size_t>(g_audioEditor.fadeOutSeconds * g_audioEditor.buffer.sampleRate));
+            for (std::size_t frame = 0; frame < fadeInFrames; ++frame) {
+                const float gain = fadeInFrames > 1 ? static_cast<float>(frame) / (fadeInFrames - 1) : 1.0f;
+                for (std::size_t channel = 0; channel < channels; ++channel)
+                    g_audioEditor.buffer.samples[(selectionBegin + frame) * channels + channel] *= gain;
+            }
+            for (std::size_t frame = 0; frame < fadeOutFrames; ++frame) {
+                const float gain = fadeOutFrames > 1 ? 1.0f - static_cast<float>(frame) / (fadeOutFrames - 1) : 1.0f;
+                const std::size_t target = selectionEnd - fadeOutFrames + frame;
+                for (std::size_t channel = 0; channel < channels; ++channel)
+                    g_audioEditor.buffer.samples[target * channels + channel] *= gain;
+            }
+        }
+        if (!validSelection) ImGui::EndDisabled();
+        ImGui::Separator();
+        const bool hasUndo = !g_audioEditor.undoStack.empty();
+        if (!hasUndo) ImGui::BeginDisabled();
+        if (ImGui::Button("Undo")) {
+            g_audioEditor.redoStack.push_back(g_audioEditor.buffer);
+            g_audioEditor.buffer = std::move(g_audioEditor.undoStack.back());
+            g_audioEditor.undoStack.pop_back();
+            g_audioEditor.selectionStart = 0.0f;
+            g_audioEditor.selectionEnd = g_audioEditor.buffer.DurationSeconds();
+            g_audioEditor.dirty = true;
+        }
+        if (!hasUndo) ImGui::EndDisabled();
+        ImGui::SameLine();
+        const bool hasRedo = !g_audioEditor.redoStack.empty();
+        if (!hasRedo) ImGui::BeginDisabled();
+        if (ImGui::Button("Redo")) {
+            g_audioEditor.undoStack.push_back(g_audioEditor.buffer);
+            g_audioEditor.buffer = std::move(g_audioEditor.redoStack.back());
+            g_audioEditor.redoStack.pop_back();
+            g_audioEditor.selectionStart = 0.0f;
+            g_audioEditor.selectionEnd = g_audioEditor.buffer.DurationSeconds();
+            g_audioEditor.dirty = true;
+        }
+        if (!hasRedo) ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Reset Original") && !g_audioEditor.original.Empty()) {
+            PushAudioEditUndo();
+            g_audioEditor.buffer = g_audioEditor.original;
+            g_audioEditor.selectionStart = 0.0f;
+            g_audioEditor.selectionEnd = g_audioEditor.buffer.DurationSeconds();
+        }
+    }
+
+    if (ImGui::CollapsingHeader("Preview and Export", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (ImGui::Button("Preview Edited Clip")) {
+            std::string error;
+            const std::filesystem::path previewPath = std::filesystem::temp_directory_path()
+                / "3dg_audio_editor_preview.wav";
+            if (engine::WriteAudioWav(previewPath.string(), g_audioEditor.buffer, &error)) {
+                context.previewAudioRequested = true;
+                context.previewAudioPath = previewPath.string();
+                context.previewAudioVolume = 1.0f;
+                context.previewAudioPitch = 1.0f;
+                context.previewAudioSpatial = false;
+                context.previewAudioLoop = false;
+            } else if (context.log) context.log->Error("Audio Editor preview failed: " + error);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Preview Selection")) {
+            const auto [begin, end] = AudioSelectionFrames();
+            engine::AudioBuffer selection;
+            selection.sampleRate = g_audioEditor.buffer.sampleRate;
+            selection.channels = g_audioEditor.buffer.channels;
+            selection.samples.assign(g_audioEditor.buffer.samples.begin()
+                    + begin * selection.channels,
+                g_audioEditor.buffer.samples.begin() + end * selection.channels);
+            std::string error;
+            const std::filesystem::path previewPath = std::filesystem::temp_directory_path()
+                / "3dg_audio_editor_selection.wav";
+            if (engine::WriteAudioWav(previewPath.string(), selection, &error)) {
+                context.previewAudioRequested = true;
+                context.previewAudioPath = previewPath.string();
+                context.previewAudioSpatial = false;
+                context.previewAudioLoop = false;
+            } else if (context.log) context.log->Error("Audio Editor preview failed: " + error);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Stop")) context.stopAudioPreviewRequested = true;
+        ImGui::InputText("Export WAV", g_audioEditor.outputPath.data(), g_audioEditor.outputPath.size());
+        if (ImGui::Button("Export to Project")) {
+            std::string error;
+            if (engine::WriteAudioWav(g_audioEditor.outputPath.data(), g_audioEditor.buffer, &error)) {
+                g_audioEditor.dirty = false;
+                if (context.assets) {
+                    std::string refreshError;
+                    context.assets->Refresh(context.assets->RootPath(), &refreshError);
+                }
+                if (context.log) context.log->Info("Audio Editor exported: " + std::string(g_audioEditor.outputPath.data()));
+            } else if (context.log) context.log->Error("Audio Editor export failed: " + error);
+        }
+    }
+
+    ImGui::End();
+}
+
+void DrawAudioMixer(EditorDockspace::Context& context, bool* open) {
+    if (!ImGui::Begin(EditorPanels::Name(EditorPanels::Panel::AudioMixer), open)) {
+        ImGui::End();
+        return;
+    }
+    ImGui::TextUnformatted("Runtime Mixer");
+    ImGui::TextDisabled("Bus levels affect previews and Play mode immediately.");
+    ImGui::Text("Device: %s | %u Hz | %u channels",
+        context.audioDeviceInfo.backend.c_str(), context.audioDeviceInfo.sampleRate,
+        context.audioDeviceInfo.channels);
+    int voiceLimit = static_cast<int>(context.audioMaxVoices);
+    if (ImGui::SliderInt("Voice Budget", &voiceLimit, 8, 256)) {
+        context.audioMaxVoices = static_cast<std::size_t>(voiceLimit);
+        context.audioMaxVoicesChanged = true;
+    }
+    const auto& stats = context.audioDebugStats;
+    ImGui::Text("Active %d / %d | Managed %d | Streamed %d | Assets %d",
+        static_cast<int>(stats.activeVoices), voiceLimit,
+        static_cast<int>(stats.managedSources), static_cast<int>(stats.streamedVoices),
+        static_cast<int>(stats.pooledAssets));
+    ImGui::Text("Voice stealing: %d | Rejected: %d",
+        static_cast<int>(stats.stolenVoices), static_cast<int>(stats.rejectedVoices));
+    ImGui::Separator();
+    for (int i = static_cast<int>(engine::AudioBus::Master);
+         i <= static_cast<int>(engine::AudioBus::Ambient); ++i) {
+        const engine::AudioBus bus = static_cast<engine::AudioBus>(i);
+        ImGui::PushID(i);
+        ImGui::TextUnformatted(engine::AudioBusName(bus));
+        ImGui::SameLine(90.0f);
+        ImGui::SetNextItemWidth(std::max(ImGui::GetContentRegionAvail().x - 72.0f, 80.0f));
+        ImGui::SliderFloat("##Volume", &context.audioBusVolumes[static_cast<std::size_t>(i)],
+                           0.0f, 2.0f, "%.2f");
+        ImGui::SameLine();
+        ImGui::Checkbox("Mute", &context.audioBusMuted[static_cast<std::size_t>(i)]);
+        ImGui::PopID();
+    }
+    ImGui::Separator();
+    ImGui::TextUnformatted("Snapshots");
+    ImGui::SetNextItemWidth(140.0f);
+    if (ImGui::BeginCombo("Preset", engine::AudioSnapshotPresetName(context.activeAudioSnapshot))) {
+        for (int i = static_cast<int>(engine::AudioSnapshotPreset::Default);
+             i <= static_cast<int>(engine::AudioSnapshotPreset::Cinematic); ++i) {
+            const auto preset = static_cast<engine::AudioSnapshotPreset>(i);
+            const bool selected = preset == context.activeAudioSnapshot;
+            if (ImGui::Selectable(engine::AudioSnapshotPresetName(preset), selected)) {
+                context.requestedAudioSnapshot = preset;
+                context.audioSnapshotRequested = true;
+            }
+            if (selected) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::DragFloat("Transition", &context.audioSnapshotTransition,
+                     0.05f, 0.0f, 10.0f, "%.2f s");
+    ImGui::Checkbox("Dialogue ducks Music", &context.dialogueDucking);
+
+    ImGui::Separator();
+    ImGui::TextUnformatted("Bus Processing");
+    static int selectedEffectsBus = static_cast<int>(engine::AudioBus::SFX);
+    engine::AudioBus effectsBus = static_cast<engine::AudioBus>(selectedEffectsBus);
+    if (ImGui::BeginCombo("Process Bus", engine::AudioBusName(effectsBus))) {
+        for (int i = static_cast<int>(engine::AudioBus::Music);
+             i <= static_cast<int>(engine::AudioBus::Ambient); ++i) {
+            const bool selected = i == selectedEffectsBus;
+            if (ImGui::Selectable(engine::AudioBusName(static_cast<engine::AudioBus>(i)), selected))
+                selectedEffectsBus = i;
+            if (selected) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+    effectsBus = static_cast<engine::AudioBus>(selectedEffectsBus);
+    engine::AudioBusEffects& fx = context.audioBusEffects[static_cast<std::size_t>(effectsBus)];
+    ImGui::SliderFloat("Low Pass", &fx.lowPassHz, 20.0f, 20000.0f, "%.0f Hz",
+                       ImGuiSliderFlags_Logarithmic);
+    ImGui::SliderFloat("High Pass", &fx.highPassHz, 20.0f, 20000.0f, "%.0f Hz",
+                       ImGuiSliderFlags_Logarithmic);
+    ImGui::SliderFloat("Reverb Wet", &fx.reverbWet, 0.0f, 1.0f, "%.2f");
+    ImGui::SliderFloat("Reverb Decay", &fx.reverbDecay, 0.0f, 0.95f, "%.2f");
+    ImGui::SliderFloat("Comp Threshold", &fx.compressorThresholdDb, -60.0f, 0.0f, "%.1f dB");
+    ImGui::SliderFloat("Comp Ratio", &fx.compressorRatio, 1.0f, 20.0f, "%.1f:1");
+    if (ImGui::Button("Reset Processing")) fx = engine::AudioBusEffects{};
+
+    ImGui::Separator();
+    ImGui::TextUnformatted("Mixer Preset");
+    static std::array<char, 320> mixerPath = [] {
+        std::array<char, 320> value{};
+        std::snprintf(value.data(), value.size(), "%s",
+                      "Content/Audio/project_mixer.3dgmixer");
+        return value;
+    }();
+    ImGui::InputText("Preset Path", mixerPath.data(), mixerPath.size());
+    if (ImGui::Button("Save Mixer Preset")) {
+        context.audioMixerPresetPath = mixerPath;
+        context.saveAudioMixerPresetRequested = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Load Mixer Preset")) {
+        context.audioMixerPresetPath = mixerPath;
+        context.loadAudioMixerPresetRequested = true;
+    }
+    ImGui::End();
+}
+
+void DrawCreationPalette(EditorDockspace::Context& context) {
+    if (g_creationPaletteOpenRequested) {
+        g_creationSearch.fill('\0');
+        ImGui::OpenPopup("Create Object");
+        g_creationPaletteOpenRequested = false;
+    }
+    ImGui::SetNextWindowSize(ImVec2(470.0f, 430.0f), ImGuiCond_Appearing);
+    if (!ImGui::BeginPopup("Create Object")) return;
+
+    ImGui::TextUnformatted("Create Object");
+    ImGui::TextDisabled("Search primitives, lights, physics, and gameplay objects");
+    ImGui::SetNextItemWidth(-1.0f);
+    if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+    ImGui::InputTextWithHint("##CreationSearch", "Search...", g_creationSearch.data(), g_creationSearch.size());
+    ImGui::Separator();
+
+    enum class Action {
+        Cube, Plane, Sphere, Capsule, Cylinder, Cone, Pyramid, Torus, Staircase,
+        DynamicCube, StaticFloor, TriggerVolume,
+        NavMeshBoundsVolume,
+        DirectionalLight, PointLight, SpotLight, AreaLight,
+        PlayerStart, Door, Pickup, DamageZone, MovingPlatform
+    };
+    struct Entry { const char* label; const char* description; Action action; };
+    constexpr Entry geometry[] = {
+        {"Cube", "Box-shaped mesh", Action::Cube}, {"Plane", "Flat surface", Action::Plane},
+        {"Sphere", "Round mesh", Action::Sphere}, {"Capsule", "Rounded vertical body", Action::Capsule},
+        {"Cylinder", "Circular column", Action::Cylinder}, {"Cone", "Tapered circular mesh", Action::Cone},
+        {"Pyramid", "Tapered square mesh", Action::Pyramid}, {"Torus", "Ring-shaped mesh", Action::Torus},
+        {"Staircase", "Stepped mesh", Action::Staircase}
+    };
+    constexpr Entry physics[] = {
+        {"Dynamic Cube", "Rigid body ready for simulation", Action::DynamicCube},
+        {"Static Floor", "Static collision floor", Action::StaticFloor},
+        {"Trigger Volume", "Non-solid event volume", Action::TriggerVolume}
+    };
+    constexpr Entry navigation[] = {
+        {"Nav Mesh Bounds Volume", "Defines the level area used for navigation baking", Action::NavMeshBoundsVolume}
+    };
+    constexpr Entry lights[] = {
+        {"Directional Light", "Scene-wide directional lighting", Action::DirectionalLight},
+        {"Point Light", "Omnidirectional local light", Action::PointLight},
+        {"Spot Light", "Focused cone light", Action::SpotLight},
+        {"Area Light", "Rectangular soft light", Action::AreaLight}
+    };
+    constexpr Entry gameplay[] = {
+        {"Player Start", "Player spawn position", Action::PlayerStart},
+        {"Door", "Interactive door setup", Action::Door},
+        {"Pickup", "Collectible gameplay object", Action::Pickup},
+        {"Damage Zone", "Trigger that applies damage", Action::DamageZone},
+        {"Moving Platform", "Animated gameplay platform", Action::MovingPlatform}
+    };
+
+    bool close = false;
+    auto execute = [&](Action action) {
+        switch (action) {
+        case Action::Cube: ResetPrimitiveCreator(EditorScene::Primitive::Cube); break;
+        case Action::Plane: ResetPrimitiveCreator(EditorScene::Primitive::Plane); break;
+        case Action::Sphere: ResetPrimitiveCreator(EditorScene::Primitive::Sphere); break;
+        case Action::Capsule: ResetPrimitiveCreator(EditorScene::Primitive::Capsule); break;
+        case Action::Cylinder: ResetPrimitiveCreator(EditorScene::Primitive::Cylinder); break;
+        case Action::Cone: ResetPrimitiveCreator(EditorScene::Primitive::Cone); break;
+        case Action::Pyramid: ResetPrimitiveCreator(EditorScene::Primitive::Pyramid); break;
+        case Action::Torus: ResetPrimitiveCreator(EditorScene::Primitive::Torus); break;
+        case Action::Staircase: ResetPrimitiveCreator(EditorScene::Primitive::Staircase); break;
+        case Action::DynamicCube: context.addDynamicCubeRequested = true; break;
+        case Action::StaticFloor: context.addStaticFloorRequested = true; break;
+        case Action::TriggerVolume: context.addTriggerVolumeRequested = true; break;
+        case Action::NavMeshBoundsVolume: context.addNavMeshBoundsVolumeRequested = true; break;
+        case Action::DirectionalLight: context.addDirectionalLightRequested = true; break;
+        case Action::PointLight: context.addPointLightRequested = true; break;
+        case Action::SpotLight: context.addSpotLightRequested = true; break;
+        case Action::AreaLight: context.addAreaLightRequested = true; break;
+        case Action::PlayerStart: context.addPlayerStartRequested = true; break;
+        case Action::Door: context.addDoorRequested = true; break;
+        case Action::Pickup: context.addPickupRequested = true; break;
+        case Action::DamageZone: context.addDamageZoneRequested = true; break;
+        case Action::MovingPlatform: context.addMovingPlatformRequested = true; break;
+        }
+        if (action >= Action::DynamicCube) context.frameSelectedRequested = true;
+        close = true;
+    };
+    auto drawCategory = [&](const char* category, const Entry* entries, std::size_t count) {
+        bool any = false;
+        for (std::size_t i = 0; i < count; ++i)
+            any |= MatchesCreationSearch(entries[i].label, category);
+        if (!any) return;
+        ImGui::TextDisabled("%s", category);
+        for (std::size_t i = 0; i < count; ++i) {
+            const Entry& entry = entries[i];
+            if (!MatchesCreationSearch(entry.label, category)) continue;
+            ImGui::PushID(static_cast<int>(entry.action));
+            if (ImGui::Selectable(entry.label, false, 0, ImVec2(0.0f, 36.0f))) execute(entry.action);
+            ImGui::SameLine(190.0f);
+            ImGui::TextDisabled("%s", entry.description);
+            ImGui::PopID();
+        }
+        ImGui::Spacing();
+    };
+
+    ImGui::BeginChild("##CreationResults", ImVec2(0.0f, 0.0f), false);
+    drawCategory("Geometry", geometry, std::size(geometry));
+    drawCategory("Physics", physics, std::size(physics));
+    drawCategory("Navigation", navigation, std::size(navigation));
+    drawCategory("Lights", lights, std::size(lights));
+    drawCategory("Gameplay", gameplay, std::size(gameplay));
+    ImGui::EndChild();
+    if (close) ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+}
+
+void DrawPrimitiveCreator(EditorDockspace::Context& context) {
+    if (g_primitiveCreator.openRequested) {
+        ImGui::OpenPopup("Create Primitive");
+        g_primitiveCreator.openRequested = false;
+    }
+
+    ImGui::SetNextWindowSize(ImVec2(430.0f, 0.0f), ImGuiCond_Appearing);
+    if (!ImGui::BeginPopupModal("Create Primitive", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        return;
+    }
+
+    constexpr EditorScene::Primitive types[] = {
+        EditorScene::Primitive::Cube,
+        EditorScene::Primitive::Plane,
+        EditorScene::Primitive::Sphere,
+        EditorScene::Primitive::Capsule,
+        EditorScene::Primitive::Cylinder,
+        EditorScene::Primitive::Cone,
+        EditorScene::Primitive::Pyramid,
+        EditorScene::Primitive::Torus,
+        EditorScene::Primitive::Staircase,
+    };
+    ImGui::SetNextItemWidth(-1.0f);
+    ImGui::InputTextWithHint("##PrimitiveName", "Object name (automatic if empty)",
+        g_primitiveCreator.name.data(), g_primitiveCreator.name.size());
+    if (ImGui::BeginCombo("Type", PrimitiveName(g_primitiveCreator.type))) {
+        for (EditorScene::Primitive type : types) {
+            const bool selected = type == g_primitiveCreator.type;
+            if (ImGui::Selectable(PrimitiveName(type), selected)) {
+                ResetPrimitiveCreator(type);
+                g_primitiveCreator.openRequested = false;
+            }
+            if (selected) {
+                ImGui::SetItemDefaultFocus();
+            }
+        }
+        ImGui::EndCombo();
+    }
+
+    constexpr float kMinSize = 0.01f;
+    switch (g_primitiveCreator.type) {
+    case EditorScene::Primitive::Cube:
+        ImGui::DragFloat3("Dimensions", &g_primitiveCreator.dimensions.x, 0.05f, kMinSize, 1000.0f);
+        break;
+    case EditorScene::Primitive::Plane:
+        ImGui::DragFloat("Width", &g_primitiveCreator.dimensions.x, 0.05f, kMinSize, 1000.0f);
+        ImGui::DragFloat("Depth", &g_primitiveCreator.dimensions.z, 0.05f, kMinSize, 1000.0f);
+        break;
+    case EditorScene::Primitive::Sphere:
+        ImGui::DragFloat("Radius", &g_primitiveCreator.radius, 0.02f, kMinSize, 500.0f);
+        break;
+    case EditorScene::Primitive::Capsule:
+        ImGui::DragFloat("Radius", &g_primitiveCreator.radius, 0.02f, kMinSize, 500.0f);
+        ImGui::DragFloat("Height", &g_primitiveCreator.height, 0.05f,
+            std::max(g_primitiveCreator.radius * 2.0f, kMinSize), 1000.0f);
+        g_primitiveCreator.height = std::max(g_primitiveCreator.height, g_primitiveCreator.radius * 2.0f);
+        break;
+    case EditorScene::Primitive::Cylinder:
+    case EditorScene::Primitive::Cone:
+        ImGui::DragFloat("Radius", &g_primitiveCreator.radius, 0.02f, kMinSize, 500.0f);
+        ImGui::DragFloat("Height", &g_primitiveCreator.height, 0.05f, kMinSize, 1000.0f);
+        break;
+    case EditorScene::Primitive::Pyramid:
+        ImGui::DragFloat3("Dimensions", &g_primitiveCreator.dimensions.x, 0.05f, kMinSize, 1000.0f);
+        break;
+    case EditorScene::Primitive::Staircase:
+        ImGui::DragFloat3("Dimensions", &g_primitiveCreator.dimensions.x, 0.05f, kMinSize, 1000.0f);
+        ImGui::DragInt("Collider Steps", &g_primitiveCreator.staircaseSteps, 0.25f, 1, 64);
+        g_primitiveCreator.staircaseSteps = std::clamp(g_primitiveCreator.staircaseSteps, 1, 64);
+        break;
+    case EditorScene::Primitive::Torus:
+        ImGui::DragFloat("Outer Radius", &g_primitiveCreator.radius, 0.02f, kMinSize, 500.0f);
+        ImGui::DragFloat("Thickness", &g_primitiveCreator.height, 0.02f, kMinSize, 1000.0f);
+        break;
+    }
+
+    ImGui::Separator();
+    ImGui::TextUnformatted("Transform");
+    ImGui::DragFloat3("Position", &g_primitiveCreator.position.x, 0.05f);
+    ImGui::DragFloat3("Rotation", &g_primitiveCreator.rotationDegrees.x, 0.5f);
+    if (ImGui::Button("At Origin")) g_primitiveCreator.position = glm::vec3(0.0f);
+    ImGui::SameLine();
+    if (ImGui::Button("Place on Ground")) g_primitiveCreator.position.y = PrimitiveGroundHeight();
+    ImGui::SameLine();
+    const bool hasSelection = context.scene && context.scene->SelectedObject();
+    if (!hasSelection) ImGui::BeginDisabled();
+    if (ImGui::Button("Beside Selected") && hasSelection) {
+        if (const engine::ecs::Transform* selected = context.scene->SelectedTransform()) {
+            g_primitiveCreator.position = selected->position;
+            g_primitiveCreator.position.x += std::max(1.0f, selected->scale.x * 0.5f + 0.75f);
+        }
+    }
+    if (!hasSelection) ImGui::EndDisabled();
+    ImGui::Checkbox("Add collider", &g_primitiveCreator.addCollider);
+    ImGui::SameLine();
+    ImGui::Checkbox("Frame after creation", &g_primitiveCreator.frameAfterCreate);
+
+    ImGui::Separator();
+    const bool createRequested = ImGui::Button("Create", ImVec2(100.0f, 0.0f));
+    ImGui::SameLine();
+    const bool createAndContinue = ImGui::Button("Create & New", ImVec2(120.0f, 0.0f));
+    if (createRequested || createAndContinue) {
+        engine::ecs::Transform transform;
+        transform.position = g_primitiveCreator.position;
+        transform.rotation = glm::quat(glm::radians(g_primitiveCreator.rotationDegrees));
+
+        engine::ecs::Collider collider;
+        switch (g_primitiveCreator.type) {
+        case EditorScene::Primitive::Cube:
+            transform.scale = glm::max(g_primitiveCreator.dimensions, glm::vec3(kMinSize));
+            collider = engine::ecs::Collider::MakeBox(transform.scale * 0.5f);
+            break;
+        case EditorScene::Primitive::Plane: {
+            transform.scale = glm::vec3(std::max(g_primitiveCreator.dimensions.x, kMinSize), 1.0f,
+                                        std::max(g_primitiveCreator.dimensions.z, kMinSize));
+            const glm::vec3 normal = transform.rotation * glm::vec3(0.0f, 1.0f, 0.0f);
+            collider = engine::ecs::Collider::MakePlane(normal, glm::dot(normal, transform.position));
+            break;
+        }
+        case EditorScene::Primitive::Sphere: {
+            const float diameter = std::max(g_primitiveCreator.radius * 2.0f, kMinSize);
+            transform.scale = glm::vec3(diameter);
+            collider = engine::ecs::Collider::MakeSphere(std::max(g_primitiveCreator.radius, kMinSize));
+            break;
+        }
+        case EditorScene::Primitive::Capsule:
+            transform.scale = glm::vec3(
+                std::max(g_primitiveCreator.radius / 0.4f, kMinSize),
+                std::max(g_primitiveCreator.height / 1.8f, kMinSize),
+                std::max(g_primitiveCreator.radius / 0.4f, kMinSize));
+            collider = engine::ecs::Collider::MakeCapsuleFromHeight(
+                std::max(g_primitiveCreator.radius, kMinSize),
+                std::max(g_primitiveCreator.height, g_primitiveCreator.radius * 2.0f));
+            break;
+        case EditorScene::Primitive::Cylinder: {
+            const float diameter = std::max(g_primitiveCreator.radius * 2.0f, kMinSize);
+            transform.scale = glm::vec3(diameter, std::max(g_primitiveCreator.height, kMinSize), diameter);
+            collider = engine::ecs::Collider::MakeCylinder(
+                std::max(g_primitiveCreator.radius, kMinSize),
+                std::max(g_primitiveCreator.height, kMinSize));
+            break;
+        }
+        case EditorScene::Primitive::Cone: {
+            const float diameter = std::max(g_primitiveCreator.radius * 2.0f, kMinSize);
+            transform.scale = glm::vec3(diameter, std::max(g_primitiveCreator.height, kMinSize), diameter);
+            collider = engine::ecs::Collider::MakeCone(
+                std::max(g_primitiveCreator.radius, kMinSize),
+                std::max(g_primitiveCreator.height, kMinSize));
+            break;
+        }
+        case EditorScene::Primitive::Pyramid:
+            transform.scale = glm::max(g_primitiveCreator.dimensions, glm::vec3(kMinSize));
+            collider = engine::ecs::Collider::MakePyramid(transform.scale * 0.5f);
+            break;
+        case EditorScene::Primitive::Staircase:
+            transform.scale = glm::max(g_primitiveCreator.dimensions, glm::vec3(kMinSize));
+            collider = engine::ecs::Collider::MakeStaircase(transform.scale * 0.5f,
+                g_primitiveCreator.staircaseSteps);
+            break;
+        case EditorScene::Primitive::Torus: {
+            const float outerRadius = std::max(g_primitiveCreator.radius, kMinSize);
+            const float thickness = std::max(g_primitiveCreator.height, kMinSize);
+            transform.scale = glm::vec3(outerRadius / 0.5f, thickness / 0.3f, outerRadius / 0.5f);
+            const float minorRadius = thickness * 0.5f;
+            collider = engine::ecs::Collider::MakeTorus(
+                std::max(outerRadius - minorRadius, kMinSize), minorRadius);
+            break;
+        }
+        }
+
+        context.addConfiguredPrimitiveRequested = true;
+        context.configuredPrimitive = g_primitiveCreator.type;
+        context.configuredPrimitiveName = g_primitiveCreator.name.data();
+        context.configuredPrimitiveTransform = transform;
+        context.configuredPrimitiveColliderEnabled = g_primitiveCreator.addCollider;
+        context.configuredPrimitiveCollider = collider;
+        context.frameSelectedRequested = g_primitiveCreator.frameAfterCreate;
+        if (createAndContinue) {
+            g_primitiveCreator.name.fill('\0');
+            g_primitiveCreator.position.x += std::max(1.0f, transform.scale.x + 0.25f);
+        } else {
+            ImGui::CloseCurrentPopup();
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel", ImVec2(100.0f, 0.0f))) {
+        ImGui::CloseCurrentPopup();
+    }
+
+    ImGui::EndPopup();
+}
+
+void DrawCameraSequences(EditorDockspace::Context& context) {
+    EditorScene& scene = *context.scene;
+    const auto& cameras = scene.CameraPresets();
+    const auto& sequences = scene.CameraSequences();
+    if (g_cameraSequenceSelection >= static_cast<int>(sequences.size())) {
+        g_cameraSequenceSelection = sequences.empty()
+            ? -1 : static_cast<int>(sequences.size()) - 1;
+        g_cameraSequenceShotSelection = -1;
+        g_cameraSequenceNameSelection = -1;
+    }
+
+    ImGui::Separator();
+    ImGui::TextUnformatted("Cinematic Sequences");
+    if (context.showCameraRails) {
+        ImGui::Checkbox("Show Rails In Viewport", context.showCameraRails);
+    }
+    if (ImGui::Button("New Sequence", ImVec2(112.0f, 0.0f))) {
+        EditorScene::CameraSequence sequence;
+        sequence.name = "Sequence_" + std::to_string(sequences.size() + 1);
+        if (!cameras.empty()) {
+            sequence.shots.push_back({cameras.front().name, 1.0f, 0.25f, 1});
+        }
+        g_cameraSequenceSelection = static_cast<int>(scene.AddCameraSequence(sequence));
+        g_cameraSequenceShotSelection = sequence.shots.empty() ? -1 : 0;
+        g_cameraSequenceNameSelection = -1;
+    }
+
+    const char* sequencePreview = g_cameraSequenceSelection >= 0
+        && g_cameraSequenceSelection < static_cast<int>(scene.CameraSequences().size())
+        ? scene.CameraSequences()[static_cast<std::size_t>(g_cameraSequenceSelection)].name.c_str()
+        : "Choose sequence...";
+    if (ImGui::BeginCombo("Sequence", sequencePreview)) {
+        for (std::size_t i = 0; i < scene.CameraSequences().size(); ++i) {
+            const bool selected = static_cast<int>(i) == g_cameraSequenceSelection;
+            if (ImGui::Selectable(scene.CameraSequences()[i].name.c_str(), selected)) {
+                g_cameraSequenceSelection = static_cast<int>(i);
+                g_cameraSequenceShotSelection = -1;
+                g_cameraSequenceNameSelection = -1;
+            }
+        }
+        ImGui::EndCombo();
+    }
+
+    if (g_cameraSequenceSelection < 0
+        || g_cameraSequenceSelection >= static_cast<int>(scene.CameraSequences().size())) {
+        ImGui::TextDisabled("Create a sequence to arrange saved cameras into a cinematic.");
+        return;
+    }
+
+    const std::size_t sequenceIndex = static_cast<std::size_t>(g_cameraSequenceSelection);
+    EditorScene::CameraSequence sequence = scene.CameraSequences()[sequenceIndex];
+    if (g_cameraSequenceNameSelection != g_cameraSequenceSelection) {
+        g_cameraSequenceName.fill('\0');
+        std::snprintf(g_cameraSequenceName.data(), g_cameraSequenceName.size(),
+                      "%s", sequence.name.c_str());
+        g_cameraSequenceNameSelection = g_cameraSequenceSelection;
+    }
+
+    bool sequenceChanged = false;
+    if (ImGui::InputText("Sequence Name", g_cameraSequenceName.data(),
+                         g_cameraSequenceName.size(), ImGuiInputTextFlags_EnterReturnsTrue)) {
+        sequence.name = g_cameraSequenceName.data();
+        sequenceChanged = true;
+    }
+    sequenceChanged |= ImGui::Checkbox("Loop Sequence", &sequence.loop);
+
+    ImGui::BeginDisabled(sequence.shots.empty());
+    if (ImGui::Button("Play Sequence", ImVec2(112.0f, 0.0f))) {
+        context.cameraSequence = sequence;
+        context.cameraSequencePlayRequested = true;
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!context.cameraSequenceActive);
+    if (ImGui::Button("Stop Sequence", ImVec2(112.0f, 0.0f))) {
+        context.cameraSequenceStopRequested = true;
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!context.cameraSequenceActive);
+    if (ImGui::Button(context.cameraSequencePaused ? "Resume" : "Pause")) {
+        context.cameraSequencePauseToggleRequested = true;
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (context.cameraSequenceActive) {
+        ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.45f, 1.0f), "Playing");
+        if (!context.cameraSequenceActiveName.empty()) {
+            ImGui::Text("Active: %s", context.cameraSequenceActiveName.c_str());
+        }
+        if (context.cameraSequenceInputLocked) {
+            ImGui::TextDisabled("Player input is locked for this cinematic.");
+        }
+        if (context.cameraSequenceSkippable) {
+            ImGui::TextDisabled("Press Enter during Play mode to skip.");
+        }
+    }
+    if (context.cameraSequenceActive && context.cameraSequenceDuration > 0.0f) {
+        float timeline = context.cameraSequenceTime;
+        if (ImGui::SliderFloat("Timeline", &timeline, 0.0f,
+                               context.cameraSequenceDuration, "%.2f s")) {
+            context.cameraSequenceSeekTime = timeline;
+            context.cameraSequenceSeekRequested = true;
+        }
+        ImGui::Text("%.2f / %.2f seconds",
+                    context.cameraSequenceTime, context.cameraSequenceDuration);
+    }
+
+    ImGui::BeginDisabled(cameras.empty());
+    if (ImGui::Button("Add Shot")) {
+        sequence.shots.push_back({cameras.front().name, 1.0f, 0.25f, 1});
+        g_cameraSequenceShotSelection = static_cast<int>(sequence.shots.size()) - 1;
+        sequenceChanged = true;
+    }
+    ImGui::EndDisabled();
+    if (cameras.empty()) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("Save a camera before adding shots.");
+    }
+
+    if (ImGui::BeginChild("CameraSequenceShots", ImVec2(0.0f, 112.0f), true)) {
+        for (std::size_t i = 0; i < sequence.shots.size(); ++i) {
+            const EditorScene::CameraSequenceShot& shot = sequence.shots[i];
+            const std::string label = std::to_string(i + 1) + ". "
+                + (shot.cameraName.empty() ? "[Missing Camera]" : shot.cameraName)
+                + "##sequence_shot_" + std::to_string(i);
+            if (ImGui::Selectable(label.c_str(),
+                                  g_cameraSequenceShotSelection == static_cast<int>(i))) {
+                g_cameraSequenceShotSelection = static_cast<int>(i);
+            }
+        }
+    }
+    ImGui::EndChild();
+
+    if (g_cameraSequenceShotSelection >= 0
+        && g_cameraSequenceShotSelection < static_cast<int>(sequence.shots.size())) {
+        const std::size_t shotIndex = static_cast<std::size_t>(g_cameraSequenceShotSelection);
+        EditorScene::CameraSequenceShot& shot = sequence.shots[shotIndex];
+        const char* cameraPreview = shot.cameraName.empty()
+            ? "Choose camera..." : shot.cameraName.c_str();
+        if (ImGui::BeginCombo("Shot Camera", cameraPreview)) {
+            for (const EditorScene::CameraPreset& camera : cameras) {
+                const bool selected = camera.name == shot.cameraName;
+                if (ImGui::Selectable(camera.name.c_str(), selected)) {
+                    shot.cameraName = camera.name;
+                    sequenceChanged = true;
+                }
+            }
+            ImGui::EndCombo();
+        }
+        sequenceChanged |= ImGui::DragFloat("Travel Time", &shot.travelDuration,
+                                            0.05f, 0.0f, 120.0f, "%.2f s");
+        sequenceChanged |= ImGui::DragFloat("Hold Time", &shot.holdDuration,
+                                            0.05f, 0.0f, 120.0f, "%.2f s");
+        const char* easingNames[] = {"Linear", "Smooth Step", "Ease In", "Ease Out"};
+        sequenceChanged |= ImGui::Combo("Shot Easing", &shot.easing, easingNames, 4);
+        const char* pathNames[] = {"Linear Rail", "Catmull-Rom Spline"};
+        sequenceChanged |= ImGui::Combo("Rail Path", &shot.pathMode, pathNames, 2);
+        std::array<char, 128> eventName{};
+        std::snprintf(eventName.data(), eventName.size(), "%s", shot.eventName.c_str());
+        if (ImGui::InputText("Shot Event", eventName.data(), eventName.size())) {
+            shot.eventName = eventName.data();
+            sequenceChanged = true;
+        }
+        ImGui::TextDisabled("The event fires when the camera reaches this shot.");
+
+        ImGui::BeginDisabled(shotIndex == 0);
+        if (ImGui::Button("Move Up")) {
+            std::swap(sequence.shots[shotIndex], sequence.shots[shotIndex - 1]);
+            --g_cameraSequenceShotSelection;
+            sequenceChanged = true;
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::BeginDisabled(shotIndex + 1 >= sequence.shots.size());
+        if (ImGui::Button("Move Down")) {
+            std::swap(sequence.shots[shotIndex], sequence.shots[shotIndex + 1]);
+            ++g_cameraSequenceShotSelection;
+            sequenceChanged = true;
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Remove Shot")) {
+            sequence.shots.erase(sequence.shots.begin()
+                + static_cast<std::ptrdiff_t>(shotIndex));
+            g_cameraSequenceShotSelection = std::min(
+                g_cameraSequenceShotSelection,
+                static_cast<int>(sequence.shots.size()) - 1);
+            sequenceChanged = true;
+        }
+    }
+
+    float authoredDuration = 0.0f;
+    for (const EditorScene::CameraSequenceShot& shot : sequence.shots) {
+        authoredDuration += std::max(shot.travelDuration, 0.0f)
+            + std::max(shot.holdDuration, 0.0f);
+    }
+    ImGui::Separator();
+    ImGui::Text("Timeline Tracks (%.2f s)", authoredDuration);
+    {
+        const ImVec2 start = ImGui::GetCursorScreenPos();
+        const float width = std::max(ImGui::GetContentRegionAvail().x, 40.0f);
+        ImGui::InvisibleButton("##CinematicTimelineRuler", ImVec2(width, 24.0f));
+        ImDrawList* draw = ImGui::GetWindowDrawList();
+        const float y = start.y + 12.0f;
+        draw->AddLine(ImVec2(start.x, y), ImVec2(start.x + width, y),
+                      IM_COL32(100, 120, 150, 255), 2.0f);
+        for (const EditorScene::CinematicCue& cue : sequence.cues) {
+            const float normalized = authoredDuration > 0.0f
+                ? std::clamp(cue.time / authoredDuration, 0.0f, 1.0f) : 0.0f;
+            const float x = start.x + normalized * width;
+            const ImU32 color = cue.type == EditorScene::CinematicCueType::Audio
+                ? IM_COL32(70, 190, 255, 255)
+                : cue.type == EditorScene::CinematicCueType::Animation
+                    ? IM_COL32(190, 100, 255, 255)
+                    : IM_COL32(255, 180, 55, 255);
+            draw->AddLine(ImVec2(x, start.y + 3.0f), ImVec2(x, start.y + 21.0f),
+                          color, 3.0f);
+        }
+    }
+    if (ImGui::Button("Add Event")) {
+        sequence.cues.push_back({
+            EditorScene::CinematicCueType::Event, 0.0f, "Event"});
+        g_cameraSequenceCueSelection = static_cast<int>(sequence.cues.size()) - 1;
+        sequenceChanged = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Add Audio")) {
+        EditorScene::CinematicCue cue;
+        cue.type = EditorScene::CinematicCueType::Audio;
+        sequence.cues.push_back(cue);
+        g_cameraSequenceCueSelection = static_cast<int>(sequence.cues.size()) - 1;
+        sequenceChanged = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Add Animation")) {
+        EditorScene::CinematicCue cue;
+        cue.type = EditorScene::CinematicCueType::Animation;
+        sequence.cues.push_back(cue);
+        g_cameraSequenceCueSelection = static_cast<int>(sequence.cues.size()) - 1;
+        sequenceChanged = true;
+    }
+
+    if (ImGui::BeginChild("CinematicTimelineCues", ImVec2(0.0f, 105.0f), true)) {
+        for (std::size_t i = 0; i < sequence.cues.size(); ++i) {
+            const EditorScene::CinematicCue& cue = sequence.cues[i];
+            const char* type = cue.type == EditorScene::CinematicCueType::Audio
+                ? "Audio" : cue.type == EditorScene::CinematicCueType::Animation
+                    ? "Animation" : "Event";
+            const std::string label = std::to_string(cue.time) + "s  [" + type + "] "
+                + (cue.name.empty() ? cue.assetPath : cue.name)
+                + "##cinematic_cue_" + std::to_string(i);
+            if (ImGui::Selectable(label.c_str(),
+                    g_cameraSequenceCueSelection == static_cast<int>(i))) {
+                g_cameraSequenceCueSelection = static_cast<int>(i);
+            }
+        }
+    }
+    ImGui::EndChild();
+
+    if (g_cameraSequenceCueSelection >= 0
+        && g_cameraSequenceCueSelection < static_cast<int>(sequence.cues.size())) {
+        const std::size_t cueIndex = static_cast<std::size_t>(g_cameraSequenceCueSelection);
+        EditorScene::CinematicCue& cue = sequence.cues[cueIndex];
+        int cueType = static_cast<int>(cue.type);
+        const char* cueTypes[] = {"Event", "Audio", "Animation"};
+        if (ImGui::Combo("Track Type", &cueType, cueTypes, 3)) {
+            cue.type = static_cast<EditorScene::CinematicCueType>(cueType);
+            sequenceChanged = true;
+        }
+        sequenceChanged |= ImGui::DragFloat("Cue Time", &cue.time, 0.02f,
+                                            0.0f, std::max(authoredDuration, 0.0f), "%.2f s");
+        std::array<char, 256> text{};
+        if (cue.type == EditorScene::CinematicCueType::Event) {
+            std::snprintf(text.data(), text.size(), "%s", cue.name.c_str());
+            if (ImGui::InputText("Event Name", text.data(), text.size())) {
+                cue.name = text.data();
+                sequenceChanged = true;
+            }
+        } else if (cue.type == EditorScene::CinematicCueType::Audio) {
+            std::snprintf(text.data(), text.size(), "%s", cue.assetPath.c_str());
+            if (ImGui::InputText("Audio Asset", text.data(), text.size())) {
+                cue.assetPath = text.data();
+                sequenceChanged = true;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Paste Audio")) {
+                if (const char* clipboard = ImGui::GetClipboardText()) {
+                    cue.assetPath = clipboard;
+                    sequenceChanged = true;
+                }
+            }
+            sequenceChanged |= ImGui::SliderFloat("Audio Volume", &cue.volume, 0.0f, 2.0f);
+        } else {
+            const char* targetPreview = cue.targetObject.empty()
+                ? "Choose object..." : cue.targetObject.c_str();
+            if (ImGui::BeginCombo("Animation Target", targetPreview)) {
+                for (const EditorScene::Object& object : scene.Objects()) {
+                    const bool selectedTarget = object.name == cue.targetObject;
+                    if (ImGui::Selectable(object.name.c_str(), selectedTarget)) {
+                        cue.targetObject = object.name;
+                        sequenceChanged = true;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            std::snprintf(text.data(), text.size(), "%s", cue.animationClip.c_str());
+            if (ImGui::InputText("Animation Clip", text.data(), text.size())) {
+                cue.animationClip = text.data();
+                sequenceChanged = true;
+            }
+            ImGui::TextDisabled("Animation cues run against animated objects in Play mode.");
+        }
+        if (ImGui::Button("Remove Cue")) {
+            sequence.cues.erase(sequence.cues.begin()
+                + static_cast<std::ptrdiff_t>(cueIndex));
+            g_cameraSequenceCueSelection = std::min(
+                g_cameraSequenceCueSelection,
+                static_cast<int>(sequence.cues.size()) - 1);
+            sequenceChanged = true;
+        }
+    }
+
+    if (sequenceChanged) scene.SetCameraSequence(sequenceIndex, sequence);
+
+    if (ImGui::Button("Delete Sequence")) {
+        scene.RemoveCameraSequence(sequenceIndex);
+        g_cameraSequenceSelection = std::min(
+            g_cameraSequenceSelection,
+            static_cast<int>(scene.CameraSequences().size()) - 1);
+        g_cameraSequenceShotSelection = -1;
+        g_cameraSequenceNameSelection = -1;
+    }
+}
+
+void DrawCameraManager(EditorDockspace::Context& context, bool* open) {
+    if (!context.scene) return;
+    if (!ImGui::Begin(EditorPanels::Name(EditorPanels::Panel::CameraManager), open)) {
+        ImGui::End();
+        return;
+    }
+
+    EditorScene& scene = *context.scene;
+    const std::vector<EditorScene::CameraPreset>& cameras = scene.CameraPresets();
+    if (g_cameraPresetSelection >= static_cast<int>(cameras.size())) {
+        g_cameraPresetSelection = cameras.empty() ? -1 : static_cast<int>(cameras.size()) - 1;
+    }
+
+    ImGui::TextDisabled("Saved with the current scene.");
+    if (!context.camera) ImGui::TextDisabled("Viewport camera is unavailable.");
+
+    if (ImGui::Button("Capture Current", ImVec2(132.0f, 0.0f)) && context.camera) {
+        EditorScene::CameraPreset preset;
+        preset.name = "Camera_" + std::to_string(cameras.size() + 1);
+        preset.position = context.camera->Position();
+        preset.target = preset.position + context.camera->Front() * 10.0f;
+        preset.fov = context.camera->fov;
+        preset.nearPlane = context.camera->nearPlane;
+        preset.farPlane = context.camera->farPlane;
+        preset.primary = cameras.empty();
+        g_cameraPresetSelection = static_cast<int>(scene.AddCameraPreset(preset));
+        g_cameraPresetNameSelection = -1;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("New Default", ImVec2(112.0f, 0.0f))) {
+        EditorScene::CameraPreset preset;
+        preset.name = "Camera_" + std::to_string(cameras.size() + 1);
+        preset.primary = cameras.empty();
+        g_cameraPresetSelection = static_cast<int>(scene.AddCameraPreset(preset));
+        g_cameraPresetNameSelection = -1;
+    }
+
+    ImGui::Separator();
+    if (ImGui::BeginChild("CameraPresetList", ImVec2(0.0f, 150.0f), true)) {
+        for (std::size_t i = 0; i < cameras.size(); ++i) {
+            const EditorScene::CameraPreset& preset = cameras[i];
+            std::string label;
+            if (preset.primary) label += "[Primary] ";
+            if (preset.useInPlay) label += "[Play] ";
+            label += preset.name;
+            label += "##camera_" + std::to_string(i);
+            if (ImGui::Selectable(label.c_str(), g_cameraPresetSelection == static_cast<int>(i))) {
+                g_cameraPresetSelection = static_cast<int>(i);
+                g_cameraPresetNameSelection = -1;
+            }
+        }
+        if (cameras.empty()) {
+            ImGui::TextDisabled("No saved cameras. Capture the current viewport.");
+        }
+    }
+    ImGui::EndChild();
+
+    ImGui::Separator();
+    ImGui::TextUnformatted("Camera Shake Preview");
+    static engine::CameraShakeSettings shake;
+    ImGui::DragFloat("Shake Duration", &shake.duration, 0.01f, 0.01f, 10.0f, "%.2f s");
+    ImGui::DragFloat("Shake Frequency", &shake.frequency, 0.25f, 0.0f, 120.0f, "%.1f Hz");
+    ImGui::DragFloat3("Position Amplitude", &shake.translationAmplitude.x,
+                      0.005f, 0.0f, 10.0f, "%.3f");
+    ImGui::DragFloat2("Rotation Amplitude", &shake.rotationAmplitudeDegrees.x,
+                      0.05f, 0.0f, 45.0f, "%.2f deg");
+    ImGui::DragFloat("FOV Amplitude", &shake.fovAmplitude,
+                     0.05f, 0.0f, 30.0f, "%.2f deg");
+    if (ImGui::Button("Preview Shake", ImVec2(112.0f, 0.0f))) {
+        context.cameraShakeSettings = shake;
+        context.cameraShakeRequested = true;
+    }
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!context.cameraShakeActive);
+    if (ImGui::Button("Stop Shake", ImVec2(96.0f, 0.0f))) {
+        context.cameraShakeStopRequested = true;
+    }
+    ImGui::EndDisabled();
+    if (context.cameraShakeActive) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(0.95f, 0.72f, 0.25f, 1.0f), "Active");
+    }
+
+    DrawCameraSequences(context);
+
+    if (g_cameraPresetSelection < 0
+        || g_cameraPresetSelection >= static_cast<int>(scene.CameraPresets().size())) {
+        ImGui::End();
+        return;
+    }
+
+    const std::size_t selected = static_cast<std::size_t>(g_cameraPresetSelection);
+    EditorScene::CameraPreset preset = scene.CameraPresets()[selected];
+    if (g_cameraPresetNameSelection != g_cameraPresetSelection) {
+        g_cameraPresetName.fill('\0');
+        std::snprintf(g_cameraPresetName.data(), g_cameraPresetName.size(), "%s", preset.name.c_str());
+        g_cameraPresetNameSelection = g_cameraPresetSelection;
+    }
+
+    ImGui::BeginDisabled(context.playMode);
+    if (ImGui::Button("Pilot", ImVec2(82.0f, 0.0f)) && context.camera) {
+        context.cameraBlendRequested = true;
+        context.cameraBlendPreset = preset;
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (ImGui::Button("Update From View", ImVec2(132.0f, 0.0f)) && context.camera) {
+        preset.position = context.camera->Position();
+        preset.target = preset.position + context.camera->Front() * 10.0f;
+        preset.fov = context.camera->fov;
+        preset.nearPlane = context.camera->nearPlane;
+        preset.farPlane = context.camera->farPlane;
+        scene.SetCameraPreset(selected, preset);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Duplicate", ImVec2(88.0f, 0.0f))) {
+        const std::size_t duplicate = scene.DuplicateCameraPreset(selected);
+        if (duplicate != static_cast<std::size_t>(-1)) {
+            g_cameraPresetSelection = static_cast<int>(duplicate);
+            g_cameraPresetNameSelection = -1;
+        }
+    }
+
+    if (ImGui::InputText("Name", g_cameraPresetName.data(), g_cameraPresetName.size(),
+                         ImGuiInputTextFlags_EnterReturnsTrue)) {
+        preset.name = g_cameraPresetName.data();
+        scene.SetCameraPreset(selected, preset);
+    }
+
+    bool changed = false;
+    changed |= ImGui::DragFloat3("Position", &preset.position.x, 0.05f);
+    changed |= ImGui::DragFloat3("Target", &preset.target.x, 0.05f);
+    changed |= ImGui::SliderFloat("Field of View", &preset.fov, 10.0f, 120.0f, "%.1f deg");
+    changed |= ImGui::DragFloat("Near Plane", &preset.nearPlane, 0.01f, 0.001f, 100.0f, "%.3f");
+    changed |= ImGui::DragFloat("Far Plane", &preset.farPlane, 1.0f, 0.1f, 100000.0f, "%.1f");
+    changed |= ImGui::DragFloat("Blend Duration", &preset.blendDuration,
+                                0.05f, 0.0f, 30.0f, "%.2f s");
+    const char* easingNames[] = {"Linear", "Smooth Step", "Ease In", "Ease Out"};
+    changed |= ImGui::Combo("Blend Easing", &preset.blendEasing,
+                            easingNames, 4);
+    changed |= ImGui::Checkbox("Use as fixed camera in Play", &preset.useInPlay);
+    if (changed) scene.SetCameraPreset(selected, preset);
+
+    if (preset.primary) {
+        ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.45f, 1.0f), "Primary camera");
+    } else if (ImGui::Button("Set as Primary")) {
+        scene.SetPrimaryCameraPreset(selected);
+    }
+    ImGui::SameLine();
+    ImGui::BeginDisabled(context.playMode);
+    if (ImGui::Button("Delete")) {
+        scene.RemoveCameraPreset(selected);
+        g_cameraPresetSelection = std::min(
+            g_cameraPresetSelection,
+            static_cast<int>(scene.CameraPresets().size()) - 1);
+        g_cameraPresetNameSelection = -1;
+    }
+    ImGui::EndDisabled();
+
+    ImGui::Separator();
+    ImGui::TextWrapped("The primary camera is used in Play only when its Play option is enabled. "
+                       "Otherwise the Player Controller camera remains active.");
+    ImGui::End();
+}
+
+void DrawGizmoToolbar(EditorDockspace::Context& context, bool* open) {
     if (!context.gizmo) {
         return;
     }
 
     ImGui::SetNextWindowBgAlpha(0.85f);
-    ImGui::Begin("Gizmo", nullptr,
+    if (!ImGui::Begin(EditorPanels::Name(EditorPanels::Panel::Gizmo), open,
         ImGuiWindowFlags_AlwaysAutoResize
-        | ImGuiWindowFlags_NoCollapse
-        | ImGuiWindowFlags_NoSavedSettings);
+        | ImGuiWindowFlags_NoCollapse)) {
+        ImGui::End();
+        return;
+    }
 
     const EditorGizmo::Mode mode = context.gizmo->CurrentMode();
     if (ImGui::Selectable("Move", mode == EditorGizmo::Mode::Translate, 0, ImVec2(72.0f, 0.0f))) {
@@ -3071,6 +6167,20 @@ void DrawGizmoToolbar(EditorDockspace::Context& context) {
     }
 
     ImGui::Separator();
+    ImGui::TextUnformatted("Orientation");
+    const EditorGizmo::Space space = context.gizmo->CurrentSpace();
+    const ImGuiSelectableFlags worldFlags = mode == EditorGizmo::Mode::Scale
+        ? ImGuiSelectableFlags_Disabled : 0;
+    if (ImGui::Selectable("World", space == EditorGizmo::Space::World, worldFlags, ImVec2(104.0f, 0.0f))) {
+        context.gizmo->SetSpace(EditorGizmo::Space::World);
+    }
+    ImGui::SameLine();
+    if (ImGui::Selectable("Local", space == EditorGizmo::Space::Local, 0, ImVec2(104.0f, 0.0f))) {
+        context.gizmo->SetSpace(EditorGizmo::Space::Local);
+    }
+
+    ImGui::Separator();
+    ImGui::TextUnformatted("Axis");
     const EditorGizmo::Axis axis = context.gizmo->CurrentAxis();
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.72f, 0.16f, 0.18f, 1.0f));
     if (ImGui::Button(axis == EditorGizmo::Axis::X ? "X -> *" : "X ->", ImVec2(68.0f, 0.0f))) {
@@ -3089,6 +6199,37 @@ void DrawGizmoToolbar(EditorDockspace::Context& context) {
         context.gizmo->SetAxis(EditorGizmo::Axis::Z);
     }
     ImGui::PopStyleColor();
+
+    if (mode == EditorGizmo::Mode::Scale) {
+        ImGui::SameLine();
+        if (ImGui::Button(axis == EditorGizmo::Axis::All ? "All *" : "All", ImVec2(68.0f, 0.0f))) {
+            context.gizmo->SetAxis(EditorGizmo::Axis::All);
+        }
+    }
+
+    ImGui::Separator();
+    bool snapping = context.gizmo->SnappingEnabled();
+    if (ImGui::Checkbox("Snap", &snapping)) context.gizmo->SetSnappingEnabled(snapping);
+    float snapValue = mode == EditorGizmo::Mode::Translate ? context.gizmo->TranslationSnap()
+        : mode == EditorGizmo::Mode::Rotate ? context.gizmo->RotationSnap()
+        : context.gizmo->ScaleSnap();
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(105.0f);
+    const char* snapLabel = mode == EditorGizmo::Mode::Translate ? "Units##GizmoSnap"
+        : mode == EditorGizmo::Mode::Rotate ? "Degrees##GizmoSnap"
+        : "Step##GizmoSnap";
+    if (ImGui::DragFloat(snapLabel, &snapValue, mode == EditorGizmo::Mode::Rotate ? 0.5f : 0.01f,
+            mode == EditorGizmo::Mode::Rotate ? 0.1f : 0.001f, 1000.0f)) {
+        if (mode == EditorGizmo::Mode::Translate) context.gizmo->SetTranslationSnap(snapValue);
+        else if (mode == EditorGizmo::Mode::Rotate) context.gizmo->SetRotationSnap(snapValue);
+        else context.gizmo->SetScaleSnap(snapValue);
+    }
+
+    float visualScale = context.gizmo->VisualScale();
+    ImGui::SetNextItemWidth(210.0f);
+    if (ImGui::SliderFloat("Size", &visualScale, 0.5f, 2.5f, "%.2fx")) {
+        context.gizmo->SetVisualScale(visualScale);
+    }
 
     ImGui::End();
 }
@@ -3120,6 +6261,11 @@ bool EditorDockspace::Draw(Context& context) {
     ImGui::Begin("3DGEditorDockspace", nullptr, flags);
     ImGui::PopStyleVar(2);
 
+    const ImGuiIO& io = ImGui::GetIO();
+    if (io.KeyCtrl && io.KeyShift && !io.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_A, false)) {
+        g_creationPaletteOpenRequested = true;
+    }
+
     const ImGuiID dockspaceId = ImGui::GetID("3DGEditorDockspaceRoot");
     ImGui::DockSpace(dockspaceId, ImVec2(0.0f, 0.0f), ImGuiDockNodeFlags_PassthruCentralNode);
     if (context.dragDrop && ImGui::BeginDragDropTarget()) {
@@ -3137,9 +6283,13 @@ bool EditorDockspace::Draw(Context& context) {
             }
             ImGui::Text("Mode: %s", context.modeName);
             ImGui::Text("FPS: %.0f", context.fps);
+            ImGui::Text("Particles: %zu rendered | %d draws | %d culled | %.3f ms CPU | %.3f ms GPU",
+                context.particleRenderedCount, context.particleDrawCalls,
+                context.particleCulledEmitters, context.particleCpuMilliseconds,
+                context.particleGpuMilliseconds);
             ImGui::Text("Scene dirty: %s", context.sceneDirty ? "yes" : "no");
             if (context.gizmo) {
-                ImGui::Text("Gizmo: %s %s", context.gizmo->ModeName(), context.gizmo->AxisName());
+                ImGui::Text("Gizmo: %s %s (%s)", context.gizmo->ModeName(), context.gizmo->AxisName(), context.gizmo->SpaceName());
             }
             ImGui::Separator();
             if (ImGui::MenuItem("New Scene")) {
@@ -3207,14 +6357,52 @@ bool EditorDockspace::Draw(Context& context) {
         }
 
         if (ImGui::BeginMenu("Add")) {
+            if (ImGui::MenuItem("Create Object...", "Ctrl+Shift+A")) {
+                g_creationPaletteOpenRequested = true;
+            }
+            if (ImGui::BeginMenu("Component", context.scene && context.scene->SelectedObject()
+                    && !context.scene->SelectedObject()->navMeshBoundsVolume)) {
+                DrawComponentMenuItems(context);
+                ImGui::EndMenu();
+            }
+            ImGui::Separator();
             if (ImGui::BeginMenu("Primitives")) {
                 if (ImGui::MenuItem("Cube")) {
-                    context.addCubeRequested = true;
+                    ResetPrimitiveCreator(EditorScene::Primitive::Cube);
                 }
                 if (ImGui::MenuItem("Plane")) {
-                    context.addPlaneRequested = true;
+                    ResetPrimitiveCreator(EditorScene::Primitive::Plane);
+                }
+                if (ImGui::MenuItem("Sphere")) {
+                    ResetPrimitiveCreator(EditorScene::Primitive::Sphere);
+                }
+                if (ImGui::MenuItem("Capsule")) {
+                    ResetPrimitiveCreator(EditorScene::Primitive::Capsule);
+                }
+                if (ImGui::MenuItem("Cylinder")) {
+                    ResetPrimitiveCreator(EditorScene::Primitive::Cylinder);
+                }
+                if (ImGui::MenuItem("Cone")) {
+                    ResetPrimitiveCreator(EditorScene::Primitive::Cone);
+                }
+                if (ImGui::MenuItem("Pyramid")) {
+                    ResetPrimitiveCreator(EditorScene::Primitive::Pyramid);
+                }
+                if (ImGui::MenuItem("Torus")) {
+                    ResetPrimitiveCreator(EditorScene::Primitive::Torus);
+                }
+                if (ImGui::MenuItem("Staircase")) {
+                    ResetPrimitiveCreator(EditorScene::Primitive::Staircase);
                 }
                 ImGui::EndMenu();
+            }
+            if (ImGui::MenuItem("Terrain")) {
+                context.addTerrainRequested = true;
+                context.frameSelectedRequested = true;
+            }
+            if (ImGui::MenuItem("Water")) {
+                context.addWaterRequested = true;
+                context.frameSelectedRequested = true;
             }
             if (ImGui::BeginMenu("Physics")) {
                 if (ImGui::MenuItem("Dynamic Cube")) {
@@ -3225,6 +6413,13 @@ bool EditorDockspace::Draw(Context& context) {
                 }
                 if (ImGui::MenuItem("Trigger Volume")) {
                     context.addTriggerVolumeRequested = true;
+                }
+                ImGui::EndMenu();
+            }
+            if (ImGui::BeginMenu("Navigation")) {
+                if (ImGui::MenuItem("Nav Mesh Bounds Volume")) {
+                    context.addNavMeshBoundsVolumeRequested = true;
+                    context.frameSelectedRequested = true;
                 }
                 ImGui::EndMenu();
             }
@@ -3292,6 +6487,75 @@ bool EditorDockspace::Draw(Context& context) {
                 if (ImGui::MenuItem("Z", "Z", axis == EditorGizmo::Axis::Z)) {
                     context.gizmo->SetAxis(EditorGizmo::Axis::Z);
                 }
+                if (context.gizmo->CurrentMode() == EditorGizmo::Mode::Scale &&
+                    ImGui::MenuItem("All (Uniform)", nullptr, axis == EditorGizmo::Axis::All)) {
+                    context.gizmo->SetAxis(EditorGizmo::Axis::All);
+                }
+                ImGui::EndMenu();
+            }
+            if (ImGui::BeginMenu("Orientation")) {
+                const EditorGizmo::Space space = context.gizmo->CurrentSpace();
+                if (ImGui::MenuItem("World", nullptr, space == EditorGizmo::Space::World,
+                        context.gizmo->CurrentMode() != EditorGizmo::Mode::Scale))
+                    context.gizmo->SetSpace(EditorGizmo::Space::World);
+                if (ImGui::MenuItem("Local", nullptr, space == EditorGizmo::Space::Local))
+                    context.gizmo->SetSpace(EditorGizmo::Space::Local);
+                ImGui::EndMenu();
+            }
+            bool snapping = context.gizmo->SnappingEnabled();
+            if (ImGui::MenuItem("Snapping", nullptr, snapping))
+                context.gizmo->SetSnappingEnabled(!snapping);
+            ImGui::EndMenu();
+        }
+
+        if (ImGui::BeginMenu("Debug")) {
+            if (ImGui::BeginMenu("Navigation")) {
+                if (context.showNavigationPreview) {
+                    const bool shown = *context.showNavigationPreview;
+                    if (ImGui::MenuItem("Show Walkable Areas", nullptr, shown)) {
+                        *context.showNavigationPreview = !shown;
+                        if (!shown) context.rebuildNavigationPreviewRequested = true;
+                    }
+                }
+                if (ImGui::MenuItem("Rebuild Navigation")) {
+                    context.rebuildNavigationPreviewRequested = true;
+                }
+                ImGui::Separator();
+                ImGui::TextDisabled("%d walkable polygons", context.navigationPreviewPolygons);
+                ImGui::EndMenu();
+            }
+            if (context.showAiDebug) {
+                bool shown = *context.showAiDebug;
+                if (ImGui::MenuItem("AI Agent Debug", nullptr, shown)) {
+                    *context.showAiDebug = !shown;
+                }
+            }
+            if (ImGui::BeginMenu("Particles")) {
+                if (context.showParticleDebug) {
+                    ImGui::MenuItem("Show Guides", nullptr, context.showParticleDebug);
+                }
+                const bool enabled = !context.showParticleDebug || *context.showParticleDebug;
+                ImGui::BeginDisabled(!enabled);
+                if (context.particleDebugSelectedOnly) {
+                    ImGui::MenuItem("Selected Only", nullptr, context.particleDebugSelectedOnly);
+                }
+                ImGui::Separator();
+                if (context.particleDebugShapes) {
+                    ImGui::MenuItem("Emitter Shapes", nullptr, context.particleDebugShapes);
+                }
+                if (context.particleDebugDirections) {
+                    ImGui::MenuItem("Emission Directions", nullptr, context.particleDebugDirections);
+                }
+                if (context.particleDebugBounds) {
+                    ImGui::MenuItem("Culling Bounds", nullptr, context.particleDebugBounds);
+                }
+                if (context.particleDebugCullingState) {
+                    ImGui::MenuItem("Culling Status", nullptr, context.particleDebugCullingState);
+                }
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(0.15f, 0.85f, 1.0f, 1.0f), "Cyan: culling enabled");
+                ImGui::TextColored(ImVec4(0.72f, 0.32f, 0.92f, 1.0f), "Purple: culling disabled");
+                ImGui::EndDisabled();
                 ImGui::EndMenu();
             }
             ImGui::EndMenu();
@@ -3320,6 +6584,9 @@ bool EditorDockspace::Draw(Context& context) {
         ImGui::EndMenuBar();
     }
 
+    DrawCreationPalette(context);
+    DrawPrimitiveCreator(context);
+
     for (int i = 0; i < static_cast<int>(EditorPanels::Panel::Count); ++i) {
         const EditorPanels::Panel panel = static_cast<EditorPanels::Panel>(i);
         bool open = context.panels->IsOpen(panel);
@@ -3336,7 +6603,7 @@ bool EditorDockspace::Draw(Context& context) {
             break;
         case EditorPanels::Panel::WorldSettings:
             if (context.scene) {
-                DrawWorldSettings(*context.scene, &open);
+                DrawWorldSettings(*context.scene, context, &open);
             }
             break;
         case EditorPanels::Panel::Assets:
@@ -3347,6 +6614,20 @@ bool EditorDockspace::Draw(Context& context) {
             break;
         case EditorPanels::Panel::MaterialMaker:
             break;
+        case EditorPanels::Panel::BehaviorGraph:
+            break;   // drawn by EditorApp::DrawBehaviorGraphPanel (needs app-owned state)
+        case EditorPanels::Panel::AudioEditor:
+            DrawAudioEditor(context, &open);
+            break;
+        case EditorPanels::Panel::AudioMixer:
+            DrawAudioMixer(context, &open);
+            break;
+        case EditorPanels::Panel::ParticleEditor:
+            break; // drawn by EditorApp (owns the isolated preview renderer)
+        case EditorPanels::Panel::ShaderEditor:
+            break; // drawn by EditorApp (owns isolated shader preview resources)
+        case EditorPanels::Panel::Hud:
+            break; // drawn by EditorApp::DrawHudEditorPanel (owns the HUD document)
         case EditorPanels::Panel::PhysicsStatus:
             DrawPhysicsStatus(context, &open);
             break;
@@ -3356,14 +6637,18 @@ bool EditorDockspace::Draw(Context& context) {
         case EditorPanels::Panel::AnimationPreview:
             DrawAnimationPreview(context, &open);
             break;
+        case EditorPanels::Panel::Gizmo:
+            DrawGizmoToolbar(context, &open);
+            break;
+        case EditorPanels::Panel::CameraManager:
+            DrawCameraManager(context, &open);
+            break;
         case EditorPanels::Panel::Count:
             break;
         }
 
         context.panels->SetOpen(panel, open);
     }
-
-    DrawGizmoToolbar(context);
 
     ImGui::End();
     return true;

@@ -37,11 +37,20 @@ bool ColliderShapeIsInvalid(const engine::ecs::Collider& collider) {
     case engine::ecs::ColliderShape::Sphere:
         return collider.radius <= 0.0f;
     case engine::ecs::ColliderShape::Box:
+    case engine::ecs::ColliderShape::Pyramid:
+    case engine::ecs::ColliderShape::Staircase:
         return collider.halfExtents.x <= 0.0f
             || collider.halfExtents.y <= 0.0f
             || collider.halfExtents.z <= 0.0f;
     case engine::ecs::ColliderShape::Plane:
         return glm::dot(collider.planeNormal, collider.planeNormal) <= 0.0001f;
+    case engine::ecs::ColliderShape::Capsule:
+        return collider.radius <= 0.0f || collider.halfHeight < 0.0f;
+    case engine::ecs::ColliderShape::Cylinder:
+    case engine::ecs::ColliderShape::Cone:
+        return collider.radius <= 0.0f || collider.halfHeight <= 0.0f;
+    case engine::ecs::ColliderShape::Torus:
+        return collider.majorRadius <= 0.0f || collider.minorRadius <= 0.0f;
     }
 
     return true;
@@ -160,9 +169,15 @@ bool EditorRuntimeController::LoadScene(EditorScene& scene,
     const engine::Mesh& cube,
     const engine::Mesh& plane,
     const engine::Mesh& sphere,
+    const engine::Mesh& capsule,
+    const engine::Mesh& cylinder,
+    const engine::Mesh& cone,
+    const engine::Mesh& pyramid,
+    const engine::Mesh& torus,
+    const engine::Mesh& staircase,
     EditorLog& log) const {
     std::string error;
-    if (scene.Load(project.ScenePath(), cube, plane, sphere, &error)) {
+    if (scene.Load(project.ScenePath(), cube, plane, sphere, capsule, cylinder, cone, pyramid, torus, staircase, &error)) {
         log.Info("Loaded " + project.ScenePath());
         return true;
     }
@@ -190,6 +205,12 @@ bool EditorRuntimeController::ValidateRuntimeScene(const EditorProject& project,
     const engine::Mesh& cube,
     const engine::Mesh& plane,
     const engine::Mesh& sphere,
+    const engine::Mesh& capsule,
+    const engine::Mesh& cylinder,
+    const engine::Mesh& cone,
+    const engine::Mesh& pyramid,
+    const engine::Mesh& torus,
+    const engine::Mesh& staircase,
     EditorLog& log) const {
     engine::RuntimeSceneLoader::Scene runtimeScene;
     std::string error;
@@ -199,7 +220,7 @@ bool EditorRuntimeController::ValidateRuntimeScene(const EditorProject& project,
     }
 
     engine::ecs::Registry registry;
-    engine::RuntimeSceneLoader::PrimitiveMeshes meshes{&cube, &plane, &sphere};
+    engine::RuntimeSceneLoader::PrimitiveMeshes meshes{&cube, &plane, &sphere, &capsule, &cylinder, &cone, &pyramid, &torus, &staircase};
     if (!engine::RuntimeSceneLoader::Instantiate(runtimeScene, registry, meshes, nullptr, &error)) {
         log.Error("Runtime scene validation failed: " + error);
         return false;
@@ -225,7 +246,9 @@ bool EditorRuntimeController::ValidateRuntimeScene(const EditorProject& project,
         + std::to_string(physics.rigidBodies) + " rigid bodies, "
         + std::to_string(physics.dynamicBodies) + " dynamic, "
         + std::to_string(physics.colliders) + " colliders, "
-        + std::to_string(physics.triggerColliders) + " triggers");
+        + std::to_string(physics.triggerColliders) + " triggers, "
+        + std::to_string(ComponentCount<engine::ecs::AudioSource>(registry)) + " audio sources, "
+        + std::to_string(ComponentCount<engine::ParticleSystemComponent>(registry)) + " particle systems");
     return true;
 }
 
@@ -234,6 +257,12 @@ bool EditorRuntimeController::BuildPlayRuntimePreview(const EditorScene& scene,
     const engine::Mesh& cube,
     const engine::Mesh& plane,
     const engine::Mesh& sphere,
+    const engine::Mesh& capsule,
+    const engine::Mesh& cylinder,
+    const engine::Mesh& cone,
+    const engine::Mesh& pyramid,
+    const engine::Mesh& torus,
+    const engine::Mesh& staircase,
     engine::ecs::Registry& playRegistry,
     engine::RuntimeAssetManager& playAssets,
     std::vector<engine::ecs::Entity>* createdEntities,
@@ -250,8 +279,8 @@ bool EditorRuntimeController::BuildPlayRuntimePreview(const EditorScene& scene,
         return false;
     }
 
-    engine::RuntimeSceneLoader::PrimitiveMeshes meshes{&cube, &plane, &sphere};
-    if (!engine::RuntimeSceneLoader::Instantiate(runtimeScene, playRegistry, meshes, nullptr, error)) {
+    engine::RuntimeSceneLoader::PrimitiveMeshes meshes{&cube, &plane, &sphere, &capsule, &cylinder, &cone, &pyramid, &torus, &staircase};
+    if (!engine::RuntimeSceneLoader::Instantiate(runtimeScene, playRegistry, meshes, createdEntities, error)) {
         return false;
     }
 
