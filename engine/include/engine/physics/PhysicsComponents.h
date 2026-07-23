@@ -8,6 +8,28 @@
 namespace engine {
 namespace ecs {
 
+// Named collision channels used by editor presets and gameplay queries. Keeping
+// these as bits preserves the existing layer/mask format while giving authors
+// readable Unreal-style object channels instead of raw integers.
+namespace CollisionLayer {
+constexpr std::uint32_t Default       = 1u << 0;
+constexpr std::uint32_t WorldStatic   = 1u << 1;
+constexpr std::uint32_t WorldDynamic  = 1u << 2;
+constexpr std::uint32_t Player        = 1u << 3;
+constexpr std::uint32_t Enemy         = 1u << 4;
+constexpr std::uint32_t Collectible   = 1u << 5;
+constexpr std::uint32_t Projectile    = 1u << 6;
+constexpr std::uint32_t CameraBlocker = 1u << 7;
+constexpr std::uint32_t Trigger       = 1u << 8;
+constexpr std::uint32_t All           = 0xFFFFFFFFu;
+
+// Queries use their own response masks. Collectibles and trigger volumes can
+// still emit overlap events, but never stop the character or retract the camera.
+constexpr std::uint32_t CharacterBlockers = All & ~Collectible & ~Trigger;
+constexpr std::uint32_t CameraBlockers =
+    Default | WorldStatic | WorldDynamic | CameraBlocker;
+} // namespace CollisionLayer
+
 // A body that participates in dynamics. invMass = 0 means infinite mass (static
 // or immovable). Velocity is integrated each fixed step; accumForce is applied
 // then cleared. Surface material (bounciness, friction) lives on the Collider,
@@ -95,6 +117,17 @@ struct RigidBody {
         m[0][0] = 1.0f / ix; m[1][1] = 1.0f / iy; m[2][2] = 1.0f / ix;
         return m;
     }
+    // Solid cylinder aligned with local +Y. `halfHeight` excludes no caps: the
+    // total flat-ended height is exactly 2 * halfHeight.
+    static glm::mat3 CylinderInvInertia(float mass, float r, float halfHeight) {
+        if (mass <= 0.0f || r <= 0.0f || halfHeight <= 0.0f) return glm::mat3(0.0f);
+        const float h = 2.0f * halfHeight;
+        const float iy = 0.5f * mass * r * r;
+        const float ix = (mass / 12.0f) * (3.0f * r * r + h * h);
+        glm::mat3 m(0.0f);
+        m[0][0] = 1.0f / ix; m[1][1] = 1.0f / iy; m[2][2] = 1.0f / ix;
+        return m;
+    }
 };
 
 enum class ColliderShape {
@@ -134,8 +167,8 @@ struct Collider {
     // Default: layer 0 (bit 1), collides with everything. Put the player, enemies,
     // props, projectiles, etc. on different layers and mask out the pairs you
     // don't want to test (cheaper broad phase + no unwanted contacts/triggers).
-    std::uint32_t layer = 0x00000001u;            // this collider's layer bit(s)
-    std::uint32_t mask  = 0xFFFFFFFFu;            // which layers this collider hits
+    std::uint32_t layer = CollisionLayer::Default; // this collider's object channel
+    std::uint32_t mask  = CollisionLayer::All;     // channels this collider responds to
 
     static Collider MakeSphere(float r) { Collider c; c.shape = ColliderShape::Sphere; c.radius = r; return c; }
     static Collider MakePlane(const glm::vec3& n, float off) {

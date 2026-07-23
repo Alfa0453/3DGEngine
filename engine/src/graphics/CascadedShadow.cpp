@@ -128,8 +128,19 @@ void CascadedShadow::Generate(ecs::Registry& reg, const Camera& camera, float as
 
     GLint prevFbo = 0;
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFbo);
+    const GLboolean polygonOffsetWasEnabled = glIsEnabled(GL_POLYGON_OFFSET_FILL);
+    GLfloat previousPolygonOffsetFactor = 0.0f;
+    GLfloat previousPolygonOffsetUnits = 0.0f;
+    glGetFloatv(GL_POLYGON_OFFSET_FACTOR, &previousPolygonOffsetFactor);
+    glGetFloatv(GL_POLYGON_OFFSET_UNITS, &previousPolygonOffsetUnits);
+
     glViewport(0, 0, m_size, m_size);
     glBindFramebuffer(GL_FRAMEBUFFER, m_fbo);
+    // Push caster depth away from the light while building the shadow maps.
+    // Without this, large coplanar receivers repeatedly shadow themselves and
+    // expose the individual PCF levels as broad bands (shadow acne).
+    glEnable(GL_POLYGON_OFFSET_FILL);
+    glPolygonOffset(2.0f, 4.0f);
     m_shader.Bind();
     m_batch.Build(reg);
 
@@ -145,6 +156,8 @@ void CascadedShadow::Generate(ecs::Registry& reg, const Camera& camera, float as
         if (drawExtraCasters) drawExtraCasters(m_vp[i]);   // skinned / non-ECS casters
     }
 
+    glPolygonOffset(previousPolygonOffsetFactor, previousPolygonOffsetUnits);
+    if (!polygonOffsetWasEnabled) glDisable(GL_POLYGON_OFFSET_FILL);
     glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prevFbo));
 }
 

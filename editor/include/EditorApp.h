@@ -44,6 +44,7 @@
 #include "ParticleEditorPanel.h"
 #include "ShaderEditorPanel.h"
 #include "HudEditorPanel.h"
+#include "CharacterEditorPanel.h"
 
 #include "EditorAssets.h"
 #include "EditorContentController.h"
@@ -64,15 +65,19 @@
 #include <glm/glm.hpp>
 
 #include <array>
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
+namespace engine { class GrassField; }   // header pulls in glad, so keep it out of this header
+
 class EditorApp final : public engine::Application {
 public:
     explicit EditorApp(engine::Config& config);
+    ~EditorApp() override;   // defined in EditorApp.cpp where GrassField is complete
 
 protected:
     void OnInit()           override;
@@ -118,6 +123,7 @@ private:
         int                 team = 0;                            // faction id (0 = neutral)
         bool                autoTarget = false;                  // acquire nearest hostile each tick
         engine::ai::AiAgent brain;                               // built-in patrol/chase/search
+        engine::ai::AiMovementComponent movement;
         // M7: optional data-driven behaviour tree. When useGraph is set, 'tree' + 'ctx'
         // drive the agent instead of 'brain'.
         bool                                              useGraph = false;
@@ -158,6 +164,7 @@ private:
     void DrawParticleEditorPanel();
     void DrawShaderEditorPanel();
     void DrawHudEditorPanel();
+    void DrawCharacterEditorPanel();
     void DrawPlayHud();
     void SyncHudFromScene();   // load the scene's referenced .hud into m_hud
     void ScanHudImages();      // recursively list content-folder images for the picker
@@ -185,14 +192,20 @@ private:
     void HandleMouseViewportGizmo();
     void HandleTerrainSculpt();
     void AddTerrainMeshes(engine::ecs::Registry& pbrRegistry);   // shared edit + play terrain draw
+    // Representative albedo colour of a painted-layer material (base colour modulated by
+    // the average of its albedo map); cached by path. Empty path -> default palette.
+    glm::vec3 TerrainLayerMaterialColor(const std::string& materialPath);
+    bool AverageImageColor(const std::string& relativePath, glm::vec3& outColor);
     float TerrainSurfaceY(float worldX, float worldZ, bool& over);  // walkable height query
     float WaterSurfaceY(float worldX, float worldZ, bool& over);     // wave height for buoyancy
+    void ApplyWaterBuoyancy(float dt);                               // float/sink dynamic bodies in water
     void BeginAssetDrag();
     void DropPayloadOnScene();
     glm::vec3 SceneDropPosition();
     bool IsViewportDropPosition(float x, float y);
     float ProjectGizmoDrag(float dx, float dy, const glm::mat4& viewProj,
                            int viewportWidth, int viewportHeight) const;
+    void AddEmpty();
     void AddCube();
     void AddPlane();
     void AddSphere();
@@ -204,11 +217,15 @@ private:
     void AddDynamicCube();
     void AddStaticFloor();
     void AddTerrain();
-    void AddWater();
+    void AddWater(int preset = 0);   // 0 generic, 1 lake, 2 ocean, 3 river
     void DrawWaterBodies(const engine::Camera& camera, float aspect);   // transparent water pass
+    void DrawGrass(const engine::Camera& camera, float aspect);         // instanced grass on terrain
+    void AddSpline();                                     // create an editable Catmull-Rom path
+    void DrawSplines(const glm::mat4& viewProj);          // curve + control-point handles
     void AddTriggerVolume();
     void AddNavMeshBoundsVolume();
     void AddPlayerStart();
+    void AddCharacterToScene(const CharacterAsset& character, const glm::vec3& position);   // instantiate a .3dgcharacter
     void AddGameplayDoor();
     void AddGameplayPickup();
     void AddGameplayDamageZone();
@@ -225,6 +242,9 @@ private:
     void Redo();
     void SaveScene();
     void SaveSceneAs(const std::string& path);
+    void PersistProject();                                       // save project settings to the right config
+    void NewProject(const std::string& location, const std::string& name);
+    void OpenProjectFromPath(const std::string& projectFile);
     void SetScenePathDraft(const std::string& path);
     void UpdateAutosave(float dt);
     void LoadScene();
@@ -282,7 +302,9 @@ private:
     void CapturePlayPhysicsEvents();
     bool Pressed(int key);
 
-    engine::Config&       m_config;
+    engine::Config&       m_config;          // global editor.cfg (window settings + current project pointer)
+    engine::Config        m_projectConfig;   // active project's Project.3dgproject (when m_hasProjectFile)
+    bool                  m_hasProjectFile = false;
     engine::Renderer      m_renderer;
     engine::Camera        m_camera{ glm::vec3(0.0f, 3.0f, 8.0f) };
     engine::CameraBlend   m_cameraBlend;
@@ -339,6 +361,8 @@ private:
     };
     std::unordered_map<engine::ecs::Entity, TerrainCache> m_terrains;
     std::unordered_map<engine::ecs::Entity, engine::Water> m_waters;   // one Water per water object
+    std::unordered_map<engine::ecs::Entity, std::unique_ptr<engine::GrassField>> m_grass;   // one grass field per terrain
+    std::unordered_map<std::string, glm::vec3> m_terrainMaterialColors;   // paint-layer material -> colour cache
     bool  m_terrainSculpt = false;        // sculpt mode active (paints the selected terrain)
     int   m_terrainSculptMode = 0;        // 0 raise, 1 lower, 2 smooth, 3 flatten, 4 paint
     int   m_terrainPaintLayer = 1;        // 0 auto/erase, 1 grass, 2 rock, 3 dirt, 4 snow, 5 sand
@@ -358,6 +382,7 @@ private:
     ParticleEditorPanel                  m_particleEditor;
     ShaderEditorPanel                    m_shaderEditor;
     HudEditorPanel                       m_hudPanel;
+    CharacterEditorPanel                 m_characterEditor;
     engine::HudDocument                  m_hud;              // active HUD document (in memory)
     std::string                          m_hudPath;          // last saved/loaded .hud path
     std::unordered_map<std::string, float>       m_hudFloats;   // named numeric HUD values
@@ -391,7 +416,7 @@ private:
     std::vector<EditorDockspace::PhysicsEventRow> m_physicsEventRows;
     std::vector<EditorViewport::PhysicsEventGuide> m_physicsEventGuides;
     std::vector<engine::ScriptAnimationEvent> m_playAnimationEvents;
-    bool m_showPhysicsEventGuides = true;
+    bool m_showPhysicsEventGuides = false;
     bool m_showAiDebug = true;
     bool m_showParticleDebug = true;
     bool m_showCameraRails = true;
@@ -417,6 +442,7 @@ private:
     std::unordered_map<std::string, engine::ai::BehaviorGraph> m_playBtGraphCache;  // subtree assets
     engine::ai::NavMesh m_editorNavMesh;
     bool m_showNavigationPreview = false;
+    bool m_showGrid = true;               // reference ground grid + world axes (edit mode)
 
     float m_fps = 60.0f;
     float m_elapsed = 0.0f;
@@ -428,6 +454,9 @@ private:
     std::string m_pendingScenePath;
     bool m_dirtyScenePromptQueued = false;
     std::array<char, 260> m_scenePathDraft{};
+    std::array<char, 128> m_projectNameDraft{};       // New Project: name field
+    std::array<char, 260> m_projectLocationDraft{};   // New Project: parent folder field
+    std::array<char, 260> m_openProjectDraft{};       // Open Project: path to a .3dgproject
     std::unordered_map<int, bool> m_keyPrev;
     std::unordered_map<int, bool> m_scriptKeyPrev;
     std::unordered_map<int, bool> m_scriptMousePrev;

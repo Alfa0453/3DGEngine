@@ -9,6 +9,8 @@
 #include <engine/ai/BtScript.h>
 #include <engine/ecs/RuntimeSystems.h>
 #include <engine/ai/NavMeshBuilder.h>
+#include <engine/ai/AgentCollision.h>
+#include <engine/ai/AiMovement.h>
 #include <engine/ai/Perception.h>
 #include <engine/ai/Steering.h>
 #include <engine/ecs/Systems.h>          // RenderLoadedModels
@@ -40,6 +42,21 @@ engine::WindowProps MakeProps(engine::Config& cfg) {
     p.height = cfg.GetInt("window.height", 720);
     p.vsync  = cfg.GetBool("window.vsync", true);
     return p;
+}
+
+engine::ProceduralSky::CloudSettings SkyClouds(
+    const RuntimeSceneLoader::Scene::Environment& environment) {
+    engine::ProceduralSky::CloudSettings clouds;
+    clouds.enabled = environment.clouds;
+    clouds.coverage = environment.cloudCoverage;
+    clouds.density = environment.cloudDensity;
+    clouds.scale = environment.cloudScale;
+    clouds.softness = environment.cloudSoftness;
+    clouds.windSpeed = environment.cloudWindSpeed;
+    clouds.windDirectionDegrees = environment.cloudWindDirection;
+    clouds.horizonHeight = environment.cloudHorizonHeight;
+    clouds.color = environment.cloudColor;
+    return clouds;
 }
 } // namespace
 
@@ -418,9 +435,14 @@ void RuntimePlayerApp::SetupPlayer() {
     if (const Transform* t = m_registry.TryGet<Transform>(found)) {
         controller.SetPosition(t->position);
     }
-    // The controller owns a kinematic capsule; drop the entity's physics so the
-    // solver doesn't fight it (mirrors the editor's play setup).
-    if (m_registry.Has<engine::ecs::Collider>(found))  m_registry.Remove<engine::ecs::Collider>(found);
+    // The controller owns movement, while this trigger-only proxy lets coins,
+    // camera zones, and scripts receive overlap events without pushing the player.
+    engine::ecs::Collider playerProxy = engine::ecs::Collider::MakeCapsuleFromHeight(
+        controller.body.radius, controller.body.height);
+    playerProxy.isTrigger = true;
+    playerProxy.layer = engine::ecs::CollisionLayer::Player;
+    playerProxy.mask = engine::ecs::CollisionLayer::All;
+    m_registry.Add<engine::ecs::Collider>(found, playerProxy);
     if (m_registry.Has<engine::ecs::RigidBody>(found)) m_registry.Remove<engine::ecs::RigidBody>(found);
 
     m_playerEntity = found;
@@ -629,6 +651,12 @@ void RuntimePlayerApp::BuildAI() {
         runtime.name = desc.entityName;
         runtime.team = desc.team;
         runtime.autoTarget = desc.autoTarget;
+        runtime.movement.mode = desc.movementMode;
+        runtime.movement.gravity = desc.movementGravity;
+        runtime.movement.maxFallSpeed = desc.movementMaxFallSpeed;
+        runtime.movement.groundProbeDistance = desc.movementGroundProbe;
+        runtime.movement.stepHeight = desc.movementStepHeight;
+        runtime.movement.maxSlopeDegrees = desc.movementMaxSlope;
         runtime.brain.agent.maxSpeed = desc.speed;
         runtime.brain.agent.maxForce = desc.maxForce;
         runtime.brain.reachRadius = desc.reachRadius;
@@ -798,10 +826,12 @@ void RuntimePlayerApp::UpdateAI(float dt) {
                 agent.targetEntity, m_physics, m_registry);
         }
 
+        glm::vec3 movementTarget = targetPosition;
+        if (!agent.movement.IsFlying()) movementTarget.y = position.y;
         if (agent.useGraph) {
             engine::ai::AgentContext& context = agent.context;
             context.dt = dt;
-            context.targetPos = targetPosition;
+            context.targetPos = movementTarget;
             context.seesTarget = seesTarget;
             context.mesh = &m_navMesh;
             context.registry = &m_registry;
@@ -825,23 +855,37 @@ void RuntimePlayerApp::UpdateAI(float dt) {
                 agent.brain.SetPosition(lockedPosition);
                 agent.brain.agent.velocity = glm::vec3(0.0f);
             } else {
-                agent.brain.Update(dt, targetPosition, seesTarget, m_navMesh);
+                agent.brain.Update(dt, movementTarget, seesTarget, m_navMesh);
             }
             transform->position = agent.brain.Position();
             facing = agent.brain.Facing();
+        }
+        const glm::vec3 requestedPosition = transform->position;
+        bool overTerrain = false;
+        const float terrainY = TerrainSurfaceY(
+            requestedPosition.x, requestedPosition.z, overTerrain);
+        transform->position = engine::ai::MoveAiAgent(
+            m_physics, m_registry, agent.entity, lockedPosition,
+            requestedPosition, dt, agent.movement, overTerrain, terrainY);
+        glm::vec3 resolvedVelocity = dt > 1.0e-6f
+            ? (transform->position - lockedPosition) / dt : glm::vec3(0.0f);
+        resolvedVelocity.y = 0.0f;
+        if (agent.useGraph) {
+            agent.context.agent.position = transform->position;
+            agent.context.agent.velocity = resolvedVelocity;
+        } else {
+            agent.brain.SetPosition(transform->position);
+            agent.brain.agent.velocity = resolvedVelocity;
+        }
+        if (engine::AnimatedModel* animatedModel =
+                m_registry.TryGet<engine::AnimatedModel>(agent.entity)) {
+            engine::ai::UpdateAiAnimationParameters(
+                *animatedModel, agent.movement, resolvedVelocity);
         }
         if (glm::dot(facing, facing) > 1.0e-6f) {
             const float yaw = std::atan2(facing.x, facing.z);
             transform->rotation =
                 glm::angleAxis(yaw, glm::vec3(0.0f, 1.0f, 0.0f));
-        }
-        bool overTerrain = false;
-        const float terrainY =
-            TerrainSurfaceY(transform->position.x, transform->position.z, overTerrain);
-        if (overTerrain) {
-            transform->position.y = terrainY;
-            if (agent.useGraph) agent.context.agent.position.y = terrainY;
-            else agent.brain.SetPosition(transform->position);
         }
     }
 
@@ -849,6 +893,9 @@ void RuntimePlayerApp::UpdateAI(float dt) {
     for (RuntimeAgent& agent : m_agents) {
         Transform* transform = m_registry.TryGet<Transform>(agent.entity);
         if (!transform) continue;
+        const engine::AnimatedModel* animated =
+            m_registry.TryGet<engine::AnimatedModel>(agent.entity);
+        if (animated && animated->BlocksMovement()) continue;
         glm::vec3 push(0.0f);
         for (const RuntimeAgent& other : m_agents) {
             if (other.entity == agent.entity) continue;
@@ -864,7 +911,9 @@ void RuntimePlayerApp::UpdateAI(float dt) {
         glm::vec3 move = push * 0.5f;
         const float length = glm::length(move);
         if (length > 0.10f) move *= 0.10f / length;
-        transform->position += move;
+        transform->position = engine::ai::MoveAgentWithCollision(
+            m_physics, m_registry, agent.entity,
+            transform->position, transform->position + move);
         if (agent.useGraph) agent.context.agent.position = transform->position;
         else agent.brain.SetPosition(transform->position);
     }
@@ -1370,7 +1419,32 @@ void RuntimePlayerApp::OnFixedUpdate(float h) {
         engine::PlayerInput in = m_playerInput;
         if (!m_lookPending) { in.lookYaw = 0.0f; in.lookPitch = 0.0f; }
         m_lookPending = false;
-        m_playerController->Update(m_registry, in, h, true);
+        engine::AnimatedModel* animated =
+            m_registry.TryGet<engine::AnimatedModel>(m_playerEntity);
+        const bool movementLocked = animated && animated->BlocksMovement();
+        if (animated) {
+            const float moveMagnitude = std::min(
+                glm::length(glm::vec2(in.moveForward, in.moveRight)), 1.0f);
+            const float movementSpeed = movementLocked ? 0.0f : moveMagnitude *
+                (in.sprint ? m_playerController->runSpeed : m_playerController->walkSpeed);
+            const float previousSpeed = animated->controller.Parameter("Speed", 0.0f);
+            const float invStep = h > 0.0001f ? 1.0f / h : 0.0f;
+            animated->controller.SetParameter("Speed", movementSpeed);
+            animated->controller.SetParameter("Direction", moveMagnitude > 0.001f
+                ? glm::degrees(std::atan2(in.moveRight, in.moveForward)) : 0.0f);
+            animated->controller.SetParameter("Acceleration", (movementSpeed - previousSpeed) * invStep);
+            animated->controller.SetParameter("Deceleration",
+                std::max(previousSpeed - movementSpeed, 0.0f) * invStep);
+            animated->controller.SetParameter("TurnRate", in.lookYaw * invStep);
+            animated->controller.SetBoolParameter("IsMoving", movementSpeed > 0.05f);
+            animated->controller.SetBoolParameter("IsStopping",
+                previousSpeed > 0.05f && movementSpeed <= 0.05f);
+            animated->controller.SetParameter("VerticalSpeed", m_playerController->body.velocity.y);
+            animated->controller.SetBoolParameter("IsGrounded", m_playerController->body.grounded);
+            animated->controller.SetBoolParameter("IsFalling", !m_playerController->body.grounded
+                && m_playerController->body.velocity.y < 0.0f);
+        }
+        m_playerController->Update(m_registry, in, h, !movementLocked);
         if (Transform* t = m_registry.TryGet<Transform>(m_playerEntity)) {
             bool overTerrain = false;
             const float surfaceY = TerrainSurfaceY(
@@ -1423,10 +1497,22 @@ void RuntimePlayerApp::OnRender() {
     engine::PbrRenderer::Options opt;
     opt.ambient = m_sample.ambient + glm::vec3(0.04f);
     opt.ibl = &*m_ibl;
+    opt.skylightOcclusion = env.skylightOcclusion;
+    opt.skylightOcclusionStrength = env.skylightOcclusionStrength;
+    opt.minimumSkylight = env.minimumSkylight;
     opt.fog = env.fog;
     opt.fogDensity = env.fogDensity;
     opt.fogHeight = env.fogHeight;
     opt.fogHeightFalloff = env.fogHeightFalloff;
+    opt.cloudShadows = env.clouds && env.cloudShadows;
+    opt.cloudShadowStrength = env.cloudShadowStrength;
+    opt.cloudShadowScale = env.cloudShadowScale;
+    opt.cloudCoverage = env.cloudCoverage;
+    opt.cloudDensity = env.cloudDensity;
+    opt.cloudSoftness = env.cloudSoftness;
+    opt.cloudWindSpeed = env.cloudWindSpeed;
+    opt.cloudWindDirectionDegrees = env.cloudWindDirection;
+    opt.shadowDistance = env.shadowDistance;
     // RM3: shadow parity — directional (sun) + point + spot shadows are all on by
     // default in Options, matching the editor's play view.
     // Let animated characters cast sun shadows too (skinned depth into the cascade).
@@ -1461,6 +1547,17 @@ void RuntimePlayerApp::OnRender() {
         lighting.ambient = m_sample.ambient * env.skyLightIntensity;
         lighting.cascade = &m_pbr->Cascade();
         lighting.ibl = &*m_ibl;
+        lighting.skylightOcclusion = env.skylightOcclusion;
+        lighting.skylightOcclusionStrength = env.skylightOcclusionStrength;
+        lighting.minimumSkylight = env.minimumSkylight;
+        lighting.cloudShadows = env.clouds && env.cloudShadows;
+        lighting.cloudShadowStrength = env.cloudShadowStrength;
+        lighting.cloudShadowScale = env.cloudShadowScale;
+        lighting.cloudCoverage = env.cloudCoverage;
+        lighting.cloudDensity = env.cloudDensity;
+        lighting.cloudSoftness = env.cloudSoftness;
+        lighting.cloudWindSpeed = env.cloudWindSpeed;
+        lighting.cloudWindDirectionDegrees = env.cloudWindDirection;
         lighting.tonemap = true;
         lighting.fog = env.fog;
         lighting.fogColor = m_sample.horizon;
@@ -1470,7 +1567,8 @@ void RuntimePlayerApp::OnRender() {
         m_skinnedRenderer->DrawScene(m_registry, cam, aspect, lighting);
     }
 
-    m_sky->Draw(cam.ViewMatrix(), cam.ProjectionMatrix(aspect), m_sample, false);
+    m_sky->Draw(cam.ViewMatrix(), cam.ProjectionMatrix(aspect), m_sample, false,
+                SkyClouds(env));
     if (m_particleRenderer) {
         m_particleRenderer->ResetStats();
         m_registry.view<engine::ParticleSystemComponent>().each(

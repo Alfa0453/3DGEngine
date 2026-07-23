@@ -5,6 +5,7 @@
 #include "engine/gameplay/GameplayComponents.h"
 #include "engine/gameplay/Script.h"
 #include "engine/physics/PhysicsComponents.h"
+#include "engine/ai/AiMovement.h"
 
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -40,6 +41,12 @@ public:
     };
 
     struct AnimationStateDesc {
+        struct BlendSampleDesc {
+            int clipIndex = 0;
+            std::string clipName;
+            float value = 0.0f;
+            float valueY = 0.0f;
+        };
         std::string name;
         int clipIndex = 0;
         std::string clipName;
@@ -51,6 +58,10 @@ public:
         float blendMin = 0.0f;
         float blendMax = 1.0f;
         bool rootMotion = false;
+        std::vector<BlendSampleDesc> blendSamples;
+        std::string blendParameterY;
+        bool blendSpace2D = false;
+        bool synchronizeBlendSpace = true;
     };
 
     struct AnimationParameterDesc {
@@ -112,6 +123,9 @@ public:
         glm::vec3 color{1.0f};
         std::string modelPath;
         std::string materialPath;
+        glm::vec3 modelOrientationEuler{0.0f};   // render-only rotation (deg); collider unaffected
+        glm::vec3 modelOffsetPosition{0.0f};     // render-only mesh position offset; collider unaffected
+        glm::vec3 modelOffsetScale{1.0f};        // render-only mesh scale (about model centre)
         std::unordered_map<std::string, std::string> materialParameterOverrides;
         bool skeletalModel = false;
         int animationClipIndex = 0;
@@ -182,6 +196,12 @@ public:
             std::string brainAsset;
             int team = 0;
             bool autoTarget = false;
+            engine::ai::AiMovementMode movementMode = engine::ai::AiMovementMode::Grounded;
+            float movementGravity = -9.81f;
+            float movementMaxFallSpeed = 35.0f;
+            float movementGroundProbe = 0.25f;
+            float movementStepHeight = 0.35f;
+            float movementMaxSlope = 50.0f;
             std::vector<glm::vec3> patrolPoints;
         };
         struct TriggerActionDesc {
@@ -270,8 +290,24 @@ public:
             };
             float timeOfDay = 0.46f;
             float skyLightIntensity = 1.0f;
+            bool skylightOcclusion = true;
+            float skylightOcclusionStrength = 0.90f;
+            float minimumSkylight = 0.06f;
             bool driveSunLight = true;
             float sunIntensity = 1.0f;
+            bool clouds = true;
+            float cloudCoverage = 0.45f;
+            float cloudDensity = 0.75f;
+            float cloudScale = 1.35f;
+            float cloudSoftness = 0.18f;
+            float cloudWindSpeed = 0.025f;
+            float cloudWindDirection = 25.0f;
+            float cloudHorizonHeight = 0.08f;
+            glm::vec3 cloudColor{1.0f, 0.98f, 0.94f};
+            bool cloudShadows = true;
+            float cloudShadowStrength = 0.45f;
+            float cloudShadowScale = 0.035f;
+            float shadowDistance = 300.0f;
             bool fog = true;
             float fogDensity = 0.008f;
             float fogHeight = -0.35f;

@@ -45,6 +45,9 @@ public:
         bool      tonemap = true;   // false = output linear HDR (for post-processing)
         const IBL*  ibl   = nullptr;   // image-based ambient lighting (optional)
         const SSAO* ssao = nullptr;    // screen-space ambient occlusion (optional)
+        bool        skylightOcclusion = false;
+        float       skylightOcclusionStrength = 0.90f;
+        float       minimumSkylight = 0.06f;
         bool        pointShadows = true;    // omnidirectional shadows for point lights
         bool        spotShadows  = true;  // perspective shadows for spotlights
         bool        directionalShadows = true; // cascaded shadows for the directional sun
@@ -55,6 +58,16 @@ public:
         // values spread the same shadow-map resolution over more area, so bump the
         // shadow map size too (PbrRenderer ctor) if they get soft.
         float       shadowDistance = 140.0f;
+
+        // Animated world-space cloud shadows modulate direct sunlight only.
+        bool  cloudShadows = false;
+        float cloudShadowStrength = 0.45f;
+        float cloudShadowScale = 0.035f;
+        float cloudCoverage = 0.45f;
+        float cloudDensity = 0.75f;
+        float cloudSoftness = 0.18f;
+        float cloudWindSpeed = 0.025f;
+        float cloudWindDirectionDegrees = 25.0f;
 
         // Distance + height fog (applied to lit geometry in linear HDR).
         bool      fog = false;

@@ -139,7 +139,8 @@ void PlayerController::Update(ecs::Registry& reg, const PlayerInput& in, float d
             const glm::vec3 desired = target + authoredOffset;
             PhysicsWorld query;
             const RaycastHit hit = query.SphereCast(
-                reg, target, desired, std::max(camProbeRadius, 0.0f));
+                reg, target, desired, std::max(camProbeRadius, 0.0f),
+                ecs::kNull, ecs::CollisionLayer::CameraBlockers);
             if (hit.hit) {
                 safeDistance = std::clamp(
                     hit.distance - std::max(camCollisionPadding, 0.0f),

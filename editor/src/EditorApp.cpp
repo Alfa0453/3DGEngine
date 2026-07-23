@@ -4,6 +4,7 @@
 #include <engine/ecs/RuntimeSystems.h>
 #include <engine/gameplay/GameplayComponents.h>
 #include <engine/gameplay/GameplaySystems.h>
+#include <engine/gameplay/GameMode.h>
 #include <engine/gameplay/Script.h>
 #include <engine/ecs/Systems.h>
 #include <engine/graphics/Model.h>
@@ -12,8 +13,17 @@
 #include <engine/animation/Animator.h>
 #include <engine/ai/NavMeshBuilder.h>
 #include <engine/ai/BtScript.h>
+#include <engine/ai/AgentCollision.h>
+#include <engine/ai/AiMovement.h>
+#include <engine/graphics/ImageDecode.h>
+#include <engine/graphics/GrassField.h>
+#include <engine/math/Spline.h>
+#include <engine/assets/MaterialAssetLoader.h>
 
 #include "GameBtScripts.h"
+#include "EditorScriptTools.h"
+#include "AnimationGraphBuilder.h"
+#include "NativeDialog.h"
 #include <game/GameModule.h>
 #include "ParticleAsset.h"
 
@@ -27,7 +37,6 @@
 #include <chrono>
 #include <cctype>
 #include <cmath>
-#include <cstdarg>
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
@@ -39,32 +48,6 @@ using engine::ecs::MeshRenderer;
 using engine::ecs::Transform;
 
 namespace {
-
-// --- TEMPORARY terrain crash tracing ---------------------------------------
-// Appends to "terrain_debug.log" beside the running exe, flushing after every
-// line so the LAST line written survives a hard crash. When the engine dies on
-// a terrain action, open that file: the final line is the last step that ran,
-// so the crash is between it and the next expected step. Remove once fixed.
-void TerrainTrace(const char* fmt, ...) {
-#ifdef _MSC_VER
-    static std::FILE* file = [] {
-        std::FILE* f = nullptr;
-        fopen_s(&f, "D:/C++_Projects/3DGEngine/terrain_debug.log", "a");
-        return f;
-    }();
-#else
-    static std::FILE* file = std::fopen("D:/C++_Projects/3DGEngine/terrain_debug.log", "a");
-#endif
-    if (!file) {
-        return;
-    }
-    std::va_list args;
-    va_start(args, fmt);
-    std::vfprintf(file, fmt, args);
-    va_end(args);
-    std::fputc('\n', file);
-    std::fflush(file);
-}
 
 engine::WindowProps MakeEditorWindowProps(const engine::Config& config) {
     engine::WindowProps props;
@@ -253,6 +236,20 @@ engine::ecs::Light EnvironmentSunLight(const engine::DayNightCycle::Sample& sky,
     return light;
 }
 
+engine::ProceduralSky::CloudSettings SkyClouds(const EditorScene::Environment& environment) {
+    engine::ProceduralSky::CloudSettings clouds;
+    clouds.enabled = environment.clouds;
+    clouds.coverage = environment.cloudCoverage;
+    clouds.density = environment.cloudDensity;
+    clouds.scale = environment.cloudScale;
+    clouds.softness = environment.cloudSoftness;
+    clouds.windSpeed = environment.cloudWindSpeed;
+    clouds.windDirectionDegrees = environment.cloudWindDirection;
+    clouds.horizonHeight = environment.cloudHorizonHeight;
+    clouds.color = environment.cloudColor;
+    return clouds;
+}
+
 void AddEnvironmentSunIfNeeded(engine::ecs::Registry& registry,
                                const EditorScene::Environment& environment,
                                const engine::DayNightCycle::Sample& sky,
@@ -273,6 +270,10 @@ EditorApp::EditorApp(engine::Config &config)
       m_runtimeAudio(m_audio)
 {
 }
+
+// Defined here (not defaulted in the header) so the unique_ptr<GrassField> members in
+// m_grass are destroyed where engine::GrassField is a complete type.
+EditorApp::~EditorApp() = default;
 
 void EditorApp::OnInit()
 {
@@ -512,7 +513,24 @@ void EditorApp::OnInit()
     m_sky.emplace();
     m_text.emplace();
 
-    m_project.Load(m_config);
+    {
+        // If a project was opened last time, reopen it; otherwise fall back to the
+        // legacy single project stored directly in editor.cfg.
+        const std::string currentProject = m_config.GetString("editor.current_project", "");
+        std::error_code projEc;
+        if (!currentProject.empty() && std::filesystem::is_regular_file(currentProject, projEc)) {
+            std::string projErr;
+            if (m_project.OpenProjectFile(currentProject, m_projectConfig, &projErr)) {
+                m_hasProjectFile = true;
+                m_log.Info("Opened project: " + m_project.ProjectName() + " (" + currentProject + ")");
+            } else {
+                m_log.Error("Could not open project '" + currentProject + "': " + projErr);
+                m_project.Load(m_config);
+            }
+        } else {
+            m_project.Load(m_config);
+        }
+    }
     SetScenePathDraft(m_project.ScenePath());
     m_content.Refresh(m_assets, m_project, m_log);
     m_materialMaker.SetOutputDirectory(m_project.AssetRoot());
@@ -520,8 +538,41 @@ void EditorApp::OnInit()
     engine::ai::RegisterExampleBtScripts();   // built-in example scripts (idempotent)
     RegisterGameBtScripts();                  // legacy: editor/src/GameBtScripts.cpp
     RegisterGameModule();                     // shared game module (scripts used by editor + player)
-    m_scene.BuildDefault(*m_cube, *m_plane, *m_sphere, *m_capsule, *m_cylinder, *m_cone,
-        *m_pyramid, *m_torus, *m_staircase);
+    {
+        std::error_code ec;
+        const std::filesystem::path projectRoot =
+            std::filesystem::absolute(m_project.AssetRoot(), ec).parent_path();
+        const std::string scriptBuildStatus =
+            EditorScriptTools::ReadLastBuildStatus(projectRoot);
+        if (scriptBuildStatus.rfind("success", 0) == 0) {
+            m_log.Info("Script compilation completed successfully");
+        } else if (scriptBuildStatus.rfind("failed", 0) == 0) {
+            m_log.Error("Script compilation failed. Open the Script Editor to view the build log.");
+        }
+        std::filesystem::remove(projectRoot / "build" / "script_compile.status", ec);
+    }
+    bool restoredLastScene = false;
+    std::error_code savedSceneError;
+    if (m_project.HasLastSavedScene()
+        && std::filesystem::is_regular_file(m_project.LastSavedScenePath(), savedSceneError)) {
+        restoredLastScene = m_runtime.LoadScene(
+            m_scene, m_project, *m_cube, *m_plane, *m_sphere, *m_capsule,
+            *m_cylinder, *m_cone, *m_pyramid, *m_torus, *m_staircase, m_log);
+        if (restoredLastScene) {
+            m_project.MarkCurrentSceneSaved();
+            m_project.AddRecentScene(m_project.ScenePath());
+            PersistProject();
+            SyncHudFromScene();
+            m_log.Info("Restored last saved scene: " + m_project.ScenePath());
+        }
+    }
+    if (!restoredLastScene) {
+        m_scene.BuildDefault(*m_cube, *m_plane, *m_sphere, *m_capsule, *m_cylinder,
+            *m_cone, *m_pyramid, *m_torus, *m_staircase);
+        if (m_project.HasLastSavedScene()) {
+            m_log.Warning("Last saved scene was unavailable; opened the default scene instead");
+        }
+    }
     m_imgui.Init(GetWindow());
 }
 
@@ -712,6 +763,7 @@ void EditorApp::OnRender()
     } else {
         DrawEditScene(viewProj);
     }
+    DrawGrass(m_camera, GetWindow().AspectRatio());          // opaque grass on terrain (before water)
     DrawWaterBodies(m_camera, GetWindow().AspectRatio());   // animated water surfaces (edit + play)
     m_gpuProfiler.End();
     m_cpuSceneMs = std::chrono::duration<double, std::milli>(
@@ -768,7 +820,13 @@ void EditorApp::OnRender()
 void EditorApp::OnShutdown()
 {
     m_imgui.Shutdown();
-    m_project.Save(m_config);
+    if (m_hasProjectFile) {
+        m_project.Save(m_projectConfig);
+        m_projectConfig.Save();
+        m_config.Set("editor.current_project", m_project.ProjectFilePath());
+    } else {
+        m_project.Save(m_config);
+    }
     m_config.Set("window.vsync", GetWindow().IsVSync());
     m_config.Set("window.fullscreen", GetWindow().IsFullscreen());
     m_config.Save();
@@ -816,6 +874,13 @@ void EditorApp::DrawEditModeModels(const glm::mat4 & viewProj)
 
             engine::AnimatedModel animated;
             animated.SetModel(model);
+            // Render-only orientation offset: rotate the mesh upright AND re-centre it
+            // on the object origin (where the capsule is centred), so the standing model
+            // lines up with the collider. The object transform is untouched, so the
+            // collider/controller stay upright. Only applied when an offset is set.
+            animated.renderOffset = engine::MakeModelRenderOffset(
+                object.modelOffsetPosition, object.modelOrientationEuler,
+                object.modelOffsetScale, model->Center());
             if (model->AnimationCount() > 0) {
                 auto resolveClip = [&](int fallback, const std::string& name) {
                     int clip = fallback;
@@ -838,53 +903,9 @@ void EditorApp::DrawEditModeModels(const glm::mat4 & viewProj)
                     return AnimationClipSeconds(animations[static_cast<std::size_t>(clip)]);
                 };
                 if (!object.animationStates.empty()) {
-                    std::unordered_map<std::string, int> stateIndices;
-                    for (const EditorScene::AnimationStateNode& stateNode : object.animationStates) {
-                        const int clip = resolveClip(stateNode.clipIndex, stateNode.clipName);
-                        const int index = animated.controller.AddState(engine::AnimationController::State{
-                            stateNode.name.empty() ? std::string("State") : stateNode.name,
-                            clip,
-                            stateNode.loop,
-                            std::max(stateNode.speed, 0.0f),
-                            -std::numeric_limits<float>::infinity(),
-                            std::numeric_limits<float>::infinity(),
-                            clipSeconds(clip),
-                            stateNode.blendClipIndex >= 0
-                                ? resolveClip(stateNode.blendClipIndex, stateNode.blendClipName)
-                                : -1,
-                            stateNode.blendParameter,
-                            stateNode.blendMin,
-                            stateNode.blendMax,
-                            stateNode.rootMotion
-                        });
-                        stateIndices[stateNode.name] = index;
-                    }
-                    for (const EditorScene::AnimationParameter& parameter : object.animationParameters) {
-                        animated.controller.DeclareParameter({
-                            parameter.name,
-                            static_cast<engine::AnimationController::ParameterType>(parameter.type),
-                            parameter.defaultValue
-                        });
-                    }
-                    for (const EditorScene::AnimationStateTransition& transition : object.animationTransitions) {
-                        const auto from = stateIndices.find(transition.fromState);
-                        const auto to = stateIndices.find(transition.toState);
-                        if ((!transition.fromState.empty() && from == stateIndices.end()) || to == stateIndices.end()) {
-                            continue;
-                        }
-                        animated.controller.AddTransition(engine::AnimationController::Transition{
-                            transition.fromState.empty() ? -1 : from->second,
-                            to->second,
-                            transition.parameter,
-                            static_cast<engine::AnimationController::Transition::Compare>(
-                            std::clamp(static_cast<int>(transition.compare), 0, 3)),
-                            transition.threshold,
-                            std::max(transition.fade, 0.0f),
-                            std::clamp(transition.exitTime, 0.0f, 1.0f),
-                            transition.priority,
-                            transition.canInterrupt
-                        });
-                    }
+                    editor::BuildAnimationController(animated.controller,
+                        object.animationStates, object.animationParameters,
+                        object.animationTransitions, resolveClip, clipSeconds);
                 } else if (object.animationLocomotionEnabled) {
                     animated.controller = engine::AnimationController::Locomotion(
                         resolveClip(object.animationIdleClipIndex, object.animationIdleClipName),
@@ -972,7 +993,7 @@ void EditorApp::DrawEditModeModels(const glm::mat4 & viewProj)
                 } else {
                     m_skinnedRenderer->Draw(*model,
                                             preview->pose,
-                                            transform->Model(),
+                                            transform->Model() * preview->renderOffset,
                                             m_camera,
                                             window.AspectRatio(),
                                             sky.keyLightDirection,
@@ -1029,7 +1050,8 @@ void EditorApp::DrawSelectionOutline(const glm::mat4 & viewProj)
 
     const EditorScene::Object* selected = m_scene.SelectedObject();
     const Transform* transform = m_scene.SelectedTransform();
-    if (!selected || !transform || !selected->visible || selected->navMeshBoundsVolume) {
+    if (!selected || !transform || !selected->visible || selected->navMeshBoundsVolume
+        || selected->primitive == EditorScene::Primitive::Empty) {
         return;
     }
 
@@ -1052,8 +1074,11 @@ void EditorApp::DrawSelectionOutline(const glm::mat4 & viewProj)
                 m_skinnedOutlineShader->Bind();
                 m_skinnedOutlineShader->SetMat4("uViewProj", viewProj);
                 m_skinnedOutlineShader->SetVec2("uViewportSize", viewportSize);
+                const glm::mat4 renderOffset = engine::MakeModelRenderOffset(
+                    selected->modelOffsetPosition, selected->modelOrientationEuler,
+                    selected->modelOffsetScale, model->Center());
                 m_viewport.DrawSelectedSkinnedModelOutline(m_renderer, *m_skinnedOutlineShader,
-                    *transform, *model, *pose, color, 2.0f);
+                    *transform, *model, *pose, color, 2.0f, renderOffset);
             }
             return;
         }
@@ -1072,11 +1097,7 @@ void EditorApp::DrawSelectionOutline(const glm::mat4 & viewProj)
     // the highlight now hugs the mountains and stays visible when the camera faces them.
     if (selected->isTerrain) {
         const auto terrainIt = m_terrains.find(selected->entity);
-        TerrainTrace("Outline: terrain selected found=%d ready=%d",
-                     terrainIt != m_terrains.end() ? 1 : 0,
-                     (terrainIt != m_terrains.end() && terrainIt->second.terrain.Ready()) ? 1 : 0);
         if (terrainIt != m_terrains.end() && terrainIt->second.terrain.Ready()) {
-            TerrainTrace("Outline: drawing terrain mesh...");
             const glm::vec3 color = selected->locked
                 ? glm::vec3(1.0f, 0.28f, 0.08f)
                 : glm::vec3(1.0f, 0.55f, 0.05f);
@@ -1086,7 +1107,6 @@ void EditorApp::DrawSelectionOutline(const glm::mat4 & viewProj)
             m_outlineShader->SetVec2("uViewportSize", glm::vec2(window.Width(), window.Height()));
             m_viewport.DrawSelectedMeshOutline(m_renderer, *m_outlineShader, *transform,
                                                terrainIt->second.terrain.GetMesh(), color, 2.0f);
-            TerrainTrace("Outline: terrain mesh drawn");
         }
         return;
     }
@@ -1108,8 +1128,6 @@ void EditorApp::DrawSelectionOutline(const glm::mat4 & viewProj)
 
 void EditorApp::DrawEditorOverlay()
 {
-   const engine::Window& window = GetWindow();
-
     // Frame profiler overlay: CPU render cost + per-pass GPU timings (previous frame).
     if (m_showProfiler) {
         if (ImGui::Begin("Profiler", &m_showProfiler,
@@ -1137,10 +1155,9 @@ void EditorApp::DrawEditorOverlay()
     }
 
     m_audio.SetListener(m_camera.Position(), m_camera.Front());
-    const int width = window.Width();
-    const int height = window.Height();
     EditorDockspace::Context dockspaceContext;
     dockspaceContext.panels = &m_panels;
+    dockspaceContext.config = &m_config;
     dockspaceContext.scene = &m_scene;
     dockspaceContext.assets = &m_assets;
     dockspaceContext.dragDrop = &m_dragDrop;
@@ -1180,6 +1197,7 @@ void EditorApp::DrawEditorOverlay()
     dockspaceContext.terrainBrushRadius = &m_terrainBrushRadius;
     dockspaceContext.terrainBrushStrength = &m_terrainBrushStrength;
     dockspaceContext.showNavigationPreview = &m_showNavigationPreview;
+    dockspaceContext.showGrid = &m_showGrid;
     dockspaceContext.showParticleDebug = &m_showParticleDebug;
     dockspaceContext.particleDebugSelectedOnly = &m_particleDebugSelectedOnly;
     dockspaceContext.particleDebugShapes = &m_particleDebugShapes;
@@ -1192,6 +1210,12 @@ void EditorApp::DrawEditorOverlay()
     dockspaceContext.physicsEventGuidesEnterExitOnly = &m_physicsEventGuidesEnterExitOnly;
     dockspaceContext.scenePathBuffer = m_scenePathDraft.data();
     dockspaceContext.scenePathBufferSize = m_scenePathDraft.size();
+    dockspaceContext.projectNameBuffer = m_projectNameDraft.data();
+    dockspaceContext.projectNameBufferSize = m_projectNameDraft.size();
+    dockspaceContext.projectLocationBuffer = m_projectLocationDraft.data();
+    dockspaceContext.projectLocationBufferSize = m_projectLocationDraft.size();
+    dockspaceContext.openProjectBuffer = m_openProjectDraft.data();
+    dockspaceContext.openProjectBufferSize = m_openProjectDraft.size();
     dockspaceContext.fps = m_fps;
     if (m_particleRenderer) {
         const engine::ParticleRenderer::Stats& stats = m_particleRenderer->GetStats();
@@ -1242,7 +1266,29 @@ void EditorApp::DrawEditorOverlay()
         dockspaceContext.selectedRuntimeAudioCursor = m_audio.SourceCursorSeconds(selectedRuntimeAudio);
     }
     dockspaceContext.sceneDirty = m_scene.IsDirty();
-    const bool dockspaceDrawn = m_dockspace.Draw(dockspaceContext);
+    m_dockspace.Draw(dockspaceContext);
+    if (dockspaceContext.scriptCompileAndRestartRequested) {
+        if (m_mode != EditorMode::Edit) {
+            m_log.Warning("Exit Play mode before compiling scripts");
+        } else {
+            if (m_scene.IsDirty()) SaveScene();
+            if (m_scene.IsDirty()) {
+                m_log.Error("Script compile cancelled because the scene could not be saved");
+            } else {
+                std::error_code ec;
+                const std::filesystem::path projectRoot =
+                    std::filesystem::absolute(m_project.AssetRoot(), ec).parent_path();
+                std::string error;
+                if (EditorScriptTools::LaunchCompileAndRestart(
+                        projectRoot, "Debug", &error)) {
+                    m_log.Info("Script compiler started; rebuilding editor and player");
+                    GetWindow().SetShouldClose(true);
+                } else {
+                    m_log.Error("Script compiler: " + error);
+                }
+            }
+        }
+    }
     if (dockspaceContext.cameraBlendRequested && m_mode == EditorMode::Edit) {
         BeginCameraBlend(dockspaceContext.cameraBlendPreset);
     }
@@ -1306,6 +1352,7 @@ void EditorApp::DrawEditorOverlay()
     DrawParticleEditorPanel();
     DrawShaderEditorPanel();
     DrawHudEditorPanel();
+    DrawCharacterEditorPanel();
     DrawDirtyScenePrompt();
     if (selectedRuntimeAudio != engine::AudioEngine::InvalidSource) {
         if (dockspaceContext.runtimeAudioRestartRequested) m_audio.PlaySource(selectedRuntimeAudio, true);
@@ -1370,6 +1417,36 @@ void EditorApp::DrawEditorOverlay()
     if (dockspaceContext.redoRequested) {
         Redo();
     }
+    if (dockspaceContext.browseProjectLocationRequested) {
+        const std::string dir = editor::PickFolderDialog("Choose project location");
+        if (!dir.empty()) {
+            std::memset(m_projectLocationDraft.data(), 0, m_projectLocationDraft.size());
+            std::snprintf(m_projectLocationDraft.data(), m_projectLocationDraft.size(), "%s", dir.c_str());
+        }
+    }
+    if (dockspaceContext.newProjectRequested) {
+        if (m_projectLocationDraft[0] == '\0') {
+            // No location chosen yet -> ask for one now via the native picker.
+            const std::string dir = editor::PickFolderDialog("Choose project location");
+            if (!dir.empty()) {
+                std::snprintf(m_projectLocationDraft.data(), m_projectLocationDraft.size(), "%s", dir.c_str());
+            }
+        }
+        if (m_projectLocationDraft[0] != '\0') {
+            NewProject(m_projectLocationDraft.data(), m_projectNameDraft.data());
+        } else {
+            m_log.Warning("New project cancelled: no location chosen");
+        }
+    }
+    if (dockspaceContext.browseOpenProjectRequested) {
+        const std::string file = editor::OpenFileDialog("Open project", "3DG Project", "3dgproject");
+        if (!file.empty()) {
+            OpenProjectFromPath(file);
+        }
+    }
+    if (dockspaceContext.openProjectRequested) {
+        OpenProjectFromPath(m_openProjectDraft.data());
+    }
     if (dockspaceContext.saveSceneRequested) {
         SaveScene();
     }
@@ -1386,6 +1463,77 @@ void EditorApp::DrawEditorOverlay()
     }
     if (!dockspaceContext.sceneAssetOpenRequested.empty()) {
         RequestLoadSceneFromPath(dockspaceContext.sceneAssetOpenRequested);
+    }
+    if (!dockspaceContext.behaviorGraphAssetOpenRequested.empty()) {
+        m_panels.SetOpen(EditorPanels::Panel::BehaviorGraph, true);
+        if (m_behaviorGraph.LoadFromFile(dockspaceContext.behaviorGraphAssetOpenRequested)) {
+            m_log.Info("Opened behavior tree: "
+                + dockspaceContext.behaviorGraphAssetOpenRequested);
+        } else {
+            m_log.Error(m_behaviorGraph.StatusMessage());
+        }
+    }
+    if (!dockspaceContext.editorAssetOpenRequested.empty()) {
+        const std::string& path = dockspaceContext.editorAssetOpenRequested;
+        switch (dockspaceContext.editorAssetOpenType) {
+        case EditorAssets::Type::Material:
+            m_panels.SetOpen(EditorPanels::Panel::MaterialMaker, true);
+            if (m_materialMaker.LoadFromFile(path)) {
+                m_log.Info("Opened material: " + path);
+            } else {
+                m_log.Error("Material Maker could not open: " + path);
+            }
+            break;
+        case EditorAssets::Type::Shader:
+            if (std::filesystem::path(path).extension() == ".3dgshader") {
+                m_panels.SetOpen(EditorPanels::Panel::ShaderEditor, true);
+                m_shaderEditor.QueueOpen(path);
+                m_log.Info("Opening shader: " + path);
+            } else {
+                m_log.Warning("Only .3dgshader assets open in the Shader Editor");
+            }
+            break;
+        case EditorAssets::Type::Particle:
+        case EditorAssets::Type::ParticleEffect:
+            m_panels.SetOpen(EditorPanels::Panel::ParticleEditor, true);
+            m_particleEditor.RequestOpen(path);
+            m_log.Info("Opening particle asset: " + path);
+            break;
+        case EditorAssets::Type::Hud: {
+            std::string error;
+            if (m_hud.Load(path, &error)) {
+                m_hudPath = path;
+                m_hudPanel.SetPath(path);
+                m_hudPanel.SetSelected(-1);
+                m_panels.SetOpen(EditorPanels::Panel::Hud, true);
+                m_log.Info("Opened HUD: " + path);
+            } else {
+                m_log.Error("HUD load failed: " + error);
+            }
+            break;
+        }
+        case EditorAssets::Type::Character:
+            m_panels.SetOpen(EditorPanels::Panel::CharacterEditor, true);
+            m_characterEditor.QueueOpen(path);
+            m_log.Info("Opening character: " + path);
+            break;
+        case EditorAssets::Type::Model:
+        case EditorAssets::Type::SkeletalModel:
+            m_panels.SetOpen(EditorPanels::Panel::AnimationPreview, true);
+            m_log.Info("Opened Animation Preview for model asset selection");
+            break;
+        case EditorAssets::Type::Audio:
+            m_panels.SetOpen(EditorPanels::Panel::AudioEditor, true);
+            break;
+        case EditorAssets::Type::Texture:
+            m_log.Info("Texture selected; drag it to a material texture slot to use it");
+            break;
+        case EditorAssets::Type::Scene:
+        case EditorAssets::Type::BehaviorGraph:
+        case EditorAssets::Type::Script:
+        case EditorAssets::Type::Other:
+            break;
+        }
     }
     if (dockspaceContext.exportRuntimeRequested) {
         ExportRuntimeScene();
@@ -1411,6 +1559,9 @@ void EditorApp::DrawEditorOverlay()
         m_physicsEventStayCount = 0;
         m_physicsEventExitCount = 0;
         m_physicsActionCount = 0;
+    }
+    if (dockspaceContext.addEmptyRequested) {
+        AddEmpty();
     }
     if (dockspaceContext.addCubeRequested) {
         AddCube();
@@ -1445,7 +1596,10 @@ void EditorApp::DrawEditorOverlay()
         AddTerrain();
     }
     if (dockspaceContext.addWaterRequested) {
-        AddWater();
+        AddWater(dockspaceContext.addWaterPreset);
+    }
+    if (dockspaceContext.addSplineRequested) {
+        AddSpline();
     }
     if (dockspaceContext.addTriggerVolumeRequested) {
         AddTriggerVolume();
@@ -1499,6 +1653,10 @@ void EditorApp::DrawEditorOverlay()
         FrameSelected();
     }
 
+// The pre-ImGui text overlay is intentionally disabled. The dockspace is now
+// the editor's only panel system in both Edit and Play modes. Keep the gameplay
+// HUD path (DrawPlayHud) separate; authored game UI must continue to render.
+#if 0
     m_text->Begin(width, height);
 
     const glm::vec3 text(0.92f, 0.94f, 0.96f);
@@ -1541,7 +1699,8 @@ void EditorApp::DrawEditorOverlay()
             const MeshRenderer* renderer = m_scene.Registry().TryGet<MeshRenderer>(selected->entity);
             std::snprintf(line, sizeof(line), "Name: %s", selected->name.c_str());
             m_text->Text(line, static_cast<float>(width) - 330.0f, 106.0f, 1.2f, muted);
-            const char* primitiveType = selected->primitive == EditorScene::Primitive::Plane ? "Plane"
+            const char* primitiveType = selected->primitive == EditorScene::Primitive::Empty ? "Empty"
+                : selected->primitive == EditorScene::Primitive::Plane ? "Plane"
                 : selected->primitive == EditorScene::Primitive::Sphere ? "Sphere"
                 : selected->primitive == EditorScene::Primitive::Capsule ? "Capsule"
                 : selected->primitive == EditorScene::Primitive::Cylinder ? "Cylinder"
@@ -1604,6 +1763,7 @@ void EditorApp::DrawEditorOverlay()
         24.0f, static_cast<float>(height) - 34.0f, 1.2f, muted);
 
     m_text->End();
+#endif
 }
 
 void EditorApp::DrawParticleEditorPanel() {
@@ -1674,8 +1834,32 @@ void EditorApp::DrawHudEditorPanel() {
     if (m_hudImageChoices.empty()) ScanHudImages();   // first-open populate
     const auto texLookup = [this](const std::string& rel) { return HudTextureId(rel); };
 
+    engine::HudContext previewContext;
+    previewContext.floats = m_hudFloats;
+    previewContext.strings = m_hudStrings;
+    const engine::GameMode& gameMode = engine::GameMode::Instance();
+    previewContext.floats["fps"] = m_fps;
+    previewContext.floats["score"] = static_cast<float>(gameMode.Score());
+    previewContext.floats["time"] = gameMode.Elapsed();
+    previewContext.strings["score"] = std::to_string(gameMode.Score());
+    previewContext.strings["gamestate"] = engine::GameMode::StateName(gameMode.State());
+    previewContext.strings["gamemessage"] = gameMode.Message();
+    if (m_mode == EditorMode::Play && m_playRegistry
+        && m_playPlayerEntity != engine::ecs::kNull) {
+        if (const engine::Health* health =
+                m_playRegistry->TryGet<engine::Health>(m_playPlayerEntity)) {
+            previewContext.hasHealth = true;
+            previewContext.health = health->hp;
+            previewContext.maxHealth = health->maxHp;
+            previewContext.healthFraction = health->maxHp > 0.0f
+                ? health->hp / health->maxHp : 0.0f;
+            previewContext.alive = health->alive;
+        }
+    }
+
     bool open = true;
-    const HudEditorPanel::Result r = m_hudPanel.Draw(m_hud, &open, m_hudImageChoices, texLookup);
+    const HudEditorPanel::Result r = m_hudPanel.Draw(
+        m_hud, &open, m_hudImageChoices, texLookup, &previewContext);
 
     if (r.refreshImagesRequested) ScanHudImages();
 
@@ -1711,6 +1895,27 @@ void EditorApp::DrawHudEditorPanel() {
     }
 
     m_panels.SetOpen(EditorPanels::Panel::Hud, open);
+}
+
+void EditorApp::DrawCharacterEditorPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::CharacterEditor)) return;
+    bool open = true;
+    bool assetSaved = false;
+    std::string message;
+    m_characterEditor.Draw(m_scene, m_project.AssetRoot(), &open,
+        &assetSaved, &message, m_dt);
+    m_panels.SetOpen(EditorPanels::Panel::CharacterEditor, open);
+    if (assetSaved) {
+        std::string error;
+        if (!m_assets.Refresh(m_project.AssetRoot(), &error)) m_log.Warning(error);
+    }
+    if (m_characterEditor.ConsumeAddToSceneRequest()) {
+        // Drop the character a few units in front of the camera so it's visible.
+        glm::vec3 spawn = m_camera.Position() + m_camera.Front() * 6.0f;
+        spawn.y = 0.0f;
+        AddCharacterToScene(m_characterEditor.Asset(), spawn);
+    }
+    if (!message.empty()) m_log.Info(message);
 }
 
 void EditorApp::DrawPlayHud() {
@@ -1763,6 +1968,12 @@ void EditorApp::DrawPlayHud() {
         ctx.floats["hp"] = ctx.health;
         ctx.floats["maxhp"] = ctx.maxHealth;
     }
+    const engine::GameMode& gameMode = engine::GameMode::Instance();
+    ctx.floats["score"] = static_cast<float>(gameMode.Score());
+    ctx.floats["time"] = gameMode.Elapsed();
+    ctx.strings["score"] = std::to_string(gameMode.Score());
+    ctx.strings["gamestate"] = engine::GameMode::StateName(gameMode.State());
+    ctx.strings["gamemessage"] = gameMode.Message();
 
     // Cursor + click edge for button hit-testing (only when the cursor is free).
     ctx.cursorActive = !m_playMouseCaptured;
@@ -2044,6 +2255,25 @@ EditorDockspace::AnimationPreviewState EditorApp::BuildAnimationPreviewState() {
     state.actionProfiles = selected->animationActionProfiles;
     state.states = selected->animationStates;
     state.parameterDefinitions = selected->animationParameters;
+    if (selected->navAgentEnabled) {
+        auto addMovementDefinition = [&](const char* name,
+                                         EditorScene::AnimationParameter::Type type,
+                                         float defaultValue) {
+            const auto existing = std::find_if(
+                state.parameterDefinitions.begin(), state.parameterDefinitions.end(),
+                [&](const EditorScene::AnimationParameter& parameter) {
+                    return parameter.name == name;
+                });
+            if (existing == state.parameterDefinitions.end()) {
+                state.parameterDefinitions.push_back({name, type, defaultValue});
+            }
+        };
+        addMovementDefinition("Speed", EditorScene::AnimationParameter::Type::Float, 0.0f);
+        addMovementDefinition("VerticalSpeed", EditorScene::AnimationParameter::Type::Float, 0.0f);
+        addMovementDefinition("IsGrounded", EditorScene::AnimationParameter::Type::Bool, 1.0f);
+        addMovementDefinition("IsFalling", EditorScene::AnimationParameter::Type::Bool, 0.0f);
+        addMovementDefinition("IsFlying", EditorScene::AnimationParameter::Type::Bool, 0.0f);
+    }
     state.transitions = selected->animationTransitions;
     auto addPreviewParameter = [&](const std::string& name, float value,
                                    EditorScene::AnimationParameter::Type type = EditorScene::AnimationParameter::Type::Float) {
@@ -2061,7 +2291,7 @@ EditorDockspace::AnimationPreviewState EditorApp::BuildAnimationPreviewState() {
             type
         });
     };
-    for (const EditorScene::AnimationParameter& parameter : selected->animationParameters) {
+    for (const EditorScene::AnimationParameter& parameter : state.parameterDefinitions) {
         const auto found = m_animationPreviewParameters.find(parameter.name);
         addPreviewParameter(parameter.name,
             found == m_animationPreviewParameters.end() ? parameter.defaultValue : found->second,
@@ -2071,7 +2301,7 @@ EditorDockspace::AnimationPreviewState EditorApp::BuildAnimationPreviewState() {
         const std::string name = transition.parameter.empty() ? std::string("Speed") : transition.parameter;
         const auto found = m_animationPreviewParameters.find(name);
         auto type = EditorScene::AnimationParameter::Type::Float;
-        for (const EditorScene::AnimationParameter& definition : selected->animationParameters) {
+        for (const EditorScene::AnimationParameter& definition : state.parameterDefinitions) {
             if (definition.name == name) { type = definition.type; break; }
         }
         addPreviewParameter(name, found == m_animationPreviewParameters.end() ? 0.0f : found->second, type);
@@ -2477,7 +2707,8 @@ void EditorApp::DrawPlayScene(const glm::mat4 & viewProj)
     const engine::DayNightCycle::Sample sky = engine::DayNightCycle::At(environment.timeOfDay);
     if (m_sky) {
         const engine::Window& window = GetWindow();
-        m_sky->Draw(m_camera.ViewMatrix(), m_camera.ProjectionMatrix(window.AspectRatio()), sky);
+        m_sky->Draw(m_camera.ViewMatrix(), m_camera.ProjectionMatrix(window.AspectRatio()),
+                    sky, true, SkyClouds(environment));
     }
 
     if (m_pbrRenderer && m_playRegistry) {
@@ -2576,6 +2807,17 @@ void EditorApp::DrawPlayScene(const glm::mat4 & viewProj)
         lighting.cascade = &m_pbrRenderer->Cascade();
         lighting.ibl = environment.ibl && m_ibl ? &*m_ibl : nullptr;
         lighting.shadowSoftness = environment.shadowSoftness;
+        lighting.skylightOcclusion = environment.skylightOcclusion;
+        lighting.skylightOcclusionStrength = environment.skylightOcclusionStrength;
+        lighting.minimumSkylight = environment.minimumSkylight;
+        lighting.cloudShadows = environment.clouds && environment.cloudShadows;
+        lighting.cloudShadowStrength = environment.cloudShadowStrength;
+        lighting.cloudShadowScale = environment.cloudShadowScale;
+        lighting.cloudCoverage = environment.cloudCoverage;
+        lighting.cloudDensity = environment.cloudDensity;
+        lighting.cloudSoftness = environment.cloudSoftness;
+        lighting.cloudWindSpeed = environment.cloudWindSpeed;
+        lighting.cloudWindDirectionDegrees = environment.cloudWindDirection;
         lighting.tonemap = !m_renderingHdrPreview;
         lighting.fog = environment.fog;
         lighting.fogColor = sky.horizon;
@@ -2675,7 +2917,8 @@ void EditorApp::DrawEditScene(const glm::mat4 & viewProj)
     const engine::DayNightCycle::Sample sky = engine::DayNightCycle::At(environment.timeOfDay);
     if (m_sky) {
         const engine::Window& window = GetWindow();
-        m_sky->Draw(m_camera.ViewMatrix(), m_camera.ProjectionMatrix(window.AspectRatio()), sky);
+        m_sky->Draw(m_camera.ViewMatrix(), m_camera.ProjectionMatrix(window.AspectRatio()),
+                    sky, true, SkyClouds(environment));
     }
 
     if (m_pbrRenderer) {
@@ -2685,12 +2928,17 @@ void EditorApp::DrawEditScene(const glm::mat4 & viewProj)
         bool environmentSunApplied = false;
 
         for (const EditorScene::Object& object : objects) {
-            if (!object.visible || object.navMeshBoundsVolume || !object.modelAssetPath.empty()) {
+            if (!object.visible || object.navMeshBoundsVolume
+                || object.primitive == EditorScene::Primitive::Empty
+                || !object.modelAssetPath.empty()) {
                 continue;
             }
 
             if (object.isTerrain) {
                 continue;   // terrain meshes are added by AddTerrainMeshes() below
+            }
+            if (object.isSpline) {
+                continue;   // splines have no mesh; drawn as a curve by DrawSplines()
             }
             // Water objects keep their flat plane (the opaque "bed"); the animated
             // transparent surface is drawn on top by DrawWaterBodies().
@@ -2779,18 +3027,22 @@ void EditorApp::DrawEditScene(const glm::mat4 & viewProj)
         ConfigureEnvironmentPbrOptions(pbrRegistry, options, environment, sky);
 
         const engine::Window& window = GetWindow();
-        TerrainTrace("EditRender: PbrRenderer.Render... hasShadowCasters=%d", options.shadowCasters ? 1 : 0);
         m_pbrRenderer->Render(pbrRegistry, m_camera, window.AspectRatio(), m_renderW, m_renderH, options);
-        TerrainTrace("EditRender: PbrRenderer.Render done");
     }
     DrawEditModeModels(viewProj);
+    if (m_showGrid && m_shader && m_cube) {
+        m_viewport.DrawWorldGrid(m_renderer, *m_shader, *m_cube, viewProj);
+    }
     if (m_showNavigationPreview && m_shader && m_cube) {
         m_viewport.DrawEditorNavMeshOverlay(m_renderer, *m_shader, *m_cube, m_editorNavMesh, viewProj);
     }
     DrawSelectionOutline(viewProj);
+    DrawSplines(viewProj);   // spline curves + control-point handles
     if (m_shader && m_cube) {
         m_viewport.DrawNavMeshBoundsGuides(m_renderer, *m_shader, *m_cube, m_scene, viewProj);
         m_viewport.DrawAudioSourceGuides(m_renderer, *m_shader, *m_cube, m_scene, viewProj);
+        // Unreal-style forward arrow so characters can be aimed "forward" when placed.
+        m_viewport.DrawCharacterFacingArrows(m_renderer, *m_shader, *m_cube, m_scene, viewProj);
         if (m_showCameraRails) {
             m_viewport.DrawCameraSequenceGuides(
                 m_renderer, *m_shader, *m_cube, m_scene, viewProj);
@@ -2905,10 +3157,22 @@ void EditorApp::ConfigureEnvironmentPbrOptions(engine::ecs::Registry& registry,
     options.ambient = sky.ambient * environment.skyLightIntensity;
     options.tonemap = !m_renderingHdrPreview;
     options.ibl = environment.ibl && m_ibl ? &*m_ibl : nullptr;
+    options.skylightOcclusion = environment.skylightOcclusion;
+    options.skylightOcclusionStrength = environment.skylightOcclusionStrength;
+    options.minimumSkylight = environment.minimumSkylight;
     options.pointShadows = environment.pointShadows;
     options.spotShadows = environment.spotShadows;
     options.directionalShadows = environment.directionalShadows;
     options.shadowSoftness = environment.shadowSoftness;
+    options.shadowDistance = environment.shadowDistance;
+    options.cloudShadows = environment.clouds && environment.cloudShadows;
+    options.cloudShadowStrength = environment.cloudShadowStrength;
+    options.cloudShadowScale = environment.cloudShadowScale;
+    options.cloudCoverage = environment.cloudCoverage;
+    options.cloudDensity = environment.cloudDensity;
+    options.cloudSoftness = environment.cloudSoftness;
+    options.cloudWindSpeed = environment.cloudWindSpeed;
+    options.cloudWindDirectionDegrees = environment.cloudWindDirection;
     options.fog = environment.fog;
     // Fog tint follows the sky horizon so it darkens with the day/night cycle
     // (this intentionally overrides the authored Environment.fogColor).
@@ -2959,26 +3223,8 @@ void EditorApp::HandleMouseAssetDrag()
     const float x = static_cast<float>(cursorX);
     const float y = static_cast<float>(cursorY);
 
-    if (left.pressed && m_panels.IsOpen(EditorPanels::Panel::Assets)) {
-        const int folderIndex = m_content.FolderIndexAtPosition(m_assets, m_panels, m_scene, x, y);
-        if (folderIndex >= 0) {
-            m_assets.SelectFolderIndex(folderIndex);
-            return;
-        }
-
-        const int assetIndex = m_content.AssetIndexAtPosition(m_assets, m_panels, m_scene, x, y);
-        if (assetIndex >= 0) {
-            m_assets.SelectIndex(assetIndex);
-            if (const EditorAssets::Asset* asset = m_assets.SelectedAsset()) {
-                m_dragDrop.BeginAssetDragAt(m_content.AssetFullPath(m_assets, *asset),
-                    EditorAssets::TypeName(asset->type),
-                    x,
-                    y);
-                m_log.Info("Mouse dragging asset " + asset->relativePath);
-            }
-        }
-    }
-
+    // Asset selection and drag creation are owned by the ImGui Assets panel.
+    // This handler only tracks and completes a drag that the panel started.
     if (left.down && m_dragDrop.IsMouseDriven()) {
         m_dragDrop.UpdateCursor(x, y);
     }
@@ -3064,6 +3310,60 @@ void EditorApp::HandleMouseViewportSelection()
     }
 }
 
+bool EditorApp::AverageImageColor(const std::string& relativePath, glm::vec3& outColor)
+{
+    // Only PNG/JPEG can be decoded to CPU pixels here; other formats (e.g. TGA) fall
+    // back to the material base colour.
+    std::string ext;
+    if (const auto dot = relativePath.find_last_of('.'); dot != std::string::npos) {
+        ext = relativePath.substr(dot + 1);
+        for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    if (ext != "png" && ext != "jpg" && ext != "jpeg") return false;
+
+    const std::filesystem::path full = std::filesystem::path(m_assets.RootPath()) / relativePath;
+    engine::image::Image img;
+    try {
+        img = (ext == "png") ? engine::image::DecodePNG(full.string())
+                             : engine::image::DecodeJPEG(full.string());
+    } catch (...) {
+        return false;
+    }
+    if (img.rgba.size() < 4 || img.width <= 0 || img.height <= 0) return false;
+
+    glm::vec3 sum(0.0f);
+    std::size_t count = 0;
+    const std::size_t pixels = img.rgba.size() / 4;
+    const std::size_t stride = std::max<std::size_t>(1, pixels / 4096);   // ~4k samples
+    for (std::size_t p = 0; p < pixels; p += stride) {
+        const std::size_t i = p * 4;
+        sum.r += img.rgba[i]; sum.g += img.rgba[i + 1]; sum.b += img.rgba[i + 2];
+        ++count;
+    }
+    if (count == 0) return false;
+    outColor = sum / (255.0f * static_cast<float>(count));
+    return true;
+}
+
+glm::vec3 EditorApp::TerrainLayerMaterialColor(const std::string& materialPath)
+{
+    const auto cached = m_terrainMaterialColors.find(materialPath);
+    if (cached != m_terrainMaterialColors.end()) return cached->second;
+
+    glm::vec3 color(0.6f, 0.6f, 0.6f);   // neutral fallback if the material won't load
+    std::string error;
+    if (const engine::RuntimeMaterialAsset* mat = m_editAssets.LoadMaterial(materialPath, &error)) {
+        color = mat->material.albedo;
+        glm::vec3 avg;
+        if (!mat->albedoMapPath.empty() && AverageImageColor(mat->albedoMapPath, avg)) {
+            color *= avg;   // modulate base colour by the texture's average
+        }
+    }
+    color = glm::clamp(color, glm::vec3(0.0f), glm::vec3(1.0f));
+    m_terrainMaterialColors[materialPath] = color;
+    return color;
+}
+
 void EditorApp::AddTerrainMeshes(engine::ecs::Registry& pbrRegistry)
 {
     for (const EditorScene::Object& object : m_scene.Objects()) {
@@ -3072,10 +3372,6 @@ void EditorApp::AddTerrainMeshes(engine::ecs::Registry& pbrRegistry)
         }
         const Transform* t = m_scene.TryGetTransform(object.entity);
         TerrainCache& tc = m_terrains[object.entity];
-        TerrainTrace("AddTerrainMeshes: object=%u res=%d size=%.2f maxH=%.2f seed=%d oct=%d freq=%.3f heights=%zu paint=%zu hasTransform=%d",
-                     static_cast<unsigned>(object.entity), object.terrainRes, object.terrainSize,
-                     object.terrainMaxHeight, object.terrainSeed, object.terrainOctaves, object.terrainFrequency,
-                     object.terrainHeights.size(), object.terrainPaint.size(), t ? 1 : 0);
         const bool needsGen = tc.terrain.Map().h.empty() ||
             tc.res != object.terrainRes || tc.size != object.terrainSize ||
             tc.maxHeight != object.terrainMaxHeight || tc.seed != object.terrainSeed ||
@@ -3083,7 +3379,6 @@ void EditorApp::AddTerrainMeshes(engine::ecs::Registry& pbrRegistry)
         if (needsGen) {
             const bool haveHeights = static_cast<int>(object.terrainHeights.size()) ==
                                      object.terrainRes * object.terrainRes;
-            TerrainTrace("AddTerrainMeshes: needsGen haveHeights=%d", haveHeights ? 1 : 0);
             if (haveHeights) {
                 engine::Heightmap hm;
                 hm.res = object.terrainRes;
@@ -3091,35 +3386,96 @@ void EditorApp::AddTerrainMeshes(engine::ecs::Registry& pbrRegistry)
                 hm.origin = glm::vec3(0.0f);
                 hm.maxHeight = object.terrainMaxHeight;
                 hm.h = object.terrainHeights;
-                TerrainTrace("AddTerrainMeshes: SetHeightmap...");
                 tc.terrain.SetHeightmap(hm);
-                TerrainTrace("AddTerrainMeshes: SetHeightmap done");
             } else {
-                TerrainTrace("AddTerrainMeshes: Generate...");
                 tc.terrain.Generate(std::max(object.terrainRes, 2), object.terrainSize,
                                     glm::vec3(0.0f), object.terrainMaxHeight,
                                     static_cast<unsigned>(object.terrainSeed),
                                     std::max(object.terrainOctaves, 1), object.terrainFrequency);
-                TerrainTrace("AddTerrainMeshes: Generate done");
             }
             if (static_cast<int>(object.terrainPaint.size()) == object.terrainRes * object.terrainRes) {
-                TerrainTrace("AddTerrainMeshes: SetPaint...");
                 tc.terrain.SetPaint(object.terrainPaint);   // overlay painted layers
-                TerrainTrace("AddTerrainMeshes: SetPaint done");
             }
             tc.res = object.terrainRes; tc.size = object.terrainSize;
             tc.maxHeight = object.terrainMaxHeight; tc.seed = object.terrainSeed;
             tc.octaves = object.terrainOctaves; tc.frequency = object.terrainFrequency;
         }
-        // Generation needs a live GL context; if the mesh/albedo somehow didn't build
-        // (e.g. a failed generate), skip this terrain rather than dereferencing an empty
-        // optional in Albedo()/GetMesh(), which would crash.
-        TerrainTrace("AddTerrainMeshes: ready=%d hasMesh=%d hasAlbedo=%d",
-                     tc.terrain.Ready() ? 1 : 0, tc.terrain.HasMesh() ? 1 : 0, tc.terrain.HasAlbedo() ? 1 : 0);
+        // If generation somehow produced no mesh/albedo, skip rather than referencing
+        // empty resources.
         if (!tc.terrain.Ready()) {
-            TerrainTrace("AddTerrainMeshes: SKIP not ready");
             continue;
         }
+
+        // Paint-layer palette: default colours, overridden by any assigned material's
+        // representative colour. SetLayerColors only rebuilds the albedo when it changes.
+        glm::vec3 layerColors[6];
+        engine::DefaultTerrainLayerColors(layerColors);
+        for (int layer = 1; layer <= 5; ++layer) {
+            const std::string& matPath = object.terrainLayerMaterials[static_cast<std::size_t>(layer - 1)];
+            if (!matPath.empty()) {
+                layerColors[layer] = TerrainLayerMaterialColor(matPath);
+            }
+        }
+        tc.terrain.SetLayerColors(layerColors);
+
+        // Grass: instanced blades on the painted grass layer. Rebuild the scatter only
+        // when the terrain/paint/density/position change (cheap signature).
+        if (object.grassEnabled) {
+            std::unique_ptr<engine::GrassField>& slot = m_grass[object.entity];
+            if (!slot) slot = std::make_unique<engine::GrassField>();
+            engine::GrassField& grass = *slot;
+            engine::GrassConfig gcfg;
+            gcfg.density = object.grassDensity;
+            gcfg.bladeHeight = object.grassHeight;
+            gcfg.windStrength = object.grassWindStrength;
+            gcfg.windSpeed = object.grassWindSpeed;
+            gcfg.baseColor = object.grassBaseColor;
+            gcfg.tipColor = object.grassTipColor;
+            gcfg.grassLayer = 1;   // grass paints on layer 1
+
+            const engine::Heightmap& hm = tc.terrain.Map();
+            const std::vector<std::uint8_t>& paint = tc.terrain.Paint();
+            const glm::vec3 worldOrigin = t ? t->position : glm::vec3(0.0f);
+            auto fbits = [](float f) { unsigned b = 0; std::memcpy(&b, &f, sizeof(float)); return static_cast<std::size_t>(b); };
+            std::size_t sig = 1469598103934665603ull;
+            auto mix = [&sig](std::size_t v) { sig = (sig ^ v) * 1099511628211ull; };
+            mix(static_cast<std::size_t>(hm.res));
+            mix(fbits(hm.size)); mix(fbits(hm.maxHeight));   // NOT the active settings -- those
+            mix(fbits(worldOrigin.x)); mix(fbits(worldOrigin.y)); mix(fbits(worldOrigin.z));  // only bake at paint time
+            mix(paint.size());
+            const std::size_t pstride = std::max<std::size_t>(1, paint.size() / 512);
+            for (std::size_t k = 0; k < paint.size(); k += pstride) mix(paint[k]);
+            const std::size_t hstride = std::max<std::size_t>(1, hm.h.size() / 512);
+            for (std::size_t k = 0; k < hm.h.size(); k += hstride) mix(fbits(hm.h[k]));
+            // Per-region style: rebuild when the style map or palette changes.
+            const std::vector<unsigned char>& styleMap = object.terrainGrassStyle;
+            mix(styleMap.size());
+            const std::size_t sstride = std::max<std::size_t>(1, styleMap.size() / 512);
+            for (std::size_t k = 0; k < styleMap.size(); k += sstride) mix(styleMap[k]);
+            mix(object.terrainGrassPalette.size());
+            for (const auto& e : object.terrainGrassPalette) {
+                mix(fbits(e.density)); mix(fbits(e.height));
+                mix(fbits(e.base.r)); mix(fbits(e.tip.r));
+            }
+
+            // Convert the editor palette to engine styles.
+            std::vector<engine::GrassStyle> palette;
+            palette.reserve(object.terrainGrassPalette.size());
+            for (const auto& e : object.terrainGrassPalette) {
+                engine::GrassStyle gs;
+                gs.density = e.density; gs.bladeHeight = e.height; gs.base = e.base; gs.tip = e.tip;
+                palette.push_back(gs);
+            }
+            if (grass.Signature() != sig) {
+                grass.Build(hm, paint, styleMap, palette, worldOrigin, gcfg);
+                grass.SetSignature(sig);
+            } else {
+                grass.SetConfig(gcfg);   // wind/width are live uniforms
+            }
+        } else {
+            m_grass.erase(object.entity);   // disabled -> drop the field
+        }
+
         engine::ecs::PbrMaterial mat;
         mat.albedo = glm::vec3(1.0f);
         mat.roughness = 0.92f;
@@ -3128,7 +3484,6 @@ void EditorApp::AddTerrainMeshes(engine::ecs::Registry& pbrRegistry)
         const Entity e = pbrRegistry.Create();
         pbrRegistry.Add<Transform>(e, t ? *t : Transform{});
         pbrRegistry.Add<engine::ecs::MeshPBR>(e, engine::ecs::MeshPBR{&tc.terrain.GetMesh(), mat});
-        TerrainTrace("AddTerrainMeshes: added mesh entity");
     }
 }
 
@@ -3190,9 +3545,6 @@ void EditorApp::HandleTerrainSculpt()
 
     engine::Heightmap hm = it->second.terrain.Map();   // working copy
     const int   res  = hm.res;
-    TerrainTrace("Sculpt: mode=%d res=%d hSize=%zu paintSize=%zu hit=(%.1f,%.1f) base=(%.1f,%.1f)",
-                 m_terrainSculptMode, res, hm.h.size(), it->second.terrain.Paint().size(),
-                 hit.x, hit.z, base.x, base.z);
     if (res < 2) return;
     const float cell = hm.size / static_cast<float>(res - 1);
     const float lx = hit.x - base.x;   // brush centre in terrain-local XZ
@@ -3207,20 +3559,54 @@ void EditorApp::HandleTerrainSculpt()
         std::vector<unsigned char> paint = it->second.terrain.Paint();
         if (static_cast<int>(paint.size()) != res * res) paint.assign(static_cast<std::size_t>(res) * res, 0);
         const unsigned char layer = static_cast<unsigned char>(std::clamp(m_terrainPaintLayer, 0, 5));
+
+        // Painting the Grass layer (1) freezes the CURRENT grass settings into a style slot
+        // and stamps it, so later setting changes don't touch grass already painted.
+        const bool stampGrass = (layer == 1);
+        unsigned char grassSlot = 0;
+        std::vector<unsigned char> style;
+        if (stampGrass) {
+            grassSlot = static_cast<unsigned char>(std::clamp(m_scene.EnsureActiveGrassStyleSlot(), 0, 255));
+            style = m_scene.SelectedTerrainGrassStyle();
+            if (static_cast<int>(style.size()) != res * res) style.assign(static_cast<std::size_t>(res) * res, 0);
+        }
         for (int j = gj - rad; j <= gj + rad; ++j) {
             for (int i = gi - rad; i <= gi + rad; ++i) {
                 if (i < 0 || j < 0 || i >= res || j >= res) continue;
                 const float vx = i * cell, vz = j * cell;
                 const float d = std::sqrt((vx - lx) * (vx - lx) + (vz - lz) * (vz - lz));
                 if (d > radius) continue;
-                paint[static_cast<std::size_t>(j) * res + i] = layer;
+                const std::size_t idx = static_cast<std::size_t>(j) * res + i;
+                paint[idx] = layer;
+                if (stampGrass) style[idx] = grassSlot;
             }
         }
-        TerrainTrace("Sculpt: paint SetPaint... paintSize=%zu", paint.size());
         it->second.terrain.SetPaint(paint);       // rebuild albedo with painted layers
-        TerrainTrace("Sculpt: paint SetPaint done");
         m_scene.SetSelectedTerrainPaint(std::move(paint));
-        TerrainTrace("Sculpt: paint persisted");
+        if (stampGrass) m_scene.SetSelectedTerrainGrassStyle(std::move(style));
+        return;
+    }
+    // --- Erase mode: clear paint (layer 0) within the brush, which also removes grass
+    //     (grass grows only where the Grass layer is painted). ---
+    if (m_terrainSculptMode == 5) {
+        std::vector<unsigned char> paint = it->second.terrain.Paint();
+        if (static_cast<int>(paint.size()) != res * res) return;   // nothing painted yet
+        std::vector<unsigned char> style = m_scene.SelectedTerrainGrassStyle();
+        const bool haveStyle = static_cast<int>(style.size()) == res * res;
+        for (int j = gj - rad; j <= gj + rad; ++j) {
+            for (int i = gi - rad; i <= gi + rad; ++i) {
+                if (i < 0 || j < 0 || i >= res || j >= res) continue;
+                const float vx = i * cell, vz = j * cell;
+                const float d = std::sqrt((vx - lx) * (vx - lx) + (vz - lz) * (vz - lz));
+                if (d > radius) continue;
+                const std::size_t idx = static_cast<std::size_t>(j) * res + i;
+                paint[idx] = 0;
+                if (haveStyle) style[idx] = 0;
+            }
+        }
+        it->second.terrain.SetPaint(paint);
+        m_scene.SetSelectedTerrainPaint(std::move(paint));
+        if (haveStyle) m_scene.SetSelectedTerrainGrassStyle(std::move(style));
         return;
     }
 
@@ -3261,11 +3647,8 @@ void EditorApp::HandleTerrainSculpt()
         }
     }
 
-    TerrainTrace("Sculpt: height SetHeightmap... hSize=%zu", hm.h.size());
     it->second.terrain.SetHeightmap(hm);        // rebuild mesh + albedo
-    TerrainTrace("Sculpt: height SetHeightmap done");
     m_scene.SetSelectedTerrainHeights(hm.h);    // persist the stroke
-    TerrainTrace("Sculpt: height persisted");
 }
 
 void EditorApp::HandleMouseViewportGizmo()
@@ -3496,10 +3879,87 @@ void EditorApp::DropPayloadOnScene()
         } else {
             m_log.Warning("Texture drop failed: select an unlocked object first");
         }
+    } else if (payload.typeName == "Character") {
+        CharacterAsset character;
+        std::string error;
+        if (!character.Load(payload.path, &error)) {
+            m_log.Error("Character drop failed: " + error);
+            m_dragDrop.Clear();
+            return;
+        }
+        AddCharacterToScene(character, SceneDropPosition());
     } else {
         m_log.Warning("Asset type cannot be dropped on the scene yet");
     }
     m_dragDrop.Clear();
+}
+
+void EditorApp::AddCharacterToScene(const CharacterAsset& character, const glm::vec3& position)
+{
+    if (!m_cube) {
+        m_log.Error("Character add failed: editor meshes are not ready");
+        return;
+    }
+
+    // A character carries a capsule collider + player controller that must stay
+    // world-upright, so we do NOT bake a model up-axis rotation into the object
+    // transform (that would tilt the capsule). Instead we auto-size it, and — if the
+    // rig is Z-up — set a render-only model orientation (applied further below), which
+    // stands the mesh up while the collider stays vertical.
+    Transform transform;
+    transform.position = position;
+    // If the character asset already carries a model offset (the user set one in the
+    // Character Editor), respect it and skip the Z-up auto-detect below.
+    const bool assetHasOffset =
+        glm::dot(character.modelOffsetPosition, character.modelOffsetPosition) > 1e-8f
+        || glm::dot(character.modelOrientationEuler, character.modelOrientationEuler) > 1e-4f
+        || glm::dot(character.modelOffsetScale - glm::vec3(1.0f),
+                    character.modelOffsetScale - glm::vec3(1.0f)) > 1e-8f;
+    bool modelIsZUp = false;
+    if (!character.modelAssetPath.empty()) {
+        std::string modelError;
+        if (const engine::SkinnedModel* skinned =
+                m_editAssets.LoadSkinnedModel(character.modelAssetPath, &modelError)) {
+            const glm::vec3 size = skinned->Max() - skinned->Min();
+            const float height = std::max(std::max(size.y, size.z), 0.001f);   // Y or Z = up axis
+            transform.scale = glm::vec3(1.8f / height);
+            modelIsZUp = !assetHasOffset && size.z > size.y * 1.25f;   // taller along Z than deep along Y -> Z-up
+            // A Z-up rig gets a render offset that re-centres the mesh on the object
+            // origin, so its feet sit ~half its (scaled) height below the origin. Lift
+            // the spawn by that half-height so it stands on the drop surface.
+            if (modelIsZUp) {
+                transform.position.y += 0.9f;   // half of the 1.8 auto-scaled height
+            }
+        }
+    }
+
+    // Create the object (from the model when present, else an empty) so it is the
+    // current selection, then stamp the full character setup onto it.
+    bool created = false;
+    if (!character.modelAssetPath.empty()) {
+        created = m_scene.AddModel(character.modelAssetPath, *m_cube, transform);
+    }
+    if (!created) {
+        m_scene.AddEmpty(*m_cube);
+        created = m_scene.SelectedObject() != nullptr;
+    }
+    if (!created) {
+        m_log.Warning("Character add failed: could not create a scene object");
+        return;
+    }
+
+    if (character.Apply(m_scene)) {
+        m_editModelLoadErrors.erase(character.modelAssetPath);
+        // Stand up a Z-up rig via the render-only orientation (collider stays vertical).
+        // Skipped when the asset already carries its own offset (Apply set it above).
+        if (modelIsZUp) {
+            m_scene.SetSelectedModelOffset(glm::vec3(0.0f), glm::vec3(-90.0f, 0.0f, 0.0f), glm::vec3(1.0f));
+        }
+        m_log.Info("Added character to scene: "
+            + (character.name.empty() ? std::string("Character") : character.name));
+    } else {
+        m_log.Warning("Character add failed: the new object is locked");
+    }
 }
 
 glm::vec3 EditorApp::SceneDropPosition()
@@ -3527,6 +3987,16 @@ bool EditorApp::IsViewportDropPosition(float x, float y)
 
     const engine::Window& window = GetWindow();
     return m_viewport.ContainsPoint(x, y, window.Width(), window.Height());
+}
+
+void EditorApp::AddEmpty()
+{
+    if (!m_cube) {
+        m_log.Error("Add failed: placeholder mesh is not ready");
+        return;
+    }
+    m_scene.AddEmpty(*m_cube);
+    m_log.Info("Added empty object");
 }
 
 void EditorApp::AddCube()
@@ -3631,30 +4101,136 @@ void EditorApp::AddStaticFloor() {
 }
 
 void EditorApp::AddTerrain() {
-    TerrainTrace("AddTerrain: begin");
     if (!m_plane) {
         m_log.Error("Add failed: plane mesh is not ready");
-        TerrainTrace("AddTerrain: ABORT plane mesh not ready");
         return;
     }
     m_scene.AddPlane(*m_plane);   // a plane object that becomes terrain (mesh is replaced)
-    TerrainTrace("AddTerrain: AddPlane done");
     m_scene.SetSelectedTerrain(true, 128, 64.0f, 8.0f, 1337, 5, 2.0f);
-    TerrainTrace("AddTerrain: SetSelectedTerrain done");
     m_log.Info("Added terrain");
-    TerrainTrace("AddTerrain: end");
 }
 
-void EditorApp::AddWater() {
+void EditorApp::AddWater(int preset) {
     if (!m_plane) {
         m_log.Error("Add failed: plane mesh is not ready");
         return;
     }
+    // Per-type look + motion. size/res, colours, transparency/fresnel/spec/shininess,
+    // then surface motion: seaHeight, seaChoppy, seaSpeed, seaFreq, foam.
+    struct Preset {
+        const char* name;
+        float size; int res;
+        glm::vec3 shallow, deep, reflection;
+        float transparency, fresnel, specular, shininess;
+        float seaHeight, seaChoppy, seaSpeed, seaFreq, foam;
+    };
+    Preset p;
+    switch (preset) {
+        case 1: // Lake -- small, calm, still, green-tinted
+            p = {"Lake", 45.0f, 140,
+                 {0.13f, 0.42f, 0.38f}, {0.02f, 0.12f, 0.14f}, {0.52f, 0.66f, 0.70f},
+                 0.66f, 5.0f, 0.5f, 320.0f,
+                 0.16f, 1.5f, 0.35f, 0.14f, 0.10f};
+            break;
+        case 2: // Ocean -- vast, choppy, deep blue, foamy whitecaps
+            p = {"Ocean", 220.0f, 200,
+                 {0.12f, 0.55f, 0.62f}, {0.01f, 0.09f, 0.19f}, {0.55f, 0.72f, 0.92f},
+                 0.82f, 5.0f, 0.95f, 420.0f,
+                 0.95f, 4.2f, 1.0f, 0.085f, 0.95f};
+            break;
+        case 3: // River -- medium, faster flow, moderate ripples
+            p = {"River", 70.0f, 160,
+                 {0.14f, 0.46f, 0.44f}, {0.03f, 0.17f, 0.21f}, {0.50f, 0.66f, 0.78f},
+                 0.72f, 5.0f, 0.7f, 340.0f,
+                 0.26f, 2.3f, 1.7f, 0.13f, 0.35f};
+            break;
+        default: // Generic water
+            p = {"Water", 80.0f, 160,
+                 {0.10f, 0.42f, 0.50f}, {0.02f, 0.10f, 0.18f}, {0.55f, 0.72f, 0.92f},
+                 0.74f, 5.0f, 0.8f, 400.0f,
+                 0.55f, 3.2f, 0.8f, 0.10f, 0.55f};
+            break;
+    }
     m_scene.AddPlane(*m_plane);   // a plane object that becomes a water body (rendered by the water pass)
-    m_scene.SetSelectedWater(80.0f, 160, 0.0f,
-                             glm::vec3(0.10f, 0.42f, 0.50f), glm::vec3(0.02f, 0.10f, 0.18f),
-                             glm::vec3(0.55f, 0.72f, 0.92f), 0.72f, 4.0f, 1.2f, 220.0f);
-    m_log.Info("Added water");
+    m_scene.SetSelectedWater(p.size, p.res, 0.0f, p.shallow, p.deep, p.reflection,
+                             p.transparency, p.fresnel, p.specular, p.shininess);
+    m_scene.SetSelectedWaterWaves(p.seaHeight, p.seaChoppy, p.seaSpeed, p.seaFreq, p.foam, preset);
+    m_log.Info(std::string("Added ") + p.name);
+}
+
+void EditorApp::AddSpline() {
+    if (!m_plane) {
+        m_log.Error("Add failed: plane mesh is not ready");
+        return;
+    }
+    m_scene.AddPlane(*m_plane);          // gives the spline an entity + transform anchor
+    m_scene.SetSelectedSpline(true, false, 0);   // seeds a short editable path
+    m_log.Info("Added spline");
+}
+
+void EditorApp::DrawSplines(const glm::mat4& viewProj) {
+    if (!m_shader || !m_cube) return;
+    m_viewport.DrawSplineGuides(m_renderer, *m_shader, *m_cube, m_scene, viewProj);
+}
+
+namespace {
+// Defined further down; declared here so DrawWaterBodies (below) can place contact-foam
+// rings at each object's waterline.
+void ColliderFootprint(const engine::ecs::Collider& c, const glm::vec3& scale,
+                       float& horizRadius, float& halfY);
+}
+
+void EditorApp::DrawGrass(const engine::Camera& camera, float aspect) {
+    if (m_grass.empty()) return;
+    const EditorScene::Environment& env = m_scene.GetEnvironment();
+    const engine::DayNightCycle::Sample sky = engine::DayNightCycle::At(env.timeOfDay);
+    const glm::vec3 sunDir   = sky.keyLightDirection;
+    const glm::vec3 sunColor = sky.keyLightColor * env.sunIntensity;
+    const glm::vec3 ambient  = sky.ambient * env.skyLightIntensity;
+
+    // Interactors: objects that push/flatten the grass as they move through it. Each is
+    // (worldX, worldY, worldZ, radius). Play mode uses physics bodies (incl. the player);
+    // edit mode uses placed props so you can see grass part around them.
+    std::vector<glm::vec4> interactors;
+    interactors.reserve(engine::GrassField::kMaxInteractors);
+    auto addInteractor = [&](const glm::vec3& pos, float radius) {
+        if (static_cast<int>(interactors.size()) >= engine::GrassField::kMaxInteractors) return;
+        interactors.emplace_back(pos.x, pos.y, pos.z, std::max(radius, 0.2f));
+    };
+    if (m_mode == EditorMode::Play && m_playRegistry) {
+        // The player (character controller) is the main thing walking through grass, and
+        // may not carry an ECS collider, so add it explicitly.
+        if (m_playPlayerController) {
+            const engine::CharacterController& b = m_playPlayerController->body;
+            addInteractor(b.position, b.radius + 0.5f);
+        }
+        m_playRegistry->view<engine::ecs::Transform, engine::ecs::Collider>().each(
+            [&](Entity /*e*/, engine::ecs::Transform& tr, engine::ecs::Collider& c) {
+                if (c.isTrigger) return;
+                float hr = 0.5f, hy = 0.5f;
+                ColliderFootprint(c, tr.scale, hr, hy);
+                addInteractor(tr.position, hr + 0.4f);   // margin so grass parts around it
+            });
+    } else {
+        for (const EditorScene::Object& o : m_scene.Objects()) {
+            if (o.isTerrain || o.isWater || o.isSpline || o.light ||
+                o.navMeshBoundsVolume || !o.visible) {
+                continue;
+            }
+            const engine::ecs::Transform* ot = m_scene.TryGetTransform(o.entity);
+            if (!ot) continue;
+            const glm::vec3 s = glm::abs(ot->scale);
+            addInteractor(ot->position, 0.5f * std::max(s.x, s.z) + 0.4f);
+        }
+    }
+    const glm::vec4* iptr = interactors.empty() ? nullptr : interactors.data();
+    const int icount = static_cast<int>(interactors.size());
+
+    for (auto& entry : m_grass) {
+        if (!entry.second) continue;
+        entry.second->Update(m_dt);
+        entry.second->Draw(camera, aspect, sunDir, sunColor, ambient, iptr, icount);
+    }
 }
 
 void EditorApp::DrawWaterBodies(const engine::Camera& camera, float aspect) {
@@ -3681,11 +4257,75 @@ void EditorApp::DrawWaterBodies(const engine::Camera& camera, float aspect) {
         cfg.fresnelPower = object.waterFresnel;
         cfg.specularStrength = object.waterSpecular;
         cfg.shininess = object.waterShininess;
+        cfg.seaHeight = object.waterSeaHeight;
+        cfg.seaChoppy = object.waterSeaChoppy;
+        cfg.seaSpeed  = object.waterSeaSpeed;
+        cfg.seaFreq   = object.waterSeaFreq;
+        cfg.foamAmount = object.waterFoam;
+
+        // Directional flow: a river can follow a named spline. Sample the spline tangent
+        // nearest the patch centre and scroll the waves along it.
+        if (!object.waterFlowSpline.empty()) {
+            for (const EditorScene::Object& s : m_scene.Objects()) {
+                if (!s.isSpline || s.name != object.waterFlowSpline || s.splinePoints.size() < 2) continue;
+                engine::Spline spline(s.splinePoints, s.splineClosed);
+                glm::vec3 tangent(0.0f, 0.0f, 1.0f);
+                spline.ClosestPoint(cfg.center, nullptr, &tangent);
+                const glm::vec2 dir(tangent.x, tangent.z);
+                const float len = glm::length(dir);
+                if (len > 1.0e-4f) {
+                    cfg.flowDir = dir / len;
+                    cfg.flowStrength = std::max(object.waterSeaSpeed, 0.5f);
+                }
+                break;
+            }
+        }
 
         auto res = m_waters.try_emplace(object.entity, cfg);
         if (!res.second) res.first->second.SetConfig(cfg);
         res.first->second.Update(m_dt);
-        res.first->second.Draw(camera, aspect, sunDir, sunColor, ambient);
+
+        // Gather objects piercing this water's surface so the shader can draw a foam
+        // ring where they meet the water. Each contact = (worldX, worldZ, radius, strength).
+        std::vector<glm::vec4> contacts;
+        contacts.reserve(engine::Water::kMaxContacts);
+        const float surfaceY = cfg.center.y;
+        const float halfFoot = object.waterSize * 0.5f;
+        auto consider = [&](const glm::vec3& pos, float horizRadius, float halfY) {
+            if (static_cast<int>(contacts.size()) >= engine::Water::kMaxContacts) return;
+            if (std::abs(pos.x - cfg.center.x) > halfFoot + horizRadius) return;   // outside footprint
+            if (std::abs(pos.z - cfg.center.z) > halfFoot + horizRadius) return;
+            const float band = halfY + 0.6f;
+            const float dy = std::abs(pos.y - surfaceY);
+            if (dy > band) return;                                                 // not touching the surface
+            const float strength = glm::clamp(1.0f - dy / band, 0.0f, 1.0f);
+            contacts.emplace_back(pos.x, pos.z, std::max(horizRadius, 0.15f), strength);
+        };
+        if (m_mode == EditorMode::Play && m_playRegistry) {
+            // Physical bodies (have a collider) that pierce the surface.
+            m_playRegistry->view<engine::ecs::Transform, engine::ecs::Collider>().each(
+                [&](Entity /*e*/, engine::ecs::Transform& tr, engine::ecs::Collider& c) {
+                    if (c.isTrigger) return;
+                    float hr = 0.5f, hy = 0.5f;
+                    ColliderFootprint(c, tr.scale, hr, hy);
+                    consider(tr.position, hr, hy);
+                });
+        } else {
+            for (const EditorScene::Object& other : m_scene.Objects()) {
+                if (other.isWater || other.isTerrain || other.light ||
+                    other.navMeshBoundsVolume || !other.visible) {
+                    continue;   // only solid props get a waterline ring
+                }
+                const engine::ecs::Transform* ot = m_scene.TryGetTransform(other.entity);
+                if (!ot) continue;
+                const glm::vec3 s = glm::abs(ot->scale);
+                consider(ot->position, 0.5f * std::max(s.x, s.z), 0.5f * s.y);
+            }
+        }
+
+        res.first->second.Draw(camera, aspect, sunDir, sunColor, ambient,
+                               contacts.empty() ? nullptr : contacts.data(),
+                               static_cast<int>(contacts.size()));
     }
 }
 
@@ -3711,6 +4351,139 @@ float EditorApp::WaterSurfaceY(float worldX, float worldZ, bool& over) {
         if (!over || y > best) { best = y; over = true; }
     }
     return best;
+}
+
+namespace {
+// Characteristic vertical half-extent + total volume of a collider (scaled by the
+// object's transform), used to compute how submerged a floating body is and how much
+// water it displaces. Both drive the buoyancy force in ApplyWaterBuoyancy.
+float BuoyancyShapeMetrics(const engine::ecs::Collider& c, const glm::vec3& scale, float& outVolume) {
+    const float sx = std::abs(scale.x), sy = std::abs(scale.y), sz = std::abs(scale.z);
+    const float sVol = sx * sy * sz;
+    constexpr float kPi = 3.14159265f;
+    float halfY = 0.5f;
+    float vol   = 1.0f;
+    switch (c.shape) {
+        case engine::ecs::ColliderShape::Sphere:
+            halfY = c.radius * sy;
+            vol   = (4.0f / 3.0f) * kPi * c.radius * c.radius * c.radius * sVol;
+            break;
+        case engine::ecs::ColliderShape::Box:
+            halfY = c.halfExtents.y * sy;
+            vol   = 8.0f * c.halfExtents.x * c.halfExtents.y * c.halfExtents.z * sVol;
+            break;
+        case engine::ecs::ColliderShape::Pyramid:
+            halfY = c.halfExtents.y * sy;
+            vol   = (8.0f * c.halfExtents.x * c.halfExtents.y * c.halfExtents.z) * (1.0f / 3.0f) * sVol;
+            break;
+        case engine::ecs::ColliderShape::Staircase:
+            halfY = c.halfExtents.y * sy;
+            vol   = 8.0f * c.halfExtents.x * c.halfExtents.y * c.halfExtents.z * 0.5f * sVol;
+            break;
+        case engine::ecs::ColliderShape::Capsule:
+            halfY = (c.halfHeight + c.radius) * sy;
+            vol   = (kPi * c.radius * c.radius * (2.0f * c.halfHeight)
+                     + (4.0f / 3.0f) * kPi * c.radius * c.radius * c.radius) * sVol;
+            break;
+        case engine::ecs::ColliderShape::Cylinder:
+            halfY = c.halfHeight * sy;
+            vol   = kPi * c.radius * c.radius * (2.0f * c.halfHeight) * sVol;
+            break;
+        case engine::ecs::ColliderShape::Cone:
+            halfY = c.halfHeight * sy;
+            vol   = (1.0f / 3.0f) * kPi * c.radius * c.radius * (2.0f * c.halfHeight) * sVol;
+            break;
+        case engine::ecs::ColliderShape::Torus:
+            halfY = c.minorRadius * sy;
+            vol   = 2.0f * kPi * kPi * c.majorRadius * c.minorRadius * c.minorRadius * sVol;
+            break;
+        default:
+            halfY = 0.5f * sy;
+            vol   = sVol;
+            break;
+    }
+    outVolume = std::max(vol, 1.0e-4f);
+    return std::max(halfY, 0.05f);
+}
+
+// Horizontal radius + vertical half-extent of a collider (scaled), used to place the
+// water contact-foam ring at an object's waterline.
+void ColliderFootprint(const engine::ecs::Collider& c, const glm::vec3& scale,
+                       float& horizRadius, float& halfY) {
+    const float sx = std::abs(scale.x), sy = std::abs(scale.y), sz = std::abs(scale.z);
+    const float sh = std::max(sx, sz);
+    switch (c.shape) {
+        case engine::ecs::ColliderShape::Sphere:
+            horizRadius = c.radius * sh;             halfY = c.radius * sy; break;
+        case engine::ecs::ColliderShape::Box:
+        case engine::ecs::ColliderShape::Pyramid:
+        case engine::ecs::ColliderShape::Staircase:
+            horizRadius = std::max(c.halfExtents.x * sx, c.halfExtents.z * sz);
+            halfY = c.halfExtents.y * sy; break;
+        case engine::ecs::ColliderShape::Capsule:
+            horizRadius = c.radius * sh;             halfY = (c.halfHeight + c.radius) * sy; break;
+        case engine::ecs::ColliderShape::Cylinder:
+        case engine::ecs::ColliderShape::Cone:
+            horizRadius = c.radius * sh;             halfY = c.halfHeight * sy; break;
+        case engine::ecs::ColliderShape::Torus:
+            horizRadius = (c.majorRadius + c.minorRadius) * sh; halfY = c.minorRadius * sy; break;
+        default:
+            horizRadius = 0.5f * sh;                 halfY = 0.5f * sy; break;
+    }
+    horizRadius = std::max(horizRadius, 0.1f);
+    halfY = std::max(halfY, 0.05f);
+}
+} // namespace
+
+void EditorApp::ApplyWaterBuoyancy(float dt) {
+    if (!m_playRegistry || m_waters.empty()) {
+        return;
+    }
+    using engine::ecs::Transform;
+    using engine::ecs::RigidBody;
+    using engine::ecs::Collider;
+
+    const float g = std::max(std::abs(m_playPhysics.gravity.y), 0.01f);
+    // Water "density": buoyant force = kWaterDensity * g * displacedVolume * submersion.
+    // A body floats when kWaterDensity * volume > mass and sinks otherwise, so raising an
+    // object's Mass (inspector) makes it ride lower / sink; a big light object floats high.
+    constexpr float kWaterDensity = 3.0f;
+    constexpr float kLinearDrag   = 2.5f;   // water resistance: damps drift + bobbing
+    constexpr float kAngularDrag  = 2.5f;   // damps spin so floating props settle
+
+    m_playRegistry->view<Transform, RigidBody>().each(
+        [&](Entity entity, Transform& transform, RigidBody& body) {
+            if (body.invMass <= 0.0f || body.kinematic) {
+                return;   // static / kinematic bodies are unaffected by buoyancy
+            }
+            bool over = false;
+            const float waterY = WaterSurfaceY(transform.position.x, transform.position.z, over);
+            if (!over) {
+                return;
+            }
+            float volume = 1.0f;
+            float halfHeight = 0.5f;
+            if (const Collider* collider = m_playRegistry->TryGet<Collider>(entity)) {
+                halfHeight = BuoyancyShapeMetrics(*collider, transform.scale, volume);
+            } else {
+                const glm::vec3 s = glm::abs(transform.scale);
+                volume = std::max(s.x * s.y * s.z, 1.0e-4f);
+                halfHeight = std::max(0.5f * s.y, 0.05f);
+            }
+            const float bottom = transform.position.y - halfHeight;
+            if (bottom >= waterY) {
+                return;   // wholly above the surface
+            }
+            const float submersion = glm::clamp((waterY - bottom) / (2.0f * halfHeight), 0.0f, 1.0f);
+            // Archimedes lift (up); the solver applies gravity (down) separately.
+            body.AddForce(glm::vec3(0.0f, kWaterDensity * g * volume * submersion, 0.0f));
+            // Water resistance while submerged.
+            const float lin = 1.0f / (1.0f + dt * kLinearDrag * submersion);
+            body.velocity *= lin;
+            body.angularVelocity *= 1.0f / (1.0f + dt * kAngularDrag * submersion);
+            body.sleeping = false;   // keep bobbing on the waves
+            body.sleepTimer = 0.0f;
+        });
 }
 
 void EditorApp::AddTriggerVolume() {
@@ -3772,12 +4545,12 @@ void EditorApp::AddNavMeshBoundsVolume() {
 
 void EditorApp::AddPlayerStart()
 {
-    if (!m_cube) {
-        m_log.Error("Add failed: cube mesh is not ready");
+    if (!m_capsule) {
+        m_log.Error("Add failed: capsule mesh is not ready");
         return;
     }
 
-    m_scene.AddCube(*m_cube);
+    m_scene.AddCapsule(*m_capsule);
     m_scene.SetSelectedName("PlayerStart");
 
     EditorScene::PlayerControllerSettings player;
@@ -3796,7 +4569,13 @@ void EditorApp::AddPlayerStart()
 
     Transform transform;
     transform.position = glm::vec3(0.0f, player.capsuleHeight * 0.5f, 4.0f);
-    transform.scale = glm::vec3(player.capsuleRadius * 2.0f, player.capsuleHeight, player.capsuleRadius * 2.0f);
+    // The shared capsule primitive is authored at radius 0.4 and height 1.8,
+    // matching the controller defaults. Express later default changes as ratios
+    // so the visible PlayerStart capsule remains aligned with its controller body.
+    transform.scale = glm::vec3(
+        player.capsuleRadius / 0.4f,
+        player.capsuleHeight / 1.8f,
+        player.capsuleRadius / 0.4f);
     m_scene.SetSelectedTransform(transform);
     m_scene.SetSelectedColor(glm::vec3(0.18f, 0.72f, 1.0f));
     m_scene.SetSelectedRigidBodyEnabled(false);
@@ -4114,6 +4893,9 @@ void EditorApp::Redo()
 void EditorApp::SaveScene()
 {
     if (m_runtime.SaveScene(m_scene, m_project, m_log)) {
+        m_project.MarkCurrentSceneSaved();
+        m_project.AddRecentScene(m_project.ScenePath());
+        PersistProject();
         m_autosaveTimer = 0.0f;
         SetScenePathDraft(m_project.ScenePath());
         m_content.Refresh(m_assets, m_project, m_log);
@@ -4128,12 +4910,101 @@ void EditorApp::SaveSceneAs(const std::string& path) {
 
     m_project.SetScenePath(m_project.ResolveScenePath(path));
     if (m_runtime.SaveScene(m_scene, m_project, m_log)) {
-        m_project.Save(m_config);
-        m_config.Save();
+        m_project.MarkCurrentSceneSaved();
+        m_project.AddRecentScene(m_project.ScenePath());
+        PersistProject();
         m_autosaveTimer = 0.0f;
         SetScenePathDraft(m_project.ScenePath());
         m_content.Refresh(m_assets, m_project, m_log);
     }
+}
+
+void EditorApp::PersistProject() {
+    // Project settings go to the project file when one is active, otherwise to the
+    // legacy editor.cfg. Either way editor.cfg is written so window + the current
+    // project pointer persist.
+    if (m_hasProjectFile) {
+        m_project.Save(m_projectConfig);
+        m_projectConfig.Save();
+        m_config.Set("editor.current_project", m_project.ProjectFilePath());
+    } else {
+        m_project.Save(m_config);
+    }
+    m_config.Save();
+}
+
+void EditorApp::NewProject(const std::string& location, const std::string& name) {
+    if (!m_cube || !m_plane || !m_sphere || !m_capsule || !m_cylinder || !m_cone
+        || !m_pyramid || !m_torus || !m_staircase) {
+        m_log.Error("New project failed: editor meshes are not ready");
+        return;
+    }
+    const std::string trimmedName = name.empty() ? std::string("NewProject") : name;
+    const std::string loc = location.empty() ? std::string(".") : location;
+    const std::filesystem::path projectDir = std::filesystem::path(loc) / trimmedName;
+
+    std::string err;
+    if (!m_project.CreateProject(projectDir.string(), trimmedName, &err)) {
+        m_log.Error("New project failed: " + err);
+        return;
+    }
+
+    // Switch the editor onto the new project's config + asset root.
+    m_projectConfig = engine::Config(m_project.ProjectFilePath());
+    m_hasProjectFile = true;
+    m_config.Set("editor.current_project", m_project.ProjectFilePath());
+    m_config.Save();
+
+    m_materialMaker.SetOutputDirectory(m_project.AssetRoot());
+    m_behaviorGraph.SetOutputDirectory(m_project.AssetRoot());
+    m_content.Refresh(m_assets, m_project, m_log);
+
+    // Start the project from a clean default scene and save it into the project.
+    m_scene.BuildDefault(*m_cube, *m_plane, *m_sphere, *m_capsule, *m_cylinder,
+        *m_cone, *m_pyramid, *m_torus, *m_staircase);
+    SetScenePathDraft(m_project.ScenePath());
+    SaveScene();          // writes Main.scene and persists the project
+    SyncHudFromScene();
+    m_log.Info("Created project '" + trimmedName + "' at " + projectDir.lexically_normal().string());
+}
+
+void EditorApp::OpenProjectFromPath(const std::string& projectFile) {
+    if (!m_cube || !m_plane || !m_sphere || !m_capsule || !m_cylinder || !m_cone
+        || !m_pyramid || !m_torus || !m_staircase) {
+        m_log.Error("Open project failed: editor meshes are not ready");
+        return;
+    }
+    if (projectFile.empty()) {
+        m_log.Warning("Open project: path is empty");
+        return;
+    }
+
+    std::string err;
+    if (!m_project.OpenProjectFile(projectFile, m_projectConfig, &err)) {
+        m_log.Error("Open project failed: " + err);
+        return;
+    }
+    m_hasProjectFile = true;
+    m_config.Set("editor.current_project", m_project.ProjectFilePath());
+    m_config.Save();
+
+    m_materialMaker.SetOutputDirectory(m_project.AssetRoot());
+    m_behaviorGraph.SetOutputDirectory(m_project.AssetRoot());
+    m_content.Refresh(m_assets, m_project, m_log);
+    SetScenePathDraft(m_project.ScenePath());
+
+    std::error_code ec;
+    if (m_project.HasLastSavedScene()
+        && std::filesystem::is_regular_file(m_project.LastSavedScenePath(), ec)) {
+        LoadScene();
+    } else {
+        m_scene.BuildDefault(*m_cube, *m_plane, *m_sphere, *m_capsule, *m_cylinder,
+            *m_cone, *m_pyramid, *m_torus, *m_staircase);
+        SetScenePathDraft(m_project.ScenePath());
+        SaveScene();
+    }
+    SyncHudFromScene();
+    m_log.Info("Opened project: " + m_project.ProjectName());
 }
 
 void EditorApp::SetScenePathDraft(const std::string& path) {
@@ -4162,9 +5033,9 @@ void EditorApp::LoadScene()
     }
 
     if (m_runtime.LoadScene(m_scene, m_project, *m_cube, *m_plane, *m_sphere, *m_capsule, *m_cylinder, *m_cone, *m_pyramid, *m_torus, *m_staircase, m_log)) {
+        m_project.MarkCurrentSceneSaved();
         m_project.AddRecentScene(m_project.ScenePath());
-        m_project.Save(m_config);
-        m_config.Save();
+        PersistProject();
         m_autosaveTimer = 0.0f;
         SetScenePathDraft(m_project.ScenePath());
         SyncHudFromScene();
@@ -4252,9 +5123,9 @@ void EditorApp::PerformLoadSceneFromPath(const std::string& path) {
     const std::string previousPath = m_project.ScenePath();
     m_project.SetScenePath(m_project.ResolveScenePath(path));
     if (m_runtime.LoadScene(m_scene, m_project, *m_cube, *m_plane, *m_sphere, *m_capsule, *m_cylinder, *m_cone, *m_pyramid, *m_torus, *m_staircase, m_log)) {
+        m_project.MarkCurrentSceneSaved();
         m_project.AddRecentScene(m_project.ScenePath());
-        m_project.Save(m_config);
-        m_config.Save();
+        PersistProject();
         m_autosaveTimer = 0.0f;
         SetScenePathDraft(m_project.ScenePath());
         SyncHudFromScene();
@@ -4307,8 +5178,9 @@ void EditorApp::LoadSceneFromPath(const std::string& path) {
     const std::string previousPath = m_project.ScenePath();
     m_project.SetScenePath(path);
     if (m_runtime.LoadScene(m_scene, m_project, *m_cube, *m_plane, *m_sphere, *m_capsule, *m_cylinder, *m_cone, *m_pyramid, *m_torus, *m_staircase, m_log)) {
-        m_project.Save(m_config);
-        m_config.Save();
+        m_project.MarkCurrentSceneSaved();
+        m_project.AddRecentScene(m_project.ScenePath());
+        PersistProject();
         m_autosaveTimer = 0.0f;
         SetScenePathDraft(m_project.ScenePath());
         SyncHudFromScene();
@@ -4423,6 +5295,9 @@ void EditorApp::EnterPlayMode()
     m_cameraDirector.SetStopped();
     m_cameraDirector.ClearEvents();
     m_cameraDirector.TakeCommands();
+    engine::GameMode::Instance().Reset();
+    m_hudFloats.clear();
+    m_hudStrings.clear();
     m_cinematicSkipPrev = false;
     m_activeCinematicCues.clear();
     m_cameraSequencePaused = false;
@@ -4769,6 +5644,12 @@ void EditorApp::BuildPlayAgents(const std::unordered_map<std::string, engine::ec
         playAgent.name = object.name;
         playAgent.team = object.navAgentTeam;
         playAgent.autoTarget = object.navAgentAutoTarget;
+        playAgent.movement.mode = object.navMovementMode;
+        playAgent.movement.gravity = object.navMovementGravity;
+        playAgent.movement.maxFallSpeed = object.navMovementMaxFallSpeed;
+        playAgent.movement.groundProbeDistance = object.navMovementGroundProbe;
+        playAgent.movement.stepHeight = object.navMovementStepHeight;
+        playAgent.movement.maxSlopeDegrees = object.navMovementMaxSlope;
         playAgent.brain.agent.maxSpeed = std::max(object.navAgentSpeed, 0.0f);
         playAgent.brain.agent.maxForce = std::max(object.navAgentMaxForce, 0.0f);
         playAgent.brain.reachRadius = std::max(object.navAgentReachRadius, 0.05f);
@@ -5135,16 +6016,26 @@ void EditorApp::UpdateAI(float dt)
                 const glm::vec3 eye = agentPos + glm::vec3(0.0f, 0.6f, 0.0f) + forward * 0.6f;
                 seesTarget = engine::ai::CanSee(eye, forward, playAgent.brain.vision,
                                                 targetPos, playAgent.targetEntity,
-                                                m_playPhysics, *m_playRegistry);
+                                                m_playPhysics, *m_playRegistry,
+                                                playAgent.entity);
             }
         }
 
+        glm::vec3 movementTarget = targetPos;
+        if (!playAgent.movement.IsFlying()) movementTarget.y = agentPos.y;
+        const bool hasValidTarget = playAgent.targetEntity != engine::ecs::kNull
+            && m_playRegistry->Valid(playAgent.targetEntity);
+        const float stopRange = playAgent.useGraph
+            ? playAgent.ctx.reachRadius : playAgent.brain.reachRadius;
+        const bool targetWithinReach = hasValidTarget
+            && glm::length(glm::vec2(targetPos.x - agentPos.x,
+                                     targetPos.z - agentPos.z)) <= stopRange;
         glm::vec3 facing;
         if (playAgent.useGraph) {
             // Data-driven behaviour tree drives the steering body.
             engine::ai::AgentContext& c = playAgent.ctx;
             c.dt = dt;
-            c.targetPos = targetPos;
+            c.targetPos = movementTarget;
             c.seesTarget = seesTarget;
             c.grid = m_useNavMesh ? nullptr : &m_playNavGrid;
             c.mesh = m_useNavMesh ? &m_playNavMesh : nullptr;
@@ -5154,7 +6045,7 @@ void EditorApp::UpdateAI(float dt)
             c.steer = glm::vec3(0.0f);
             std::fill(c.nodeStatus.begin(), c.nodeStatus.end(), 0);   // reset per-frame debug status
             playAgent.tree.Tick(c, dt);
-            if (movementLocked) {
+            if (movementLocked || targetWithinReach) {
                 c.steer = glm::vec3(0.0f);
                 c.agent.velocity = glm::vec3(0.0f);
                 c.agent.position = lockedPosition;
@@ -5167,28 +6058,60 @@ void EditorApp::UpdateAI(float dt)
             t->position = c.agent.position;
             facing = c.facing;
         } else {
-            if (movementLocked) {
+            if (movementLocked || targetWithinReach) {
                 playAgent.brain.SetPosition(lockedPosition);
                 playAgent.brain.agent.velocity = glm::vec3(0.0f);
             } else {
                 if (m_useNavMesh) {
-                    playAgent.brain.Update(dt, targetPos, seesTarget, m_playNavMesh);
+                    playAgent.brain.Update(dt, movementTarget, seesTarget, m_playNavMesh);
                 } else {
-                    playAgent.brain.Update(dt, targetPos, seesTarget, m_playNavGrid);
+                    playAgent.brain.Update(dt, movementTarget, seesTarget, m_playNavGrid);
                 }
             }
             t->position = playAgent.brain.Position();
             facing = playAgent.brain.Facing();
         }
-        // Walk on terrain: snap the agent to the terrain surface beneath it, if any.
+        const glm::vec3 requestedPosition = t->position;
         bool overTerrain = false;
-        const float surfaceY = TerrainSurfaceY(t->position.x, t->position.z, overTerrain);
-        if (overTerrain) {
-            t->position.y = surfaceY;
-            if (playAgent.useGraph) {
-                playAgent.ctx.agent.position.y = surfaceY;
-            } else {
-                playAgent.brain.SetPosition(glm::vec3(t->position.x, surfaceY, t->position.z));
+        const float surfaceY = TerrainSurfaceY(
+            requestedPosition.x, requestedPosition.z, overTerrain);
+        t->position = engine::ai::MoveAiAgent(
+            m_playPhysics, *m_playRegistry, playAgent.entity,
+            lockedPosition, requestedPosition, dt, playAgent.movement,
+            overTerrain, surfaceY);
+        glm::vec3 resolvedVelocity = dt > 1.0e-6f
+            ? (t->position - lockedPosition) / dt : glm::vec3(0.0f);
+        resolvedVelocity.y = 0.0f;
+        if (playAgent.useGraph) {
+            playAgent.ctx.agent.position = t->position;
+            playAgent.ctx.agent.velocity = resolvedVelocity;
+        } else {
+            playAgent.brain.SetPosition(t->position);
+            playAgent.brain.agent.velocity = resolvedVelocity;
+        }
+        if (engine::AnimatedModel* animatedModel =
+                m_playRegistry->TryGet<engine::AnimatedModel>(playAgent.entity)) {
+            engine::ai::UpdateAiAnimationParameters(
+                *animatedModel, playAgent.movement, resolvedVelocity);
+        }
+        // Visual Behavior Trees control target focus explicitly through their
+        // Focus Target / Clear Focus tasks. The built-in brain retains automatic
+        // close-range focus so its behaviour remains useful without a graph.
+        const float horizontalSpeed = glm::length(glm::vec2(
+            resolvedVelocity.x, resolvedVelocity.z));
+        const bool graphFocus = playAgent.useGraph
+            && playAgent.ctx.focusTarget && hasValidTarget;
+        const bool builtInFocus = !playAgent.useGraph
+            && (seesTarget || targetWithinReach)
+            && (movementLocked || targetWithinReach || horizontalSpeed <= 0.15f);
+        if (graphFocus || builtInFocus) {
+            glm::vec3 toTarget = targetPos - t->position;
+            toTarget.y = 0.0f;
+            if (glm::dot(toTarget, toTarget) > 1.0e-6f) {
+                facing = glm::normalize(toTarget);
+                if (playAgent.useGraph) {
+                    playAgent.ctx.facing = facing;
+                }
             }
         }
         if (glm::dot(facing, facing) > 1e-6f) {
@@ -5227,7 +6150,9 @@ void EditorApp::UpdateAI(float dt)
             const float len = glm::length(delta);
             if (len > 1.0e-5f) {
                 if (len > kMaxMove) delta *= kMaxMove / len;
-                ta->position += delta;
+                ta->position = engine::ai::MoveAgentWithCollision(
+                    m_playPhysics, *m_playRegistry, a.entity,
+                    ta->position, ta->position + delta);
                 if (a.useGraph) a.ctx.agent.position = ta->position;   // keep AI position in sync
                 else            a.brain.SetPosition(ta->position);
             }
@@ -5288,9 +6213,12 @@ void EditorApp::ConfigurePlayPlayerController(const std::unordered_map<std::stri
         if (const Transform* transform = m_playRegistry->TryGet<Transform>(m_playPlayerEntity)) {
             controller.SetPosition(transform->position);
         }
-        if (m_playRegistry->Has<engine::ecs::Collider>(m_playPlayerEntity)) {
-            m_playRegistry->Remove<engine::ecs::Collider>(m_playPlayerEntity);
-        }
+        engine::ecs::Collider playerProxy = engine::ecs::Collider::MakeCapsuleFromHeight(
+            controller.body.radius, controller.body.height);
+        playerProxy.isTrigger = true;
+        playerProxy.layer = engine::ecs::CollisionLayer::Player;
+        playerProxy.mask = engine::ecs::CollisionLayer::All;
+        m_playRegistry->Add<engine::ecs::Collider>(m_playPlayerEntity, playerProxy);
         if (m_playRegistry->Has<engine::ecs::RigidBody>(m_playPlayerEntity)) {
             m_playRegistry->Remove<engine::ecs::RigidBody>(m_playPlayerEntity);
         }
@@ -5710,7 +6638,20 @@ void EditorApp::UpdatePlayPlayerController(float dt, bool inputEnabled)
             : moveMagnitude * (input.sprint
                 ? m_playPlayerController->runSpeed
                 : m_playPlayerController->walkSpeed);
+        const float previousSpeed = animated->controller.Parameter("Speed", 0.0f);
+        const float invDt = dt > 0.0001f ? 1.0f / dt : 0.0f;
         animated->controller.SetParameter("Speed", speed);
+        animated->controller.SetParameter("Direction",
+            moveMagnitude > 0.001f ? glm::degrees(std::atan2(input.moveRight, input.moveForward)) : 0.0f);
+        animated->controller.SetParameter("Acceleration", (speed - previousSpeed) * invDt);
+        animated->controller.SetParameter("Deceleration", std::max(previousSpeed - speed, 0.0f) * invDt);
+        animated->controller.SetParameter("TurnRate", input.lookYaw * invDt);
+        animated->controller.SetBoolParameter("IsMoving", speed > 0.05f);
+        animated->controller.SetBoolParameter("IsStopping", previousSpeed > 0.05f && speed <= 0.05f);
+        animated->controller.SetParameter("VerticalSpeed", m_playPlayerController->body.velocity.y);
+        animated->controller.SetBoolParameter("IsGrounded", m_playPlayerController->body.grounded);
+        animated->controller.SetBoolParameter("IsFalling", !m_playPlayerController->body.grounded
+            && m_playPlayerController->body.velocity.y < 0.0f);
     }
 
     m_playPlayerController->Update(*m_playRegistry, input, dt, !movementLocked);
@@ -6067,8 +7008,11 @@ void EditorApp::StepPlayPhysics(float dt, bool inputEnabled)
         m_playAnimationEvents.clear();
         UpdateAI(step);
         engine::UpdateAnimations(*m_playRegistry, step);
+        ApplyWaterBuoyancy(step);
         m_playPhysics.Step(*m_playRegistry, step);
         CapturePlayPhysicsEvents();
+        engine::GameMode::Instance().Update(
+            *m_playRegistry, m_playPlayerEntity, step);
         m_physicsStepRequested = false;
         m_physicsStepsLastFrame = 1;
         return;
@@ -6096,8 +7040,11 @@ void EditorApp::StepPlayPhysics(float dt, bool inputEnabled)
         engine::ecs::UpdateRuntimeMotion(*m_playRegistry, step);
         UpdateAI(step);
         engine::UpdateAnimations(*m_playRegistry, step);
+        ApplyWaterBuoyancy(step);
         m_playPhysics.Step(*m_playRegistry, step);
         CapturePlayPhysicsEvents();
+        engine::GameMode::Instance().Update(
+            *m_playRegistry, m_playPlayerEntity, step);
         m_physicsAccumulator -= step;
         ++m_physicsStepsLastFrame;
     }

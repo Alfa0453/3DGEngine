@@ -10,7 +10,7 @@ namespace ai {
 
 bool CanSee(const glm::vec3& eye, const glm::vec3& forward, const VisionCone& cone,
             const glm::vec3& target, ecs::Entity targetEntity,
-            PhysicsWorld& world, ecs::Registry& reg) {
+            PhysicsWorld& world, ecs::Registry& reg, ecs::Entity observerEntity) {
     if (!InvisionCone(eye, forward, cone, target)) return false;
 
     const glm::vec3 d = target - eye;
@@ -20,7 +20,8 @@ bool CanSee(const glm::vec3& eye, const glm::vec3& forward, const VisionCone& co
     Ray ray;
     ray.origin = eye;
     ray.direction = d / dist;
-    const RaycastHit hit = world.Raycast(reg, ray, dist + 0.01f);
+    const RaycastHit hit = world.Raycast(
+        reg, ray, dist + 0.01f, 0xFFFFFFFFu, observerEntity);
 
     // Blocked only if something other than the target is hit before we reach it.
     if (hit.hit && hit.entity != targetEntity && hit.distance < dist - 0.05f) return false;

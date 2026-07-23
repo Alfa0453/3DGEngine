@@ -12,7 +12,7 @@ std::string Trim(const std::string& s) {
     const char* ws = " \t\r\n";
     const size_t a = s.find_first_not_of(ws);
     if (a == std::string::npos) return "";
-    const size_t b = s.find_first_not_of(ws);
+    const size_t b = s.find_last_not_of(ws);
     return s.substr(a, b - a + 1);
 }
 

@@ -13,6 +13,7 @@
 #include "engine/graphics/Frustum.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <sstream>
@@ -204,6 +205,45 @@ uniform vec3  uFogColor;
 uniform float uFogDensity;
 uniform float uFogHeight;
 uniform float uFogHeightFalloff;
+uniform int   uSkylightOcclusion;
+uniform float uSkylightOcclusionStrength;
+uniform float uMinimumSkylight;
+uniform int   uCloudShadows;
+uniform float uCloudShadowStrength;
+uniform float uCloudShadowScale;
+uniform float uCloudCoverage;
+uniform float uCloudDensity;
+uniform float uCloudSoftness;
+uniform vec2  uCloudWindOffset;
+
+float CloudHash(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+}
+float CloudNoise(vec2 p) {
+    vec2 i = floor(p), f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(CloudHash(i), CloudHash(i + vec2(1.0, 0.0)), f.x),
+               mix(CloudHash(i + vec2(0.0, 1.0)), CloudHash(i + vec2(1.0)), f.x), f.y);
+}
+float CloudFbm(vec2 p) {
+    float value = 0.0, weight = 0.52;
+    mat2 octave = mat2(1.7, 1.2, -1.2, 1.7);
+    for (int i = 0; i < 5; ++i) {
+        value += CloudNoise(p) * weight;
+        p = octave * p + vec2(13.7, 9.2);
+        weight *= 0.5;
+    }
+    return value;
+}
+float CloudSunlight(vec3 worldPos) {
+    if (uCloudShadows == 0) return 1.0;
+    vec2 p = worldPos.xz * max(uCloudShadowScale, 0.0001) + uCloudWindOffset;
+    float shape = mix(CloudFbm(p), CloudFbm(p * 2.7 + vec2(4.2, -3.1)), 0.28);
+    float edge = max(uCloudSoftness, 0.005);
+    float cover = smoothstep(uCloudCoverage - edge, uCloudCoverage + edge, shape);
+    float opacity = clamp(cover * uCloudDensity * uCloudShadowStrength, 0.0, 0.95);
+    return 1.0 - opacity;
+}
 float DistributionGGX(vec3 N, vec3 H, float r) {
     float a = r*r; float a2 = a*a; float NdotH = max(dot(N,H),0.0);
     float d = (NdotH*NdotH)*(a2-1.0)+1.0; return a2/(PI*d*d);
@@ -238,13 +278,38 @@ float SpotShadowFactor(int idx, vec3 worldPos) {
     else               closest = texture(uSpotMap[3], p.xy).r;
     return (p.z - bias > closest) ? 1.0 : 0.0;
 }
-float ShadowFactor(float NdotL) {
-    float depth = abs((uView * vec4(vWorldPos, 1.0)).z);
+float BilinearShadowCompare(vec2 uv, int layer, float receiverDepth) {
+    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) return 0.0;
+    ivec2 size = textureSize(uCascadeMaps, 0).xy;
+    vec2 texelPosition = uv * vec2(size) - vec2(0.5);
+    ivec2 base = ivec2(floor(texelPosition));
+    vec2 blend = fract(texelPosition);
+    ivec2 maxCoord = size - ivec2(1);
+    ivec2 p00 = clamp(base, ivec2(0), maxCoord);
+    ivec2 p10 = clamp(base + ivec2(1, 0), ivec2(0), maxCoord);
+    ivec2 p01 = clamp(base + ivec2(0, 1), ivec2(0), maxCoord);
+    ivec2 p11 = clamp(base + ivec2(1, 1), ivec2(0), maxCoord);
+    float s00 = receiverDepth > texelFetch(uCascadeMaps, ivec3(p00, layer), 0).r ? 1.0 : 0.0;
+    float s10 = receiverDepth > texelFetch(uCascadeMaps, ivec3(p10, layer), 0).r ? 1.0 : 0.0;
+    float s01 = receiverDepth > texelFetch(uCascadeMaps, ivec3(p01, layer), 0).r ? 1.0 : 0.0;
+    float s11 = receiverDepth > texelFetch(uCascadeMaps, ivec3(p11, layer), 0).r ? 1.0 : 0.0;
+    return mix(mix(s00, s10, blend.x), mix(s01, s11, blend.x), blend.y);
+}
+float ShadowFactor(float NdotL, vec3 N) {
+    // Normal-offset bias: nudge the shadow lookup off the surface along its normal
+    // so curved / grazing-angle surfaces don't shadow themselves (the classic
+    // shadow-acne blotches). The offset grows toward the terminator (small NdotL),
+    // where acne is worst, and is small enough not to detach contact shadows.
+    float normalOffset = mix(0.025, 0.09, clamp(1.0 - NdotL, 0.0, 1.0));
+    vec3 shadowWorldPos = vWorldPos + N * normalOffset;
+
+    float depth = abs((uView * vec4(shadowWorldPos, 1.0)).z);
     int layer = 3;
     for (int i = 0; i < 4; ++i) { if (depth < uCascadeSplits[i]) { layer = i; break; } }
-    vec4 lp = uCascadeVP[layer] * vec4(vWorldPos, 1.0);
+    vec4 lp = uCascadeVP[layer] * vec4(shadowWorldPos, 1.0);
     vec3 p = lp.xyz / lp.w * 0.5 + 0.5;
-    if (p.z > 1.0) return 0.0;
+    if (p.z <= 0.0 || p.z > 1.0 || any(lessThan(p.xy, vec2(0.0))) ||
+        any(greaterThan(p.xy, vec2(1.0)))) return 0.0;
     float cur = p.z;
     float bias = max(0.0025 * (1.0 - NdotL), 0.0008);
     vec2 texel = 1.0 / vec2(textureSize(uCascadeMaps, 0).xy);
@@ -265,10 +330,9 @@ float ShadowFactor(float NdotL) {
     // PCSS step 3: PCF over a kernel sized by the penumbra.
     float s = 0.0;
     for (int x = -2; x <= 2; ++x) for (int y = -2; y <= 2; ++y) {
-        float d = texture(uCascadeMaps, vec3(p.xy + vec2(x, y) * texel * radius, float(layer))).r;
-        s += (cur - bias > d) ? 1.0 : 0.0;
+        s += BilinearShadowCompare(p.xy + vec2(x, y) * texel * radius, layer, cur - bias);
     }
-    return s / 25.0;
+    return clamp(s / 25.0, 0.0, 1.0);
 }
 // Filmic ACES tone map (Narkowicz fit) -- punchier + more saturated than Reinhard.
 vec3 ACES(vec3 x) {
@@ -384,9 +448,10 @@ void main() {
     vec3 Lo = vec3(0.0);
     vec3 Ls = normalize(-uSunDir);
     float sunNdotL = max(dot(N,Ls),0.0);
-    float shadow = (uSunShadow == 1) ? ShadowFactor(sunNdotL) : 0.0;
-    Lo += (1.0-shadow)*Lighting(N,V,Ls,uSunColor,albedo,F0,metallic,roughness);
-    if (uInstanced == 0) Lo += (1.0-shadow)*ClearcoatSpecular(N,V,Ls,uSunColor);
+    float shadow = (uSunShadow == 1) ? ShadowFactor(sunNdotL, N) : 0.0;
+    float sunVisibility = (1.0 - shadow) * CloudSunlight(vWorldPos);
+    Lo += sunVisibility*Lighting(N,V,Ls,uSunColor,albedo,F0,metallic,roughness);
+    if (uInstanced == 0) Lo += sunVisibility*ClearcoatSpecular(N,V,Ls,uSunColor);
     ivec2 tile = ivec2(gl_FragCoord.xy / (uScreenSize / vec2(TILE_COUNT)));
     tile = clamp(tile, ivec2(0), TILE_COUNT - ivec2(1));
     int tbase = (tile.y * TILE_COUNT.x + tile.x) * TILE_STRIDE;
@@ -428,6 +493,13 @@ void main() {
         }
     } else {
         ambient = uAmbient*albedo*ao;
+    }
+    if (uSkylightOcclusion == 1) {
+        // Only strong, stable sun occlusion should darken the skylight. This
+        // keeps soft shadow-edge noise from being amplified across large walls.
+        float skyOcclusion = smoothstep(0.35, 0.90, shadow);
+        float skyVisibility = max(1.0 - skyOcclusion, clamp(uMinimumSkylight, 0.0, 1.0));
+        ambient *= mix(1.0, skyVisibility, clamp(uSkylightOcclusionStrength, 0.0, 1.0));
     }
     if (uUseSSAO == 1) ambient *= texture(uSsaoMap, gl_FragCoord.xy / uScreenSize).r;
     vec3 color = ambient + Lo + ((uInstanced == 1) ? vIEmissive : uEmissive);
@@ -609,6 +681,21 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
     m_pbr->SetFloat("uFogDensity", opt.fogDensity);
     m_pbr->SetFloat("uFogHeight", opt.fogHeight);
     m_pbr->SetFloat("uFogHeightFalloff", opt.fogHeightFalloff);
+    m_pbr->SetInt("uSkylightOcclusion", opt.skylightOcclusion ? 1 : 0);
+    m_pbr->SetFloat("uSkylightOcclusionStrength", opt.skylightOcclusionStrength);
+    m_pbr->SetFloat("uMinimumSkylight", opt.minimumSkylight);
+    m_pbr->SetInt("uCloudShadows", opt.cloudShadows ? 1 : 0);
+    m_pbr->SetFloat("uCloudShadowStrength", opt.cloudShadowStrength);
+    m_pbr->SetFloat("uCloudShadowScale", opt.cloudShadowScale);
+    m_pbr->SetFloat("uCloudCoverage", opt.cloudCoverage);
+    m_pbr->SetFloat("uCloudDensity", opt.cloudDensity);
+    m_pbr->SetFloat("uCloudSoftness", opt.cloudSoftness);
+    const float cloudAngle = glm::radians(opt.cloudWindDirectionDegrees);
+    const float cloudSeconds = std::chrono::duration<float>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    m_pbr->SetVec2("uCloudWindOffset",
+        glm::vec2(std::cos(cloudAngle), std::sin(cloudAngle))
+        * (cloudSeconds * opt.cloudWindSpeed));
 
     // Main lit pass. Untextured MeshPBR entities that share a mesh are drawn in
     // ONE instanced call (per-instance model + material); textured ones fall back

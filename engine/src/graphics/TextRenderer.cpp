@@ -2,11 +2,14 @@
 
 #include "engine/graphics/Shader.h"
 #include "engine/graphics/Texture.h"
+#include "engine/graphics/TrueType.h"
 
 #include <glad/glad.h>
 #include <glm/gtc/matrix_transform.hpp>
 
 #include <sstream>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace engine {
@@ -184,7 +187,23 @@ std::vector<unsigned char> BuildAtlas() {
 
 } // anonymous namespace
 
+// One baked TrueType face: its own atlas texture plus per-codepoint metrics.
+struct TextRenderer::FontStore {
+    struct LoadedFont {
+        std::unique_ptr<Texture> atlas;
+        std::unordered_map<int, truetype::Glyph> glyphs;
+        float pixelHeight = 1.0f;
+        float ascent      = 0.0f;
+        float descent     = 0.0f;
+        float lineHeight  = 0.0f;
+        std::string name;
+    };
+    std::vector<LoadedFont> fonts;   // font id N (>=1) maps to fonts[N-1]
+};
+
 TextRenderer::TextRenderer() {
+    m_fonts = std::make_unique<FontStore>();
+
     // Font atlas (nearest-filtered, no mipmaps -> crisp pixels).
     const std::vector<unsigned char> atlas = BuildAtlas();
     m_atlas = std::make_unique<Texture>(atlas.data(), kAtlasW, kAtlasH, false);
@@ -209,7 +228,59 @@ TextRenderer::~TextRenderer() {
     if (m_vao) glDeleteVertexArrays(1, &m_vao);
 }
 
+int TextRenderer::LoadFont(const std::string& path, int pixelHeight) {
+    truetype::BakedFont baked = truetype::BakeTrueTypeFont(path, pixelHeight);
+    if (!baked.ok || baked.atlasRGBA.empty()) return -1;
+
+    FontStore::LoadedFont lf;
+    // Linear-filtered so the high-res master scales down smoothly at HUD sizes.
+    lf.atlas       = std::make_unique<Texture>(baked.atlasRGBA.data(), baked.atlasW, baked.atlasH, true);
+    lf.glyphs      = std::move(baked.glyphs);
+    lf.pixelHeight = static_cast<float>(baked.pixelHeight);
+    lf.ascent      = baked.ascent;
+    lf.descent     = baked.descent;
+    lf.lineHeight  = baked.lineHeight;
+    lf.name        = path;
+    m_fonts->fonts.push_back(std::move(lf));
+    return static_cast<int>(m_fonts->fonts.size());   // id = index + 1
+}
+
+bool TextRenderer::SetFont(int fontId) {
+    if (fontId <= 0) { m_activeFont = 0; return true; }
+    if (!m_fonts || fontId > static_cast<int>(m_fonts->fonts.size())) return false;
+    m_activeFont = fontId;
+    return true;
+}
+
+int TextRenderer::FontCount() const {
+    return 1 + (m_fonts ? static_cast<int>(m_fonts->fonts.size()) : 0);
+}
+
+void TextRenderer::BindActiveAtlas() const {
+    if (m_activeFont > 0 && m_fonts && m_activeFont <= static_cast<int>(m_fonts->fonts.size()))
+        m_fonts->fonts[m_activeFont - 1].atlas->Bind(0);
+    else
+        m_atlas->Bind(0);
+}
+
 float TextRenderer::Measure(const std::string& text, float scale) const {
+    if (m_activeFont > 0 && m_fonts && m_activeFont <= static_cast<int>(m_fonts->fonts.size())) {
+        const FontStore::LoadedFont& f = m_fonts->fonts[m_activeFont - 1];
+        const float rs = (kGlyphPx * scale) / f.pixelHeight;
+        const float fallback = f.pixelHeight * 0.5f;
+        float w = 0.0f, maxW = 0.0f;
+        for (char c : text) {
+            if (c == '\n') { if (w > maxW) maxW = w; w = 0.0f; continue; }
+            const auto it = f.glyphs.find(static_cast<int>(static_cast<unsigned char>(c)));
+            if (it != f.glyphs.end()) w += it->second.advance * rs;
+            else {
+                const auto sp = f.glyphs.find(32);
+                w += (sp != f.glyphs.end() ? sp->second.advance : fallback) * rs;
+            }
+        }
+        if (w > maxW) maxW = w;
+        return maxW;
+    }
     return static_cast<float>(text.size()) * kGlyphPx * scale;
 }
 
@@ -225,7 +296,7 @@ void TextRenderer::Begin(int screenWidth, int screenHeight) {
     m_shader->SetInt("uText", 0);
     m_shader->SetFloat("uSolid", 0.0f);
     m_shader->SetFloat("uImage", 0.0f);
-    m_atlas->Bind(0);
+    BindActiveAtlas();
 }
 
 void TextRenderer::End() {
@@ -234,6 +305,60 @@ void TextRenderer::End() {
 }
 
 void TextRenderer::Text(const std::string& text, float x, float y, float scale, const glm::vec3& color) {
+    // --- TrueType path: proportional glyphs from the active loaded font. ------
+    if (m_activeFont > 0 && m_fonts && m_activeFont <= static_cast<int>(m_fonts->fonts.size())) {
+        const FontStore::LoadedFont& f = m_fonts->fonts[m_activeFont - 1];
+        // Normalize so a line occupies kGlyphPx*scale px, matching the built-in
+        // font's sizing convention -- existing HUD layouts stay correct.
+        const float rs       = (kGlyphPx * scale) / f.pixelHeight;
+        const float baseline = f.ascent * rs;           // baseline offset from line top
+        const float fallback = f.pixelHeight * 0.5f;
+
+        std::vector<float> verts;
+        verts.reserve(text.size() * 6 * 4);
+
+        float penX = x;
+        float lineTop = y;
+        for (char c : text) {
+            if (c == '\n') { penX = x; lineTop += f.lineHeight * rs; continue; }
+            const int cp = static_cast<int>(static_cast<unsigned char>(c));
+            auto it = f.glyphs.find(cp);
+            if (it == f.glyphs.end()) {
+                const auto sp = f.glyphs.find(32);
+                penX += (sp != f.glyphs.end() ? sp->second.advance : fallback) * rs;
+                continue;
+            }
+            const truetype::Glyph& g = it->second;
+            if (g.hasBitmap) {
+                const float x0 = penX + g.drawXOff * rs;
+                const float y0 = lineTop + baseline + g.drawYOff * rs;
+                const float x1 = x0 + g.w * rs;
+                const float y1 = y0 + g.h * rs;
+                const float quad[6][4] = {
+                    {x0, y0, g.u0, g.v0}, {x1, y0, g.u1, g.v0}, {x1, y1, g.u1, g.v1},
+                    {x1, y1, g.u1, g.v1}, {x0, y1, g.u0, g.v1}, {x0, y0, g.u0, g.v0},
+                };
+                for (const auto& vtx : quad) {
+                    verts.push_back(vtx[0]); verts.push_back(vtx[1]);
+                    verts.push_back(vtx[2]); verts.push_back(vtx[3]);
+                }
+            }
+            penX += g.advance * rs;
+        }
+        if (verts.empty()) return;
+
+        m_shader->SetFloat("uSolid", 0.0f);
+        m_shader->SetVec3("uColor", color);
+        BindActiveAtlas();
+        glBindVertexArray(m_vao);
+        glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
+        glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(verts.size() * sizeof(float)),
+                                      verts.data(), GL_DYNAMIC_DRAW);
+        glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(verts.size() / 4));
+        return;
+    }
+
+    // --- Built-in 8x8 bitmap path (monospace, unchanged). --------------------
     const float cell = kGlyphPx * scale;
     const float au = 1.0f / kAtlasW;
     const float av = 1.0f / kAtlasH;
@@ -336,7 +461,7 @@ void TextRenderer::Image(unsigned int textureId, float x, float y, float w, floa
 
     // Restore state so later Text()/FillRect() use the font atlas again.
     m_shader->SetFloat("uImage", 0.0f);
-    m_atlas->Bind(0);
+    BindActiveAtlas();
 }
 
 void TextRenderer::CustomRect(
@@ -386,7 +511,7 @@ void TextRenderer::CustomRect(
     m_shader->SetInt("uText", 0);
     m_shader->SetFloat("uSolid", 0.0f);
     m_shader->SetFloat("uImage", 0.0f);
-    m_atlas->Bind(0);
+    BindActiveAtlas();
 }
 
 } // namespace engine

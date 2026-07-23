@@ -52,7 +52,8 @@ void HudEditorPanel::SetPath(const std::string& path) {
 
 HudEditorPanel::Result HudEditorPanel::Draw(HudDocument& doc, bool* open,
                                             const std::vector<std::string>& imageChoices,
-                                            const std::function<unsigned int(const std::string&)>& texLookup) {
+                                            const std::function<unsigned int(const std::string&)>& texLookup,
+                                            const engine::HudContext* previewContext) {
     Result result;
 
     ImGui::SetNextWindowSize(ImVec2(960.0f, 620.0f), ImGuiCond_FirstUseEver);
@@ -167,11 +168,15 @@ HudEditorPanel::Result HudEditorPanel::Draw(HudDocument& doc, bool* open,
             switch (w.type) {
                 case HudWidgetType::Bar:
                     dl->AddRectFilled(p0, p1, ToU32(w.bgColor));
-                    dl->AddRectFilled(p0, ImVec2(p0.x + ww * 0.65f, p1.y), ToU32(w.fillColor));
+                    dl->AddRectFilled(p0, ImVec2(p0.x + ww * (previewContext
+                        ? engine::ResolveHudFraction(w, *previewContext) : 0.65f), p1.y), ToU32(w.fillColor));
                     break;
-                case HudWidgetType::Text:
-                    dl->AddText(p0, ToU32(w.color), w.text.c_str());
+                case HudWidgetType::Text: {
+                    const std::string text = previewContext
+                        ? engine::ResolveHudText(w, *previewContext) : w.text;
+                    dl->AddText(p0, ToU32(w.color), text.c_str());
                     break;
+                }
                 case HudWidgetType::Image: {
                     unsigned int tex = 0;
                     if (!w.imageAsset.empty() && texLookup) tex = texLookup(w.imageAsset);
@@ -189,9 +194,11 @@ HudEditorPanel::Result HudEditorPanel::Draw(HudDocument& doc, bool* open,
                 default: // Panel / Button
                     dl->AddRectFilled(p0, p1, ToU32(w.color));
                     if (w.type == HudWidgetType::Button && !w.text.empty()) {
-                        const ImVec2 ts = ImGui::CalcTextSize(w.text.c_str());
+                        const std::string text = previewContext
+                            ? engine::ResolveHudText(w, *previewContext) : w.text;
+                        const ImVec2 ts = ImGui::CalcTextSize(text.c_str());
                         dl->AddText(ImVec2(p0.x + (ww - ts.x) * 0.5f, p0.y + (hh - ts.y) * 0.5f),
-                                    IM_COL32(245, 245, 245, 255), w.text.c_str());
+                                    IM_COL32(245, 245, 245, 255), text.c_str());
                     }
                     break;
             }

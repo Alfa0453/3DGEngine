@@ -26,7 +26,8 @@ public:
     // path to a GL texture id so the canvas can preview images.
     Result Draw(engine::HudDocument& doc, bool* open,
                 const std::vector<std::string>& imageChoices,
-                const std::function<unsigned int(const std::string&)>& texLookup);
+                const std::function<unsigned int(const std::string&)>& texLookup,
+                const engine::HudContext* previewContext = nullptr);
 
     int  SelectedIndex() const { return m_selected; }
     void SetSelected(int index) { m_selected = index; }

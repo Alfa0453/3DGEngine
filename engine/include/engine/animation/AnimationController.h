@@ -29,6 +29,11 @@ public:
     };
 
     struct State {
+        struct BlendSample {
+            int clip = -1;
+            float value = 0.0f;
+            float valueY = 0.0f;
+        };
         std::string name;
         int   clip  = 0;         // index into SkinnedModel::Animations()
         bool  loop  = true;
@@ -42,6 +47,25 @@ public:
         float blendMin = 0.0f;
         float blendMax = 1.0f;
         bool rootMotion = false;
+        // Optional 1D Blend Space. When two or more samples are present, the
+        // parameter selects the neighbouring clips and their interpolation.
+        std::vector<BlendSample> blendSamples;
+        std::string blendParameterY;
+        bool blendSpace2D = false;
+        bool synchronizeBlendSpace = true;
+    };
+
+    struct BlendSpaceResult {
+        struct WeightedSample {
+            int clip = -1;
+            float weight = 0.0f;
+        };
+        int clipA = -1;
+        int clipB = -1;
+        float alpha = 0.0f;
+        bool active = false;
+        bool synchronized = true;
+        std::vector<WeightedSample> samples;
     };
 
     struct Transition {
@@ -83,6 +107,9 @@ public:
 
     // Add a state; the first one added becomes current. Returns its index.
     int AddState(const State& s);
+    void AddBlendSample(int stateIndex, const State::BlendSample& sample);
+    void ConfigureBlendSpace(int stateIndex, const std::string& parameterY,
+                             bool twoDimensional, bool synchronize);
     void AddTransition(const Transition& t);
 
     // Locomotion helper: idle / walk / run auto-selected by a speed parameter.
@@ -116,6 +143,8 @@ public:
     int   PrevClip()    const { return (m_prev >= 0) ? m_states[static_cast<std::size_t>(m_prev)].clip : -1; }
     int   CurrentBlendClip() const { return (m_cur >= 0) ? m_states[static_cast<std::size_t>(m_cur)].blendClip : -1; }
     float CurrentBlendWeight() const;
+    BlendSpaceResult CurrentBlendSpace() const;
+    BlendSpaceResult PreviousBlendSpace() const;
     bool  CurrentRootMotion() const { return m_cur >= 0 && m_states[static_cast<std::size_t>(m_cur)].rootMotion; }
     bool  CurrentLoop() const { return (m_cur  >= 0) ? m_states[static_cast<std::size_t>(m_cur)].loop  : true; }
     float CurrentTime() const { return m_curTime; }
@@ -126,6 +155,7 @@ public:
     std::vector<TransitionDebugInfo> TransitionDebug() const;
 
 private:
+    BlendSpaceResult EvaluateBlendSpace(int stateIndex) const;
     int  PickByParam() const;
     int  PickByTransition() const;
     bool TestTransition(const Transition& transition) const;

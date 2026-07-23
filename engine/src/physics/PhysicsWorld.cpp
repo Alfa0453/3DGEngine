@@ -112,8 +112,8 @@ glm::mat3 InertiaFor(const Collider& c, float mass) {
     if (c.shape == ColliderShape::Box)     return RigidBody::SolidBoxInvInertia(mass, c.halfExtents);
     if (c.shape == ColliderShape::Sphere)  return RigidBody::SolidSphereInvInertia(mass, c.radius);
     if (c.shape == ColliderShape::Capsule) return RigidBody::CapsuleInvInertia(mass, c.radius, c.halfHeight);
-    if (c.shape == ColliderShape::Cylinder || c.shape == ColliderShape::Cone
-        || c.shape == ColliderShape::Pyramid || c.shape == ColliderShape::Torus
+    if (c.shape == ColliderShape::Cylinder) return RigidBody::CylinderInvInertia(mass, c.radius, c.halfHeight);
+    if (c.shape == ColliderShape::Cone || c.shape == ColliderShape::Pyramid || c.shape == ColliderShape::Torus
         || c.shape == ColliderShape::Staircase)
         return RigidBody::SolidBoxInvInertia(mass, c.halfExtents);
     return glm::mat3(0.0f);
@@ -441,10 +441,22 @@ void BuildProxies(const Body& body, ProxySet& set) {
     }
 
     if (c.shape == ColliderShape::Cylinder) {
-        // A capsule contained inside the finite cylinder: no collision extends
-        // beyond the flat caps, while the curved side remains radial.
-        AddProxy(set, body, glm::vec3(0.0f), glm::quat(1.0f, 0.0f, 0.0f, 0.0f),
-            Collider::MakeCapsule(c.radius, std::max(c.halfHeight - c.radius, 0.0f)));
+        // Flat-ended cylinder, approximated by vertical box strips across its
+        // circular XZ cross-section. Unlike the old capsule proxy, these pieces
+        // reach the same top/bottom plane at every radius and never add rounded
+        // hemispherical caps. Twenty strips keep the radial error small while
+        // staying within ProxySet capacity.
+        constexpr int slices = 20;
+        const float radius = std::max(c.radius, 0.001f);
+        const float halfHeight = std::max(c.halfHeight, 0.001f);
+        const float width = (2.0f * radius) / static_cast<float>(slices);
+        for (int i = 0; i < slices; ++i) {
+            const float x = -radius + (static_cast<float>(i) + 0.5f) * width;
+            const float z = std::sqrt(std::max(radius * radius - x * x, 0.0f));
+            AddProxy(set, body, glm::vec3(x, 0.0f, 0.0f),
+                glm::quat(1.0f, 0.0f, 0.0f, 0.0f),
+                Collider::MakeBox(glm::vec3(width * 0.5f, halfHeight, std::max(z, 0.001f))));
+        }
         return;
     }
 
@@ -1112,10 +1124,15 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
         SolverBody* B = &m_bodies[pr.second];
         if (priority(A->c->shape) > priority(B->c->shape)) std::swap(A, B);
         if (!LayersCollide(*A->c, *B->c)) continue;    // collision layer/mask filter
-        if (Inactive(*A) && Inactive(*B)) {
+        // Trigger volumes are often moved directly by gameplay systems (for example
+        // the character-controller proxy) and therefore do not need a RigidBody.
+        // They still require overlap detection even when both participants would
+        // otherwise be classified as static/inactive.
+        const bool triggerPair = A->c->isTrigger || B->c->isTrigger;
+        if (!triggerPair && Inactive(*A) && Inactive(*B)) {
             const std::uint64_t key = PairKey(A->e, B->e);
             if (m_touching.find(key) != m_touching.end())
-                m_touchingNow[key] = (A->c->isTrigger || B->c->isTrigger);
+                m_touchingNow[key] = false;
             continue;
         }
         const Contact ct = Detect(*A, *B);
@@ -1351,7 +1368,7 @@ float RayCapsule(const glm::vec3& o, const glm::vec3& d,
 } // namespace
 
 RaycastHit PhysicsWorld::Raycast(ecs::Registry& reg, const Ray& ray, float maxDistance,
-                                 std::uint32_t layerMask) const {
+                                 std::uint32_t layerMask, Entity ignored) const {
     RaycastHit best;
     best.distance = maxDistance;
     const float len2 = glm::dot(ray.direction, ray.direction);
@@ -1359,6 +1376,7 @@ RaycastHit PhysicsWorld::Raycast(ecs::Registry& reg, const Ray& ray, float maxDi
     const glm::vec3 d = ray.direction / std::sqrt(len2);
 
     reg.view<Transform, Collider>().each([&](Entity e, Transform& t, Collider& c) {
+        if (e == ignored || c.isTrigger) return;
         if ((c.layer & layerMask) == 0u) return;    // filtered out by the query mask
         glm::vec3 n(0.0f);
         float hitT = -1.0f;
@@ -1422,7 +1440,8 @@ RaycastHit PhysicsWorld::SphereCast(ecs::Registry& reg,
                                     const glm::vec3& end,
                                     float radius,
                                     Entity ignored,
-                                    std::uint32_t layerMask) const {
+                                    std::uint32_t layerMask,
+                                    std::uint32_t queryLayer) const {
     RaycastHit result;
     const glm::vec3 travel = end - start;
     const float distance = glm::length(travel);
@@ -1436,6 +1455,7 @@ RaycastHit PhysicsWorld::SphereCast(ecs::Registry& reg,
     reg.view<Transform, Collider>().each([&](Entity entity, Transform& transform, Collider& collider) {
         if (entity == ignored || collider.isTrigger) return;
         if ((collider.layer & layerMask) == 0u) return;    // filtered out by the query mask
+        if (queryLayer != 0u && (collider.mask & queryLayer) == 0u) return;
 
         float toi = 1.0f;
         glm::vec3 normal(0.0f);
@@ -1445,6 +1465,35 @@ RaycastHit PhysicsWorld::SphereCast(ecs::Registry& reg,
         } else if (collider.shape == ColliderShape::Sphere) {
             toi = SweptSphereSphere(start, end, sweepRadius,
                                     transform.position, collider.radius, normal);
+        } else if (CompositeShape(collider.shape)) {
+            Body parent{entity, &transform, &collider, nullptr};
+            ProxySet proxies;
+            BuildProxies(parent, proxies);
+            for (int i = 0; i < proxies.count; ++i) {
+                const Transform& proxyTransform = proxies.transforms[i];
+                const Collider& proxyCollider = proxies.colliders[i];
+                float proxyToi = 1.0f;
+                glm::vec3 proxyNormal(0.0f);
+                if (proxyCollider.shape == ColliderShape::Sphere) {
+                    proxyToi = SweptSphereSphere(
+                        start, end, sweepRadius, proxyTransform.position,
+                        proxyCollider.radius, proxyNormal);
+                } else {
+                    OBB proxyBox;
+                    proxyBox.center = proxyTransform.position;
+                    const glm::mat3 rotation = glm::mat3_cast(proxyTransform.rotation);
+                    proxyBox.axis[0] = rotation[0];
+                    proxyBox.axis[1] = rotation[1];
+                    proxyBox.axis[2] = rotation[2];
+                    proxyBox.ext = proxyCollider.halfExtents;
+                    proxyToi = SweptSphereBox(
+                        start, end, sweepRadius, proxyBox, proxyNormal);
+                }
+                if (proxyToi < toi) {
+                    toi = proxyToi;
+                    normal = proxyNormal;
+                }
+            }
         } else {
             OBB box;
             box.center = transform.position;
@@ -1497,6 +1546,21 @@ std::vector<ecs::Entity> PhysicsWorld::OverlapSphere(ecs::Registry& reg,
             const glm::vec3 cp = ClosestOnSeg(t.position - h, t.position + h, center);
             const glm::vec3 d = center - cp;
             overlap = glm::dot(d, d) <= (r + c.radius) * (r + c.radius);
+        } else if (c.shape == ColliderShape::Cylinder) {
+            // Exact closest point from the query centre to a finite, oriented,
+            // flat-ended cylinder.
+            const glm::quat inverseRotation = glm::inverse(t.rotation);
+            const glm::vec3 local = inverseRotation * (center - t.position);
+            glm::vec3 closest = local;
+            closest.y = glm::clamp(closest.y, -c.halfHeight, c.halfHeight);
+            const float radialLength = glm::length(glm::vec2(local.x, local.z));
+            if (radialLength > c.radius && radialLength > 0.000001f) {
+                const float scale = c.radius / radialLength;
+                closest.x *= scale;
+                closest.z *= scale;
+            }
+            const glm::vec3 delta = local - closest;
+            overlap = glm::dot(delta, delta) <= r * r;
         } else {
             // Box (and composite shapes conservatively via their world AABB): closest
             // point on the OBB to the query centre.

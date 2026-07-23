@@ -2,6 +2,7 @@
 
 #include <engine/ai/NavGrid.h>
 #include <engine/ai/NavMesh.h>
+#include <engine/animation/AnimatedModel.h>
 
 #include <engine/assets/RuntimeAssetManager.h>
 #include <engine/graphics/Camera.h>
@@ -13,6 +14,7 @@
 #include <engine/graphics/Shader.h>
 #include <engine/graphics/SkinnedModel.h>
 #include <engine/graphics/Texture.h>
+#include <engine/math/Spline.h>
 
 #include <glad/glad.h>
 #include <glm/gtc/matrix_transform.hpp>
@@ -36,6 +38,7 @@ void DrawStencilSelectionOutline(engine::Shader& shader,
                                  const engine::ecs::Transform& transform,
                                  const glm::vec3& color,
                                  float thickness,
+                                 const glm::mat4& modelOffset,
                                  DrawGeometry&& drawGeometry) {
     GLboolean colorMask[4]{};
     GLboolean depthWrite = GL_TRUE;
@@ -67,7 +70,7 @@ void DrawStencilSelectionOutline(engine::Shader& shader,
     glDepthFunc(GL_LEQUAL);
     glDisable(GL_CULL_FACE);
 
-    shader.SetMat4("uModel", transform.Model());
+    shader.SetMat4("uModel", transform.Model() * modelOffset);
     shader.SetVec3("uColor", color);
     shader.SetFloat("uThickness", 0.0f);
     drawGeometry();
@@ -557,6 +560,36 @@ void DrawCapsuleColliderGuide(engine::Renderer& renderer,
     DrawGuideRing(renderer, shader, cube, b, EditorGizmo::Axis::X, radius, 0.024f, color);
 }
 
+void DrawCylinderColliderGuide(engine::Renderer& renderer,
+                               engine::Shader& shader,
+                               const engine::Mesh& cube,
+                               const engine::ecs::Transform& transform,
+                               const engine::ecs::Collider& collider,
+                               const glm::vec3& color) {
+    const float radius = std::max(collider.radius, 0.001f);
+    const float halfHeight = std::max(collider.halfHeight, 0.001f);
+    glm::vec3 axis = glm::mat3_cast(transform.rotation) * glm::vec3(0.0f, 1.0f, 0.0f);
+    axis = glm::dot(axis, axis) > 0.0001f ? glm::normalize(axis) : glm::vec3(0.0f, 1.0f, 0.0f);
+    glm::vec3 right;
+    glm::vec3 forward;
+    BuildBasis(axis, &right, &forward);
+    const glm::vec3 bottom = transform.position - axis * halfHeight;
+    const glm::vec3 top = transform.position + axis * halfHeight;
+
+    // Two circular cap rims and straight side generators make the flat ends
+    // visually distinct from the rounded capsule guide.
+    DrawBasisRing(renderer, shader, cube, bottom, right, forward, radius, 0.028f, color);
+    DrawBasisRing(renderer, shader, cube, top, right, forward, radius, 0.028f, color);
+    constexpr int sideLines = 8;
+    constexpr float twoPi = 6.28318530718f;
+    for (int i = 0; i < sideLines; ++i) {
+        const float angle = twoPi * static_cast<float>(i) / static_cast<float>(sideLines);
+        const glm::vec3 radial = right * std::cos(angle) * radius
+            + forward * std::sin(angle) * radius;
+        DrawGuideSegment(renderer, shader, cube, bottom + radial, top + radial, 0.026f, color);
+    }
+}
+
 void DrawGizmoCone(engine::Renderer& renderer,
                    engine::Shader& shader,
                    const engine::Mesh& cone,
@@ -622,7 +655,11 @@ void EditorViewport::DrawSceneGizmo(engine::Renderer& renderer,
     shader.SetVec3("uLightDir", glm::normalize(glm::vec3(-0.4f, -1.0f, -0.3f)));
     shader.SetVec3("uEmissive", glm::vec3(0.0f));
 
-    const glm::vec3 center = selectedTransform->position;
+    // Terrain renders as a mesh spanning local [0,size] (corner at the transform position),
+    // so centre the gizmo on the terrain footprint instead of its corner.
+    const glm::vec3 center = selectedTransform->position
+        + (selected->isTerrain ? glm::vec3(selected->terrainSize * 0.5f, 0.0f, selected->terrainSize * 0.5f)
+                               : glm::vec3(0.0f));
     const glm::vec3 xColor = AxisColor(EditorGizmo::Axis::X, gizmo.CurrentAxis());
     const glm::vec3 yColor = AxisColor(EditorGizmo::Axis::Y, gizmo.CurrentAxis());
     const glm::vec3 zColor = AxisColor(EditorGizmo::Axis::Z, gizmo.CurrentAxis());
@@ -761,6 +798,47 @@ void EditorViewport::DrawSelectedLightGuide(engine::Renderer& renderer,
     shader.SetVec3("uEmissive", glm::vec3(0.0f));
 }
 
+void EditorViewport::DrawWorldGrid(engine::Renderer& renderer,
+                                   engine::Shader& shader,
+                                   const engine::Mesh& cube,
+                                   const glm::mat4& viewProj) const {
+    shader.Bind();
+    shader.SetMat4("uViewProj", viewProj);
+    shader.SetVec3("uLightDir", glm::normalize(glm::vec3(-0.4f, -1.0f, -0.3f)));
+    shader.SetInt("uHasDiffuse", 0);
+
+    const int   half   = 20;                 // grid half-extent in units (covers -20..+20)
+    const float span   = static_cast<float>(half);
+    const float thinT  = 0.012f;             // minor line thickness
+    const float thickT = 0.020f;             // major line / axis thickness
+    const glm::vec3 minorColor(0.30f, 0.32f, 0.36f);
+    const glm::vec3 majorColor(0.45f, 0.48f, 0.53f);
+
+    for (int i = -half; i <= half; ++i) {
+        if (i == 0) continue;                // the centre lines are the coloured axes below
+        const float f = static_cast<float>(i);
+        const bool  major = (i % 5) == 0;
+        const glm::vec3 color = major ? majorColor : minorColor;
+        const float t = major ? thickT : thinT;
+        shader.SetVec3("uEmissive", color * (major ? 0.40f : 0.26f));
+        DrawGuideSegment(renderer, shader, cube, glm::vec3(f, 0.0f, -span), glm::vec3(f, 0.0f, span), t, color);
+        DrawGuideSegment(renderer, shader, cube, glm::vec3(-span, 0.0f, f), glm::vec3(span, 0.0f, f), t, color);
+    }
+
+    // Coloured world axes through the origin: X red, Z blue, Y green (short, upward).
+    const glm::vec3 xCol(0.86f, 0.30f, 0.30f);
+    const glm::vec3 zCol(0.32f, 0.50f, 0.92f);
+    const glm::vec3 yCol(0.34f, 0.80f, 0.40f);
+    shader.SetVec3("uEmissive", xCol * 0.55f);
+    DrawGuideSegment(renderer, shader, cube, glm::vec3(-span, 0.0f, 0.0f), glm::vec3(span, 0.0f, 0.0f), thickT, xCol);
+    shader.SetVec3("uEmissive", zCol * 0.55f);
+    DrawGuideSegment(renderer, shader, cube, glm::vec3(0.0f, 0.0f, -span), glm::vec3(0.0f, 0.0f, span), thickT, zCol);
+    shader.SetVec3("uEmissive", yCol * 0.55f);
+    DrawGuideSegment(renderer, shader, cube, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, span * 0.2f, 0.0f), thickT, yCol);
+
+    shader.SetVec3("uEmissive", glm::vec3(0.0f));   // reset for subsequent guides
+}
+
 void EditorViewport::DrawPhysicsColliderGuides(engine::Renderer& renderer,
                                                engine::Shader& shader,
                                                const engine::Mesh& cube,
@@ -811,10 +889,7 @@ void EditorViewport::DrawPhysicsColliderGuides(engine::Renderer& renderer,
             DrawCapsuleColliderGuide(renderer, shader, cube, *transform, object.collider, color);
             break;
         case engine::ecs::ColliderShape::Cylinder: {
-            engine::ecs::Collider guide = engine::ecs::Collider::MakeCapsule(
-                object.collider.radius,
-                std::max(object.collider.halfHeight - object.collider.radius, 0.0f));
-            DrawCapsuleColliderGuide(renderer, shader, cube, *transform, guide, color);
+            DrawCylinderColliderGuide(renderer, shader, cube, *transform, object.collider, color);
             break;
         }
         case engine::ecs::ColliderShape::Cone:
@@ -869,6 +944,58 @@ void EditorViewport::DrawPhysicsColliderGuides(engine::Renderer& renderer,
             break;
         }
         }
+    }
+
+    shader.SetVec3("uEmissive", glm::vec3(0.0f));
+}
+
+void EditorViewport::DrawCharacterFacingArrows(engine::Renderer& renderer,
+                                               engine::Shader& shader,
+                                               const engine::Mesh& cube,
+                                               const EditorScene& scene,
+                                               const glm::mat4& viewProj) const {
+    const EditorScene::Object* selected = scene.SelectedObject();
+    shader.Bind();
+    shader.SetMat4("uViewProj", viewProj);
+    shader.SetVec3("uLightDir", glm::normalize(glm::vec3(-0.4f, -1.0f, -0.3f)));
+    shader.SetInt("uHasDiffuse", 0);
+
+    for (const EditorScene::Object& object : scene.Objects()) {
+        if (!object.visible || !object.skeletalModel) {
+            continue;
+        }
+        const engine::ecs::Transform* transform = scene.TryGetTransform(object.entity);
+        if (!transform) {
+            continue;
+        }
+
+        // Object forward = local -Z, projected onto the ground plane so the arrow lies
+        // flat like Unreal's. The player controller faces the mesh this way, so aligning
+        // the character to the arrow makes it face forward when it moves.
+        glm::vec3 dir = glm::mat3_cast(transform->rotation) * glm::vec3(0.0f, 0.0f, -1.0f);
+        dir.y = 0.0f;
+        if (glm::dot(dir, dir) < 1e-6f) {
+            dir = glm::vec3(0.0f, 0.0f, -1.0f);
+        }
+        dir = glm::normalize(dir);
+        const glm::vec3 up(0.0f, 1.0f, 0.0f);
+        const glm::vec3 side = glm::normalize(glm::cross(up, dir));
+
+        const bool isSelected = selected && selected->entity == object.entity;
+        const glm::vec3 color = isSelected ? glm::vec3(0.15f, 0.95f, 1.0f)
+                                           : glm::vec3(0.10f, 0.55f, 0.62f);
+        shader.SetVec3("uEmissive", color * (isSelected ? 0.40f : 0.15f));
+
+        const float radius = std::max(object.collider.radius, 0.25f);
+        const float length = std::max(radius * 2.6f, 0.9f);
+        const glm::vec3 base = transform->position + up * 0.02f;
+        const glm::vec3 tip = base + dir * length;
+        const float head = length * 0.28f;
+        DrawGuideSegment(renderer, shader, cube, base, tip, 0.03f, color);
+        DrawGuideSegment(renderer, shader, cube, tip,
+            tip - dir * head + side * head * 0.6f, 0.03f, color);
+        DrawGuideSegment(renderer, shader, cube, tip,
+            tip - dir * head - side * head * 0.6f, 0.03f, color);
     }
 
     shader.SetVec3("uEmissive", glm::vec3(0.0f));
@@ -985,6 +1112,48 @@ void EditorViewport::DrawCameraSequenceGuides(
                 DrawGuideSegment(renderer, shader, cube, previous, point, 0.025f, railColor);
                 previous = point;
             }
+        }
+    }
+    shader.SetVec3("uEmissive", glm::vec3(0.0f));
+}
+
+void EditorViewport::DrawSplineGuides(
+    engine::Renderer& renderer, engine::Shader& shader, const engine::Mesh& cube,
+    const EditorScene& scene, const glm::mat4& viewProj) const {
+    const EditorScene::Object* selected = scene.SelectedObject();
+
+    shader.Bind();
+    shader.SetMat4("uViewProj", viewProj);
+    shader.SetVec3("uLightDir", glm::normalize(glm::vec3(-0.4f, -1.0f, -0.3f)));
+    shader.SetInt("uHasDiffuse", 0);
+
+    for (const EditorScene::Object& object : scene.Objects()) {
+        if (!object.isSpline || !object.visible) continue;
+        const bool isSel = selected && selected->entity == object.entity;
+
+        // Curve colour by type: river = cyan, rail = orange, path = green; brighten if selected.
+        glm::vec3 curveColor = object.splineType == 1 ? glm::vec3(0.2f, 0.7f, 1.0f)
+                             : object.splineType == 2 ? glm::vec3(1.0f, 0.6f, 0.2f)
+                             :                          glm::vec3(0.4f, 0.9f, 0.5f);
+        if (isSel) curveColor = glm::mix(curveColor, glm::vec3(1.0f), 0.35f);
+
+        if (object.splinePoints.size() >= 2) {
+            shader.SetVec3("uEmissive", curveColor * 0.4f);
+            engine::Spline spline(object.splinePoints, object.splineClosed);
+            std::vector<glm::vec3> pts;
+            const int samples = std::max(24, static_cast<int>(object.splinePoints.size()) * 12);
+            spline.SampleUniform(samples, pts);
+            for (std::size_t i = 1; i < pts.size(); ++i) {
+                DrawGuideSegment(renderer, shader, cube, pts[i - 1], pts[i],
+                                 isSel ? 0.06f : 0.04f, curveColor);
+            }
+        }
+
+        // Control-point handles (bigger + brighter on the selected spline).
+        shader.SetVec3("uEmissive", glm::vec3(0.5f, 0.42f, 0.1f));
+        const float handle = isSel ? 0.32f : 0.22f;
+        for (const glm::vec3& p : object.splinePoints) {
+            DrawGizmoBox(renderer, shader, cube, p, glm::vec3(handle), glm::vec3(1.0f, 0.85f, 0.2f));
         }
     }
     shader.SetVec3("uEmissive", glm::vec3(0.0f));
@@ -1333,7 +1502,7 @@ void EditorViewport::DrawSelectedModelOutline(engine::Renderer& renderer,
                                               const engine::Model& model,
                                               const glm::vec3& color,
                                               float thickness) const {
-    DrawStencilSelectionOutline(shader, transform, color, thickness, [&]() {
+    DrawStencilSelectionOutline(shader, transform, color, thickness, glm::mat4(1.0f), [&]() {
         for (const engine::SubMesh& subMesh : model.SubMeshes()) renderer.Draw(subMesh.mesh);
     });
 }
@@ -1344,7 +1513,8 @@ void EditorViewport::DrawSelectedMeshOutline(engine::Renderer& renderer,
                                              const engine::Mesh& mesh,
                                              const glm::vec3& color,
                                              float thickness) const {
-    DrawStencilSelectionOutline(shader, transform, color, thickness, [&]() { renderer.Draw(mesh); });
+    DrawStencilSelectionOutline(shader, transform, color, thickness, glm::mat4(1.0f),
+                                [&]() { renderer.Draw(mesh); });
 }
 
 void EditorViewport::DrawSelectedSkinnedModelOutline(engine::Renderer& renderer,
@@ -1353,12 +1523,13 @@ void EditorViewport::DrawSelectedSkinnedModelOutline(engine::Renderer& renderer,
                                                       const engine::SkinnedModel& model,
                                                       const std::vector<glm::mat4>& pose,
                                                       const glm::vec3& color,
-                                                      float thickness) const {
+                                                      float thickness,
+                                                      const glm::mat4& modelOffset) const {
     const std::size_t boneCount = std::min<std::size_t>(pose.size(), engine::SkinnedModel::kMaxBones);
     for (std::size_t i = 0; i < boneCount; ++i) {
         shader.SetMat4("uBones[" + std::to_string(i) + "]", pose[i]);
     }
-    DrawStencilSelectionOutline(shader, transform, color, thickness, [&]() {
+    DrawStencilSelectionOutline(shader, transform, color, thickness, modelOffset, [&]() {
         for (const engine::SubMesh& subMesh : model.SubMeshes()) renderer.Draw(subMesh.mesh);
     });
 }
@@ -1435,7 +1606,8 @@ int EditorViewport::PickSceneObject(const EditorScene& scene,
         const EditorScene::Object& object = objects[static_cast<std::size_t>(i)];
         // Large authoring volumes surround normal level geometry; treating their
         // full AABB as solid picking geometry would block selection inside them.
-        if (!object.visible || object.navMeshBoundsVolume) {
+        if (!object.visible || object.navMeshBoundsVolume
+            || object.primitive == EditorScene::Primitive::Empty) {
             continue;
         }
 
@@ -1449,12 +1621,40 @@ int EditorViewport::PickSceneObject(const EditorScene& scene,
         float hitDistance = 0.0f;
         bool hit = false;
         if (!object.modelAssetPath.empty()) {
-            const engine::Model* model = assets.FindModel(object.modelAssetPath);
-            if (model) {
-                hit = IntersectLocalAabb(localRay, model->Min(), model->Max(), &hitDistance);
+            if (object.skeletalModel) {
+                // A skeletal character is drawn at Transform * renderOffset (render-only
+                // stand-up + re-centre on the origin). Pick against that same space using
+                // the skinned model's real bounds -- FindModel returns null for a skinned
+                // asset, so the old path fell back to a tiny box that (at the character's
+                // ~0.009 scale) was effectively impossible to click.
+                const engine::SkinnedModel* skinned = assets.FindSkinnedModel(object.modelAssetPath);
+                const glm::mat4 offset = skinned
+                    ? engine::MakeModelRenderOffset(object.modelOffsetPosition,
+                          object.modelOrientationEuler, object.modelOffsetScale, skinned->Center())
+                    : glm::mat4(1.0f);
+                const PickRay skinnedRay =
+                    TransformRayToLocal(ray, glm::inverse(transform->Model() * offset));
+                if (skinned) {
+                    hit = IntersectLocalAabb(skinnedRay, skinned->Min(), skinned->Max(), &hitDistance);
+                } else {
+                    hit = IntersectLocalAabb(skinnedRay, glm::vec3(-0.5f), glm::vec3(0.5f), &hitDistance);
+                }
             } else {
-                hit = IntersectLocalAabb(localRay, glm::vec3(-0.5f), glm::vec3(0.5f), &hitDistance);
+                const engine::Model* model = assets.FindModel(object.modelAssetPath);
+                if (model) {
+                    hit = IntersectLocalAabb(localRay, model->Min(), model->Max(), &hitDistance);
+                } else {
+                    hit = IntersectLocalAabb(localRay, glm::vec3(-0.5f), glm::vec3(0.5f), &hitDistance);
+                }
             }
+        } else if (object.isTerrain) {
+            // Terrain renders as a generated mesh spanning local [0,size] in X/Z (not the
+            // object's unit plane quad), so pick against that footprint or you can't click
+            // the terrain to select it (and reach the sculpt controls).
+            const float s = std::max(object.terrainSize, 0.01f);
+            const float h = std::max(object.terrainMaxHeight, 0.5f);
+            hit = IntersectLocalAabb(localRay, glm::vec3(0.0f, -0.5f, 0.0f),
+                                     glm::vec3(s, h + 0.5f, s), &hitDistance);
         } else {
             switch (object.primitive) {
             case EditorScene::Primitive::Plane:
@@ -1511,7 +1711,11 @@ bool EditorViewport::PickGizmoHandle(EditorGizmo& gizmo,
     const float rotateRadius = gizmoScale * 0.72f;
     constexpr float pi = 3.14159265359f;
     const glm::vec2 mouse{x, y};
-    const glm::vec3 center = selectedTransform->position;
+    // Match the drawn gizmo: terrain's gizmo sits at its footprint centre, not the corner.
+    const glm::vec3 center = selectedTransform->position
+        + (selectedObject && selectedObject->isTerrain
+               ? glm::vec3(selectedObject->terrainSize * 0.5f, 0.0f, selectedObject->terrainSize * 0.5f)
+               : glm::vec3(0.0f));
     glm::vec2 centerScreen;
     if (!ProjectWorldToScreen(center, viewProj, width, height, &centerScreen)) {
         return false;

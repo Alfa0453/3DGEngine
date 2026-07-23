@@ -1,8 +1,11 @@
 #include "engine/assets/RuntimeAssetManager.h"
 
 #include "engine/animation/AnimatedModel.h"
+#include "engine/animation/AnimationGraphDesc.h"
 #include "engine/ecs/Components.h"
 #include "engine/assets/ShaderGraphCompiler.h"
+
+#include <glm/gtc/quaternion.hpp>
 
 #include <algorithm>
 #include <exception>
@@ -62,6 +65,55 @@ const SkinnedModel* RuntimeAssetManager::LoadSkinnedModel(const std::string& pat
         const SkinnedModel* result = model.get();
         m_skinnedModels.emplace(path, std::move(model));
         SetError(error, std::string{});
+        return result;
+    } catch (const std::exception& ex) {
+        SetError(error, ex.what());
+        return nullptr;
+    }
+}
+
+const SkinnedModel* RuntimeAssetManager::LoadSkinnedModel(
+    const std::string& path, const std::vector<SkinnedAnimationSource>& extraAnimations,
+    std::string* error) {
+    if (extraAnimations.empty()) {
+        return LoadSkinnedModel(path, error);
+    }
+    if (path.empty()) {
+        SetError(error, "RuntimeAssetManager: skinned model path is empty");
+        return nullptr;
+    }
+
+    // Cache key = model path + each source (name/strip/path), so a model with a
+    // given set of merged clips is loaded once and shared.
+    std::string key = path;
+    for (const SkinnedAnimationSource& source : extraAnimations) {
+        key += '\n';
+        key += source.name;
+        key += source.stripRootMotion ? "|1|" : "|0|";
+        key += source.path;
+    }
+
+    const auto existing = m_skinnedModels.find(key);
+    if (existing != m_skinnedModels.end()) {
+        SetError(error, std::string{});
+        return existing->second.get();
+    }
+
+    try {
+        auto model = std::make_unique<SkinnedModel>(SkinnedModel::FromFile(path));
+        std::string mergeError;
+        for (const SkinnedAnimationSource& source : extraAnimations) {
+            if (source.path.empty()) continue;
+            try {
+                model->AddAnimationsFromFile(source.path, source.stripRootMotion, source.name);
+            } catch (const std::exception& ex) {
+                // Keep whatever clips loaded; report the first failure but don't abort.
+                if (mergeError.empty()) mergeError = ex.what();
+            }
+        }
+        const SkinnedModel* result = model.get();
+        m_skinnedModels.emplace(key, std::move(model));
+        SetError(error, mergeError);
         return result;
     } catch (const std::exception& ex) {
         SetError(error, ex.what());
@@ -244,6 +296,11 @@ RuntimeAssetManager::ResolveReport RuntimeAssetManager::ResolveRegistryAssets(ec
 
         AnimatedModel animated;
         animated.SetModel(model);
+        // Render-only orientation offset: stand up + re-centre the mesh on the object
+        // origin (where the capsule is), without rotating the entity transform.
+        animated.renderOffset = MakeModelRenderOffset(
+            asset.modelOffsetPosition, asset.modelOrientationEuler,
+            asset.modelOffsetScale, model->Center());
         for (const ecs::SkinnedModelAsset::Notify& notify : asset.notifies) {
             if (notify.name.empty()) {
                 continue;
@@ -256,44 +313,65 @@ RuntimeAssetManager::ResolveReport RuntimeAssetManager::ResolveRegistryAssets(ec
         }
         if (model->AnimationCount() > 0 && asset.autoplay) {
             if (!asset.states.empty()) {
+                // Convert the serialized component into the engine's canonical
+                // graph descriptor and build the controller through the single
+                // shared mapping (shared with the editor's authoring path).
+                AnimationGraphDesc desc;
+                desc.states.reserve(asset.states.size());
                 for (const ecs::SkinnedModelAsset::AnimationState& state : asset.states) {
-                    const int clip = resolveClip(state.clipIndex, state.clipName);
-                    animated.controller.AddState(engine::AnimationController::State{
-                        state.name.empty() ? std::string("State") : state.name,
-                        clip,
-                        state.loop,
-                        std::max(state.speed, 0.0f),
-                        -std::numeric_limits<float>::infinity(),
-                        std::numeric_limits<float>::infinity(),
-                        clipSeconds(clip),
-                        state.blendClipIndex >= 0 ? resolveClip(state.blendClipIndex, state.blendClipName) : -1,
-                        state.blendParameter,
-                        state.blendMin,
-                        state.blendMax,
-                        state.rootMotion
-                    });
+                    AnimationGraphDesc::StateDesc stateDesc;
+                    stateDesc.name                  = state.name;
+                    stateDesc.clipIndex             = state.clipIndex;
+                    stateDesc.clipName              = state.clipName;
+                    stateDesc.loop                  = state.loop;
+                    stateDesc.speed                 = state.speed;
+                    stateDesc.blendClipIndex        = state.blendClipIndex;
+                    stateDesc.blendClipName         = state.blendClipName;
+                    stateDesc.blendParameter        = state.blendParameter;
+                    stateDesc.blendMin              = state.blendMin;
+                    stateDesc.blendMax              = state.blendMax;
+                    stateDesc.rootMotion            = state.rootMotion;
+                    stateDesc.blendParameterY       = state.blendParameterY;
+                    stateDesc.blendSpace2D          = state.blendSpace2D;
+                    stateDesc.synchronizeBlendSpace = state.synchronizeBlendSpace;
+                    stateDesc.blendSamples.reserve(state.blendSamples.size());
+                    for (const auto& sample : state.blendSamples) {
+                        stateDesc.blendSamples.push_back(
+                            {sample.clipIndex, sample.clipName, sample.value, sample.valueY});
+                    }
+                    desc.states.push_back(std::move(stateDesc));
                 }
+                desc.parameters.reserve(asset.parameters.size());
                 for (const ecs::SkinnedModelAsset::AnimationParameter& parameter : asset.parameters) {
-                    animated.controller.DeclareParameter({
+                    desc.parameters.push_back({
                         parameter.name,
-                        static_cast<engine::AnimationController::ParameterType>(std::clamp(parameter.type, 0, 2)),
+                        static_cast<AnimationGraphDesc::ParamDesc::Type>(std::clamp(parameter.type, 0, 2)),
                         parameter.defaultValue
                     });
                 }
+                desc.transitions.reserve(asset.transitions.size());
                 for (const ecs::SkinnedModelAsset::AnimationTransition& transition : asset.transitions) {
-                    animated.controller.AddTransition(engine::AnimationController::Transition{
-                        transition.from,
-                        transition.to,
-                        transition.parameter,
-                        static_cast<engine::AnimationController::Transition::Compare>(
-                            std::clamp(transition.compare, 0, 3)),
-                        transition.threshold,
-                        std::max(transition.fade, 0.0f),
-                        std::clamp(transition.exitTime, 0.0f, 1.0f),
-                        transition.priority,
-                        transition.canInterrupt
-                    });
+                    AnimationGraphDesc::TransitionDesc transitionDesc;
+                    // The component stores integer state indices; the canonical
+                    // builder resolves transitions by state name, so translate.
+                    // A negative 'from' means "any state" (left empty here).
+                    if (transition.from >= 0 && transition.from < static_cast<int>(asset.states.size())) {
+                        transitionDesc.fromState = asset.states[static_cast<std::size_t>(transition.from)].name;
+                    }
+                    if (transition.to >= 0 && transition.to < static_cast<int>(asset.states.size())) {
+                        transitionDesc.toState = asset.states[static_cast<std::size_t>(transition.to)].name;
+                    }
+                    transitionDesc.parameter    = transition.parameter;
+                    transitionDesc.compare      = static_cast<AnimationGraphDesc::TransitionDesc::Compare>(
+                        std::clamp(transition.compare, 0, 3));
+                    transitionDesc.threshold    = transition.threshold;
+                    transitionDesc.fade         = transition.fade;
+                    transitionDesc.exitTime     = transition.exitTime;
+                    transitionDesc.priority     = transition.priority;
+                    transitionDesc.canInterrupt = transition.canInterrupt;
+                    desc.transitions.push_back(std::move(transitionDesc));
                 }
+                BuildAnimationController(animated.controller, desc, resolveClip, clipSeconds);
             } else if (asset.locomotionEnabled) {
                 const int idle = resolveClip(asset.idleClipIndex, asset.idleClipName);
                 const int walk = resolveClip(asset.walkClipIndex, asset.walkClipName);

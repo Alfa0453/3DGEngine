@@ -50,6 +50,7 @@ const char *EditorPanels::Name(Panel panel)
     case Panel::ParticleEditor: return "Particle Editor";
     case Panel::ShaderEditor: return "Shader Editor";
     case Panel::Hud: return "HUD Editor";
+    case Panel::CharacterEditor: return "Character Editor";
     case Panel::Count:     break;
     }
     return "Panel";

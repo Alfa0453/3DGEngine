@@ -130,6 +130,11 @@ struct HudDrawResult {
     std::string     clickedKey    = "";
 };
 
+// Resolve authored bindings using the same rules used by the runtime renderer.
+// Editor previews call these helpers so their text and bars match Play mode.
+std::string ResolveHudText(const HudWidget& widget, const HudContext& context);
+float ResolveHudFraction(const HudWidget& widget, const HudContext& context);
+
 // Draw the whole HUD for one frame. Handles its own text.Begin()/End().
 // screenW/screenH are the framebuffer size in pixels.
 HudDrawResult DrawHud(TextRenderer& text, const HudDocument& doc, const HudContext& ctx,

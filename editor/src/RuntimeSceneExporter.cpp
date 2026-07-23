@@ -5,6 +5,7 @@
 
 #include <fstream>
 #include <iomanip>
+#include <sstream>
 
 using engine::ecs::MeshRenderer;
 using engine::ecs::Light;
@@ -14,6 +15,7 @@ namespace {
 
 const char* PrimitiveName(EditorScene::Primitive primitive) {
     switch (primitive) {
+    case EditorScene::Primitive::Empty: return "Empty";
     case EditorScene::Primitive::Plane: return "Plane";
     case EditorScene::Primitive::Cube: return "Cube";
     case EditorScene::Primitive::Sphere: return "Sphere";
@@ -27,8 +29,13 @@ const char* PrimitiveName(EditorScene::Primitive primitive) {
     return "Cube";
 }
 
-const char* StoredPath(const std::string& path) {
-    return path.empty() ? "-" : path.c_str();
+// Space-safe string field: quoted so values containing spaces (asset paths,
+// animation clip names, etc.) round-trip through the whitespace-tokenised reader.
+// Empty is stored as the quoted sentinel "-" (the loader clears it back to empty).
+std::string StoredPath(const std::string& path) {
+    std::ostringstream out;
+    out << std::quoted(path.empty() ? std::string("-") : path);
+    return out.str();
 }
 
 const char* LightTypeName(Light::Type type) {
@@ -51,7 +58,7 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         return false;
     }
 
-    out << "3DGRuntimeScene 51\n";
+    out << "3DGRuntimeScene 61\n";
     out << "# Runtime export from 3DGEditor. Editor-only flags are omitted.\n";
     const EditorScene::Environment& environment = scene.GetEnvironment();
     out << "environment "
@@ -74,7 +81,27 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         << environment.physicsSleepLinearVelocity << ' '
         << environment.physicsSleepAngularVelocity << ' '
         << environment.physicsTimeToSleep << ' '
-        << std::quoted(environment.hudAsset) << '\n';
+        << std::quoted(environment.hudAsset) << ' '
+        << environment.shadowDistance << '\n';
+    out << "clouds "
+        << (environment.clouds ? 1 : 0) << ' '
+        << environment.cloudCoverage << ' '
+        << environment.cloudDensity << ' '
+        << environment.cloudScale << ' '
+        << environment.cloudSoftness << ' '
+        << environment.cloudWindSpeed << ' '
+        << environment.cloudWindDirection << ' '
+        << environment.cloudHorizonHeight << ' '
+        << environment.cloudColor.r << ' '
+        << environment.cloudColor.g << ' '
+        << environment.cloudColor.b << ' '
+        << (environment.cloudShadows ? 1 : 0) << ' '
+        << environment.cloudShadowStrength << ' '
+        << environment.cloudShadowScale << '\n';
+    out << "skylight_occlusion "
+        << (environment.skylightOcclusion ? 1 : 0) << ' '
+        << environment.skylightOcclusionStrength << ' '
+        << environment.minimumSkylight << '\n';
     for (const EditorScene::Environment::PostProcessEffect& effect :
          environment.postProcessEffects) {
         out << "post_effect "
@@ -138,6 +165,9 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         if (!object.visible || object.navMeshBoundsVolume) {
             continue;
         }
+        if (object.isSpline) {
+            continue;   // splines are authoring paths, not runtime meshes
+        }
 
         const Transform* transform = scene.TryGetTransform(object.entity);
         const MeshRenderer* renderer = scene.TryGetMeshRenderer(object.entity);
@@ -149,7 +179,7 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
             const Light* light = scene.TryGetLight(object.entity);
             const Light& data = light ? *light : object.lightData;
             out << "light "
-                << object.name << ' '
+                << StoredPath(object.name) << ' '
                 << LightTypeName(data.type) << ' '
                 << transform->position.x << ' ' << transform->position.y << ' ' << transform->position.z << ' '
                 << data.color.r << ' ' << data.color.g << ' ' << data.color.b << ' '
@@ -161,7 +191,7 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
 
         out << "entity "
             << PrimitiveName(object.primitive) << ' '
-            << object.name << ' '
+            << StoredPath(object.name) << ' '
             << transform->position.x << ' ' << transform->position.y << ' ' << transform->position.z << ' '
             << transform->scale.x << ' ' << transform->scale.y << ' ' << transform->scale.z << ' '
             << transform->rotation.w << ' ' << transform->rotation.x << ' '
@@ -169,6 +199,15 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
             << renderer->color.r << ' ' << renderer->color.g << ' ' << renderer->color.b << ' '
             << StoredPath(object.modelAssetPath) << ' '
             << StoredPath(object.materialAssetPath) << ' '
+            << object.modelOrientationEuler.x << ' '
+            << object.modelOrientationEuler.y << ' '
+            << object.modelOrientationEuler.z << ' '
+            << object.modelOffsetPosition.x << ' '
+            << object.modelOffsetPosition.y << ' '
+            << object.modelOffsetPosition.z << ' '
+            << object.modelOffsetScale.x << ' '
+            << object.modelOffsetScale.y << ' '
+            << object.modelOffsetScale.z << ' '
             << (object.skeletalModel ? 1 : 0) << ' '
             << object.animationClipIndex << ' '
             << StoredPath(object.animationClipName) << ' '
@@ -212,7 +251,15 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
                 << StoredPath(state.blendParameter) << ' '
                 << state.blendMin << ' '
                 << state.blendMax << ' '
-                << (state.rootMotion ? 1 : 0) << ' ';
+                << (state.rootMotion ? 1 : 0) << ' '
+                << (state.blendSpace2D ? 1 : 0) << ' '
+                << StoredPath(state.blendParameterY) << ' '
+                << (state.synchronizeBlendSpace ? 1 : 0) << ' '
+                << state.blendSamples.size() << ' ';
+            for (const auto& sample : state.blendSamples) {
+                out << sample.clipIndex << ' ' << StoredPath(sample.clipName) << ' '
+                    << sample.value << ' ' << sample.valueY << ' ';
+            }
         }
         out << object.animationParameters.size() << ' ';
         for (const EditorScene::AnimationParameter& parameter : object.animationParameters) {
@@ -258,6 +305,8 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
             << object.collider.restitution << ' '
             << object.collider.friction << ' '
             << (object.collider.isTrigger ? 1 : 0) << ' '
+            << object.collider.layer << ' '
+            << object.collider.mask << ' '
             << (object.rotatorEnabled ? 1 : 0) << ' '
             << object.rotator.axis.x << ' ' << object.rotator.axis.y << ' ' << object.rotator.axis.z << ' '
             << object.rotator.radiansPerSecond << ' '
@@ -418,12 +467,18 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
             << std::quoted(object.navAgentTargetName) << ' '
             << object.navAgentVisionRange << ' '
             << object.navAgentVisionHalfAngle << ' '
-            << std::quoted(StoredPath(object.navAgentBrainAsset)) << ' '
+            << StoredPath(object.navAgentBrainAsset) << ' '
             << object.navAgentTeam << ' '
             << (object.navAgentAutoTarget ? 1 : 0) << ' '
             << object.patrolPoints.size();
         for (const glm::vec3& point : object.patrolPoints)
             out << ' ' << point.x << ' ' << point.y << ' ' << point.z;
+        out << ' ' << static_cast<int>(object.navMovementMode)
+            << ' ' << object.navMovementGravity
+            << ' ' << object.navMovementMaxFallSpeed
+            << ' ' << object.navMovementGroundProbe
+            << ' ' << object.navMovementStepHeight
+            << ' ' << object.navMovementMaxSlope;
         out << '\n';
     }
 

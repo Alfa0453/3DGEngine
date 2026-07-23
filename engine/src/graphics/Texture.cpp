@@ -5,12 +5,33 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdarg>
 #include <cstdint>
+#include <cstdio>
 #include <fstream>
 #include <stdexcept>
 #include <vector>
 
 namespace engine {
+
+// TEMPORARY: pinpoint a crash during terrain albedo texture creation. Own file
+// (truncated each run), flushed per line. Remove once resolved.
+static void TexTrace(const char* fmt, ...) {
+    static std::FILE* file = [] {
+        std::FILE* f = nullptr;
+#ifdef _MSC_VER
+        fopen_s(&f, "D:/C++_Projects/3DGEngine/texture_trace.log", "w");
+#else
+        f = std::fopen("D:/C++_Projects/3DGEngine/texture_trace.log", "w");
+#endif
+        return f;
+    }();
+    if (!file) return;
+    std::va_list args; va_start(args, fmt);
+    std::vfprintf(file, fmt, args); va_end(args);
+    std::fputc('\n', file); std::fflush(file);
+}
+
 namespace {
 
 struct Image {
@@ -89,10 +110,13 @@ void FlipRowsRGBA(std::vector<unsigned char>& px, int w, int h) {
 } // anonymous namespace
 
 void Texture::Create(const unsigned char* rgba, int width, int height, bool smooth) {
+    TexTrace("Create: begin w=%d h=%d smooth=%d rgba=%p thisId=%u", width, height,
+             smooth ? 1 : 0, static_cast<const void*>(rgba), m_id);
     m_width  = width;
     m_height = height;
 
     glGenTextures(1, &m_id);
+    TexTrace("Create: glGenTextures -> id=%u", m_id);
     glBindTexture(GL_TEXTURE_2D, m_id);
 
     if (smooth) {
@@ -107,13 +131,29 @@ void Texture::Create(const unsigned char* rgba, int width, int height, bool smoo
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     }
+    // Reset pixel-unpack state to safe defaults. Other code (ImGui, image loaders, font
+    // atlases) can leave GL_UNPACK_ROW_LENGTH / alignment / skips set; if so, glTexImage2D
+    // would read past our tightly-packed buffer -- a segfault that grows with texture width
+    // (which is exactly why the 256-wide terrain albedo crashed while a 128-wide one didn't).
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);   // ensure we read client memory, not a PBO
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    glPixelStorei(GL_UNPACK_IMAGE_HEIGHT, 0);
+    glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
+    glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+    glPixelStorei(GL_UNPACK_SKIP_IMAGES, 0);
+    TexTrace("Create: params set, glTexImage2D...");
 
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, m_width, m_height, 0,
                  GL_RGBA, GL_UNSIGNED_BYTE, rgba);
-    if (smooth)
+    TexTrace("Create: glTexImage2D done");
+    if (smooth) {
         glGenerateMipmap(GL_TEXTURE_2D);
+        TexTrace("Create: glGenerateMipmap done");
+    }
 
     glBindTexture(GL_TEXTURE_2D, 0);
+    TexTrace("Create: end");
 }
 
 Texture::Texture(const std::string& path, bool smooth) {
@@ -176,6 +216,13 @@ void Texture::Update(const unsigned char* rgbaPixels, int width, int height) {
         return;   // size must match the existing texture
     }
     glBindTexture(GL_TEXTURE_2D, m_id);
+    // Same safe pixel-unpack state as Create() -- avoid reading past the buffer if some
+    // other code left GL_UNPACK_ROW_LENGTH / alignment set.
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
+    glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgbaPixels);
     glGenerateMipmap(GL_TEXTURE_2D);   // keep mip chain consistent
 }

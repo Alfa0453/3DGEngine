@@ -5,10 +5,20 @@
 namespace engine {
 namespace ai {
 namespace {
+constexpr float kVelocityResponseTime = 0.15f;
+
 glm::vec3 ClampLen(const glm::vec3& v, float maxLen) {
     const float l2 = glm::dot(v, v);
     if (l2 > maxLen * maxLen && l2 > 1e-12f) return v * (maxLen / std::sqrt(l2));
     return v;
+}
+
+glm::vec3 MatchVelocity(const Agent& a, const glm::vec3& desired) {
+    // Convert the velocity error into acceleration. Previously the raw velocity
+    // difference was integrated as acceleration, which made Max Force mostly
+    // ineffective and allowed agents to continue along an obsolete heading for
+    // close to a second after their target changed direction.
+    return ClampLen((desired - a.velocity) / kVelocityResponseTime, a.maxForce);
 }
 } // namespace
 
@@ -17,7 +27,7 @@ glm::vec3 Seek(const Agent& a, const glm::vec3& target) {
     const float len = glm::length(d);
     if (len < 1e-6f) return glm::vec3(0.0f);
     const glm::vec3 desired = (d / len) * a.maxSpeed;
-    return ClampLen(desired - a.velocity, a.maxForce);
+    return MatchVelocity(a, desired);
 }
 
 glm::vec3 Flee(const Agent& a, const glm::vec3& target) {
@@ -25,16 +35,16 @@ glm::vec3 Flee(const Agent& a, const glm::vec3& target) {
     const float len = glm::length(d);
     if (len < 1e-6f) return glm::vec3(0.0f);
     const glm::vec3 desired = (d / len) * a.maxSpeed;
-    return ClampLen(desired - a.velocity, a.maxForce);
+    return MatchVelocity(a, desired);
 }
 
 glm::vec3 Arrive(const Agent& a, const glm::vec3& target, float slowRadius, float stopRadius) {
     const glm::vec3 d = target - a.position;
     const float dist = glm::length(d);
-    if (dist < stopRadius) return ClampLen(-a.velocity, a.maxForce);   // brake to a stop
+    if (dist < stopRadius) return MatchVelocity(a, glm::vec3(0.0f));   // brake to a stop
     const float speed = (dist < slowRadius) ? a.maxSpeed * (dist / slowRadius) : a.maxSpeed;
     const glm::vec3 desired = (d / dist) * speed;
-    return ClampLen(desired - a.velocity, a.maxForce);
+    return MatchVelocity(a, desired);
 }
 
 glm::vec3 Pursue(const Agent& a, const glm::vec3& targetPos, const glm::vec3& targetVel) {

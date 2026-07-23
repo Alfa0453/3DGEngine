@@ -4,8 +4,12 @@
 
 #include <imgui.h>
 
+#include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <functional>
 
 using engine::ai::BtNodeType;
@@ -16,6 +20,38 @@ namespace {
 constexpr float kNodeW   = 150.0f;
 constexpr float kNodeH   = 56.0f;   // title + param area
 constexpr float kAttachH = 16.0f;   // per attached decorator/service row
+
+std::filesystem::path NormalizedAbsolutePath(const std::filesystem::path& path) {
+    std::error_code ec;
+    const std::filesystem::path absolute = std::filesystem::absolute(path, ec);
+    return (ec ? path : absolute).lexically_normal();
+}
+
+std::filesystem::path CanonicalBehaviorGraphPath(const std::filesystem::path& input) {
+    std::filesystem::path result = input;
+    constexpr const char* suffix = ".btgraph";
+    auto lower = [](std::string value) {
+        std::transform(value.begin(), value.end(), value.begin(),
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return value;
+    };
+
+    std::string filename = result.filename().string();
+    std::string lowered = lower(filename);
+    const std::string doubled = std::string(suffix) + suffix;
+    while (lowered.size() >= doubled.size()
+           && lowered.compare(lowered.size() - doubled.size(), doubled.size(), doubled) == 0) {
+        filename.erase(filename.size() - std::char_traits<char>::length(suffix));
+        lowered = lower(filename);
+    }
+    if (lowered.size() < std::char_traits<char>::length(suffix)
+        || lowered.compare(lowered.size() - std::char_traits<char>::length(suffix),
+                           std::char_traits<char>::length(suffix), suffix) != 0) {
+        filename += suffix;
+    }
+    result.replace_filename(filename);
+    return result;
+}
 
 float NodeHeight(const BtGraphNode& n) {
     return kNodeH + static_cast<float>(n.decorators.size() + n.services.size()) * kAttachH;
@@ -72,6 +108,8 @@ bool CreationMenu(BtNodeType* out) {
         item(BtNodeType::Flee);
         item(BtNodeType::Wander);
         item(BtNodeType::Attack);       // deal damage to the target
+        item(BtNodeType::FocusTarget);  // face a visible target persistently
+        item(BtNodeType::ClearFocus);   // release target-facing control
         item(BtNodeType::ScriptTask);   // your own C++ task
         item(BtNodeType::BbSetBool);    // blackboard writes (no code)
         item(BtNodeType::BbSetFloat);
@@ -109,19 +147,81 @@ ImU32 NodeColor(BtNodeType t, bool selected) {
 
 } // namespace
 
+void BehaviorGraphPanel::SetOutputDirectory(const std::string& dir) {
+    if (m_outputDir == dir) return;
+    m_outputDir = dir;
+    RefreshSavedGraphs();
+}
+
+void BehaviorGraphPanel::RefreshSavedGraphs() {
+    m_savedGraphs.clear();
+    if (m_outputDir.empty()) return;
+
+    const std::filesystem::path root = NormalizedAbsolutePath(m_outputDir);
+    std::error_code ec;
+    if (!std::filesystem::is_directory(root, ec)) return;
+
+    for (std::filesystem::recursive_directory_iterator it(root, ec), end;
+         it != end && !ec; it.increment(ec)) {
+        if (!it->is_regular_file(ec)) continue;
+        std::string extension = it->path().extension().string();
+        std::transform(extension.begin(), extension.end(), extension.begin(),
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (extension != ".btgraph") continue;
+
+        SavedGraph asset;
+        asset.fullPath = NormalizedAbsolutePath(it->path()).string();
+        asset.displayPath = std::filesystem::relative(it->path(), root, ec).generic_string();
+        if (ec) {
+            ec.clear();
+            asset.displayPath = it->path().filename().string();
+        }
+        m_savedGraphs.push_back(std::move(asset));
+    }
+    std::sort(m_savedGraphs.begin(), m_savedGraphs.end(),
+        [](const SavedGraph& a, const SavedGraph& b) {
+            return a.displayPath < b.displayPath;
+        });
+}
+
 void BehaviorGraphPanel::NewGraph() {
     m_graph = engine::ai::BehaviorGraph{};
     m_selected = -1;
     m_linkSource = -1;
     m_currentPath.clear();
+    std::snprintf(m_nameBuffer, sizeof(m_nameBuffer), "%s", "behavior");
     m_status = "New graph.";
 }
 
 bool BehaviorGraphPanel::SaveToFile(const std::string& path) {
+    const std::filesystem::path requestedTarget = NormalizedAbsolutePath(path);
+    const std::filesystem::path target = NormalizedAbsolutePath(
+        CanonicalBehaviorGraphPath(path));
+    std::error_code existenceError;
+    const bool replacingExisting = std::filesystem::is_regular_file(target, existenceError);
+    std::error_code directoryError;
+    if (!target.parent_path().empty()) {
+        std::filesystem::create_directories(target.parent_path(), directoryError);
+    }
+    if (directoryError) {
+        m_status = "Save failed: could not create the behavior-tree folder.";
+        return false;
+    }
     std::string err;
-    if (engine::ai::SaveBehaviorGraph(path, m_graph, &err)) {
-        m_currentPath = path;
-        m_status = "Saved " + path;
+    if (engine::ai::SaveBehaviorGraph(target.string(), m_graph, &err)) {
+        bool removedDuplicate = false;
+        if (requestedTarget != target) {
+            std::error_code duplicateError;
+            if (std::filesystem::is_regular_file(requestedTarget, duplicateError)) {
+                removedDuplicate = std::filesystem::remove(
+                    requestedTarget, duplicateError) && !duplicateError;
+            }
+        }
+        m_currentPath = target.string();
+        m_status = std::string(replacingExisting ? "Updated " : "Created ")
+            + target.filename().string();
+        if (removedDuplicate) m_status += " (removed duplicate extension)";
+        RefreshSavedGraphs();
         return true;
     }
     m_status = "Save failed: " + err;
@@ -129,14 +229,17 @@ bool BehaviorGraphPanel::SaveToFile(const std::string& path) {
 }
 
 bool BehaviorGraphPanel::LoadFromFile(const std::string& path) {
+    const std::filesystem::path target = NormalizedAbsolutePath(path);
     std::string err;
     engine::ai::BehaviorGraph loaded;
-    if (engine::ai::LoadBehaviorGraph(path, loaded, &err)) {
+    if (engine::ai::LoadBehaviorGraph(target.string(), loaded, &err)) {
         m_graph = std::move(loaded);
-        m_currentPath = path;
+        m_currentPath = target.string();
+        const std::string stem = target.stem().string();
+        std::snprintf(m_nameBuffer, sizeof(m_nameBuffer), "%s", stem.c_str());
         m_selected = -1;
         m_linkSource = -1;
-        m_status = "Loaded " + path;
+        m_status = "Loaded " + target.filename().string();
         return true;
     }
     m_status = "Load failed: " + err;
@@ -273,6 +376,36 @@ void BehaviorGraphPanel::DrawBlackboard() {
 }
 
 void BehaviorGraphPanel::DrawToolbar(bool* savedThisFrame) {
+    std::string openPreview = "Choose saved behavior tree...";
+    for (const SavedGraph& asset : m_savedGraphs) {
+        if (std::filesystem::path(asset.fullPath).lexically_normal()
+            == std::filesystem::path(m_currentPath).lexically_normal()) {
+            openPreview = std::filesystem::path(asset.displayPath).filename().string();
+            break;
+        }
+    }
+    ImGui::SetNextItemWidth(260.0f);
+    if (ImGui::BeginCombo("Saved Trees", openPreview.c_str())) {
+        if (m_savedGraphs.empty()) ImGui::TextDisabled("No .btgraph assets in Content");
+        for (const SavedGraph& asset : m_savedGraphs) {
+            const bool selected = std::filesystem::path(asset.fullPath).lexically_normal()
+                == std::filesystem::path(m_currentPath).lexically_normal();
+            const std::string filename =
+                std::filesystem::path(asset.displayPath).filename().string();
+            const std::string itemLabel = filename + "###" + asset.fullPath;
+            if (ImGui::Selectable(itemLabel.c_str(), selected)) {
+                LoadFromFile(asset.fullPath);
+            }
+            if (ImGui::IsItemHovered() && asset.displayPath != filename) {
+                ImGui::SetTooltip("Content/%s", asset.displayPath.c_str());
+            }
+            if (selected) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Refresh Trees")) RefreshSavedGraphs();
+
     // Node-type picker + Add.
     const char* current = engine::ai::BtNodeTypeName(static_cast<BtNodeType>(m_addType));
     ImGui::SetNextItemWidth(160.0f);
@@ -306,12 +439,22 @@ void BehaviorGraphPanel::DrawToolbar(bool* savedThisFrame) {
     ImGui::TextDisabled("|");
     ImGui::SameLine();
     ImGui::SetNextItemWidth(140.0f);
+    if (!m_currentPath.empty()) ImGui::BeginDisabled();
     ImGui::InputText("##name", m_nameBuffer, sizeof(m_nameBuffer));
+    if (!m_currentPath.empty()) {
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip("Save updates %s",
+                std::filesystem::path(m_currentPath).filename().string().c_str());
+        }
+    }
     ImGui::SameLine();
     if (ImGui::Button("Save")) {
-        std::string path = m_outputDir.empty() ? std::string(m_nameBuffer)
-                                               : m_outputDir + "/" + m_nameBuffer;
-        if (path.size() < 9 || path.substr(path.size() - 9) != ".btgraph") path += ".btgraph";
+        std::string path = m_currentPath;
+        if (path.empty()) {
+            path = m_outputDir.empty() ? std::string(m_nameBuffer)
+                                       : m_outputDir + "/" + m_nameBuffer;
+        }
         if (SaveToFile(path) && savedThisFrame) *savedThisFrame = true;
     }
 

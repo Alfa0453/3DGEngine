@@ -176,11 +176,20 @@ resolves contacts, and solves joints. Call it from `OnFixedUpdate`.
 
 ## 6. Gameplay
 
-**Scripts.** Attach a `NativeScriptComponent` (by class name) to an entity; write the
-class as an `engine::Script` subclass with `OnCreate` / `OnUpdate(dt)` /
-`OnFixedUpdate(dt)` / `OnDestroy` and a typed `ScriptContext` for reaching the entity,
-its components, input, and audio. Register the class in the global registry so the name
-resolves:
+**Scripts.** In the Inspector's Script component, enter a class name, choose a template,
+and click **Create Script**. The editor creates a header-only `engine::Script` subclass
+under `Content/Scripts`, attaches it to the selected object, adds its default
+fields, and updates the shared editor/player registry. Expand **Script Source** to edit
+and save its `OnCreate` / `OnUpdate(dt)` / `OnFixedUpdate(dt)` / `OnDestroy` logic from
+inside the editor, or double-click a script under the Assets panel's `Scripts` folder
+to open the standalone Script Editor. Choose the built-in editor, VS Code, Visual
+Studio, Rider, or a custom executable from **Code Editor**. **Compile Scripts &
+Restart** saves the script and scene, runs the native compiler after the editor closes,
+builds both the editor and player, relaunches the editor, and records a persistent
+compiler log. The rebuilt class is then available to Editor Play and the standalone
+player.
+
+Scripts created outside this workflow can still be registered manually:
 
 ```cpp
 engine::ScriptRegistry::Instance().Register("Coin", [] { return std::make_unique<Coin>(); });

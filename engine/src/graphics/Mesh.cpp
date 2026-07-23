@@ -68,9 +68,49 @@ Mesh &Mesh::operator=(Mesh &&other) noexcept
 }
 void Mesh::Draw() const
 {
+    if (!m_vao || !m_indexCount) return;   // empty (not yet uploaded)
     glBindVertexArray(m_vao);
     glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(m_indexCount), GL_UNSIGNED_INT, nullptr);
+    // Leave no VAO bound: otherwise a later glDeleteVertexArrays on THIS still-bound VAO
+    // (e.g. when a terrain/water mesh is rebuilt after being drawn) hits a driver edge
+    // case that can crash. Unbinding here keeps deletion happening on an unbound VAO.
+    glBindVertexArray(0);
 }
+void Mesh::Upload(const std::vector<float>& vertices,
+                  const std::vector<std::uint32_t>& indices,
+                  const VertexLayout& layout)
+{
+    if (!m_vao) glGenVertexArrays(1, &m_vao);
+    if (!m_vbo) glGenBuffers(1, &m_vbo);
+    if (!m_ebo) glGenBuffers(1, &m_ebo);
+
+    glBindVertexArray(m_vao);
+
+    glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
+    glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(vertices.size() * sizeof(float)),
+                 vertices.data(), GL_DYNAMIC_DRAW);   // reallocates; safe on size changes
+
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_ebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+                 static_cast<GLsizeiptr>(indices.size() * sizeof(std::uint32_t)),
+                 indices.data(), GL_DYNAMIC_DRAW);
+
+    const GLsizei stride = static_cast<GLsizei>(layout.Stride());
+    std::size_t   offset = 0;
+    unsigned int  location = 0;
+    for (const VertexAttribute& attr : layout.Attributes()) {
+        glEnableVertexAttribArray(location);
+        glVertexAttribPointer(location, static_cast<GLint>(attr.componentCount),
+                              GL_FLOAT, GL_FALSE, stride,
+                              reinterpret_cast<const void*>(offset));
+        offset += attr.componentCount * sizeof(float);
+        ++location;
+    }
+
+    m_indexCount = static_cast<unsigned int>(indices.size());
+    glBindVertexArray(0);
+}
+
 void Mesh::UpdateVertices(const std::vector<float>& vertices)
 {
     glBindBuffer(GL_ARRAY_BUFFER, m_vbo);

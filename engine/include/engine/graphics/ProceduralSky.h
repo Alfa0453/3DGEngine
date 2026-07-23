@@ -14,6 +14,18 @@ namespace engine {
 // new sample each frame.
 class ProceduralSky {
 public:
+    struct CloudSettings {
+        bool enabled = false;
+        float coverage = 0.45f;
+        float density = 0.75f;
+        float scale = 1.35f;
+        float softness = 0.18f;
+        float windSpeed = 0.025f;
+        float windDirectionDegrees = 25.0f;
+        float horizonHeight = 0.08f;
+        glm::vec3 color{1.0f, 0.98f, 0.94f};
+    };
+
     ProceduralSky();
 
     ProceduralSky(const ProceduralSky&)            = delete;
@@ -22,8 +34,9 @@ public:
     ProceduralSky& operator=(ProceduralSky&&) noexcept = default;
 
     // Draw behind the scene. tonemap=false outputs linear HDR for a post pass.
-    void Draw(const glm::mat4& view, const glm::mat4& projectio,
-              const DayNightCycle::Sample& sky, bool tonemap = true);
+    void Draw(const glm::mat4& view, const glm::mat4& projection,
+              const DayNightCycle::Sample& sky, bool tonemap = true,
+              const CloudSettings& clouds = {});
 
 private:
     Mesh   m_cube;

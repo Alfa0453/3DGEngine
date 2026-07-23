@@ -62,10 +62,13 @@ struct AgentContext {
     // Outputs, read by the host after Tick().
     glm::vec3 steer{0.0f};                   // desired steering acceleration this tick
     glm::vec3 facing{0.0f, 0.0f, 1.0f};
+    bool      focusTarget = false;            // persistent override controlled by focus tasks
 
     // Runtime path scratch used by Chase/MoveTo actions.
     std::vector<glm::vec3> path;
     std::size_t pathIndex = 0;
+    glm::vec3   pathGoal{0.0f};
+    bool        pathGoalValid = false;
     std::size_t patrolIndex = 0;
     float       repathTimer = 0.0f;
 
@@ -115,6 +118,8 @@ enum class BtNodeType {
     HealthBelow,      // condition/decorator: Success if self's HP fraction < param
     TargetDead,       // condition/decorator: Success if the chase target's Health is dead
     Attack,           // task: deal `param` damage to the target if within reach radius
+    FocusTarget,      // task: face a visible target until ClearFocus runs
+    ClearFocus,       // task: release the target-facing override
 
     Count
 };

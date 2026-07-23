@@ -93,3 +93,25 @@ else()
     target_compile_options(runtime_ai_tests PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 add_test(NAME runtime_ai_regression COMMAND runtime_ai_tests)
+
+add_executable(image_decode_tests
+    image_decode_tests.cpp)
+target_link_libraries(image_decode_tests PRIVATE engine)
+if(MSVC)
+    target_compile_options(image_decode_tests PRIVATE /W4)
+else()
+    target_compile_options(image_decode_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME image_decode_regression COMMAND image_decode_tests)
+
+add_executable(editor_assets_tests
+    editor_assets_tests.cpp
+    ${CMAKE_SOURCE_DIR}/editor/src/EditorAssets.cpp)
+target_include_directories(editor_assets_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/editor/include)
+if(MSVC)
+    target_compile_options(editor_assets_tests PRIVATE /W4)
+else()
+    target_compile_options(editor_assets_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME editor_assets_regression COMMAND editor_assets_tests)

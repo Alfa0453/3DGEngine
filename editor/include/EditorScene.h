@@ -6,9 +6,11 @@
 #include <engine/gameplay/GameplayComponents.h>
 #include <engine/gameplay/Script.h>
 #include <engine/physics/PhysicsComponents.h>
+#include <engine/ai/AiMovement.h>
 
 #include <glm/glm.hpp>
 
+#include <array>
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -19,7 +21,7 @@ class Mesh;
 
 class EditorScene {
 public:
-    enum class Primitive { Plane, Cube, Sphere, Capsule, Cylinder, Cone, Pyramid, Torus, Staircase };
+    enum class Primitive { Plane, Cube, Sphere, Capsule, Cylinder, Cone, Pyramid, Torus, Staircase, Empty };
 
     enum class TriggerActionMode {
         None = 0,
@@ -82,6 +84,12 @@ public:
     };
 
     struct AnimationStateNode {
+        struct BlendSample {
+            int clipIndex = 0;
+            std::string clipName;
+            float value = 0.0f;
+            float valueY = 0.0f;
+        };
         std::string name = "State";
         int clipIndex = 0;
         std::string clipName;
@@ -93,6 +101,10 @@ public:
         float blendMin = 0.0f;
         float blendMax = 1.0f;
         bool rootMotion = false;
+        std::vector<BlendSample> blendSamples;
+        std::string blendParameterY;
+        bool blendSpace2D = false;
+        bool synchronizeBlendSpace = true;
     };
 
     struct AnimationParameter {
@@ -133,6 +145,9 @@ public:
         std::string modelAssetPath;
         std::string materialAssetPath;
         std::unordered_map<std::string, std::string> materialParameterOverrides;
+        glm::vec3 modelOrientationEuler{0.0f};   // render-only model rotation (deg); collider unaffected
+        glm::vec3 modelOffsetPosition{0.0f};     // render-only model position offset; collider unaffected
+        glm::vec3 modelOffsetScale{1.0f};        // render-only model scale (about model centre)
         bool skeletalModel = false;
         int animationClipIndex = 0;
         std::string animationClipName;
@@ -241,6 +256,12 @@ public:
         // acquires the nearest agent on a different non-zero team as its chase target.
         int  navAgentTeam = 0;
         bool navAgentAutoTarget = false;
+        engine::ai::AiMovementMode navMovementMode = engine::ai::AiMovementMode::Grounded;
+        float navMovementGravity = -9.81f;
+        float navMovementMaxFallSpeed = 35.0f;
+        float navMovementGroundProbe = 0.25f;
+        float navMovementStepHeight = 0.35f;
+        float navMovementMaxSlope = 50.0f;
         // Procedural terrain (fBm heightmap). When set, the object renders a generated
         // terrain mesh (grass/rock/snow height coloring) instead of its primitive.
         bool  isTerrain = false;
@@ -252,6 +273,30 @@ public:
         float terrainFrequency = 2.0f;
         std::vector<float> terrainHeights;          // sculpted heights (empty = pure noise)
         std::vector<unsigned char> terrainPaint;    // per-vertex paint layer (0 = auto)
+        // Optional material assigned to each paint layer 1..5 (index 0..4). Empty = use
+        // the default palette colour for that layer. The painted region takes on the
+        // material's representative albedo colour.
+        std::array<std::string, 5> terrainLayerMaterials{};
+
+        // Instanced procedural grass, grown only where the Grass layer (1) is painted.
+        // The grass* fields below are the "active" settings applied to NEWLY painted grass.
+        bool  grassEnabled = false;
+        float grassDensity = 2.0f;         // blades per square unit (before the paint mask)
+        float grassHeight = 0.6f;
+        float grassWindStrength = 0.18f;   // wind is global (shared by all grass)
+        float grassWindSpeed = 1.4f;
+        glm::vec3 grassBaseColor{0.16f, 0.34f, 0.12f};   // root
+        glm::vec3 grassTipColor{0.42f, 0.68f, 0.28f};    // tip
+        // Per-region grass: each painted grass vertex records which frozen style it used,
+        // so changing the active settings never alters grass already on the field.
+        struct GrassStyleEntry {
+            float density = 2.0f;
+            float height = 0.6f;
+            glm::vec3 base{0.16f, 0.34f, 0.12f};
+            glm::vec3 tip{0.42f, 0.68f, 0.28f};
+        };
+        std::vector<GrassStyleEntry> terrainGrassPalette;    // frozen styles (slot 1..N)
+        std::vector<unsigned char>   terrainGrassStyle;      // per-vertex slot (0 = active, 1..N)
 
         // Water body (animated Gerstner-wave surface). Rendered by the water pass,
         // not as a mesh; see EditorApp::DrawWaterBodies. Object.transform.position.xz
@@ -267,6 +312,25 @@ public:
         float waterFresnel = 4.0f;
         float waterSpecular = 1.2f;
         float waterShininess = 220.0f;
+        // Surface motion (fed to engine::WaterConfig). Presets (lake/ocean/river) tune
+        // these so each water type moves differently: calm lakes, choppy oceans, flowing
+        // rivers. waterType is a label only (0 custom, 1 lake, 2 ocean, 3 river).
+        int   waterType = 0;
+        float waterSeaHeight = 0.55f;
+        float waterSeaChoppy = 3.2f;
+        float waterSeaSpeed  = 0.8f;
+        float waterSeaFreq   = 0.10f;
+        float waterFoam      = 0.55f;
+        // A water body may follow a spline (by name) for directional flow -- see below.
+        std::string waterFlowSpline;
+
+        // Spline (Catmull-Rom path). General purpose: river flow, motion paths, camera
+        // rails, spawn lanes, etc. Control points are world-space. splineType is a label
+        // (0 path, 1 river, 2 rail). Rendered as a curve + handles by the editor.
+        bool  isSpline = false;
+        bool  splineClosed = false;
+        int   splineType = 0;
+        std::vector<glm::vec3> splinePoints;
     };
 
     struct ObjectSnapshot {
@@ -349,8 +413,23 @@ public:
 
         float timeOfDay = 0.46f;
         float skyLightIntensity = 1.0f;
+        bool skylightOcclusion = true;
+        float skylightOcclusionStrength = 0.90f;
+        float minimumSkylight = 0.06f;
         bool driveSunLight = true;
         float sunIntensity = 1.0f;
+        bool clouds = true;
+        float cloudCoverage = 0.45f;
+        float cloudDensity = 0.75f;
+        float cloudScale = 1.35f;
+        float cloudSoftness = 0.18f;
+        float cloudWindSpeed = 0.025f;
+        float cloudWindDirection = 25.0f;
+        float cloudHorizonHeight = 0.08f;
+        glm::vec3 cloudColor{1.0f, 0.98f, 0.94f};
+        bool cloudShadows = true;
+        float cloudShadowStrength = 0.45f;
+        float cloudShadowScale = 0.035f;
         bool showLightGuides = true;
         bool selectedLightGuideOnly = true;
         bool ibl = true;
@@ -368,6 +447,7 @@ public:
         bool pointShadows = true;
         bool spotShadows = true;
         float shadowSoftness = 2.5f;
+        float shadowDistance = 300.0f;
         bool  fog = true;
         glm::vec3 fogColor{0.58f, 0.68f, 0.80f};
         float fogDensity = 0.008f;
@@ -439,6 +519,7 @@ public:
     bool Redo(const engine::Mesh& cube, const engine::Mesh& plane, const engine::Mesh& sphere, const engine::Mesh& capsule, const engine::Mesh& cylinder, const engine::Mesh& cone, const engine::Mesh& pyramid, const engine::Mesh& torus, const engine::Mesh& staircase);
     Snapshot CreateSnapshot();
     void RestoreFromSnapshot(const Snapshot& snapshot, const engine::Mesh& cube, const engine::Mesh& plane, const engine::Mesh& sphere, const engine::Mesh& capsule, const engine::Mesh& cylinder, const engine::Mesh& cone, const engine::Mesh& pyramid, const engine::Mesh& torus, const engine::Mesh& staircase);
+    void AddEmpty(const engine::Mesh& placeholderMesh);
     void AddCube(const engine::Mesh& cube);
     void AddPlane(const engine::Mesh& plane);
     void AddSphere(const engine::Mesh& sphere);
@@ -464,6 +545,12 @@ public:
     bool SetSelectedColor(const glm::vec3& color);
     bool SetSelectedPrimitive(Primitive primitive, const engine::Mesh& mesh);
     bool SetSelectedModelAsset(const std::string& path);
+    bool SetSelectedModelOrientation(const glm::vec3& eulerDegrees);
+    // Render-only model offset transform (position + Euler rotation + scale). The
+    // collider/controller read the object Transform, which is left untouched.
+    bool SetSelectedModelOffset(const glm::vec3& position,
+                                const glm::vec3& eulerDegrees,
+                                const glm::vec3& scale);
     bool SetSelectedMaterialAsset(const std::string& path);
     bool SetSelectedMaterialParameterOverride(const std::string& name,
                                               const std::string& value);
@@ -545,14 +632,38 @@ public:
                              const std::string& targetName, float visionRange, float visionHalfAngle);
     bool SetSelectedNavAgentBrain(const std::string& brainAsset);
     bool SetSelectedNavAgentTeam(int team, bool autoTarget);
+    bool SetSelectedNavAgentMovement(engine::ai::AiMovementMode mode, float gravity,
+                                     float maxFallSpeed, float groundProbe,
+                                     float stepHeight, float maxSlopeDegrees);
     bool SetSelectedTerrain(bool enabled, int res, float size, float maxHeight,
                             int seed, int octaves, float frequency);
     bool SetSelectedTerrainHeights(std::vector<float> heights);   // sculpt result (no undo)
     bool SetSelectedTerrainPaint(std::vector<unsigned char> paint);   // paint result (no undo)
+    // Assign (or clear, with an empty path) the material painted for layer 1..5.
+    bool SetSelectedTerrainLayerMaterial(int layer, const std::string& materialPath);
+    // Grass (instanced blades on the painted grass layer).
+    bool SetSelectedTerrainGrass(bool enabled, float density, float height,
+                                 float windStrength, float windSpeed,
+                                 const glm::vec3& baseColor, const glm::vec3& tipColor);
+    // Per-region grass style: freeze the active settings into a palette slot (deduped) and
+    // read/write the per-vertex slot map so painting new grass never changes old grass.
+    int  EnsureActiveGrassStyleSlot();                     // returns 1-based slot
+    std::vector<unsigned char> SelectedTerrainGrassStyle();
+    bool SetSelectedTerrainGrassStyle(std::vector<unsigned char> style);
     bool SetSelectedWater(float size, int resolution, float level,
                           const glm::vec3& shallow, const glm::vec3& deep,
                           const glm::vec3& reflection, float transparency,
                           float fresnel, float specular, float shininess);
+    // Surface motion + foam (lake/ocean/river presets differ here). waterType is a label.
+    bool SetSelectedWaterWaves(float seaHeight, float seaChoppy, float seaSpeed,
+                               float seaFreq, float foam, int waterType);
+    bool SetSelectedWaterFlowSpline(const std::string& splineName);   // river follows a spline
+
+    // Spline authoring (Catmull-Rom path).
+    bool SetSelectedSpline(bool enabled, bool closed, int type);
+    bool AddSelectedSplinePoint(const glm::vec3& point);
+    bool SetSelectedSplinePoint(std::size_t index, const glm::vec3& point);
+    bool RemoveSelectedSplinePoint(std::size_t index);
     bool AddSelectedPatrolPoint(const glm::vec3& point);
     bool ClearSelectedPatrolPoints();
     bool SetSelectedScriptFields(const std::vector<ScriptField>& fields);

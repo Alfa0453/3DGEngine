@@ -1,4 +1,5 @@
 #include "game/GameModule.h"
+#include "game/EditorGeneratedScripts.h"
 
 #include <engine/gameplay/Script.h>   // engine::ScriptRegistry, engine::Script
 #include <engine/ai/BtScript.h>       // engine::ai::BtScriptRegistry
@@ -34,6 +35,7 @@ void RegisterGameModule() {
 
     // --- Gameplay scripts ---------------------------------------------------
     scripts.Register("Spinner", [] { return std::make_unique<Spinner>(); });
+    RegisterEditorGeneratedScripts(scripts);
     // scripts.Register("FireballCaster",     [] { return std::make_unique<FireballCaster>(); });
     // scripts.Register("FireballProjectile", [] { return std::make_unique<FireballProjectile>(); });
 

@@ -25,6 +25,12 @@ struct SkinnedLighting {
     const CascadedShadow* cascade = nullptr;   // sun (cascade) shadows
     const IBL*            ibl     = nullptr;    // image-based ambient
     float shadowSoftness = 2.5f;
+    bool skylightOcclusion = false;
+    float skylightOcclusionStrength = 0.90f, minimumSkylight = 0.06f;
+    bool cloudShadows = false;
+    float cloudShadowStrength = 0.45f, cloudShadowScale = 0.035f;
+    float cloudCoverage = 0.45f, cloudDensity = 0.75f, cloudSoftness = 0.18f;
+    float cloudWindSpeed = 0.025f, cloudWindDirectionDegrees = 25.0f;
     bool  tonemap = false;                      // false = linear HDR (for PostProcess)
     bool  fog = false;
     glm::vec3 fogColor{0.6f, 0.7f, 0.8f};

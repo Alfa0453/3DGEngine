@@ -18,6 +18,9 @@ namespace engine {
 namespace {
 
 const Mesh* MeshForPrimitive(const std::string& primitive, const RuntimeSceneLoader::PrimitiveMeshes& meshes) {
+    if (primitive == "Empty") {
+        return nullptr;
+    }
     if (primitive == "Cube") {
         return meshes.cube;
     }
@@ -96,11 +99,11 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
     std::string magic;
     int version = 0;
     in >> magic >> version;
-    if (magic != "3DGRuntimeScene" || version < 1 || version > 51) {
+    if (magic != "3DGRuntimeScene" || version < 1 || version > 61) {
         if (error) {
             *error = "Runtime scene file has an unknown format: "
                 + magic + " " + std::to_string(version)
-                + " (expected 3DGRuntimeScene 1..51).";
+                + " (expected 3DGRuntimeScene 1..61).";
         }
         return false;
     }
@@ -116,6 +119,49 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
         std::istringstream record(line);
         std::string recordType;
         record >> recordType;
+        if (recordType == "skylight_occlusion" && version >= 54) {
+            int enabled = 1;
+            record >> enabled
+                   >> loaded.environment.skylightOcclusionStrength
+                   >> loaded.environment.minimumSkylight;
+            if (!record) {
+                if (error) *error = "Runtime scene contains invalid skylight occlusion settings.";
+                return false;
+            }
+            loaded.environment.skylightOcclusion = enabled != 0;
+            continue;
+        }
+        if (recordType == "clouds" && version >= 52) {
+            int enabled = 1;
+            record >> enabled
+                   >> loaded.environment.cloudCoverage
+                   >> loaded.environment.cloudDensity
+                   >> loaded.environment.cloudScale
+                   >> loaded.environment.cloudSoftness
+                   >> loaded.environment.cloudWindSpeed
+                   >> loaded.environment.cloudWindDirection
+                   >> loaded.environment.cloudHorizonHeight
+                   >> loaded.environment.cloudColor.r
+                   >> loaded.environment.cloudColor.g
+                   >> loaded.environment.cloudColor.b;
+            if (!record) {
+                if (error) *error = "Runtime scene contains an invalid clouds record.";
+                return false;
+            }
+            loaded.environment.clouds = enabled != 0;
+            if (version >= 53) {
+                int shadows = 1;
+                record >> shadows
+                       >> loaded.environment.cloudShadowStrength
+                       >> loaded.environment.cloudShadowScale;
+                loaded.environment.cloudShadows = shadows != 0;
+            }
+            if (!record) {
+                if (error) *error = "Runtime scene contains invalid cloud shadow settings.";
+                return false;
+            }
+            continue;
+        }
         if (recordType == "trigger_action" && version >= 51) {
             Scene::TriggerActionDesc action;
             int lockInput = 1, skippable = 1;
@@ -223,6 +269,17 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             agent.patrolPoints.resize(patrolCount);
             for (glm::vec3& point : agent.patrolPoints)
                 record >> point.x >> point.y >> point.z;
+            if (version >= 57) {
+                int movementMode = 0;
+                record >> movementMode
+                       >> agent.movementGravity
+                       >> agent.movementMaxFallSpeed
+                       >> agent.movementGroundProbe
+                       >> agent.movementStepHeight
+                       >> agent.movementMaxSlope;
+                agent.movementMode = movementMode == static_cast<int>(ai::AiMovementMode::Flying)
+                    ? ai::AiMovementMode::Flying : ai::AiMovementMode::Grounded;
+            }
             if (!record || agent.entityName.empty()) {
                 if (error) *error = "Runtime scene contains an invalid navigation agent.";
                 return false;
@@ -232,6 +289,11 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             agent.reachRadius = std::max(agent.reachRadius, 0.05f);
             agent.repathInterval = std::max(agent.repathInterval, 0.05f);
             agent.visionRange = std::max(agent.visionRange, 0.0f);
+            agent.movementGravity = std::min(agent.movementGravity, 0.0f);
+            agent.movementMaxFallSpeed = std::max(agent.movementMaxFallSpeed, 0.0f);
+            agent.movementGroundProbe = std::max(agent.movementGroundProbe, 0.02f);
+            agent.movementStepHeight = std::max(agent.movementStepHeight, 0.0f);
+            agent.movementMaxSlope = std::clamp(agent.movementMaxSlope, 0.0f, 89.0f);
             loaded.navAgents.push_back(std::move(agent));
             continue;
         }
@@ -423,6 +485,11 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                 if (record) loaded.environment.hudAsset = hud;
                 else record.clear();
             }
+            if (version >= 56) {
+                record >> loaded.environment.shadowDistance;
+                loaded.environment.shadowDistance = std::clamp(
+                    loaded.environment.shadowDistance, 10.0f, 5000.0f);
+            }
             loaded.environment.driveSunLight = driveSun != 0;
             loaded.environment.fog = fog != 0;
             loaded.environment.physicsBroadPhase = physicsBroadPhase != 0;
@@ -440,7 +507,7 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             }
             Scene::LightDesc desc;
             std::string typeName;
-            record >> desc.name >> typeName
+            record >> std::quoted(desc.name) >> typeName
                    >> desc.position.x >> desc.position.y >> desc.position.z
                    >> desc.light.color.r >> desc.light.color.g >> desc.light.color.b
                    >> desc.light.intensity
@@ -462,14 +529,14 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
         }
 
         EntityDesc entity;
-        record >> entity.primitive >> entity.name
+        record >> entity.primitive >> std::quoted(entity.name)
                >> entity.position.x >> entity.position.y >> entity.position.z
                >> entity.scale.x >> entity.scale.y >> entity.scale.z
                >> entity.rotation.w >> entity.rotation.x >> entity.rotation.y >> entity.rotation.z
                >> entity.color.r >> entity.color.g >> entity.color.b;
 
         if (version >= 2) {
-            record >> entity.modelPath >> entity.materialPath;
+            record >> std::quoted(entity.modelPath) >> std::quoted(entity.materialPath);
             if (entity.modelPath == "-") {
                 entity.modelPath.clear();
             }
@@ -477,13 +544,26 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                 entity.materialPath.clear();
             }
         }
+        if (version >= 60) {
+            record >> entity.modelOrientationEuler.x
+                   >> entity.modelOrientationEuler.y
+                   >> entity.modelOrientationEuler.z;
+        }
+        if (version >= 61) {
+            record >> entity.modelOffsetPosition.x
+                   >> entity.modelOffsetPosition.y
+                   >> entity.modelOffsetPosition.z
+                   >> entity.modelOffsetScale.x
+                   >> entity.modelOffsetScale.y
+                   >> entity.modelOffsetScale.z;
+        }
         if (version >= 17) {
             int skeletalModel = 0;
             int animationAutoplay = 1;
             int animationLoop = 1;
             record >> skeletalModel
                    >> entity.animationClipIndex
-                   >> entity.animationClipName
+                   >> std::quoted(entity.animationClipName)
                    >> animationAutoplay
                    >> animationLoop
                    >> entity.animationSpeed;
@@ -500,11 +580,11 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             int animationLocomotionEnabled = 0;
             record >> animationLocomotionEnabled
                    >> entity.animationIdleClipIndex
-                   >> entity.animationIdleClipName
+                   >> std::quoted(entity.animationIdleClipName)
                    >> entity.animationWalkClipIndex
-                   >> entity.animationWalkClipName
+                   >> std::quoted(entity.animationWalkClipName)
                    >> entity.animationRunClipIndex
-                   >> entity.animationRunClipName
+                   >> std::quoted(entity.animationRunClipName)
                    >> entity.animationWalkAt
                    >> entity.animationRunAt;
             entity.animationLocomotionEnabled = animationLocomotionEnabled != 0;
@@ -530,7 +610,7 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                 AnimationEventDesc event;
                 record >> event.clipIndex
                        >> event.time
-                       >> event.name;
+                       >> std::quoted(event.name);
                 event.clipIndex = std::max(event.clipIndex, 0);
                 event.time = std::max(event.time, 0.0f);
                 if (event.name == "-") {
@@ -544,10 +624,10 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             record >> profileCount;
             for (std::size_t i = 0; i < profileCount; ++i) {
                 AnimationActionProfileDesc profile;
-                record >> profile.name
+                record >> std::quoted(profile.name)
                        >> profile.clipIndex
-                       >> profile.clipName
-                       >> profile.maskRootBone
+                       >> std::quoted(profile.clipName)
+                       >> std::quoted(profile.maskRootBone)
                        >> profile.fadeIn
                        >> profile.fadeOut
                        >> profile.speed;
@@ -573,22 +653,41 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             for (std::size_t i = 0; i < stateCount; ++i) {
                 AnimationStateDesc state;
                 int loop = 1;
-                record >> state.name
+                record >> std::quoted(state.name)
                        >> state.clipIndex
-                       >> state.clipName
+                       >> std::quoted(state.clipName)
                        >> loop
                        >> state.speed;
                 if (version >= 24) {
                     int rootMotion = 0;
                     record >> state.blendClipIndex
-                           >> state.blendClipName
-                           >> state.blendParameter
+                           >> std::quoted(state.blendClipName)
+                           >> std::quoted(state.blendParameter)
                            >> state.blendMin
                            >> state.blendMax
                            >> rootMotion;
                     if (state.blendClipName == "-") state.blendClipName.clear();
                     if (state.blendParameter == "-") state.blendParameter.clear();
                     state.rootMotion = rootMotion != 0;
+                    if (version >= 58) {
+                        if (version >= 59) {
+                            int is2D = 0, synchronize = 1;
+                            record >> is2D >> std::quoted(state.blendParameterY) >> synchronize;
+                            if (state.blendParameterY == "-") state.blendParameterY.clear();
+                            state.blendSpace2D = is2D != 0;
+                            state.synchronizeBlendSpace = synchronize != 0;
+                        }
+                        std::size_t sampleCount = 0;
+                        record >> sampleCount;
+                        for (std::size_t sampleIndex = 0; sampleIndex < sampleCount; ++sampleIndex) {
+                            AnimationStateDesc::BlendSampleDesc sample;
+                            record >> sample.clipIndex >> std::quoted(sample.clipName) >> sample.value;
+                            if (version >= 59) record >> sample.valueY;
+                            if (sample.clipName == "-") sample.clipName.clear();
+                            sample.clipIndex = std::max(sample.clipIndex, 0);
+                            state.blendSamples.push_back(std::move(sample));
+                        }
+                    }
                 }
                 if (state.name == "-") {
                     state.name.clear();
@@ -607,7 +706,7 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                 record >> parameterCount;
                 for (std::size_t i = 0; i < parameterCount; ++i) {
                     AnimationParameterDesc parameter;
-                    record >> parameter.name >> parameter.type >> parameter.defaultValue;
+                    record >> std::quoted(parameter.name) >> parameter.type >> parameter.defaultValue;
                     if (parameter.name == "-") parameter.name.clear();
                     parameter.type = std::clamp(parameter.type, 0, 2);
                     entity.animationParameters.push_back(parameter);
@@ -618,9 +717,9 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             record >> transitionCount;
             for (std::size_t i = 0; i < transitionCount; ++i) {
                 AnimationTransitionDesc transition;
-                record >> transition.fromState
-                       >> transition.toState
-                       >> transition.parameter
+                record >> std::quoted(transition.fromState)
+                       >> std::quoted(transition.toState)
+                       >> std::quoted(transition.parameter)
                        >> transition.compare
                        >> transition.threshold
                        >> transition.fade;
@@ -709,6 +808,9 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             else
                 entity.collider.shape = ecs::ColliderShape::Sphere;
         }
+        if (version >= 55) {
+            record >> entity.collider.layer >> entity.collider.mask;
+        }
         if (version >= 11) {
             int rotatorEnabled = 0;
             record >> rotatorEnabled
@@ -741,8 +843,8 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
         if (version >= 14) {
             int scriptEnabled = 0;
             record >> scriptEnabled
-                   >> entity.scriptClassName
-                   >> entity.scriptPath;
+                   >> std::quoted(entity.scriptClassName)
+                   >> std::quoted(entity.scriptPath);
             if (entity.scriptClassName == "-") {
                 entity.scriptClassName.clear();
             }
@@ -756,7 +858,7 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                 for (std::size_t i = 0; i < scriptFieldCount; ++i) {
                     ScriptField field;
                     int fieldType = 0;
-                    record >> field.name >> fieldType >> field.value;
+                    record >> std::quoted(field.name) >> fieldType >> std::quoted(field.value);
                     if (field.name == "-") {
                         field.name.clear();
                     }
@@ -782,7 +884,7 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             int audioLoop = 0;
             int audioAutoplay = 1;
             record >> audioSourceEnabled
-                   >> entity.audioSource.path
+                   >> std::quoted(entity.audioSource.path)
                    >> entity.audioSource.volume
                    >> entity.audioSource.pitch
                    >> audioSpatial
@@ -806,7 +908,7 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
         if (version >= 27) {
             int enterAudioAction = 0;
             int exitAudioAction = 0;
-            record >> entity.triggerAudio.targetName >> enterAudioAction >> exitAudioAction;
+            record >> std::quoted(entity.triggerAudio.targetName) >> enterAudioAction >> exitAudioAction;
             if (entity.triggerAudio.targetName == "-") entity.triggerAudio.targetName.clear();
             enterAudioAction = std::clamp(enterAudioAction,
                 static_cast<int>(ecs::AudioAction::None), static_cast<int>(ecs::AudioAction::Stop));
@@ -921,7 +1023,7 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             if (version >= 33) {
                 int enterParticleAction = 0;
                 int exitParticleAction = 0;
-                record >> entity.triggerParticle.targetName >> enterParticleAction >> exitParticleAction;
+                record >> std::quoted(entity.triggerParticle.targetName) >> enterParticleAction >> exitParticleAction;
                 if (entity.triggerParticle.targetName == "-") entity.triggerParticle.targetName.clear();
                 enterParticleAction = std::clamp(enterParticleAction, 0,
                     static_cast<int>(ParticleAction::Clear));
@@ -1064,7 +1166,8 @@ bool RuntimeSceneLoader::Instantiate(const Scene &scene, ecs::Registry &registry
 
     for (const EntityDesc& desc : scene.entities) {
         const Mesh* mesh = MeshForPrimitive(desc.primitive, meshes);
-        if (!mesh) {
+        const bool emptyObject = desc.primitive == "Empty";
+        if (!mesh && !emptyObject) {
             if (error) {
                 *error = "Runtime scene references unsupported primitive: " + desc.primitive;
             }
@@ -1078,10 +1181,12 @@ bool RuntimeSceneLoader::Instantiate(const Scene &scene, ecs::Registry &registry
             desc.scale,
             desc.rotation
         });
-        registry.Add<ecs::MeshRenderer>(entity, ecs::MeshRenderer{
-            mesh,
-            desc.color
-        });
+        if (mesh) {
+            registry.Add<ecs::MeshRenderer>(entity, ecs::MeshRenderer{
+                mesh,
+                desc.color
+            });
+        }
         if (!desc.modelPath.empty() && desc.skeletalModel) {
             std::vector<ecs::SkinnedModelAsset::Notify> notifies;
             notifies.reserve(desc.animationEvents.size());
@@ -1117,7 +1222,7 @@ bool RuntimeSceneLoader::Instantiate(const Scene &scene, ecs::Registry &registry
                 if (state.name.empty()) {
                     continue;
                 }
-                states.push_back(ecs::SkinnedModelAsset::AnimationState{
+                ecs::SkinnedModelAsset::AnimationState runtimeState{
                     state.name,
                     state.clipIndex,
                     state.clipName,
@@ -1129,7 +1234,15 @@ bool RuntimeSceneLoader::Instantiate(const Scene &scene, ecs::Registry &registry
                     state.blendMin,
                     state.blendMax,
                     state.rootMotion
-                });
+                };
+                for (const auto& sample : state.blendSamples) {
+                    runtimeState.blendSamples.push_back(
+                        {sample.clipIndex, sample.clipName, sample.value, sample.valueY});
+                }
+                runtimeState.blendParameterY = state.blendParameterY;
+                runtimeState.blendSpace2D = state.blendSpace2D;
+                runtimeState.synchronizeBlendSpace = state.synchronizeBlendSpace;
+                states.push_back(std::move(runtimeState));
             }
             std::vector<ecs::SkinnedModelAsset::AnimationParameter> parameters;
             parameters.reserve(desc.animationParameters.size());
@@ -1168,6 +1281,9 @@ bool RuntimeSceneLoader::Instantiate(const Scene &scene, ecs::Registry &registry
             }
             registry.Add<ecs::SkinnedModelAsset>(entity, ecs::SkinnedModelAsset{
                 desc.modelPath,
+                desc.modelOrientationEuler,
+                desc.modelOffsetPosition,
+                desc.modelOffsetScale,
                 desc.animationClipIndex,
                 desc.animationClipName,
                 desc.animationAutoplay,
@@ -1189,9 +1305,9 @@ bool RuntimeSceneLoader::Instantiate(const Scene &scene, ecs::Registry &registry
                 std::move(transitions)
             });
         } else if (!desc.modelPath.empty()) {
-            registry.Add<ecs::ModelAsset>(entity, ecs::ModelAsset{desc.modelPath});
-        }
-        if (!desc.modelPath.empty()) {
+            // Non-skeletal model -> static model asset. A skeletal character must NOT
+            // also get a ModelAsset, or it renders twice (once skinned + upright via
+            // the render offset, once static at the raw transform).
             registry.Add<ecs::ModelAsset>(entity, ecs::ModelAsset{desc.modelPath});
         }
         if (!desc.materialPath.empty()) {

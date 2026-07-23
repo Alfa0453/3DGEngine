@@ -18,6 +18,12 @@
 namespace engine {
 namespace ai {
 
+namespace {
+float HorizontalDistance(const glm::vec3& a, const glm::vec3& b) {
+    return glm::length(glm::vec2(a.x - b.x, a.z - b.z));
+}
+} // namespace
+
 // ------------------------------- vocabulary ---------------------------------
 
 const char* BtNodeTypeName(BtNodeType type) {
@@ -52,6 +58,8 @@ const char* BtNodeTypeName(BtNodeType type) {
         case BtNodeType::HealthBelow:     return "Health Below?";
         case BtNodeType::TargetDead:      return "Target Dead?";
         case BtNodeType::Attack:          return "Attack";
+        case BtNodeType::FocusTarget:     return "Focus Target";
+        case BtNodeType::ClearFocus:      return "Clear Focus";
         case BtNodeType::Count:        break;
     }
     return "?";
@@ -385,7 +393,7 @@ Ptr WrapDecorator(const BtAttachment& d, Ptr child) {
             const float r = d.param;
             std::vector<Ptr> v;
             v.push_back(Bt<AgentContext>::Condition([r](AgentContext& c) {
-                return glm::length(c.targetPos - c.agent.position) <= r;
+                return HorizontalDistance(c.targetPos, c.agent.position) <= r;
             }));
             v.push_back(std::move(child));
             return std::make_unique<detail::Sequence<AgentContext>>(std::move(v));
@@ -474,15 +482,30 @@ Ptr MakeAction(BtNodeType type, float param) {
 
         case BtNodeType::TargetWithin:
             return Bt<AgentContext>::Condition([param](AgentContext& c) {
-                return glm::length(c.targetPos - c.agent.position) <= param;
+                return HorizontalDistance(c.targetPos, c.agent.position) <= param;
             });
 
         case BtNodeType::Chase:
             return Bt<AgentContext>::Action([](AgentContext& c, float) {
+                const float targetDistance = HorizontalDistance(
+                    c.targetPos, c.agent.position);
+                if (targetDistance <= c.reachRadius) {
+                    c.steer = glm::vec3(0.0f);
+                    c.agent.velocity = glm::vec3(0.0f);
+                    c.path.clear();
+                    c.pathIndex = 0;
+                    c.pathGoalValid = false;
+                    return BtStatus::Success;
+                }
                 c.repathTimer += c.dt;
-                if (c.path.empty() || c.repathTimer > c.repathInterval) {
+                const float goalRefreshDistance = std::max(0.15f, c.reachRadius * 0.25f);
+                const bool targetMoved = !c.pathGoalValid
+                    || HorizontalDistance(c.targetPos, c.pathGoal) > goalRefreshDistance;
+                if (c.path.empty() || targetMoved || c.repathTimer > c.repathInterval) {
                     c.path = c.Plan(c.agent.position, c.targetPos);
                     c.pathIndex = 0;
+                    c.pathGoal = c.targetPos;
+                    c.pathGoalValid = true;
                     c.repathTimer = 0.0f;
                 }
                 if (c.seesTarget && glm::length(c.targetPos - c.agent.position) < c.chargeRadius) {
@@ -490,21 +513,30 @@ Ptr MakeAction(BtNodeType type, float param) {
                 } else {
                     c.steer = FollowPath(c.agent, c.path, c.pathIndex, c.reachRadius);
                 }
-                return (glm::length(c.targetPos - c.agent.position) < c.reachRadius)
-                           ? BtStatus::Success : BtStatus::Running;
+                return BtStatus::Running;
             });
 
         case BtNodeType::MoveToTarget:
             return Bt<AgentContext>::Action([](AgentContext& c, float) {
-                if (c.path.empty()) {
-                    c.path = c.Plan(c.agent.position, c.targetPos);
-                    c.pathIndex = 0;
-                }
-                c.steer = FollowPath(c.agent, c.path, c.pathIndex, c.reachRadius);
-                if (glm::length(c.targetPos - c.agent.position) < c.reachRadius) {
+                if (HorizontalDistance(c.targetPos, c.agent.position)
+                    <= c.reachRadius) {
+                    c.steer = glm::vec3(0.0f);
+                    c.agent.velocity = glm::vec3(0.0f);
                     c.path.clear();
+                    c.pathIndex = 0;
+                    c.pathGoalValid = false;
                     return BtStatus::Success;
                 }
+                const float goalRefreshDistance = std::max(0.15f, c.reachRadius * 0.25f);
+                const bool targetMoved = !c.pathGoalValid
+                    || HorizontalDistance(c.targetPos, c.pathGoal) > goalRefreshDistance;
+                if (c.path.empty() || targetMoved) {
+                    c.path = c.Plan(c.agent.position, c.targetPos);
+                    c.pathIndex = 0;
+                    c.pathGoal = c.targetPos;
+                    c.pathGoalValid = true;
+                }
+                c.steer = FollowPath(c.agent, c.path, c.pathIndex, c.reachRadius);
                 return BtStatus::Running;
             });
 
@@ -561,11 +593,33 @@ Ptr MakeAction(BtNodeType type, float param) {
             return Bt<AgentContext>::Action([param](AgentContext& c, float) {
                 if (!c.registry || c.targetEntity == ecs::kNull) return BtStatus::Failure;
                 Health* th = c.registry->TryGet<Health>(c.targetEntity);
-                if (th && th->alive && glm::length(c.targetPos - c.agent.position) <= c.reachRadius) {
+                if (th && th->alive
+                    && HorizontalDistance(c.targetPos, c.agent.position) <= c.reachRadius) {
                     th->Damage(param);
                     return BtStatus::Success;
                 }
                 return BtStatus::Failure;
+            });
+
+        case BtNodeType::FocusTarget:
+            return Bt<AgentContext>::Action([](AgentContext& c, float) {
+                if (!c.seesTarget || c.targetEntity == ecs::kNull) {
+                    return BtStatus::Failure;
+                }
+                glm::vec3 direction = c.targetPos - c.agent.position;
+                direction.y = 0.0f;
+                if (glm::dot(direction, direction) <= 1.0e-6f) {
+                    return BtStatus::Failure;
+                }
+                c.focusTarget = true;
+                c.facing = glm::normalize(direction);
+                return BtStatus::Success;
+            });
+
+        case BtNodeType::ClearFocus:
+            return Bt<AgentContext>::Action([](AgentContext& c, float) {
+                c.focusTarget = false;
+                return BtStatus::Success;
             });
 
         default:

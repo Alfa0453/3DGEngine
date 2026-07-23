@@ -326,6 +326,11 @@ void ShaderEditorPanel::RequestOpen(const std::string& path)
     else OpenDocument(path);
 }
 
+void ShaderEditorPanel::QueueOpen(const std::string& path)
+{
+    m_externalOpenPath = path;
+}
+
 void ShaderEditorPanel::RequestNew()
 {
     if (m_dirty)
@@ -1379,6 +1384,12 @@ void ShaderEditorPanel::Draw(EditorAssets& assets, bool* open)
     {
         ImGui::OpenPopup("Unsaved Shader Asset");
         m_promptQueued = false;
+    }
+    if (!m_externalOpenPath.empty())
+    {
+        const std::string path = std::move(m_externalOpenPath);
+        m_externalOpenPath.clear();
+        RequestOpen(path);
     }
 
     if (ImGui::Button("New")) RequestNew();

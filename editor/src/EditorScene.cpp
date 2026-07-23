@@ -19,14 +19,9 @@ using engine::ecs::Transform;
 
 namespace {
 
-// TEMPORARY terrain crash tracing (shares terrain_debug.log with EditorApp.cpp).
-void TerrainTrace(const std::string& msg) {
-    std::ofstream f("D:/C++_Projects/3DGEngine/terrain_debug.log", std::ios::app);
-    if (f.is_open()) { f << msg << std::endl; }
-}
-
 const char* PrimitiveName(EditorScene::Primitive primitive) {
     switch (primitive) {
+    case EditorScene::Primitive::Empty: return "Empty";
     case EditorScene::Primitive::Plane: return "Plane";
     case EditorScene::Primitive::Cube: return "Cube";
     case EditorScene::Primitive::Sphere: return "Sphere";
@@ -71,6 +66,10 @@ bool ParseLightType(const std::string& value, Light::Type* type) {
 }
 
 bool ParsePrimitive(const std::string& value, EditorScene::Primitive* primitive) {
+    if (value == "Empty") {
+        *primitive = EditorScene::Primitive::Empty;
+        return true;
+    }
     if (value == "Plane") {
         *primitive = EditorScene::Primitive::Plane;
         return true;
@@ -180,8 +179,14 @@ const glm::vec3 kPalette[] = {
     {0.34f, 0.37f, 0.41f}
 };
 
-const char* StoredPath(const std::string& path) {
-    return path.empty() ? "-" : path.c_str();
+// Space-safe string field: quoted so values with spaces (asset paths, animation
+// clip names, etc.) survive the whitespace-tokenised reader. Empty -> quoted "-"
+// (Load clears it back to empty). Reading with std::quoted stays backward
+// compatible with older unquoted scenes for space-free single-word values.
+std::string StoredPath(const std::string& path) {
+    std::ostringstream out;
+    out << std::quoted(path.empty() ? std::string("-") : path);
+    return out.str();
 }
 
 } // namespace
@@ -231,7 +236,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         return false;
     }
 
-    out << "3DGEditorScene 76\n";
+    out << "3DGEditorScene 89\n";
     out << "environment "
         << m_environment.timeOfDay << ' '
         << m_environment.skyLightIntensity << ' '
@@ -272,7 +277,27 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         << (m_environment.msaa ? 1 : 0) << ' '
         << (m_environment.fxaa ? 1 : 0) << ' '
         << m_environment.renderScale << ' '
-        << (m_environment.hudAsset.empty() ? std::string("~") : m_environment.hudAsset) << '\n';
+        << (m_environment.hudAsset.empty() ? std::string("~") : m_environment.hudAsset) << ' '
+        << m_environment.shadowDistance << '\n';
+    out << "clouds "
+        << (m_environment.clouds ? 1 : 0) << ' '
+        << m_environment.cloudCoverage << ' '
+        << m_environment.cloudDensity << ' '
+        << m_environment.cloudScale << ' '
+        << m_environment.cloudSoftness << ' '
+        << m_environment.cloudWindSpeed << ' '
+        << m_environment.cloudWindDirection << ' '
+        << m_environment.cloudHorizonHeight << ' '
+        << m_environment.cloudColor.r << ' '
+        << m_environment.cloudColor.g << ' '
+        << m_environment.cloudColor.b << ' '
+        << (m_environment.cloudShadows ? 1 : 0) << ' '
+        << m_environment.cloudShadowStrength << ' '
+        << m_environment.cloudShadowScale << '\n';
+    out << "skylight_occlusion "
+        << (m_environment.skylightOcclusion ? 1 : 0) << ' '
+        << m_environment.skylightOcclusionStrength << ' '
+        << m_environment.minimumSkylight << '\n';
     for (const Environment::PostProcessEffect& effect :
          m_environment.postProcessEffects) {
         out << "post_effect "
@@ -333,7 +358,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
             const Light* light = m_registry.TryGet<Light>(object.entity);
             const Light& data = light ? *light : object.lightData;
             out << "light "
-                << object.name << ' '
+                << StoredPath(object.name) << ' '
                 << LightTypeName(data.type) << ' '
                 << transform->position.x << ' ' << transform->position.y << ' ' << transform->position.z << ' '
                 << data.color.r << ' ' << data.color.g << ' ' << data.color.b << ' '
@@ -347,7 +372,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
 
         out << "object "
             << PrimitiveName(object.primitive) << ' '
-            << object.name << ' '
+            << StoredPath(object.name) << ' '
             << transform->position.x << ' ' << transform->position.y << ' ' << transform->position.z << ' '
             << transform->scale.x << ' ' << transform->scale.y << ' ' << transform->scale.z << ' '
             << transform->rotation.w << ' ' << transform->rotation.x << ' '
@@ -357,6 +382,15 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
             << (object.locked ? 1 : 0) << ' '
             << StoredPath(object.modelAssetPath) << ' '
             << StoredPath(object.materialAssetPath) << ' '
+            << object.modelOrientationEuler.x << ' '
+            << object.modelOrientationEuler.y << ' '
+            << object.modelOrientationEuler.z << ' '
+            << object.modelOffsetPosition.x << ' '
+            << object.modelOffsetPosition.y << ' '
+            << object.modelOffsetPosition.z << ' '
+            << object.modelOffsetScale.x << ' '
+            << object.modelOffsetScale.y << ' '
+            << object.modelOffsetScale.z << ' '
             << (object.skeletalModel ? 1 : 0) << ' '
             << object.animationClipIndex << ' '
             << StoredPath(object.animationClipName) << ' '
@@ -400,7 +434,15 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
                 << StoredPath(state.blendParameter) << ' '
                 << state.blendMin << ' '
                 << state.blendMax << ' '
-                << (state.rootMotion ? 1 : 0) << ' ';
+                << (state.rootMotion ? 1 : 0) << ' '
+                << (state.blendSpace2D ? 1 : 0) << ' '
+                << StoredPath(state.blendParameterY) << ' '
+                << (state.synchronizeBlendSpace ? 1 : 0) << ' '
+                << state.blendSamples.size() << ' ';
+            for (const auto& sample : state.blendSamples) {
+                out << sample.clipIndex << ' ' << StoredPath(sample.clipName) << ' '
+                    << sample.value << ' ' << sample.valueY << ' ';
+            }
         }
         out << object.animationParameters.size() << ' ';
         for (const AnimationParameter& parameter : object.animationParameters) {
@@ -635,6 +677,19 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         out << '\n';
     }
 
+    // AI movement authoring is stored separately so older object records remain
+    // readable and the component can grow without destabilizing the main line.
+    for (const Object& object : m_objects) {
+        if (!object.navAgentEnabled) continue;
+        out << "ai_movement " << std::quoted(object.name) << ' '
+            << static_cast<int>(object.navMovementMode) << ' '
+            << object.navMovementGravity << ' '
+            << object.navMovementMaxFallSpeed << ' '
+            << object.navMovementGroundProbe << ' '
+            << object.navMovementStepHeight << ' '
+            << object.navMovementMaxSlope << '\n';
+    }
+
     for (const Object& object : m_objects) {
         if (object.materialParameterOverrides.empty()) continue;
         out << "material_overrides " << std::quoted(object.name) << ' '
@@ -659,6 +714,43 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         out << '\n';
     }
 
+    // Per-layer painted materials (scene version 79+). Own line keyed by object name.
+    for (const Object& object : m_objects) {
+        if (!object.isTerrain) continue;
+        bool anyMaterial = false;
+        for (const std::string& m : object.terrainLayerMaterials) if (!m.empty()) anyMaterial = true;
+        if (!anyMaterial) continue;
+        out << "terrain_layers " << object.name;
+        for (const std::string& m : object.terrainLayerMaterials)
+            out << ' ' << (m.empty() ? std::string("-") : m);
+        out << '\n';
+    }
+
+    // Grass settings (scene version 80+). Own line keyed by object name.
+    for (const Object& object : m_objects) {
+        if (!object.isTerrain || !object.grassEnabled) continue;
+        out << "terrain_grass " << object.name << ' '
+            << object.grassDensity << ' ' << object.grassHeight << ' '
+            << object.grassWindStrength << ' ' << object.grassWindSpeed << ' '
+            << object.grassBaseColor.r << ' ' << object.grassBaseColor.g << ' ' << object.grassBaseColor.b << ' '
+            << object.grassTipColor.r << ' ' << object.grassTipColor.g << ' ' << object.grassTipColor.b << '\n';
+    }
+
+    // Per-region grass style palette + per-vertex slot map (scene version 80+).
+    for (const Object& object : m_objects) {
+        if (!object.isTerrain) continue;
+        if (object.terrainGrassPalette.empty() && object.terrainGrassStyle.empty()) continue;
+        out << "terrain_grass_paint " << object.name << ' ' << object.terrainGrassPalette.size();
+        for (const Object::GrassStyleEntry& e : object.terrainGrassPalette) {
+            out << ' ' << e.density << ' ' << e.height << ' '
+                << e.base.r << ' ' << e.base.g << ' ' << e.base.b << ' '
+                << e.tip.r << ' ' << e.tip.g << ' ' << e.tip.b;
+        }
+        out << ' ' << object.terrainGrassStyle.size();
+        for (unsigned char s : object.terrainGrassStyle) out << ' ' << static_cast<int>(s);
+        out << '\n';
+    }
+
     // Water records (own line, keyed by object name; applied after the object loads).
     for (const Object& object : m_objects) {
         if (!object.isWater) continue;
@@ -668,7 +760,22 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
             << object.waterDeep.r << ' ' << object.waterDeep.g << ' ' << object.waterDeep.b << ' '
             << object.waterReflection.r << ' ' << object.waterReflection.g << ' ' << object.waterReflection.b << ' '
             << object.waterTransparency << ' ' << object.waterFresnel << ' '
-            << object.waterSpecular << ' ' << object.waterShininess << '\n';
+            << object.waterSpecular << ' ' << object.waterShininess << ' '
+            << object.waterType << ' ' << object.waterSeaHeight << ' ' << object.waterSeaChoppy << ' '
+            << object.waterSeaSpeed << ' ' << object.waterSeaFreq << ' ' << object.waterFoam << ' '
+            << (object.waterFlowSpline.empty() ? "-" : object.waterFlowSpline) << '\n';
+    }
+
+    // Spline paths (Catmull-Rom control points).
+    for (const Object& object : m_objects) {
+        if (!object.isSpline) continue;
+        out << "spline " << object.name << ' '
+            << (object.splineClosed ? 1 : 0) << ' ' << object.splineType << ' '
+            << object.splinePoints.size();
+        for (const glm::vec3& p : object.splinePoints) {
+            out << ' ' << p.x << ' ' << p.y << ' ' << p.z;
+        }
+        out << '\n';
     }
 
     for (const PhysicsJoint& joint : m_joints) {
@@ -704,7 +811,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
     std::string magic;
     int version = 0;
     in >> magic >> version;
-    if (magic != "3DGEditorScene" ||(version < 1 || version > 76)) {
+    if (magic != "3DGEditorScene" ||(version < 1 || version > 89)) {
         if (error) *error = "Scene file has an unknown format.";
         return false;
     }
@@ -713,6 +820,52 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
 
     std::string recordType;
     while (in >> recordType) {
+        if (recordType == "skylight_occlusion" && version >= 83) {
+            int enabled = 1;
+            in >> enabled
+               >> m_environment.skylightOcclusionStrength
+               >> m_environment.minimumSkylight;
+            if (!in) {
+                if (error) *error = "Scene file contains invalid skylight occlusion settings.";
+                Clear();
+                return false;
+            }
+            m_environment.skylightOcclusion = enabled != 0;
+            continue;
+        }
+        if (recordType == "clouds" && version >= 81) {
+            int enabled = 1;
+            in >> enabled
+               >> m_environment.cloudCoverage
+               >> m_environment.cloudDensity
+               >> m_environment.cloudScale
+               >> m_environment.cloudSoftness
+               >> m_environment.cloudWindSpeed
+               >> m_environment.cloudWindDirection
+               >> m_environment.cloudHorizonHeight
+               >> m_environment.cloudColor.r
+               >> m_environment.cloudColor.g
+               >> m_environment.cloudColor.b;
+            if (!in) {
+                if (error) *error = "Scene file contains an invalid clouds record.";
+                Clear();
+                return false;
+            }
+            m_environment.clouds = enabled != 0;
+            if (version >= 82) {
+                int shadows = 1;
+                in >> shadows
+                   >> m_environment.cloudShadowStrength
+                   >> m_environment.cloudShadowScale;
+                m_environment.cloudShadows = shadows != 0;
+            }
+            if (!in) {
+                if (error) *error = "Scene file contains invalid cloud shadow settings.";
+                Clear();
+                return false;
+            }
+            continue;
+        }
         if (recordType == "post_effect" && version >= 74) {
             Environment::PostProcessEffect effect;
             int enabled = 1;
@@ -834,6 +987,9 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                 in >> hudTok;
                 m_environment.hudAsset = (hudTok == "~") ? std::string() : hudTok;
             }
+            if (version >= 84) {
+                in >> m_environment.shadowDistance;
+            }
             if (!in) {
                 if (error) *error = "Scene file contains an invalid environment record.";
                 Clear();
@@ -848,6 +1004,8 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             m_environment.directionalShadows = directionalShadows != 0;
             m_environment.pointShadows = pointShadows != 0;
             m_environment.spotShadows = spotShadows != 0;
+            m_environment.shadowDistance = std::clamp(
+                m_environment.shadowDistance, 10.0f, 5000.0f);
             m_environment.fog = fog != 0;
             m_environment.physicsBroadPhase = physicsBroadPhase != 0;
             m_environment.physicsAllowSleeping = physicsAllowSleeping != 0;
@@ -970,7 +1128,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             Light light;
             int visible = 1;
             int locked = 0;
-            in >> name >> lightTypeName
+            in >> std::quoted(name) >> lightTypeName
                >> transform.position.x >> transform.position.y >> transform.position.z
                >> light.color.r >> light.color.g >> light.color.b
                >> light.intensity
@@ -1012,8 +1170,8 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             PhysicsJoint joint;
             in >> typeName
                >> enabled
-               >> objectA
-               >> objectB
+               >> std::quoted(objectA)
+               >> std::quoted(objectB)
                >> worldAnchor
                >> joint.anchor.x >> joint.anchor.y >> joint.anchor.z
                >> joint.restLength
@@ -1065,6 +1223,65 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             continue;
         }
 
+        if (recordType == "terrain_layers" && version >= 79) {
+            std::string name;
+            in >> name;
+            std::array<std::string, 5> mats{};
+            for (std::string& m : mats) {
+                std::string token;
+                in >> token;
+                m = (token == "-") ? std::string() : token;
+            }
+            for (Object& obj : m_objects) {
+                if (obj.name == name) { obj.terrainLayerMaterials = mats; break; }
+            }
+            continue;
+        }
+
+        if (recordType == "terrain_grass" && version >= 80) {
+            std::string name;
+            float density = 2.0f, height = 0.6f, windStr = 0.18f, windSpd = 1.4f;
+            glm::vec3 base(0.16f, 0.34f, 0.12f), tip(0.42f, 0.68f, 0.28f);
+            in >> name >> density >> height >> windStr >> windSpd
+               >> base.r >> base.g >> base.b >> tip.r >> tip.g >> tip.b;
+            for (Object& obj : m_objects) {
+                if (obj.name == name) {
+                    obj.grassEnabled = true;
+                    obj.grassDensity = density;
+                    obj.grassHeight = height;
+                    obj.grassWindStrength = windStr;
+                    obj.grassWindSpeed = windSpd;
+                    obj.grassBaseColor = base;
+                    obj.grassTipColor = tip;
+                    break;
+                }
+            }
+            continue;
+        }
+
+        if (recordType == "terrain_grass_paint" && version >= 80) {
+            std::string name;
+            std::size_t pcount = 0;
+            in >> name >> pcount;
+            std::vector<Object::GrassStyleEntry> pal(pcount);
+            for (Object::GrassStyleEntry& e : pal) {
+                in >> e.density >> e.height >> e.base.r >> e.base.g >> e.base.b
+                   >> e.tip.r >> e.tip.g >> e.tip.b;
+            }
+            std::size_t scount = 0;
+            in >> scount;
+            std::vector<unsigned char> style(scount);
+            for (std::size_t k = 0; k < scount; ++k) { int v = 0; in >> v; style[k] = static_cast<unsigned char>(v); }
+            for (Object& obj : m_objects) {
+                if (obj.name == name) {
+                    obj.terrainGrassPalette = std::move(pal);
+                    obj.terrainGrassStyle = std::move(style);
+                    break;
+                }
+            }
+            continue;
+        }
+
         if (recordType == "water") {
             std::string name;
             float size = 80.0f, level = 0.0f, transparency = 0.72f, fresnel = 4.0f, spec = 1.2f, shininess = 220.0f;
@@ -1075,6 +1292,15 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                >> deep.r >> deep.g >> deep.b
                >> refl.r >> refl.g >> refl.b
                >> transparency >> fresnel >> spec >> shininess;
+            int   waterType = 0;
+            float seaHeight = 0.55f, seaChoppy = 3.2f, seaSpeed = 0.8f, seaFreq = 0.10f, foam = 0.55f;
+            std::string flowSpline = "-";
+            if (version >= 77) {
+                in >> waterType >> seaHeight >> seaChoppy >> seaSpeed >> seaFreq >> foam;
+            }
+            if (version >= 78) {
+                in >> flowSpline;
+            }
             for (Object& obj : m_objects) {
                 if (obj.name == name) {
                     obj.isWater = true;
@@ -1088,8 +1314,61 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                     obj.waterFresnel = fresnel;
                     obj.waterSpecular = spec;
                     obj.waterShininess = shininess;
+                    obj.waterType = waterType;
+                    obj.waterSeaHeight = seaHeight;
+                    obj.waterSeaChoppy = seaChoppy;
+                    obj.waterSeaSpeed = seaSpeed;
+                    obj.waterSeaFreq = seaFreq;
+                    obj.waterFoam = foam;
+                    obj.waterFlowSpline = (flowSpline == "-") ? std::string() : flowSpline;
                     break;
                 }
+            }
+            continue;
+        }
+
+        if (recordType == "spline" && version >= 78) {
+            std::string name;
+            int closed = 0, type = 0;
+            std::size_t count = 0;
+            in >> name >> closed >> type >> count;
+            std::vector<glm::vec3> pts;
+            pts.reserve(count);
+            for (std::size_t i = 0; i < count; ++i) {
+                glm::vec3 p(0.0f);
+                in >> p.x >> p.y >> p.z;
+                pts.push_back(p);
+            }
+            for (Object& obj : m_objects) {
+                if (obj.name == name) {
+                    obj.isSpline = true;
+                    obj.splineClosed = (closed != 0);
+                    obj.splineType = type;
+                    obj.splinePoints = std::move(pts);
+                    break;
+                }
+            }
+            continue;
+        }
+
+        if (recordType == "ai_movement" && version >= 85) {
+            std::string name;
+            int mode = 0;
+            float gravity = -9.81f, maxFallSpeed = 35.0f;
+            float groundProbe = 0.25f, stepHeight = 0.35f, maxSlope = 50.0f;
+            in >> std::quoted(name) >> mode >> gravity >> maxFallSpeed
+               >> groundProbe >> stepHeight >> maxSlope;
+            for (Object& obj : m_objects) {
+                if (obj.name != name) continue;
+                obj.navMovementMode = mode == static_cast<int>(engine::ai::AiMovementMode::Flying)
+                    ? engine::ai::AiMovementMode::Flying
+                    : engine::ai::AiMovementMode::Grounded;
+                obj.navMovementGravity = std::min(gravity, 0.0f);
+                obj.navMovementMaxFallSpeed = std::max(maxFallSpeed, 0.0f);
+                obj.navMovementGroundProbe = std::max(groundProbe, 0.02f);
+                obj.navMovementStepHeight = std::max(stepHeight, 0.0f);
+                obj.navMovementMaxSlope = std::clamp(maxSlope, 0.0f, 89.0f);
+                break;
             }
             continue;
         }
@@ -1109,6 +1388,9 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         int locked = 0;
         std::string modelAssetPath;
         std::string materialAssetPath;
+        glm::vec3 modelOrientationEuler{0.0f};
+        glm::vec3 modelOffsetPosition{0.0f};
+        glm::vec3 modelOffsetScale{1.0f};
         int skeletalModel = 0;
         int animationClipIndex = 0;
         std::string animationClipName;
@@ -1224,7 +1506,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         float audioOcclusion = 0.0f;
         int audioPriority = 50;
 
-        in >> primitiveName >> name
+        in >> primitiveName >> std::quoted(name)
            >> transform.position.x >> transform.position.y >> transform.position.z
            >> transform.scale.x >> transform.scale.y >> transform.scale.z;
 
@@ -1242,7 +1524,14 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             in >> locked;
         }
         if (version >= 5) {
-            in >> modelAssetPath >> materialAssetPath;
+            in >> std::quoted(modelAssetPath) >> std::quoted(materialAssetPath);
+            if (version >= 88) {
+                in >> modelOrientationEuler.x >> modelOrientationEuler.y >> modelOrientationEuler.z;
+            }
+            if (version >= 89) {
+                in >> modelOffsetPosition.x >> modelOffsetPosition.y >> modelOffsetPosition.z
+                   >> modelOffsetScale.x >> modelOffsetScale.y >> modelOffsetScale.z;
+            }
             if (modelAssetPath == "-") {
                 modelAssetPath.clear();
             }
@@ -1253,7 +1542,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         if (version >= 29) {
             in >> skeletalModel
                >> animationClipIndex
-               >> animationClipName
+               >> std::quoted(animationClipName)
                >> animationAutoplay
                >> animationLoop
                >> animationSpeed;
@@ -1264,11 +1553,11 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         if (version >= 30) {
             in >> animationLocomotionEnabled
                >> animationIdleClipIndex
-               >> animationIdleClipName
+               >> std::quoted(animationIdleClipName)
                >> animationWalkClipIndex
-               >> animationWalkClipName
+               >> std::quoted(animationWalkClipName)
                >> animationRunClipIndex
-               >> animationRunClipName
+               >> std::quoted(animationRunClipName)
                >> animationWalkAt
                >> animationRunAt;
             if (animationIdleClipName == "-") {
@@ -1288,7 +1577,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                 AnimationEvent event;
                 in >> event.clipIndex
                    >> event.time
-                   >> event.name;
+                   >> std::quoted(event.name);
                 event.clipIndex = std::max(event.clipIndex, 0);
                 event.time = std::max(event.time, 0.0f);
                 if (event.name == "-") {
@@ -1302,10 +1591,10 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             in >> profileCount;
             for (std::size_t i = 0; i < profileCount; ++i) {
                 AnimationActionProfile profile;
-                in >> profile.name
+                in >> std::quoted(profile.name)
                    >> profile.clipIndex
-                   >> profile.clipName
-                   >> profile.maskRootBone
+                   >> std::quoted(profile.clipName)
+                   >> std::quoted(profile.maskRootBone)
                    >> profile.fadeIn
                    >> profile.fadeOut
                    >> profile.speed;
@@ -1331,22 +1620,41 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             for (std::size_t i = 0; i < stateCount; ++i) {
                 AnimationStateNode state;
                 int loop = 1;
-                in >> state.name
+                in >> std::quoted(state.name)
                    >> state.clipIndex
-                   >> state.clipName
+                   >> std::quoted(state.clipName)
                    >> loop
                    >> state.speed;
                 if (version >= 36) {
                     int rootMotion = 0;
                     in >> state.blendClipIndex
-                       >> state.blendClipName
-                       >> state.blendParameter
+                       >> std::quoted(state.blendClipName)
+                       >> std::quoted(state.blendParameter)
                        >> state.blendMin
                        >> state.blendMax
                        >> rootMotion;
                     if (state.blendClipName == "-") state.blendClipName.clear();
                     if (state.blendParameter == "-") state.blendParameter.clear();
                     state.rootMotion = rootMotion != 0;
+                    if (version >= 86) {
+                        if (version >= 87) {
+                            int is2D = 0, synchronize = 1;
+                            in >> is2D >> std::quoted(state.blendParameterY) >> synchronize;
+                            if (state.blendParameterY == "-") state.blendParameterY.clear();
+                            state.blendSpace2D = is2D != 0;
+                            state.synchronizeBlendSpace = synchronize != 0;
+                        }
+                        std::size_t sampleCount = 0;
+                        in >> sampleCount;
+                        for (std::size_t sampleIndex = 0; sampleIndex < sampleCount; ++sampleIndex) {
+                            AnimationStateNode::BlendSample sample;
+                            in >> sample.clipIndex >> std::quoted(sample.clipName) >> sample.value;
+                            if (version >= 87) in >> sample.valueY;
+                            if (sample.clipName == "-") sample.clipName.clear();
+                            sample.clipIndex = std::max(sample.clipIndex, 0);
+                            state.blendSamples.push_back(std::move(sample));
+                        }
+                    }
                 }
                 if (state.name == "-") {
                     state.name.clear();
@@ -1366,7 +1674,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                 for (std::size_t i = 0; i < parameterCount; ++i) {
                     AnimationParameter parameter;
                     int type = 0;
-                    in >> parameter.name >> type >> parameter.defaultValue;
+                    in >> std::quoted(parameter.name) >> type >> parameter.defaultValue;
                     if (parameter.name == "-") parameter.name.clear();
                     parameter.type = static_cast<AnimationParameter::Type>(std::clamp(type, 0, 2));
                     animationParameters.push_back(parameter);
@@ -1378,9 +1686,9 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             for (std::size_t i = 0; i < transitionCount; ++i) {
                 AnimationStateTransition transition;
                 int compare = 0;
-                in >> transition.fromState
-                   >> transition.toState
-                   >> transition.parameter
+                in >> std::quoted(transition.fromState)
+                   >> std::quoted(transition.toState)
+                   >> std::quoted(transition.parameter)
                    >> compare
                    >> transition.threshold
                    >> transition.fade;
@@ -1473,7 +1781,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                >> mover.phase;
         }
         if (version >= 21) {
-            in >> triggerTargetName
+            in >> std::quoted(triggerTargetName)
                >> triggerEnterMoverAction
                >> triggerEnterRotatorAction;
             if (triggerTargetName == "-") {
@@ -1524,7 +1832,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                    >> playerController.lockOnTrackingSpeed;
             }
             if (version >= 69) {
-                in >> triggerCameraSequenceName
+                in >> std::quoted(triggerCameraSequenceName)
                    >> triggerEnterCameraAction
                    >> triggerExitCameraAction
                    >> triggerCameraLockInput
@@ -1533,7 +1841,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             }
             if (version >= 66) {
                 in >> cameraZoneEnabled
-                   >> cameraZonePresetName
+                   >> std::quoted(cameraZonePresetName)
                    >> cameraZoneRestoreOnExit
                    >> cameraZonePriority
                    >> cameraZoneReturnBlend;
@@ -1551,8 +1859,8 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         }
         if (version >= 26) {
             in >> scriptEnabled
-               >> scriptClassName
-               >> scriptPath;
+               >> std::quoted(scriptClassName)
+               >> std::quoted(scriptPath);
             if (scriptClassName == "-") {
                 scriptClassName.clear();
             }
@@ -1565,7 +1873,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                 for (std::size_t i = 0; i < scriptFieldCount; ++i) {
                     ScriptField field;
                     int fieldType = 0;
-                    in >> field.name >> fieldType >> field.value;
+                    in >> std::quoted(field.name) >> fieldType >> std::quoted(field.value);
                     if (field.name == "-") {
                         field.name.clear();
                     }
@@ -1598,13 +1906,13 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             }
         }
         if (version >= 38) {
-            in >> navAgentTargetName >> navAgentVisionRange >> navAgentVisionHalfAngle;
+            in >> std::quoted(navAgentTargetName) >> navAgentVisionRange >> navAgentVisionHalfAngle;
             if (navAgentTargetName == "-") {
                 navAgentTargetName.clear();
             }
         }
         if (version >= 40) {
-            in >> navAgentBrainAsset;
+            in >> std::quoted(navAgentBrainAsset);
             if (navAgentBrainAsset == "-") {
                 navAgentBrainAsset.clear();
             }
@@ -1613,7 +1921,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             in >> navMeshBoundsVolume;
         }
         if (version >= 42) {
-            in >> audioSourceEnabled >> audioAssetPath >> audioVolume >> audioPitch
+            in >> audioSourceEnabled >> std::quoted(audioAssetPath) >> audioVolume >> audioPitch
                >> audioSpatial >> audioLoop >> audioAutoplay
                >> audioMinDistance >> audioMaxDistance >> audioRolloff;
             if (audioAssetPath == "-") audioAssetPath.clear();
@@ -1796,6 +2104,9 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         m_objects.back().locked = locked != 0;
         m_objects.back().modelAssetPath = modelAssetPath;
         m_objects.back().materialAssetPath = materialAssetPath;
+        m_objects.back().modelOrientationEuler = modelOrientationEuler;
+        m_objects.back().modelOffsetPosition = modelOffsetPosition;
+        m_objects.back().modelOffsetScale = modelOffsetScale;
         m_objects.back().skeletalModel = skeletalModel != 0;
         m_objects.back().animationClipIndex = std::max(animationClipIndex, 0);
         m_objects.back().animationClipName = animationClipName;
@@ -2170,6 +2481,19 @@ void EditorScene::RestoreFromSnapshot(const Snapshot &snapshot, const engine::Me
     m_dirty = false;
 }
 
+void EditorScene::AddEmpty(const engine::Mesh& placeholderMesh)
+{
+    PushUndoSnapshot();
+
+    Transform transform;
+    const std::string name = "EmptyObject_" + std::to_string(m_nextCubeNumber++);
+    // Keep a placeholder only for editor snapshots and serialization. Empty
+    // objects are excluded from rendering and receive no runtime MeshRenderer.
+    CreateObject(name, Primitive::Empty, placeholderMesh, transform, glm::vec3(0.45f));
+    m_selectedIndex = static_cast<int>(m_objects.size()) - 1;
+    m_dirty = true;
+}
+
 void EditorScene::AddCube(const engine::Mesh & cube)
 {
     PushUndoSnapshot();
@@ -2499,6 +2823,40 @@ bool EditorScene::SetSelectedModelAsset(const std::string &path)
     return true;
 }
 
+bool EditorScene::SetSelectedModelOrientation(const glm::vec3 &eulerDegrees)
+{
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) {
+        return false;
+    }
+    PushUndoSnapshot();
+    selected.modelOrientationEuler = eulerDegrees;
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedModelOffset(const glm::vec3& position,
+                                         const glm::vec3& eulerDegrees,
+                                         const glm::vec3& scale)
+{
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) {
+        return false;
+    }
+    PushUndoSnapshot();
+    selected.modelOffsetPosition = position;
+    selected.modelOrientationEuler = eulerDegrees;
+    selected.modelOffsetScale = scale;
+    m_dirty = true;
+    return true;
+}
+
 bool EditorScene::SetSelectedMaterialAsset(const std::string &path)
 {
     if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
@@ -2692,6 +3050,7 @@ bool EditorScene::SetSelectedLight(const Light& light) {
 void EditorScene::SetEnvironment(const Environment& environment) {
     PushUndoSnapshot();
     m_environment = environment;
+    m_environment.shadowDistance = std::clamp(m_environment.shadowDistance, 10.0f, 5000.0f);
     m_dirty = true;
 }
 
@@ -3025,6 +3384,8 @@ bool EditorScene::SetSelectedPlayerControllerEnabled(bool enabled) {
         selected.collider = engine::ecs::Collider::MakeCapsuleFromHeight(
             selected.playerController.capsuleRadius,
             selected.playerController.capsuleHeight);
+        selected.collider.layer = engine::ecs::CollisionLayer::Player;
+        selected.collider.mask = engine::ecs::CollisionLayer::All;
     }
     m_dirty = true;
     return true;
@@ -3055,6 +3416,8 @@ bool EditorScene::SetSelectedPlayerController(const PlayerControllerSettings& se
     selected.playerController = safe;
     selected.colliderEnabled = true;
     selected.collider = engine::ecs::Collider::MakeCapsuleFromHeight(safe.capsuleRadius, safe.capsuleHeight);
+    selected.collider.layer = engine::ecs::CollisionLayer::Player;
+    selected.collider.mask = engine::ecs::CollisionLayer::All;
     m_dirty = true;
     return true;
 }
@@ -3337,9 +3700,15 @@ bool EditorScene::SetSelectedScriptEnabled(bool enabled) {
     if (selected.locked || selected.scriptEnabled == enabled) {
         return false;
     }
+    // An enabled native-script component without a class cannot be constructed
+    // by the runtime loader. Reject it without adding a misleading undo entry or
+    // dirtying the scene; the Inspector can commit its buffered class first.
+    if (enabled && selected.scriptClassName.empty()) {
+        return false;
+    }
 
     PushUndoSnapshot();
-    selected.scriptEnabled = enabled && !selected.scriptClassName.empty();
+    selected.scriptEnabled = enabled;
     m_dirty = true;
     return true;
 }
@@ -3397,11 +3766,29 @@ bool EditorScene::SetSelectedNavAgentTeam(int team, bool autoTarget) {
     return true;
 }
 
+bool EditorScene::SetSelectedNavAgentMovement(engine::ai::AiMovementMode mode,
+                                              float gravity, float maxFallSpeed,
+                                              float groundProbe, float stepHeight,
+                                              float maxSlopeDegrees) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) return false;
+    PushUndoSnapshot();
+    selected.navMovementMode = mode == engine::ai::AiMovementMode::Flying
+        ? engine::ai::AiMovementMode::Flying : engine::ai::AiMovementMode::Grounded;
+    selected.navMovementGravity = std::min(gravity, 0.0f);
+    selected.navMovementMaxFallSpeed = std::max(maxFallSpeed, 0.0f);
+    selected.navMovementGroundProbe = std::max(groundProbe, 0.02f);
+    selected.navMovementStepHeight = std::max(stepHeight, 0.0f);
+    selected.navMovementMaxSlope = std::clamp(maxSlopeDegrees, 0.0f, 89.0f);
+    m_dirty = true;
+    return true;
+}
+
 bool EditorScene::SetSelectedTerrain(bool enabled, int res, float size, float maxHeight,
                                      int seed, int octaves, float frequency) {
-    TerrainTrace("SetSelectedTerrain: begin enabled=" + std::to_string(enabled ? 1 : 0) +
-                 " selIndex=" + std::to_string(m_selectedIndex) +
-                 " objs=" + std::to_string(m_objects.size()));
     if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
         return false;
     }
@@ -3410,9 +3797,8 @@ bool EditorScene::SetSelectedTerrain(bool enabled, int res, float size, float ma
         return false;
     }
     PushUndoSnapshot();
-    TerrainTrace("SetSelectedTerrain: snapshot pushed entity=" + std::to_string(static_cast<unsigned>(selected.entity)));
     selected.isTerrain = enabled;
-    selected.terrainRes = std::clamp(res, 8, 512);
+    selected.terrainRes = std::clamp(res, 8, 1024);
     selected.terrainSize = std::max(size, 1.0f);
     selected.terrainMaxHeight = std::max(maxHeight, 0.0f);
     selected.terrainSeed = seed;
@@ -3429,14 +3815,11 @@ bool EditorScene::SetSelectedTerrain(bool enabled, int res, float size, float ma
     // Normalising the transform scale to 1 keeps render, outline, height query and sculpt in
     // the same coordinate space.
     if (enabled) {
-        engine::ecs::Transform* t = m_registry.TryGet<engine::ecs::Transform>(selected.entity);
-        TerrainTrace(std::string("SetSelectedTerrain: transform ") + (t ? "found, normalising scale" : "MISSING"));
-        if (t) {
+        if (engine::ecs::Transform* t = m_registry.TryGet<engine::ecs::Transform>(selected.entity)) {
             t->scale = glm::vec3(1.0f);
         }
     }
     m_dirty = true;
-    TerrainTrace("SetSelectedTerrain: end ok");
     return true;
 }
 
@@ -3475,6 +3858,86 @@ bool EditorScene::SetSelectedWater(float size, int resolution, float level,
     return true;
 }
 
+bool EditorScene::SetSelectedWaterWaves(float seaHeight, float seaChoppy, float seaSpeed,
+                                        float seaFreq, float foam, int waterType) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) {
+        return false;
+    }
+    PushUndoSnapshot();
+    selected.isWater = true;
+    selected.waterSeaHeight = std::max(seaHeight, 0.0f);
+    selected.waterSeaChoppy = std::clamp(seaChoppy, 0.0f, 10.0f);
+    selected.waterSeaSpeed  = std::max(seaSpeed, 0.0f);
+    selected.waterSeaFreq   = std::clamp(seaFreq, 0.01f, 1.0f);
+    selected.waterFoam      = std::clamp(foam, 0.0f, 4.0f);
+    selected.waterType      = waterType;
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedWaterFlowSpline(const std::string& splineName) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) return false;
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) return false;
+    PushUndoSnapshot();
+    selected.waterFlowSpline = splineName;
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedSpline(bool enabled, bool closed, int type) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) return false;
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) return false;
+    PushUndoSnapshot();
+    selected.isSpline = enabled;
+    selected.splineClosed = closed;
+    selected.splineType = type;
+    if (enabled && selected.splinePoints.empty()) {
+        // Seed a short 3-point path centred on the object so there's something to edit.
+        const glm::vec3 c = m_registry.TryGet<engine::ecs::Transform>(selected.entity)
+            ? m_registry.TryGet<engine::ecs::Transform>(selected.entity)->position : glm::vec3(0.0f);
+        selected.splinePoints = {c + glm::vec3(-6.0f, 0.0f, 0.0f),
+                                 c + glm::vec3(0.0f, 0.0f, 4.0f),
+                                 c + glm::vec3(6.0f, 0.0f, 0.0f)};
+    }
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::AddSelectedSplinePoint(const glm::vec3& point) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) return false;
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked || !selected.isSpline) return false;
+    PushUndoSnapshot();
+    selected.splinePoints.push_back(point);
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedSplinePoint(std::size_t index, const glm::vec3& point) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) return false;
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked || index >= selected.splinePoints.size()) return false;
+    selected.splinePoints[index] = point;   // no snapshot: called during drags
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::RemoveSelectedSplinePoint(std::size_t index) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) return false;
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked || index >= selected.splinePoints.size()) return false;
+    PushUndoSnapshot();
+    selected.splinePoints.erase(selected.splinePoints.begin() + static_cast<std::ptrdiff_t>(index));
+    m_dirty = true;
+    return true;
+}
+
 bool EditorScene::SetSelectedTerrainPaint(std::vector<unsigned char> paint) {
     if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
         return false;
@@ -3484,6 +3947,72 @@ bool EditorScene::SetSelectedTerrainPaint(std::vector<unsigned char> paint) {
         return false;
     }
     selected.terrainPaint = std::move(paint);
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedTerrainLayerMaterial(int layer, const std::string& materialPath) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) return false;
+    if (layer < 1 || layer > 5) return false;
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) return false;
+    PushUndoSnapshot();
+    selected.terrainLayerMaterials[static_cast<std::size_t>(layer - 1)] = materialPath;
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedTerrainGrass(bool enabled, float density, float height,
+                                          float windStrength, float windSpeed,
+                                          const glm::vec3& baseColor, const glm::vec3& tipColor) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) return false;
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) return false;
+    PushUndoSnapshot();
+    selected.grassEnabled = enabled;
+    selected.grassDensity = std::clamp(density, 0.05f, 40.0f);
+    selected.grassHeight = std::max(height, 0.05f);
+    selected.grassWindStrength = std::max(windStrength, 0.0f);
+    selected.grassWindSpeed = std::max(windSpeed, 0.0f);
+    selected.grassBaseColor = baseColor;
+    selected.grassTipColor = tipColor;
+    m_dirty = true;
+    return true;
+}
+
+int EditorScene::EnsureActiveGrassStyleSlot() {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) return 0;
+    Object& s = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    Object::GrassStyleEntry active;
+    active.density = s.grassDensity;
+    active.height = s.grassHeight;
+    active.base = s.grassBaseColor;
+    active.tip = s.grassTipColor;
+    auto close = [](float a, float b) { const float d = a - b; return d < 1.0e-4f && d > -1.0e-4f; };
+    for (std::size_t i = 0; i < s.terrainGrassPalette.size(); ++i) {
+        const Object::GrassStyleEntry& e = s.terrainGrassPalette[i];
+        if (close(e.density, active.density) && close(e.height, active.height) &&
+            close(e.base.r, active.base.r) && close(e.base.g, active.base.g) && close(e.base.b, active.base.b) &&
+            close(e.tip.r, active.tip.r) && close(e.tip.g, active.tip.g) && close(e.tip.b, active.tip.b)) {
+            return static_cast<int>(i) + 1;   // reuse an identical style
+        }
+    }
+    if (s.terrainGrassPalette.size() >= 250) return 1;   // palette full: reuse first
+    s.terrainGrassPalette.push_back(active);
+    m_dirty = true;
+    return static_cast<int>(s.terrainGrassPalette.size());   // 1-based
+}
+
+std::vector<unsigned char> EditorScene::SelectedTerrainGrassStyle() {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) return {};
+    return m_objects[static_cast<std::size_t>(m_selectedIndex)].terrainGrassStyle;
+}
+
+bool EditorScene::SetSelectedTerrainGrassStyle(std::vector<unsigned char> style) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) return false;
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) return false;
+    selected.terrainGrassStyle = std::move(style);   // no undo: called during paint drags
     m_dirty = true;
     return true;
 }

@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Scripting Guide — Creating, Setting Up &amp; Implementing Scripts (3DGEngine)</title>
+<style>
+  :root{ --ink:#1c2230; --muted:#5a6478; --accent:#1f7a4d; --accent2:#2f6df6; --line:#d9dee8; --bg-soft:#f2f7f4; --warn:#b8860b; --tip:#0e7a63; }
+  @page { size: A4; margin: 17mm 16mm; }
+  *{ box-sizing:border-box; } html,body{ margin:0; padding:0; }
+  body{ font-family:"Segoe UI",Roboto,Helvetica,Arial,sans-serif; color:var(--ink); font-size:10.4pt; line-height:1.48; }
+  .wrap{ max-width:820px; margin:0 auto; padding:24px; }
+  h2{ font-size:16pt; margin:0 0 4px; border-bottom:2px solid var(--accent); padding-bottom:5px; }
+  h3{ font-size:11.5pt; margin:14px 0 4px; color:#22402f; }
+  p{ margin:7px 0; }
+  code{ font-family:"Consolas","SF Mono",monospace; background:var(--bg-soft); padding:1px 5px; border-radius:4px; font-size:9.2pt; color:#1c5c3c; }
+  pre{ font-family:"Consolas","SF Mono",monospace; background:#111a15; color:#e6f2ea; padding:11px 13px; border-radius:8px; font-size:8.7pt; line-height:1.42; white-space:pre-wrap; }
+  ul,ol{ margin:6px 0 6px 4px; padding-left:20px; } li{ margin:3px 0; }
+  .muted{ color:var(--muted); }
+  .step{ page-break-before:always; }
+  .box{ border:1px solid var(--line); border-radius:9px; padding:11px 14px; margin:12px 0; break-inside:avoid; }
+  .path{ background:var(--bg-soft); border-left:4px solid var(--accent); border-radius:6px; padding:8px 12px; margin:9px 0; font-size:9.6pt; break-inside:avoid; }
+  .path b{ color:var(--accent); }
+  .tip{ border-left:4px solid var(--tip); background:#eefaf6; } .warn{ border-left:4px solid var(--warn); background:#fdf6e3; }
+  .tag{ display:inline-block; font-size:8pt; font-weight:700; letter-spacing:.04em; text-transform:uppercase; color:#fff; background:var(--accent); border-radius:4px; padding:2px 7px; margin-right:6px; vertical-align:1px; }
+  .tag.tip{ background:var(--tip); } .tag.warn{ background:var(--warn); } .tag.try{ background:var(--accent2); }
+  table{ border-collapse:collapse; width:100%; margin:10px 0; font-size:9.2pt; break-inside:avoid; }
+  th,td{ border:1px solid var(--line); padding:5px 9px; text-align:left; vertical-align:top; } th{ background:var(--bg-soft); }
+  .lead{ font-size:11pt; color:#2c4838; }
+  .cover{ height:245mm; display:flex; flex-direction:column; justify-content:center; page-break-after:always; }
+  .cover .kicker{ color:var(--accent); font-weight:700; letter-spacing:.14em; text-transform:uppercase; font-size:10pt; }
+  .cover h1{ font-size:30pt; margin:10px 0 6px; letter-spacing:-.5px; }
+  .cover .sub{ font-size:13pt; color:var(--muted); max-width:580px; }
+  .cover .rule{ height:5px; width:120px; background:var(--accent); border-radius:3px; margin:22px 0; }
+  .pill{ display:inline-block; background:var(--bg-soft); border:1px solid var(--line); border-radius:20px; padding:3px 11px; font-size:8.6pt; margin:3px 5px 3px 0; }
+  hr{ border:0; border-top:1px solid var(--line); margin:16px 0; } .small{ font-size:9pt; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="cover">
+    <div class="kicker">3DGEngine · Developer Guide</div>
+    <h1>Scripting</h1>
+    <div class="rule"></div>
+    <p class="sub">Create, register, compile, attach and implement gameplay scripts. Scripts are small C++
+    classes that give objects custom behavior — the same code runs in the editor's Play mode and in the
+    packaged game.</p>
+    <div style="margin-top:14px;">
+      <span class="pill">engine::Script</span><span class="pill">Lifecycle</span>
+      <span class="pill">Register in game module</span><span class="pill">Compile &amp; Restart</span>
+      <span class="pill">Attach + fields</span><span class="pill">The API</span>
+      <span class="pill">Worked examples</span>
+    </div>
+  </div>
+
+  <!-- OVERVIEW -->
+  <section>
+    <h2>How scripting works</h2>
+    <p class="lead">A script is a C++ class that derives from <code>engine::Script</code>. You override lifecycle
+    methods, attach the script to an object by class name in the editor, and expose tunable <b>fields</b>. Scripts
+    are compiled into the shared <code>game</code> library that both the editor and the standalone player link, so
+    a script behaves identically in Play mode and in the shipped build.</p>
+    <div class="box">
+      <b>The lifecycle</b>
+      <table>
+        <tr><th>Method</th><th>When it runs</th></tr>
+        <tr><td><code>OnCreate()</code></td><td>Once, when the script starts (entering Play / scene load)</td></tr>
+        <tr><td><code>OnUpdate(float dt)</code></td><td>Once per rendered frame (variable <code>dt</code>) — most logic goes here</td></tr>
+        <tr><td><code>OnFixedUpdate(float dt)</code></td><td>Once per physics step (fixed <code>dt</code>) — physics-coupled logic</td></tr>
+        <tr><td><code>OnDestroy()</code></td><td>Once, before the entity/script is destroyed</td></tr>
+      </table>
+    </div>
+    <div class="box tip"><span class="tag tip">Two ways to author</span>
+    You can write scripts <b>in code</b> (a header under <code>game/</code>, registered in the game module — full
+    control), or use the editor's built-in <b>Script templates</b> and <b>Compile &amp; Restart</b> for a
+    no-leave-the-app loop. This guide covers the code path in depth and the editor path at the end.</p>
+  </section>
+
+  <!-- STEP 1 -->
+  <section class="step">
+    <h2>1 · Write the script class</h2>
+    <p>Create a header under <code>game/include/game/scripts/</code>. The minimal example (this exact one ships as
+    <code>Spinner</code>) rotates its object every frame:</p>
+    <pre>#pragma once
+#include &lt;engine/gameplay/Script.h&gt;
+#include &lt;engine/ecs/Components.h&gt;
+#include &lt;glm/gtc/quaternion.hpp&gt;
+
+class Spinner : public engine::Script {
+public:
+    void OnUpdate(float dt) override {
+        if (engine::ecs::Transform* t = Transform()) {
+            const glm::quat spin = glm::angleAxis(dt * 1.5f, glm::vec3(0,1,0));
+            t-&gt;rotation = glm::normalize(spin * t-&gt;rotation);
+        }
+    }
+};</pre>
+    <ul>
+      <li><code>Transform()</code> returns this object's transform (or nullptr).</li>
+      <li><code>Self()</code> is this entity; <code>Registry()</code> is the world. Both are available anywhere in the class.</li>
+      <li>Override only the lifecycle methods you need. If the script has a <code>.cpp</code>, list it in
+      <code>game/CMakeLists.txt</code>; header-only scripts need nothing extra.</li>
+    </ul>
+  </section>
+
+  <!-- STEP 2 -->
+  <section class="step">
+    <h2>2 · Register it in the game module</h2>
+    <p>Scripts are looked up by name at runtime. Register yours in <code>game/src/GameModule.cpp</code>:</p>
+    <pre>// 1. include your header near the top:
+#include "game/scripts/Spinner.h"
+
+void RegisterGameModule() {
+    engine::ScriptRegistry&amp; scripts = engine::ScriptRegistry::Instance();
+
+    // 2. register it. The name MUST match what a scene stores (the class name
+    //    you'll type in the editor's Script field).
+    scripts.Register("Spinner", [] { return std::make_unique&lt;Spinner&gt;(); });
+}</pre>
+    <div class="box warn"><span class="tag warn">The name must match</span>
+    The string you pass to <code>Register("...")</code> is the identifier the editor stores on an object and looks
+    up at runtime. It must exactly match the <b>Class Name</b> you set in the Inspector (Step 4). A mismatch means
+    the object silently has no behavior.</div>
+  </section>
+
+  <!-- STEP 3 -->
+  <section class="step">
+    <h2>3 · Compile</h2>
+    <p>Because scripts are C++, changes take effect after a rebuild of the <code>game</code> library. From the
+    editor you don't have to leave the app:</p>
+    <div class="path"><b>Editor ▸ Compile &amp; Restart</b> (script tools)</div>
+    <p>This runs the bundled <code>3DGScriptCompiler</code>, rebuilds the game module, and relaunches — the build
+    log and status are written under <code>build/script_compile.log</code> / <code>.status</code> and surfaced in
+    the editor. Alternatively rebuild the whole project from your normal CMake build. Either way, the compiled
+    script now runs in <b>Play mode and the packaged player</b> identically.</p>
+    <div class="box tip"><span class="tag tip">Iteration loop</span>
+    Edit the script → Compile &amp; Restart → Play. Keep scripts small so each compile is quick.</div>
+  </section>
+
+  <!-- STEP 4 -->
+  <section class="step">
+    <h2>4 · Attach it to an object</h2>
+    <ol>
+      <li>Select an object, open the <b>Inspector</b>, and <b>Add Component ▸ Script</b>.</li>
+      <li>Set <b>Class Name</b> to the registered name (e.g. <code>Spinner</code>).</li>
+      <li>Enable the script. Press <span style="font-family:monospace">P</span> to Play — the behavior runs.</li>
+    </ol>
+    <p>The object stores the class name (and any fields) in the scene, so it's restored on load and carried into
+    the packaged build.</p>
+  </section>
+
+  <!-- STEP 5 -->
+  <section class="step">
+    <h2>5 · Expose tunable fields</h2>
+    <p>Hard-coding values (speeds, ranges, targets) is limiting. Declare <b>fields</b> on the object's Script
+    component in the Inspector — each has a name, a type (Float / Int / Bool / String) and a value — and read them
+    in the script:</p>
+    <pre>void OnUpdate(float dt) override {
+    float speed  = GetFieldFloat("spinSpeed", 1.5f);   // reads the "spinSpeed" field
+    bool  active = GetFieldBool("active", true);
+    if (!active) return;
+    if (auto* t = Transform())
+        t-&gt;rotation = glm::normalize(glm::angleAxis(dt*speed, glm::vec3(0,1,0)) * t-&gt;rotation);
+}</pre>
+    <table>
+      <tr><th>Reader</th><th>Field type</th></tr>
+      <tr><td><code>GetFieldFloat(name, fallback)</code></td><td>Float</td></tr>
+      <tr><td><code>GetFieldInt(name, fallback)</code></td><td>Int</td></tr>
+      <tr><td><code>GetFieldBool(name, fallback)</code></td><td>Bool</td></tr>
+      <tr><td><code>GetFieldString(name, fallback)</code></td><td>String</td></tr>
+    </table>
+    <p>Now the same script drives many objects with different values, tuned per-object in the editor — no recompile
+    to change a number.</p>
+  </section>
+
+  <!-- STEP 6 -->
+  <section class="step">
+    <h2>6 · The script API</h2>
+    <p>Everything below is available inside your script (protected members of <code>engine::Script</code>).</p>
+
+    <h3>This object &amp; the world</h3>
+    <table>
+      <tr><td><code>Self()</code>, <code>Registry()</code>, <code>Transform()</code></td><td>this entity, the world, this transform</td></tr>
+      <tr><td><code>FindObject(name)</code>, <code>FindTransform(name)</code></td><td>look another object up by name</td></tr>
+      <tr><td><code>TryGet&lt;T&gt;()</code>, <code>Has&lt;T&gt;()</code>, <code>Add&lt;T&gt;()</code>, <code>Remove&lt;T&gt;()</code></td><td>access/add/remove components on self (overloads take an entity)</td></tr>
+      <tr><td><code>SpawnEmpty(name,pos)</code>, <code>SpawnFromObject(prototypeName,pos)</code></td><td>create objects at runtime</td></tr>
+      <tr><td><code>DestroySelf()</code>, <code>Destroy(entity)</code></td><td>remove objects</td></tr>
+    </table>
+
+    <h3>Input</h3>
+    <table>
+      <tr><td><code>IsKeyDown(key)</code>, <code>WasKeyPressed(key)</code></td><td>held / just-pressed this frame</td></tr>
+      <tr><td><code>IsMouseButtonDown(b)</code>, <code>WasMouseButtonPressed(b)</code>, <code>MouseDeltaX/Y()</code></td><td>mouse</td></tr>
+    </table>
+
+    <h3>Triggers, collision &amp; timers</h3>
+    <table>
+      <tr><td><code>WasTriggerEntered(e)</code>, <code>WasTriggerExited(e)</code>, <code>IsTriggerTouching(e)</code></td><td>respond to trigger volumes</td></tr>
+      <tr><td><code>SetTimer(seconds, cb, repeat)</code>, <code>Delay(seconds, cb)</code>, <code>ClearTimer(id)</code></td><td>schedule callbacks</td></tr>
+    </table>
+
+    <h3>Animation</h3>
+    <table>
+      <tr><td><code>SetAnimationParameter(name,v)</code>, <code>SetAnimationBool</code>, <code>SetAnimationTrigger</code></td><td>drive the animation graph (e.g. push <code>Speed</code>)</td></tr>
+      <tr><td><code>PlayAnimationAction(clip)</code>, <code>PlayMaskedAnimationAction(clip,rootBone)</code>, <code>PlayAnimationProfile(name)</code></td><td>one-shot / layered actions (attacks, hits)</td></tr>
+      <tr><td><code>WasAnimationEvent(name)</code>, <code>IsAnimationActionPlaying()</code>, <code>IsAnimationMovementLocked()</code></td><td>react to notifies / action state</td></tr>
+    </table>
+
+    <h3>Audio, particles, camera</h3>
+    <table>
+      <tr><td><code>PlayAudio()</code>, <code>PlayAudioCue(path)</code>, <code>StopAudio()</code>, <code>SetAudioVolume(v)</code> …</td><td>this object's audio source or a one-shot cue</td></tr>
+      <tr><td><code>PlayParticles()</code>, <code>BurstParticles(n)</code>, <code>StopParticles()</code> …</td><td>this object's particle system</td></tr>
+      <tr><td><code>ShakeCamera(intensity,duration)</code>, <code>PlayCameraSequence(name)</code></td><td>camera feedback / cinematics</td></tr>
+    </table>
+
+    <h3>Persistence &amp; flow</h3>
+    <table>
+      <tr><td><code>SaveValue(key,value)</code>, <code>LoadValue(key,fallback)</code></td><td>simple key/value save data</td></tr>
+      <tr><td><code>SaveCheckpoint(name,pos)</code>, <code>LoadCheckpoint(name,&amp;pos)</code></td><td>checkpoints</td></tr>
+      <tr><td><code>RequestSceneLoad(runtimeScenePath)</code></td><td>load another scene (applied safely after the update)</td></tr>
+    </table>
+  </section>
+
+  <!-- STEP 7 -->
+  <section class="step">
+    <h2>7 · Worked examples</h2>
+
+    <h3>Pickup — collect on touch</h3>
+    <pre>class Pickup : public engine::Script {
+public:
+    void OnUpdate(float) override {
+        // fires when the player (a trigger) enters this object
+        if (WasTriggerEntered(Self())) {
+            PlayAudioCue(GetFieldString("sound", "Content/Audio/coin.wav"), false);
+            // ...award score / set a flag your goal checks...
+            DestroySelf();
+        }
+    }
+};</pre>
+
+    <h3>Door — open when triggered</h3>
+    <pre>class Door : public engine::Script {
+    bool m_open = false;
+public:
+    void OnUpdate(float dt) override {
+        if (!m_open &amp;&amp; WasTriggerEntered(Self())) m_open = true;
+        if (m_open) {
+            if (auto* t = Transform()) {
+                float target = GetFieldFloat("openHeight", 3.0f);
+                t-&gt;position.y = glm::mix(t-&gt;position.y, target, dt * 4.0f);
+            }
+        }
+    }
+};</pre>
+
+    <h3>Key-press action</h3>
+    <pre>void OnUpdate(float) override {
+    if (WasKeyPressed(GLFW_KEY_E)) {        // interact
+        if (auto* target = FindObject("Lever")) { /* ... */ }
+    }
+}</pre>
+    <p class="small muted">Remember to register each class in <code>GameModule.cpp</code> and set the matching
+    Class Name on the object.</p>
+  </section>
+
+  <!-- STEP 8 -->
+  <section class="step">
+    <h2>8 · The editor template path</h2>
+    <p>For a faster loop, the editor's Script component can generate a starting script from a <b>template</b>, let
+    you edit the source in-app, and <b>Compile &amp; Restart</b> — no manual file editing. Built-in templates:</p>
+    <table>
+      <tr><th>Template</th><th>Starting point for…</th></tr>
+      <tr><td>Empty</td><td>a blank script (just the lifecycle stubs)</td></tr>
+      <tr><td>Player Movement</td><td>reading input and moving the object</td></tr>
+      <tr><td>Door Opener</td><td>trigger-driven motion</td></tr>
+      <tr><td>Pickup</td><td>collect-on-touch + destroy</td></tr>
+      <tr><td>Damage Zone</td><td>apply damage on contact</td></tr>
+    </table>
+    <p>Generated scripts are written into the game module (<code>EditorGeneratedScripts.h</code>) and registered
+    automatically, so they behave exactly like hand-written ones. Use templates to prototype, then hand-edit as the
+    logic grows.</p>
+  </section>
+
+  <!-- GOTCHAS -->
+  <section class="step">
+    <h2>Gotchas &amp; cheat-sheet</h2>
+    <table>
+      <tr><th>Pitfall</th><th>Fix</th></tr>
+      <tr><td>Object has no behavior in Play</td><td>Class Name must exactly match the <code>Register("...")</code> name, and the script must be enabled.</td></tr>
+      <tr><td>Changes don't take effect</td><td>Scripts are C++ — <b>Compile &amp; Restart</b> (or rebuild) after every edit.</td></tr>
+      <tr><td>Physics feels frame-rate dependent</td><td>Put physics-coupled logic in <code>OnFixedUpdate(dt)</code>, not <code>OnUpdate</code>.</td></tr>
+      <tr><td>Crash when loading a scene from a callback</td><td>Use <code>RequestSceneLoad(...)</code> — it's deferred to a safe point.</td></tr>
+      <tr><td>Field change requires recompile</td><td>It doesn't — expose it as a <b>field</b> and read via <code>GetFieldFloat/Int/Bool/String</code>.</td></tr>
+    </table>
+    <h3>Add-a-script checklist</h3>
+    <ol>
+      <li>Header in <code>game/include/game/scripts/</code>, subclass <code>engine::Script</code>.</li>
+      <li><code>#include</code> + <code>scripts.Register("Name", …)</code> in <code>GameModule.cpp</code>.</li>
+      <li><b>Compile &amp; Restart</b>.</li>
+      <li>Add a <b>Script</b> component to an object; set <b>Class Name</b>; add any <b>fields</b>.</li>
+      <li><span style="font-family:monospace">P</span> to Play.</li>
+    </ol>
+    <hr>
+    <p class="small muted">Scripts run in the shared <code>game</code> module linked by both the editor and the
+    standalone player, so what you test in Play mode is exactly what ships.</p>
+  </section>
+
+</div>
+</body>
+</html>

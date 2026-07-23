@@ -1,5 +1,7 @@
 #pragma once
 
+#include "engine/physics/PhysicsComponents.h"
+
 #include <glm/glm.hpp>
 #include <glm/gtc/constants.hpp>
 #include <cmath>
@@ -27,12 +29,13 @@ public:
     float     maxSlopeCos = std::cos(glm::radians(50.0f));  // steeper = wall
     float     stepHeight  = 0.35f;          // ledges up to this are stepped over
     int       depenetrationIters = 4;
+    std::uint32_t collisionMask = ecs::CollisionLayer::CharacterBlockers;
 
     void SetMaxSlopeDegrees(float deg) { maxSlopeCos = std::cos(glm::radians(deg)); }
 
     // Advance one fixed step. wishVel is the desired horizontal velocity (x,z);
     // vertical motion (gravity, landing) is handled internally. Trigger colliders
-    // are ignored.
+    // and object channels excluded by collisionMask are ignored.
     void Move(ecs::Registry& registry, const glm::vec3& wishVel, float dt);
 
     // Jump helper: sets upward velocity if grounded.

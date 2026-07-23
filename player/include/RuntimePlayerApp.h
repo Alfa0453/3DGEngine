@@ -156,6 +156,7 @@ private:
         bool autoTarget = false;
         bool useGraph = false;
         engine::ai::AiAgent brain;
+        engine::ai::AiMovementComponent movement;
         engine::ai::AgentContext context;
         engine::ai::BehaviorTree<engine::ai::AgentContext> tree;
     };

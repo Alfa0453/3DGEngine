@@ -13,42 +13,37 @@ class Shader;
 class Camera;
 class IBL;
 
-// One Gerstner wave that contributes to the water surface. Several are summed for a
-// natural, non-repeating look. `steepness` (0..1) sharpens crests; keep the total
-// across waves <= 1 to avoid the surface folding over itself.
-struct WaterWave {
-    glm::vec2 direction{1.0f, 0.0f};   // travel direction on the XZ plane (normalized on use)
-    float     amplitude  = 0.11f;      // wave height (world units)
-    float     wavelength = 9.0f;       // crest-to-crest distance
-    float     speed      = 1.0f;       // phase speed
-    float     steepness  = 0.30f;      // 0 = round sine, 1 = sharp Gerstner crest
-};
-
-// A water body: a subdivided plane animated by summed Gerstner waves, shaded with a
-// Fresnel sky reflection, a sun glint, and depth-tinted transparency.
+// A stylised water body (Sea-of-Thieves style). The surface is displaced by iterative
+// value-noise "sea octaves" (after Alexander Alekseev's Seascape / the gameidea.org
+// stylised-water tutorial), shaded with a deep/shallow tint, Fresnel sky reflection, a
+// sun glint, and procedural crest foam. Rendered as a transparent forward pass.
 struct WaterConfig {
     glm::vec3 center{0.0f, 0.0f, 0.0f};   // world centre of the patch (y = calm surface level)
     float     size = 80.0f;               // square extent (world units)
     int       resolution = 160;           // grid subdivisions per side (mesh detail)
 
-    glm::vec3 shallowColor{0.10f, 0.42f, 0.50f};
-    glm::vec3 deepColor{0.02f, 0.10f, 0.18f};
-    glm::vec3 reflectionColor{0.55f, 0.72f, 0.92f};  // sky tint blended in by Fresnel
-    float     transparency   = 0.72f;     // base alpha looking straight down (0..1)
-    float     fresnelPower   = 4.0f;      // how quickly reflection takes over at grazing angles
-    float     specularStrength = 1.2f;    // sun glint intensity
-    float     shininess      = 220.0f;    // sun glint tightness
+    // Surface shape: iterated value-noise waves. Higher choppy = sharper crests.
+    float     seaHeight = 0.55f;          // overall wave height (world units)
+    float     seaChoppy = 3.2f;           // crest sharpness
+    float     seaSpeed  = 0.8f;           // animation speed
+    float     seaFreq   = 0.10f;          // base spatial frequency (larger = smaller waves)
 
-    int       waveCount = 4;              // 1..4 waves used
-    // Long, low, gently-sloped swells layered with progressively smaller ripples in
-    // varied directions. Low steepness keeps crests rounded (no razor bands); the
-    // spread of wavelengths/directions breaks up any obvious tiling.
-    WaterWave waves[4] = {
-        {{ 1.0f,  0.15f}, 0.13f, 17.0f, 0.85f, 0.32f},
-        {{ 0.5f,  0.85f}, 0.08f, 10.0f, 1.05f, 0.26f},
-        {{-0.8f,  0.35f}, 0.045f, 5.5f, 1.35f, 0.20f},
-        {{ 0.25f,-1.0f},  0.025f, 3.0f, 1.65f, 0.16f},
-    };
+    glm::vec3 shallowColor{0.14f, 0.55f, 0.60f};     // bright shallow / grazing tint
+    glm::vec3 deepColor{0.02f, 0.13f, 0.20f};        // deep water tint
+    glm::vec3 reflectionColor{0.55f, 0.72f, 0.92f};  // sky tint blended in by Fresnel
+    float     transparency   = 0.74f;     // base alpha looking straight down (0..1)
+    float     fresnelPower   = 5.0f;      // how quickly reflection takes over at grazing angles
+    float     specularStrength = 0.8f;    // sun glint intensity
+    float     shininess      = 400.0f;    // sun glint tightness
+
+    // Stylised whitecap foam on wave crests.
+    glm::vec3 foamColor{1.0f, 1.0f, 1.0f};
+    float     foamAmount = 0.55f;         // 0 = none; higher = more crest foam
+
+    // Directional flow (e.g. a river following a spline). flowDir is a world XZ
+    // direction; flowStrength scrolls the wave pattern along it (0 = still water).
+    glm::vec2 flowDir{0.0f, 0.0f};
+    float     flowStrength = 0.0f;
 };
 
 class Water {
@@ -68,8 +63,12 @@ public:
 
     // Draw the transparent water surface. Call AFTER the opaque scene (it reads the
     // depth buffer and blends). Restores GL blend/depth state afterward.
+    // `contacts` are objects piercing the surface: each is (worldX, worldZ, radius,
+    // strength); a foam ring is drawn where the water meets them (up to kMaxContacts).
+    static constexpr int kMaxContacts = 16;
     void Draw(const Camera& camera, float aspect,
-              const glm::vec3& sunDir, const glm::vec3& sunColor, const glm::vec3& ambient);
+              const glm::vec3& sunDir, const glm::vec3& sunColor, const glm::vec3& ambient,
+              const glm::vec4* contacts = nullptr, int contactCount = 0);
 
     // Surface height at a world XZ position and the current time -- for buoyancy,
     // splashes, or floating the player. Matches the shader's Gerstner sum.

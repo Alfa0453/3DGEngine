@@ -75,9 +75,22 @@ Pen CapsuleVsCollider(const glm::vec3& p0, const glm::vec3& p1, float r, const T
         if (p.hit && (!out.hit || p.depth > out.depth)) out = p;
     };
     if (c.shape == ColliderShape::Cylinder) {
-        const Collider proxy = Collider::MakeCapsule(c.radius,
-            std::max(c.halfHeight - c.radius, 0.0f));
-        return CapsuleVsCollider(p0, p1, r, t, proxy);
+        // Match PhysicsWorld's flat-ended cylinder decomposition. Using box
+        // strips here preserves the circular side while keeping both cap planes
+        // flat for character stepping and push-out.
+        constexpr int slices = 20;
+        const float radius = std::max(c.radius, 0.001f);
+        const float halfHeight = std::max(c.halfHeight, 0.001f);
+        const float width = (2.0f * radius) / static_cast<float>(slices);
+        for (int i = 0; i < slices; ++i) {
+            const float x = -radius + (static_cast<float>(i) + 0.5f) * width;
+            const float z = std::sqrt(std::max(radius * radius - x * x, 0.0f));
+            Transform piece = t;
+            piece.position += t.rotation * glm::vec3(x, 0.0f, 0.0f);
+            consider(CapsuleVsCollider(p0, p1, r, piece,
+                Collider::MakeBox(glm::vec3(width * 0.5f, halfHeight, std::max(z, 0.001f)))));
+        }
+        return out;
     }
     if (c.shape == ColliderShape::Torus) {
         constexpr int segments = 20;
@@ -158,7 +171,7 @@ bool CharacterController::ResolvePenetrations(ecs::Registry& reg) {
         const glm::vec3 p0 = position - glm::vec3(0, halfSeg, 0);
         const glm::vec3 p1 = position + glm::vec3(0, halfSeg, 0);
         reg.view<Transform, Collider>().each([&](Entity, Transform& t, Collider& c) {
-            if (c.isTrigger) return;
+            if (c.isTrigger || (c.layer & collisionMask) == 0u) return;
             const Pen p = CapsuleVsCollider(p0, p1, radius, t, c);
             if (p.hit && p.depth > best.depth) best = p;
         });
@@ -213,7 +226,7 @@ void CharacterController::Move(ecs::Registry& reg, const glm::vec3& wishVel, flo
         const glm::vec3 p0 = position - glm::vec3(0, halfSeg, 0);
         const glm::vec3 p1 = position + glm::vec3(0, halfSeg, 0);
         reg.view<Transform, Collider>().each([&](Entity, Transform& t, Collider& c) {
-            if (c.isTrigger) return;
+            if (c.isTrigger || (c.layer & collisionMask) == 0u) return;
             const Pen p = CapsuleVsCollider(p0, p1, radius, t, c);
             if (p.hit && p.normal.y > maxSlopeCos) { grounded = true; groundNormal = p.normal; }
         });

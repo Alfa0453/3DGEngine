@@ -22,6 +22,7 @@ class ShaderEditorPanel {
 public:
     ~ShaderEditorPanel();
     void Draw(EditorAssets& assets, bool* open);
+    void QueueOpen(const std::string& path);
     bool WantsKeyboard() const { return m_keyboardFocused; }
 
 private:
@@ -31,7 +32,6 @@ private:
     bool OpenDocument(const std::string& path);
     bool SaveDocument(EditorAssets& assets, bool saveAs);
     bool DuplicateDocument(EditorAssets& assets);
-    void RequestOpen(const std::string& path);
     void RequestNew();
     void GenerateSources();
     void DrawGraphCanvas();
@@ -45,6 +45,7 @@ private:
     void UndoGraph();
     void RedoGraph();
     void Compile(bool force = false);
+    void RequestOpen(const std::string& path);
     unsigned int RenderPreview(int width, int height);
     void EnsurePreviewResources();
     std::string NumberedSource(const std::string& source) const;
@@ -60,6 +61,7 @@ private:
     std::string m_status{"Create or open a shader asset."};
     std::string m_error;
     std::string m_pendingOpenPath;
+    std::string m_externalOpenPath;
     std::array<char, 160> m_name{};
     std::array<char, 96> m_sourceSearch{};
     bool m_dirty = false;

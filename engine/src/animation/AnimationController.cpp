@@ -22,6 +22,20 @@ void AnimationController::AddTransition(const Transition& t) {
     m_transitions.push_back(t);
 }
 
+void AnimationController::AddBlendSample(int stateIndex, const State::BlendSample& sample) {
+    if (stateIndex < 0 || stateIndex >= static_cast<int>(m_states.size()) || sample.clip < 0) return;
+    m_states[static_cast<std::size_t>(stateIndex)].blendSamples.push_back(sample);
+}
+
+void AnimationController::ConfigureBlendSpace(int stateIndex, const std::string& parameterY,
+                                               bool twoDimensional, bool synchronize) {
+    if (stateIndex < 0 || stateIndex >= static_cast<int>(m_states.size())) return;
+    State& state = m_states[static_cast<std::size_t>(stateIndex)];
+    state.blendParameterY = parameterY;
+    state.blendSpace2D = twoDimensional;
+    state.synchronizeBlendSpace = synchronize;
+}
+
 void AnimationController::DeclareParameter(const ParameterDefinition& definition) {
     if (definition.name.empty()) return;
     for (ParameterDefinition& current : m_parameterDefinitions) {
@@ -285,6 +299,79 @@ float AnimationController::CurrentBlendWeight() const {
     const float span = state.blendMax - state.blendMin;
     if (std::abs(span) <= 0.0001f) return 0.0f;
     return std::clamp((Parameter(state.blendParameter) - state.blendMin) / span, 0.0f, 1.0f);
+}
+
+AnimationController::BlendSpaceResult AnimationController::EvaluateBlendSpace(int stateIndex) const {
+    BlendSpaceResult result;
+    if (stateIndex < 0 || stateIndex >= static_cast<int>(m_states.size())) return result;
+    const State& state = m_states[static_cast<std::size_t>(stateIndex)];
+    if (state.blendSamples.empty() || state.blendParameter.empty()) return result;
+    result.synchronized = state.synchronizeBlendSpace;
+
+    const float value = Parameter(state.blendParameter, 0.0f);
+    if (state.blendSpace2D && !state.blendParameterY.empty()) {
+        const float valueY = Parameter(state.blendParameterY, 0.0f);
+        struct Candidate { const State::BlendSample* sample; float distance; };
+        std::vector<Candidate> candidates;
+        candidates.reserve(state.blendSamples.size());
+        for (const State::BlendSample& sample : state.blendSamples) {
+            if (sample.clip < 0) continue;
+            const float dx = value - sample.value;
+            float dy = valueY - sample.valueY;
+            if (state.blendParameterY == "Direction") dy = std::remainder(dy, 360.0f);
+            const float distance = std::sqrt(dx * dx + dy * dy);
+            if (distance <= 0.0001f) {
+                result.clipA = result.clipB = sample.clip;
+                result.active = true;
+                result.samples.push_back({sample.clip, 1.0f});
+                return result;
+            }
+            candidates.push_back({&sample, distance});
+        }
+        std::sort(candidates.begin(), candidates.end(),
+            [](const Candidate& a, const Candidate& b) { return a.distance < b.distance; });
+        const std::size_t count = std::min<std::size_t>(candidates.size(), 4);
+        float total = 0.0f;
+        for (std::size_t i = 0; i < count; ++i) total += 1.0f / candidates[i].distance;
+        for (std::size_t i = 0; i < count && total > 0.0f; ++i) {
+            result.samples.push_back({candidates[i].sample->clip,
+                (1.0f / candidates[i].distance) / total});
+        }
+        if (!result.samples.empty()) {
+            result.clipA = result.samples.front().clip;
+            result.clipB = result.samples.size() > 1 ? result.samples[1].clip : result.clipA;
+            result.alpha = result.samples.size() > 1 ? result.samples[1].weight : 0.0f;
+            result.active = true;
+        }
+        return result;
+    }
+    const State::BlendSample* lower = nullptr;
+    const State::BlendSample* upper = nullptr;
+    for (const State::BlendSample& sample : state.blendSamples) {
+        if (sample.clip < 0) continue;
+        if (sample.value <= value && (!lower || sample.value > lower->value)) lower = &sample;
+        if (sample.value >= value && (!upper || sample.value < upper->value)) upper = &sample;
+    }
+    if (!lower && !upper) return result;
+    if (!lower) lower = upper;
+    if (!upper) upper = lower;
+    result.clipA = lower->clip;
+    result.clipB = upper->clip;
+    result.active = true;
+    const float span = upper->value - lower->value;
+    result.alpha = std::abs(span) > 0.0001f
+        ? std::clamp((value - lower->value) / span, 0.0f, 1.0f) : 0.0f;
+    result.samples.push_back({result.clipA, 1.0f - result.alpha});
+    if (result.clipB != result.clipA) result.samples.push_back({result.clipB, result.alpha});
+    return result;
+}
+
+AnimationController::BlendSpaceResult AnimationController::CurrentBlendSpace() const {
+    return EvaluateBlendSpace(m_cur);
+}
+
+AnimationController::BlendSpaceResult AnimationController::PreviousBlendSpace() const {
+    return EvaluateBlendSpace(m_prev);
 }
 
 } // namespace engine

@@ -13,7 +13,7 @@
 // built-in patrol/chase/search brain.
 class BehaviorGraphPanel {
 public:
-    void SetOutputDirectory(const std::string& dir) { m_outputDir = dir; }
+    void SetOutputDirectory(const std::string& dir);
 
     // Draws the whole panel body (toolbar + canvas + inspector). Returns true on the
     // frame the graph was saved (so the host can react, e.g. assign it to a selection).
@@ -38,6 +38,7 @@ private:
     void DrawBlackboard();
     void DrawCanvas();
     void DrawInspector();
+    void RefreshSavedGraphs();
 
     bool CanLink(int parent, int child) const;   // rejects self/cycles/arity violations
     void AddLink(int parent, int child);
@@ -48,6 +49,12 @@ private:
     std::string m_currentPath;
     std::string m_status;
     char        m_nameBuffer[128] = "behavior";
+
+    struct SavedGraph {
+        std::string displayPath;
+        std::string fullPath;
+    };
+    std::vector<SavedGraph> m_savedGraphs;
 
     int   m_selected   = -1;
     int   m_hovered    = -1;   // node under the cursor this frame (for link targeting)

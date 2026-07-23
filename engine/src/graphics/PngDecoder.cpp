@@ -279,32 +279,44 @@ Image DecodePNGFromMemeory(const unsigned char* data, std::size_t size) {
     Image img;
     img.width  = width;
     img.height = height;
+    img.sourceBitDepth = bitDepth;
     img.rgba.resize(static_cast<std::size_t>(width) * height * 4);
+    img.luminance16.resize(static_cast<std::size_t>(width) * height);
+    auto toU16 = [&](int sample) -> std::uint16_t {
+        return static_cast<std::uint16_t>(
+            (static_cast<std::uint64_t>(sample) * 65535u + maxVal / 2) / maxVal);
+    };
     for (int y = 0; y < height; ++y) {
         const unsigned char* row = &recon[static_cast<std::size_t>(y) * stride];
         for (int x = 0; x < width; ++x) {
-            unsigned char* o = &img.rgba[(static_cast<std::size_t>(y) * width + x) * 4];
+            const std::size_t pixel = static_cast<std::size_t>(y) * width + x;
+            unsigned char* o = &img.rgba[pixel * 4];
             unsigned char r, g, b, a = 255;
+            std::uint16_t luminance = 0;
             switch (colorType) {
             case 0: {   // grayscale (any supported depth)
                 const int s0 = sampleAt(row, x, 0);
                 r = g = b = toByte(s0);
+                luminance = toU16(s0);
                 break;
             }
             case 2: {   // RGB (8/16-bit)
-                r = toByte(sampleAt(row, x, 0));
-                g = toByte(sampleAt(row, x, 1));
-                b = toByte(sampleAt(row, x, 2));
+                const int sr = sampleAt(row, x, 0), sg = sampleAt(row, x, 1), sb = sampleAt(row, x, 2);
+                r = toByte(sr); g = toByte(sg); b = toByte(sb);
+                luminance = static_cast<std::uint16_t>((2126u * toU16(sr) + 7152u * toU16(sg) + 722u * toU16(sb)) / 10000u);
                 break;
             }
             case 4: {   // grayscale + alpha (8/16-bit)
-                r = g = b = toByte(sampleAt(row, x, 0));
+                const int s0 = sampleAt(row, x, 0);
+                r = g = b = toByte(s0);
                 a = toByte(sampleAt(row, x, 1));
+                luminance = toU16(s0);
                 break;
             }
             case 6: {   // RGBA (8/16-bit)
-                r = toByte(sampleAt(row, x, 0)); g = toByte(sampleAt(row, x, 1));
-                b = toByte(sampleAt(row, x, 2)); a = toByte(sampleAt(row, x, 3));
+                const int sr = sampleAt(row, x, 0), sg = sampleAt(row, x, 1), sb = sampleAt(row, x, 2);
+                r = toByte(sr); g = toByte(sg); b = toByte(sb); a = toByte(sampleAt(row, x, 3));
+                luminance = static_cast<std::uint16_t>((2126u * toU16(sr) + 7152u * toU16(sg) + 722u * toU16(sb)) / 10000u);
                 break;
             }
             case 3: {   // palette index (any supported depth)
@@ -312,11 +324,14 @@ Image DecodePNGFromMemeory(const unsigned char* data, std::size_t size) {
                 if (idx * 3 + 2 >= palette.size()) throw std::runtime_error("PNG: palette index out of range");
                 r = palette[idx * 3]; g = palette[idx * 3 + 1]; b = palette[idx * 3 + 2];
                 a = (idx < trns.size()) ? trns[idx] : 255;
+                const std::uint64_t weighted = 2126ull * r + 7152ull * g + 722ull * b;
+                luminance = static_cast<std::uint16_t>(weighted * 65535ull / (10000ull * 255ull));
                 break;
             }
             default: r = g = b = 0; break;
             }
             o[0] = r; o[1] = g; o[2] = b; o[3] = a;
+            img.luminance16[pixel] = luminance;
         }
     }
     return img;

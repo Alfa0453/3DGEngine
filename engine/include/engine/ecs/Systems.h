@@ -125,6 +125,7 @@ inline void RenderLoadedModels(
             DrawModel(*loaded.model, *shader);
         }
     );
+    // Restore GL state after rendering loaded models
     glDisable(GL_BLEND);
     glDepthMask(GL_TRUE);
 }

@@ -67,12 +67,28 @@ public:
                                 const glm::mat4& viewProj,
                                 bool selectedOnly) const;
 
+    // Reference ground grid on the XZ plane (minor + brighter major lines) with
+    // coloured world axes through the origin: X red, Z blue, Y green.
+    void DrawWorldGrid(engine::Renderer& renderer,
+                       engine::Shader& shader,
+                       const engine::Mesh& cube,
+                       const glm::mat4& viewProj) const;
+
     void DrawPhysicsColliderGuides(engine::Renderer& renderer,
                                    engine::Shader& shader,
                                    const engine::Mesh& cube,
                                    const EditorScene& scene,
                                    const glm::mat4& viewProj,
                                    bool selectedOnly) const;
+
+    // Unreal-style forward arrow for skeletal characters: points along the object's
+    // local -Z (the gameplay "front" the player controller faces). Align the character
+    // mesh to it (via the Model Rot offset) so it faces forward when placed.
+    void DrawCharacterFacingArrows(engine::Renderer& renderer,
+                                   engine::Shader& shader,
+                                   const engine::Mesh& cube,
+                                   const EditorScene& scene,
+                                   const glm::mat4& viewProj) const;
 
     void DrawPhysicsEventGuides(engine::Renderer& renderer,
                                 engine::Shader& shader,
@@ -99,6 +115,14 @@ public:
                                   const engine::Mesh& cube,
                                   const EditorScene& scene,
                                   const glm::mat4& viewProj) const;
+
+    // Draws every spline object's smooth curve plus its control-point handles
+    // (the selected spline is highlighted).
+    void DrawSplineGuides(engine::Renderer& renderer,
+                          engine::Shader& shader,
+                          const engine::Mesh& cube,
+                          const EditorScene& scene,
+                          const glm::mat4& viewProj) const;
 
     void DrawNavMeshBoundsGuides(engine::Renderer& renderer,
                                  engine::Shader& shader,
@@ -173,7 +197,8 @@ public:
                                          const engine::SkinnedModel& model,
                                          const std::vector<glm::mat4>& pose,
                                          const glm::vec3& color,
-                                         float thickness) const;
+                                         float thickness,
+                                         const glm::mat4& modelOffset = glm::mat4(1.0f)) const;
 
     void DrawLoadedModel(engine::Shader& shader,
                          const engine::ecs::Transform& transform,

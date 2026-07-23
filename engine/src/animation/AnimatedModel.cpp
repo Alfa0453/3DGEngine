@@ -86,26 +86,47 @@ void UpdateAnimations(ecs::Registry& reg, float dt) {
             }
         }
 
-        // --- Base locomotion pose (single clip, or a cross-fade of two) ---------
+        // --- Base locomotion pose (clip, Blend Space, and state cross-fade) -----
         const Animation* cur = clipAt(am.controller.CurrentClip());
         if (!cur) { Animator::ComputeBindPose(skel, am.pose); return; }
 
         if (am.controller.CurrentRootMotion()
             && previousBaseClip == am.controller.CurrentClip()
             && dt > 0.0f) {
-            const glm::vec3 before = Animator::SampleRootTranslation(skel, *cur, previousBaseTime);
-            const glm::vec3 after = Animator::SampleRootTranslation(skel, *cur, am.controller.CurrentTime());
-            glm::vec3 delta = after - before;
-            const float length = ClipSeconds(*cur);
-            if (length > 0.0f) {
-                const int previousCycle = static_cast<int>(std::floor(previousBaseTime / length));
-                const int currentCycle = static_cast<int>(std::floor(am.controller.CurrentTime() / length));
-                if (currentCycle > previousCycle) {
-                    const glm::vec3 start = Animator::SampleRootTranslation(skel, *cur, 0.0f);
-                    const glm::vec3 end = Animator::SampleRootTranslation(skel, *cur, length - 0.0001f);
-                    delta = (end - before) + (after - start)
-                        + static_cast<float>(currentCycle - previousCycle - 1) * (end - start);
+            const auto rootDelta = [&](const Animation& animation, float beforeTime, float afterTime) {
+                const glm::vec3 before = Animator::SampleRootTranslation(skel, animation, beforeTime);
+                const glm::vec3 after = Animator::SampleRootTranslation(skel, animation, afterTime);
+                glm::vec3 delta = after - before;
+                const float length = ClipSeconds(animation);
+                if (length > 0.0f) {
+                    const int previousCycle = static_cast<int>(std::floor(beforeTime / length));
+                    const int currentCycle = static_cast<int>(std::floor(afterTime / length));
+                    if (currentCycle > previousCycle) {
+                        const glm::vec3 start = Animator::SampleRootTranslation(skel, animation, 0.0f);
+                        const glm::vec3 end = Animator::SampleRootTranslation(skel, animation, length - 0.0001f);
+                        delta = (end - before) + (after - start)
+                            + static_cast<float>(currentCycle - previousCycle - 1) * (end - start);
+                    }
                 }
+                return delta;
+            };
+            glm::vec3 delta(0.0f);
+            const auto rootSpace = am.controller.CurrentBlendSpace();
+            if (rootSpace.active && !rootSpace.samples.empty()) {
+                const float referenceLength = ClipSeconds(*cur);
+                for (const auto& sample : rootSpace.samples) {
+                    const Animation* animation = clipAt(sample.clip);
+                    if (!animation || sample.weight <= 0.0f) continue;
+                    float beforeTime = previousBaseTime, afterTime = am.controller.CurrentTime();
+                    const float sampleLength = ClipSeconds(*animation);
+                    if (rootSpace.synchronized && referenceLength > 0.0001f && sampleLength > 0.0001f) {
+                        beforeTime = previousBaseTime * sampleLength / referenceLength;
+                        afterTime = am.controller.CurrentTime() * sampleLength / referenceLength;
+                    }
+                    delta += rootDelta(*animation, beforeTime, afterTime) * sample.weight;
+                }
+            } else {
+                delta = rootDelta(*cur, previousBaseTime, am.controller.CurrentTime());
             }
             transform.position += transform.rotation * delta;
         }
@@ -116,26 +137,73 @@ void UpdateAnimations(ecs::Registry& reg, float dt) {
             if (len > 0.0f) curTime = std::min(curTime, len - 1e-4f);
         }
 
-        std::vector<BoneLocal> local;
-        const Animation* prev = am.controller.Blending() ? clipAt(am.controller.PrevClip()) : nullptr;
-        if (prev) {
-            std::vector<BoneLocal> a, b;
-            Animator::SampleLocal(skel, *prev, am.controller.PrevTime(), a);
-            Animator::SampleLocal(skel, *cur, curTime, b);
-            Animator::BlendLocal(a, b, am.controller.Blend(), local);
-        } else {
-            Animator::SampleLocal(skel, *cur, curTime, local);
+        auto sampleState = [&](int fallbackClip, float time,
+                               const AnimationController::BlendSpaceResult& space,
+                               std::vector<BoneLocal>& out) {
+            const Animation* reference = clipAt(fallbackClip);
+            auto synchronizedTime = [&](const Animation* sample) {
+                if (!space.synchronized || !reference || !sample) return time;
+                const float referenceLength = ClipSeconds(*reference);
+                const float sampleLength = ClipSeconds(*sample);
+                if (referenceLength <= 0.0001f || sampleLength <= 0.0001f) return time;
+                const float phase = std::fmod(std::max(time, 0.0f), referenceLength) / referenceLength;
+                return phase * sampleLength;
+            };
+            if (space.active && !space.samples.empty()) {
+                float accumulated = 0.0f;
+                bool sampled = false;
+                for (const auto& weighted : space.samples) {
+                    const Animation* clip = clipAt(weighted.clip);
+                    if (!clip || weighted.weight <= 0.0f) continue;
+                    std::vector<BoneLocal> pose;
+                    Animator::SampleLocal(skel, *clip, synchronizedTime(clip), pose);
+                    if (!sampled) {
+                        out = std::move(pose);
+                        accumulated = weighted.weight;
+                        sampled = true;
+                    } else {
+                        std::vector<BoneLocal> mixed;
+                        const float blend = weighted.weight / (accumulated + weighted.weight);
+                        Animator::BlendLocal(out, pose, blend, mixed);
+                        out = std::move(mixed);
+                        accumulated += weighted.weight;
+                    }
+                }
+                return sampled;
+            }
+            const Animation* a = clipAt(fallbackClip);
+            if (!a) return false;
+            Animator::SampleLocal(skel, *a, time, out);
+            return true;
+        };
+
+        std::vector<BoneLocal> currentPose;
+        sampleState(am.controller.CurrentClip(), curTime,
+            am.controller.CurrentBlendSpace(), currentPose);
+
+        // Preserve the original two-clip field for older assets.
+        if (!am.controller.CurrentBlendSpace().active) {
+            const Animation* blendClip = clipAt(am.controller.CurrentBlendClip());
+            const float blendWeight = am.controller.CurrentBlendWeight();
+            if (blendClip && blendWeight > 0.0f) {
+                std::vector<BoneLocal> blendPose, mixed;
+                Animator::SampleLocal(skel, *blendClip, curTime, blendPose);
+                Animator::BlendLocal(currentPose, blendPose, blendWeight, mixed);
+                currentPose = std::move(mixed);
+            }
         }
 
-
-        const Animation* blendClip = clipAt(am.controller.CurrentBlendClip());
-        const float blendWeight = am.controller.CurrentBlendWeight();
-        if (blendClip && blendWeight > 0.0f) {
-            std::vector<BoneLocal> blendPose;
-            Animator::SampleLocal(skel, *blendClip, curTime, blendPose);
-            std::vector<BoneLocal> mixed;
-            Animator::BlendLocal(local, blendPose, blendWeight, mixed);
-            local = std::move(mixed);
+        std::vector<BoneLocal> local;
+        if (am.controller.Blending()) {
+            std::vector<BoneLocal> previousPose;
+            if (sampleState(am.controller.PrevClip(), am.controller.PrevTime(),
+                    am.controller.PreviousBlendSpace(), previousPose)) {
+                Animator::BlendLocal(previousPose, currentPose, am.controller.Blend(), local);
+            } else {
+                local = std::move(currentPose);
+            }
+        } else {
+            local = std::move(currentPose);
         }
         if (am.controller.CurrentRootMotion() && !local.empty() && !skel.bones.empty()) {
             local[0].pos = glm::vec3(skel.bones[0].localBind[3]);

@@ -141,6 +141,14 @@ bool PointInRect(float px, float py, float x, float y, float w, float h) {
 
 } // namespace
 
+std::string ResolveHudText(const HudWidget& widget, const HudContext& context) {
+    return ResolveText(widget, context);
+}
+
+float ResolveHudFraction(const HudWidget& widget, const HudContext& context) {
+    return ResolveFraction(widget, context);
+}
+
 // ---------------------------------------------------------------------------
 // Draw
 // ---------------------------------------------------------------------------
@@ -181,13 +189,13 @@ HudDrawResult DrawHud(TextRenderer& text, const HudDocument& doc, const HudConte
             }
 
             case HudWidgetType::Text: {
-                const std::string str = ResolveText(w, ctx);
+                const std::string str = ResolveHudText(w, ctx);
                 text.Text(str, x, y, effScale, glm::vec3(w.color));
                 break;
             }
 
             case HudWidgetType::Bar: {
-                const float frac = ResolveFraction(w, ctx);
+                const float frac = ResolveHudFraction(w, ctx);
                 drawRect(x, y, ww, hh, w.bgColor);
                 if (frac > 0.0f) {
                     drawRect(x, y, ww * frac, hh, w.fillColor);
@@ -204,7 +212,7 @@ HudDrawResult DrawHud(TextRenderer& text, const HudDocument& doc, const HudConte
                 }
                 drawRect(x, y, ww, hh, glm::vec4(bg, alpha));
 
-                const std::string label = ResolveText(w, ctx);
+                const std::string label = ResolveHudText(w, ctx);
                 const float tw = text.Measure(label, effScale);
                 const float th = TextRenderer::kGlyphPx * effScale;
                 text.Text(label, x + (ww - tw) * 0.5f, y + (hh - th) * 0.5f, effScale, glm::vec3(0.97f));
@@ -397,10 +405,10 @@ bool HudDocument::Load(const std::string& path, std::string* error) {
                     for (std::size_t i = 0; i < parameterCount; ++i) {
                         std::string name;
                         std::string value;
-                        int type = 0;
-                        shaderStream >> std::quoted(name) >> type >> std::quoted(value);
+                        int parameterType = 0;
+                        shaderStream >> std::quoted(name) >> parameterType >> std::quoted(value);
                         w.shaderParameters[name] = value;
-                        w.shaderParameterTypes[name] = type;
+                        w.shaderParameterTypes[name] = parameterType;
                     }
                 }
             }

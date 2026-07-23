@@ -76,6 +76,10 @@ bool CurveKeysControl(const char* label, bool& enabled, std::array<float, 4>& ke
 
 } // namespace
 
+void ParticleEditorPanel::RequestOpen(const std::string& path) {
+    m_externalOpenPath = path;
+}
+
 void ParticleEditorPanel::SyncSelection(EditorScene& scene) {
     const int selected = scene.SelectedIndex();
     if (selected == m_selectedIndex) return;
@@ -837,19 +841,7 @@ void ParticleEditorPanel::Draw(EditorScene& scene, EditorAssets& assets, bool* o
     if (!ImGui::Begin("Particle Editor", open)) { ImGui::End(); return; }
 
     const EditorScene::Object* object = scene.SelectedObject();
-    if (!object) {
-        ImGui::TextDisabled("Select an object with a Particle System component.");
-        ImGui::End(); return;
-    }
-    if (!object->particleSystemEnabled) {
-        ImGui::TextDisabled("%s has no Particle System component.", object->name.c_str());
-        if (ImGui::Button("Add Particle System")) {
-            engine::ParticleSystemComponent defaults;
-            scene.SetSelectedParticleSystem(true, defaults);
-            m_selectedIndex = -2;
-        }
-        ImGui::End(); return;
-    }
+    const bool attachedToObject = object && object->particleSystemEnabled;
 
     auto openAsset = [&](const std::string& path) {
         engine::ParticleSystemComponent loaded;
@@ -859,7 +851,8 @@ void ParticleEditorPanel::Draw(EditorScene& scene, EditorAssets& assets, bool* o
         m_assetPath = path;
         m_assetName = std::filesystem::path(path).stem().string();
         m_assetDirty = false;
-        scene.SetSelectedParticleAsset(path, m_settings, false);
+        m_hasSystem = true;
+        if (attachedToObject) scene.SetSelectedParticleAsset(path, m_settings, false);
         RestartPreview();
         m_error.clear();
     };
@@ -868,7 +861,8 @@ void ParticleEditorPanel::Draw(EditorScene& scene, EditorAssets& assets, bool* o
         m_assetPath.clear();
         m_assetName = "NewParticle";
         m_assetDirty = true;
-        scene.SetSelectedParticleAsset({}, m_settings, false);
+        m_hasSystem = true;
+        if (attachedToObject) scene.SetSelectedParticleAsset({}, m_settings, false);
         RestartPreview();
     };
     auto saveAsset = [&](bool saveAs) {
@@ -883,12 +877,51 @@ void ParticleEditorPanel::Draw(EditorScene& scene, EditorAssets& assets, bool* o
         m_assetPath = path.string();
         m_assetName = path.stem().string();
         m_assetDirty = false;
-        scene.SetSelectedParticleAsset(m_assetPath, m_settings, false);
+        if (attachedToObject) scene.SetSelectedParticleAsset(m_assetPath, m_settings, false);
         scene.RefreshParticleAssetInstances(m_assetPath, m_settings);
         assets.Refresh(assets.RootPath(), &error);
         m_error = error;
         return true;
     };
+
+    if (!m_externalOpenPath.empty()) {
+        const std::string path = std::move(m_externalOpenPath);
+        m_externalOpenPath.clear();
+        if (std::filesystem::path(path).extension() == ".particlefx") {
+            std::vector<engine::ParticleEffectLayer> loadedLayers;
+            std::string error;
+            if (particle_asset::LoadEffect(path, &loadedLayers, &error)) {
+                m_effectLayers = std::move(loadedLayers);
+                m_effectAssetPath = path;
+                m_effectAssetName = std::filesystem::path(path).stem().string();
+                m_hasSystem = true;
+                if (attachedToObject) scene.SetSelectedParticleEffectLayers(m_effectLayers);
+                RestartEffectPreview();
+                m_error.clear();
+            } else {
+                m_error = error;
+            }
+        } else if (m_assetDirty) {
+            m_pendingOpenPath = path;
+            ImGui::OpenPopup("Unsaved Particle Asset");
+        } else {
+            openAsset(path);
+        }
+    }
+
+    if (!m_hasSystem) {
+        if (!object) {
+            ImGui::TextDisabled("Open a particle asset, or select an object with a Particle System component.");
+        } else {
+            ImGui::TextDisabled("%s has no Particle System component.", object->name.c_str());
+            if (ImGui::Button("Add Particle System")) {
+                engine::ParticleSystemComponent defaults;
+                scene.SetSelectedParticleSystem(true, defaults);
+                m_selectedIndex = -2;
+            }
+        }
+        ImGui::End(); return;
+    }
 
     ImGui::SeparatorText("Particle Asset");
     ImGui::Text("%s%s", m_assetPath.empty() ? "Unsaved asset" : m_assetPath.c_str(),
@@ -949,7 +982,8 @@ void ParticleEditorPanel::Draw(EditorScene& scene, EditorAssets& assets, bool* o
     }
 
     ImGui::SeparatorText("Multi-Emitter Layers");
-    std::vector<engine::ParticleEffectLayer> layers = object->particleEffectLayers;
+    std::vector<engine::ParticleEffectLayer> layers = attachedToObject
+        ? object->particleEffectLayers : m_effectLayers;
     bool layersChanged = false;
     std::array<char, 160> effectName{};
     std::snprintf(effectName.data(), effectName.size(), "%s", m_effectAssetName.c_str());
@@ -1040,7 +1074,7 @@ void ParticleEditorPanel::Draw(EditorScene& scene, EditorAssets& assets, bool* o
         ImGui::PopID();
     }
     if (layersChanged) {
-        scene.SetSelectedParticleEffectLayers(layers);
+        if (attachedToObject) scene.SetSelectedParticleEffectLayers(layers);
         m_effectLayers = layers;
         for (engine::ParticleEffectLayer& layer : m_effectLayers) {
             std::string error;
@@ -1054,7 +1088,7 @@ void ParticleEditorPanel::Draw(EditorScene& scene, EditorAssets& assets, bool* o
         const float instantFps = 1.0f / dt;
         m_previewFps += (instantFps - m_previewFps) * std::min(dt * 5.0f, 1.0f);
     }
-    ImGui::Text("Editing: %s", object->name.c_str());
+    ImGui::Text("Editing: %s", attachedToObject ? object->name.c_str() : "standalone asset");
     ImGui::SameLine();
     const std::size_t previewAlive = m_settings.gpuBackendActive && m_settings.gpuEmitter
         ? m_settings.gpuEmitter->Alive() : m_emitter.Alive();
@@ -1169,7 +1203,7 @@ void ParticleEditorPanel::Draw(EditorScene& scene, EditorAssets& assets, bool* o
         presetApplied = true;
     }
     if (presetApplied) {
-        scene.SetSelectedParticleSystem(true, m_settings);
+        if (attachedToObject) scene.SetSelectedParticleSystem(true, m_settings);
         m_assetDirty = !m_assetPath.empty() || m_assetDirty;
         RestartPreview();
     }
@@ -1181,11 +1215,11 @@ void ParticleEditorPanel::Draw(EditorScene& scene, EditorAssets& assets, bool* o
         m_settings.config.lifeMax = std::max(m_settings.config.lifeMax, m_settings.config.lifeMin);
         engine::SyncParticleModuleStack(m_settings.config);
         m_emitter.cfg = m_settings.config;
-        if (ImGui::IsAnyItemActive()) scene.BeginParticleEdit();
-        scene.SetSelectedParticleSystem(true, m_settings);
+        if (attachedToObject && ImGui::IsAnyItemActive()) scene.BeginParticleEdit();
+        if (attachedToObject) scene.SetSelectedParticleSystem(true, m_settings);
         m_assetDirty = !m_assetPath.empty() || m_assetDirty;
     }
-    if (!ImGui::IsAnyItemActive()) scene.EndParticleEdit();
+    if (attachedToObject && !ImGui::IsAnyItemActive()) scene.EndParticleEdit();
     for (const std::string& warning : ValidateParticleSettings(m_settings))
         ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.2f, 1.0f), "! %s", warning.c_str());
     ImGui::End();

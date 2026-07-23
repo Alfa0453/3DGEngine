@@ -1,4 +1,5 @@
 #include "EditorDockspace.h"
+#include "EditorScriptTools.h"
 #include "ParticlePresets.h"
 #include "ParticleAsset.h"
 
@@ -6,6 +7,7 @@
 #include <engine/audio/AudioEditing.h>
 #include <engine/graphics/Camera.h>
 #include <engine/graphics/SkinnedModel.h>
+#include <engine/graphics/ImageDecode.h>
 #include <engine/assets/ShaderAsset.h>
 #include <engine/physics/PhysicsComponents.h>
 
@@ -32,6 +34,17 @@ std::array<char, 128> g_scriptClassBuffer{};
 engine::ecs::Entity g_objectNameEntity = engine::ecs::kNull;
 engine::ecs::Entity g_scriptEntity = engine::ecs::kNull;
 int g_scriptTemplateIndex = 0;
+constexpr std::size_t kScriptSourceCapacity = 128u * 1024u;
+std::vector<char> g_scriptSourceBuffer(kScriptSourceCapacity, '\0');
+std::string g_scriptSourcePath;
+bool g_scriptSourceLoaded = false;
+bool g_scriptSourceDirty = false;
+bool g_scriptEditorWindowOpen = false;
+bool g_scriptEditorSettingsLoaded = false;
+int g_preferredCodeEditor = static_cast<int>(PreferredCodeEditor::BuiltIn);
+std::array<char, 512> g_customCodeEditorPath{};
+std::string g_scriptBuildLog;
+bool g_scriptBuildLogOpen = false;
 ImGuiTextFilter g_hierarchyFilter;
 std::array<char, 96> g_componentSearch{};
 bool g_componentPopupOpenRequested = false;
@@ -43,6 +56,169 @@ int g_cameraSequenceShotSelection = -1;
 int g_cameraSequenceCueSelection = -1;
 int g_cameraSequenceNameSelection = -1;
 std::array<char, 128> g_cameraSequenceName{};
+
+struct CollisionChannelDesc {
+    const char* name;
+    std::uint32_t bit;
+};
+
+constexpr CollisionChannelDesc kCollisionChannels[] = {
+    {"Default", engine::ecs::CollisionLayer::Default},
+    {"World Static", engine::ecs::CollisionLayer::WorldStatic},
+    {"World Dynamic", engine::ecs::CollisionLayer::WorldDynamic},
+    {"Player", engine::ecs::CollisionLayer::Player},
+    {"Enemy", engine::ecs::CollisionLayer::Enemy},
+    {"Collectible", engine::ecs::CollisionLayer::Collectible},
+    {"Projectile", engine::ecs::CollisionLayer::Projectile},
+    {"Camera Blocker", engine::ecs::CollisionLayer::CameraBlocker},
+    {"Trigger", engine::ecs::CollisionLayer::Trigger},
+};
+
+struct CollisionPresetDesc {
+    const char* name;
+    std::uint32_t layer;
+    std::uint32_t mask;
+    bool trigger;
+};
+
+constexpr CollisionPresetDesc kCollisionPresets[] = {
+    {"Default", engine::ecs::CollisionLayer::Default, engine::ecs::CollisionLayer::All, false},
+    {"World Static", engine::ecs::CollisionLayer::WorldStatic, engine::ecs::CollisionLayer::All, false},
+    {"World Dynamic", engine::ecs::CollisionLayer::WorldDynamic, engine::ecs::CollisionLayer::All, false},
+    {"Player", engine::ecs::CollisionLayer::Player, engine::ecs::CollisionLayer::All, false},
+    {"Enemy", engine::ecs::CollisionLayer::Enemy, engine::ecs::CollisionLayer::All, false},
+    {"Collectible", engine::ecs::CollisionLayer::Collectible,
+        engine::ecs::CollisionLayer::Player, true},
+    {"Projectile", engine::ecs::CollisionLayer::Projectile, engine::ecs::CollisionLayer::All, false},
+    {"Camera Blocker", engine::ecs::CollisionLayer::CameraBlocker, engine::ecs::CollisionLayer::All, false},
+    {"Trigger Volume", engine::ecs::CollisionLayer::Trigger, engine::ecs::CollisionLayer::All, true},
+    {"No Collision", engine::ecs::CollisionLayer::Default, 0u, false},
+};
+
+int CollisionChannelIndex(std::uint32_t layer) {
+    for (int i = 0; i < static_cast<int>(IM_ARRAYSIZE(kCollisionChannels)); ++i)
+        if (layer == kCollisionChannels[i].bit) return i;
+    return 0;
+}
+
+int CollisionPresetIndex(const engine::ecs::Collider& collider) {
+    for (int i = 0; i < static_cast<int>(IM_ARRAYSIZE(kCollisionPresets)); ++i) {
+        const CollisionPresetDesc& preset = kCollisionPresets[i];
+        if (collider.layer == preset.layer && collider.mask == preset.mask
+            && collider.isTrigger == preset.trigger) return i + 1;
+    }
+    return 0; // Custom
+}
+
+struct GaeaImportSettings {
+    float worldSize = 1000.0f;
+    float maxHeight = 250.0f;
+    int maxResolutionIndex = 1; // 256, 512, 1024
+    bool flipX = false;
+    bool flipZ = true;
+    bool invertHeight = false;
+    bool rawBigEndian = false;
+    int maskLayer = 1;
+    float maskThreshold = 0.5f;
+    bool invertMask = false;
+    bool clearLayerBeforeMask = true;
+};
+GaeaImportSettings g_gaeaImport;
+
+struct GaeaRaster {
+    int width = 0;
+    int height = 0;
+    int bitDepth = 0;
+    std::vector<float> values;
+};
+
+std::string LowerExtension(const std::string& path) {
+    std::string ext = std::filesystem::path(path).extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return ext;
+}
+
+bool LoadGaeaRaster(const std::string& path, bool rawBigEndian,
+                    GaeaRaster& out, std::string& error) {
+    try {
+        const std::string ext = LowerExtension(path);
+        if (ext == ".png") {
+            const engine::image::Image image = engine::image::DecodePNG(path);
+            if (image.width <= 1 || image.height <= 1 || image.luminance16.empty()) {
+                error = "PNG contains no usable height samples.";
+                return false;
+            }
+            out.width = image.width;
+            out.height = image.height;
+            out.bitDepth = image.sourceBitDepth;
+            out.values.resize(image.luminance16.size());
+            for (std::size_t i = 0; i < image.luminance16.size(); ++i)
+                out.values[i] = static_cast<float>(image.luminance16[i]) / 65535.0f;
+            return true;
+        }
+        if (ext == ".raw" || ext == ".r16") {
+            std::ifstream input(path, std::ios::binary);
+            if (!input) { error = "Could not open RAW16 heightmap."; return false; }
+            const std::vector<unsigned char> bytes(
+                (std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+            if (bytes.empty() || (bytes.size() & 1u) != 0u) {
+                error = "RAW16 size must contain complete 16-bit samples.";
+                return false;
+            }
+            const std::size_t sampleCount = bytes.size() / 2;
+            const int side = static_cast<int>(std::llround(std::sqrt(static_cast<double>(sampleCount))));
+            if (side < 2 || static_cast<std::size_t>(side) * side != sampleCount) {
+                error = "RAW16 import requires a square heightmap; its resolution could not be inferred.";
+                return false;
+            }
+            out.width = out.height = side;
+            out.bitDepth = 16;
+            out.values.resize(sampleCount);
+            for (std::size_t i = 0; i < sampleCount; ++i) {
+                const unsigned char a = bytes[i * 2], b = bytes[i * 2 + 1];
+                const std::uint16_t sample = rawBigEndian
+                    ? static_cast<std::uint16_t>((a << 8) | b)
+                    : static_cast<std::uint16_t>((b << 8) | a);
+                out.values[i] = static_cast<float>(sample) / 65535.0f;
+            }
+            return true;
+        }
+        error = "Select a Gaea 16-bit PNG, .raw, or .r16 heightmap.";
+    } catch (const std::exception& exception) {
+        error = exception.what();
+    }
+    return false;
+}
+
+float SampleGaeaRaster(const GaeaRaster& raster, float u, float v) {
+    const float x = std::clamp(u, 0.0f, 1.0f) * static_cast<float>(raster.width - 1);
+    const float y = std::clamp(v, 0.0f, 1.0f) * static_cast<float>(raster.height - 1);
+    const int x0 = static_cast<int>(std::floor(x)), y0 = static_cast<int>(std::floor(y));
+    const int x1 = std::min(x0 + 1, raster.width - 1), y1 = std::min(y0 + 1, raster.height - 1);
+    const float fx = x - x0, fy = y - y0;
+    const auto at = [&](int px, int py) { return raster.values[static_cast<std::size_t>(py) * raster.width + px]; };
+    return glm::mix(glm::mix(at(x0, y0), at(x1, y0), fx),
+                    glm::mix(at(x0, y1), at(x1, y1), fx), fy);
+}
+
+std::vector<float> ResampleGaeaRaster(const GaeaRaster& raster, int resolution,
+                                      bool flipX, bool flipZ, bool invert) {
+    std::vector<float> values(static_cast<std::size_t>(resolution) * resolution);
+    const float denom = static_cast<float>(std::max(resolution - 1, 1));
+    for (int z = 0; z < resolution; ++z) {
+        for (int x = 0; x < resolution; ++x) {
+            float u = static_cast<float>(x) / denom;
+            float v = static_cast<float>(z) / denom;
+            if (flipX) u = 1.0f - u;
+            if (flipZ) v = 1.0f - v;
+            float value = SampleGaeaRaster(raster, u, v);
+            if (invert) value = 1.0f - value;
+            values[static_cast<std::size_t>(z) * resolution + x] = std::clamp(value, 0.0f, 1.0f);
+        }
+    }
+    return values;
+}
 
 struct AudioEditorState {
     engine::AudioBuffer buffer;
@@ -133,6 +309,9 @@ bool g_creationPaletteOpenRequested = false;
 std::array<char, 96> g_creationSearch{};
 
 const char* PrimitiveName(EditorScene::Primitive primitive) {
+    if (primitive == EditorScene::Primitive::Empty) {
+        return "Empty";
+    }
     if (primitive == EditorScene::Primitive::Plane) {
         return "Plane";
     }
@@ -193,6 +372,7 @@ bool MatchesCreationSearch(const char* label, const char* category) {
 
 float PrimitiveGroundHeight() {
     switch (g_primitiveCreator.type) {
+    case EditorScene::Primitive::Empty: return 0.0f;
     case EditorScene::Primitive::Plane: return 0.0f;
     case EditorScene::Primitive::Sphere: return g_primitiveCreator.radius;
     case EditorScene::Primitive::Capsule:
@@ -429,7 +609,9 @@ std::vector<EditorScene::ScriptField> DefaultFieldsForTemplate(ScriptTemplate sc
         add("height", Field::Type::Float, "3.0");
         break;
     case ScriptTemplate::Pickup:
-        add("interactKey", Field::Type::String, "E");
+        add("target", Field::Type::String, "PlayerStart");
+        add("score", Field::Type::Int, "10");
+        add("particleBurst", Field::Type::Int, "16");
         break;
     case ScriptTemplate::DamageZone:
         add("target", Field::Type::String, "PlayerStart");
@@ -445,7 +627,7 @@ std::string ScriptTemplateDescription(ScriptTemplate scriptTemplate) {
     switch (scriptTemplate) {
     case ScriptTemplate::PlayerMovement: return "Moves this object with WASD using the `speed` field.";
     case ScriptTemplate::DoorOpener: return "Moves a named target upward while E is held.";
-    case ScriptTemplate::Pickup: return "Destroys this object when E is pressed.";
+    case ScriptTemplate::Pickup: return "Collects on a trigger overlap, awards score, and plays audio and particles.";
     case ScriptTemplate::DamageZone: return "Damages a named Health target every update.";
     case ScriptTemplate::Empty: return "Blank script with helper comments.";
     }
@@ -482,9 +664,14 @@ void WriteTemplateUpdateBody(std::ostringstream& source, ScriptTemplate scriptTe
                << "    }\n";
         break;
     case ScriptTemplate::Pickup:
-        source << "    if (WasKeyPressed('E')) {\n"
-               << "        DestroySelf();\n"
-               << "    }\n";
+        source << "    if (m_collected) return;\n"
+               << "    const engine::ecs::Entity target = FindObject(GetFieldString(\"target\", \"PlayerStart\"));\n"
+               << "    if (target == engine::ecs::kNull || !WasTriggerEntered(target)) return;\n\n"
+               << "    m_collected = true;\n"
+               << "    engine::GameMode::Instance().AddScore(GetFieldInt(\"score\", 10));\n"
+               << "    PlayAudio(true);\n"
+               << "    BurstParticles(GetFieldInt(\"particleBurst\", 16));\n"
+               << "    Delay(0.12f, [this] { DestroySelf(); });\n";
         break;
     case ScriptTemplate::DamageZone:
         source << "    const std::string targetName = GetFieldString(\"target\", \"PlayerStart\");\n"
@@ -595,13 +782,116 @@ std::string SanitizeScriptClassName(const std::string& raw) {
     return result;
 }
 
-std::filesystem::path ScriptRootFor(const EditorDockspace::Context& context) {
+bool IsGameModuleRoot(const std::filesystem::path& path) {
+    std::error_code ec;
+    return std::filesystem::exists(path / "CMakeLists.txt", ec)
+        && std::filesystem::exists(path / "include" / "game" / "GameModule.h", ec);
+}
+
+std::filesystem::path GameModuleRootFor(const EditorDockspace::Context& context) {
+    std::vector<std::filesystem::path> starts;
     if (context.assets && !context.assets->RootPath().empty()) {
-        const std::filesystem::path assetRoot(context.assets->RootPath());
-        const std::filesystem::path parent = assetRoot.parent_path();
-        return (parent.empty() ? std::filesystem::path("Game") : parent / "Game") / "Scripts";
+        std::error_code ec;
+        starts.push_back(std::filesystem::absolute(context.assets->RootPath(), ec));
     }
-    return std::filesystem::path("Game") / "Scripts";
+    std::error_code ec;
+    starts.push_back(std::filesystem::current_path(ec));
+
+    for (std::filesystem::path start : starts) {
+        if (start.empty()) continue;
+        for (int depth = 0; depth < 8 && !start.empty(); ++depth) {
+            if (IsGameModuleRoot(start)) return start;
+            if (IsGameModuleRoot(start / "game")) return start / "game";
+            const std::filesystem::path parent = start.parent_path();
+            if (parent == start) break;
+            start = parent;
+        }
+    }
+    return std::filesystem::current_path(ec) / "game";
+}
+
+std::filesystem::path ProjectRootFor(const EditorDockspace::Context& context) {
+    return GameModuleRootFor(context).parent_path();
+}
+
+void EnsureScriptEditorSettings(EditorDockspace::Context& context) {
+    if (g_scriptEditorSettingsLoaded) return;
+    g_scriptEditorSettingsLoaded = true;
+    if (!context.config) return;
+    const std::string preferred =
+        context.config->GetString("scripts.code_editor", "BuiltIn");
+    if (preferred == "VSCode") g_preferredCodeEditor = static_cast<int>(PreferredCodeEditor::VisualStudioCode);
+    else if (preferred == "VisualStudio") g_preferredCodeEditor = static_cast<int>(PreferredCodeEditor::VisualStudio);
+    else if (preferred == "Rider") g_preferredCodeEditor = static_cast<int>(PreferredCodeEditor::Rider);
+    else if (preferred == "Custom") g_preferredCodeEditor = static_cast<int>(PreferredCodeEditor::Custom);
+    const std::string custom = context.config->GetString("scripts.custom_editor", "");
+    std::snprintf(g_customCodeEditorPath.data(), g_customCodeEditorPath.size(), "%s", custom.c_str());
+}
+
+void SaveScriptEditorSettings(EditorDockspace::Context& context) {
+    if (!context.config) return;
+    static const char* values[] = {"BuiltIn", "VSCode", "VisualStudio", "Rider", "Custom"};
+    const int index = std::clamp(g_preferredCodeEditor, 0, 4);
+    context.config->Set("scripts.code_editor", values[index]);
+    context.config->Set("scripts.custom_editor", g_customCodeEditorPath.data());
+    context.config->Save();
+}
+
+std::string StoredScriptPath(const std::filesystem::path& absolutePath) {
+    std::error_code ec;
+    const std::filesystem::path relative =
+        std::filesystem::relative(absolutePath, std::filesystem::current_path(ec), ec);
+    return ec ? absolutePath.lexically_normal().generic_string()
+              : relative.lexically_normal().generic_string();
+}
+
+std::string ScriptHeaderPathFor(const EditorDockspace::Context& context,
+                                const std::string& className) {
+    std::error_code ec;
+    const std::filesystem::path contentRoot =
+        context.assets && !context.assets->RootPath().empty()
+            ? std::filesystem::absolute(context.assets->RootPath(), ec)
+            : GameModuleRootFor(context).parent_path() / "Content";
+    return StoredScriptPath(contentRoot / "Scripts" / (className + ".h"));
+}
+
+struct SavedScriptEntry {
+    std::string className;
+    std::string storedPath;
+};
+
+std::vector<SavedScriptEntry> SavedScriptsFor(const EditorDockspace::Context& context) {
+    std::vector<std::filesystem::path> roots;
+    std::error_code ec;
+    if (context.assets && !context.assets->RootPath().empty()) {
+        roots.push_back(std::filesystem::absolute(context.assets->RootPath(), ec) / "Scripts");
+        ec.clear();
+    }
+    roots.push_back(ProjectRootFor(context) / "Content" / "Scripts");
+
+    std::vector<SavedScriptEntry> scripts;
+    for (const std::filesystem::path& root : roots) {
+        for (std::filesystem::directory_iterator it(root, ec), end;
+             !ec && it != end; it.increment(ec)) {
+            if (!it->is_regular_file(ec) || it->path().extension() != ".h") continue;
+            const std::string stem = it->path().stem().string();
+            const std::string className = SanitizeScriptClassName(stem);
+            if (className.empty() || className != stem) continue;
+            const bool alreadyListed = std::any_of(scripts.begin(), scripts.end(),
+                [&className](const SavedScriptEntry& entry) {
+                    return entry.className == className;
+                });
+            if (!alreadyListed) {
+                scripts.push_back({className, StoredScriptPath(it->path())});
+            }
+        }
+        ec.clear();
+    }
+    std::sort(scripts.begin(), scripts.end(),
+        [](const SavedScriptEntry& a, const SavedScriptEntry& b) {
+            return a.className < b.className;
+        });
+    return scripts;
 }
 
 bool WriteTextFile(const std::filesystem::path& path, const std::string& text, std::string* error) {
@@ -616,13 +906,106 @@ bool WriteTextFile(const std::filesystem::path& path, const std::string& text, s
     return true;
 }
 
+bool UpdateEditorScriptRegistry(const std::filesystem::path& gameRoot,
+                                const std::filesystem::path& scriptRoot,
+                                const std::string& newClassName,
+                                std::string* error) {
+    const std::filesystem::path listPath = gameRoot / "EditorScripts.list";
+    std::vector<std::string> classes;
+    {
+        std::ifstream input(listPath);
+        std::string line;
+        while (std::getline(input, line)) {
+            if (line.empty() || line.front() == '#') continue;
+            const std::string className = SanitizeScriptClassName(line);
+            if (!className.empty()) classes.push_back(className);
+        }
+    }
+    classes.push_back(newClassName);
+    std::sort(classes.begin(), classes.end());
+    classes.erase(std::unique(classes.begin(), classes.end()), classes.end());
+    classes.erase(std::remove_if(classes.begin(), classes.end(),
+        [&scriptRoot](const std::string& className) {
+            std::error_code ec;
+            return !std::filesystem::exists(
+                scriptRoot / (className + ".h"), ec);
+        }), classes.end());
+
+    std::ostringstream list;
+    list << "# One generated gameplay-script class name per line.\n"
+         << "# This file is maintained by the editor. Empty lines and comments are ignored.\n";
+    for (const std::string& className : classes) list << className << '\n';
+    if (!WriteTextFile(listPath, list.str(), error)) return false;
+
+    std::ostringstream registry;
+    registry << "#pragma once\n\n"
+             << "#include <engine/gameplay/Script.h>\n"
+             << "#include <memory>\n";
+    for (const std::string& className : classes) {
+        registry << "#include <Scripts/" << className << ".h>\n";
+    }
+    registry << "\n// Generated by the editor. Changes are replaced when scripts are created.\n"
+             << "inline void RegisterEditorGeneratedScripts(engine::ScriptRegistry& scripts) {\n";
+    for (const std::string& className : classes) {
+        registry << "    scripts.Register(\"" << className << "\", [] { return std::make_unique<"
+                 << className << ">(); });\n";
+    }
+    registry << "}\n";
+    return WriteTextFile(gameRoot / "include" / "game" / "EditorGeneratedScripts.h",
+                         registry.str(), error);
+}
+
+bool LoadScriptSource(const std::string& path, std::string* error) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+        if (error) *error = "Could not open " + path;
+        return false;
+    }
+    const std::string source((std::istreambuf_iterator<char>(input)),
+                             std::istreambuf_iterator<char>());
+    if (source.size() + 1 > g_scriptSourceBuffer.size()) {
+        if (error) *error = "Script is larger than the editor's 128 KB source limit.";
+        return false;
+    }
+    std::fill(g_scriptSourceBuffer.begin(), g_scriptSourceBuffer.end(), '\0');
+    std::copy(source.begin(), source.end(), g_scriptSourceBuffer.begin());
+    g_scriptSourcePath = path;
+    g_scriptSourceLoaded = true;
+    g_scriptSourceDirty = false;
+    return true;
+}
+
+bool OpenScriptInPreferredEditor(EditorDockspace::Context& context,
+                                 const std::string& path,
+                                 std::string* error) {
+    EnsureScriptEditorSettings(context);
+    if (!LoadScriptSource(path, error)) return false;
+    g_scriptEditorWindowOpen = true;
+    const PreferredCodeEditor preferred =
+        static_cast<PreferredCodeEditor>(std::clamp(g_preferredCodeEditor, 0, 4));
+    if (preferred == PreferredCodeEditor::BuiltIn) return true;
+    return EditorScriptTools::OpenExternalEditor(preferred,
+        g_customCodeEditorPath.data(), path, ProjectRootFor(context), error);
+}
+
 bool CreateScriptFiles(const EditorDockspace::Context& context,
                        const std::string& className,
                        ScriptTemplate scriptTemplate,
                        std::string* scriptPath,
                        std::string* error) {
-    const std::filesystem::path scriptRoot = ScriptRootFor(context);
+    const std::filesystem::path gameRoot = GameModuleRootFor(context);
+    if (!IsGameModuleRoot(gameRoot)) {
+        if (error) {
+            *error = "Could not find the shared game module (game/CMakeLists.txt and game/include/game/GameModule.h).";
+        }
+        return false;
+    }
     std::error_code ec;
+    const std::filesystem::path contentRoot =
+        context.assets && !context.assets->RootPath().empty()
+            ? std::filesystem::absolute(context.assets->RootPath(), ec)
+            : gameRoot.parent_path() / "Content";
+    const std::filesystem::path scriptRoot = contentRoot / "Scripts";
     std::filesystem::create_directories(scriptRoot, ec);
     if (ec) {
         if (error) {
@@ -632,8 +1015,7 @@ bool CreateScriptFiles(const EditorDockspace::Context& context,
     }
 
     const std::filesystem::path headerPath = scriptRoot / (className + ".h");
-    const std::filesystem::path sourcePath = scriptRoot / (className + ".cpp");
-    const std::filesystem::path docsRoot = scriptRoot / "docs";
+    const std::filesystem::path docsRoot = scriptRoot / "Docs";
     std::filesystem::create_directories(docsRoot, ec);
     if (ec) {
         if (error) {
@@ -643,46 +1025,49 @@ bool CreateScriptFiles(const EditorDockspace::Context& context,
     }
     const std::filesystem::path docPath = docsRoot / (className + ".md");
 
+    // Copy scripts made by the previous workflow into Content/Scripts. Keep the
+    // old file untouched so projects can migrate without losing user changes.
+    const std::filesystem::path legacyHeader =
+        gameRoot / "include" / "game" / "scripts" / (className + ".h");
+    if (!std::filesystem::exists(headerPath, ec)
+        && std::filesystem::exists(legacyHeader, ec)) {
+        std::filesystem::copy_file(legacyHeader, headerPath,
+            std::filesystem::copy_options::skip_existing, ec);
+        if (ec) {
+            if (error) *error = "Could not migrate existing script into Content/Scripts: " + ec.message();
+            return false;
+        }
+    }
+
     if (!std::filesystem::exists(headerPath)) {
         std::ostringstream header;
         header << "#pragma once\n\n"
+               << "#include <engine/gameplay/GameMode.h>\n"
+               << "#include <engine/gameplay/GameplayComponents.h>\n"
                << "#include <engine/gameplay/Script.h>\n\n"
-               << "class " << className << " : public engine::Script {\n"
+               << "#include <algorithm>\n"
+               << "#include <glm/geometric.hpp>\n"
+               << "#include <string>\n\n"
+               << "class " << className << " final : public engine::Script {\n"
                << "public:\n"
-               << "    void OnCreate() override;\n"
-               << "    void OnUpdate(float dt) override;\n"
-               << "};\n\n"
-               << "void Register" << className << "Script();\n";
+               << "    void OnCreate() override {\n"
+               << "    // Called when the object enters Play mode.\n"
+               << "    // Example: if (auto* transform = Transform()) { transform->position.y += 1.0f; }\n"
+               << "    }\n\n"
+               << "    void OnUpdate(float dt) override {\n";
+        WriteTemplateUpdateBody(header, scriptTemplate);
+        header << "    }\n";
+        if (scriptTemplate == ScriptTemplate::Pickup) {
+            header << "\nprivate:\n"
+                   << "    bool m_collected = false;\n";
+        }
+        header << "};\n";
         if (!WriteTextFile(headerPath, header.str(), error)) {
             return false;
         }
     }
 
-    if (!std::filesystem::exists(sourcePath)) {
-        std::ostringstream source;
-        source << "#include \"" << className << ".h\"\n\n"
-               << "#include <engine/ecs/Entity.h>\n"
-               << "#include <engine/gameplay/GameplayComponents.h>\n"
-               << "#include <engine/gameplay/Script.h>\n\n"
-               << "#include <algorithm>\n"
-               << "#include <glm/geometric.hpp>\n"
-               << "#include <memory>\n\n"
-               << "void " << className << "::OnCreate() {\n"
-               << "    // Called when the object enters Play mode.\n"
-               << "    // Example: if (auto* transform = Transform()) { transform->position.y += 1.0f; }\n"
-               << "}\n\n"
-               << "void " << className << "::OnUpdate(float dt) {\n";
-        WriteTemplateUpdateBody(source, scriptTemplate);
-        source << "}\n\n"
-               << "void Register" << className << "Script() {\n"
-               << "    engine::ScriptRegistry::Instance().Register(\"" << className << "\", [] {\n"
-               << "        return std::make_unique<" << className << ">();\n"
-               << "    });\n"
-               << "}\n";
-        if (!WriteTextFile(sourcePath, source.str(), error)) {
-            return false;
-        }
-    }
+    if (!UpdateEditorScriptRegistry(gameRoot, scriptRoot, className, error)) return false;
 
     if (!std::filesystem::exists(docPath)) {
         std::ostringstream doc;
@@ -690,14 +1075,14 @@ bool CreateScriptFiles(const EditorDockspace::Context& context,
             << "## What It Does\n\n"
             << "Gameplay script template generated by the editor. " << ScriptTemplateDescription(scriptTemplate) << " It derives from `engine::Script` so it can be attached to a scene object and run in Play mode after registration.\n\n"
             << "## How To Use It\n\n"
-            << "Use `OnCreate()` for one-time setup when the object enters Play mode. Use `OnUpdate(float dt)` for fixed-step behavior. Call `Register" << className << "Script()` from your game startup before entering Play mode so `ScriptRegistry` can construct the script from its class name. Common helpers include `GetFieldFloat()`, `GetFieldInt()`, `GetFieldBool()`, `GetFieldString()`, `Self()`, `Transform()`, `FindObject()`, `FindTransform()`, `IsKeyDown()`, `WasKeyPressed()`, `PlayAudio()`, `StopAudio()`, `PlayParticles()`, `StopParticles()`, `RestartParticles()`, `BurstParticles()`, `SetParticleRate()`, `ShakeCamera()`, `PlayCameraSequence()`, `WasCameraSequenceEvent()`, `WasCameraSequenceFinished()`, and `DestroySelf()`. Pass an entity returned by `FindObject()` to control another object's Audio Source or Particle System.\n";
+            << "Use `OnCreate()` for one-time setup when the object enters Play mode. Use `OnUpdate(float dt)` for per-frame behavior. The editor registers this class automatically in the shared game module; rebuild and restart the editor before Play mode can run newly compiled code. The standalone player receives the same class on its next build. Common helpers include `GetFieldFloat()`, `GetFieldInt()`, `GetFieldBool()`, `GetFieldString()`, `Self()`, `Transform()`, `FindObject()`, `FindTransform()`, `IsKeyDown()`, `WasKeyPressed()`, `PlayAudio()`, `StopAudio()`, `PlayParticles()`, `StopParticles()`, `RestartParticles()`, `BurstParticles()`, `SetParticleRate()`, `ShakeCamera()`, `PlayCameraSequence()`, `WasCameraSequenceEvent()`, `WasCameraSequenceFinished()`, and `DestroySelf()`. Pass an entity returned by `FindObject()` to control another object's Audio Source or Particle System.\n";
         if (!WriteTextFile(docPath, doc.str(), error)) {
             return false;
         }
     }
 
     if (scriptPath) {
-        *scriptPath = (std::filesystem::path("Game") / "Scripts" / (className + ".cpp")).string();
+        *scriptPath = StoredScriptPath(headerPath);
     }
     return true;
 }
@@ -962,6 +1347,9 @@ bool AddComponent(EditorDockspace::Context& context, AddableComponent component)
     case AddableComponent::ParticleSystem: {
         engine::ParticleSystemComponent settings;
         added = context.scene->SetSelectedParticleSystem(true, settings);
+        if (added && context.panels) {
+            context.panels->SetOpen(EditorPanels::Panel::ParticleEditor, true);
+        }
         break;
     }
     }
@@ -1076,6 +1464,39 @@ std::vector<EditorAssets::Asset> FindMaterialAssets(const EditorAssets& assets) 
             return a.relativePath < b.relativePath;
         });
     return materials;
+}
+
+std::vector<EditorAssets::Asset> FindBehaviorGraphAssets(const EditorAssets& assets) {
+    std::vector<EditorAssets::Asset> graphs;
+    std::error_code ec;
+    const std::filesystem::path root = assets.RootPath();
+    if (!std::filesystem::exists(root, ec) || !std::filesystem::is_directory(root, ec)) {
+        return graphs;
+    }
+
+    for (const std::filesystem::directory_entry& entry :
+         std::filesystem::recursive_directory_iterator(root, ec)) {
+        if (ec) break;
+        if (!entry.is_regular_file(ec)) continue;
+        std::string extension = entry.path().extension().string();
+        std::transform(extension.begin(), extension.end(), extension.begin(),
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (extension != ".btgraph") continue;
+
+        EditorAssets::Asset graph;
+        graph.relativePath = std::filesystem::relative(entry.path(), root, ec).string();
+        if (ec) continue;
+        std::replace(graph.relativePath.begin(), graph.relativePath.end(), '\\', '/');
+        graph.displayName = entry.path().filename().string();
+        graph.type = EditorAssets::Type::BehaviorGraph;
+        graphs.push_back(std::move(graph));
+    }
+
+    std::sort(graphs.begin(), graphs.end(),
+        [](const EditorAssets::Asset& a, const EditorAssets::Asset& b) {
+            return a.relativePath < b.relativePath;
+        });
+    return graphs;
 }
 
 std::vector<EditorAssets::Asset> FindAudioAssets(const EditorAssets& assets) {
@@ -1493,14 +1914,86 @@ void DrawWorldSettings(EditorScene& scene, EditorDockspace::Context& context, bo
         if (ImGui::SmallButton("Reset Lighting")) {
             environment.timeOfDay = defaults.timeOfDay;
             environment.skyLightIntensity = defaults.skyLightIntensity;
+            environment.skylightOcclusion = defaults.skylightOcclusion;
+            environment.skylightOcclusionStrength = defaults.skylightOcclusionStrength;
+            environment.minimumSkylight = defaults.minimumSkylight;
             environment.driveSunLight = defaults.driveSunLight;
             environment.sunIntensity = defaults.sunIntensity;
             changed = true;
         }
         changed |= ImGui::SliderFloat("Time Of Day", &environment.timeOfDay, 0.0f, 1.0f);
         changed |= ImGui::DragFloat("Sky Light", &environment.skyLightIntensity, 0.02f, 0.0f, 8.0f);
+        changed |= ImGui::Checkbox("Skylight Occlusion (Indoor Darkness)", &environment.skylightOcclusion);
+        if (!environment.skylightOcclusion) ImGui::BeginDisabled();
+        changed |= ImGui::SliderFloat("Indoor Occlusion Strength", &environment.skylightOcclusionStrength, 0.0f, 1.0f, "%.2f");
+        changed |= ImGui::SliderFloat("Minimum Indoor Skylight", &environment.minimumSkylight, 0.0f, 1.0f, "%.2f");
+        if (!environment.skylightOcclusion) ImGui::EndDisabled();
+        ImGui::TextDisabled("Uses dynamic sun-shadow visibility to block sky/IBL inside enclosed spaces.");
         changed |= ImGui::Checkbox("Time Sun", &environment.driveSunLight);
         changed |= ImGui::DragFloat("Sun Intensity", &environment.sunIntensity, 0.02f, 0.0f, 8.0f);
+    }
+
+    if (ImGui::CollapsingHeader("Clouds", ImGuiTreeNodeFlags_DefaultOpen)) {
+        const char* toggleLabel = environment.clouds ? "Clouds: On" : "Clouds: Off";
+        if (ImGui::Button(toggleLabel, ImVec2(110.0f, 0.0f))) {
+            environment.clouds = !environment.clouds;
+            changed = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Reset Clouds")) {
+            environment.clouds = defaults.clouds;
+            environment.cloudCoverage = defaults.cloudCoverage;
+            environment.cloudDensity = defaults.cloudDensity;
+            environment.cloudScale = defaults.cloudScale;
+            environment.cloudSoftness = defaults.cloudSoftness;
+            environment.cloudWindSpeed = defaults.cloudWindSpeed;
+            environment.cloudWindDirection = defaults.cloudWindDirection;
+            environment.cloudHorizonHeight = defaults.cloudHorizonHeight;
+            environment.cloudColor = defaults.cloudColor;
+            environment.cloudShadows = defaults.cloudShadows;
+            environment.cloudShadowStrength = defaults.cloudShadowStrength;
+            environment.cloudShadowScale = defaults.cloudShadowScale;
+            changed = true;
+        }
+
+        if (!environment.clouds) ImGui::BeginDisabled();
+        if (ImGui::SmallButton("Clear")) {
+            environment.cloudCoverage = 0.82f;
+            environment.cloudDensity = 0.20f;
+            changed = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Scattered")) {
+            environment.cloudCoverage = 0.45f;
+            environment.cloudDensity = 0.75f;
+            changed = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Overcast")) {
+            environment.cloudCoverage = 0.27f;
+            environment.cloudDensity = 1.25f;
+            environment.cloudSoftness = 0.22f;
+            changed = true;
+        }
+        changed |= ImGui::SliderFloat("Coverage", &environment.cloudCoverage, 0.05f, 0.95f, "%.2f");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Lower values create more cloud cover; higher values clear the sky.");
+        changed |= ImGui::SliderFloat("Density", &environment.cloudDensity, 0.0f, 2.0f, "%.2f");
+        changed |= ImGui::SliderFloat("Cloud Scale", &environment.cloudScale, 0.10f, 6.0f, "%.2f");
+        changed |= ImGui::SliderFloat("Edge Softness", &environment.cloudSoftness, 0.01f, 0.45f, "%.2f");
+        changed |= ImGui::SliderFloat("Wind Speed", &environment.cloudWindSpeed, -0.25f, 0.25f, "%.3f");
+        changed |= ImGui::SliderFloat("Wind Direction", &environment.cloudWindDirection, -180.0f, 180.0f, "%.0f deg");
+        changed |= ImGui::SliderFloat("Horizon Height", &environment.cloudHorizonHeight, 0.005f, 0.50f, "%.3f");
+        changed |= ImGui::ColorEdit3("Cloud Tint", &environment.cloudColor.x);
+        ImGui::Separator();
+        changed |= ImGui::Checkbox("Cast Cloud Shadows", &environment.cloudShadows);
+        if (!environment.cloudShadows) ImGui::BeginDisabled();
+        changed |= ImGui::SliderFloat("Shadow Strength", &environment.cloudShadowStrength, 0.0f, 1.0f, "%.2f");
+        changed |= ImGui::SliderFloat("Shadow World Scale", &environment.cloudShadowScale, 0.002f, 0.15f, "%.3f");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Controls the size of moving cloud shadows across the world.");
+        if (!environment.cloudShadows) ImGui::EndDisabled();
+        if (!environment.clouds) ImGui::EndDisabled();
     }
 
     if (ImGui::CollapsingHeader("Render Features", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -1671,12 +2164,18 @@ void DrawWorldSettings(EditorScene& scene, EditorDockspace::Context& context, bo
             environment.pointShadows = defaults.pointShadows;
             environment.spotShadows = defaults.spotShadows;
             environment.shadowSoftness = defaults.shadowSoftness;
+            environment.shadowDistance = defaults.shadowDistance;
             changed = true;
         }
         changed |= ImGui::Checkbox("Sun Shadows", &environment.directionalShadows);
         changed |= ImGui::Checkbox("Point Shadows", &environment.pointShadows);
         changed |= ImGui::Checkbox("Spot Shadows", &environment.spotShadows);
         changed |= ImGui::DragFloat("Shadow Softness", &environment.shadowSoftness, 0.05f, 0.1f, 12.0f, "%.2f");
+        changed |= ImGui::DragFloat("Shadow Visibility Distance", &environment.shadowDistance,
+                                    5.0f, 10.0f, 5000.0f, "%.0f units");
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("How far sun shadows remain visible from the camera. Larger values cover more world space but reduce shadow detail.");
+        }
     }
 
     if (ImGui::CollapsingHeader("Atmosphere", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -1729,7 +2228,7 @@ void DrawWorldSettings(EditorScene& scene, EditorDockspace::Context& context, bo
         }
         changed |= ImGui::Checkbox("Light Guides", &environment.showLightGuides);
         changed |= ImGui::Checkbox("Selected Guide Only", &environment.selectedLightGuideOnly);
-        changed |= ImGui::Checkbox("Physics Guides", &environment.showPhysicsGuides);
+        changed |= ImGui::Checkbox("Collider Guides (Edit Mode)", &environment.showPhysicsGuides);
         changed |= ImGui::Checkbox("Selected Physics Only", &environment.selectedPhysicsGuideOnly);
     }
 
@@ -1948,7 +2447,7 @@ void DrawPhysicsStatus(EditorDockspace::Context& context, bool* open) {
 
     if (ImGui::CollapsingHeader("Scene Debug", ImGuiTreeNodeFlags_DefaultOpen)) {
         if (context.showPhysicsEventGuides) {
-            ImGui::Checkbox("Event Guides", context.showPhysicsEventGuides);
+            ImGui::Checkbox("Show Play Physics Event Lines", context.showPhysicsEventGuides);
         }
         if (context.showAiDebug) {
             ImGui::Checkbox("AI Debug", context.showAiDebug);
@@ -3056,7 +3555,9 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
         }
 
         bool visible = selected->visible;
-        if (ImGui::Checkbox("Visible", &visible)) {
+        const char* activeLabel = selected->primitive == EditorScene::Primitive::Empty
+            ? "Active in Play" : "Visible";
+        if (ImGui::Checkbox(activeLabel, &visible)) {
             context.scene->ToggleSelectVisible();
         }
 
@@ -3131,9 +3632,35 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
         return;
     }
 
-    if (ImGui::CollapsingHeader("Rendering", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (selected->primitive == EditorScene::Primitive::Empty) {
+        ImGui::TextDisabled("Empty objects do not render. Add scripts or other components below.");
+    } else if (ImGui::CollapsingHeader("Rendering", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Text("Model: %s", selected->modelAssetPath.empty() ? "-" : selected->modelAssetPath.c_str());
         ImGui::Text("Material: %s", selected->materialAssetPath.empty() ? "-" : selected->materialAssetPath.c_str());
+
+        // Render-only model orientation: stands up an off-axis rig (e.g. a Z-up
+        // import) without rotating the object transform, so the collider stays upright.
+        // Applies to skeletal (animated) models.
+        if (selected->skeletalModel) {
+            glm::vec3 position = selected->modelOffsetPosition;
+            glm::vec3 orient = selected->modelOrientationEuler;
+            glm::vec3 scale = selected->modelOffsetScale;
+            bool changed = false;
+            ImGui::TextDisabled("Model Transform (render-only; collider stays upright)");
+            changed |= ImGui::DragFloat3("Offset Pos", &position.x, 0.01f, -100.0f, 100.0f);
+            changed |= ImGui::DragFloat3("Model Rot (deg)", &orient.x, 0.5f, -180.0f, 180.0f);
+            changed |= ImGui::DragFloat3("Model Scale", &scale.x, 0.01f, 0.001f, 100.0f);
+            if (changed) {
+                context.scene->SetSelectedModelOffset(position, orient, scale);
+            }
+            if (ImGui::SmallButton("Stand up (Z-up)")) {
+                context.scene->SetSelectedModelOffset(position, glm::vec3(-90.0f, 0.0f, 0.0f), scale);
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Reset Transform")) {
+                context.scene->SetSelectedModelOffset(glm::vec3(0.0f), glm::vec3(0.0f), glm::vec3(1.0f));
+            }
+        }
 
         const engine::ecs::MeshRenderer* renderer = context.scene->TryGetMeshRenderer(selected->entity);
         if (renderer) {
@@ -3537,6 +4064,27 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
 
     if (selected->particleSystemEnabled) {
         if (ImGui::CollapsingHeader("Particle System", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Text("Asset: %s%s", selected->particleAssetPath.empty()
+                ? "(instance settings)" : selected->particleAssetPath.c_str(),
+                selected->particleAssetOverride ? " (overridden)" : "");
+            ImGui::TextDisabled("Particle authoring is available in the dedicated Particle Editor.");
+            if (ImGui::Button("Open Particle Editor")) {
+                context.panels->SetOpen(EditorPanels::Panel::ParticleEditor, true);
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Remove Particle System Component")) {
+                engine::ParticleSystemComponent settings;
+                context.scene->SetSelectedParticleSystem(false, settings);
+            }
+        }
+    }
+
+// Legacy duplicate particle authoring UI is intentionally excluded. Particle
+// settings are owned by ParticleEditorPanel; the Inspector only exposes the
+// component summary and navigation button above.
+#if 0
+    if (selected->particleSystemEnabled) {
+        if (ImGui::CollapsingHeader("Particle System", ImGuiTreeNodeFlags_DefaultOpen)) {
             engine::ParticleSystemComponent settings;
             settings.config = selected->particleConfig;
             settings.autoplay = selected->particleAutoplay;
@@ -3765,6 +4313,7 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                 context.scene->SetSelectedParticleSystem(false, settings);
         }
     }
+#endif
 
     if (ImGui::CollapsingHeader("Runtime Components", ImGuiTreeNodeFlags_DefaultOpen)) {
         bool linearVelocityEnabled = selected->linearVelocityEnabled;
@@ -3943,8 +4492,34 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             engine::ecs::Collider collider = selected->collider;
             int shapeIndex = ColliderShapeIndex(collider.shape);
             const char* shapes[] = {"Sphere", "Box", "Plane", "Capsule", "Cylinder", "Cone", "Pyramid", "Torus", "Staircase"};
-            if (ImGui::Combo("Collider Shape", &shapeIndex, shapes, 9)) {
-                collider.shape = ColliderShapeFromIndex(shapeIndex);
+            if (ImGui::Combo("Collider Shape", &shapeIndex, shapes, IM_ARRAYSIZE(shapes))) {
+                const engine::ecs::ColliderShape newShape = ColliderShapeFromIndex(shapeIndex);
+                if (newShape == engine::ecs::ColliderShape::Cylinder) {
+                    // A shape switch should produce usable cylinder dimensions
+                    // instead of inheriting arbitrary radius/height values from
+                    // the previous collider type.
+                    const engine::ecs::Transform* transform =
+                        context.scene->TryGetTransform(selected->entity);
+                    const float radius = transform
+                        ? 0.5f * std::max(transform->scale.x, transform->scale.z)
+                        : 0.5f;
+                    const float height = transform ? transform->scale.y : 1.0f;
+
+                    const float restitution = collider.restitution;
+                    const float friction = collider.friction;
+                    const bool trigger = collider.isTrigger;
+                    const std::uint32_t layer = collider.layer;
+                    const std::uint32_t mask = collider.mask;
+                    collider = engine::ecs::Collider::MakeCylinder(
+                        std::max(radius, 0.001f), std::max(height, 0.002f));
+                    collider.restitution = restitution;
+                    collider.friction = friction;
+                    collider.isTrigger = trigger;
+                    collider.layer = layer;
+                    collider.mask = mask;
+                } else {
+                    collider.shape = newShape;
+                }
                 context.scene->SetSelectedCollider(collider);
             }
             if (collider.shape == engine::ecs::ColliderShape::Sphere) {
@@ -3967,6 +4542,9 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                 bool changed = false;
                 changed |= ImGui::DragFloat("Radius", &collider.radius, 0.02f, 0.001f, 1000.0f);
                 changed |= ImGui::DragFloat("Half Height", &collider.halfHeight, 0.02f, 0.001f, 1000.0f);
+                if (collider.shape == engine::ecs::ColliderShape::Cylinder) {
+                    ImGui::TextDisabled("Vertical Y-axis cylinder. Total height = 2 x Half Height.");
+                }
                 if (changed) {
                     collider.halfExtents = glm::vec3(collider.radius, collider.halfHeight, collider.radius);
                     context.scene->SetSelectedCollider(collider);
@@ -4000,25 +4578,57 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             if (ImGui::DragFloat("Friction", &collider.friction, 0.02f, 0.0f, 10.0f)) {
                 context.scene->SetSelectedCollider(collider);
             }
-            if (ImGui::Checkbox("Trigger##ColliderMode", &collider.isTrigger)) {
-                context.scene->SetSelectedCollider(collider);
-            }
-
-            // Collision filtering. Layer = which group this collider is in; Mask =
-            // which groups it collides with. Edited as bitfields (0..31 checkboxes
-            // would be noisy, so expose the raw hex-ish integers).
-            int layer = static_cast<int>(collider.layer);
-            int mask  = static_cast<int>(collider.mask);
-            if (ImGui::InputInt("Layer bits", &layer, 1, 16)) {
-                collider.layer = static_cast<std::uint32_t>(std::max(layer, 0));
-                context.scene->SetSelectedCollider(collider);
-            }
-            if (ImGui::InputInt("Collides-with mask", &mask, 1, 16)) {
-                collider.mask = static_cast<std::uint32_t>(std::max(mask, 0));
+            if (ImGui::Checkbox("Overlap Only (Trigger)", &collider.isTrigger)) {
                 context.scene->SetSelectedCollider(collider);
             }
             if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Bitfields: two colliders touch only if each side's mask includes the other's layer bit.");
+                ImGui::SetTooltip("Overlap events are generated, but this collider never blocks movement.");
+            }
+
+            int presetIndex = CollisionPresetIndex(collider);
+            const char* presetPreview = presetIndex == 0
+                ? "Custom" : kCollisionPresets[presetIndex - 1].name;
+            if (ImGui::BeginCombo("Collision Preset", presetPreview)) {
+                if (ImGui::Selectable("Custom", presetIndex == 0)) presetIndex = 0;
+                for (int i = 0; i < static_cast<int>(IM_ARRAYSIZE(kCollisionPresets)); ++i) {
+                    if (ImGui::Selectable(kCollisionPresets[i].name, presetIndex == i + 1)) {
+                        const CollisionPresetDesc& preset = kCollisionPresets[i];
+                        collider.layer = preset.layer;
+                        collider.mask = preset.mask;
+                        collider.isTrigger = preset.trigger;
+                        context.scene->SetSelectedCollider(collider);
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Collectible overlaps Player, and is ignored by player movement and camera collision.");
+            }
+
+            int channelIndex = CollisionChannelIndex(collider.layer);
+            if (ImGui::BeginCombo("Object Channel", kCollisionChannels[channelIndex].name)) {
+                for (int i = 0; i < static_cast<int>(IM_ARRAYSIZE(kCollisionChannels)); ++i) {
+                    if (ImGui::Selectable(kCollisionChannels[i].name, channelIndex == i)) {
+                        collider.layer = kCollisionChannels[i].bit;
+                        context.scene->SetSelectedCollider(collider);
+                    }
+                }
+                ImGui::EndCombo();
+            }
+
+            if (ImGui::TreeNode("Channel Responses (Block / Ignore)")) {
+                ImGui::TextDisabled("Checked channels interact; unchecked channels are ignored.");
+                for (const CollisionChannelDesc& channel : kCollisionChannels) {
+                    ImGui::PushID(static_cast<int>(channel.bit));
+                    bool responds = (collider.mask & channel.bit) != 0u;
+                    if (ImGui::Checkbox(channel.name, &responds)) {
+                        if (responds) collider.mask |= channel.bit;
+                        else collider.mask &= ~channel.bit;
+                        context.scene->SetSelectedCollider(collider);
+                    }
+                    ImGui::PopID();
+                }
+                ImGui::TreePop();
             }
         }
 
@@ -4321,11 +4931,52 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
 
         bool scriptEnabled = selected->scriptEnabled;
         if (ImGui::Checkbox("Script Enabled", &scriptEnabled)) {
-            if (!context.scene->SetSelectedScriptEnabled(scriptEnabled) && context.log) {
-                context.log->Warning("Script toggle failed: add a script class first or unlock the object");
+            bool toggled = false;
+            if (scriptEnabled) {
+                // The class text box is intentionally buffered so it can be edited
+                // without creating an undo entry for every key press. Enabling the
+                // component is an explicit commit point, just like Attach.
+                const std::string className = SanitizeScriptClassName(g_scriptClassBuffer.data());
+                if (!className.empty() && className != selected->scriptClassName) {
+                    toggled = context.scene->SetSelectedScript(
+                        className, ScriptHeaderPathFor(context, className), true);
+                    if (toggled) {
+                        std::snprintf(g_scriptClassBuffer.data(), g_scriptClassBuffer.size(), "%s", className.c_str());
+                    }
+                } else {
+                    toggled = context.scene->SetSelectedScriptEnabled(true);
+                }
+            } else {
+                toggled = context.scene->SetSelectedScriptEnabled(false);
+            }
+
+            if (!toggled && context.log) {
+                context.log->Warning("Script toggle failed: enter a script class or unlock the object");
             }
         }
 
+        const std::vector<SavedScriptEntry> savedScripts = SavedScriptsFor(context);
+        const std::string bufferedClass = SanitizeScriptClassName(g_scriptClassBuffer.data());
+        const auto selectedSavedScript = std::find_if(savedScripts.begin(), savedScripts.end(),
+            [&bufferedClass](const SavedScriptEntry& entry) {
+                return entry.className == bufferedClass;
+            });
+        const char* savedScriptPreview = selectedSavedScript != savedScripts.end()
+            ? selectedSavedScript->className.c_str() : "Choose saved script...";
+        if (ImGui::BeginCombo("Saved Script", savedScriptPreview)) {
+            for (const SavedScriptEntry& entry : savedScripts) {
+                const bool isSelected = entry.className == bufferedClass;
+                if (ImGui::Selectable(entry.className.c_str(), isSelected)) {
+                    std::snprintf(g_scriptClassBuffer.data(), g_scriptClassBuffer.size(),
+                        "%s", entry.className.c_str());
+                }
+                if (isSelected) ImGui::SetItemDefaultFocus();
+            }
+            if (savedScripts.empty()) {
+                ImGui::TextDisabled("No scripts found in Content/Scripts");
+            }
+            ImGui::EndCombo();
+        }
         ImGui::InputText("Script Class", g_scriptClassBuffer.data(), g_scriptClassBuffer.size());
         ImGui::Text("Script Path: %s", selected->scriptPath.empty() ? "-" : selected->scriptPath.c_str());
         const char* scriptTemplates[] = {"Empty", "Player Movement", "Door Opener", "Pickup", "Damage Zone"};
@@ -4345,6 +4996,13 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                     context.scene->SetSelectedScript(className, scriptPath, true);
                     context.scene->SetSelectedScriptFields(DefaultFieldsForTemplate(scriptTemplate));
                     std::snprintf(g_scriptClassBuffer.data(), g_scriptClassBuffer.size(), "%s", className.c_str());
+                    std::string sourceError;
+                    if (!LoadScriptSource(scriptPath, &sourceError)) {
+                        if (context.log) context.log->Warning(
+                            "Created script but could not open source: " + sourceError);
+                    } else {
+                        g_scriptEditorWindowOpen = true;
+                    }
                     if (context.assets) {
                         std::string refreshError;
                         context.assets->Refresh(context.assets->RootPath(), &refreshError);
@@ -4358,15 +5016,20 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             }
         }
         ImGui::SameLine();
-        if (ImGui::Button("Attach")) {
+        if (ImGui::Button("Attach Selected")) {
             const std::string className = SanitizeScriptClassName(g_scriptClassBuffer.data());
             if (className.empty()) {
                 if (context.log) {
                     context.log->Warning("Script attach failed: enter a class name");
                 }
             } else {
-                const std::filesystem::path storedPath = std::filesystem::path("Game") / "Scripts" / (className + ".cpp");
-                if (context.scene->SetSelectedScript(className, storedPath.string(), true)) {
+                const auto saved = std::find_if(savedScripts.begin(), savedScripts.end(),
+                    [&className](const SavedScriptEntry& entry) {
+                        return entry.className == className;
+                    });
+                const std::string scriptPath = saved != savedScripts.end()
+                    ? saved->storedPath : ScriptHeaderPathFor(context, className);
+                if (context.scene->SetSelectedScript(className, scriptPath, true)) {
                     if (context.log) {
                         context.log->Info("Attached script: " + className);
                     }
@@ -4385,6 +5048,47 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             } else if (context.log) {
                 context.log->Warning("Script remove failed: selected object is locked");
             }
+        }
+
+        if (!selected->scriptPath.empty()) {
+            ImGui::SameLine();
+            if (ImGui::Button("Edit Source")) {
+                std::string error;
+                if (!LoadScriptSource(selected->scriptPath, &error) && context.log) {
+                    context.log->Error("Script source open failed: " + error);
+                }
+            }
+        }
+
+        if (g_scriptSourceLoaded && !selected->scriptPath.empty()
+            && std::filesystem::path(g_scriptSourcePath).lexically_normal()
+                == std::filesystem::path(selected->scriptPath).lexically_normal()
+            && ImGui::TreeNode("Script Source")) {
+            ImGui::TextWrapped("This header is compiled into both Editor Play and the standalone game. Save it, then rebuild and restart the editor to load native code changes.");
+            if (ImGui::InputTextMultiline("##ScriptSource",
+                    g_scriptSourceBuffer.data(), g_scriptSourceBuffer.size(),
+                    ImVec2(-1.0f, 340.0f), ImGuiInputTextFlags_AllowTabInput)) {
+                g_scriptSourceDirty = true;
+            }
+            if (ImGui::Button(g_scriptSourceDirty ? "Save Source *" : "Save Source")) {
+                std::string error;
+                if (WriteTextFile(g_scriptSourcePath, g_scriptSourceBuffer.data(), &error)) {
+                    g_scriptSourceDirty = false;
+                    if (context.log) context.log->Info("Saved script source: " + g_scriptSourcePath);
+                } else if (context.log) {
+                    context.log->Error("Script source save failed: " + error);
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Reload Source")) {
+                std::string error;
+                if (!LoadScriptSource(g_scriptSourcePath, &error) && context.log) {
+                    context.log->Error("Script source reload failed: " + error);
+                }
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled(g_scriptSourceDirty ? "Unsaved changes" : "Saved - rebuild required");
+            ImGui::TreePop();
         }
 
         if (ImGui::Button("Add Field")) {
@@ -4661,30 +5365,78 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             }
             ImGui::TextDisabled("Move the object between adds to build a patrol loop, then Play.");
 
-            // Behaviour-tree brain: an optional .btgraph asset that overrides the
-            // built-in patrol/chase/search brain at Play time. Author it in the
-            // Behavior Graph panel (F11), then drag it here from the Content browser.
+            if (ImGui::TreeNodeEx("AI Movement", ImGuiTreeNodeFlags_DefaultOpen)) {
+                int movementMode = selected->navMovementMode == engine::ai::AiMovementMode::Flying
+                    ? 1 : 0;
+                float gravity = selected->navMovementGravity;
+                float maxFallSpeed = selected->navMovementMaxFallSpeed;
+                float groundProbe = selected->navMovementGroundProbe;
+                float stepHeight = selected->navMovementStepHeight;
+                float maxSlope = selected->navMovementMaxSlope;
+                const char* modes[] = {"Grounded / Falling", "Flying"};
+                bool movementChanged = ImGui::Combo("Movement Mode", &movementMode,
+                                                     modes, IM_ARRAYSIZE(modes));
+                if (movementMode == 0) {
+                    movementChanged |= ImGui::DragFloat(
+                        "Gravity", &gravity, 0.1f, -100.0f, 0.0f, "%.2f m/s2");
+                    movementChanged |= ImGui::DragFloat(
+                        "Maximum Fall Speed", &maxFallSpeed, 0.25f, 0.0f, 200.0f, "%.2f m/s");
+                    movementChanged |= ImGui::DragFloat(
+                        "Ground Probe", &groundProbe, 0.01f, 0.02f, 5.0f, "%.2f m");
+                    movementChanged |= ImGui::DragFloat(
+                        "Step Height", &stepHeight, 0.01f, 0.0f, 5.0f, "%.2f m");
+                    movementChanged |= ImGui::DragFloat(
+                        "Maximum Slope", &maxSlope, 0.5f, 0.0f, 89.0f, "%.1f deg");
+                    ImGui::TextDisabled("Navigation stays horizontal; gravity and floor probes control height.");
+                } else {
+                    ImGui::TextDisabled("Flying agents follow the Behavior Tree target in 3D and ignore gravity.");
+                }
+                if (movementChanged) {
+                    context.scene->SetSelectedNavAgentMovement(
+                        movementMode == 1 ? engine::ai::AiMovementMode::Flying
+                                          : engine::ai::AiMovementMode::Grounded,
+                        gravity, maxFallSpeed, groundProbe, stepHeight, maxSlope);
+                }
+                ImGui::TreePop();
+            }
+
+            // An optional authored tree overrides the built-in patrol/chase/search
+            // brain at Play time. Every .btgraph under Content is available here.
             ImGui::Separator();
             const std::string& brain = selected->navAgentBrainAsset;
-            ImGui::Text("Brain: %s", brain.empty() ? "Built-in (patrol/chase/search)" : brain.c_str());
-            ImGui::Button(brain.empty() ? "Drop .btgraph here" : "Replace brain (drop .btgraph)");
-            if (ImGui::BeginDragDropTarget()) {
-                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("3DGEDITOR_ASSET")) {
-                    const std::string dropped(static_cast<const char*>(payload->Data),
-                                              static_cast<std::size_t>(payload->DataSize));
-                    const std::string trimmed = dropped.c_str();   // stop at first NUL if padded
-                    if (trimmed.size() >= 9 && trimmed.substr(trimmed.size() - 9) == ".btgraph") {
-                        context.scene->SetSelectedNavAgentBrain(trimmed);
-                    }
-                }
-                ImGui::EndDragDropTarget();
-            }
-            if (!brain.empty()) {
-                ImGui::SameLine();
-                if (ImGui::Button("Clear Brain")) {
+            const std::string brainPreview = brain.empty()
+                ? "Built-in (patrol/chase/search)"
+                : std::filesystem::path(brain).filename().string();
+            ImGui::SetNextItemWidth(280.0f);
+            if (ImGui::BeginCombo("Behavior Tree", brainPreview.c_str())) {
+                if (ImGui::Selectable("Built-in (patrol/chase/search)", brain.empty())) {
                     context.scene->SetSelectedNavAgentBrain(std::string());
                 }
+                if (context.assets) {
+                    const std::vector<EditorAssets::Asset> graphs =
+                        FindBehaviorGraphAssets(*context.assets);
+                    if (graphs.empty()) ImGui::TextDisabled("No .btgraph assets in Content");
+                    for (const EditorAssets::Asset& graph : graphs) {
+                        const std::string fullPath =
+                            (std::filesystem::path(context.assets->RootPath()) /
+                             graph.relativePath).lexically_normal().string();
+                        const bool current = std::filesystem::path(brain).lexically_normal()
+                            == std::filesystem::path(fullPath).lexically_normal();
+                        const std::string itemLabel =
+                            graph.displayName + "###BehaviorTree/" + graph.relativePath;
+                        if (ImGui::Selectable(itemLabel.c_str(), current)) {
+                            context.scene->SetSelectedNavAgentBrain(fullPath);
+                        }
+                        if (ImGui::IsItemHovered()
+                            && graph.relativePath != graph.displayName) {
+                            ImGui::SetTooltip("Content/%s", graph.relativePath.c_str());
+                        }
+                        if (current) ImGui::SetItemDefaultFocus();
+                    }
+                }
+                ImGui::EndCombo();
             }
+            ImGui::TextDisabled("Choose a saved Behavior Tree asset to run during Play.");
         }
     }
 
@@ -4699,7 +5451,7 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
         float frequency = selected->terrainFrequency;
         bool changed = false;
         {
-            changed |= ImGui::DragInt("Resolution", &res, 1.0f, 8, 512);
+            changed |= ImGui::DragInt("Resolution", &res, 1.0f, 8, 1024);
             changed |= ImGui::DragFloat("Size (m)", &size, 0.5f, 1.0f, 2000.0f, "%.1f");
             changed |= ImGui::DragFloat("Max Height", &maxHeight, 0.1f, 0.0f, 500.0f, "%.1f");
             changed |= ImGui::DragInt("Seed", &seed, 1.0f, 0, 1000000);
@@ -4712,21 +5464,149 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             ImGui::TextDisabled("Regenerates on change. Positioned by the object's Transform; "
                                 "grass/rock/snow colouring is by height + slope.");
 
+            if (ImGui::TreeNodeEx("Import from Gaea", ImGuiTreeNodeFlags_DefaultOpen)) {
+                const std::string selectedPath = context.assets
+                    ? context.assets->SelectedAssetFullPath() : std::string{};
+                const std::string selectedExt = LowerExtension(selectedPath);
+                const bool supported = selectedExt == ".png" || selectedExt == ".raw" || selectedExt == ".r16";
+                ImGui::TextWrapped("Export a heightfield from Gaea as 16-bit grayscale PNG or RAW16, "
+                                   "place it in Content, and select it in Assets.");
+                ImGui::Text("Selected: %s", selectedPath.empty()
+                    ? "(select a heightmap in Assets)"
+                    : std::filesystem::path(selectedPath).filename().string().c_str());
+                ImGui::DragFloat("Imported World Size (m)", &g_gaeaImport.worldSize, 1.0f, 1.0f, 100000.0f, "%.1f");
+                ImGui::DragFloat("Imported Max Height (m)", &g_gaeaImport.maxHeight, 1.0f, 0.0f, 10000.0f, "%.1f");
+                const char* resolutionCaps[] = {"256", "512", "1024"};
+                ImGui::Combo("Maximum Resolution", &g_gaeaImport.maxResolutionIndex,
+                             resolutionCaps, IM_ARRAYSIZE(resolutionCaps));
+                ImGui::Checkbox("Flip X", &g_gaeaImport.flipX);
+                ImGui::SameLine();
+                ImGui::Checkbox("Flip Z", &g_gaeaImport.flipZ);
+                ImGui::SameLine();
+                ImGui::Checkbox("Invert Height", &g_gaeaImport.invertHeight);
+                if (selectedExt == ".raw" || selectedExt == ".r16")
+                    ImGui::Checkbox("RAW Big Endian", &g_gaeaImport.rawBigEndian);
+
+                if (!supported) ImGui::BeginDisabled();
+                if (ImGui::Button("Import Selected Heightmap")) {
+                    GaeaRaster raster;
+                    std::string importError;
+                    if (!LoadGaeaRaster(selectedPath, g_gaeaImport.rawBigEndian, raster, importError)) {
+                        if (context.log) context.log->Error("Gaea import: " + importError);
+                    } else {
+                        const int caps[] = {256, 512, 1024};
+                        const int cap = caps[std::clamp(g_gaeaImport.maxResolutionIndex, 0, 2)];
+                        const int importedResolution = std::clamp(
+                            std::max(raster.width, raster.height), 8, cap);
+                        std::vector<float> imported = ResampleGaeaRaster(
+                            raster, importedResolution, g_gaeaImport.flipX,
+                            g_gaeaImport.flipZ, g_gaeaImport.invertHeight);
+                        for (float& value : imported) value *= std::max(g_gaeaImport.maxHeight, 0.0f);
+                        if (context.scene->SetSelectedTerrain(
+                                true, importedResolution, g_gaeaImport.worldSize,
+                                g_gaeaImport.maxHeight, seed, octaves, frequency)
+                            && context.scene->SetSelectedTerrainHeights(std::move(imported))) {
+                            if (context.log) {
+                                context.log->Info("Imported Gaea heightmap: "
+                                    + std::to_string(raster.width) + "x" + std::to_string(raster.height)
+                                    + " (" + std::to_string(raster.bitDepth) + "-bit) -> terrain "
+                                    + std::to_string(importedResolution) + "x"
+                                    + std::to_string(importedResolution));
+                            }
+                        } else if (context.log) {
+                            context.log->Error("Gaea import failed: terrain is locked or unavailable.");
+                        }
+                    }
+                }
+                if (!supported) ImGui::EndDisabled();
+                if (selectedExt == ".exr")
+                    ImGui::TextColored(ImVec4(1.0f, 0.65f, 0.25f, 1.0f),
+                                       "EXR is not supported; export PNG16 or RAW16 from Gaea.");
+
+                ImGui::Separator();
+                ImGui::TextUnformatted("Gaea Mask to Paint Layer");
+                const char* maskLayers[] = {"Grass", "Rock", "Dirt", "Snow", "Sand"};
+                int maskLayerIndex = std::clamp(g_gaeaImport.maskLayer - 1, 0, 4);
+                if (ImGui::Combo("Target Layer", &maskLayerIndex, maskLayers, IM_ARRAYSIZE(maskLayers)))
+                    g_gaeaImport.maskLayer = maskLayerIndex + 1;
+                ImGui::SliderFloat("Mask Threshold", &g_gaeaImport.maskThreshold, 0.0f, 1.0f, "%.2f");
+                ImGui::Checkbox("Invert Mask", &g_gaeaImport.invertMask);
+                ImGui::Checkbox("Replace Existing Target Layer", &g_gaeaImport.clearLayerBeforeMask);
+                if (!supported) ImGui::BeginDisabled();
+                if (ImGui::Button("Import Selected Mask")) {
+                    GaeaRaster raster;
+                    std::string importError;
+                    if (!LoadGaeaRaster(selectedPath, g_gaeaImport.rawBigEndian, raster, importError)) {
+                        if (context.log) context.log->Error("Gaea mask import: " + importError);
+                    } else {
+                        const int targetRes = selected->terrainRes;
+                        const std::vector<float> mask = ResampleGaeaRaster(
+                            raster, targetRes, g_gaeaImport.flipX, g_gaeaImport.flipZ,
+                            g_gaeaImport.invertMask);
+                        std::vector<unsigned char> paint = selected->terrainPaint;
+                        if (paint.size() != mask.size()) paint.assign(mask.size(), 0);
+                        if (g_gaeaImport.clearLayerBeforeMask) {
+                            for (unsigned char& layer : paint)
+                                if (layer == g_gaeaImport.maskLayer) layer = 0;
+                        }
+                        std::size_t painted = 0;
+                        for (std::size_t i = 0; i < mask.size(); ++i) {
+                            if (mask[i] >= g_gaeaImport.maskThreshold) {
+                                paint[i] = static_cast<unsigned char>(g_gaeaImport.maskLayer);
+                                ++painted;
+                            }
+                        }
+                        if (context.scene->SetSelectedTerrainPaint(std::move(paint))) {
+                            if (context.log) context.log->Info("Imported Gaea mask to terrain layer "
+                                + std::to_string(g_gaeaImport.maskLayer) + " ("
+                                + std::to_string(painted) + " vertices painted)");
+                        } else if (context.log) {
+                            context.log->Error("Gaea mask import failed: terrain is locked.");
+                        }
+                    }
+                }
+                if (!supported) ImGui::EndDisabled();
+                ImGui::TreePop();
+            }
+
             // Sculpting: brush tools that edit the heightmap directly in the viewport.
             if (context.terrainSculpt && context.terrainSculptMode &&
                 context.terrainBrushRadius && context.terrainBrushStrength) {
                 ImGui::Separator();
                 ImGui::Checkbox("Sculpt mode (left-drag in viewport)", context.terrainSculpt);
                 if (*context.terrainSculpt) {
-                    const char* modes[] = {"Raise", "Lower", "Smooth", "Flatten", "Paint"};
+                    const char* modes[] = {"Raise", "Lower", "Smooth", "Flatten", "Paint", "Erase"};
                     ImGui::Combo("Brush", context.terrainSculptMode, modes, IM_ARRAYSIZE(modes));
                     if (*context.terrainSculptMode == 4 && context.terrainPaintLayer) {
                         const char* layers[] = {"Erase (auto)", "Grass", "Rock", "Dirt", "Snow", "Sand"};
                         ImGui::Combo("Layer", context.terrainPaintLayer, layers, IM_ARRAYSIZE(layers));
+                        const int activeLayer = *context.terrainPaintLayer;   // 0 = erase, 1..5 = paintable
+                        if (activeLayer >= 1 && activeLayer <= 5) {
+                            const std::string& assigned =
+                                selected->terrainLayerMaterials[static_cast<std::size_t>(activeLayer - 1)];
+                            ImGui::Text("Material: %s", assigned.empty() ? "(default colour)" : assigned.c_str());
+                            const EditorAssets::Asset* sel =
+                                context.assets ? context.assets->SelectedAsset() : nullptr;
+                            const bool selIsMaterial = sel && IsMaterialDocument(sel->relativePath);
+                            if (!selIsMaterial) ImGui::BeginDisabled();
+                            if (ImGui::Button("Use Selected Material")) {
+                                context.scene->SetSelectedTerrainLayerMaterial(activeLayer, sel->relativePath);
+                            }
+                            if (!selIsMaterial) ImGui::EndDisabled();
+                            ImGui::SameLine();
+                            if (ImGui::Button("Clear Material")) {
+                                context.scene->SetSelectedTerrainLayerMaterial(activeLayer, std::string());
+                            }
+                            ImGui::TextDisabled("Select a .3dgmat in Assets, then Use Selected Material. "
+                                                "Empty layers keep the default palette colour.");
+                        }
                     }
                     ImGui::DragFloat("Brush Radius", context.terrainBrushRadius, 0.1f, 0.5f, 100.0f, "%.1f");
-                    if (*context.terrainSculptMode != 4) {
+                    if (*context.terrainSculptMode != 4 && *context.terrainSculptMode != 5) {
                         ImGui::DragFloat("Brush Strength", context.terrainBrushStrength, 0.1f, 0.1f, 50.0f, "%.1f");
+                    }
+                    if (*context.terrainSculptMode == 5) {
+                        ImGui::TextDisabled("Erase: clears paint + grass under the brush.");
                     }
                     ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f),
                                        "Editing: object selection/move is paused.");
@@ -4735,6 +5615,33 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
         }
         if (changed) {
             context.scene->SetSelectedTerrain(true, res, size, maxHeight, seed, octaves, frequency);
+        }
+
+        // Grass: instanced blades grown on the painted Grass layer.
+        ImGui::Separator();
+        bool grassEnabled = selected->grassEnabled;
+        if (ImGui::Checkbox("Grass (grows on painted Grass layer)", &grassEnabled)) {
+            context.scene->SetSelectedTerrainGrass(grassEnabled, selected->grassDensity,
+                selected->grassHeight, selected->grassWindStrength, selected->grassWindSpeed,
+                selected->grassBaseColor, selected->grassTipColor);
+        }
+        if (selected->grassEnabled) {
+            float density = selected->grassDensity, height = selected->grassHeight;
+            float windStr = selected->grassWindStrength, windSpd = selected->grassWindSpeed;
+            glm::vec3 base = selected->grassBaseColor, tip = selected->grassTipColor;
+            bool gc = false;
+            gc |= ImGui::DragFloat("Grass Density", &density, 0.05f, 0.05f, 40.0f, "%.2f");
+            gc |= ImGui::DragFloat("Grass Height", &height, 0.01f, 0.05f, 5.0f, "%.2f");
+            gc |= ImGui::DragFloat("Wind Strength", &windStr, 0.01f, 0.0f, 2.0f, "%.2f");
+            gc |= ImGui::DragFloat("Wind Speed", &windSpd, 0.02f, 0.0f, 8.0f, "%.2f");
+            gc |= ImGui::ColorEdit3("Grass Root", &base.x);
+            gc |= ImGui::ColorEdit3("Grass Tip", &tip.x);
+            if (gc) {
+                context.scene->SetSelectedTerrainGrass(true, density, height, windStr, windSpd, base, tip);
+            }
+            ImGui::TextDisabled("These settings apply to grass you paint NEXT. Grass already on the "
+                                "field keeps the settings it was painted with. Paint the Grass layer "
+                                "(Sculpt > Paint > Grass) to grow grass; wind is shared by all grass.");
         }
     }
 
@@ -4760,10 +5667,100 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
         changed |= ImGui::DragFloat("Fresnel Power", &fresnel, 0.05f, 0.1f, 12.0f, "%.2f");
         changed |= ImGui::DragFloat("Specular", &spec, 0.02f, 0.0f, 8.0f, "%.2f");
         changed |= ImGui::DragFloat("Shininess", &shininess, 1.0f, 1.0f, 1000.0f, "%.0f");
-        ImGui::TextDisabled("Animated Gerstner waves. Centre = object Transform XZ; level = calm Y.");
         if (changed) {
             context.scene->SetSelectedWater(size, res, level, shallow, deep, refl,
                                             transparency, fresnel, spec, shininess);
+        }
+
+        // Surface motion (differs per water type: lake/ocean/river presets).
+        ImGui::Separator();
+        const char* typeNames[] = {"Custom", "Lake", "Ocean", "River"};
+        const int typeIdx = (selected->waterType >= 0 && selected->waterType <= 3) ? selected->waterType : 0;
+        ImGui::Text("Type: %s", typeNames[typeIdx]);
+        float seaHeight = selected->waterSeaHeight;
+        float seaChoppy = selected->waterSeaChoppy;
+        float seaSpeed  = selected->waterSeaSpeed;
+        float seaFreq   = selected->waterSeaFreq;
+        float foam      = selected->waterFoam;
+        bool waveChanged = false;
+        waveChanged |= ImGui::DragFloat("Wave Height", &seaHeight, 0.01f, 0.0f, 5.0f, "%.2f");
+        waveChanged |= ImGui::DragFloat("Choppiness", &seaChoppy, 0.02f, 0.0f, 10.0f, "%.2f");
+        waveChanged |= ImGui::DragFloat("Flow Speed", &seaSpeed, 0.02f, 0.0f, 5.0f, "%.2f");
+        waveChanged |= ImGui::DragFloat("Wave Scale", &seaFreq, 0.005f, 0.01f, 1.0f, "%.3f");
+        waveChanged |= ImGui::DragFloat("Foam", &foam, 0.02f, 0.0f, 4.0f, "%.2f");
+        ImGui::TextDisabled("Noise-wave surface. Centre = object Transform XZ; level = calm Y.");
+        if (waveChanged) {
+            // Editing motion by hand makes it "Custom" (0).
+            context.scene->SetSelectedWaterWaves(seaHeight, seaChoppy, seaSpeed, seaFreq, foam, 0);
+        }
+
+        // River flow: make the surface scroll along a spline's direction.
+        ImGui::Separator();
+        const std::string& currentFlow = selected->waterFlowSpline;
+        if (ImGui::BeginCombo("Flow Spline", currentFlow.empty() ? "(none)" : currentFlow.c_str())) {
+            if (ImGui::Selectable("(none)", currentFlow.empty())) {
+                context.scene->SetSelectedWaterFlowSpline(std::string());
+            }
+            for (const EditorScene::Object& o : context.scene->Objects()) {
+                if (!o.isSpline) continue;
+                if (ImGui::Selectable(o.name.c_str(), o.name == currentFlow)) {
+                    context.scene->SetSelectedWaterFlowSpline(o.name);
+                }
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::TextDisabled("Assign a spline to make the water flow along it (rivers).");
+    }
+
+    if (selected->isSpline && ImGui::CollapsingHeader("Spline", ImGuiTreeNodeFlags_DefaultOpen)) {
+        bool closed = selected->splineClosed;
+        int  type = selected->splineType;
+        const char* types[] = {"Path", "River", "Rail"};
+        bool metaChanged = false;
+        metaChanged |= ImGui::Combo("Use", &type, types, IM_ARRAYSIZE(types));
+        metaChanged |= ImGui::Checkbox("Closed loop", &closed);
+        if (metaChanged) {
+            context.scene->SetSelectedSpline(true, closed, type);
+        }
+
+        ImGui::Text("Control points: %d", static_cast<int>(selected->splinePoints.size()));
+        ImGui::TextDisabled("Drag XYZ to shape the path (world space).");
+
+        int removeIndex = -1;
+        for (std::size_t i = 0; i < selected->splinePoints.size(); ++i) {
+            ImGui::PushID(static_cast<int>(i));
+            glm::vec3 p = selected->splinePoints[i];
+            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 32.0f);
+            if (ImGui::DragFloat3("##pt", &p.x, 0.1f, -100000.0f, 100000.0f, "%.2f")) {
+                context.scene->SetSelectedSplinePoint(i, p);
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("X")) removeIndex = static_cast<int>(i);
+            ImGui::PopID();
+        }
+        if (removeIndex >= 0) {
+            context.scene->RemoveSelectedSplinePoint(static_cast<std::size_t>(removeIndex));
+        }
+
+        if (ImGui::Button("Add Point")) {
+            glm::vec3 np(0.0f);
+            const auto& pts = selected->splinePoints;
+            if (!pts.empty()) {
+                np = pts.back();
+                if (pts.size() >= 2) np += (pts.back() - pts[pts.size() - 2]);   // extend direction
+                else np += glm::vec3(3.0f, 0.0f, 0.0f);
+            }
+            context.scene->AddSelectedSplinePoint(np);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Add at View") && context.camera) {
+            // Drop a point in front of the camera on the y=0 plane (or last point's height).
+            const glm::vec3 eye = context.camera->Position();
+            const glm::vec3 fwd = context.camera->Front();
+            const float h = selected->splinePoints.empty() ? 0.0f : selected->splinePoints.back().y;
+            const float denom = (std::abs(fwd.y) > 1.0e-4f) ? fwd.y : -1.0f;
+            const float dist = std::clamp((h - eye.y) / denom, 2.0f, 60.0f);
+            context.scene->AddSelectedSplinePoint(eye + fwd * dist);
         }
     }
 
@@ -4828,6 +5825,18 @@ void DrawAssets(EditorDockspace::Context& context, bool* open) {
         }
     }
     ImGui::SameLine();
+    const bool canRenameFolder =
+        context.assets->SelectedType() == EditorAssets::SelectionType::Folder;
+    static char renameFolderName[128] = "";
+    if (!canRenameFolder) ImGui::BeginDisabled();
+    if (ImGui::Button("Rename")) {
+        const EditorAssets::Folder* selectedFolder = context.assets->SelectedFolder();
+        std::snprintf(renameFolderName, sizeof(renameFolderName), "%s",
+            selectedFolder ? selectedFolder->displayName.c_str() : "");
+        ImGui::OpenPopup("Rename Content Folder");
+    }
+    if (!canRenameFolder) ImGui::EndDisabled();
+    ImGui::SameLine();
     if (ImGui::Button("Delete")) {
         std::string error;
         if (context.assets->DeleteSelectedEntry(&error)) {
@@ -4837,6 +5846,33 @@ void DrawAssets(EditorDockspace::Context& context, bool* open) {
         } else if (context.log) {
             context.log->Warning(error);
         }
+    }
+    if (ImGui::BeginPopupModal("Rename Content Folder", nullptr,
+                               ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextUnformatted("New folder name");
+        ImGui::SetNextItemWidth(300.0f);
+        const bool submitted = ImGui::InputText(
+            "##RenameFolderName", renameFolderName, sizeof(renameFolderName),
+            ImGuiInputTextFlags_EnterReturnsTrue);
+        ImGui::TextDisabled("Renaming changes the Content path of assets inside this folder.");
+        const bool confirm = ImGui::Button("Rename", ImVec2(110.0f, 0.0f)) || submitted;
+        ImGui::SameLine();
+        const bool cancel = ImGui::Button("Cancel", ImVec2(110.0f, 0.0f));
+        if (confirm) {
+            std::string error;
+            if (context.assets->RenameSelectedFolder(renameFolderName, &error)) {
+                if (context.log) {
+                    context.log->Info(std::string("Renamed Content folder to: ")
+                        + renameFolderName);
+                }
+                ImGui::CloseCurrentPopup();
+            } else if (context.log) {
+                context.log->Error(error);
+            }
+        } else if (cancel) {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
     }
     if (context.assets->HasCopiedEntry()) {
         ImGui::Text("Copied: %s", context.assets->CopiedDisplayName().c_str());
@@ -4896,19 +5932,61 @@ void DrawAssets(EditorDockspace::Context& context, bool* open) {
         const EditorAssets::Asset& asset = assets[static_cast<std::size_t>(i)];
         char label[256];
         std::snprintf(label, sizeof(label), "[%s] %s",
-            EditorAssets::TypeName(asset.type), asset.relativePath.c_str());
+            EditorAssets::TypeName(asset.type), asset.displayName.c_str());
 
         const bool selected = context.assets->SelectedType() == EditorAssets::SelectionType::Asset
             && i == context.assets->SelectedIndex();
         if (ImGui::Selectable(label, selected)) {
             context.assets->SelectIndex(i);
         }
-        if (ImGui::IsItemHovered()
-            && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)
-            && asset.type == EditorAssets::Type::Scene) {
-            context.sceneAssetOpenRequested =
-                (std::filesystem::path(context.assets->RootPath())
-                    / asset.relativePath).string();
+        const bool assetHovered = ImGui::IsItemHovered();
+        if (assetHovered && asset.relativePath != asset.displayName) {
+            ImGui::SetTooltip("Content/%s", asset.relativePath.c_str());
+        }
+        if (assetHovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+            const std::string fullPath =
+                (std::filesystem::path(context.assets->RootPath()) / asset.relativePath).string();
+            if (asset.type == EditorAssets::Type::Scene) {
+                context.sceneAssetOpenRequested = fullPath;
+            } else if (asset.type == EditorAssets::Type::BehaviorGraph) {
+                context.behaviorGraphAssetOpenRequested = fullPath;
+            } else if (asset.type == EditorAssets::Type::Script) {
+                std::string error;
+                if (!OpenScriptInPreferredEditor(context, fullPath, &error) && context.log) {
+                    context.log->Error("Script source open failed: " + error);
+                }
+            } else if (asset.type == EditorAssets::Type::Audio) {
+                context.panels->SetOpen(EditorPanels::Panel::AudioEditor, true);
+                if (IsEditableAudioPath(fullPath)) {
+                    LoadAudioIntoEditor(fullPath, context.log);
+                } else {
+                    std::string extension = std::filesystem::path(fullPath).extension().string();
+                    std::transform(extension.begin(), extension.end(), extension.begin(),
+                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                    std::string error;
+                    if (extension == ".3dgaudio") {
+                        std::snprintf(g_audioEditor.cuePath.data(), g_audioEditor.cuePath.size(),
+                            "%s", fullPath.c_str());
+                        if (engine::LoadAudioCue(fullPath, &g_audioEditor.cue, &error)) {
+                            g_audioEditor.selectedCueClip = g_audioEditor.cue.clips.empty() ? -1 : 0;
+                        } else if (context.log) context.log->Error("Audio Cue: " + error);
+                    } else if (extension == ".3dgmusic") {
+                        std::snprintf(g_audioEditor.musicPath.data(), g_audioEditor.musicPath.size(),
+                            "%s", fullPath.c_str());
+                        if (engine::LoadAdaptiveMusic(fullPath, &g_audioEditor.music, &error)) {
+                            g_audioEditor.selectedMusicState = g_audioEditor.music.states.empty() ? -1 : 0;
+                        } else if (context.log) context.log->Error("Adaptive Music: " + error);
+                    } else if (extension == ".3dgmixer") {
+                        context.panels->SetOpen(EditorPanels::Panel::AudioMixer, true);
+                        std::snprintf(context.audioMixerPresetPath.data(),
+                            context.audioMixerPresetPath.size(), "%s", fullPath.c_str());
+                        context.loadAudioMixerPresetRequested = true;
+                    }
+                }
+            } else {
+                context.editorAssetOpenRequested = fullPath;
+                context.editorAssetOpenType = asset.type;
+            }
         }
 
         if (context.dragDrop && ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
@@ -4928,6 +6006,98 @@ void DrawAssets(EditorDockspace::Context& context, bool* open) {
         }
     }
 
+    ImGui::End();
+}
+
+void DrawStandaloneScriptEditor(EditorDockspace::Context& context) {
+    if (!g_scriptEditorWindowOpen || !g_scriptSourceLoaded) return;
+    EnsureScriptEditorSettings(context);
+    if (!ImGui::Begin("Script Editor", &g_scriptEditorWindowOpen)) {
+        ImGui::End();
+        return;
+    }
+
+    ImGui::TextWrapped("%s", g_scriptSourcePath.c_str());
+    const char* editors[] = {"Built-in", "VS Code", "Visual Studio", "Rider", "Custom"};
+    if (ImGui::Combo("Code Editor", &g_preferredCodeEditor, editors, 5)) {
+        SaveScriptEditorSettings(context);
+    }
+    if (g_preferredCodeEditor == static_cast<int>(PreferredCodeEditor::Custom)) {
+        if (ImGui::InputText("Editor Executable", g_customCodeEditorPath.data(),
+                g_customCodeEditorPath.size())) {
+            SaveScriptEditorSettings(context);
+        }
+    }
+    if (g_preferredCodeEditor != static_cast<int>(PreferredCodeEditor::BuiltIn)) {
+        if (ImGui::Button("Open in Selected Editor")) {
+            std::string error;
+            if (!EditorScriptTools::OpenExternalEditor(
+                    static_cast<PreferredCodeEditor>(g_preferredCodeEditor),
+                    g_customCodeEditorPath.data(), g_scriptSourcePath,
+                    ProjectRootFor(context), &error) && context.log) {
+                context.log->Error("Code editor: " + error);
+            }
+        }
+    }
+    ImGui::TextDisabled("Compile Scripts saves native code, closes the editor, rebuilds editor + player, and reopens the project.");
+    ImGui::Separator();
+    if (ImGui::InputTextMultiline("##StandaloneScriptSource",
+            g_scriptSourceBuffer.data(), g_scriptSourceBuffer.size(),
+            ImVec2(-1.0f, -ImGui::GetFrameHeightWithSpacing() * 2.0f),
+            ImGuiInputTextFlags_AllowTabInput)) {
+        g_scriptSourceDirty = true;
+    }
+
+    if (ImGui::Button(g_scriptSourceDirty ? "Save Source *" : "Save Source")) {
+        std::string error;
+        if (WriteTextFile(g_scriptSourcePath, g_scriptSourceBuffer.data(), &error)) {
+            g_scriptSourceDirty = false;
+            if (context.log) context.log->Info("Saved script source: " + g_scriptSourcePath);
+        } else if (context.log) {
+            context.log->Error("Script source save failed: " + error);
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Reload Source")) {
+        std::string error;
+        if (!LoadScriptSource(g_scriptSourcePath, &error) && context.log) {
+            context.log->Error("Script source reload failed: " + error);
+        }
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled(g_scriptSourceDirty ? "Unsaved changes" : "Saved");
+    ImGui::Separator();
+    ImGui::BeginDisabled(context.playMode);
+    if (ImGui::Button("Compile Scripts & Restart")) {
+        std::string error;
+        bool saved = true;
+        if (g_scriptSourceDirty) {
+            saved = WriteTextFile(g_scriptSourcePath, g_scriptSourceBuffer.data(), &error);
+            if (saved) g_scriptSourceDirty = false;
+        }
+        if (saved) context.scriptCompileAndRestartRequested = true;
+        else if (context.log) context.log->Error("Script source save failed: " + error);
+    }
+    ImGui::EndDisabled();
+    if (context.playMode && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip("Exit Play mode before compiling scripts.");
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Last Build Log")) {
+        g_scriptBuildLog = EditorScriptTools::ReadLastBuildLog(ProjectRootFor(context));
+        if (g_scriptBuildLog.empty()) g_scriptBuildLog = "No script build has run yet.";
+        g_scriptBuildLogOpen = true;
+    }
+    ImGui::End();
+}
+
+void DrawScriptBuildLog() {
+    if (!g_scriptBuildLogOpen) return;
+    if (ImGui::Begin("Script Compiler Output", &g_scriptBuildLogOpen)) {
+        ImGui::InputTextMultiline("##ScriptBuildLog", g_scriptBuildLog.data(),
+            g_scriptBuildLog.size() + 1, ImVec2(-1.0f, -1.0f),
+            ImGuiInputTextFlags_ReadOnly);
+    }
     ImGui::End();
 }
 
@@ -5354,13 +6524,16 @@ void DrawCreationPalette(EditorDockspace::Context& context) {
     ImGui::Separator();
 
     enum class Action {
-        Cube, Plane, Sphere, Capsule, Cylinder, Cone, Pyramid, Torus, Staircase,
+        Empty, Cube, Plane, Sphere, Capsule, Cylinder, Cone, Pyramid, Torus, Staircase,
         DynamicCube, StaticFloor, TriggerVolume,
         NavMeshBoundsVolume,
         DirectionalLight, PointLight, SpotLight, AreaLight,
         PlayerStart, Door, Pickup, DamageZone, MovingPlatform
     };
     struct Entry { const char* label; const char* description; Action action; };
+    constexpr Entry systems[] = {
+        {"Empty Object", "Non-rendering host for scripts and world systems", Action::Empty}
+    };
     constexpr Entry geometry[] = {
         {"Cube", "Box-shaped mesh", Action::Cube}, {"Plane", "Flat surface", Action::Plane},
         {"Sphere", "Round mesh", Action::Sphere}, {"Capsule", "Rounded vertical body", Action::Capsule},
@@ -5393,6 +6566,10 @@ void DrawCreationPalette(EditorDockspace::Context& context) {
     bool close = false;
     auto execute = [&](Action action) {
         switch (action) {
+        case Action::Empty:
+            context.addEmptyRequested = true;
+            context.frameSelectedRequested = true;
+            break;
         case Action::Cube: ResetPrimitiveCreator(EditorScene::Primitive::Cube); break;
         case Action::Plane: ResetPrimitiveCreator(EditorScene::Primitive::Plane); break;
         case Action::Sphere: ResetPrimitiveCreator(EditorScene::Primitive::Sphere); break;
@@ -5438,6 +6615,7 @@ void DrawCreationPalette(EditorDockspace::Context& context) {
     };
 
     ImGui::BeginChild("##CreationResults", ImVec2(0.0f, 0.0f), false);
+    drawCategory("Systems", systems, std::size(systems));
     drawCategory("Geometry", geometry, std::size(geometry));
     drawCategory("Physics", physics, std::size(physics));
     drawCategory("Navigation", navigation, std::size(navigation));
@@ -6292,6 +7470,34 @@ bool EditorDockspace::Draw(Context& context) {
                 ImGui::Text("Gizmo: %s %s (%s)", context.gizmo->ModeName(), context.gizmo->AxisName(), context.gizmo->SpaceName());
             }
             ImGui::Separator();
+            if (ImGui::BeginMenu("Project")) {
+                if (context.project) {
+                    ImGui::TextDisabled("Current: %s", context.project->ProjectName().c_str());
+                    ImGui::Separator();
+                }
+                ImGui::TextDisabled("Create a new empty project");
+                if (context.projectNameBuffer && context.projectNameBufferSize > 0) {
+                    ImGui::SetNextItemWidth(280.0f);
+                    ImGui::InputText("Name", context.projectNameBuffer, context.projectNameBufferSize);
+                }
+                if (context.projectLocationBuffer && context.projectLocationBuffer[0] != '\0') {
+                    ImGui::TextWrapped("Location: %s", context.projectLocationBuffer);
+                } else {
+                    ImGui::TextDisabled("Location: (none chosen)");
+                }
+                if (ImGui::MenuItem("Choose Location...")) {
+                    context.browseProjectLocationRequested = true;
+                }
+                if (ImGui::MenuItem("Create Project")) {
+                    context.newProjectRequested = true;
+                }
+                ImGui::Separator();
+                if (ImGui::MenuItem("Open Project...")) {
+                    context.browseOpenProjectRequested = true;
+                }
+                ImGui::EndMenu();
+            }
+            ImGui::Separator();
             if (ImGui::MenuItem("New Scene")) {
                 context.newSceneRequested = true;
             }
@@ -6366,6 +7572,10 @@ bool EditorDockspace::Draw(Context& context) {
                 ImGui::EndMenu();
             }
             ImGui::Separator();
+            if (ImGui::MenuItem("Empty Object")) {
+                context.addEmptyRequested = true;
+                context.frameSelectedRequested = true;
+            }
             if (ImGui::BeginMenu("Primitives")) {
                 if (ImGui::MenuItem("Cube")) {
                     ResetPrimitiveCreator(EditorScene::Primitive::Cube);
@@ -6400,8 +7610,28 @@ bool EditorDockspace::Draw(Context& context) {
                 context.addTerrainRequested = true;
                 context.frameSelectedRequested = true;
             }
-            if (ImGui::MenuItem("Water")) {
-                context.addWaterRequested = true;
+            if (ImGui::BeginMenu("Water")) {
+                if (ImGui::MenuItem("Lake")) {
+                    context.addWaterRequested = true; context.addWaterPreset = 1;
+                    context.frameSelectedRequested = true;
+                }
+                if (ImGui::MenuItem("Ocean")) {
+                    context.addWaterRequested = true; context.addWaterPreset = 2;
+                    context.frameSelectedRequested = true;
+                }
+                if (ImGui::MenuItem("River")) {
+                    context.addWaterRequested = true; context.addWaterPreset = 3;
+                    context.frameSelectedRequested = true;
+                }
+                ImGui::Separator();
+                if (ImGui::MenuItem("Custom Water")) {
+                    context.addWaterRequested = true; context.addWaterPreset = 0;
+                    context.frameSelectedRequested = true;
+                }
+                ImGui::EndMenu();
+            }
+            if (ImGui::MenuItem("Spline")) {
+                context.addSplineRequested = true;
                 context.frameSelectedRequested = true;
             }
             if (ImGui::BeginMenu("Physics")) {
@@ -6509,6 +7739,20 @@ bool EditorDockspace::Draw(Context& context) {
         }
 
         if (ImGui::BeginMenu("Debug")) {
+            if (ImGui::BeginMenu("Physics")) {
+                if (context.showPhysicsEventGuides) {
+                    ImGui::MenuItem("Show Play Event Lines", nullptr,
+                        context.showPhysicsEventGuides);
+                }
+                if (ImGui::MenuItem("Clear Recent Event Lines")) {
+                    context.clearPhysicsEventGuidesRequested = true;
+                }
+                if (!context.playMode) {
+                    ImGui::Separator();
+                    ImGui::TextDisabled("Event lines are drawn during Play mode.");
+                }
+                ImGui::EndMenu();
+            }
             if (ImGui::BeginMenu("Navigation")) {
                 if (context.showNavigationPreview) {
                     const bool shown = *context.showNavigationPreview;
@@ -6523,6 +7767,12 @@ bool EditorDockspace::Draw(Context& context) {
                 ImGui::Separator();
                 ImGui::TextDisabled("%d walkable polygons", context.navigationPreviewPolygons);
                 ImGui::EndMenu();
+            }
+            if (context.showGrid) {
+                bool shown = *context.showGrid;
+                if (ImGui::MenuItem("Grid & Axes", nullptr, shown)) {
+                    *context.showGrid = !shown;
+                }
             }
             if (context.showAiDebug) {
                 bool shown = *context.showAiDebug;
@@ -6628,6 +7878,8 @@ bool EditorDockspace::Draw(Context& context) {
             break; // drawn by EditorApp (owns isolated shader preview resources)
         case EditorPanels::Panel::Hud:
             break; // drawn by EditorApp::DrawHudEditorPanel (owns the HUD document)
+        case EditorPanels::Panel::CharacterEditor:
+            break; // drawn by EditorApp (owns the reusable character asset)
         case EditorPanels::Panel::PhysicsStatus:
             DrawPhysicsStatus(context, &open);
             break;
@@ -6649,6 +7901,9 @@ bool EditorDockspace::Draw(Context& context) {
 
         context.panels->SetOpen(panel, open);
     }
+
+    DrawStandaloneScriptEditor(context);
+    DrawScriptBuildLog();
 
     ImGui::End();
     return true;

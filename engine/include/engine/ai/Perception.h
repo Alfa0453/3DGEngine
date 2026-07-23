@@ -35,7 +35,8 @@ inline bool InvisionCone(const glm::vec3& eye, const glm::vec3& forward,
 // target; if a collider other than the target is hit first, the view is blocked.
 bool CanSee(const glm::vec3& eye, const glm::vec3& forward, const VisionCone& cone,
             const glm::vec3& target, ecs::Entity targetEntity,
-            PhysicsWorld& world, ecs::Registry& registry);
+            PhysicsWorld& world, ecs::Registry& registry,
+            ecs::Entity observerEntity = ecs::kNull);
 
 } // namespace ai
 } // namespace engine

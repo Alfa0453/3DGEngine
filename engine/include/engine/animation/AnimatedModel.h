@@ -3,6 +3,8 @@
 #include "engine/animation/AnimationController.h"
 
 #include <glm/glm.hpp>
+#include <glm/gtc/quaternion.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 
 #include <cstddef>
 #include <functional>
@@ -10,6 +12,42 @@
 #include <vector>
 
 namespace engine {
+
+// Build a render-only model offset from an Euler rotation (degrees): it rotates the
+// mesh AND re-centres the model's bounding-box centre on the object origin, so a
+// stood-up off-axis rig lines up with an origin-centred capsule. Identity when the
+// Euler is ~zero (no offset). The object transform is never touched, so the collider
+// and controller stay upright.
+inline glm::mat4 MakeModelRenderOffset(const glm::vec3& eulerDegrees, const glm::vec3& modelCenter) {
+    if (glm::dot(eulerDegrees, eulerDegrees) < 1e-4f) return glm::mat4(1.0f);
+    return glm::mat4_cast(glm::quat(glm::radians(eulerDegrees)))
+         * glm::translate(glm::mat4(1.0f), -modelCenter);
+}
+
+// Full render-only model offset: position + Euler rotation (degrees) + non-uniform
+// scale, all applied about the model's bounding-box centre. A point of the model maps
+// as  T(position) * R(euler) * S(scale) * T(-modelCenter). So rotation and scale pivot
+// on the model centre, and position then shifts it in the object's local space. Returns
+// identity when position~0, euler~0 and scale~1 (a plain model is left untouched, never
+// re-centred). The object Transform is never modified, so the collider stays put.
+inline glm::mat4 MakeModelRenderOffset(const glm::vec3& position,
+                                       const glm::vec3& eulerDegrees,
+                                       const glm::vec3& scale,
+                                       const glm::vec3& modelCenter) {
+    const glm::vec3 scaleDelta = scale - glm::vec3(1.0f);
+    const bool isIdentity = glm::dot(position, position) < 1e-8f
+                         && glm::dot(eulerDegrees, eulerDegrees) < 1e-4f
+                         && glm::dot(scaleDelta, scaleDelta) < 1e-8f;
+    if (isIdentity) return glm::mat4(1.0f);
+    glm::mat4 m(1.0f);
+    m = glm::translate(m, position);
+    m *= glm::mat4_cast(glm::quat(glm::radians(eulerDegrees)));
+    m = glm::scale(m, glm::vec3(scale.x != 0.0f ? scale.x : 1e-4f,
+                                scale.y != 0.0f ? scale.y : 1e-4f,
+                                scale.z != 0.0f ? scale.z : 1e-4f));
+    m = glm::translate(m, -modelCenter);
+    return m;
+}
 
 class SkinnedModel;                 // forward declared -- only a pointer is stored
 class Texture;                      // optional albedo override
@@ -67,6 +105,12 @@ struct AnimatedModel {
     // material maps. Useful for packs whose textures aren't referenced by the mesh
     // file (e.g. a shared palette atlas beside the model). null = use materials.
     const Texture* albedoOverride = nullptr;
+
+    // Render-only orientation offset applied to the model's local space (model matrix
+    // becomes Transform * renderOffset). Used to stand up an off-axis rig (e.g. a
+    // Z-up import) WITHOUT rotating the entity Transform -- so the collider and
+    // controller, which read the Transform, stay upright. Identity = no offset.
+    glm::mat4 renderOffset{1.0f};
 
     void SetModel(const SkinnedModel* m) { model = m; }
 

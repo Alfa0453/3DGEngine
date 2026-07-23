@@ -26,8 +26,23 @@ public:
         std::vector<std::string> errors;
     };
 
+    // One animation-only file to merge onto a model's skeleton by bone name (the
+    // Mixamo / separate-clip workflow). `name` becomes the clip name; strip root
+    // motion for in-place locomotion (walk/run) so the character doesn't drift.
+    struct SkinnedAnimationSource {
+        std::string path;
+        std::string name;
+        bool        stripRootMotion = false;
+    };
+
     const Model* LoadModel(const std::string& path, std::string* error = nullptr);
     const SkinnedModel* LoadSkinnedModel(const std::string& path, std::string* error = nullptr);
+    // Load a skinned model and merge extra animation files onto it. Cached under a
+    // key combining the model path and the sources, so each unique model+clip set
+    // is a distinct instance (the plain overload above is unaffected).
+    const SkinnedModel* LoadSkinnedModel(const std::string& path,
+                                         const std::vector<SkinnedAnimationSource>& extraAnimations,
+                                         std::string* error = nullptr);
     const Texture* LoadTexture(const std::string& path, std::string* error = nullptr);
     const RuntimeMaterialAsset* LoadMaterial(const std::string& path, std::string* error = nullptr);
     const Shader* LoadShader(const std::string& path, bool skinned = false,

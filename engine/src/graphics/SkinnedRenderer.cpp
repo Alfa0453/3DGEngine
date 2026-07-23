@@ -14,6 +14,8 @@
 
 #include <string>
 #include <algorithm>
+#include <chrono>
+#include <cmath>
 #include <sstream>
 
 namespace engine {
@@ -158,6 +160,30 @@ uniform vec3  uFogColor;
 uniform float uFogDensity;
 uniform float uFogHeight;
 uniform float uFogHeightFalloff;
+uniform int uSkylightOcclusion;
+uniform float uSkylightOcclusionStrength, uMinimumSkylight;
+uniform int uCloudShadows;
+uniform float uCloudShadowStrength, uCloudShadowScale;
+uniform float uCloudCoverage, uCloudDensity, uCloudSoftness;
+uniform vec2 uCloudWindOffset;
+float CloudHash(vec2 p) { return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453123); }
+float CloudNoise(vec2 p) {
+    vec2 i=floor(p), f=fract(p); f=f*f*(3.0-2.0*f);
+    return mix(mix(CloudHash(i),CloudHash(i+vec2(1,0)),f.x),
+               mix(CloudHash(i+vec2(0,1)),CloudHash(i+vec2(1)),f.x),f.y);
+}
+float CloudFbm(vec2 p) {
+    float v=0.0,w=0.52; mat2 o=mat2(1.7,1.2,-1.2,1.7);
+    for(int i=0;i<5;++i){v+=CloudNoise(p)*w;p=o*p+vec2(13.7,9.2);w*=0.5;} return v;
+}
+float CloudSunlight(vec3 wp) {
+    if(uCloudShadows==0)return 1.0;
+    vec2 p=wp.xz*max(uCloudShadowScale,0.0001)+uCloudWindOffset;
+    float s=mix(CloudFbm(p),CloudFbm(p*2.7+vec2(4.2,-3.1)),0.28);
+    float c=smoothstep(uCloudCoverage-max(uCloudSoftness,0.005),
+                       uCloudCoverage+max(uCloudSoftness,0.005),s);
+    return 1.0-clamp(c*uCloudDensity*uCloudShadowStrength,0.0,0.95);
+}
 float DistributionGGX(vec3 N, vec3 H, float r) {
     float a = r*r; float a2 = a*a; float NdotH = max(dot(N,H),0.0);
     float d = (NdotH*NdotH)*(a2-1.0)+1.0; return a2/(PI*d*d);
@@ -172,13 +198,36 @@ vec3 FresnelSchlick(float c, vec3 F0) { return F0+(1.0-F0)*pow(clamp(1.0-c,0.0,1
 vec3 FresnelSchlickRough(float c, vec3 F0, float r) {
     return F0 + (max(vec3(1.0-r), F0) - F0) * pow(clamp(1.0-c,0.0,1.0),5.0);
 }
-float ShadowFactor(float NdotL) {
+float BilinearShadowCompare(vec2 uv, int layer, float receiverDepth) {
+    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) return 0.0;
+    ivec2 size = textureSize(uCascadeMaps, 0).xy;
+    vec2 texelPosition = uv * vec2(size) - vec2(0.5);
+    ivec2 base = ivec2(floor(texelPosition));
+    vec2 blend = fract(texelPosition);
+    ivec2 maxCoord = size - ivec2(1);
+    ivec2 p00 = clamp(base, ivec2(0), maxCoord);
+    ivec2 p10 = clamp(base + ivec2(1, 0), ivec2(0), maxCoord);
+    ivec2 p01 = clamp(base + ivec2(0, 1), ivec2(0), maxCoord);
+    ivec2 p11 = clamp(base + ivec2(1, 1), ivec2(0), maxCoord);
+    float s00 = receiverDepth > texelFetch(uCascadeMaps, ivec3(p00, layer), 0).r ? 1.0 : 0.0;
+    float s10 = receiverDepth > texelFetch(uCascadeMaps, ivec3(p10, layer), 0).r ? 1.0 : 0.0;
+    float s01 = receiverDepth > texelFetch(uCascadeMaps, ivec3(p01, layer), 0).r ? 1.0 : 0.0;
+    float s11 = receiverDepth > texelFetch(uCascadeMaps, ivec3(p11, layer), 0).r ? 1.0 : 0.0;
+    return mix(mix(s00, s10, blend.x), mix(s01, s11, blend.x), blend.y);
+}
+float ShadowFactor(float NdotL, vec3 N) {
     float depth = abs((uView * vec4(vWorldPos, 1.0)).z);
     int layer = 3;
     for (int i = 0; i < 4; ++i) { if (depth < uCascadeSplits[i]) { layer = i; break; } }
-    vec4 lp = uCascadeVP[layer] * vec4(vWorldPos, 1.0);
+    // Normal-offset bias: sample the cascade from a point pushed along the surface
+    // normal toward the light. Without it the character self-shadows its own sun-facing
+    // surfaces, so the shadow that belongs on the floor smears across the mesh as a
+    // dark band. Grows on grazing surfaces (low NdotL) where acne is worst.
+    vec3 biasedPos = vWorldPos + N * mix(0.02, 0.08, 1.0 - NdotL);
+    vec4 lp = uCascadeVP[layer] * vec4(biasedPos, 1.0);
     vec3 p = lp.xyz / lp.w * 0.5 + 0.5;
-    if (p.z > 1.0) return 0.0;
+    if (p.z <= 0.0 || p.z > 1.0 || any(lessThan(p.xy, vec2(0.0))) ||
+        any(greaterThan(p.xy, vec2(1.0)))) return 0.0;
     float cur = p.z;
     float bias = max(0.0025 * (1.0 - NdotL), 0.0008);
     vec2 texel = 1.0 / vec2(textureSize(uCascadeMaps, 0).xy);
@@ -193,10 +242,9 @@ float ShadowFactor(float NdotL) {
     float radius = clamp(penumbra, 1.0, 16.0);
     float s = 0.0;
     for (int x = -2; x <= 2; ++x) for (int y = -2; y <= 2; ++y) {
-        float d = texture(uCascadeMaps, vec3(p.xy + vec2(x, y) * texel * radius, float(layer))).r;
-        s += (cur - bias > d) ? 1.0 : 0.0;
+        s += BilinearShadowCompare(p.xy + vec2(x, y) * texel * radius, layer, cur - bias);
     }
-    return s / 25.0;
+    return clamp(s / 25.0, 0.0, 1.0);
 }
 vec3 ACES(vec3 x) {
     const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
@@ -220,8 +268,9 @@ void main() {
     vec3 F0 = mix(vec3(0.04), albedo, metallic);
     vec3 Ls = normalize(-uSunDir);
     float sunNdotL = max(dot(N, Ls), 0.0);
-    float shadow = (uHasShadow == 1) ? ShadowFactor(sunNdotL) : 0.0;
-    vec3 Lo = (1.0 - shadow) * Lighting(N, V, Ls, uSunColor, albedo, F0, metallic, roughness);
+    float shadow = (uHasShadow == 1) ? ShadowFactor(sunNdotL, N) : 0.0;
+    vec3 Lo = (1.0 - shadow) * CloudSunlight(vWorldPos)
+            * Lighting(N, V, Ls, uSunColor, albedo, F0, metallic, roughness);
     vec3 ambient;
     if (uUseIBL == 1) {
         vec3 F = FresnelSchlickRough(max(dot(N,V),0.0), F0, roughness);
@@ -235,6 +284,11 @@ void main() {
         ambient = (kD*diffuse + specular) * ao;
     } else {
         ambient = uAmbient*albedo*ao;
+    }
+    if (uSkylightOcclusion == 1) {
+        float skyOcclusion = smoothstep(0.35, 0.90, shadow);
+        float skyVisibility = max(1.0 - skyOcclusion, clamp(uMinimumSkylight, 0.0, 1.0));
+        ambient *= mix(1.0, skyVisibility, clamp(uSkylightOcclusionStrength, 0.0, 1.0));
     }
     vec3 color = ambient + Lo + uEmissive;
     if (uFogEnabled == 1) {
@@ -370,6 +424,21 @@ void SkinnedRenderer::DrawScene(ecs::Registry& reg, const Camera& camera, float 
     m_pbr->SetFloat("uFogDensity", lit.fogDensity);
     m_pbr->SetFloat("uFogHeight", lit.fogHeight);
     m_pbr->SetFloat("uFogHeightFalloff", lit.fogHeightFalloff);
+    m_pbr->SetInt("uSkylightOcclusion", lit.skylightOcclusion ? 1 : 0);
+    m_pbr->SetFloat("uSkylightOcclusionStrength", lit.skylightOcclusionStrength);
+    m_pbr->SetFloat("uMinimumSkylight", lit.minimumSkylight);
+    m_pbr->SetInt("uCloudShadows", lit.cloudShadows ? 1 : 0);
+    m_pbr->SetFloat("uCloudShadowStrength", lit.cloudShadowStrength);
+    m_pbr->SetFloat("uCloudShadowScale", lit.cloudShadowScale);
+    m_pbr->SetFloat("uCloudCoverage", lit.cloudCoverage);
+    m_pbr->SetFloat("uCloudDensity", lit.cloudDensity);
+    m_pbr->SetFloat("uCloudSoftness", lit.cloudSoftness);
+    const float cloudAngle = glm::radians(lit.cloudWindDirectionDegrees);
+    const float cloudSeconds = std::chrono::duration<float>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    m_pbr->SetVec2("uCloudWindOffset",
+        glm::vec2(std::cos(cloudAngle), std::sin(cloudAngle))
+        * (cloudSeconds * lit.cloudWindSpeed));
 
     reg.view<ecs::Transform, AnimatedModel>().each([&](ecs::Entity entity, ecs::Transform& t, AnimatedModel& am) {
         if (!am.model || am.pose.empty()) return;
@@ -380,7 +449,7 @@ void SkinnedRenderer::DrawScene(ecs::Registry& reg, const Camera& camera, float 
             shader.Bind();
             shader.SetMat4("uViewProjection",
                 camera.ProjectionMatrix(aspect) * camera.ViewMatrix());
-            shader.SetMat4("uModel", t.Model());
+            shader.SetMat4("uModel", t.Model() * am.renderOffset);
             shader.SetVec3("uLightDirection", lit.sunDir);
             shader.SetFloat("uLightIntensity",
                 std::max({lit.sunColor.x, lit.sunColor.y, lit.sunColor.z}));
@@ -392,7 +461,7 @@ void SkinnedRenderer::DrawScene(ecs::Registry& reg, const Camera& camera, float 
                 submesh.mesh.Draw();
             return;
         }
-        m_pbr->SetMat4("uModel", t.Model());
+        m_pbr->SetMat4("uModel", t.Model() * am.renderOffset);
         UploadBones(*m_pbr, am.pose);
 
         // An albedo override (a shared palette atlas, say) applies to every submesh.
@@ -441,7 +510,7 @@ void SkinnedRenderer::DrawSceneDepth(ecs::Registry& reg, const glm::mat4& lightV
     m_depth->SetMat4("uLightVP", lightVP);
     reg.view<ecs::Transform, AnimatedModel>().each([&](ecs::Entity, ecs::Transform& t, AnimatedModel& am) {
         if (!am.model || am.pose.empty() || !am.castShadow) return;
-        m_depth->SetMat4("uModel", t.Model());
+        m_depth->SetMat4("uModel", t.Model() * am.renderOffset);
         UploadBones(*m_depth, am.pose);
         for (const SubMesh& sm : am.model->SubMeshes()) sm.mesh.Draw();
     });

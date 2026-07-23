@@ -23,6 +23,7 @@ class EditorAssets;
 class ParticleEditorPanel {
 public:
     void Draw(EditorScene& scene, EditorAssets& assets, bool* open, float dt);
+    void RequestOpen(const std::string& path);
 
 private:
     void SyncSelection(EditorScene& scene);
@@ -67,6 +68,7 @@ private:
     bool m_assetDirty = false;
     bool m_pendingNew = false;
     std::string m_pendingOpenPath;
+    std::string m_externalOpenPath;
     std::string m_error;
     EditorAssets* m_assetsContext = nullptr;
     engine::RuntimeAssetManager m_shaderAssets;

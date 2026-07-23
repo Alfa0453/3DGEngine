@@ -1,0 +1,125 @@
+<#
+    package_game.ps1 — build the 3DGEngine standalone player and stage a
+    self-contained, zippable folder ready to upload to itch.io.
+
+    WHY THIS WORKS
+    --------------
+    * All third-party deps are static (BUILD_SHARED_LIBS OFF) -> no DLLs to ship.
+    * -DGAMEENGINE_STATIC_RUNTIME=ON links the MSVC runtime statically -> the
+      exe runs on a clean Windows machine with no Visual C++ redistributable.
+    * player.exe resolves player.cfg + the scene next to itself; it resolves
+      ASSET paths (models/textures/materials/audio) relative to the working
+      directory. On double-click the working directory IS the exe folder, so we
+      copy your content tree beside the exe and everything lines up.
+
+    USAGE (from a "Developer PowerShell for VS" or any shell with cmake on PATH):
+
+        ./package_game.ps1 `
+            -ContentDir "D:\C++_Projects\3DGEngine\MyGame\Content" `
+            -SceneRelative "Content/Scenes/level.runtime.scene" `
+            -GameName "MyJamGame"
+
+    -ContentDir     Your project's asset root folder. Its WHOLE tree is copied
+                    beside the exe (keeping its folder name, e.g. "Content").
+    -SceneRelative  The scene the player boots, written as it will sit next to
+                    the exe (forward slashes). Usually "<ContentFolder>/Scenes/<file>".
+                    Use the exported runtime scene (File > Export Runtime).
+    -GameName       Output name: dist/<GameName>/ and dist/<GameName>.zip.
+
+    If the packaged game shows "Asset errors > 0" on launch, your scene stores
+    asset paths WITHOUT the content-folder prefix. Re-run with -StageContentsOnly
+    to copy the *contents* of -ContentDir to the exe folder instead of the folder
+    itself, and set -SceneRelative accordingly (e.g. "Scenes/level.runtime.scene").
+#>
+
+param(
+    [string]$RepoRoot          = "D:\C++_Projects\3DGEngine",
+    [string]$BuildDir          = "",
+    [Parameter(Mandatory=$true)][string]$ContentDir,
+    [Parameter(Mandatory=$true)][string]$SceneRelative,
+    [string]$GameName          = "MyJamGame",
+    [string]$OutDir            = "",
+    [string]$Config            = "Release",
+    [int]$WindowWidth          = 1280,
+    [int]$WindowHeight         = 720,
+    [switch]$StageContentsOnly,   # copy CONTENTS of ContentDir instead of the folder itself
+    [switch]$Reconfigure          # force a fresh CMake configure
+)
+
+$ErrorActionPreference = "Stop"
+function Say($m) { Write-Host "[package] $m" -ForegroundColor Cyan }
+
+if (-not $BuildDir) { $BuildDir = Join-Path $RepoRoot "build" }
+if (-not $OutDir)   { $OutDir   = Join-Path $RepoRoot "dist" }
+if (-not (Test-Path $ContentDir)) { throw "ContentDir not found: $ContentDir" }
+
+# 1) Configure (static runtime so the build needs no redistributable). ----------
+$cacheFile = Join-Path $BuildDir "CMakeCache.txt"
+if ($Reconfigure -or -not (Test-Path $cacheFile)) {
+    Say "Configuring CMake (static runtime ON) ..."
+    cmake -S $RepoRoot -B $BuildDir -DGAMEENGINE_STATIC_RUNTIME=ON -DCMAKE_BUILD_TYPE=$Config
+    if ($LASTEXITCODE -ne 0) { throw "CMake configure failed" }
+} else {
+    Say "Using existing build dir (pass -Reconfigure to force a fresh configure)"
+}
+
+# 2) Build just the player target in Release. -----------------------------------
+Say "Building player ($Config) ..."
+cmake --build $BuildDir --target player --config $Config
+if ($LASTEXITCODE -ne 0) { throw "Build failed" }
+
+# 3) Find the produced player.exe (multi-config puts it under bin/<Config>). -----
+$candidates = @(
+    (Join-Path $BuildDir "bin/$Config/player.exe"),
+    (Join-Path $BuildDir "bin/player.exe")
+)
+$playerExe = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not $playerExe) { throw "Could not find player.exe in: $($candidates -join ', ')" }
+$binDir = Split-Path $playerExe -Parent
+Say "Found exe: $playerExe"
+
+# 4) Fresh staging folder. ------------------------------------------------------
+$stage = Join-Path $OutDir $GameName
+if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
+New-Item -ItemType Directory -Force -Path $stage | Out-Null
+
+# 5) Copy the exe + any stray DLLs (there should be none with static linking). ---
+Copy-Item $playerExe (Join-Path $stage "player.exe") -Force
+Get-ChildItem $binDir -Filter *.dll -ErrorAction SilentlyContinue |
+    ForEach-Object { Copy-Item $_.FullName $stage -Force }
+
+# 6) Copy the content tree beside the exe. --------------------------------------
+if ($StageContentsOnly) {
+    Say "Staging CONTENTS of $ContentDir beside the exe"
+    Copy-Item (Join-Path $ContentDir "*") $stage -Recurse -Force
+} else {
+    $leaf = Split-Path $ContentDir -Leaf
+    Say "Staging content folder '$leaf' beside the exe"
+    Copy-Item $ContentDir (Join-Path $stage $leaf) -Recurse -Force
+}
+
+# 7) Write player.cfg pointing at the scene. ------------------------------------
+$cfg = @(
+    "# Auto-generated by package_game.ps1",
+    "window.width = $WindowWidth",
+    "window.height = $WindowHeight",
+    "window.vsync = true",
+    "player.scene = $SceneRelative"
+) -join "`n"
+Set-Content -Path (Join-Path $stage "player.cfg") -Value $cfg -Encoding ASCII
+
+if (-not (Test-Path (Join-Path $stage $SceneRelative))) {
+    Write-Warning "Scene '$SceneRelative' not found in the staged folder. Check -SceneRelative / -ContentDir."
+}
+
+# 8) Zip it for upload. ---------------------------------------------------------
+$zip = Join-Path $OutDir "$GameName.zip"
+if (Test-Path $zip) { Remove-Item $zip -Force }
+Say "Zipping -> $zip"
+Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $zip -Force
+
+Say "DONE."
+Say "Staged folder: $stage"
+Say "Upload this zip: $zip"
+Say "TEST IT: extract the zip to a NEW folder, double-click player.exe, and confirm"
+Say "         the on-screen 'Asset errors' count is 0. Ideally test on a second PC."

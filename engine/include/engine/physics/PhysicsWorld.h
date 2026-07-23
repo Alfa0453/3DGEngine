@@ -148,7 +148,8 @@ public:
     // maxDistance (sphere / plane / box). direction need not be pre-normalized.
     RaycastHit Raycast(ecs::Registry& registry, const Ray& ray,
                        float maxDistance = 1.0e30f,
-                       std::uint32_t layerMask = 0xFFFFFFFFu) const;
+                       std::uint32_t layerMask = 0xFFFFFFFFu,
+                       ecs::Entity ignored = ecs::kNull) const;
 
     // Sweep a sphere from start to end and return the earliest solid collider.
     // Trigger volumes and the optional ignored entity are skipped. This is useful
@@ -158,7 +159,8 @@ public:
                           const glm::vec3& end,
                           float radius,
                           ecs::Entity ignored = ecs::kNull,
-                          std::uint32_t layerMask = 0xFFFFFFFFu) const;
+                          std::uint32_t layerMask = 0xFFFFFFFFu,
+                          std::uint32_t queryLayer = 0u) const;
 
     // Collect every collider overlapping a world-space sphere (AoE queries:
     // explosions, detection). Trigger volumes are included. Filtered by layerMask.

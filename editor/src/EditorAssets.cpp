@@ -276,6 +276,80 @@ bool EditorAssets::PasteCopied(std::string *error)
     return Refresh(m_rootPath, error);
 }
 
+bool EditorAssets::RenameSelectedFolder(const std::string& newName, std::string* error)
+{
+    const Folder* folder = SelectedFolder();
+    if (m_selectedType != SelectionType::Folder || !folder) {
+        if (error) *error = "Select a folder to rename.";
+        return false;
+    }
+
+    const std::string cleanName = SanitizeFolderName(newName);
+    if (cleanName.empty() || cleanName == "." || cleanName == "..") {
+        if (error) *error = "Enter a valid folder name.";
+        return false;
+    }
+    if (cleanName.back() == '.') {
+        if (error) *error = "Folder names cannot end with a period.";
+        return false;
+    }
+
+    const std::string oldRelative = folder->relativePath;
+    const fs::path source = FullPathForRelative(oldRelative);
+    const fs::path destination = source.parent_path() / cleanName;
+    if (source.filename().string() == cleanName) {
+        if (error) *error = "The folder already has that name.";
+        return false;
+    }
+
+    std::error_code ec;
+    const bool caseOnlyRename = Lower(source.filename().string()) == Lower(cleanName);
+    if (!caseOnlyRename && fs::exists(destination, ec)) {
+        if (error) *error = "A folder or asset with that name already exists.";
+        return false;
+    }
+
+    if (caseOnlyRename) {
+        const fs::path temporary = UniqueDestinationPath(
+            source.parent_path() / (source.filename().string() + ".rename_tmp"));
+        fs::rename(source, temporary, ec);
+        if (!ec) {
+            fs::rename(temporary, destination, ec);
+            if (ec) {
+                std::error_code rollbackError;
+                fs::rename(temporary, source, rollbackError);
+            }
+        }
+    } else {
+        fs::rename(source, destination, ec);
+    }
+    if (ec) {
+        if (error) *error = "Could not rename folder to: " + cleanName;
+        return false;
+    }
+
+    const std::string newRelative = NormalizeSlashes(
+        (fs::path(oldRelative).parent_path() / cleanName).string());
+    if (m_clipboardRelativePath == oldRelative
+        || (m_clipboardRelativePath.size() > oldRelative.size()
+            && m_clipboardRelativePath.compare(0, oldRelative.size(), oldRelative) == 0
+            && m_clipboardRelativePath[oldRelative.size()] == '/')) {
+        m_clipboardRelativePath = newRelative
+            + m_clipboardRelativePath.substr(oldRelative.size());
+    }
+
+    m_selectedType = SelectionType::None;
+    m_selectedFolderIndex = -1;
+    if (!Refresh(m_rootPath, error)) return false;
+    for (int i = 0; i < static_cast<int>(m_folders.size()); ++i) {
+        if (m_folders[static_cast<std::size_t>(i)].relativePath == newRelative) {
+            SelectFolderIndex(i);
+            break;
+        }
+    }
+    return true;
+}
+
 bool EditorAssets::DeleteSelectedEntry(std::string *error)
 {
     std::string relative;
@@ -417,6 +491,10 @@ const char *EditorAssets::TypeName(Type type)
         case Type::Scene: return "Scene";
         case Type::Particle: return "Particle";
         case Type::ParticleEffect: return "Particle Effect";
+        case Type::Hud: return "HUD";
+        case Type::Character: return "Character";
+        case Type::BehaviorGraph: return "Behavior Tree";
+        case Type::Script: return "Script";
         case Type::Other: return "Other";
     }
     return "Other";
@@ -430,7 +508,8 @@ EditorAssets::Type EditorAssets::ClassifyExtension(const std::string &extension)
     if (extension == ".3dgmat") {
         return Type::Material;
     }
-    if (extension == ".png" || extension == ".jpg" || extension == ".jpeg" || extension == ".tga") {
+    if (extension == ".png" || extension == ".jpg" || extension == ".jpeg" || extension == ".tga"
+        || extension == ".raw" || extension == ".r16" || extension == ".exr") {
         return Type::Texture;
     }
     if (extension == ".vert" || extension == ".frag" || extension == ".glsl"
@@ -450,6 +529,19 @@ EditorAssets::Type EditorAssets::ClassifyExtension(const std::string &extension)
     }
     if (extension == ".particlefx") {
         return Type::ParticleEffect;
+    }
+    if (extension == ".hud") {
+        return Type::Hud;
+    }
+    if (extension == ".3dgcharacter") {
+        return Type::Character;
+    }
+    if (extension == ".btgraph") {
+        return Type::BehaviorGraph;
+    }
+    if (extension == ".h" || extension == ".hpp"
+        || extension == ".cpp" || extension == ".cc") {
+        return Type::Script;
     }
     return Type::Other;
 }

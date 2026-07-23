@@ -44,6 +44,7 @@ add_library(engine STATIC
     src/graphics/SSR.cpp
     src/graphics/Terrain.cpp
     src/graphics/Water.cpp
+    src/math/Spline.cpp
     src/graphics/GpuProfiler.cpp
     src/scene/RuntimeSceneLoader.cpp
     src/assets/RuntimeAssetManager.cpp
@@ -71,6 +72,8 @@ add_library(engine STATIC
     src/ai/Perception.cpp
     src/ai/Steering.cpp
     src/ai/AiAgent.cpp
+    src/ai/AgentCollision.cpp
+    src/ai/AiMovement.cpp
     src/ai/NavMesh.cpp
     src/ai/NavMeshBuilder.cpp
     src/ai/BehaviorGraph.cpp

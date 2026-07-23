@@ -16,6 +16,10 @@ public:
         Scene,
         Particle,
         ParticleEffect,
+        Hud,
+        Character,
+        BehaviorGraph,
+        Script,
         Other
     };
 
@@ -44,6 +48,7 @@ public:
     bool GoUp(std::string* error);
     bool CopySelected(std::string* error);
     bool PasteCopied(std::string* error);
+    bool RenameSelectedFolder(const std::string& newName, std::string* error);
     bool DeleteSelectedEntry(std::string* error);
 
     const std::string& RootPath() const { return m_rootPath; }

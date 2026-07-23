@@ -1,0 +1,5 @@
+Create: begin w=128 h=48 smooth=0 rgba=0000015BBA8F5360 thisId=0
+Create: glGenTextures -> id=11
+Create: params set, glTexImage2D...
+Create: glTexImage2D done
+Create: end

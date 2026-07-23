@@ -55,6 +55,8 @@ private:
     std::size_t m_patrolIndex = 0;
     std::vector<glm::vec3> m_path;
     std::size_t m_pathIndex = 0;
+    glm::vec3   m_pathGoal{0.0f};
+    bool        m_pathGoalValid = false;
     glm::vec3   m_lastKnown{0.0f};
     float       m_repathTimer = 0.0f;
     glm::vec3   m_facing{1.0f, 0.0f, 0.0f};

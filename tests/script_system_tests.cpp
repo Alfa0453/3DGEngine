@@ -1,5 +1,10 @@
 #include <engine/gameplay/Script.h>
+#include <engine/gameplay/GameMode.h>
+#include <engine/physics/PhysicsComponents.h>
+#include <engine/physics/PhysicsWorld.h>
+#include <engine/ui/Hud.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <iostream>
 #include <memory>
@@ -128,6 +133,36 @@ int main() {
 
     {
         engine::ecs::Registry registry;
+        const engine::ecs::Entity player = registry.Create();
+        registry.Add<engine::ecs::Transform>(player, engine::ecs::Transform{});
+        engine::ecs::Collider playerCollider =
+            engine::ecs::Collider::MakeCapsuleFromHeight(0.4f, 1.8f);
+        playerCollider.isTrigger = true;
+        registry.Add<engine::ecs::Collider>(player, playerCollider);
+
+        const engine::ecs::Entity coin = registry.Create();
+        registry.Add<engine::ecs::Transform>(coin, engine::ecs::Transform{});
+        engine::ecs::Collider coinCollider = engine::ecs::Collider::MakeCylinder(0.25f, 0.05f);
+        coinCollider.isTrigger = true;
+        registry.Add<engine::ecs::Collider>(coin, coinCollider);
+
+        engine::PhysicsWorld physics;
+        physics.gravity = glm::vec3(0.0f);
+        physics.Step(registry, 1.0f / 60.0f);
+        const auto entered = std::find_if(
+            physics.Events().begin(), physics.Events().end(),
+            [player, coin](const engine::CollisionEvent& event) {
+                return event.trigger
+                    && event.phase == engine::CollisionEvent::Phase::Enter
+                    && ((event.a == player && event.b == coin)
+                        || (event.a == coin && event.b == player));
+            });
+        Check(entered != physics.Events().end(),
+              "trigger-only player and coin emit an overlap event without rigid bodies");
+    }
+
+    {
+        engine::ecs::Registry registry;
         const engine::ecs::Entity prototype = registry.Create();
         registry.Add<engine::ecs::RuntimeName>(
             prototype, engine::ecs::RuntimeName{"ProjectilePrototype"});
@@ -223,6 +258,34 @@ int main() {
         engine::ShutdownScripts(registry);
         Check(throwingDestroyed == 1,
               "disabled scripts still receive OnDestroy during shutdown");
+    }
+
+    {
+        engine::GameMode& gameMode = engine::GameMode::Instance();
+        engine::ecs::Registry registry;
+        gameMode.Reset();
+        gameMode.AddScore(30);
+        gameMode.Update(registry, engine::ecs::kNull, 1.5f);
+
+        engine::HudContext context;
+        context.floats["score"] = static_cast<float>(gameMode.Score());
+        context.floats["time"] = gameMode.Elapsed();
+        context.strings["gamestate"] = engine::GameMode::StateName(gameMode.State());
+        engine::HudWidget score;
+        score.type = engine::HudWidgetType::Text;
+        score.binding = engine::HudBinding::NamedFloat;
+        score.bindKey = "score";
+        score.text = "Score: {}";
+        engine::HudWidget state = score;
+        state.binding = engine::HudBinding::NamedString;
+        state.bindKey = "gamestate";
+        state.text = "{}";
+        Check(engine::ResolveHudText(score, context) == "Score: 30",
+              "HUD resolves the live GameMode score binding");
+        Check(engine::ResolveHudText(state, context) == "Playing",
+              "HUD resolves the live GameMode state binding");
+        Check(context.floats["time"] > 1.49f,
+              "GameMode play clock advances for the HUD time binding");
     }
 
     if (failures != 0) {

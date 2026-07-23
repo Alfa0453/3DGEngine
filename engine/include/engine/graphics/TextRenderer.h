@@ -51,17 +51,40 @@ public:
 
     void End();
 
-    // Pixel width a string occupies at the given scale (monospace).
+    // Pixel width a string occupies at the given scale (widest line if multi-line).
     float Measure(const std::string& text, float scale) const;
 
-    static constexpr int kGlyphPx = 8;  // font cell size
+    // --- TrueType fonts ------------------------------------------------------
+    // Load a .ttf and bake it at `pixelHeight` (a high value like 48 gives crisp
+    // text that scales down smoothly). Returns a font id (>= 1) to pass to
+    // SetFont(), or -1 on failure. The built-in 8x8 bitmap font is always id 0.
+    int  LoadFont(const std::string& path, int pixelHeight = 48);
+
+    // Make a loaded font the active one for all following Text()/Measure() calls
+    // -- this is the "use it everywhere" switch. id 0 restores the built-in font.
+    // Returns false if the id is unknown.
+    bool SetFont(int fontId);
+
+    int  ActiveFont() const { return m_activeFont; }
+    int  FontCount() const;                 // includes the built-in (always >= 1)
+    bool FontIsBuiltin(int fontId) const { return fontId <= 0; }
+
+    static constexpr int kGlyphPx = 8;  // built-in font cell size
 
 private:
+    // Bind whichever atlas the active font uses (built-in or a loaded TTF).
+    void BindActiveAtlas() const;
+
     unsigned int m_vao = 0;
     unsigned int m_vbo = 0;
     std::unique_ptr<Shader> m_shader;   // built from inline GLSL
-    std::unique_ptr<Texture> m_atlas;   // 128x48 font atlas (16x6 cells)
+    std::unique_ptr<Texture> m_atlas;   // 128x48 built-in font atlas (16x6 cells)
     glm::mat4 m_projection{1.0f};
+
+    // Loaded TrueType fonts (opaque, defined in the .cpp to keep GL out of here).
+    struct FontStore;
+    std::unique_ptr<FontStore> m_fonts;
+    int m_activeFont = 0;               // 0 = built-in bitmap font
 };
 
 } // namespace engine

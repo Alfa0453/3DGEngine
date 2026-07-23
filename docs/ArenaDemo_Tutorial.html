@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Building a 3rd-Person Action Arena — 3DGEngine Demo Tutorial</title>
+<style>
+  :root{
+    --ink:#1c2230; --muted:#5a6478; --accent:#2f6df6; --accent2:#12a488;
+    --line:#d9dee8; --bg-soft:#f4f6fb; --warn:#b8860b; --tip:#0e7a63;
+  }
+  @page { size: A4; margin: 17mm 16mm; }
+  *{ box-sizing:border-box; }
+  html,body{ margin:0; padding:0; }
+  body{
+    font-family:"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    color:var(--ink); font-size:10.6pt; line-height:1.5; background:#fff;
+  }
+  .wrap{ max-width:820px; margin:0 auto; padding:24px; }
+  h1,h2,h3{ line-height:1.2; }
+  h2{ font-size:16pt; margin:0 0 4px; color:var(--ink); border-bottom:2px solid var(--accent); padding-bottom:5px; }
+  h3{ font-size:12pt; margin:16px 0 4px; color:#28324a; }
+  p{ margin:7px 0; }
+  a{ color:var(--accent); text-decoration:none; }
+  code{ font-family:"Consolas","SF Mono",monospace; background:var(--bg-soft); padding:1px 5px; border-radius:4px; font-size:9.4pt; color:#243; }
+  pre{ font-family:"Consolas","SF Mono",monospace; background:#0e1626; color:#e6ecf5; padding:12px 14px; border-radius:8px; font-size:9pt; line-height:1.45; overflow:auto; white-space:pre-wrap; }
+  ul,ol{ margin:6px 0 6px 4px; padding-left:20px; }
+  li{ margin:3px 0; }
+  .muted{ color:var(--muted); }
+  section{ page-break-inside:auto; }
+  .step{ page-break-before:always; }
+  .box{ border:1px solid var(--line); border-radius:9px; padding:11px 14px; margin:12px 0; background:#fff; break-inside:avoid; }
+  .path{ background:var(--bg-soft); border-left:4px solid var(--accent); border-radius:6px; padding:8px 12px; margin:9px 0; font-size:9.7pt; break-inside:avoid; }
+  .path b{ color:var(--accent); }
+  .tip{ border-left:4px solid var(--tip); background:#eefaf6; }
+  .warn{ border-left:4px solid var(--warn); background:#fdf6e3; }
+  .tag{ display:inline-block; font-size:8pt; font-weight:700; letter-spacing:.04em; text-transform:uppercase;
+        color:#fff; background:var(--accent); border-radius:4px; padding:2px 7px; margin-right:6px; vertical-align:1px; }
+  .tag.tip{ background:var(--tip); } .tag.warn{ background:var(--warn); } .tag.try{ background:var(--accent2); }
+  table{ border-collapse:collapse; width:100%; margin:10px 0; font-size:9.6pt; break-inside:avoid; }
+  th,td{ border:1px solid var(--line); padding:6px 9px; text-align:left; vertical-align:top; }
+  th{ background:var(--bg-soft); }
+  .lead{ font-size:11pt; color:#33405c; }
+  /* Cover */
+  .cover{ height:246mm; display:flex; flex-direction:column; justify-content:center; page-break-after:always; }
+  .cover .kicker{ color:var(--accent); font-weight:700; letter-spacing:.14em; text-transform:uppercase; font-size:10pt; }
+  .cover h1{ font-size:31pt; margin:10px 0 6px; letter-spacing:-.5px; }
+  .cover .sub{ font-size:13pt; color:var(--muted); max-width:560px; }
+  .cover .rule{ height:5px; width:120px; background:var(--accent); border-radius:3px; margin:22px 0; }
+  .cover .meta{ margin-top:28px; color:var(--muted); font-size:9.6pt; }
+  .toc li{ margin:4px 0; }
+  .pill{ display:inline-block; background:var(--bg-soft); border:1px solid var(--line); border-radius:20px; padding:3px 11px; font-size:8.6pt; margin:3px 5px 3px 0; }
+  .small{ font-size:9pt; }
+  hr{ border:0; border-top:1px solid var(--line); margin:16px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- ===================== COVER ===================== -->
+  <div class="cover">
+    <div class="kicker">3DGEngine · Hands-on Tutorial</div>
+    <h1>Building a 3rd-Person<br>Action Arena</h1>
+    <div class="rule"></div>
+    <p class="sub">A complete, step-by-step walkthrough for building a small playable demo
+    from an empty project to a packaged, uploadable build — using the editor and the engine's
+    gameplay, animation, AI, physics, HUD and audio systems.</p>
+    <div style="margin-top:14px;">
+      <span class="pill">New Project</span><span class="pill">Arena &amp; Lighting</span>
+      <span class="pill">3rd-Person Controller</span><span class="pill">Animated Character</span>
+      <span class="pill">Enemy AI + NavMesh</span><span class="pill">Pickup &amp; Exit</span>
+      <span class="pill">HUD &amp; Audio</span><span class="pill">Export &amp; Package</span>
+    </div>
+    <div class="meta">
+      Target: a jam-scale demo you can finish in a sitting and ship.<br>
+      Editor menus referenced in this guide are the engine's real <em>Create</em> and <em>File</em> menus.
+    </div>
+  </div>
+
+  <!-- ===================== OVERVIEW ===================== -->
+  <section>
+    <h2>What you'll build</h2>
+    <p class="lead">A compact 3rd-person arena: you spawn in a walled play space, dodge a
+    patrolling enemy that chases on sight, grab an objective pickup, and reach the exit to win —
+    lose if your health hits zero.</p>
+
+    <div class="box">
+      <b>The gameplay loop</b>
+      <ol>
+        <li><b>Spawn</b> as a 3rd-person character in a walled arena.</li>
+        <li><b>Explore</b> to find the glowing objective pickup.</li>
+        <li><b>Avoid</b> an AI enemy that patrols and chases when it sees you (it damages you on contact).</li>
+        <li><b>Collect</b> the objective, then reach the <b>exit trigger</b>.</li>
+        <li><b>Win</b> screen on exit; <b>lose</b> screen if health reaches zero.</li>
+      </ol>
+    </div>
+
+    <h3>Engine features this demo exercises</h3>
+    <table>
+      <tr><th>System</th><th>Used for</th></tr>
+      <tr><td>Project system</td><td>A self-contained game project with its own assets &amp; scenes</td></tr>
+      <tr><td>Primitives / Terrain / Static Floor</td><td>The arena floor and walls</td></tr>
+      <tr><td>Lighting, sky &amp; day-night</td><td>Mood and readability</td></tr>
+      <tr><td>Player controller (3rd person)</td><td>Movement, camera, capsule collision</td></tr>
+      <tr><td>Skinned model + animation graph</td><td>Idle / walk / run locomotion on the hero</td></tr>
+      <tr><td>AI: Nav Mesh + Nav Agent + Behavior graph</td><td>Enemy patrol &amp; chase</td></tr>
+      <tr><td>Gameplay components</td><td>Pickup, Damage Zone, Door, Moving Platform, Trigger Volume</td></tr>
+      <tr><td>Health</td><td>Lose condition</td></tr>
+      <tr><td>HUD editor</td><td>Health bar, score, win/lose text</td></tr>
+      <tr><td>Audio (buses, spatial)</td><td>Music, pickup SFX, ambience</td></tr>
+      <tr><td>Runtime export + packaging</td><td>A standalone, uploadable build</td></tr>
+    </table>
+
+    <div class="box tip"><span class="tag tip">Scope</span>
+    Build the <b>gray-box</b> version first — primitives for everything, one enemy, one pickup, one exit.
+    Get the full loop working end-to-end before you add a character model, audio, or polish. A playable
+    ugly demo beats a pretty broken one, especially under a jam clock.</div>
+
+    <div class="warn box"><span class="tag warn">Note on labels</span>
+    Menu paths below match the engine's <em>Create</em> and <em>File</em> menus. Inspector field names
+    (speeds, radii, etc.) live in the right-hand <b>Inspector</b> panel and may read slightly differently
+    depending on your build — the intent is called out so you can find the matching control.</div>
+  </section>
+
+  <!-- ===================== PREREQS ===================== -->
+  <section class="step">
+    <h2>0 · Before you start</h2>
+    <p>Build the editor and player once, from a clean configure. The root project is trimmed to just the
+    game targets (engine, game, editor, player), so this is quick.</p>
+    <pre>cmake -S . -B build -DGAMEENGINE_STATIC_RUNTIME=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release</pre>
+    <ul>
+      <li><code>GAMEENGINE_STATIC_RUNTIME=ON</code> makes the eventual player build run on any Windows PC with no redistributable.</li>
+      <li>Launch <code>build/bin/Release/3DGEditor.exe</code> (or your build's bin path).</li>
+    </ul>
+    <div class="path"><b>Controls in the editor viewport:</b> right-mouse + WASD to fly the camera ·
+    <code>W/E/R</code> switch gizmo to move/rotate/scale · <code>F</code> frame the selected object ·
+    <code>P</code> toggle Play mode.</div>
+  </section>
+
+  <!-- ===================== STEP 1 ===================== -->
+  <section class="step">
+    <h2>1 · Create the game project</h2>
+    <p>Give the demo its own project so its assets and scenes are self-contained and packageable.</p>
+    <div class="path"><b>File ▸ Project ▸ Choose Location…</b> → pick a folder in the native dialog ·
+    type a <b>Name</b> (e.g. <code>ArenaDemo</code>) · <b>Create Project</b>.</div>
+    <p>The editor scaffolds <code>&lt;location&gt;/ArenaDemo/Content/Scenes/</code>, drops you into a default
+    scene, and remembers the project next launch. Everything you author now lives under that
+    <code>Content</code> folder — which is exactly what gets packaged later.</p>
+    <div class="box tip"><span class="tag tip">Tip</span>
+    Keep asset references <b>relative</b> (drag assets from the Content browser rather than typing absolute
+    paths). Relative paths survive being copied to another machine at package time.</div>
+  </section>
+
+  <!-- ===================== STEP 2 ===================== -->
+  <section class="step">
+    <h2>2 · Block out the arena</h2>
+    <p>Start with a floor and four walls — pure gray-box.</p>
+    <h3>Floor</h3>
+    <div class="path"><b>Create ▸ Physics ▸ Static Floor</b> — a large static, collidable ground plane.</div>
+    <p>Alternatively <b>Create ▸ Terrain</b> for a sculpted ground (raise/lower with sculpt mode, paint a
+    grass/rock material), but a Static Floor is faster for a first pass and gives clean collision.</p>
+    <h3>Walls</h3>
+    <ol>
+      <li><b>Create ▸ Cube</b>. In the Inspector, scale it long and tall (e.g. scale ≈ <code>20 × 3 × 1</code>).</li>
+      <li>Move it to one edge of the floor with the move gizmo (<code>W</code>).</li>
+      <li><b>Duplicate</b> (<code>Ctrl+D</code>) for the opposite wall; rotate/duplicate again for the other two sides.</li>
+      <li>Make sure each wall has a <b>Collider</b> enabled in the Inspector so the player can't walk through it.</li>
+    </ol>
+    <div class="box"><span class="tag try">Try it</span>
+    Aim for an arena roughly 20×20 units — big enough to run around, small enough that the enemy is a
+    constant threat. Frame it all with <code>F</code> to check proportions.</div>
+  </section>
+
+  <!-- ===================== STEP 3 ===================== -->
+  <section class="step">
+    <h2>3 · Light the scene</h2>
+    <p>Add a key light and set the environment so the arena reads clearly.</p>
+    <div class="path"><b>Create ▸ Directional Light</b> — this is your sun. Rotate it in the Inspector so
+    shadows fall at a readable angle (avoid straight-down).</div>
+    <ul>
+      <li>Open <b>World / Environment settings</b> and set the <b>time of day</b> — the day-night cycle drives
+      sky colour, ambient light and the sun direction together.</li>
+      <li>Nudge <b>ambient</b> up slightly so shadowed areas aren't pure black.</li>
+      <li>The procedural sky and image-based lighting update automatically from the environment.</li>
+    </ul>
+    <div class="box tip"><span class="tag tip">Readability</span>
+    For an action arena, a bright mid-morning or late-afternoon setting keeps the enemy and pickup easy to
+    spot. Save atmospheric dusk for exploration games.</div>
+  </section>
+
+  <!-- ===================== STEP 4 ===================== -->
+  <section class="step">
+    <h2>4 · Player start &amp; the 3rd-person camera</h2>
+    <p>Place where the player spawns and dial in the third-person feel.</p>
+    <div class="path"><b>Create ▸ Gameplay ▸ Player Start</b> — position it near one corner of the arena.</div>
+    <p>Select the Player Start and open its <b>Player Controller</b> settings in the Inspector. For a
+    3rd-person action feel:</p>
+    <ul>
+      <li>Turn <b>first person off</b> (3rd-person orbit camera).</li>
+      <li><b>Camera distance</b> ≈ 5, <b>camera target height</b> ≈ 1 (frames the character nicely).</li>
+      <li><b>Walk speed</b> ≈ 4, <b>run speed</b> ≈ 7, <b>jump</b> ≈ 5.</li>
+      <li>Leave <b>camera collision</b> on so the camera doesn't clip through walls.</li>
+      <li>Optional: enable <b>shoulder camera</b> / <b>lock-on</b> for a more combat-forward feel.</li>
+    </ul>
+    <div class="box"><span class="tag try">Try it</span>
+    Hit <code>P</code> to Play. You should spawn and move with WASD, the camera orbiting behind you (hold/right-mouse
+    to look, per your control scheme). Press <code>P</code> again to stop. You now have a playable character —
+    everything after this is the game <em>around</em> them.</div>
+  </section>
+
+  <!-- ===================== STEP 5 ===================== -->
+  <section class="step">
+    <h2>5 · Give the player a body (animated character)</h2>
+    <p>Swap the capsule for a rigged, animated hero. This is optional for a gray-box, but it's what makes the
+    demo feel like a game.</p>
+    <ol>
+      <li>Open the <b>Character Editor</b> panel.</li>
+      <li>Assign a <b>skinned model</b> (an <code>.fbx</code>/<code>.gltf</code> with animations) and a <b>material</b> from the Content browser.</li>
+      <li>Under animation, enable <b>locomotion</b> and pick the <b>idle</b>, <b>walk</b> and <b>run</b> clips.
+      Set the <b>walk-at</b> and <b>run-at</b> speed thresholds so the animation blends by movement speed.</li>
+      <li>Set the <b>capsule collider</b> to roughly wrap the model.</li>
+      <li>Apply the character to your player so it drives the controller.</li>
+    </ol>
+    <div class="box tip"><span class="tag tip">How locomotion works</span>
+    The animation graph auto-selects idle/walk/run from a single <b>Speed</b> parameter and cross-fades
+    between them — you just supply the three clips and the two thresholds. For attacks or hit-reactions later,
+    add a one-shot <b>action</b> layered on top (e.g. an upper-body swing while the legs keep running).</div>
+  </section>
+
+  <!-- ===================== STEP 6 ===================== -->
+  <section class="step">
+    <h2>6 · The objective pickup</h2>
+    <p>Place the thing the player must collect.</p>
+    <div class="path"><b>Create ▸ Gameplay ▸ Pickup</b> — position it across the arena from the spawn.</div>
+    <ul>
+      <li>In the Inspector, set what the pickup grants (e.g. score, or set a flag your win check reads).</li>
+      <li>Give it an obvious look — a bright emissive material or a small particle glow so it reads as "grab me".</li>
+      <li>Optionally attach a pickup <b>sound</b> (see Step 11).</li>
+    </ul>
+    <div class="box"><span class="tag try">Try it</span>
+    Play and walk into the pickup — it should be consumed and update your score/flag. That flag is what the
+    exit will check in Step 9.</div>
+  </section>
+
+  <!-- ===================== STEP 7 ===================== -->
+  <section class="step">
+    <h2>7 · The enemy AI</h2>
+    <p>Add a patrolling enemy that chases you on sight. This needs a nav mesh, a nav agent, and a behavior.</p>
+
+    <h3>7a · Bake a nav mesh</h3>
+    <div class="path"><b>Create ▸ Navigation ▸ Nav Mesh Bounds Volume</b> — scale it to enclose the whole
+    arena floor. Then <b>bake</b> the editor nav mesh (Navigation / AI tools).</div>
+    <p>The bake produces the walkable surface the agent routes over. Re-bake whenever you move walls.</p>
+
+    <h3>7b · The agent</h3>
+    <ol>
+      <li>Create the enemy body (a capsule, or a second animated character).</li>
+      <li>In the Inspector, enable <b>Nav Agent</b>: set <b>speed</b>, <b>reach radius</b>, <b>vision range</b> and
+      <b>vision angle</b> (how far/wide it can see you).</li>
+      <li>Set its <b>team</b> different from the player and enable <b>auto-target</b> so it acquires the player.</li>
+    </ol>
+
+    <h3>7c · The behavior</h3>
+    <p>Give it a brain: either the built-in <b>patrol → chase → search</b> behavior, or author one in the
+    <b>Behavior Graph</b> panel (a behavior tree: patrol waypoints; when the player enters vision, switch to
+    chase; lose sight, search then return). Assign the behavior asset to the agent.</p>
+
+    <h3>7d · Make contact hurt</h3>
+    <p>Attach a <b>Damage Zone</b> to the enemy (or a script) so touching the player reduces Health. That's the
+    threat that makes the pickup run tense.</p>
+
+    <div class="box tip"><span class="tag tip">Debug it</span>
+    Turn on the <b>AI debug</b> and <b>navigation preview</b> overlays while playing to see the agent's path,
+    vision cone and current state. If it stands still, the nav mesh probably doesn't cover its position — re-bake.</div>
+  </section>
+
+  <!-- ===================== STEP 8 ===================== -->
+  <section class="step">
+    <h2>8 · Hazards &amp; moving parts (optional flavour)</h2>
+    <p>A couple of these turn a bare arena into a small level. Add only what serves the loop.</p>
+    <table>
+      <tr><th>Create ▸ Gameplay ▸</th><th>Use in the arena</th></tr>
+      <tr><td>Damage Zone</td><td>A lava strip / spike patch the player must route around</td></tr>
+      <tr><td>Moving Platform</td><td>A patrolling platform to cross a gap to the exit</td></tr>
+      <tr><td>Door</td><td>Gate the exit until the pickup is collected</td></tr>
+      <tr><td>Trigger Volume</td><td>Fire events: open a door, start a camera move, spawn the enemy</td></tr>
+    </table>
+    <div class="box tip"><span class="tag tip">Keep it tight</span>
+    One hazard and one moving part is plenty for a demo. Every extra prop is another thing to test and package.</div>
+  </section>
+
+  <!-- ===================== STEP 9 ===================== -->
+  <section class="step">
+    <h2>9 · The exit &amp; win/lose conditions</h2>
+    <h3>Win</h3>
+    <div class="path"><b>Create ▸ Physics ▸ Trigger Volume</b> — place it at the exit. Configure its trigger
+    action (or a small script on it) to fire "win" <em>only if the pickup flag is set</em>.</div>
+    <ul>
+      <li>Optionally gate it behind a <b>Door</b> that opens when the pickup is collected, so the exit is
+      physically blocked until the objective is done.</li>
+      <li>On win, trigger a short <b>camera sequence</b> and show the win HUD (Step 10).</li>
+    </ul>
+    <h3>Lose</h3>
+    <p>The player has a <b>Health</b> component (from the player controller / character setup). When the enemy's
+    Damage Zone or a hazard drains it to zero, show the lose HUD. Wire "restart" to reload the scene.</p>
+    <div class="box"><span class="tag try">Try it</span>
+    Play the full loop: dodge the enemy → grab the pickup → reach the exit → win screen. Then deliberately let
+    the enemy catch you → lose screen. If both fire correctly, your game is <em>done</em> — the rest is presentation.</div>
+  </section>
+
+  <!-- ===================== STEP 10 ===================== -->
+  <section class="step">
+    <h2>10 · HUD</h2>
+    <p>Give the player feedback with the <b>HUD Editor</b> panel.</p>
+    <ul>
+      <li>A <b>health bar</b> bound to the player's Health value.</li>
+      <li>A <b>score / objective</b> readout ("Objective: 0/1" → "1/1 — reach the exit!").</li>
+      <li>Full-screen <b>"YOU WIN"</b> and <b>"YOU DIED — press R to retry"</b> panels, hidden until triggered.</li>
+    </ul>
+    <p>Save the <code>.hud</code> into your project's Content and reference it from the scene so it loads at
+    runtime. HUD text can now use a <b>TrueType font</b> — load one and set it so the UI matches your game's look.</p>
+    <div class="box tip"><span class="tag tip">Binding values</span>
+    HUD widgets read named numeric/text values (like health or score) the gameplay side publishes each frame, so
+    the bar and counters update live without custom drawing code.</div>
+  </section>
+
+  <!-- ===================== STEP 11 ===================== -->
+  <section class="step">
+    <h2>11 · Audio</h2>
+    <p>Sound is the cheapest polish that most raises perceived quality.</p>
+    <ul>
+      <li><b>Ambient / music bed</b> on the Music bus (looping).</li>
+      <li><b>Pickup SFX</b> on the SFX bus, fired when the objective is collected.</li>
+      <li><b>Enemy / hazard cue</b> so damage has a sound.</li>
+      <li>Make the enemy and pickup sounds <b>spatial</b> so they pan and fade with distance — great for sensing the
+      enemy off-screen.</li>
+    </ul>
+    <div class="box tip"><span class="tag tip">Mix</span>
+    Set per-bus volumes so music sits under SFX. Even three sounds (music, pickup, hit) transform the feel.</div>
+  </section>
+
+  <!-- ===================== STEP 12 ===================== -->
+  <section class="step">
+    <h2>12 · Camera polish (optional)</h2>
+    <p>Use the <b>Camera Director</b> to add moments:</p>
+    <ul>
+      <li>A short <b>intro sequence</b> panning across the arena on start.</li>
+      <li>A <b>camera zone</b> that pulls back when the enemy engages, then returns.</li>
+      <li>A <b>win sequence</b> that frames the exit as you leave.</li>
+    </ul>
+    <p>Sequences can lock input and be skippable — keep intros short and skippable so they don't annoy on replay.</p>
+  </section>
+
+  <!-- ===================== STEP 13 ===================== -->
+  <section class="step">
+    <h2>13 · Playtest &amp; iterate</h2>
+    <ul>
+      <li><b>Play</b> (<code>P</code>) and run the whole loop repeatedly. Fix the thing that breaks the flow first.</li>
+      <li>Use the <b>gameplay debug</b>, <b>physics event</b>, and <b>AI</b> overlays to see triggers firing,
+      collisions, and the agent's state.</li>
+      <li>Tune numbers, not systems: enemy speed &amp; vision, player speed, pickup placement, arena size.</li>
+      <li><b>Save often</b> (<b>File ▸ Save</b>) and keep a backup copy of the project folder.</li>
+    </ul>
+    <div class="box warn"><span class="tag warn">Stability</span>
+    If anything crashes or an asset fails to load, fix it now — a demo that crashes on someone else's machine
+    scores nothing. Watch the log panel for asset warnings.</div>
+  </section>
+
+  <!-- ===================== STEP 14 ===================== -->
+  <section class="step">
+    <h2>14 · Export &amp; package a standalone build</h2>
+    <p>Turn the scene into a self-contained, uploadable build.</p>
+    <ol>
+      <li>In the editor: <b>File ▸ Export Runtime</b> to write the runtime scene into your project's Content.</li>
+      <li>Package it with the project's helper script (from a shell with <code>cmake</code> on PATH):</li>
+    </ol>
+    <pre>./package_game.ps1 `
+    -ContentDir "D:\path\to\ArenaDemo\Content" `
+    -SceneRelative "Content/Scenes/arena.runtime.scene" `
+    -GameName "ArenaDemo"</pre>
+    <p>It builds Release + static runtime, stages <code>player.exe</code> + <code>player.cfg</code> + your
+    content beside it, and produces <code>dist/ArenaDemo.zip</code>.</p>
+    <div class="box warn"><span class="tag warn">Verify</span>
+    Extract the zip to a <b>fresh folder</b> and double-click <code>player.exe</code>. Confirm the on-screen
+    <b>"Asset errors" reads 0</b> and the game plays. If assets are missing, re-run the packager with
+    <code>-StageContentsOnly</code> and adjust <code>-SceneRelative</code>. Test on a second PC if you can.</div>
+    <p class="small muted">All third-party libraries are statically linked, so there are no DLLs to ship; the static
+    runtime option means no Visual C++ redistributable is required on the target machine.</p>
+  </section>
+
+  <!-- ===================== TROUBLESHOOTING ===================== -->
+  <section class="step">
+    <h2>Troubleshooting</h2>
+    <table>
+      <tr><th>Symptom</th><th>Likely cause &amp; fix</th></tr>
+      <tr><td>Player falls through the floor</td><td>Floor/wall <b>collider</b> not enabled, or player capsule mis-sized. Enable colliders; check capsule radius/height.</td></tr>
+      <tr><td>Enemy stands still</td><td>Nav mesh doesn't cover its spot, or no target. Re-bake the nav mesh after moving geometry; enable auto-target; check vision range.</td></tr>
+      <tr><td>Animation doesn't play</td><td>Wrong clip names / thresholds, or the model isn't marked skeletal. Re-pick idle/walk/run in the Character Editor; confirm walk-at &lt; run-at.</td></tr>
+      <tr><td>Camera clips through walls</td><td>Enable <b>camera collision</b> in the player controller settings.</td></tr>
+      <tr><td>Win fires without the pickup</td><td>Exit trigger isn't checking the pickup flag — gate the win on the collected flag, or block the exit with a Door until collected.</td></tr>
+      <tr><td>Packaged build: "Asset errors &gt; 0"</td><td>Asset paths don't line up beside the exe. Ensure relative paths; try <code>-StageContentsOnly</code>. Avoid absolute asset roots.</td></tr>
+      <tr><td>Packaged build won't launch elsewhere</td><td>Rebuild with <code>-DGAMEENGINE_STATIC_RUNTIME=ON</code> so no redistributable is needed.</td></tr>
+    </table>
+  </section>
+
+  <!-- ===================== APPENDIX ===================== -->
+  <section class="step">
+    <h2>Appendix · Quick reference</h2>
+
+    <h3>Build order at a glance</h3>
+    <ol>
+      <li>New project</li>
+      <li>Floor + walls (gray-box)</li>
+      <li>Light + sky</li>
+      <li>Player Start + 3rd-person controller <span class="muted">— playable checkpoint</span></li>
+      <li>Animated character (optional)</li>
+      <li>Objective pickup</li>
+      <li>Enemy: nav mesh → agent → behavior → damage</li>
+      <li>Hazards / moving parts (optional)</li>
+      <li>Exit trigger + win/lose <span class="muted">— full-loop checkpoint</span></li>
+      <li>HUD</li>
+      <li>Audio</li>
+      <li>Camera polish (optional)</li>
+      <li>Playtest &amp; tune</li>
+      <li>Export &amp; package</li>
+    </ol>
+
+    <h3>Create menu map</h3>
+    <table>
+      <tr><th>Menu path</th><th>What it adds</th></tr>
+      <tr><td>Create ▸ Cube / Sphere / …</td><td>Primitives for walls, blockers, props</td></tr>
+      <tr><td>Create ▸ Terrain</td><td>Sculptable, paintable ground</td></tr>
+      <tr><td>Create ▸ Water ▸ Lake/Ocean/River</td><td>Water bodies (with buoyancy)</td></tr>
+      <tr><td>Create ▸ Physics ▸ Static Floor / Dynamic Cube / Trigger Volume</td><td>Ground, physics props, event volumes</td></tr>
+      <tr><td>Create ▸ Navigation ▸ Nav Mesh Bounds Volume</td><td>The region the nav mesh bakes over</td></tr>
+      <tr><td>Create ▸ Gameplay ▸ Player Start</td><td>Spawn point + player controller</td></tr>
+      <tr><td>Create ▸ Gameplay ▸ Pickup / Door / Damage Zone / Moving Platform</td><td>Gameplay building blocks</td></tr>
+      <tr><td>Create ▸ Directional / Point / Spot / Area Light</td><td>Lighting</td></tr>
+    </table>
+
+    <h3>Two checkpoints that matter most</h3>
+    <p>If you hit both of these, you have a shippable demo — everything else is polish:</p>
+    <ul>
+      <li><b>Playable checkpoint (Step 4):</b> you can spawn and move in the arena.</li>
+      <li><b>Full-loop checkpoint (Step 9):</b> pickup → exit → win, and death → lose, both fire correctly.</li>
+    </ul>
+
+    <hr>
+    <p class="small muted">Built with 3DGEngine — a from-scratch C++17 / OpenGL engine (PBR rendering, ECS,
+    physics, skeletal animation, AI &amp; navigation, terrain/water/grass, audio, a full ImGui editor, and a
+    standalone runtime player). This tutorial targets a jam-scale demo; scale the same steps up for a larger game.</p>
+  </section>
+
+</div>
+</body>
+</html>

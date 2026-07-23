@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <array>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace engine {
@@ -136,6 +137,7 @@ public:
     
     struct Context {
         EditorPanels* panels = nullptr;
+        engine::Config* config = nullptr;
         EditorScene* scene = nullptr;
         EditorAssets* assets = nullptr;
         engine::RuntimeAssetManager* runtimeAssets = nullptr;
@@ -166,6 +168,7 @@ public:
         float cameraSequenceSeekTime = 0.0f;
         const char* modeName = "Edit";
         bool playMode = false;
+        bool scriptCompileAndRestartRequested = false;
         bool physicsPaused = false;
         bool physicsPauseToggleRequested = false;
         bool physicsStepRequested = false;
@@ -188,6 +191,7 @@ public:
         float* terrainBrushRadius = nullptr;
         float* terrainBrushStrength = nullptr;
         bool* showNavigationPreview = nullptr;
+        bool* showGrid = nullptr;            // reference ground grid + world axes
         bool* showParticleDebug = nullptr;
         bool* particleDebugSelectedOnly = nullptr;
         bool* particleDebugShapes = nullptr;
@@ -204,6 +208,17 @@ public:
         bool vsyncChangeRequested = false;   // set by the World Settings checkbox
         char* scenePathBuffer = nullptr;
         std::size_t scenePathBufferSize = 0;
+        // Project management (New / Open Project).
+        bool newProjectRequested = false;
+        bool openProjectRequested = false;
+        bool browseProjectLocationRequested = false;   // open native folder picker for the location
+        bool browseOpenProjectRequested = false;        // open native file picker for a .3dgproject
+        char* projectNameBuffer = nullptr;
+        std::size_t projectNameBufferSize = 0;
+        char* projectLocationBuffer = nullptr;          // display of the chosen location (filled by dialog)
+        std::size_t projectLocationBufferSize = 0;
+        char* openProjectBuffer = nullptr;
+        std::size_t openProjectBufferSize = 0;
         float fps = 0.0f;
         int particleDrawCalls = 0;
         int particleCulledEmitters = 0;
@@ -267,6 +282,10 @@ public:
         bool redoRequested = false;
         int recentSceneRequested = -1;
         std::string sceneAssetOpenRequested;
+        std::string behaviorGraphAssetOpenRequested;
+        std::string editorAssetOpenRequested;
+        EditorAssets::Type editorAssetOpenType = EditorAssets::Type::Other;
+        bool addEmptyRequested = false;
         bool addCubeRequested = false;
         bool addPlaneRequested = false;
         bool addSphereRequested = false;
@@ -281,6 +300,8 @@ public:
         bool addStaticFloorRequested = false;
         bool addTerrainRequested = false;
         bool addWaterRequested = false;
+        int  addWaterPreset = 0;            // 0 generic, 1 lake, 2 ocean, 3 river
+        bool addSplineRequested = false;
         bool addTriggerVolumeRequested = false;
         bool addNavMeshBoundsVolumeRequested = false;
         bool addPlayerStartRequested = false;

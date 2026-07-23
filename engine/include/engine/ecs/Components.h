@@ -10,6 +10,7 @@
 
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace engine {
 
@@ -136,6 +137,12 @@ struct SkinnedModelAsset {
     };
 
     struct AnimationState {
+        struct BlendSample {
+            int clipIndex = 0;
+            std::string clipName;
+            float value = 0.0f;
+            float valueY = 0.0f;
+        };
         std::string name;
         int clipIndex = 0;
         std::string clipName;
@@ -147,6 +154,10 @@ struct SkinnedModelAsset {
         float blendMin = 0.0f;
         float blendMax = 1.0f;
         bool rootMotion = false;
+        std::vector<BlendSample> blendSamples;
+        std::string blendParameterY;
+        bool blendSpace2D = false;
+        bool synchronizeBlendSpace = true;
     };
 
     struct AnimationParameter {
@@ -168,6 +179,9 @@ struct SkinnedModelAsset {
     };
 
     std::string path;
+    glm::vec3 modelOrientationEuler{0.0f};   // render-only rotation (deg); collider unaffected
+    glm::vec3 modelOffsetPosition{0.0f};     // render-only mesh position offset; collider unaffected
+    glm::vec3 modelOffsetScale{1.0f};        // render-only mesh scale (about model centre)
     int clipIndex = 0;
     std::string clipName;
     bool autoplay = true;
