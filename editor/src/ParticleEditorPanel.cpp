@@ -387,8 +387,20 @@ bool ParticleEditorPanel::DrawModuleStack(engine::ParticleSystemComponent& s) {
     bool changed = false;
     engine::NormalizeParticleModuleStack(s.config, false);
     ImGui::SeparatorText("Module Stack");
-    ImGui::TextDisabled("Ordered authoring modules compile into the CPU/GPU emitter pipeline.");
+    ImGui::TextWrapped(
+        "Stages organize the particle pipeline. Settings belong to the modules inside "
+        "each stage. Click a module row or its Edit button to open its properties below.");
     auto& modules = s.config.modules;
+    const auto selectedModuleIt = std::find_if(
+        modules.begin(), modules.end(), [this](const engine::ParticleModule& module) {
+            return m_selectedModuleId != 0
+                ? module.instanceId == m_selectedModuleId
+                : module.type == m_selectedModule;
+        });
+    if (selectedModuleIt == modules.end() && !modules.empty()) {
+        m_selectedModule = modules.front().type;
+        m_selectedModuleId = modules.front().instanceId;
+    }
     for (std::size_t i = 0; i < modules.size(); ++i) {
         engine::ParticleModule& module = modules[i];
         if (i == 0 || modules[i - 1].stage != module.stage) {
@@ -415,7 +427,8 @@ bool ParticleEditorPanel::DrawModuleStack(engine::ParticleSystemComponent& s) {
             ImGui::BeginDisabled(); ImGui::Checkbox("##Enabled", &requiredEnabled); ImGui::EndDisabled();
         }
         ImGui::SameLine();
-        const float labelWidth = std::max(70.0f, ImGui::GetContentRegionAvail().x - (removable ? 94.0f : 70.0f));
+        const float labelWidth = std::max(
+            70.0f, ImGui::GetContentRegionAvail().x - (removable ? 140.0f : 116.0f));
         const char* displayName = module.name.empty() ? engine::ParticleModuleName(module.type)
                                                        : module.name.c_str();
         if (ImGui::Selectable(displayName,
@@ -424,6 +437,18 @@ bool ParticleEditorPanel::DrawModuleStack(engine::ParticleSystemComponent& s) {
         {
             m_selectedModule = module.type;
             m_selectedModuleId = module.instanceId;
+            m_focusSelectedModuleSettings = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Edit")) {
+            m_selectedModule = module.type;
+            m_selectedModuleId = module.instanceId;
+            m_focusSelectedModuleSettings = true;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "Edit %s settings in the %s below.",
+                displayName, engine::ParticleModuleStageName(module.stage));
         }
         ImGui::SameLine();
         const bool canMoveUp = i > 0 && modules[i - 1].stage == module.stage;
@@ -508,6 +533,7 @@ bool ParticleEditorPanel::DrawModuleStack(engine::ParticleSystemComponent& s) {
                 engine::NormalizeParticleModuleStack(s.config, true);
                 m_selectedModule = type;
                 m_selectedModuleId = nextId;
+                m_focusSelectedModuleSettings = true;
                 changed = true;
                 ImGui::CloseCurrentPopup();
             }
@@ -522,6 +548,7 @@ bool ParticleEditorPanel::DrawModuleStack(engine::ParticleSystemComponent& s) {
         engine::NormalizeParticleModuleStack(s.config, false);
         m_selectedModule = engine::ParticleModuleType::Spawn;
         m_selectedModuleId = s.config.modules.empty() ? 0 : s.config.modules.front().instanceId;
+        m_focusSelectedModuleSettings = true;
         changed = true;
     }
     ImGui::SameLine();
@@ -576,13 +603,29 @@ bool ParticleEditorPanel::DrawSettings(engine::ParticleSystemComponent& s) {
         ImGui::TextDisabled("Auto uses GPU compute when supported, otherwise CPU.");
     }
 
-    ImGui::SeparatorText(engine::ParticleModuleName(m_selectedModule));
     const auto selected = m_selectedModule;
     auto moduleIt = std::find_if(s.config.modules.begin(), s.config.modules.end(),
         [this, selected](const engine::ParticleModule& module) {
             return m_selectedModuleId != 0 ? module.instanceId == m_selectedModuleId
                                            : module.type == selected;
         });
+    ImGui::SeparatorText("Selected Module Properties");
+    if (m_focusSelectedModuleSettings) {
+        ImGui::SetScrollHereY(0.0f);
+        m_focusSelectedModuleSettings = false;
+    }
+    if (moduleIt != s.config.modules.end()) {
+        const char* moduleName = moduleIt->name.empty()
+            ? engine::ParticleModuleName(moduleIt->type)
+            : moduleIt->name.c_str();
+        ImGui::TextColored(
+            ImVec4(0.35f, 0.72f, 1.0f, 1.0f), "%s  >  %s",
+            engine::ParticleModuleStageName(moduleIt->stage), moduleName);
+        ImGui::SameLine();
+        ImGui::TextDisabled("(settings below)");
+    } else {
+        ImGui::TextDisabled("Select a module from Spawn, Update, or Render Stage.");
+    }
     if (moduleIt != s.config.modules.end()) {
         m_selectedModuleId = moduleIt->instanceId;
         std::array<char, 96> moduleName{};
@@ -1203,6 +1246,12 @@ void ParticleEditorPanel::Draw(EditorScene& scene, EditorAssets& assets, bool* o
         presetApplied = true;
     }
     if (presetApplied) {
+        engine::NormalizeParticleModuleStack(m_settings.config, false);
+        if (!m_settings.config.modules.empty()) {
+            m_selectedModule = m_settings.config.modules.front().type;
+            m_selectedModuleId = m_settings.config.modules.front().instanceId;
+            m_focusSelectedModuleSettings = true;
+        }
         if (attachedToObject) scene.SetSelectedParticleSystem(true, m_settings);
         m_assetDirty = !m_assetPath.empty() || m_assetDirty;
         RestartPreview();

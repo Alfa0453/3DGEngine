@@ -31,14 +31,11 @@
 void RegisterGameModule() {
     engine::ScriptRegistry&       scripts = engine::ScriptRegistry::Instance();
     engine::ai::BtScriptRegistry& bt      = engine::ai::BtScriptRegistry::Instance();
-    (void)bt;
 
     // --- Gameplay scripts ---------------------------------------------------
     scripts.Register("Spinner", [] { return std::make_unique<Spinner>(); });
     RegisterEditorGeneratedScripts(scripts);
+    RegisterEditorGeneratedBtScripts(bt);
     // scripts.Register("FireballCaster",     [] { return std::make_unique<FireballCaster>(); });
     // scripts.Register("FireballProjectile", [] { return std::make_unique<FireballProjectile>(); });
-
-    // --- Behaviour-tree scripts --------------------------------------------
-    // bt.Register("ChaseAndShoot", [] { return std::make_unique<ChaseAndShoot>(); });
 }

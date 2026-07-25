@@ -1,8 +1,7 @@
 #pragma once
 //
-// DECORATOR template. Copy into ../ , rename file + class, fill in Check(), then
-// #include + Register it in src/GameBtScripts.cpp. Attach it to a node via
-// "+ Decorator > Script Decorator" in the inspector.
+// DECORATOR template. The editor copies this into Content/Scripts, renames and
+// registers it automatically. Attach it through Script Decorator in a Behavior Graph.
 //
 // A Decorator is a GATE: return false and the node it is attached to is blocked
 // (reports Failure without running); return true and the node runs normally.

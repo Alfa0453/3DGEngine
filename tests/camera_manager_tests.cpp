@@ -131,6 +131,19 @@ int main() {
     }
 
     EditorScene scene;
+    engine::Mesh emptyPlaceholder;
+    scene.AddEmpty(emptyPlaceholder);
+    Check(scene.ToggleSelectedLocked(), "lock empty object for script attachment test");
+    Check(scene.SelectedLocked(), "script attachment test object is locked");
+    Check(scene.SetSelectedScript(
+              "PlayerAttack", "Content/Scripts/PlayerAttack.h", true),
+          "locked object accepts script component attachment");
+    Check(scene.SelectedObject()
+              && scene.SelectedObject()->scriptEnabled
+              && scene.SelectedObject()->scriptClassName == "PlayerAttack",
+          "locked object stores attached script metadata");
+    Check(scene.SetSelectedScriptEnabled(false),
+          "locked object permits script component toggle");
 
     EditorScene::CameraPreset gameplay;
     gameplay.name = "Gameplay Camera";
@@ -177,6 +190,18 @@ int main() {
     environment.postProcessEffects.push_back(postEffect);
     scene.SetEnvironment(environment);
 
+    EditorScene::GameModeSettings gameMode;
+    gameMode.playerObjectName = "PlayerStart";
+    gameMode.playerInputEnabled = true;
+    gameMode.startPaused = true;
+    gameMode.allowPause = false;
+    gameMode.allowRestart = false;
+    gameMode.loseOnPlayerDeath = false;
+    gameMode.initialScore = 25;
+    gameMode.cameraOverride = true;
+    gameMode.cameraMode = 2;
+    scene.SetGameModeSettings(gameMode);
+
     const std::filesystem::path path =
         std::filesystem::temp_directory_path() / "3dg_camera_manager_test.scene";
     std::string error;
@@ -203,6 +228,10 @@ int main() {
               != std::string::npos
           && saved.find("\"Intensity\" 0 \"1.75\"") != std::string::npos,
           "post-process stack and parameters are serialized");
+    Check(saved.find(
+              "game_mode \"PlayerStart\" 1 1 0 0 0 25 1 2")
+              != std::string::npos,
+          "game mode startup and camera override settings are serialized");
     input.close();
     std::filesystem::remove(path);
 
@@ -224,6 +253,13 @@ int main() {
     Check(runtimeScene.cameraSequences[0].cues.size() == 1
           && runtimeScene.cameraSequences[0].cues[0].name == "RevealBoss",
           "runtime export preserves cinematic cues");
+    Check(runtimeScene.gameMode.playerObjectName == "PlayerStart"
+          && runtimeScene.gameMode.startPaused
+          && !runtimeScene.gameMode.allowPause
+          && runtimeScene.gameMode.initialScore == 25
+          && runtimeScene.gameMode.cameraOverride
+          && runtimeScene.gameMode.cameraMode == 2,
+          "runtime export preserves Game Mode settings");
     std::filesystem::remove(runtimePath);
 
     std::cout << "camera manager tests passed\n";

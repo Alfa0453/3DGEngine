@@ -1,19 +1,93 @@
 #include "engine/assets/ParticleAsset.h"
 
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <mutex>
 
 namespace engine {
+namespace {
+
+std::mutex g_particleAssetRootMutex;
+std::filesystem::path g_particleAssetContentRoot;
+
+bool IsContentComponent(const std::filesystem::path& component) {
+    std::string value = component.string();
+    std::transform(value.begin(), value.end(), value.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return value == "content";
+}
+
+std::filesystem::path WithoutContentPrefix(const std::filesystem::path& path) {
+    auto it = path.begin();
+    if (it == path.end() || !IsContentComponent(*it)) return path;
+    std::filesystem::path relative;
+    for (++it; it != path.end(); ++it) relative /= *it;
+    return relative;
+}
+
+} // namespace
+
+void SetParticleAssetContentRoot(const std::string& contentRoot) {
+    std::error_code ec;
+    std::filesystem::path root(contentRoot);
+    if (!root.empty()) root = std::filesystem::absolute(root, ec).lexically_normal();
+    std::lock_guard<std::mutex> lock(g_particleAssetRootMutex);
+    g_particleAssetContentRoot = ec ? std::filesystem::path(contentRoot).lexically_normal()
+                                    : std::move(root);
+}
+
+std::string ParticleAssetContentRoot() {
+    std::lock_guard<std::mutex> lock(g_particleAssetRootMutex);
+    return g_particleAssetContentRoot.string();
+}
+
+std::string ResolveParticleAssetPath(const std::string& path) {
+    if (path.empty()) return path;
+    std::filesystem::path requested(path);
+    std::error_code ec;
+    if (std::filesystem::is_regular_file(requested, ec)) {
+        return requested.lexically_normal().string();
+    }
+
+    std::filesystem::path root;
+    {
+        std::lock_guard<std::mutex> lock(g_particleAssetRootMutex);
+        root = g_particleAssetContentRoot;
+    }
+    if (root.empty() || requested.is_absolute()) return path;
+
+    const std::filesystem::path relative = WithoutContentPrefix(requested);
+    const std::filesystem::path rooted = (root / relative).lexically_normal();
+    ec.clear();
+    if (std::filesystem::is_regular_file(rooted, ec)) return rooted.string();
+
+    // Script-facing shorthand: "EnemyArcaneBolt" or
+    // "EnemyArcaneBolt.particle" resolves in the standard particle folder.
+    if (!requested.has_parent_path()) {
+        std::filesystem::path filename = requested;
+        if (!filename.has_extension()) filename += ".particle";
+        const std::filesystem::path particle =
+            (root / "Assets" / "Particles" / filename).lexically_normal();
+        ec.clear();
+        if (std::filesystem::is_regular_file(particle, ec)) return particle.string();
+    }
+    return path;
+}
 
 bool LoadParticleAsset(const std::string& path, ParticleSystemComponent* output, std::string* error) {
     if (!output) { if (error) *error = "Particle asset output is null."; return false; }
-    std::ifstream in(path);
+    const std::string resolvedPath = ResolveParticleAssetPath(path);
+    std::ifstream in(resolvedPath);
     std::string magic;
     int version = 0;
     if (!(in >> magic >> version) || magic != "3DGParticle" || version < 1 || version > 12) {
-        if (error) *error = "Unsupported or malformed particle asset: " + path;
+        if (error) {
+            *error = "Unsupported, missing, or malformed particle asset: " + path;
+            if (resolvedPath != path) *error += " (resolved to " + resolvedPath + ")";
+        }
         return false;
     }
     ParticleSystemComponent s;

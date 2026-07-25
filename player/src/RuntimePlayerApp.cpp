@@ -274,7 +274,14 @@ void RuntimePlayerApp::LoadScene() {
     ValidateRuntimeScene();
     LoadHud();
 
-    engine::GameMode::Instance().Reset();   // fresh run: Playing, score 0, clock 0
+    engine::GameMode::Instance().Reset();
+    engine::GameMode::Instance().loseOnPlayerDeath =
+        m_scene.gameMode.loseOnPlayerDeath;
+    engine::GameMode::Instance().SetScore(m_scene.gameMode.initialScore);
+    m_paused = m_scene.gameMode.startPaused;
+    if (m_paused) {
+        engine::GameMode::Instance().Pause();
+    }
     m_simReady = true;
 }
 
@@ -375,7 +382,9 @@ void RuntimePlayerApp::DrawHudOverlay() {
     const engine::HudDrawResult r = engine::DrawHud(*m_text, m_hud, ctx, w.Width(), w.Height());
     switch (r.clickedAction) {
         case engine::HudButtonAction::ExitPlay:    w.SetShouldClose(true); break;
-        case engine::HudButtonAction::RestartPlay: RestartScene(); break;
+        case engine::HudButtonAction::RestartPlay:
+            if (m_scene.gameMode.allowRestart) RestartScene();
+            break;
         default: break;
     }
 }
@@ -389,8 +398,34 @@ void RuntimePlayerApp::SetupPlayer() {
     // exported before v48 still spawn a player.
     const engine::RuntimeSceneLoader::EntityDesc* desc = nullptr;
     std::string playerName = "PlayerStart";
-    for (const auto& d : m_scene.entities) {
-        if (d.playerControllerEnabled) { desc = &d; playerName = d.name; break; }
+    if (!m_scene.gameMode.playerObjectName.empty()) {
+        for (const auto& d : m_scene.entities) {
+            if (d.playerControllerEnabled
+                && d.name == m_scene.gameMode.playerObjectName) {
+                desc = &d;
+                playerName = d.name;
+                break;
+            }
+        }
+        // Keep renamed/removed player selections recoverable instead of leaving
+        // the game without a controller.
+        if (!desc) {
+            for (const auto& d : m_scene.entities) {
+                if (d.playerControllerEnabled) {
+                    desc = &d;
+                    playerName = d.name;
+                    break;
+                }
+            }
+        }
+    } else {
+        for (const auto& d : m_scene.entities) {
+            if (d.playerControllerEnabled) {
+                desc = &d;
+                playerName = d.name;
+                break;
+            }
+        }
     }
 
     Entity found = engine::ecs::kNull;
@@ -403,8 +438,16 @@ void RuntimePlayerApp::SetupPlayer() {
     engine::PlayerController controller;
     if (desc) {
         const engine::RuntimeSceneLoader::PlayerControllerDesc& pc = desc->playerController;
-        controller.view = pc.firstPerson ? engine::PlayerController::View::FirstPerson
-                                         : engine::PlayerController::View::ThirdPerson;
+        const int authoredCameraMode =
+            pc.firstPerson ? 1 : std::clamp(pc.cameraMode, 0, 2);
+        const int cameraMode = m_scene.gameMode.cameraOverride
+            ? std::clamp(m_scene.gameMode.cameraMode, 0, 2)
+            : authoredCameraMode;
+        controller.view = cameraMode == 1
+            ? engine::PlayerController::View::FirstPerson
+            : cameraMode == 2
+                ? engine::PlayerController::View::Isometric
+                : engine::PlayerController::View::ThirdPerson;
         controller.walkSpeed          = pc.walkSpeed;
         controller.runSpeed           = pc.runSpeed;
         controller.jumpSpeed          = pc.jumpSpeed;
@@ -412,6 +455,8 @@ void RuntimePlayerApp::SetupPlayer() {
         controller.eyeHeight          = pc.eyeHeight;
         controller.camDistance        = pc.cameraDistance;
         controller.camTargetHeight    = pc.cameraTargetHeight;
+        controller.SetIsometricView(
+            pc.isometricYaw, pc.isometricPitch, pc.isometricDistance);
         controller.camCollision       = pc.cameraCollision;
         controller.camProbeRadius     = pc.cameraProbeRadius;
         controller.camCollisionPadding = pc.cameraCollisionPadding;
@@ -425,11 +470,23 @@ void RuntimePlayerApp::SetupPlayer() {
         controller.lockOnViewAngle    = pc.lockOnViewAngle;
         controller.lockOnTargetHeight = pc.lockOnTargetHeight;
         controller.lockOnTrackingSpeed = pc.lockOnTrackingSpeed;
+        controller.facingMode = pc.facingMode == 1
+            ? engine::PlayerController::FacingMode::MovementDirection
+            : engine::PlayerController::FacingMode::CameraRelative;
+        controller.turnSpeed = pc.turnSpeed;
         controller.body.stepHeight    = pc.stepHeight;
         controller.body.SetMaxSlopeDegrees(pc.maxSlopeDegrees);
         controller.SetCapsule(pc.capsuleRadius, pc.capsuleHeight);
     } else {
         controller.SetCapsule(0.4f, 1.8f);
+    }
+    if (m_scene.gameMode.cameraOverride) {
+        const int cameraMode = std::clamp(m_scene.gameMode.cameraMode, 0, 2);
+        controller.view = cameraMode == 1
+            ? engine::PlayerController::View::FirstPerson
+            : cameraMode == 2
+                ? engine::PlayerController::View::Isometric
+                : engine::PlayerController::View::ThirdPerson;
     }
 
     if (const Transform* t = m_registry.TryGet<Transform>(found)) {
@@ -603,6 +660,13 @@ void RuntimePlayerApp::ValidateRuntimeScene() {
             !engine::ScriptRegistry::Instance().Has(entity.scriptClassName))
             warn("Script class is not registered: " + entity.scriptClassName +
                  " (entity " + entity.name + ")");
+        for (const auto& script : entity.additionalScripts) {
+            if (script.enabled && !script.className.empty()
+                && !engine::ScriptRegistry::Instance().Has(script.className)) {
+                warn("Script class is not registered: " + script.className
+                     + " (entity " + entity.name + ")");
+            }
+        }
     }
     for (const auto& zone : m_scene.cameraZones) {
         const bool presetExists = std::any_of(
@@ -1089,7 +1153,6 @@ void RuntimePlayerApp::GatherPlayerInput() {
     if (w.IsKeyPressed(GLFW_KEY_A)) in.moveRight -= 1.0f;
     in.jump   = w.IsKeyPressed(GLFW_KEY_SPACE);
     in.sprint = w.IsKeyPressed(GLFW_KEY_LEFT_SHIFT) || w.IsKeyPressed(GLFW_KEY_RIGHT_SHIFT);
-    in.toggleView = w.IsKeyPressed(GLFW_KEY_V);
     // Mouse-look only while the cursor is captured (i.e. playing, not paused).
     if (!m_paused) {
         in.lookYaw   = w.MouseDeltaX();
@@ -1339,8 +1402,13 @@ void RuntimePlayerApp::OnUpdate(float dt) {
     // P toggles pause (edge-detected). Pausing frees the cursor so the HUD's menu
     // buttons become clickable; resuming re-captures it for mouse-look.
     const bool pauseDown = w.IsKeyPressed(GLFW_KEY_P);
-    if (pauseDown && !m_pausePrev) {
+    if (m_scene.gameMode.allowPause && pauseDown && !m_pausePrev) {
         m_paused = !m_paused;
+        if (m_paused) {
+            engine::GameMode::Instance().Pause();
+        } else {
+            engine::GameMode::Instance().Resume();
+        }
         if (HasPlayer()) SetPlayCursor(!m_paused);
     }
     m_pausePrev = pauseDown;
@@ -1348,7 +1416,9 @@ void RuntimePlayerApp::OnUpdate(float dt) {
     // Game over / victory: free the cursor for the end screen and allow a restart.
     if (engine::GameMode::Instance().IsOver()) {
         if (HasPlayer()) SetPlayCursor(false);
-        if (w.IsKeyPressed(GLFW_KEY_R)) RestartScene();
+        if (m_scene.gameMode.allowRestart && w.IsKeyPressed(GLFW_KEY_R)) {
+            RestartScene();
+        }
     }
 
     const bool skipDown =
@@ -1363,7 +1433,9 @@ void RuntimePlayerApp::OnUpdate(float dt) {
     if (m_simReady && !m_paused && m_zoneCameraBlend.Active())
         m_zoneCameraBlend.Update(dt);
 
-    const bool inputEnabled = !m_cameraDirector.InputLocked();
+    const bool inputEnabled =
+        m_scene.gameMode.playerInputEnabled
+        && !m_cameraDirector.InputLocked();
     if (m_simReady && !m_paused) {
         const engine::ScriptInputState input =
             CaptureScriptInput(inputEnabled, true);
@@ -1410,7 +1482,9 @@ void RuntimePlayerApp::OnUpdate(float dt) {
 void RuntimePlayerApp::OnFixedUpdate(float h) {
     // Freeze the simulation while paused or once the run is over/won (GameMode).
     if (!m_simReady || m_paused || !engine::GameMode::Instance().IsPlaying()) return;
-    const bool inputEnabled = !m_cameraDirector.InputLocked();
+    const bool inputEnabled =
+        m_scene.gameMode.playerInputEnabled
+        && !m_cameraDirector.InputLocked();
 
     // Player capsule first (moves via its own kinematic sweep against colliders).
     // Apply the frame's mouse-look only once even if several fixed steps run.
@@ -1470,6 +1544,7 @@ void RuntimePlayerApp::OnFixedUpdate(float h) {
         m_registry, h, &input, &m_runtimeAudio,
         &m_cameraShake, &m_cameraDirector);
     UpdateAI(h);
+    engine::UpdateProjectiles(m_registry, h);
     engine::ecs::UpdateGameplay(m_registry, h);        // rotators + movers
     engine::UpdateHealth(m_registry);
     engine::ecs::UpdateRuntimeMotion(m_registry, h);   // linear/angular velocity
@@ -1565,6 +1640,21 @@ void RuntimePlayerApp::OnRender() {
         lighting.fogHeight = env.fogHeight;
         lighting.fogHeightFalloff = env.fogHeightFalloff;
         m_skinnedRenderer->DrawScene(m_registry, cam, aspect, lighting);
+
+        // Socketed attachments (weapons/shields) ride the animated bones.
+        if (m_modelShader) {
+            const glm::mat4 viewProj = cam.ProjectionMatrix(aspect) * cam.ViewMatrix();
+            m_modelShader->Bind();
+            m_modelShader->SetMat4("uViewProj", viewProj);
+            m_modelShader->SetVec3("uLightPos", cam.Position() + glm::vec3(-4.0f, 6.0f, 4.0f));
+            m_modelShader->SetVec3("uLightColor", glm::vec3(1.0f));
+            m_modelShader->SetVec3("uViewPos", cam.Position());
+            m_registry.view<engine::ecs::Transform, engine::AnimatedModel>().each(
+                [&](Entity, engine::ecs::Transform& t, engine::AnimatedModel& am) {
+                    if (am.attachments.empty()) return;
+                    engine::DrawAnimatedModelAttachments(am, t.Model() * am.renderOffset, *m_modelShader);
+                });
+        }
     }
 
     m_sky->Draw(cam.ViewMatrix(), cam.ProjectionMatrix(aspect), m_sample, false,

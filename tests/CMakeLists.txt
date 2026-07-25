@@ -106,7 +106,8 @@ add_test(NAME image_decode_regression COMMAND image_decode_tests)
 
 add_executable(editor_assets_tests
     editor_assets_tests.cpp
-    ${CMAKE_SOURCE_DIR}/editor/src/EditorAssets.cpp)
+    ${CMAKE_SOURCE_DIR}/editor/src/EditorAssets.cpp
+    ${CMAKE_SOURCE_DIR}/editor/src/AnimationClipAsset.cpp)
 target_include_directories(editor_assets_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/editor/include)
 if(MSVC)

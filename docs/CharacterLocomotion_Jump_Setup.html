@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Character Locomotion + Jump — Setup Guide</title>
+<style>
+  :root{
+    --ink:#1b2430; --muted:#5a6675; --line:#d8dee7;
+    --brand:#2b6cb0; --brand-dark:#1f4e7a;
+    --tip:#2f855a; --tip-bg:#e9f6ee;
+    --warn:#b7791f; --warn-bg:#fbf3e3;
+    --code-bg:#f4f6f9; --chip:#eef2f7;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{font-family:"Segoe UI",Roboto,Helvetica,Arial,sans-serif; color:var(--ink);
+       font-size:11pt; line-height:1.5; background:#eceff3;}
+  .page{background:#fff; width:210mm; min-height:297mm; margin:12px auto; padding:20mm 18mm; position:relative;}
+  h1,h2,h3{line-height:1.2;}
+  h1{font-size:25pt; margin:0 0 4px;}
+  h2{font-size:15.5pt; margin:24px 0 8px; padding-bottom:5px; border-bottom:2px solid var(--brand); color:var(--brand-dark);}
+  h3{font-size:12pt; margin:15px 0 4px; color:var(--brand-dark);}
+  p{margin:6px 0;} ul,ol{margin:6px 0 6px 20px; padding:0;} li{margin:4px 0;}
+  code{font-family:"Consolas",Menlo,monospace; background:var(--code-bg); border:1px solid var(--line);
+       border-radius:4px; padding:0 4px; font-size:9.6pt;}
+  .lead{color:var(--muted); font-size:11.5pt;}
+  .kicker{letter-spacing:.14em; text-transform:uppercase; color:var(--brand); font-weight:700; font-size:9pt;}
+  .meta{color:var(--muted); font-size:9.2pt; margin-top:8px;}
+  .rule{height:3px;background:linear-gradient(90deg,var(--brand),#63b3ed);border:0;margin:14px 0 0;}
+  .callout{border-radius:7px; padding:10px 14px; margin:12px 0; border:1px solid var(--line); font-size:10.2pt;}
+  .callout .label{font-weight:700; font-size:8.6pt; letter-spacing:.08em; text-transform:uppercase; display:block; margin-bottom:2px;}
+  .tip{background:var(--tip-bg); border-color:#bfe3cd;} .tip .label{color:var(--tip);}
+  .warn{background:var(--warn-bg); border-color:#edddb6;} .warn .label{color:var(--warn);}
+  .steps{counter-reset:step; list-style:none; margin-left:0;}
+  .steps>li{position:relative; padding-left:34px; margin:12px 0;}
+  .steps>li::before{counter-increment:step; content:counter(step); position:absolute; left:0; top:-1px;
+     width:24px; height:24px; border-radius:50%; background:var(--brand); color:#fff; font-weight:700;
+     font-size:10pt; display:flex; align-items:center; justify-content:center;}
+  table{border-collapse:collapse; width:100%; margin:10px 0; font-size:9.7pt;}
+  th,td{border:1px solid var(--line); padding:6px 9px; text-align:left; vertical-align:top;}
+  th{background:var(--chip); color:var(--brand-dark);}
+  tr:nth-child(even) td{background:#fafbfc;}
+  .path{font-family:"Consolas",monospace; font-size:9.3pt; color:var(--brand-dark);}
+  .tag{display:inline-block; background:var(--chip); border:1px solid var(--line); border-radius:20px;
+       padding:1px 9px; font-size:8.8pt; color:var(--brand-dark); margin:2px 4px 2px 0;}
+  .panel{background:#f7f9fc; border:1px solid var(--line); border-left:4px solid var(--brand);
+         border-radius:6px; padding:10px 14px; margin:10px 0;}
+  .flow{display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin:10px 0; font-size:9.4pt;}
+  .node{background:#eef4fb; border:1px solid #b9d3ee; border-radius:6px; padding:5px 10px; color:var(--brand-dark); font-weight:600;}
+  .arrow{color:var(--muted); font-weight:700;}
+  .cond{color:var(--muted); font-style:italic;}
+  .foot{position:absolute; bottom:10mm; left:18mm; right:18mm; border-top:1px solid var(--line);
+        padding-top:5px; color:var(--muted); font-size:8.4pt; display:flex; justify-content:space-between;}
+  @media print{
+    body{background:#fff;}
+    .page{margin:0; box-shadow:none; width:auto; min-height:auto; padding:16mm 15mm;}
+    .page-break{page-break-before:always;}
+    h2,h3{page-break-after:avoid;} table,.callout,.panel,.flow{page-break-inside:avoid;}
+    .noprint{display:none;}
+  }
+  .noprint{background:#1f2a37;color:#cbd5e1;padding:9px 14px;font-size:9.4pt;text-align:center;}
+</style>
+</head>
+<body>
+
+<div class="noprint">Print-ready guide &mdash; open in a browser and use <b>Ctrl&#8239;+&#8239;P &rarr; Save as PDF</b> (A4, default margins) to export.</div>
+
+<!-- ============ PAGE 1 ============ -->
+<section class="page">
+  <div class="kicker">3DG Engine &middot; Character Pipeline</div>
+  <h1>Character Locomotion + Jump</h1>
+  <p class="lead">Extending a walk/run character with a proper jump: rise, fall, and land, driven automatically by the player controller in Play mode.</p>
+  <hr class="rule">
+  <p class="meta">Builds on the FBX Idle/Walk/Run setup &middot; adds an air state machine keyed on IsGrounded / IsFalling / VerticalSpeed</p>
+
+  <h2>What you'll build</h2>
+  <p>A character whose animation graph blends <b>Idle&nbsp;&rarr;&nbsp;Walk&nbsp;&rarr;&nbsp;Run</b> on the ground and switches to <b>Jump&nbsp;&rarr;&nbsp;Fall&nbsp;&rarr;&nbsp;Land</b> in the air. You press <span class="tag">Space</span> to jump; the controller launches the capsule and the graph plays the air animations, returning to locomotion on landing &mdash; no scripting required.</p>
+
+  <div class="panel">
+    <b>The core idea.</b> The player controller already reports its physical state every frame as animation parameters. For jumps the three that matter are <code>IsGrounded</code> (bool), <code>IsFalling</code> (bool) and <code>VerticalSpeed</code> (float, +up / &minus;down). You add a few air <b>states</b> to the graph and wire <b>transitions</b> that compare those parameters. The engine sets them; your graph reacts.
+  </div>
+
+  <h2>Prerequisites</h2>
+  <p>You should already have a working <b>Idle / Walk / Run</b> character (see the <i>Animated Character Setup</i> guide): a skeletal model, three merged locomotion clips, a capsule collider, and an enabled Player Controller. This guide adds the jump on top.</p>
+
+  <h3>Extra animation clips you need</h3>
+  <p>Export these as separate FBX files sharing the character's skeleton (Mixamo works well):</p>
+  <ul>
+    <li><b>Jump</b> &mdash; the launch / rising pose (a "jump up" clip). One clip is enough to start.</li>
+    <li><b>Fall</b> &mdash; the airborne descending / falling-idle loop.</li>
+    <li><b>Land</b> &mdash; the touchdown / landing recovery (a short one-shot).</li>
+  </ul>
+  <p>Minimal build: even a single <b>Jump</b> clip covering the whole airborne phase works &mdash; add Fall and Land later for polish.</p>
+
+  <div class="callout tip"><span class="label">Tip &mdash; set the jump height first</span>
+    In the Character Editor's <b>Movement</b> tab, set <b>Jump Speed</b> (e.g. <code>5</code>) so the character actually leaves the ground. This is the upward launch velocity; higher = higher jump. Gravity and landing are handled by the character controller.
+  </div>
+
+  <div class="foot"><span>3DG Engine &mdash; Locomotion + Jump</span><span>Page 1</span></div>
+</section>
+
+<!-- ============ PAGE 2 ============ -->
+<section class="page page-break">
+  <h2>Step 1 &mdash; add the air clips as animation sources</h2>
+  <p>Open <b>Character Editor</b>, go to the <b>Mesh</b> tab (or the <b>Animation</b> tab's <b>Animation Sources</b> section) and add the new files alongside your Idle/Walk/Run, naming their clips clearly:</p>
+  <table>
+    <tr><th>File</th><th>Clip Name</th><th>Strip Root Motion</th></tr>
+    <tr><td><span class="path">Jump.fbx</span></td><td><code>Jump</code></td><td>Yes (keep it in place)</td></tr>
+    <tr><td><span class="path">Fall.fbx</span></td><td><code>Fall</code></td><td>Yes</td></tr>
+    <tr><td><span class="path">Land.fbx</span></td><td><code>Land</code></td><td>Yes</td></tr>
+  </table>
+  <p>They merge onto the model by bone name, joining the clip list next to Idle/Walk/Run.</p>
+
+  <h2>Step 2 &mdash; build the ground locomotion</h2>
+  <p>On the <b>Animation</b> tab, with Idle/Walk/Run present, click <b>Create 1D Locomotion</b>. This makes the grounded <b>Locomotion</b> state (a blend space on <code>Speed</code>). This is your "on the ground" state; the jump states sit beside it.</p>
+
+  <h2>Step 3 &mdash; add the air states</h2>
+  <p>In the <b>States</b> section, add three states, each pointing at the matching clip:</p>
+  <table>
+    <tr><th>State</th><th>Clip</th><th>Loop</th><th>Notes</th></tr>
+    <tr><td><b>Jump</b></td><td>Jump</td><td>No</td><td>The rising phase. Plays once as the character leaves the ground.</td></tr>
+    <tr><td><b>Fall</b></td><td>Fall</td><td>Yes</td><td>Loops while descending (air time can vary).</td></tr>
+    <tr><td><b>Land</b></td><td>Land</td><td>No</td><td>One-shot on touchdown, then back to Locomotion.</td></tr>
+  </table>
+
+  <h2>Step 4 &mdash; declare the parameters</h2>
+  <p>In the <b>Parameters</b> section add these (the engine drives them each frame in Play &mdash; you just declare them so transitions can read them):</p>
+  <table>
+    <tr><th>Parameter</th><th>Type</th><th>Meaning</th></tr>
+    <tr><td><code>IsGrounded</code></td><td>Bool</td><td>true while standing on the ground</td></tr>
+    <tr><td><code>IsFalling</code></td><td>Bool</td><td>true while airborne and moving downward</td></tr>
+    <tr><td><code>VerticalSpeed</code></td><td>Float</td><td>vertical velocity: positive rising, negative falling</td></tr>
+  </table>
+
+  <div class="callout warn"><span class="label">Names must match exactly</span>
+    Spell the parameters <code>IsGrounded</code>, <code>IsFalling</code>, <code>VerticalSpeed</code> (case-sensitive). The controller writes to those exact names; a typo means the transition never fires and the character "sticks" to the ground pose in the air.
+  </div>
+
+  <div class="foot"><span>3DG Engine &mdash; Locomotion + Jump</span><span>Page 2</span></div>
+</section>
+
+<!-- ============ PAGE 3 ============ -->
+<section class="page page-break">
+  <h2>Step 5 &mdash; wire the transitions</h2>
+  <p>In the <b>Transitions</b> section, connect the states like this:</p>
+  <div class="flow">
+    <span class="node">Locomotion</span><span class="arrow">&rarr;</span><span class="node">Jump</span>
+    <span class="arrow">&rarr;</span><span class="node">Fall</span>
+    <span class="arrow">&rarr;</span><span class="node">Land</span>
+    <span class="arrow">&rarr;</span><span class="node">Locomotion</span>
+  </div>
+  <table>
+    <tr><th>From &rarr; To</th><th>Condition</th><th>Fade</th></tr>
+    <tr><td>Locomotion &rarr; Jump</td><td><code>IsGrounded</code> is <b>false</b></td><td>0.10</td></tr>
+    <tr><td>Jump &rarr; Fall</td><td><code>VerticalSpeed</code> &lt; <code>0</code> &nbsp;(or <code>IsFalling</code> is <b>true</b>)</td><td>0.15</td></tr>
+    <tr><td>Fall &rarr; Land</td><td><code>IsGrounded</code> is <b>true</b></td><td>0.10</td></tr>
+    <tr><td>Land &rarr; Locomotion</td><td><b>Exit Time</b> = 1.0 (when the Land clip finishes)</td><td>0.15</td></tr>
+  </table>
+
+  <p>Two robustness edges make it forgiving:</p>
+  <table>
+    <tr><th>From &rarr; To</th><th>Condition</th><th>Why</th></tr>
+    <tr><td>Jump &rarr; Land</td><td><code>IsGrounded</code> is <b>true</b></td><td>Very short hops that never reach the Fall phase.</td></tr>
+    <tr><td>Locomotion &rarr; Fall</td><td><code>IsGrounded</code> is <b>false</b> &amp; <code>VerticalSpeed</code> &lt; <code>0</code></td><td>Walking off a ledge (falling without a jump).</td></tr>
+  </table>
+
+  <div class="callout tip"><span class="label">Tip &mdash; Can Interrupt</span>
+    Tick <b>Interrupt Blend</b> (canInterrupt) on the air transitions so a jump can trigger even mid-blend. Leave <b>Land &rarr; Locomotion</b> on Exit Time so the landing plays fully before movement resumes.
+  </div>
+
+  <div class="callout tip"><span class="label">Minimal version</span>
+    Just want "off the ground = jump pose"? Use one <b>Jump</b> state and two transitions: <i>Locomotion &rarr; Jump when IsGrounded is false</i>, and <i>Jump &rarr; Locomotion when IsGrounded is true</i>. Add Fall/Land later.
+  </div>
+
+  <h2>How the parameters are driven (for reference)</h2>
+  <p>You don't set these yourself &mdash; in Play the engine updates them every frame from the character controller. This is what each reflects:</p>
+  <table>
+    <tr><th>Parameter</th><th>Driven from</th></tr>
+    <tr><td><code>IsGrounded</code></td><td>the capsule's ground contact (true on the floor)</td></tr>
+    <tr><td><code>IsFalling</code></td><td>airborne <b>and</b> vertical velocity &lt; 0</td></tr>
+    <tr><td><code>VerticalSpeed</code></td><td>the body's Y velocity (jump gives a positive spike, then gravity pulls it negative)</td></tr>
+    <tr><td><code>Speed</code></td><td>horizontal move speed &mdash; still drives the grounded Locomotion blend</td></tr>
+  </table>
+
+  <div class="foot"><span>3DG Engine &mdash; Locomotion + Jump</span><span>Page 3</span></div>
+</section>
+
+<!-- ============ PAGE 4 ============ -->
+<section class="page page-break">
+  <h2>Step 6 &mdash; save, place, and play</h2>
+  <ol class="steps">
+    <li><b>Save</b> the <span class="path">.3dgcharacter</span> asset (Character Editor menu &rarr; Save).</li>
+    <li><b>Add it to the scene</b> (drag from Assets, or Add to Scene) onto ground that has a collider, and confirm <b>Jump Speed</b> is set in Movement.</li>
+    <li><b>Enter Play.</b> <span class="tag">W A S D</span> move, <span class="tag">Shift</span> run, <span class="tag">Space</span> jump, <span class="tag">Mouse</span> look.</li>
+    <li><b>Verify the cycle:</b> pressing Space plays <b>Jump</b> as the character rises, blends to <b>Fall</b> as it descends, then <b>Land</b> on touchdown, and returns to Idle/Walk/Run.</li>
+  </ol>
+
+  <div class="callout warn"><span class="label">Editor vs Play</span>
+    In the editor viewport characters hold a <b>paused idle</b> by default, so you won't see the jump graph run until you enter Play (or toggle <b>View &rarr; Animate Characters in Editor</b>). The jump only plays in Play mode, where the physics drives the parameters.
+  </div>
+
+  <h2>Troubleshooting</h2>
+  <table>
+    <tr><th>Symptom</th><th>Cause &amp; fix</th></tr>
+    <tr><td>Character doesn't leave the ground</td><td><b>Jump Speed</b> is 0 in the Movement tab, or there's a ceiling. Set Jump Speed (e.g. 5).</td></tr>
+    <tr><td>Jumps physically but the pose never changes</td><td>Transition conditions don't match. Check the parameter names (<code>IsGrounded</code>/<code>IsFalling</code>/<code>VerticalSpeed</code>) and that <i>Locomotion &rarr; Jump</i> uses <code>IsGrounded == false</code>.</td></tr>
+    <tr><td>Stuck in the Jump pose after landing</td><td>Missing the return edge. Add <i>Fall &rarr; Land</i> (or <i>Jump &rarr; Locomotion</i>) on <code>IsGrounded == true</code>, and <i>Land &rarr; Locomotion</i> on Exit Time.</td></tr>
+    <tr><td>Fall never plays (jumps straight to Land)</td><td>Air time is short or the Fall edge is wrong. Use <code>VerticalSpeed &lt; 0</code> for <i>Jump &rarr; Fall</i>; raise Jump Speed to lengthen air time.</td></tr>
+    <tr><td>Feet slide during the jump</td><td>Root motion in the air clips. Tick <b>Strip Root Motion</b> on Jump/Fall/Land.</td></tr>
+    <tr><td>Landing pose snaps in hard</td><td>Increase the transition <b>Fade</b> (e.g. 0.15) into Land and back to Locomotion.</td></tr>
+    <tr><td>T-pose in the air</td><td>The air clip didn't merge (name mismatch). Confirm the state's <b>Clip</b> matches a source's <b>Clip Name</b>.</td></tr>
+  </table>
+
+  <div class="callout tip"><span class="label">Going further</span>
+    Split Jump into <b>JumpStart &rarr; JumpLoop &rarr; JumpApex</b> for a weightier feel, add a double-jump by watching <code>VerticalSpeed</code> spikes, or use <code>Speed</code> in the Land transition to pick a running vs standing landing. The same parameter-driven pattern extends to all of it.
+  </div>
+
+  <div class="foot"><span>3DG Engine &mdash; Locomotion + Jump</span><span>Page 4</span></div>
+</section>
+
+</body>
+</html>

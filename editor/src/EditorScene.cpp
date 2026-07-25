@@ -236,7 +236,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         return false;
     }
 
-    out << "3DGEditorScene 89\n";
+    out << "3DGEditorScene 100\n";
     out << "environment "
         << m_environment.timeOfDay << ' '
         << m_environment.skyLightIntensity << ' '
@@ -279,6 +279,17 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         << m_environment.renderScale << ' '
         << (m_environment.hudAsset.empty() ? std::string("~") : m_environment.hudAsset) << ' '
         << m_environment.shadowDistance << '\n';
+    out << "game_mode "
+        << std::quoted(m_gameMode.playerObjectName.empty()
+            ? std::string("-") : m_gameMode.playerObjectName) << ' '
+        << m_gameMode.playerInputEnabled << ' '
+        << m_gameMode.startPaused << ' '
+        << m_gameMode.allowPause << ' '
+        << m_gameMode.allowRestart << ' '
+        << m_gameMode.loseOnPlayerDeath << ' '
+        << m_gameMode.initialScore << ' '
+        << m_gameMode.cameraOverride << ' '
+        << std::clamp(m_gameMode.cameraMode, 0, 2) << '\n';
     out << "clouds "
         << (m_environment.clouds ? 1 : 0) << ' '
         << m_environment.cloudCoverage << ' '
@@ -410,7 +421,8 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         for (const AnimationEvent& event : object.animationEvents) {
             out << event.clipIndex << ' '
                 << event.time << ' '
-                << StoredPath(event.name) << ' ';
+                << StoredPath(event.name) << ' '
+                << StoredPath(event.clipName) << ' ';
         }
         out << object.animationActionProfiles.size() << ' ';
         for (const AnimationActionProfile& profile : object.animationActionProfiles) {
@@ -460,8 +472,32 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
                 << transition.fade << ' '
                 << transition.exitTime << ' '
                 << transition.priority << ' '
-                << (transition.canInterrupt ? 1 : 0) << ' ';
+                << (transition.canInterrupt ? 1 : 0) << ' '
+                << (transition.requireAllConditions ? 1 : 0) << ' '
+                << transition.additionalConditions.size() << ' ';
+            for (const auto& condition : transition.additionalConditions) {
+                out << StoredPath(condition.parameter) << ' '
+                    << static_cast<int>(condition.compare) << ' '
+                    << condition.threshold << ' ';
+            }
         }
+        out << object.animationSources.size() << ' ';
+        for (const AnimationSource& source : object.animationSources) {
+            out << StoredPath(source.file) << ' '
+                << StoredPath(source.clipName) << ' '
+                << (source.stripRootMotion ? 1 : 0) << ' '
+                << StoredPath(source.sourceClipName) << ' ';
+        }
+        out << object.modelAttachments.size() << ' ';
+        for (const ModelAttachment& a : object.modelAttachments) {
+            out << StoredPath(a.modelPath) << ' ' << StoredPath(a.boneName) << ' '
+                << a.position.x << ' ' << a.position.y << ' ' << a.position.z << ' '
+                << a.eulerDegrees.x << ' ' << a.eulerDegrees.y << ' ' << a.eulerDegrees.z << ' '
+                << a.scale.x << ' ' << a.scale.y << ' ' << a.scale.z << ' '
+                << StoredPath(a.materialPath) << ' '
+                << StoredPath(a.socketName) << ' ';
+        }
+        out << StoredPath(object.characterAssetPath) << ' ';
         out
             << object.linearVelocity.x << ' ' << object.linearVelocity.y << ' ' << object.linearVelocity.z << ' '
             << object.angularVelocityAxis.x << ' ' << object.angularVelocityAxis.y << ' ' << object.angularVelocityAxis.z << ' '
@@ -530,6 +566,12 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
             << object.playerController.lockOnViewAngle << ' '
             << object.playerController.lockOnTargetHeight << ' '
             << object.playerController.lockOnTrackingSpeed << ' '
+            << object.playerController.facingMode << ' '
+            << object.playerController.turnSpeed << ' '
+            << object.playerController.cameraMode << ' '
+            << object.playerController.isometricYaw << ' '
+            << object.playerController.isometricPitch << ' '
+            << object.playerController.isometricDistance << ' '
             << StoredPath(object.triggerCameraSequenceName) << ' '
             << static_cast<int>(object.triggerEnterCameraAction) << ' '
             << static_cast<int>(object.triggerExitCameraAction) << ' '
@@ -553,6 +595,18 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
                 << StoredPath(field.name) << ' '
                 << static_cast<int>(field.type) << ' '
                 << StoredPath(field.value);
+        }
+        out << ' ' << object.additionalScripts.size();
+        for (const ScriptBinding& script : object.additionalScripts) {
+            out << ' ' << (script.enabled ? 1 : 0)
+                << ' ' << StoredPath(script.className)
+                << ' ' << StoredPath(script.path)
+                << ' ' << script.fields.size();
+            for (const ScriptField& field : script.fields) {
+                out << ' ' << StoredPath(field.name)
+                    << ' ' << static_cast<int>(field.type)
+                    << ' ' << StoredPath(field.value);
+            }
         }
         // NavAgent (scene version 37+).
         out << ' ' << (object.navAgentEnabled ? 1 : 0) << ' '
@@ -811,7 +865,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
     std::string magic;
     int version = 0;
     in >> magic >> version;
-    if (magic != "3DGEditorScene" ||(version < 1 || version > 89)) {
+    if (magic != "3DGEditorScene" ||(version < 1 || version > 100)) {
         if (error) *error = "Scene file has an unknown format.";
         return false;
     }
@@ -820,6 +874,25 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
 
     std::string recordType;
     while (in >> recordType) {
+        if (recordType == "game_mode" && version >= 97) {
+            in >> std::quoted(m_gameMode.playerObjectName)
+               >> m_gameMode.playerInputEnabled
+               >> m_gameMode.startPaused
+               >> m_gameMode.allowPause
+               >> m_gameMode.allowRestart
+               >> m_gameMode.loseOnPlayerDeath
+               >> m_gameMode.initialScore
+               >> m_gameMode.cameraOverride
+               >> m_gameMode.cameraMode;
+            if (m_gameMode.playerObjectName == "-") m_gameMode.playerObjectName.clear();
+            m_gameMode.cameraMode = std::clamp(m_gameMode.cameraMode, 0, 2);
+            if (!in) {
+                if (error) *error = "Scene file contains invalid Game Mode settings.";
+                Clear();
+                return false;
+            }
+            continue;
+        }
         if (recordType == "skylight_occlusion" && version >= 83) {
             int enabled = 1;
             in >> enabled
@@ -1411,6 +1484,9 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         std::vector<AnimationStateNode> animationStates;
         std::vector<AnimationParameter> animationParameters;
         std::vector<AnimationStateTransition> animationTransitions;
+        std::vector<AnimationSource> animationSources;
+        std::vector<ModelAttachment> modelAttachments;
+        std::string characterAssetPath;
         glm::vec3 linearVelocity{0.0f};
         glm::vec3 angularVelocityAxis{0.0f, 1.0f, 0.0f};
         float angularVelocityRadians = 0.0f;
@@ -1459,6 +1535,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         std::string scriptClassName;
         std::string scriptPath;
         std::vector<ScriptField> scriptFields;
+        std::vector<ScriptBinding> additionalScripts;
         int navAgentEnabled = 0;
         float navAgentSpeed = 3.0f;
         float navAgentMaxForce = 20.0f;
@@ -1578,11 +1655,13 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                 in >> event.clipIndex
                    >> event.time
                    >> std::quoted(event.name);
+                if (version >= 99) in >> std::quoted(event.clipName);
                 event.clipIndex = std::max(event.clipIndex, 0);
                 event.time = std::max(event.time, 0.0f);
                 if (event.name == "-") {
                     event.name.clear();
                 }
+                if (event.clipName == "-") event.clipName.clear();
                 animationEvents.push_back(event);
             }
         }
@@ -1699,6 +1778,20 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                     in >> transition.priority
                        >> transition.canInterrupt;
                 }
+                if (version >= 95) {
+                    std::size_t conditionCount = 0;
+                    in >> transition.requireAllConditions >> conditionCount;
+                    for (std::size_t c = 0; c < conditionCount; ++c) {
+                        AnimationStateTransition::Condition condition;
+                        int conditionCompare = 0;
+                        in >> std::quoted(condition.parameter)
+                           >> conditionCompare >> condition.threshold;
+                        if (condition.parameter == "-") condition.parameter.clear();
+                        condition.compare = static_cast<AnimationStateTransition::Compare>(
+                            std::clamp(conditionCompare, 0, 3));
+                        transition.additionalConditions.push_back(std::move(condition));
+                    }
+                }
                 if (transition.fromState == "-") {
                     transition.fromState.clear();
                 }
@@ -1715,6 +1808,47 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                 transition.fade = std::max(transition.fade, 0.0f);
                 animationTransitions.push_back(transition);
             }
+        }
+        if (version >= 90) {
+            std::size_t sourceCount = 0;
+            in >> sourceCount;
+            for (std::size_t i = 0; i < sourceCount; ++i) {
+                AnimationSource source;
+                int strip = 0;
+                in >> std::quoted(source.file) >> std::quoted(source.clipName) >> strip;
+                if (version >= 94) in >> std::quoted(source.sourceClipName);
+                if (source.file == "-") source.file.clear();
+                if (source.clipName == "-") source.clipName.clear();
+                if (source.sourceClipName == "-") source.sourceClipName.clear();
+                source.stripRootMotion = strip != 0;
+                animationSources.push_back(std::move(source));
+            }
+        }
+        if (version >= 92) {
+            std::size_t attachmentCount = 0;
+            in >> attachmentCount;
+            for (std::size_t i = 0; i < attachmentCount; ++i) {
+                ModelAttachment a;
+                in >> std::quoted(a.modelPath) >> std::quoted(a.boneName)
+                   >> a.position.x >> a.position.y >> a.position.z
+                   >> a.eulerDegrees.x >> a.eulerDegrees.y >> a.eulerDegrees.z
+                   >> a.scale.x >> a.scale.y >> a.scale.z;
+                if (version >= 93) {
+                    in >> std::quoted(a.materialPath);
+                    if (a.materialPath == "-") a.materialPath.clear();
+                }
+                if (version >= 98) {
+                    in >> std::quoted(a.socketName);
+                    if (a.socketName == "-") a.socketName.clear();
+                }
+                if (a.modelPath == "-") a.modelPath.clear();
+                if (a.boneName == "-") a.boneName.clear();
+                modelAttachments.push_back(std::move(a));
+            }
+        }
+        if (version >= 93) {
+            in >> std::quoted(characterAssetPath);
+            if (characterAssetPath == "-") characterAssetPath.clear();
         }
         if (version >= 6) {
             in >> linearVelocity.x >> linearVelocity.y >> linearVelocity.z
@@ -1831,6 +1965,18 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                    >> playerController.lockOnTargetHeight
                    >> playerController.lockOnTrackingSpeed;
             }
+            if (version >= 91) {
+                in >> playerController.facingMode
+                   >> playerController.turnSpeed;
+            }
+            if (version >= 96) {
+                in >> playerController.cameraMode
+                   >> playerController.isometricYaw
+                   >> playerController.isometricPitch
+                   >> playerController.isometricDistance;
+            } else {
+                playerController.cameraMode = playerFirstPerson != 0 ? 1 : 0;
+            }
             if (version >= 69) {
                 in >> std::quoted(triggerCameraSequenceName)
                    >> triggerEnterCameraAction
@@ -1848,6 +1994,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                 if (cameraZonePresetName == "-") cameraZonePresetName.clear();
             }
             playerController.firstPerson = playerFirstPerson != 0;
+            playerController.firstPerson = playerController.cameraMode == 1;
         }
         if (version >= 28) {
             in >> healthEnabled
@@ -1890,6 +2037,32 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                         field.type = ScriptField::Type::Float;
                     }
                     scriptFields.push_back(field);
+                }
+            }
+            if (version >= 100) {
+                std::size_t additionalCount = 0;
+                in >> additionalCount;
+                additionalScripts.reserve(additionalCount);
+                for (std::size_t scriptIndex = 0; scriptIndex < additionalCount; ++scriptIndex) {
+                    ScriptBinding script;
+                    int enabled = 1;
+                    std::size_t fieldCount = 0;
+                    in >> enabled >> std::quoted(script.className)
+                       >> std::quoted(script.path) >> fieldCount;
+                    script.enabled = enabled != 0;
+                    if (script.className == "-") script.className.clear();
+                    if (script.path == "-") script.path.clear();
+                    for (std::size_t fieldIndex = 0; fieldIndex < fieldCount; ++fieldIndex) {
+                        ScriptField field;
+                        int fieldType = 0;
+                        in >> std::quoted(field.name) >> fieldType >> std::quoted(field.value);
+                        if (field.name == "-") field.name.clear();
+                        if (field.value == "-") field.value.clear();
+                        field.type = static_cast<ScriptField::Type>(
+                            std::clamp(fieldType, 0, 3));
+                        script.fields.push_back(std::move(field));
+                    }
+                    additionalScripts.push_back(std::move(script));
                 }
             }
         }
@@ -2127,6 +2300,9 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         m_objects.back().animationStates = animationStates;
         m_objects.back().animationParameters = animationParameters;
         m_objects.back().animationTransitions = animationTransitions;
+        m_objects.back().animationSources = animationSources;
+        m_objects.back().modelAttachments = modelAttachments;
+        m_objects.back().characterAssetPath = characterAssetPath;
         m_objects.back().linearVelocityEnabled = linearVelocityEnabled != 0;
         m_objects.back().angularVelocityEnabled = angularVelocityEnabled != 0;
         m_objects.back().linearVelocity = linearVelocity;
@@ -2159,6 +2335,11 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         m_objects.back().triggerCameraLockInput = triggerCameraLockInput != 0;
         m_objects.back().triggerCameraSkippable = triggerCameraSkippable != 0;
         m_objects.back().playerControllerEnabled = playerControllerEnabled != 0;
+        playerController.cameraMode = std::clamp(playerController.cameraMode, 0, 2);
+        playerController.isometricPitch =
+            std::clamp(playerController.isometricPitch, -89.0f, 89.0f);
+        playerController.isometricDistance =
+            std::max(playerController.isometricDistance, 0.0f);
         playerController.cameraDistance = std::max(playerController.cameraDistance, 0.0f);
         playerController.cameraProbeRadius = std::max(playerController.cameraProbeRadius, 0.0f);
         playerController.cameraCollisionPadding = std::max(playerController.cameraCollisionPadding, 0.0f);
@@ -2180,6 +2361,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         m_objects.back().scriptClassName = scriptClassName;
         m_objects.back().scriptPath = scriptPath;
         m_objects.back().scriptFields = scriptFields;
+        m_objects.back().additionalScripts = std::move(additionalScripts);
         m_objects.back().navAgentEnabled = navAgentEnabled != 0;
         m_objects.back().navAgentSpeed = navAgentSpeed;
         m_objects.back().navAgentMaxForce = navAgentMaxForce;
@@ -2966,6 +3148,44 @@ bool EditorScene::SetSelectedAnimationEvents(const std::vector<AnimationEvent>& 
     return true;
 }
 
+bool EditorScene::SetSelectedAnimationSources(const std::vector<AnimationSource>& sources) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) {
+        return false;
+    }
+    PushUndoSnapshot();
+    selected.animationSources = sources;
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedModelAttachments(const std::vector<ModelAttachment>& attachments) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) {
+        return false;
+    }
+    PushUndoSnapshot();
+    selected.modelAttachments = attachments;
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedCharacterAssetPath(const std::string& path) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    selected.characterAssetPath = path;   // metadata; no undo snapshot needed
+    m_dirty = true;
+    return true;
+}
+
 bool EditorScene::SetSelectedAnimationActionProfiles(const std::vector<AnimationActionProfile>& profiles) {
     if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
         return false;
@@ -3018,6 +3238,11 @@ bool EditorScene::SetSelectedAnimationStateGraph(const std::vector<AnimationStat
     for (AnimationStateTransition& transition : selected.animationTransitions) {
         transition.fade = std::max(transition.fade, 0.0f);
         transition.exitTime = std::clamp(transition.exitTime, 0.0f, 1.0f);
+        for (AnimationStateTransition::Condition& condition
+             : transition.additionalConditions) {
+            const int compare = std::clamp(static_cast<int>(condition.compare), 0, 3);
+            condition.compare = static_cast<AnimationStateTransition::Compare>(compare);
+        }
     }
     m_dirty = true;
     return true;
@@ -3051,6 +3276,13 @@ void EditorScene::SetEnvironment(const Environment& environment) {
     PushUndoSnapshot();
     m_environment = environment;
     m_environment.shadowDistance = std::clamp(m_environment.shadowDistance, 10.0f, 5000.0f);
+    m_dirty = true;
+}
+
+void EditorScene::SetGameModeSettings(const GameModeSettings& settings) {
+    PushUndoSnapshot();
+    m_gameMode = settings;
+    m_gameMode.cameraMode = std::clamp(m_gameMode.cameraMode, 0, 2);
     m_dirty = true;
 }
 
@@ -3403,7 +3635,12 @@ bool EditorScene::SetSelectedPlayerController(const PlayerControllerSettings& se
 
     PushUndoSnapshot();
     PlayerControllerSettings safe = settings;
+    if (safe.firstPerson && safe.cameraMode == 0) safe.cameraMode = 1;
+    safe.cameraMode = std::clamp(safe.cameraMode, 0, 2);
+    safe.firstPerson = safe.cameraMode == 1;
     safe.cameraDistance = std::max(safe.cameraDistance, 0.0f);
+    safe.isometricPitch = std::clamp(safe.isometricPitch, -89.0f, 89.0f);
+    safe.isometricDistance = std::max(safe.isometricDistance, 0.0f);
     safe.cameraProbeRadius = std::max(safe.cameraProbeRadius, 0.0f);
     safe.cameraCollisionPadding = std::max(safe.cameraCollisionPadding, 0.0f);
     safe.cameraReturnSpeed = std::max(safe.cameraReturnSpeed, 0.0f);
@@ -3498,9 +3735,8 @@ bool EditorScene::SetSelectedScript(const std::string& className, const std::str
     }
 
     Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
-    if (selected.locked) {
-        return false;
-    }
+    // Object locking protects placement/scene-authoring edits. Script metadata is
+    // deliberately still editable so a locked character can receive gameplay logic.
 
     if (selected.scriptClassName == className
         && selected.scriptPath == path
@@ -3515,6 +3751,17 @@ bool EditorScene::SetSelectedScript(const std::string& className, const std::str
     if (className.empty()) {
         selected.scriptFields.clear();
     }
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedAdditionalScripts(const std::vector<ScriptBinding>& scripts) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    PushUndoSnapshot();
+    selected.additionalScripts = scripts;
     m_dirty = true;
     return true;
 }
@@ -3697,7 +3944,7 @@ bool EditorScene::SetSelectedScriptEnabled(bool enabled) {
     }
 
     Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
-    if (selected.locked || selected.scriptEnabled == enabled) {
+    if (selected.scriptEnabled == enabled) {
         return false;
     }
     // An enabled native-script component without a class cannot be constructed
@@ -4064,9 +4311,6 @@ bool EditorScene::SetSelectedScriptFields(const std::vector<ScriptField>& fields
     }
 
     Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
-    if (selected.locked) {
-        return false;
-    }
 
     PushUndoSnapshot();
     selected.scriptFields = fields;
@@ -4080,9 +4324,6 @@ bool EditorScene::AddSelectedScriptField() {
     }
 
     Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
-    if (selected.locked) {
-        return false;
-    }
 
     PushUndoSnapshot();
     ScriptField field;
@@ -4100,7 +4341,7 @@ bool EditorScene::SetSelectedScriptField(std::size_t index, const ScriptField& f
     }
 
     Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
-    if (selected.locked || index >= selected.scriptFields.size()) {
+    if (index >= selected.scriptFields.size()) {
         return false;
     }
 
@@ -4121,7 +4362,7 @@ bool EditorScene::RemoveSelectedScriptField(std::size_t index) {
     }
 
     Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
-    if (selected.locked || index >= selected.scriptFields.size()) {
+    if (index >= selected.scriptFields.size()) {
         return false;
     }
 
@@ -4394,6 +4635,9 @@ bool EditorScene::DuplicateSelected(const engine::Mesh & cube, const engine::Mes
     m_objects.back().animationWalkAt = selectedCopy.animationWalkAt;
     m_objects.back().animationRunAt = selectedCopy.animationRunAt;
     m_objects.back().animationEvents = selectedCopy.animationEvents;
+    m_objects.back().animationSources = selectedCopy.animationSources;
+    m_objects.back().modelAttachments = selectedCopy.modelAttachments;
+    m_objects.back().characterAssetPath = selectedCopy.characterAssetPath;
     m_objects.back().animationActionProfiles = selectedCopy.animationActionProfiles;
     m_objects.back().animationStates = selectedCopy.animationStates;
     m_objects.back().animationParameters = selectedCopy.animationParameters;
@@ -4444,6 +4688,7 @@ bool EditorScene::DuplicateSelected(const engine::Mesh & cube, const engine::Mes
     m_objects.back().scriptClassName = selectedCopy.scriptClassName;
     m_objects.back().scriptPath = selectedCopy.scriptPath;
     m_objects.back().scriptFields = selectedCopy.scriptFields;
+    m_objects.back().additionalScripts = selectedCopy.additionalScripts;
     m_objects.back().audioSourceEnabled = selectedCopy.audioSourceEnabled;
     m_objects.back().audioAssetPath = selectedCopy.audioAssetPath;
     m_objects.back().audioBus = selectedCopy.audioBus;
@@ -4544,6 +4789,7 @@ EditorScene::Snapshot EditorScene::CaptureSnapshot()
     snapshot.cameraPresets = m_cameraPresets;
     snapshot.cameraSequences = m_cameraSequences;
     snapshot.environment = m_environment;
+    snapshot.gameMode = m_gameMode;
 
     for (const Object& object : m_objects) {
         const Transform* transform = m_registry.TryGet<Transform>(object.entity);
@@ -4599,10 +4845,14 @@ void EditorScene::RestoreSnapshot(const Snapshot & snapshot, const engine::Mesh 
     m_cameraPresets = snapshot.cameraPresets;
     m_cameraSequences = snapshot.cameraSequences;
     m_environment = snapshot.environment;
+    m_gameMode = snapshot.gameMode;
 }
 
 void EditorScene::PushUndoSnapshot()
 {
+    if (m_undoSuppressed) {
+        return;
+    }
     m_undoStack.push_back(CaptureSnapshot());
     m_redoStack.clear();
 }
@@ -4622,6 +4872,8 @@ void EditorScene::Clear()
     m_joints.clear();
     m_cameraPresets.clear();
     m_cameraSequences.clear();
+    m_environment = Environment{};
+    m_gameMode = GameModeSettings{};
     m_undoStack.clear();
     m_redoStack.clear();
     m_selectedIndex = -1;

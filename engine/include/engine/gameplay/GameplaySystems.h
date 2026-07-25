@@ -24,9 +24,9 @@ struct ProjectileHit {
 // health drops to zero. Run once per frame before/after damage is applied.
 void UpdateHealth(ecs::Registry& registry);
 
-// Move every Projectile along its Transform, damage the first Health entity it
-// overlaps (skipping its owner), and destroy spent projectiles (hit or out of
-// range). Returns the strikes for the caller to react to (spawn particles, etc.).
+// Sweep every Projectile through the collider scene, damage the first living
+// Health collider it strikes (skipping its owner), and destroy it on any solid
+// hit or once out of range. Returns damaging strikes for VFX/audio/scoring.
 std::vector<ProjectileHit> UpdateProjectiles(ecs::Registry& registry, float dt);
 
 // Drive every Attachment: set the child's Transform from its parent's Transform,

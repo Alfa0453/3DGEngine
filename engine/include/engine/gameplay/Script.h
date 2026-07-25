@@ -33,6 +33,7 @@ struct ScriptContext {
     RuntimeAudioSystem* audio = nullptr;
     CameraShake* cameraShake = nullptr;
     CameraDirector* cameraDirector = nullptr;
+    const std::vector<struct ScriptField>* fields = nullptr;
 };
 
 struct ScriptInputState {
@@ -82,6 +83,8 @@ protected:
     const ecs::Transform* Transform() const;
     ecs::Entity FindObject(const std::string& name) const;
     ecs::Transform* FindTransform(const std::string& name);
+    bool SocketTransform(const std::string& name, glm::mat4* world) const;
+    bool SocketPosition(const std::string& name, glm::vec3* position) const;
     void DestroySelf();
     void Destroy(ecs::Entity entity);
     ecs::Entity SpawnEmpty(const std::string& name, const glm::vec3& position = glm::vec3(0.0f));
@@ -127,6 +130,9 @@ protected:
                                    float fadeIn = 0.1f,
                                    float fadeOut = 0.2f,
                                    float speed = 1.0f);
+    // Plays a standalone Action Clip attached to the character. The name is the
+    // Action Name authored in the Clip Editor, not a locomotion graph state.
+    bool PlayActionClip(const std::string& actionName);
     bool PlayAnimationProfile(const std::string& profileName);
     bool SetAnimationParameter(const std::string& name, float value);
     bool SetAnimationBool(const std::string& name, bool value);
@@ -273,7 +279,7 @@ private:
     int m_nextTimerId = 1;
 };
 
-struct NativeScriptComponent {
+struct NativeScriptSlot {
     bool enabled = true;
     bool created = false;
     bool missingFactory = false;
@@ -281,6 +287,10 @@ struct NativeScriptComponent {
     std::string sourcePath;
     std::vector<ScriptField> fields;
     std::unique_ptr<Script> instance;
+};
+
+struct NativeScriptComponent : NativeScriptSlot {
+    std::vector<NativeScriptSlot> additional;
 };
 
 class ScriptRegistry {

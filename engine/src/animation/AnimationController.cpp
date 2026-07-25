@@ -123,19 +123,31 @@ bool AnimationController::TestTransition(const Transition& transition) const {
         return false;
     }
 
-    const float value = Parameter(transition.parameter, 0.0f);
-
-    switch (transition.compare) {
-    case Transition::Compare::GreaterOrEqual:
-        return value >= transition.threshold;
-    case Transition::Compare::Less:
-        return value < transition.threshold;
-    case Transition::Compare::Equal:
-        return std::abs(value - transition.threshold) <= 0.0001f;
-    case Transition::Compare::NotEqual:
-        return std::abs(value - transition.threshold) > 0.0001f;
+    const auto matches = [&](const std::string& parameter, Transition::Compare compare,
+                             float threshold) {
+        const float value = Parameter(parameter, 0.0f);
+        switch (compare) {
+        case Transition::Compare::GreaterOrEqual: return value >= threshold;
+        case Transition::Compare::Less:           return value < threshold;
+        case Transition::Compare::Equal:          return std::abs(value - threshold) <= 0.0001f;
+        case Transition::Compare::NotEqual:       return std::abs(value - threshold) > 0.0001f;
+        }
+        return false;
+    };
+    const bool primary = matches(
+        transition.parameter, transition.compare, transition.threshold);
+    if (transition.additionalConditions.empty()) return primary;
+    if (transition.requireAllConditions) {
+        if (!primary) return false;
+        return std::all_of(transition.additionalConditions.begin(),
+            transition.additionalConditions.end(), [&](const Transition::Condition& condition) {
+                return matches(condition.parameter, condition.compare, condition.threshold);
+            });
     }
-    return false;
+    return primary || std::any_of(transition.additionalConditions.begin(),
+        transition.additionalConditions.end(), [&](const Transition::Condition& condition) {
+            return matches(condition.parameter, condition.compare, condition.threshold);
+        });
 }
 
 bool AnimationController::ExitTimeReached(const Transition& transition) const {
@@ -193,20 +205,14 @@ std::vector<AnimationController::TransitionDebugInfo> AnimationController::Trans
         row.canInterrupt = transition.canInterrupt;
         row.exitTimeReached = ExitTimeReached(transition);
         row.blockedByBlend = Blending() && !transition.canInterrupt;
-        switch (transition.compare) {
-        case Transition::Compare::GreaterOrEqual:
-            row.conditionMet = row.value >= transition.threshold;
-            break;
-        case Transition::Compare::Less:
-            row.conditionMet = row.value < transition.threshold;
-            break;
-        case Transition::Compare::Equal:
-            row.conditionMet = std::abs(row.value - transition.threshold) <= 0.0001f;
-            break;
-        case Transition::Compare::NotEqual:
-            row.conditionMet = std::abs(row.value - transition.threshold) > 0.0001f;
-            break;
-        }
+        // TestTransition also checks exit time; temporarily reflect the aggregate
+        // condition result separately so the debugger keeps its two status columns.
+        const bool exitReached = row.exitTimeReached;
+        row.conditionMet = exitReached ? TestTransition(transition) : [&] {
+            Transition withoutExit = transition;
+            withoutExit.exitTime = 0.0f;
+            return TestTransition(withoutExit);
+        }();
         row.eligible = (transition.from == -1 || transition.from == m_cur)
             && transition.to != m_cur
             && row.conditionMet
@@ -258,19 +264,26 @@ void AnimationController::Begin(int to, bool immediate, float fadeSeconds) {
 void AnimationController::Update(float dt) {
     if (m_cur < 0) return;
 
+    // Blend Spaces use a filtered copy of their inputs. State transitions below
+    // intentionally continue to use the unfiltered parameters.
+    UpdateBlendParameters(dt);
+
     // Parameter-driven transition.
     const Transition* transition = BestTransition();
     if (transition) {
         const int want = transition->to;
         const float fade = transition->fade;
-        std::string consumedTrigger;
-        if (m_triggers.find(transition->parameter) != m_triggers.end()) {
-            consumedTrigger = transition->parameter;
-        }
+        std::vector<std::string> consumedTriggers;
+        const auto rememberTrigger = [&](const std::string& parameter) {
+            if (m_triggers.find(parameter) != m_triggers.end())
+                consumedTriggers.push_back(parameter);
+        };
+        rememberTrigger(transition->parameter);
+        for (const Transition::Condition& condition : transition->additionalConditions)
+            rememberTrigger(condition.parameter);
         Begin(want, false, fade);
-        if (!consumedTrigger.empty()) {
-            ResetTriggerParameter(consumedTrigger);
-        }
+        for (const std::string& trigger : consumedTriggers)
+            ResetTriggerParameter(trigger);
     } else if (m_transitions.empty()) {
         int want = PickByParam();
         if (want != m_cur) Begin(want, false);
@@ -298,7 +311,46 @@ float AnimationController::CurrentBlendWeight() const {
     if (state.blendClip < 0 || state.blendParameter.empty()) return 0.0f;
     const float span = state.blendMax - state.blendMin;
     if (std::abs(span) <= 0.0001f) return 0.0f;
-    return std::clamp((Parameter(state.blendParameter) - state.blendMin) / span, 0.0f, 1.0f);
+    return std::clamp((BlendParameter(state.blendParameter) - state.blendMin) / span, 0.0f, 1.0f);
+}
+
+float AnimationController::BlendParameter(const std::string& name) const {
+    const auto smoothed = m_smoothedBlendParameters.find(name);
+    return smoothed != m_smoothedBlendParameters.end()
+        ? smoothed->second
+        : Parameter(name, 0.0f);
+}
+
+void AnimationController::UpdateBlendParameters(float dt) {
+    const float safeDt = std::max(dt, 0.0f);
+    const float response = std::max(blendSpaceSmoothing, 0.0f);
+    const float alpha = response > 0.0f
+        ? 1.0f - std::exp(-response * safeDt)
+        : 1.0f;
+
+    const auto update = [&](const std::string& name) {
+        if (name.empty()) return;
+        const float target = Parameter(name, 0.0f);
+        auto [current, inserted] = m_smoothedBlendParameters.emplace(name, target);
+        if (inserted) return;
+
+        float delta = target - current->second;
+        // Direction is authored in degrees. Interpolate across the -180/180 seam
+        // by the shortest route instead of spinning through the long arc.
+        if (name == "Direction") delta = std::remainder(delta, 360.0f);
+        current->second += delta * alpha;
+        if (name == "Direction") current->second = std::remainder(current->second, 360.0f);
+    };
+    const auto updateState = [&](int index) {
+        if (index < 0 || index >= static_cast<int>(m_states.size())) return;
+        const State& state = m_states[static_cast<std::size_t>(index)];
+        if (!state.blendSamples.empty() || state.blendClip >= 0) {
+            update(state.blendParameter);
+            if (state.blendSpace2D) update(state.blendParameterY);
+        }
+    };
+    updateState(m_cur);
+    updateState(m_prev);
 }
 
 AnimationController::BlendSpaceResult AnimationController::EvaluateBlendSpace(int stateIndex) const {
@@ -308,9 +360,9 @@ AnimationController::BlendSpaceResult AnimationController::EvaluateBlendSpace(in
     if (state.blendSamples.empty() || state.blendParameter.empty()) return result;
     result.synchronized = state.synchronizeBlendSpace;
 
-    const float value = Parameter(state.blendParameter, 0.0f);
+    const float value = BlendParameter(state.blendParameter);
     if (state.blendSpace2D && !state.blendParameterY.empty()) {
-        const float valueY = Parameter(state.blendParameterY, 0.0f);
+        const float valueY = BlendParameter(state.blendParameterY);
         struct Candidate { const State::BlendSample* sample; float distance; };
         std::vector<Candidate> candidates;
         candidates.reserve(state.blendSamples.size());

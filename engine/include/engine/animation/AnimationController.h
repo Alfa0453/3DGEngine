@@ -75,6 +75,11 @@ public:
             Equal = 2,
             NotEqual = 3
         };
+        struct Condition {
+            std::string parameter = "Speed";
+            Compare compare = Compare::GreaterOrEqual;
+            float threshold = 0.0f;
+        };
 
         int from = -1;
         int to = -1;
@@ -85,6 +90,8 @@ public:
         float exitTime = 0.0f; // normalized current-state time, 0 = no wait
         int priority = 0;      // higher values win when several transitions pass
         bool canInterrupt = false;
+        bool requireAllConditions = true;
+        std::vector<Condition> additionalConditions;
     };
 
     struct TransitionDebugInfo {
@@ -104,6 +111,10 @@ public:
     };
 
     float crossfade = 0.25f;     // seconds to blend between states
+    // Exponential response used only when sampling Blend Space parameters.
+    // Transition conditions continue to read the raw values, so gameplay remains
+    // responsive while the rendered pose eases between neighbouring samples.
+    float blendSpaceSmoothing = 9.0f;
 
     // Add a state; the first one added becomes current. Returns its index.
     int AddState(const State& s);
@@ -137,7 +148,11 @@ public:
     
     // --- Poser inputs ----------------------------------------------------
     bool  Blending()    const { return m_prev >= 0 && m_blend < 1.0f; }
-    float Blend()       const { return m_blend; }     // 0 = prev, 1 = current
+    float Blend() const {
+        // Smoothstep removes the hard velocity change at both ends of a state
+        // cross-fade without changing its authored duration.
+        return m_blend * m_blend * (3.0f - 2.0f * m_blend);
+    }                                               // 0 = prev, 1 = current
     int   CurrentState()const { return m_cur; }
     int   CurrentClip() const { return (m_cur  >= 0) ? m_states[static_cast<std::size_t>(m_cur)].clip  : -1; }
     int   PrevClip()    const { return (m_prev >= 0) ? m_states[static_cast<std::size_t>(m_prev)].clip : -1; }
@@ -156,6 +171,8 @@ public:
 
 private:
     BlendSpaceResult EvaluateBlendSpace(int stateIndex) const;
+    float BlendParameter(const std::string& name) const;
+    void UpdateBlendParameters(float dt);
     int  PickByParam() const;
     int  PickByTransition() const;
     bool TestTransition(const Transition& transition) const;
@@ -171,6 +188,7 @@ private:
     float m_blend = 1.0f;   // 1 = fully in current
     float m_param = 0.0f;
     std::unordered_map<std::string, float> m_parameters;
+    std::unordered_map<std::string, float> m_smoothedBlendParameters;
     std::vector<ParameterDefinition> m_parameterDefinitions;
     std::unordered_set<std::string> m_triggers;
 };

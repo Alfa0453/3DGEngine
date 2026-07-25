@@ -1441,7 +1441,8 @@ RaycastHit PhysicsWorld::SphereCast(ecs::Registry& reg,
                                     float radius,
                                     Entity ignored,
                                     std::uint32_t layerMask,
-                                    std::uint32_t queryLayer) const {
+                                    std::uint32_t queryLayer,
+                                    Entity alsoIgnored) const {
     RaycastHit result;
     const glm::vec3 travel = end - start;
     const float distance = glm::length(travel);
@@ -1453,7 +1454,7 @@ RaycastHit PhysicsWorld::SphereCast(ecs::Registry& reg,
     const float sweepRadius = std::max(radius, 0.0f);
 
     reg.view<Transform, Collider>().each([&](Entity entity, Transform& transform, Collider& collider) {
-        if (entity == ignored || collider.isTrigger) return;
+        if (entity == ignored || entity == alsoIgnored || collider.isTrigger) return;
         if ((collider.layer & layerMask) == 0u) return;    // filtered out by the query mask
         if (queryLayer != 0u && (collider.mask & queryLayer) == 0u) return;
 

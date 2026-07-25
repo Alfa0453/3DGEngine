@@ -254,7 +254,8 @@ SkinnedModel SkinnedModel::FromFile(const std::string& path) {
 
 std::size_t SkinnedModel::AddAnimationsFromFile(const std::string& path,
                                                 bool stripRootMotion,
-                                                const std::string& nameOverride) {
+                                                const std::string& nameOverride,
+                                                const std::string& sourceClipName) {
     Assimp::Importer importer;
     // Clip-only files need no mesh post-processing; keep the node tree intact.
     const aiScene* scene = importer.ReadFile(path, aiProcess_LimitBoneWeights);
@@ -268,9 +269,21 @@ std::size_t SkinnedModel::AddAnimationsFromFile(const std::string& path,
 
     std::size_t added = 0;
     for (unsigned ai = 0; ai < scene->mNumAnimations; ++ai) {
-        const std::string nm = (scene->mNumAnimations == 1) ? nameOverride : std::string();
-        m_animations.push_back(BuildClip(scene->mAnimations[ai], m_skeleton, boneIndex, stripRootMotion, nm));
+        const aiAnimation* source = scene->mAnimations[ai];
+        const std::string sourceName = source && source->mName.length > 0
+            ? std::string(source->mName.C_Str()) : std::string();
+        if (!sourceClipName.empty() && sourceName != sourceClipName) continue;
+        // A selected take is a single logical graph clip even when its source file
+        // contains other takes, so its authored alias must still be applied.
+        const std::string nm = !nameOverride.empty()
+            && (scene->mNumAnimations == 1 || !sourceClipName.empty())
+            ? nameOverride : std::string();
+        m_animations.push_back(BuildClip(source, m_skeleton, boneIndex, stripRootMotion, nm));
         ++added;
+    }
+    if (!sourceClipName.empty() && added == 0) {
+        throw std::runtime_error("SkinnedModel: animation take '" + sourceClipName
+            + "' was not found in '" + path + "'");
     }
     return added;
 }

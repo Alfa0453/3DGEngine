@@ -1,4 +1,5 @@
-# One generated gameplay-script class name per line.
+# Generated script registrations: `gameplay ClassName` or `bt ClassName`.
 # This file is maintained by the editor. Empty lines and comments are ignored.
-Coin
-GoalTracker
+gameplay PlayerAttack
+bt WizardCastSpell
+gameplay WizardLifeReactions

@@ -124,6 +124,7 @@ struct SkinnedModelAsset {
         int clipIndex = 0;
         float time = 0.0f;
         std::string name;
+        std::string clipName;
     };
 
     struct ActionProfile {
@@ -167,6 +168,11 @@ struct SkinnedModelAsset {
     };
 
     struct AnimationTransition {
+        struct Condition {
+            std::string parameter = "Speed";
+            int compare = 0;
+            float threshold = 0.0f;
+        };
         int from = -1;
         int to = -1;
         std::string parameter = "Speed";
@@ -176,6 +182,8 @@ struct SkinnedModelAsset {
         float exitTime = 0.0f;
         int priority = 0;
         bool canInterrupt = false;
+        bool requireAllConditions = true;
+        std::vector<Condition> additionalConditions;
     };
 
     std::string path;
@@ -196,11 +204,35 @@ struct SkinnedModelAsset {
     std::string runClipName;
     float walkAt = 0.15f;
     float runAt = 3.0f;
+    // A separate animation file merged onto the model by bone name (idle/walk/run
+    // exported as their own FBX). Without these the runtime model has no clips and the
+    // character falls back to the bind (T-)pose in Play.
+    struct AnimationSourceFile {
+        std::string path;
+        std::string clipName;
+        bool        stripRootMotion = false;
+        std::string sourceClipName;
+    };
+
+    // A static model socketed to a bone (weapon/shield). Resolved to an AnimatedModel
+    // attachment (model + bone index) at load time.
+    struct Attachment {
+        std::string path;
+        std::string boneName;
+        glm::vec3   position{0.0f};
+        glm::vec3   eulerDegrees{0.0f};
+        glm::vec3   scale{1.0f};
+        std::string materialPath;   // optional .3dgmat applied to the attachment model
+        std::string socketName;     // named gameplay point (path may be empty)
+    };
+
     std::vector<Notify> notifies;
     std::vector<ActionProfile> actionProfiles;
     std::vector<AnimationState> states;
     std::vector<AnimationParameter> parameters;
     std::vector<AnimationTransition> transitions;
+    std::vector<AnimationSourceFile> animationSources;
+    std::vector<Attachment> attachments;
 };
 
 struct MaterialAsset {

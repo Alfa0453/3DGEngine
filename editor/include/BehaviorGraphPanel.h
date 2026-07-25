@@ -38,6 +38,7 @@ private:
     void DrawBlackboard();
     void DrawCanvas();
     void DrawInspector();
+    void DrawScriptCreator(engine::ai::BtNodeType type, std::string& selectedClass);
     void RefreshSavedGraphs();
 
     bool CanLink(int parent, int child) const;   // rejects self/cycles/arity violations
@@ -49,6 +50,8 @@ private:
     std::string m_currentPath;
     std::string m_status;
     char        m_nameBuffer[128] = "behavior";
+    char        m_scriptNameBuffer[128]{};
+    std::string m_scriptCreateError;
 
     struct SavedGraph {
         std::string displayPath;
@@ -62,6 +65,7 @@ private:
     int   m_addType    = 0;    // BtNodeType index in the "Add" combo
     float m_scrollX    = 0.0f; // canvas pan
     float m_scrollY    = 0.0f;
+    float m_zoom       = 1.0f; // canvas scale, centred on the mouse wheel cursor
 
     // Pending "create node here" request from a pin-drop or right-click on empty space.
     int       m_pendingParent  = -1;   // node to attach the new child to (-1 = unlinked)

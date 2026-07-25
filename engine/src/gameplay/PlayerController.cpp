@@ -27,7 +27,7 @@ glm::vec3 PlayerController::LookDirection() const {
 }
 
 glm::vec3 PlayerController::EyePosition() const {
-    return body.position + glm::vec3(0.0f, eyeHeight, 0.0f);
+    return CapsulePosition() + glm::vec3(0.0f, eyeHeight, 0.0f);
 }
 
 glm::vec3 PlayerController::CameraTarget() const {
@@ -39,7 +39,9 @@ glm::vec3 PlayerController::CameraTarget() const {
 glm::vec3 PlayerController::CameraPosition() const {
     if (view == View::FirstPerson) return EyePosition();
     const glm::vec3 target = ThirdPersonAnchor();
-    const glm::vec3 authoredOffset = ThirdPersonOffset(std::max(camDistance, 0.0f));
+    const float authoredDistance =
+        view == View::Isometric ? isometricDistance : camDistance;
+    const glm::vec3 authoredOffset = ThirdPersonOffset(std::max(authoredDistance, 0.0f));
     const float authoredLength = glm::length(authoredOffset);
     const float distance = m_cameraArmInitialized ? m_currentCameraDistance : authoredLength;
     if (authoredLength <= 0.000001f) return target;
@@ -51,15 +53,14 @@ glm::mat4 PlayerController::ViewMatrix() const {
 }
 
 glm::quat PlayerController::Facing() const {
-    // Yaw-only orientation so an attached capsule/character mesh faces travel.
-    return glm::angleAxis(glm::radians(-m_yaw - 90.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+    // Yaw-only orientation for the character mesh. Uses the body facing yaw, which
+    // tracks the camera in CameraRelative mode and lags toward travel in
+    // MovementDirection mode (so the camera can orbit a still-facing character).
+    return glm::angleAxis(glm::radians(-m_facingYaw - 90.0f), glm::vec3(0.0f, 1.0f, 0.0f));
 }
 
 void PlayerController::Update(ecs::Registry& reg, const PlayerInput& in, float dt,
                               bool movementEnabled) {
-    // 1) View toggle (edge-triggered off the held state).
-    if (in.toggleView && !m_prevToggle) ToggleView();
-    m_prevToggle = in.toggleView;
     if (in.toggleShoulder && !m_prevShoulderToggle && view == View::ThirdPerson) {
         ToggleShoulder();
     }
@@ -78,8 +79,12 @@ void PlayerController::Update(ecs::Registry& reg, const PlayerInput& in, float d
         m_currentShoulderOffset += (desiredShoulder - m_currentShoulderOffset) * alpha;
     }
 
-    // 2) Mouse-look. dy is inverted so pushing the mouse up looks up.
-    if (m_lockOnTarget) {
+    // 2) Mouse-look. Isometric view keeps an authored fixed angle; the player
+    // moves relative to that angle but cannot orbit it accidentally.
+    if (view == View::Isometric) {
+        m_yaw = isometricYaw;
+        m_pitch = glm::clamp(isometricPitch, -89.0f, 89.0f);
+    } else if (m_lockOnTarget) {
         const glm::vec3 origin = ThirdPersonAnchor();
         const glm::vec3 delta = *m_lockOnTarget - origin;
         if (glm::dot(delta, delta) > 0.000001f) {
@@ -97,8 +102,10 @@ void PlayerController::Update(ecs::Registry& reg, const PlayerInput& in, float d
         m_yaw   += in.lookYaw   * lookSensitivity;
         m_pitch -= in.lookPitch * lookSensitivity;
     }
-    const float lo = (view == View::FirstPerson) ? fpMinPitch : tpMinPitch;
-    const float hi = (view == View::FirstPerson) ? fpMaxPitch : tpMaxPitch;
+    const float lo = (view == View::FirstPerson) ? fpMinPitch
+                   : (view == View::Isometric ? -89.0f : tpMinPitch);
+    const float hi = (view == View::FirstPerson) ? fpMaxPitch
+                   : (view == View::Isometric ? 89.0f : tpMaxPitch);
     m_pitch = std::clamp(m_pitch, lo, hi);
     if (m_yaw > 360.0f) m_yaw -= 360.0f; else if (m_yaw < -360.0f) m_yaw += 360.0f;
 
@@ -110,15 +117,60 @@ void PlayerController::Update(ecs::Registry& reg, const PlayerInput& in, float d
         wish = fwd * in.moveForward + right * in.moveRight;
     }
     const float wl = glm::length(wish);
-    if (wl > 1.0f) wish /= wl; 
+    if (wl > 1.0f) wish /= wl;
     const float speed = in.sprint ? runSpeed : walkSpeed;                     // no faster on diagonals
     const glm::vec3 wishVel = wish * speed;
+
+    // Body facing. CameraRelative: the mesh tracks the camera yaw (strafe style).
+    // MovementDirection: the mesh turns toward its travel direction while the camera
+    // orbits freely; it only rotates while moving, and holds its heading when idle.
+    if (!m_facingInitialized) { m_facingYaw = m_yaw; m_facingInitialized = true; }
+    const bool orientToMovement =
+        (facingMode == FacingMode::MovementDirection || view == View::Isometric)
+        && view != View::FirstPerson && !m_lockOnTarget;
+    bool hasFacingTarget = !orientToMovement;
+    float targetFacingYaw = m_yaw;
+    if (orientToMovement && wl > 0.1f) {
+        targetFacingYaw = glm::degrees(std::atan2(wish.z, wish.x));
+        hasFacingTarget = true;
+    }
+    if (hasFacingTarget) {
+        const float delta =
+            std::fmod(targetFacingYaw - m_facingYaw + 540.0f, 360.0f) - 180.0f;
+        const float response = std::max(turnSpeed, 0.0f);
+        const float alpha = response > 0.0f
+            ? 1.0f - std::exp(-response * safeDt)
+            : 1.0f;
+        m_facingYaw += delta * alpha;
+    }
 
     // 4) Jump before the sweep so the upward velocity is integrated this step.
     if (movementEnabled && in.jump) body.Jump(jumpSpeed);
 
-    // 5) Move the capsule (gravity + collide-and-slide handled inside).
+    // 5) Move the physical capsule (gravity + collide-and-slide handled inside).
+    // Step-up has to place the collision capsule immediately on the higher tread,
+    // but retain the old rendered height and release that offset gradually. This
+    // keeps collision authoritative while preventing the mesh and camera from
+    // inheriting a one-frame vertical pop.
+    const glm::vec3 preMovePosition = body.position;
+    const bool preMoveGrounded = body.grounded;
     body.Move(reg, wishVel, dt);
+    const float stepRise = body.position.y - preMovePosition.y;
+    if (preMoveGrounded && body.grounded
+        && stepRise > 0.01f
+        && stepRise <= std::max(body.stepHeight, 0.0f) + 0.03f) {
+        const glm::vec3 requestedPosition =
+            preMovePosition + glm::vec3(wishVel.x * safeDt, 0.0f, wishVel.z * safeDt);
+        m_stepVisualOffset += requestedPosition - body.position;
+        const float maxLag = std::max(body.radius + body.stepHeight * 2.0f, 0.25f);
+        const float lagLength = glm::length(m_stepVisualOffset);
+        if (lagLength > maxLag) m_stepVisualOffset *= maxLag / lagLength;
+    }
+    const float stairResponse = std::max(stairSmoothingSpeed, 0.0f);
+    const float stairAlpha = stairResponse > 0.0f
+        ? 1.0f - std::exp(-stairResponse * safeDt)
+        : 1.0f;
+    m_stepVisualOffset += (glm::vec3(0.0f) - m_stepVisualOffset) * stairAlpha;
 
     // 6) Resolve the third-person spring arm. Obstructions retract immediately so
     // the camera never spends a frame inside a wall; returning to the authored
@@ -126,7 +178,10 @@ void PlayerController::Update(ecs::Registry& reg, const PlayerInput& in, float d
     if (view == View::FirstPerson) {
         m_cameraArmInitialized = false;
     } else {
-        const glm::vec3 authoredOffset = ThirdPersonOffset(std::max(camDistance, 0.0f));
+        const float configuredDistance =
+            view == View::Isometric ? isometricDistance : camDistance;
+        const glm::vec3 authoredOffset =
+            ThirdPersonOffset(std::max(configuredDistance, 0.0f));
         const float authoredDistance = glm::length(authoredOffset);
         if (!m_cameraArmInitialized) {
             m_currentCameraDistance = authoredDistance;
@@ -170,6 +225,6 @@ glm::vec3 PlayerController::ThirdPersonOffset(float distance) const {
 }
 
 glm::vec3 PlayerController::ThirdPersonAnchor() const {
-    return body.position + glm::vec3(0.0f, camTargetHeight, 0.0f);
+    return CapsulePosition() + glm::vec3(0.0f, camTargetHeight, 0.0f);
 }
 }

@@ -6,7 +6,10 @@
 #include <glm/glm.hpp>
 
 #include <string>
+#include <memory>
 #include <vector>
+
+class EditorLineRenderer;
 
 namespace engine {
 class Camera;
@@ -22,6 +25,9 @@ namespace ai { struct NavGrid; class NavMesh; }
 
 class EditorViewport {
 public:
+    EditorViewport();
+    ~EditorViewport();
+
     struct PhysicsEventGuide {
         glm::vec3 a{0.0f};
         glm::vec3 b{0.0f};
@@ -74,10 +80,7 @@ public:
                        const engine::Mesh& cube,
                        const glm::mat4& viewProj) const;
 
-    void DrawPhysicsColliderGuides(engine::Renderer& renderer,
-                                   engine::Shader& shader,
-                                   const engine::Mesh& cube,
-                                   const EditorScene& scene,
+    void DrawPhysicsColliderGuides(const EditorScene& scene,
                                    const glm::mat4& viewProj,
                                    bool selectedOnly) const;
 
@@ -136,10 +139,7 @@ public:
                                const EditorScene& scene,
                                const glm::mat4& viewProj) const;
 
-    void DrawParticleSystemGuides(engine::Renderer& renderer,
-                                  engine::Shader& shader,
-                                  const engine::Mesh& cube,
-                                  const EditorScene& scene,
+    void DrawParticleSystemGuides(const EditorScene& scene,
                                   const glm::mat4& viewProj,
                                   bool selectedOnly,
                                   bool showShapes,
@@ -239,4 +239,7 @@ public:
                                 const glm::mat4& viewProj,
                                 int width,
                                 int height) const;
+
+private:
+    mutable std::unique_ptr<EditorLineRenderer> m_colliderLines;
 };

@@ -1,9 +1,13 @@
 #include "CharacterEditorPanel.h"
 
+#include "AnimationClipAsset.h"
+#include "AnimationGraphAsset.h"
 #include "AnimationGraphBuilder.h"
 
+#include <engine/animation/AnimatedModel.h>
 #include <engine/animation/Animator.h>
 #include <engine/graphics/Camera.h>
+#include <engine/graphics/Model.h>
 #include <engine/graphics/Primitives.h>
 #include <engine/graphics/Shader.h>
 #include <engine/graphics/SkinnedModel.h>
@@ -34,6 +38,14 @@ std::string Lower(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(),
         [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     return value;
+}
+
+std::string StoredScriptPath(const std::filesystem::path& absolutePath) {
+    std::error_code ec;
+    const std::filesystem::path relative = std::filesystem::relative(
+        absolutePath, std::filesystem::current_path(ec), ec);
+    return ec ? absolutePath.lexically_normal().generic_string()
+              : relative.lexically_normal().generic_string();
 }
 
 struct CharacterCollisionChannel {
@@ -166,6 +178,44 @@ void main(){FragColor=vec4(uColor,1.0);}
         engine::ShaderCompileReport report;
         m_colliderGuideShader = engine::Shader::TryCompile(vertex, fragment, report);
     }
+    if (!m_attachmentShader) {
+        static const char* vertex = R"GLSL(
+#version 330 core
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec3 aNormal;
+layout(location=2) in vec2 aUV;
+uniform mat4 uModel;
+uniform mat4 uViewProj;
+uniform mat3 uNormalMat;
+out vec3 vWorld; out vec3 vNormal; out vec2 vUV;
+void main(){ vWorld=vec3(uModel*vec4(aPos,1.0)); vNormal=uNormalMat*aNormal; vUV=aUV;
+             gl_Position=uViewProj*vec4(vWorld,1.0); }
+)GLSL";
+        static const char* fragment = R"GLSL(
+#version 330 core
+in vec3 vWorld; in vec3 vNormal; in vec2 vUV;
+uniform vec3 uColor; uniform vec3 uSpecular; uniform vec3 uEmissive; uniform float uShininess;
+uniform int uHasDiffuse; uniform sampler2D uDiffuseTex;
+uniform vec3 uLightPos; uniform vec3 uLightColor; uniform vec3 uViewPos;
+out vec4 FragColor;
+void main(){
+    vec3 base = uColor;
+    if (uHasDiffuse == 1) base *= texture(uDiffuseTex, vUV).rgb;
+    vec3 N = normalize(vNormal);
+    vec3 L = normalize(uLightPos - vWorld);
+    vec3 V = normalize(uViewPos - vWorld);
+    vec3 H = normalize(L + V);
+    float diff = max(dot(N, L), 0.0);
+    float spec = diff > 0.0 ? pow(max(dot(N, H), 0.0), max(uShininess, 1.0)) : 0.0;
+    vec3 color = base * (0.28 + diff * uLightColor) + uSpecular * spec + uEmissive;
+    color = color / (color + vec3(1.0));
+    color = pow(color, vec3(1.0 / 2.2));
+    FragColor = vec4(color, 1.0);
+}
+)GLSL";
+        engine::ShaderCompileReport report;
+        m_attachmentShader = engine::Shader::TryCompile(vertex, fragment, report);
+    }
 
     // Reload the preview model when the model OR its merged animation sources change.
     std::string animSignature;
@@ -215,6 +265,8 @@ void main(){FragColor=vec4(uColor,1.0);}
     glClearColor(0.055f, 0.070f, 0.095f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
+    m_previewSocketWorld.clear();
+    m_previewSocketParentWorld.clear();
     if (m_previewModel) {
         const auto& clips = m_previewModel->Animations();
         if (!clips.empty() && !m_asset.animationStates.empty()) {
@@ -335,16 +387,101 @@ void main(){FragColor=vec4(uColor,1.0);}
         engine::Camera camera(glm::vec3(0.0f, 0.0f, 2.5f));
         camera.LookAt(glm::vec3(0.0f));
         const float aspect = static_cast<float>(width) / static_cast<float>(height);
+
+        // Reflect an assigned .3dgmat in the preview: tint the base colour and, if the
+        // material has an albedo map, show it. Cached, so this is cheap after first load.
+        glm::vec3 materialTint(1.0f);
+        const engine::Texture* materialAlbedo = nullptr;
+        if (!m_asset.materialAssetPath.empty()
+            && std::filesystem::path(m_asset.materialAssetPath).extension() == ".3dgmat") {
+            std::string materialError;
+            if (const engine::RuntimeMaterialAsset* material =
+                    m_previewAssets.LoadMaterial(m_asset.materialAssetPath, &materialError)) {
+                materialTint = material->material.albedo;
+                if (!material->albedoMapPath.empty()) {
+                    materialAlbedo = m_previewAssets.LoadTexture(material->albedoMapPath, &materialError);
+                }
+            }
+        }
+
         m_previewRenderer->Draw(*m_previewModel, m_previewPose, model, camera,
             aspect,
             glm::normalize(glm::vec3(0.45f, -1.0f, -0.35f)),
-            glm::vec3(1.0f, 0.96f, 0.90f), glm::vec3(0.16f));
+            glm::vec3(1.0f, 0.96f, 0.90f), glm::vec3(0.16f),
+            materialTint, materialAlbedo);
 
         // Cache the transforms so Draw() can project the gizmo handles onto the image.
         m_previewViewProj = camera.ProjectionMatrix(aspect) * camera.ViewMatrix();
         m_previewModelMatrix = model;
         m_previewGizmoFrame = frame;
         m_previewModelCenter = m_previewModel->Center();
+
+        // Cache every animated socket transform for preview markers, selection and the
+        // socket gizmo. This is the same model * bone * bind * offset chain used by
+        // attachments and by SocketPosition() at runtime.
+        m_previewSocketWorld.clear();
+        m_previewSocketParentWorld.clear();
+        m_previewSocketWorld.reserve(m_asset.sockets.size());
+        m_previewSocketParentWorld.reserve(m_asset.sockets.size());
+        const engine::Skeleton& previewSkeleton = m_previewModel->GetSkeleton();
+        for (const CharacterSocket& socket : m_asset.sockets) {
+            glm::mat4 parent = model;
+            const int bone = previewSkeleton.Find(socket.boneName);
+            if (bone >= 0 && bone < static_cast<int>(m_previewPose.size())) {
+                const glm::mat4 boneBind =
+                    glm::inverse(previewSkeleton.bones[static_cast<std::size_t>(bone)].offset);
+                parent *= m_previewPose[static_cast<std::size_t>(bone)] * boneBind;
+            }
+            m_previewSocketParentWorld.push_back(parent);
+            m_previewSocketWorld.push_back(parent * engine::MakeAttachmentOffset(
+                socket.position, socket.eulerDegrees, socket.scale));
+        }
+
+        // Socketed attachments (weapons/props): draw each static model at its bone.
+        if (!m_asset.attachments.empty() && m_attachmentShader) {
+            engine::AnimatedModel temp;
+            temp.pose = m_previewPose;
+            const engine::Skeleton& skel = m_previewModel->GetSkeleton();
+            for (const CharacterAttachment& a : m_asset.attachments) {
+                if (a.modelPath.empty()) continue;
+                const CharacterSocket* sock = nullptr;
+                for (const CharacterSocket& s : m_asset.sockets) {
+                    if (s.name == a.socketName) { sock = &s; break; }
+                }
+                if (!sock) continue;
+                std::string attachError;
+                if (const engine::Model* attachModel =
+                        m_previewAssets.LoadModel(a.modelPath, &attachError)) {
+                    engine::ModelAttachment r;
+                    r.model = attachModel;
+                    r.bone = skel.Find(sock->boneName);
+                    r.boneBind = r.bone >= 0
+                        ? glm::inverse(skel.bones[static_cast<std::size_t>(r.bone)].offset)
+                        : glm::mat4(1.0f);
+                    r.localOffset = engine::MakeAttachmentOffset(sock->position, sock->eulerDegrees, sock->scale);
+                    if (!a.materialPath.empty()) {
+                        std::string matError;
+                        if (const engine::RuntimeMaterialAsset* mat =
+                                m_previewAssets.LoadMaterial(a.materialPath, &matError)) {
+                            r.tint = mat->material.albedo;
+                            if (!mat->albedoMapPath.empty()) {
+                                r.albedoOverride = m_previewAssets.LoadTexture(mat->albedoMapPath, &matError);
+                            }
+                        }
+                    }
+                    temp.attachments.push_back(r);
+                }
+            }
+            if (!temp.attachments.empty()) {
+                glEnable(GL_DEPTH_TEST);
+                m_attachmentShader->Bind();
+                m_attachmentShader->SetMat4("uViewProj", m_previewViewProj);
+                m_attachmentShader->SetVec3("uLightPos", camera.Position() + glm::vec3(2.0f, 4.0f, 3.0f));
+                m_attachmentShader->SetVec3("uLightColor", glm::vec3(1.0f));
+                m_attachmentShader->SetVec3("uViewPos", camera.Position());
+                engine::DrawAnimatedModelAttachments(temp, model, *m_attachmentShader);
+            }
+        }
 
         if (m_showColliderGuide && m_asset.colliderEnabled && m_colliderGuideShader) {
             if (m_colliderGuideDirty || !m_colliderGuideMesh) RebuildColliderGuide();
@@ -405,35 +542,62 @@ void CharacterEditorPanel::SyncBuffers() {
     Copy(m_pathBuffer, m_path); Copy(m_nameBuffer, m_asset.name);
     Copy(m_modelBuffer, m_asset.modelAssetPath); Copy(m_materialBuffer, m_asset.materialAssetPath);
     Copy(m_idleBuffer, m_asset.idleClipName); Copy(m_walkBuffer, m_asset.walkClipName); Copy(m_runBuffer, m_asset.runClipName);
-    Copy(m_behaviorBuffer, m_asset.behaviorTreeAsset); Copy(m_scriptClassBuffer, m_asset.scriptClassName);
+    Copy(m_scriptClassBuffer, m_asset.scriptClassName);
     Copy(m_scriptPathBuffer, m_asset.scriptPath);
 }
 
 void CharacterEditorPanel::RefreshAssetChoices(const std::string& assetRoot) {
     m_modelChoices.clear();
     m_materialChoices.clear();
+    m_clipChoices.clear();
+    m_graphChoices.clear();
+    m_behaviorChoices.clear();
+    m_scriptChoices.clear();
     m_scannedAssetRoot = assetRoot;
     std::error_code ec;
     const std::filesystem::path root(assetRoot);
     if (!std::filesystem::exists(root, ec)) return;
-    for (std::filesystem::recursive_directory_iterator it(root, ec), end;
-         it != end && !ec; it.increment(ec)) {
-        if (!it->is_regular_file(ec)) continue;
-        const std::filesystem::path& file = it->path();
-        const std::string extension = Lower(file.extension().string());
-        AssetChoice choice{file.generic_string(), file.filename().string()};
-        if (extension == ".fbx" || extension == ".gltf" || extension == ".glb"
-            || extension == ".dae") {
-            m_modelChoices.push_back(std::move(choice));
-        } else if (extension == ".3dgmat") {
-            m_materialChoices.push_back(std::move(choice));
+    // Skip unreadable folders instead of aborting the whole scan, and use a separate
+    // error_code for the per-entry file test so one bad entry can't truncate the list
+    // (which would silently drop saved .3dgmat materials from the picker).
+    std::filesystem::recursive_directory_iterator it(
+        root, std::filesystem::directory_options::skip_permission_denied, ec), end;
+    while (!ec && it != end) {
+        std::error_code fileEc;
+        if (it->is_regular_file(fileEc)) {
+            const std::filesystem::path& file = it->path();
+            const std::string extension = Lower(file.extension().string());
+            AssetChoice choice{file.generic_string(), file.filename().string()};
+            if (extension == ".fbx" || extension == ".gltf" || extension == ".glb"
+                || extension == ".dae" || extension == ".obj") {
+                m_modelChoices.push_back(std::move(choice));
+            } else if (extension == ".3dgmat") {
+                m_materialChoices.push_back(std::move(choice));
+            } else if (extension == ".3dgclip") {
+                m_clipChoices.push_back(std::move(choice));
+            } else if (extension == ".3dggraph") {
+                m_graphChoices.push_back(std::move(choice));
+            } else if (extension == ".btgraph") {
+                m_behaviorChoices.push_back(std::move(choice));
+            } else if (extension == ".h"
+                       && Lower(file.generic_string()).find("/scripts/")
+                              != std::string::npos) {
+                choice.displayName = file.stem().string();
+                choice.path = StoredScriptPath(file);
+                m_scriptChoices.push_back(std::move(choice));
+            }
         }
+        it.increment(ec);
     }
     const auto byName = [](const AssetChoice& a, const AssetChoice& b) {
         return Lower(a.displayName) < Lower(b.displayName);
     };
     std::sort(m_modelChoices.begin(), m_modelChoices.end(), byName);
     std::sort(m_materialChoices.begin(), m_materialChoices.end(), byName);
+    std::sort(m_clipChoices.begin(), m_clipChoices.end(), byName);
+    std::sort(m_graphChoices.begin(), m_graphChoices.end(), byName);
+    std::sort(m_behaviorChoices.begin(), m_behaviorChoices.end(), byName);
+    std::sort(m_scriptChoices.begin(), m_scriptChoices.end(), byName);
 }
 
 void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot, bool* open,
@@ -444,6 +608,8 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
         std::string error;
         if (m_asset.Load(m_pendingOpen, &error)) { m_path = m_pendingOpen; m_dirty = false; if (message) *message = "Opened character: " + m_path; }
         else if (message) *message = error;
+        m_selectedSocket = -1;
+        m_selectedAttachment = -1;
         m_pendingOpen.clear(); SyncBuffers(); ResetPreviewModel();
     }
     if (m_path.empty()) {
@@ -452,9 +618,22 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
     }
     if (!ImGui::Begin("Character Editor", open, ImGuiWindowFlags_MenuBar)) { ImGui::End(); return; }
     if (ImGui::BeginMenuBar()) {
-        if (ImGui::MenuItem("New")) { m_asset = {}; m_path.clear(); m_dirty = false; SyncBuffers(); ResetPreviewModel(); }
+        if (ImGui::MenuItem("New")) {
+            m_asset = {};
+            m_path.clear();
+            m_dirty = false;
+            m_selectedSocket = -1;
+            m_selectedAttachment = -1;
+            SyncBuffers();
+            ResetPreviewModel();
+        }
         if (ImGui::MenuItem("Capture Selected", nullptr, false, scene.SelectedObject() != nullptr)) {
-            m_asset.Capture(*scene.SelectedObject()); m_dirty = true; SyncBuffers(); ResetPreviewModel();
+            m_asset.Capture(*scene.SelectedObject());
+            m_dirty = true;
+            m_selectedSocket = -1;
+            m_selectedAttachment = -1;
+            SyncBuffers();
+            ResetPreviewModel();
         }
         if (ImGui::MenuItem("Apply to Selected", nullptr, false, scene.SelectedObject() != nullptr)) {
             if (m_asset.Apply(scene) && message) *message = "Applied character setup to selected object";
@@ -477,7 +656,10 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
     const float leftWidth = 175.0f, rightWidth = 330.0f;
     ImGui::BeginChild("CharacterComponents", ImVec2(leftWidth, 0), true);
     ImGui::TextDisabled("COMPONENTS");
-    const char* components[] = { "Character", "Mesh", "Collision", "Movement", "Animation", "Gameplay", "AI", "Script" };
+    const char* components[] = {
+        "Character", "Mesh", "Collision", "Movement + Camera",
+        "Animation", "Gameplay", "AI", "Script"
+    };
     for (int i = 0; i < 8; ++i) if (ImGui::Selectable(components[i], m_component == i)) m_component = i;
     ImGui::EndChild(); ImGui::SameLine();
 
@@ -508,15 +690,77 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
                          imgMin.y + (1.0f - (ndc.y * 0.5f + 0.5f)) * imgH);
             return true;
         };
-        const glm::vec3 pivotWorld =
-            glm::vec3(m_previewModelMatrix * glm::vec4(m_previewModelCenter, 1.0f));
+        if (m_selectedSocket >= static_cast<int>(m_asset.sockets.size())) {
+            m_selectedSocket = -1;
+            m_selectedAttachment = -1;
+        }
+        const bool socketSelected = m_selectedSocket >= 0
+            && m_selectedSocket < static_cast<int>(m_previewSocketWorld.size());
+        const glm::vec3 pivotWorld = socketSelected
+            ? glm::vec3(m_previewSocketWorld[static_cast<std::size_t>(m_selectedSocket)][3])
+            : glm::vec3(m_previewModelMatrix * glm::vec4(m_previewModelCenter, 1.0f));
         ImVec2 pivotPx;
         if (project(pivotWorld, pivotPx)) {
-            const glm::mat3 frameAxes(m_previewGizmoFrame);
+            glm::mat3 frameAxes(m_previewGizmoFrame);
+            if (socketSelected) {
+                const glm::mat4& axisFrame = m_gizmoMode == 0
+                    ? m_previewSocketParentWorld[static_cast<std::size_t>(m_selectedSocket)]
+                    : m_previewSocketWorld[static_cast<std::size_t>(m_selectedSocket)];
+                frameAxes = glm::mat3(axisFrame);
+                if (m_gizmoMode != 0) {
+                    for (int axis = 0; axis < 3; ++axis) {
+                        const float length = glm::length(frameAxes[axis]);
+                        if (length > 1e-5f) frameAxes[axis] /= length;
+                    }
+                }
+            }
             const ImU32 axisColors[3] = {
                 IM_COL32(232, 68, 68, 255), IM_COL32(72, 210, 72, 255), IM_COL32(70, 120, 240, 255) };
             const float handleLen = 46.0f;
             ImDrawList* dl = ImGui::GetWindowDrawList();
+
+            // Socket markers are always visible. Clicking a marker selects the socket;
+            // attachments share their socket, so this is also a lightweight prop picker.
+            int clickedSocket = -1;
+            float closestMarker = 11.0f;
+            const ImVec2 mouse = ImGui::GetIO().MousePos;
+            for (std::size_t i = 0; i < m_previewSocketWorld.size(); ++i) {
+                ImVec2 marker;
+                if (!project(glm::vec3(m_previewSocketWorld[i][3]), marker)) continue;
+                const bool selected = static_cast<int>(i) == m_selectedSocket;
+                const ImU32 markerColor = selected
+                    ? IM_COL32(255, 190, 45, 255) : IM_COL32(75, 225, 235, 220);
+                dl->AddCircle(marker, selected ? 7.0f : 5.0f, markerColor, 16,
+                              selected ? 2.5f : 2.0f);
+                dl->AddLine(ImVec2(marker.x - 4.0f, marker.y),
+                            ImVec2(marker.x + 4.0f, marker.y), markerColor, 1.5f);
+                dl->AddLine(ImVec2(marker.x, marker.y - 4.0f),
+                            ImVec2(marker.x, marker.y + 4.0f), markerColor, 1.5f);
+                if (!m_gizmoDragging && imageHovered
+                    && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                    const float dx = mouse.x - marker.x;
+                    const float dy = mouse.y - marker.y;
+                    const float distance = std::sqrt(dx * dx + dy * dy);
+                    if (distance < closestMarker) {
+                        closestMarker = distance;
+                        clickedSocket = static_cast<int>(i);
+                    }
+                }
+            }
+            if (clickedSocket >= 0) {
+                m_selectedSocket = clickedSocket;
+                m_selectedAttachment = -1;
+                for (std::size_t i = 0; i < m_asset.attachments.size(); ++i) {
+                    if (m_asset.attachments[i].socketName
+                        == m_asset.sockets[static_cast<std::size_t>(clickedSocket)].name) {
+                        m_selectedAttachment = static_cast<int>(i);
+                        break;
+                    }
+                }
+                m_component = 1;
+                gizmoConsumedMouse = true;
+            }
+
             ImVec2 tipPx[3];
             ImVec2 dirPx[3];
             float pixelsPerUnit[3] = { 1.0f, 1.0f, 1.0f };
@@ -550,7 +794,7 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
             // Forward reference arrow (object-local -Z, the gameplay "front"). Rotate the
             // model so its face points along this cyan arrow and it will face forward in
             // the scene.
-            {
+            if (!socketSelected) {
                 const glm::vec3 fwdWorld = glm::mat3(m_previewGizmoFrame) * glm::vec3(0.0f, 0.0f, -1.0f);
                 ImVec2 fwdEnd;
                 if (project(pivotWorld + fwdWorld, fwdEnd)) {
@@ -581,8 +825,8 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
                 const float dx = p.x - (a.x + t * vx), dy = p.y - (a.y + t * vy);
                 return std::sqrt(dx * dx + dy * dy);
             };
-            const ImVec2 mouse = ImGui::GetIO().MousePos;
-            if (!m_gizmoDragging && imageHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            if (!gizmoConsumedMouse && !m_gizmoDragging && imageHovered
+                && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                 int best = -1; float bestDist = 9.0f;   // pixel pick threshold
                 for (int a = 0; a < 3; ++a) {
                     const float d = distToSegment(mouse, pivotPx, tipPx[a]);
@@ -595,12 +839,24 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
                 const int a = m_activeGizmoAxis;
                 const ImVec2 d = ImGui::GetIO().MouseDelta;
                 const float along = d.x * dirPx[a].x + d.y * dirPx[a].y;   // px moved along the axis
-                if (m_gizmoMode == 0)
+                if (socketSelected) {
+                    CharacterSocket& socket =
+                        m_asset.sockets[static_cast<std::size_t>(m_selectedSocket)];
+                    if (m_gizmoMode == 0)
+                        socket.position[a] += along / pixelsPerUnit[a];
+                    else if (m_gizmoMode == 1)
+                        socket.eulerDegrees[a] += along * 0.5f;
+                    else
+                        socket.scale[a] = std::max(
+                            0.001f, socket.scale[a] + along * 0.01f);
+                } else if (m_gizmoMode == 0) {
                     m_asset.modelOffsetPosition[a] += along / pixelsPerUnit[a];
-                else if (m_gizmoMode == 1)
+                } else if (m_gizmoMode == 1) {
                     m_asset.modelOrientationEuler[a] += along * 0.5f;
-                else
-                    m_asset.modelOffsetScale[a] = std::max(0.001f, m_asset.modelOffsetScale[a] + along * 0.01f);
+                } else {
+                    m_asset.modelOffsetScale[a] = std::max(
+                        0.001f, m_asset.modelOffsetScale[a] + along * 0.01f);
+                }
                 m_dirty = true;
             }
         }
@@ -610,7 +866,9 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
     }
 
     if (imageHovered && !gizmoConsumedMouse && !m_gizmoDragging) {
-        ImGui::SetTooltip("Left-drag to orbit. Wheel to zoom. Drag the coloured handles to transform.");
+        ImGui::SetTooltip(
+            "Click a socket marker to select it. Left-drag empty space to orbit. "
+            "Wheel to zoom. Drag the coloured handles to transform.");
         if (ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
             const ImVec2 drag = ImGui::GetIO().MouseDelta;
             m_previewYaw += drag.x * 0.45f;
@@ -634,6 +892,22 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
             ImGui::TextColored(ImVec4(1.0f, .72f, .25f, 1.0f),
                 "Bind pose - capture or create an Animation Graph.");
         }
+    }
+    if (m_selectedSocket >= 0
+        && m_selectedSocket < static_cast<int>(m_asset.sockets.size())) {
+        const CharacterSocket& socket =
+            m_asset.sockets[static_cast<std::size_t>(m_selectedSocket)];
+        ImGui::TextColored(ImVec4(1.0f, .72f, .20f, 1.0f),
+                           "Selected socket: %s", socket.name.c_str());
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Select Character")) {
+            m_selectedSocket = -1;
+            m_selectedAttachment = -1;
+            m_gizmoDragging = false;
+            m_activeGizmoAxis = -1;
+        }
+    } else {
+        ImGui::TextDisabled("Selected: Character");
     }
     if (ImGui::Button(m_previewPlaying ? "Pause" : "Play")) m_previewPlaying = !m_previewPlaying;
     ImGui::SameLine();
@@ -719,6 +993,132 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
         }
         ImGui::TextDisabled("Drag the coloured handles in the preview, or edit the fields.");
         if (transformChanged) { changed = true; m_dirty = true; }
+
+        // Sockets: named mount points (bone + offset). You tune the socket transform,
+        // never the bone, so the skeleton is never disturbed.
+        ImGui::SeparatorText("Sockets (mount points)");
+        ImGui::TextDisabled("A socket = a bone + an offset. Move/rotate/scale the socket freely.");
+        int removeSocket = -1;
+        for (std::size_t i = 0; i < m_asset.sockets.size(); ++i) {
+            auto& sock = m_asset.sockets[i];
+            ImGui::PushID(12000 + static_cast<int>(i));
+            const std::string socketLabel = "Socket: "
+                + (sock.name.empty() ? std::string("(unnamed)") : sock.name);
+            if (ImGui::Selectable(socketLabel.c_str(),
+                                  m_selectedSocket == static_cast<int>(i))) {
+                m_selectedSocket = static_cast<int>(i);
+                m_selectedAttachment = -1;
+                m_gizmoDragging = false;
+                m_activeGizmoAxis = -1;
+            }
+            std::array<char, 96> nameBuf{}; Copy(nameBuf, sock.name);
+            ImGui::SetNextItemWidth(150.0f);
+            if (ImGui::InputText("Name", nameBuf.data(), nameBuf.size())) { sock.name = nameBuf.data(); changed = true; }
+            const char* bonePreview = sock.boneName.empty() ? "(model origin)" : sock.boneName.c_str();
+            ImGui::SetNextItemWidth(-1.0f);
+            if (ImGui::BeginCombo("Bone", bonePreview)) {
+                if (ImGui::Selectable("(model origin)", sock.boneName.empty())) { sock.boneName.clear(); changed = true; }
+                if (m_previewModel) {
+                    for (const engine::Bone& b : m_previewModel->GetSkeleton().bones) {
+                        if (ImGui::Selectable(b.name.c_str(), sock.boneName == b.name)) {
+                            sock.boneName = b.name; changed = true;
+                        }
+                    }
+                } else {
+                    ImGui::TextDisabled("Load a skeletal model to list its bones.");
+                }
+                ImGui::EndCombo();
+            }
+            changed |= ImGui::DragFloat3("Pos##sock", &sock.position.x, 0.01f, -100.0f, 100.0f);
+            changed |= ImGui::DragFloat3("Rot##sock", &sock.eulerDegrees.x, 0.5f, -180.0f, 180.0f);
+            changed |= ImGui::DragFloat3("Scale##sock", &sock.scale.x, 0.01f, 0.001f, 100.0f);
+            if (ImGui::SmallButton("Remove Socket")) removeSocket = static_cast<int>(i);
+            ImGui::Separator();
+            ImGui::PopID();
+        }
+        if (removeSocket >= 0) {
+            m_asset.sockets.erase(m_asset.sockets.begin() + removeSocket);
+            if (m_selectedSocket == removeSocket) {
+                m_selectedSocket = -1;
+                m_selectedAttachment = -1;
+            } else if (m_selectedSocket > removeSocket) {
+                --m_selectedSocket;
+            }
+            changed = true;
+        }
+        if (ImGui::Button("Add Socket")) {
+            CharacterSocket s;
+            s.name = "Socket" + std::to_string(m_asset.sockets.size() + 1);
+            m_asset.sockets.push_back(std::move(s));
+            m_selectedSocket = static_cast<int>(m_asset.sockets.size() - 1);
+            m_selectedAttachment = -1;
+            changed = true;
+        }
+
+        ImGui::SeparatorText("Attachments (weapon / prop)");
+        ImGui::TextDisabled("Mount a static model to a socket; it follows the animation.");
+        int removeAttachment = -1;
+        for (std::size_t i = 0; i < m_asset.attachments.size(); ++i) {
+            auto& att = m_asset.attachments[i];
+            ImGui::PushID(11000 + static_cast<int>(i));
+            const std::string attachmentName = att.modelPath.empty()
+                ? std::string("(choose model)")
+                : std::filesystem::path(att.modelPath).filename().string();
+            if (ImGui::Selectable(("Attachment: " + attachmentName).c_str(),
+                                  m_selectedAttachment == static_cast<int>(i))) {
+                m_selectedAttachment = static_cast<int>(i);
+                m_selectedSocket = -1;
+                for (std::size_t socketIndex = 0;
+                     socketIndex < m_asset.sockets.size(); ++socketIndex) {
+                    if (m_asset.sockets[socketIndex].name == att.socketName) {
+                        m_selectedSocket = static_cast<int>(socketIndex);
+                        break;
+                    }
+                }
+                m_gizmoDragging = false;
+                m_activeGizmoAxis = -1;
+            }
+            changed |= drawPicker("Model", "##AttachModelSearch", m_animSearch, m_modelChoices, att.modelPath);
+            changed |= drawPicker("Material", "##AttachMatSearch", m_materialSearch, m_materialChoices, att.materialPath);
+            const char* socketPreview = att.socketName.empty() ? "(choose a socket)" : att.socketName.c_str();
+            ImGui::SetNextItemWidth(-1.0f);
+            if (ImGui::BeginCombo("Socket", socketPreview)) {
+                if (m_asset.sockets.empty()) {
+                    ImGui::TextDisabled("Add a socket above first.");
+                }
+                for (const CharacterSocket& s : m_asset.sockets) {
+                    if (ImGui::Selectable(s.name.c_str(), att.socketName == s.name)) {
+                        att.socketName = s.name;
+                        if (m_selectedAttachment == static_cast<int>(i)) {
+                            m_selectedSocket = static_cast<int>(&s - m_asset.sockets.data());
+                        }
+                        changed = true;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            if (ImGui::SmallButton("Remove")) removeAttachment = static_cast<int>(i);
+            ImGui::Separator();
+            ImGui::PopID();
+        }
+        if (removeAttachment >= 0) {
+            m_asset.attachments.erase(m_asset.attachments.begin() + removeAttachment);
+            if (m_selectedAttachment == removeAttachment) {
+                m_selectedAttachment = -1;
+            } else if (m_selectedAttachment > removeAttachment) {
+                --m_selectedAttachment;
+            }
+            changed = true;
+        }
+        if (ImGui::Button("Add Attachment")) {
+            CharacterAttachment a;
+            if (!m_asset.sockets.empty()) a.socketName = m_asset.sockets.front().name;
+            m_asset.attachments.push_back(std::move(a));
+            m_selectedAttachment = static_cast<int>(m_asset.attachments.size() - 1);
+            m_selectedSocket = m_asset.sockets.empty() ? -1 : 0;
+            changed = true;
+        }
+        if (changed) m_dirty = true;
     } else if (m_component == 2) {
         auto& collider = m_asset.collider;
         changed |= ImGui::Checkbox("Collider Enabled", &m_asset.colliderEnabled);
@@ -810,16 +1210,208 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
     } else if (m_component == 3) {
         auto& v=m_asset.playerController;
         changed |= ImGui::Checkbox("Player Controller", &m_asset.playerControllerEnabled);
+        ImGui::SeparatorText("Movement");
         changed |= ImGui::DragFloat("Walk Speed", &v.walkSpeed,.05f,0.0f,100.0f);
         changed |= ImGui::DragFloat("Run Speed", &v.runSpeed,.05f,0.0f,100.0f);
         changed |= ImGui::DragFloat("Jump Speed", &v.jumpSpeed,.05f,0.0f,100.0f);
         changed |= ImGui::DragFloat("Step Height", &v.stepHeight,.01f,0.0f,5.0f);
         changed |= ImGui::DragFloat("Max Slope", &v.maxSlopeDegrees,.5f,0.0f,89.0f);
-        changed |= ImGui::Checkbox("First Person", &v.firstPerson);
+        ImGui::SeparatorText("Camera");
+        const char* cameraModes[] = { "Third Person", "First Person", "Isometric" };
+        int cameraMode = std::clamp(v.cameraMode, 0, 2);
+        if (v.firstPerson && cameraMode == 0) cameraMode = 1;
+        if (ImGui::Combo("Camera Mode", &cameraMode, cameraModes, IM_ARRAYSIZE(cameraModes))) {
+            v.cameraMode = cameraMode;
+            v.firstPerson = cameraMode == 1;
+            changed = true;
+        }
+        if (cameraMode == 2) {
+            ImGui::SeparatorText("Isometric Camera");
+            changed |= ImGui::DragFloat("Isometric Distance", &v.isometricDistance,
+                                        0.1f, 0.0f, 500.0f);
+            changed |= ImGui::SliderFloat("Isometric Yaw", &v.isometricYaw,
+                                          -180.0f, 180.0f, "%.1f deg");
+            changed |= ImGui::SliderFloat("Isometric Pitch", &v.isometricPitch,
+                                          -89.0f, -5.0f, "%.1f deg");
+            changed |= ImGui::DragFloat("Target Height", &v.cameraTargetHeight,
+                                        0.01f, -100.0f, 100.0f);
+            ImGui::TextDisabled("Fixed angle in Play; movement follows the camera axes.");
+        } else if (cameraMode == 1) {
+            changed |= ImGui::DragFloat("Eye Height", &v.eyeHeight,
+                                        0.01f, 0.0f, 100.0f);
+        } else {
+            changed |= ImGui::DragFloat("Camera Distance", &v.cameraDistance,
+                                        0.05f, 0.0f, 100.0f);
+            changed |= ImGui::DragFloat("Target Height", &v.cameraTargetHeight,
+                                        0.01f, -100.0f, 100.0f);
+        }
+        if (cameraMode != 1 && ImGui::TreeNodeEx(
+                "Camera Collision", ImGuiTreeNodeFlags_DefaultOpen)) {
+            changed |= ImGui::Checkbox("Collision Enabled", &v.cameraCollision);
+            ImGui::BeginDisabled(!v.cameraCollision);
+            changed |= ImGui::DragFloat("Probe Radius", &v.cameraProbeRadius,
+                                        0.01f, 0.0f, 5.0f);
+            changed |= ImGui::DragFloat("Wall Padding", &v.cameraCollisionPadding,
+                                        0.005f, 0.0f, 2.0f);
+            changed |= ImGui::DragFloat("Return Speed", &v.cameraReturnSpeed,
+                                        0.1f, 0.0f, 100.0f);
+            ImGui::EndDisabled();
+            ImGui::TreePop();
+        }
+
+        ImGui::SeparatorText("Rotation");
+        const char* facingModes[] = { "Face Camera (strafe)", "Face Movement (free camera)" };
+        int facing = std::clamp(v.facingMode, 0, 1);
+        ImGui::SetNextItemWidth(-1.0f);
+        if (ImGui::Combo("Orientation", &facing, facingModes, IM_ARRAYSIZE(facingModes))) {
+            v.facingMode = facing; changed = true;
+        }
+        if (v.facingMode == 1) {
+            changed |= ImGui::DragFloat("Turn Speed", &v.turnSpeed, 0.25f, 0.0f, 40.0f);
+            ImGui::TextDisabled("Body turns toward its travel direction; the camera orbits freely.");
+        } else {
+            ImGui::TextDisabled("Body always faces the camera; rotating the camera turns the character.");
+        }
     } else if (m_component == 4) {
+        // Animation is authored entirely in a .3dggraph asset (Graph Editor) and baked
+        // onto placed characters on Apply. The character just references one.
+        ImGui::SeparatorText("Animation Graph");
+        ImGui::TextWrapped("Author animation (clips, states, transitions, blend spaces, movement) "
+                           "in the Graph Editor, save a .3dggraph, and reference it here.");
+        const std::string graphPreview = m_asset.animationGraphPath.empty()
+            ? std::string("None") : std::filesystem::path(m_asset.animationGraphPath).filename().string();
+        ImGui::SetNextItemWidth(-1.0f);
+        if (ImGui::BeginCombo("Animation Graph", graphPreview.c_str())) {
+            ImGui::SetNextItemWidth(-1.0f);
+            ImGui::InputTextWithHint("##GraphSearch", "Search graphs...", m_graphSearch.data(), m_graphSearch.size());
+            ImGui::Separator();
+            if (ImGui::Selectable("None", m_asset.animationGraphPath.empty())) { m_asset.animationGraphPath.clear(); changed = true; }
+            const std::string graphFilter = Lower(m_graphSearch.data());
+            for (const AssetChoice& choice : m_graphChoices) {
+                if (!graphFilter.empty() && Lower(choice.displayName).find(graphFilter) == std::string::npos) continue;
+                if (ImGui::Selectable(choice.displayName.c_str(), m_asset.animationGraphPath == choice.path)) {
+                    m_asset.animationGraphPath = choice.path; changed = true;
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", choice.path.c_str());
+            }
+            if (m_graphChoices.empty()) ImGui::TextDisabled("No .3dggraph assets - make one in the Graph Editor.");
+            ImGui::EndCombo();
+        }
+        if (ImGui::Button("Refresh")) RefreshAssetChoices(assetRoot);
+        if (!m_asset.animationGraphPath.empty()) {
+            AnimationGraphAsset graphSummary;
+            std::string graphSummaryError;
+            if (graphSummary.Load(m_asset.animationGraphPath, &graphSummaryError)) {
+                ImGui::TextDisabled("%zu clips, %zu states, %zu transitions.",
+                    graphSummary.clips.size(), graphSummary.states.size(), graphSummary.transitions.size());
+            } else {
+                ImGui::TextColored(ImVec4(1.0f, .4f, .3f, 1.0f), "Graph failed to load.");
+            }
+        }
+        ImGui::SeparatorText("Standalone Action Clips");
+        ImGui::TextWrapped(
+            "Attach one-shot clips created in the Clip Editor. They remain outside "
+            "the locomotion graph and are called by their Action Name from scripts.");
+        if (ImGui::BeginCombo("Add Action Clip", "Choose saved action...")) {
+            const std::string clipFilter = Lower(m_clipSearch.data());
+            ImGui::InputTextWithHint(
+                "##ActionClipSearch", "Search action clips...",
+                m_clipSearch.data(), m_clipSearch.size());
+            ImGui::Separator();
+            for (const AssetChoice& choice : m_clipChoices) {
+                if (!clipFilter.empty()
+                    && Lower(choice.displayName).find(clipFilter) == std::string::npos) {
+                    continue;
+                }
+                AnimationClipAsset candidate;
+                if (!candidate.Load(choice.path, nullptr) || !candidate.action) continue;
+                const bool attached = std::find(
+                    m_asset.actionClipAssets.begin(),
+                    m_asset.actionClipAssets.end(), choice.path)
+                    != m_asset.actionClipAssets.end();
+                if (ImGui::Selectable(choice.displayName.c_str(), attached)) {
+                    if (!attached) {
+                        m_asset.actionClipAssets.push_back(choice.path);
+                        changed = true;
+                    }
+                    ImGui::CloseCurrentPopup();
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Action: %s\n%s",
+                        candidate.name.c_str(), choice.path.c_str());
+                }
+            }
+            ImGui::EndCombo();
+        }
+        if (ImGui::Button("Refresh Action Clips")) {
+            RefreshAssetChoices(assetRoot);
+            if (message) {
+                *message = "Refreshed standalone Action Clips.";
+            }
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "Rescan Content for newly saved .3dgclip Action Clip assets.");
+        }
+        int removeAction = -1;
+        for (std::size_t i = 0; i < m_asset.actionClipAssets.size(); ++i) {
+            ImGui::PushID(4100 + static_cast<int>(i));
+            AnimationClipAsset action;
+            const std::string& actionPath = m_asset.actionClipAssets[i];
+            if (action.Load(actionPath, nullptr) && action.action) {
+                ImGui::Text("%s  [%s]", action.name.c_str(),
+                    action.maskRootBone.empty() ? "Full Body" : action.maskRootBone.c_str());
+                ImGui::TextDisabled("Fade %.2f / %.2f  Speed %.2f",
+                    action.fadeIn, action.fadeOut, action.speed);
+            } else {
+                ImGui::TextColored(ImVec4(1.0f, .4f, .3f, 1.0f),
+                    "%s (missing or not an Action Clip)",
+                    std::filesystem::path(actionPath).filename().string().c_str());
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Remove")) removeAction = static_cast<int>(i);
+            ImGui::PopID();
+        }
+        if (removeAction >= 0) {
+            m_asset.actionClipAssets.erase(
+                m_asset.actionClipAssets.begin() + removeAction);
+            changed = true;
+        }
+        if (m_asset.actionClipAssets.empty()) {
+            ImGui::TextDisabled("No standalone actions attached.");
+        }
+    } else if (false) {   // legacy inline animation authoring (superseded by graph assets)
         ImGui::SeparatorText("Animation Sources (separate files)");
         ImGui::TextDisabled("Merge clips from external FBX files onto this model by bone name.");
         ImGui::TextDisabled("The animation file must share the model's skeleton (e.g. Mixamo rigs).");
+        // Quick-add from a saved clip asset (authored in the Clip Editor): one pick fills
+        // file + clip name + strip-root-motion, so you don't re-enter them each time.
+        ImGui::SetNextItemWidth(-1.0f);
+        if (ImGui::BeginCombo("##AddFromClip", "Add from Clip Asset...")) {
+            ImGui::SetNextItemWidth(-1.0f);
+            ImGui::InputTextWithHint("##ClipSearch", "Search clips...", m_clipSearch.data(), m_clipSearch.size());
+            ImGui::Separator();
+            const std::string clipFilter = Lower(m_clipSearch.data());
+            for (const AssetChoice& choice : m_clipChoices) {
+                if (!clipFilter.empty() && Lower(choice.displayName).find(clipFilter) == std::string::npos) continue;
+                if (ImGui::Selectable(choice.displayName.c_str())) {
+                    AnimationClipAsset clip;
+                    std::string clipError;
+                    if (clip.Load(choice.path, &clipError)) {
+                        CharacterAnimationSource s;
+                        s.file = clip.sourceFile;
+                        s.clipName = clip.clipName;
+                        s.stripRootMotion = clip.stripRootMotion;
+                        m_asset.animationSources.push_back(std::move(s));
+                        changed = true;
+                    }
+                    ImGui::CloseCurrentPopup();
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", choice.path.c_str());
+            }
+            if (m_clipChoices.empty()) ImGui::TextDisabled("No .3dgclip assets yet - make them in the Clip Editor.");
+            ImGui::EndCombo();
+        }
         int removeSource = -1;
         for (std::size_t i = 0; i < m_asset.animationSources.size(); ++i) {
             auto& source = m_asset.animationSources[i];
@@ -1082,9 +1674,31 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
                 for(const auto& p:m_asset.animationParameters)if(ImGui::Selectable(p.name.c_str(),transition.parameter==p.name)){transition.parameter=p.name;changed=true;}
                 ImGui::EndCombo();
             }
-            int compare=std::clamp(static_cast<int>(transition.compare),0,3);
-            if(ImGui::Combo("Compare",&compare,compares,4)){transition.compare=static_cast<EditorScene::AnimationStateTransition::Compare>(compare);changed=true;}
-            changed|=ImGui::DragFloat("Threshold",&transition.threshold,.05f);
+            // Determine the selected parameter's type so a bool/trigger gets a proper
+            // "is true / is false" condition (a >= 0 default always passes and never
+            // actually compares a boolean).
+            EditorScene::AnimationParameter::Type paramType = EditorScene::AnimationParameter::Type::Float;
+            for(const auto& p:m_asset.animationParameters)
+                if(p.name==transition.parameter){paramType=p.type;break;}
+            using Comp = EditorScene::AnimationStateTransition::Compare;
+            if(paramType==EditorScene::AnimationParameter::Type::Bool
+               || paramType==EditorScene::AnimationParameter::Type::Trigger){
+                const char* boolConds[]={"is false","is true (or triggered)"};
+                int sel=(transition.threshold>=0.5f)?1:0;
+                ImGui::Combo("Condition",&sel,boolConds,2);
+                const float wantThreshold=sel?1.0f:0.0f;
+                // Normalise to an equality test so the boolean is actually compared;
+                // also fixes legacy transitions saved with the >= 0 default.
+                if(transition.compare!=Comp::Equal||transition.threshold!=wantThreshold){
+                    transition.compare=Comp::Equal;
+                    transition.threshold=wantThreshold;
+                    changed=true;
+                }
+            } else {
+                int compare=std::clamp(static_cast<int>(transition.compare),0,3);
+                if(ImGui::Combo("Compare",&compare,compares,4)){transition.compare=static_cast<Comp>(compare);changed=true;}
+                changed|=ImGui::DragFloat("Threshold",&transition.threshold,.05f);
+            }
             changed|=ImGui::DragFloat("Fade",&transition.fade,.01f,0.0f,5.0f);
             changed|=ImGui::SliderFloat("Exit Time",&transition.exitTime,0.0f,1.0f);
             changed|=ImGui::DragInt("Priority",&transition.priority,1.0f,-100,100);
@@ -1157,21 +1771,221 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
         changed |= ImGui::DragFloat("Max HP", &m_asset.health.maxHp,1,1,100000);
     } else if (m_component == 6) {
         changed |= ImGui::Checkbox("AI Agent", &m_asset.navAgentEnabled);
+        if (!m_asset.navAgentEnabled) ImGui::BeginDisabled();
         changed |= ImGui::DragFloat("Speed",&m_asset.navSpeed,.05f,0,100);
+        changed |= ImGui::DragFloat("Max Force",&m_asset.navMaxForce,.1f,0,200);
         changed |= ImGui::DragFloat("Reach Radius",&m_asset.navReachRadius,.01f,.01f,20);
+        changed |= ImGui::DragFloat("Repath (s)",&m_asset.navRepathInterval,.01f,.01f,5);
         changed |= ImGui::DragFloat("Vision Range",&m_asset.navVisionRange,.1f,0,1000);
-        changed |= ImGui::InputText("Behavior Tree",m_behaviorBuffer.data(),m_behaviorBuffer.size());
-        changed |= ImGui::Checkbox("Auto Target",&m_asset.navAutoTarget);
-        if (changed) m_asset.behaviorTreeAsset=m_behaviorBuffer.data();
+        changed |= ImGui::DragFloat(
+            "Vision Half-Angle", &m_asset.navVisionHalfAngle, .5f, 1, 180, "%.0f deg");
+
+        ImGui::SeparatorText("Behavior");
+        changed |= drawPicker(
+            "Behavior Tree", "##CharacterBehaviorSearch",
+            m_behaviorSearch, m_behaviorChoices, m_asset.behaviorTreeAsset);
+        if (ImGui::SmallButton("Refresh Trees")) {
+            RefreshAssetChoices(assetRoot);
+        }
+        if (m_behaviorChoices.empty()) {
+            ImGui::TextDisabled("No saved .btgraph assets found under Content.");
+        } else {
+            ImGui::TextDisabled("Searches all saved Behavior Trees in Content.");
+        }
+
+        ImGui::SeparatorText("Target and Team");
+        const char* targetPreview = m_asset.navTargetName.empty()
+            ? "None (patrol / auto-target)" : m_asset.navTargetName.c_str();
+        if (ImGui::BeginCombo("Chase Target", targetPreview)) {
+            if (ImGui::Selectable(
+                    "None (patrol / auto-target)", m_asset.navTargetName.empty())) {
+                m_asset.navTargetName.clear();
+                changed = true;
+            }
+            for (const EditorScene::Object& object : scene.Objects()) {
+                const bool selected = object.name == m_asset.navTargetName;
+                if (ImGui::Selectable(object.name.c_str(), selected)) {
+                    m_asset.navTargetName = object.name;
+                    changed = true;
+                }
+                if (selected) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+        changed |= ImGui::DragInt(
+            "Team ID (0 = neutral)", &m_asset.navTeam, .1f, 0, 32);
+        if (ImGui::SmallButton("Neutral##CharacterTeam")) {
+            m_asset.navTeam = 0;
+            changed = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Player##CharacterTeam")) {
+            m_asset.navTeam = 1;
+            changed = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Enemy##CharacterTeam")) {
+            m_asset.navTeam = 2;
+            changed = true;
+        }
+        changed |= ImGui::Checkbox(
+            "Auto-target nearest hostile", &m_asset.navAutoTarget);
+        if (m_asset.navAutoTarget) {
+            ImGui::TextDisabled(
+                "Targets the nearest living agent on a different non-zero team.");
+        } else if (m_asset.navTeam == 0) {
+            ImGui::TextDisabled(
+                "Neutral agents are not included in faction auto-targeting.");
+        }
+        if (!m_asset.navAgentEnabled) ImGui::EndDisabled();
     } else {
-        changed |= ImGui::Checkbox("Script Enabled",&m_asset.scriptEnabled);
-        changed |= ImGui::InputText("Class",m_scriptClassBuffer.data(),m_scriptClassBuffer.size());
-        changed |= ImGui::InputText("Path",m_scriptPathBuffer.data(),m_scriptPathBuffer.size());
-        if (changed) { m_asset.scriptClassName=m_scriptClassBuffer.data(); m_asset.scriptPath=m_scriptPathBuffer.data(); }
+        ImGui::TextDisabled(
+            "Scripts run from top to bottom. Each has an independent enabled state.");
+        for (std::size_t index = 0; index < m_asset.scripts.size(); ++index) {
+            CharacterScript& script = m_asset.scripts[index];
+            ImGui::PushID(static_cast<int>(index));
+            changed |= ImGui::Checkbox("##Enabled", &script.enabled);
+            ImGui::SameLine();
+
+            const auto selectedScript = std::find_if(
+                m_scriptChoices.begin(), m_scriptChoices.end(),
+                [&script](const AssetChoice& choice) {
+                    return choice.path == script.path
+                        || choice.displayName == script.className;
+                });
+            const char* preview = selectedScript != m_scriptChoices.end()
+                ? selectedScript->displayName.c_str()
+                : (script.className.empty() ? "Choose saved script..."
+                                            : script.className.c_str());
+            ImGui::SetNextItemWidth(220.0f);
+            if (ImGui::BeginCombo("##Script", preview)) {
+                ImGui::SetNextItemWidth(-1.0f);
+                ImGui::InputTextWithHint(
+                    "##Search", "Search saved scripts...",
+                    m_scriptSearch.data(), m_scriptSearch.size());
+                ImGui::Separator();
+                const std::string filter = Lower(m_scriptSearch.data());
+                for (const AssetChoice& choice : m_scriptChoices) {
+                    if (!filter.empty()
+                        && Lower(choice.displayName).find(filter) == std::string::npos) {
+                        continue;
+                    }
+                    const bool selected = choice.path == script.path;
+                    if (ImGui::Selectable(choice.displayName.c_str(), selected)) {
+                        script.className = choice.displayName;
+                        script.path = choice.path;
+                        script.enabled = true;
+                        changed = true;
+                        ImGui::CloseCurrentPopup();
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("%s", choice.path.c_str());
+                    }
+                }
+                if (m_scriptChoices.empty()) {
+                    ImGui::TextDisabled("No scripts found in Content/Scripts");
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::SameLine();
+            if (index > 0 && ImGui::SmallButton("Up")) {
+                std::swap(m_asset.scripts[index], m_asset.scripts[index - 1]);
+                changed = true;
+            }
+            if (index > 0) ImGui::SameLine();
+            const bool remove = ImGui::SmallButton("Remove");
+            if (!script.path.empty() && ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("%s", script.path.c_str());
+            }
+            ImGui::PopID();
+            if (remove) {
+                m_asset.scripts.erase(m_asset.scripts.begin()
+                    + static_cast<std::ptrdiff_t>(index));
+                changed = true;
+                break;
+            }
+        }
+
+        if (ImGui::Button("+ Add Script")) {
+            CharacterScript script;
+            if (!m_scriptChoices.empty()) {
+                script.className = m_scriptChoices.front().displayName;
+                script.path = m_scriptChoices.front().path;
+            }
+            m_asset.scripts.push_back(std::move(script));
+            changed = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Refresh Scripts")) {
+            RefreshAssetChoices(assetRoot);
+            if (message) *message = "Refreshed saved gameplay scripts.";
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Rescan Content/Scripts for saved .h scripts.");
+        }
+
+        if (ImGui::Button("Apply Scripts to Selected")) {
+            if (!scene.SelectedObject()) {
+                if (message) *message = "Select a scene character first.";
+            } else {
+                if (m_asset.scripts.empty()) {
+                    scene.SetSelectedScript({}, {}, false);
+                    scene.SetSelectedAdditionalScripts({});
+                } else {
+                    const CharacterScript& primary = m_asset.scripts.front();
+                    scene.SetSelectedScript(
+                        primary.className, primary.path, primary.enabled);
+                    std::vector<EditorScene::ScriptBinding> additional;
+                    for (std::size_t i = 1; i < m_asset.scripts.size(); ++i) {
+                        const CharacterScript& script = m_asset.scripts[i];
+                        additional.push_back(
+                            {script.enabled, script.className, script.path, {}});
+                    }
+                    scene.SetSelectedAdditionalScripts(additional);
+                }
+                if (message) {
+                    *message = "Applied " + std::to_string(m_asset.scripts.size())
+                        + " script(s) to the selected character.";
+                }
+            }
+        }
+
+        if (!m_asset.scripts.empty()) {
+            m_asset.scriptEnabled = m_asset.scripts.front().enabled;
+            m_asset.scriptClassName = m_asset.scripts.front().className;
+            m_asset.scriptPath = m_asset.scripts.front().path;
+        } else {
+            m_asset.scriptEnabled = false;
+            m_asset.scriptClassName.clear();
+            m_asset.scriptPath.clear();
+        }
     }
     if (changed) {
         m_dirty = true;
         if (m_component == 2) m_colliderGuideDirty = true;
+        // Live-sync: if the character placed in the scene (linked by asset path) is
+        // selected, re-stamp the edits onto it so sockets / transforms / materials update
+        // in real time without re-dropping. Undo is suppressed so a drag isn't logged
+        // as hundreds of steps.
+        const EditorScene::Object* selected = scene.SelectedObject();
+        if (!m_path.empty() && selected && selected->characterAssetPath == m_path) {
+            // If the character was auto-stood-up on drop (the asset itself carries no
+            // model offset), keep that orientation across the re-apply so it doesn't flip.
+            const glm::vec3 scaleDelta = m_asset.modelOffsetScale - glm::vec3(1.0f);
+            const bool assetHasOffset =
+                glm::dot(m_asset.modelOffsetPosition, m_asset.modelOffsetPosition) > 1e-8f
+                || glm::dot(m_asset.modelOrientationEuler, m_asset.modelOrientationEuler) > 1e-4f
+                || glm::dot(scaleDelta, scaleDelta) > 1e-8f;
+            const glm::vec3 keepPos = selected->modelOffsetPosition;
+            const glm::vec3 keepEuler = selected->modelOrientationEuler;
+            const glm::vec3 keepScale = selected->modelOffsetScale;
+            scene.SuppressUndo(true);
+            m_asset.Apply(scene);
+            if (!assetHasOffset) {
+                scene.SetSelectedModelOffset(keepPos, keepEuler, keepScale);
+            }
+            scene.SuppressUndo(false);
+        }
     }
     ImGui::Separator();
     ImGui::TextColored(m_dirty ? ImVec4(1.0f,.75f,.2f,1.0f) : ImVec4(.45f,.85f,.55f,1.0f), m_dirty ? "Unsaved changes" : "Asset saved");

@@ -18,6 +18,8 @@ public:
         ParticleEffect,
         Hud,
         Character,
+        AnimationClip,
+        AnimationGraph,
         BehaviorGraph,
         Script,
         Other

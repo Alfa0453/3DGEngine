@@ -74,6 +74,36 @@ void TestLimitsAndCleanup() {
     Check(emitter.Alive() == 1, "Fractional emission spawns at the expected boundary");
 }
 
+void TestProjectRelativeParticleAssetResolution() {
+    const std::filesystem::path root =
+        std::filesystem::temp_directory_path() / "3dg_particle_content_root";
+    const std::filesystem::path particleFolder = root / "Assets" / "Particles";
+    const std::filesystem::path asset = particleFolder / "EnemyArcaneBolt.particle";
+    std::error_code ec;
+    std::filesystem::create_directories(particleFolder, ec);
+
+    engine::ParticleSystemComponent source;
+    source.config.rate = 37.0f;
+    std::string error;
+    Check(engine::SaveParticleAsset(asset.string(), source, &error),
+          "save particle used for project-relative resolution");
+    engine::SetParticleAssetContentRoot(root.string());
+
+    engine::ParticleSystemComponent fromContentPath;
+    Check(engine::LoadParticleAsset(
+              "Content/Assets/Particles/EnemyArcaneBolt.particle",
+              &fromContentPath, &error)
+          && Near(fromContentPath.config.rate, 37.0f),
+          "particle Content path resolves against the loaded project");
+
+    engine::ParticleSystemComponent fromName;
+    Check(engine::LoadParticleAsset("EnemyArcaneBolt", &fromName, &error)
+          && Near(fromName.config.rate, 37.0f),
+          "particle saved name resolves in Assets/Particles");
+
+    std::filesystem::remove_all(root, ec);
+}
+
 void TestShapeParityAndValidation() {
     engine::ParticleEmitter cone;
     cone.position = glm::vec3(2.0f, 3.0f, 4.0f);
@@ -550,6 +580,7 @@ void TestAssetRoundTripAndCompatibility() {
 int main() {
     TestDeterministicRestart();
     TestLimitsAndCleanup();
+    TestProjectRelativeParticleAssetResolution();
     TestShapeParityAndValidation();
     TestParticleCollisionResponses();
     TestTrailHistory();

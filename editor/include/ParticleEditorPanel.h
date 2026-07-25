@@ -47,6 +47,7 @@ private:
     int m_selectedIndex = -2;
     engine::ParticleModuleType m_selectedModule = engine::ParticleModuleType::Spawn;
     std::uint32_t m_selectedModuleId = 0;
+    bool m_focusSelectedModuleSettings = false;
     std::array<char, 64> m_moduleSearch{};
     bool m_hasSystem = false;
     bool m_playing = true;

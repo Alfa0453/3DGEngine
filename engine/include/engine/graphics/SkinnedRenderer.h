@@ -10,6 +10,7 @@ namespace engine {
 class SkinnedModel;
 class Shader;
 class Camera;
+class Texture;
 class CascadedShadow;
 class IBL;
 namespace ecs { class Registry; }
@@ -56,7 +57,9 @@ public:
               const glm::mat4& modelMatrix,
               const Camera& camera, float aspect,
               const glm::vec3& sunDir, const glm::vec3& sunColor,
-              const glm::vec3& ambient);
+              const glm::vec3& ambient,
+              const glm::vec3& tint = glm::vec3(1.0f),
+              const Texture* albedoOverride = nullptr);
 
     
     // PBR ECS scene: draw every AnimatedModel entity (Transform + AnimatedModel)

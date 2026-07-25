@@ -40,6 +40,7 @@ public:
         int       size          = 256;
         float     yawDeg        = 35.0f;   // camera orbit
         float     pitchDeg      = 18.0f;
+        float     distance      = 2.9f;    // camera distance from the object (zoom)
         Shape     shape         = Shape::Sphere;
         Channel   channel       = Channel::Full;
         // Environment rig.
@@ -48,6 +49,9 @@ public:
         float     lightIntensity = 1.0f;    // multiplier on the key light
         bool      groundPlane   = false;    // ground + contact shadow
         glm::vec3 background{0.05f, 0.06f, 0.08f};
+        // Optional equirectangular environment image (HDRI / panorama). When set it
+        // replaces the procedural sky for both the visible background and the baked IBL.
+        std::string hdriPath;
         // Texture-map file paths (empty = none). Applied in full and debug views.
         std::string albedoMapPath;
         std::string normalMapPath;
@@ -86,7 +90,11 @@ private:
     };
 
     void EnsureInitialized();
-    void RegenerateEnvironment(float envTime, float envYawDeg);
+    void RegenerateEnvironment(float envTime, float envYawDeg, const std::string& hdriPath);
+    // Draw an equirectangular environment image as a sky cube for the given view/proj.
+    // `infinite` pushes it to the far plane (visible background); off for IBL capture.
+    void DrawEquirectSky(const glm::mat4& view, const glm::mat4& proj,
+                         const engine::Texture& equirect, float yawRadians, bool infinite);
     void RenderChannel(const engine::ecs::PbrMaterial& material,
                        const Settings& settings, const glm::mat4& viewProj);
     unsigned int RenderUnchecked(const engine::ecs::PbrMaterial& material,
@@ -99,6 +107,7 @@ private:
     std::string m_error;
     float m_envTime = -1.0f;   // last environment time baked into the IBL
     float m_envYaw  = -1.0e9f; // last environment rotation baked into the IBL
+    std::string m_bakedHdri = "\x01";   // last HDRI path baked (sentinel = force first bake)
     int   m_size    = 0;
 
     std::optional<engine::Mesh>          m_sphere, m_cube, m_plane, m_groundMesh;
@@ -106,7 +115,8 @@ private:
     std::optional<engine::PbrRenderer>   m_pbr;
     std::optional<engine::IBL>           m_ibl;
     std::optional<engine::ProceduralSky> m_sky;
-    std::optional<engine::Shader>        m_debug;   // unlit channel-view shader
+    std::optional<engine::Shader>        m_debug;      // unlit channel-view shader
+    std::optional<engine::Shader>        m_equirectSky; // equirect HDRI environment shader
 
     engine::DayNightCycle::Sample m_sample{};
     engine::ecs::Registry         m_reg;

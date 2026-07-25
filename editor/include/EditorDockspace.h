@@ -192,6 +192,7 @@ public:
         float* terrainBrushStrength = nullptr;
         bool* showNavigationPreview = nullptr;
         bool* showGrid = nullptr;            // reference ground grid + world axes
+        bool* previewAnimations = nullptr;   // advance character animations in the edit viewport
         bool* showParticleDebug = nullptr;
         bool* particleDebugSelectedOnly = nullptr;
         bool* particleDebugShapes = nullptr;

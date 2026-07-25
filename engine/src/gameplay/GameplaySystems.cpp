@@ -5,9 +5,12 @@
 #include "engine/ecs/Components.h"
 #include "engine/animation/AnimatedModel.h"
 #include "engine/graphics/SkinnedModel.h"
+#include "engine/physics/PhysicsComponents.h"
+#include "engine/physics/PhysicsWorld.h"
 
 #include <glm/gtc/matrix_transform.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <vector>
 
@@ -23,30 +26,40 @@ void UpdateHealth(ecs::Registry& reg) {
 std::vector<ProjectileHit> UpdateProjectiles(ecs::Registry& reg, float dt) {
     std::vector<ProjectileHit> hits;
     std::vector<ecs::Entity>   spent;
+    const PhysicsWorld collisionQueries;
 
     reg.view<ecs::Transform, Projectile>().each([&](ecs::Entity pe, ecs::Transform& pt, Projectile& pr) {
-        // Advance.
-        const float step = pr.speed * dt;
-        pt.position += pr.dir * step;
+        const glm::vec3 start = pt.position;
+        const float step = std::max(pr.speed * dt, 0.0f);
+        const glm::vec3 end = start + pr.dir * step;
         pr.traveled += step;
 
-        // Overlap test against Health targets (nearest within radius wins).
-        ecs::Entity best = ecs::kNull; float bestD = pr.radius;
-        reg.view<ecs::Transform, Health>().each([&](ecs::Entity te, ecs::Transform& tt, Health& th) {
-            if (te == pr.owner || !th.alive) return;
-            const float d = glm::length(pt.position - tt.position);
-            if (d < bestD) { bestD = d; best = te; }
-        });
-
-        if (best != ecs::kNull) {
-            Health& th = reg.Get<Health>(best);
-            th.Damage(pr.damage);
-            ProjectileHit hit;
-            hit.projectile = pe; hit.target = best; hit.point = pt.position;
-            hit.damage = pr.damage; hit.lethal = (th.hp <= 0.0f);
-            hits.push_back(hit);
+        // Sweep the projectile through the physics scene. This tests the actual
+        // target collider instead of measuring distance to its transform origin,
+        // prevents tunnelling, respects collision response masks, and lets walls
+        // stop a shot before it can damage a character behind them.
+        const RaycastHit contact = collisionQueries.SphereCast(
+            reg, start, end, std::max(pr.radius, 0.0f), pr.owner,
+            ecs::CollisionLayer::All, ecs::CollisionLayer::Projectile, pe);
+        if (contact.hit) {
+            pt.position = contact.point;
+            if (Health* health = reg.TryGet<Health>(contact.entity);
+                health && health->alive) {
+                health->Damage(pr.damage);
+                ProjectileHit hit;
+                hit.projectile = pe;
+                hit.target = contact.entity;
+                hit.point = contact.point;
+                hit.damage = pr.damage;
+                hit.lethal = health->hp <= 0.0f;
+                hits.push_back(hit);
+            }
             spent.push_back(pe);
-        } else if (pr.traveled >= pr.range) {
+        } else {
+            pt.position = end;
+        }
+
+        if (!contact.hit && pr.traveled >= pr.range) {
             spent.push_back(pe);
         }
     });

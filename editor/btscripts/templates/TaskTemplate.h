@@ -1,7 +1,7 @@
 #pragma once
 //
-// TASK template. Copy this file into ../ (the btscripts folder), rename the file and
-// the class, fill in Tick(), then #include + Register it in src/GameBtScripts.cpp.
+// TASK template. The editor copies this into Content/Scripts, renames the class,
+// and registers it for editor Play mode and built projects automatically.
 //
 // A Task is a leaf that DOES something and reports how it went.
 //

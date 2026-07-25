@@ -1,8 +1,7 @@
 #pragma once
 //
-// SERVICE template. Copy into ../ , rename file + class, fill in Tick(), then
-// #include + Register it in src/GameBtScripts.cpp. Attach it to a node via
-// "+ Service > Script Service" in the inspector and set its interval.
+// SERVICE template. The editor copies this into Content/Scripts, renames and
+// registers it automatically. Attach it through Script Service in a Behavior Graph.
 //
 // A Service runs in the BACKGROUND while its node's branch is active. Its Tick()
 // return value is ignored -- use it for side effects (refresh a blackboard value,

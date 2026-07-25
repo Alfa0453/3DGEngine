@@ -7,14 +7,18 @@
 #include <engine/animation/AnimatedModel.h>
 #include <engine/ecs/Components.h>
 #include <engine/ecs/Registry.h>
+#include <engine/gameplay/GameplayComponents.h>
+#include <engine/gameplay/GameplaySystems.h>
 #include <engine/physics/PhysicsComponents.h>
 #include <engine/physics/PhysicsWorld.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <string>
 
 namespace {
@@ -28,6 +32,16 @@ void Check(bool condition, const char* message) {
 bool Near(float a, float b) {
     return std::fabs(a - b) < 0.0001f;
 }
+
+class ScriptSlotProbe final : public engine::Script {
+public:
+    explicit ScriptSlotProbe(int* output) : m_output(output) {}
+    void OnUpdate(float) override {
+        if (m_output) *m_output = GetFieldInt("value", -1);
+    }
+private:
+    int* m_output = nullptr;
+};
 
 } // namespace
 
@@ -179,6 +193,117 @@ int main() {
     Check(turningAgent.velocity.z > std::fabs(turningAgent.velocity.x),
           "AI steering responds promptly when its target changes direction");
 
+    // A broad gameplay/attack range must not make a visual Behavior Tree's Chase
+    // task report arrival before a narrower attack branch can become eligible.
+    engine::ai::BehaviorGraph chaseGraph;
+    chaseGraph.root = chaseGraph.AddNode(
+        engine::ai::BtNodeType::Chase, glm::vec2(0.0f));
+    engine::ai::AgentContext chaseContext;
+    chaseContext.agent.maxSpeed = 3.0f;
+    chaseContext.agent.maxForce = 20.0f;
+    chaseContext.targetPos = glm::vec3(5.0f, 0.0f, 0.0f);
+    chaseContext.seesTarget = true;
+    chaseContext.reachRadius = 8.0f;
+    chaseContext.navigationAcceptanceRadius = 0.3f;
+    engine::ai::NavGrid chaseGrid(
+        20, 3, 0.5f, glm::vec3(0.0f, 0.0f, -0.5f));
+    chaseContext.grid = &chaseGrid;
+    engine::ai::BehaviorTree<engine::ai::AgentContext> chaseTree =
+        engine::ai::BuildBehaviorTree(chaseGraph);
+    const engine::ai::BtStatus chaseStatus =
+        chaseTree.Tick(chaseContext, 1.0f / 60.0f);
+    Check(chaseStatus == engine::ai::BtStatus::Running
+          && glm::length(chaseContext.steer) > 0.01f,
+          "behavior-tree chase uses navigation tolerance, not combat reach");
+
+    // Health conditions must gate branches when authored as Unreal-style node
+    // decorators, not only when placed as standalone condition nodes.
+    engine::ai::BehaviorGraph deathGraph;
+    const int deathRoot = deathGraph.AddNode(
+        engine::ai::BtNodeType::Selector, glm::vec2(0.0f));
+    const int deadIdle = deathGraph.AddNode(
+        engine::ai::BtNodeType::Idle, glm::vec2(0.0f));
+    const int liveIdle = deathGraph.AddNode(
+        engine::ai::BtNodeType::Idle, glm::vec2(0.0f));
+    deathGraph.root = deathRoot;
+    deathGraph.nodes[static_cast<std::size_t>(deathRoot)].children =
+        {deadIdle, liveIdle};
+    engine::ai::BtAttachment targetDead;
+    targetDead.type = engine::ai::BtNodeType::TargetDead;
+    deathGraph.nodes[static_cast<std::size_t>(deadIdle)].decorators.push_back(
+        targetDead);
+
+    engine::ecs::Registry deathRegistry;
+    const engine::ecs::Entity observer = deathRegistry.Create();
+    const engine::ecs::Entity target = deathRegistry.Create();
+    deathRegistry.Add<engine::Health>(target, engine::Health{100.0f, 100.0f});
+    engine::ai::AgentContext deathContext;
+    deathContext.registry = &deathRegistry;
+    deathContext.self = observer;
+    deathContext.targetEntity = target;
+    deathContext.nodeStatus.assign(deathGraph.nodes.size(), 0);
+    engine::ai::BehaviorTree<engine::ai::AgentContext> deathTree =
+        engine::ai::BuildBehaviorTree(deathGraph);
+    deathTree.Tick(deathContext, 1.0f / 60.0f);
+    Check(deathContext.nodeStatus[static_cast<std::size_t>(deadIdle)] == 3
+          && deathContext.nodeStatus[static_cast<std::size_t>(liveIdle)] == 1,
+          "Target Dead decorator rejects a living target");
+
+    deathRegistry.Get<engine::Health>(target).alive = false;
+    std::fill(deathContext.nodeStatus.begin(), deathContext.nodeStatus.end(), 0);
+    deathTree.Tick(deathContext, 1.0f / 60.0f);
+    Check(deathContext.nodeStatus[static_cast<std::size_t>(deadIdle)] == 1
+          && deathContext.nodeStatus[static_cast<std::size_t>(liveIdle)] == 0,
+          "Target Dead decorator admits a dead target");
+
+    // Projectiles must hit actual colliders along their swept path. A nearby
+    // transform origin is not a hit, and world geometry must protect actors.
+    engine::ecs::Registry projectileRegistry;
+    const engine::ecs::Entity nearMissTarget = projectileRegistry.Create();
+    projectileRegistry.Add<engine::ecs::Transform>(
+        nearMissTarget, engine::ecs::Transform{glm::vec3(1.0f, 0.8f, 0.0f)});
+    projectileRegistry.Add<engine::Health>(
+        nearMissTarget, engine::Health{100.0f, 100.0f});
+    projectileRegistry.Add<engine::ecs::Collider>(
+        nearMissTarget, engine::ecs::Collider::MakeSphere(0.1f));
+    const engine::ecs::Entity nearMissProjectile = projectileRegistry.Create();
+    projectileRegistry.Add<engine::ecs::Transform>(
+        nearMissProjectile, engine::ecs::Transform{glm::vec3(0.0f)});
+    engine::Projectile narrowShot;
+    narrowShot.dir = glm::vec3(1.0f, 0.0f, 0.0f);
+    narrowShot.speed = 2.0f;
+    narrowShot.radius = 0.12f;
+    projectileRegistry.Add<engine::Projectile>(
+        nearMissProjectile, narrowShot);
+    Check(engine::UpdateProjectiles(projectileRegistry, 0.5f).empty()
+          && Near(projectileRegistry.Get<engine::Health>(nearMissTarget).hp, 100.0f),
+          "projectile near-miss does not damage a nearby transform origin");
+    projectileRegistry.Destroy(nearMissProjectile);
+
+    const engine::ecs::Entity blockedTarget = projectileRegistry.Create();
+    projectileRegistry.Add<engine::ecs::Transform>(
+        blockedTarget, engine::ecs::Transform{glm::vec3(2.0f, 0.0f, 0.0f)});
+    projectileRegistry.Add<engine::Health>(
+        blockedTarget, engine::Health{100.0f, 100.0f});
+    projectileRegistry.Add<engine::ecs::Collider>(
+        blockedTarget, engine::ecs::Collider::MakeSphere(0.25f));
+    const engine::ecs::Entity wallBlocker = projectileRegistry.Create();
+    projectileRegistry.Add<engine::ecs::Transform>(
+        wallBlocker, engine::ecs::Transform{glm::vec3(1.0f, 0.0f, 0.0f)});
+    projectileRegistry.Add<engine::ecs::Collider>(
+        wallBlocker, engine::ecs::Collider::MakeBox(glm::vec3(0.05f, 1.0f, 1.0f)));
+    const engine::ecs::Entity blockedProjectile = projectileRegistry.Create();
+    projectileRegistry.Add<engine::ecs::Transform>(
+        blockedProjectile, engine::ecs::Transform{glm::vec3(0.0f)});
+    engine::Projectile blockedShot = narrowShot;
+    blockedShot.speed = 3.0f;
+    projectileRegistry.Add<engine::Projectile>(
+        blockedProjectile, blockedShot);
+    Check(engine::UpdateProjectiles(projectileRegistry, 1.0f).empty()
+          && Near(projectileRegistry.Get<engine::Health>(blockedTarget).hp, 100.0f)
+          && !projectileRegistry.Valid(blockedProjectile),
+          "wall consumes projectile before it can damage the player");
+
     registry.Get<engine::ecs::Collider>(wall).mask = engine::ecs::CollisionLayer::All;
     registry.Get<engine::ecs::Transform>(wall).position = glm::vec3(20.0f, 0.0f, 0.0f);
     const engine::ecs::Entity floor = registry.Create();
@@ -280,6 +405,46 @@ int main() {
           && !focusContext.focusTarget,
           "Clear Focus task releases the target-facing override");
 
+    int primaryScriptValue = 0;
+    int additionalScriptValue = 0;
+    engine::ScriptRegistry::Instance().Register(
+        "PrimarySlotProbe",
+        [&] { return std::make_unique<ScriptSlotProbe>(&primaryScriptValue); });
+    engine::ScriptRegistry::Instance().Register(
+        "AdditionalSlotProbe",
+        [&] { return std::make_unique<ScriptSlotProbe>(&additionalScriptValue); });
+    const engine::ecs::Entity scriptedEntity = registry.Create();
+    engine::NativeScriptComponent scripts;
+    scripts.className = "PrimarySlotProbe";
+    scripts.fields.push_back(
+        {"value", engine::ScriptField::Type::Int, "3"});
+    engine::NativeScriptSlot additionalScript;
+    additionalScript.className = "AdditionalSlotProbe";
+    additionalScript.fields.push_back(
+        {"value", engine::ScriptField::Type::Int, "7"});
+    scripts.additional.push_back(std::move(additionalScript));
+    registry.Add<engine::NativeScriptComponent>(
+        scriptedEntity, std::move(scripts));
+    engine::UpdateScripts(registry, 1.0f / 60.0f);
+    Check(primaryScriptValue == 3 && additionalScriptValue == 7,
+          "multiple native scripts run with independent authored fields");
+    engine::ShutdownScripts(registry);
+
+    const std::filesystem::path graphPath =
+        std::filesystem::temp_directory_path() / "3dg_named_composite_test.btgraph";
+    engine::ai::BehaviorGraph namedGraph;
+    namedGraph.root = namedGraph.AddNode(
+        engine::ai::BtNodeType::Selector, glm::vec2(12.0f, 24.0f));
+    namedGraph.nodes[static_cast<std::size_t>(namedGraph.root)].displayName =
+        "Choose Combat Or Patrol";
+    Check(engine::ai::SaveBehaviorGraph(graphPath.string(), namedGraph, &error),
+          "save behavior graph composite display name");
+    engine::ai::BehaviorGraph loadedNamedGraph;
+    Check(engine::ai::LoadBehaviorGraph(graphPath.string(), loadedNamedGraph, &error)
+          && loadedNamedGraph.nodes.size() == 1
+          && loadedNamedGraph.nodes[0].displayName == "Choose Combat Or Patrol",
+          "load behavior graph composite display name with spaces");
+
     movement.mode = engine::ai::AiMovementMode::Flying;
     position = engine::ai::MoveAiAgent(
         physics, registry, enemy, position, glm::vec3(0.0f, 3.0f, 0.0f),
@@ -299,6 +464,7 @@ int main() {
           "AI movement publishes locomotion flags to the animation graph");
 
     std::filesystem::remove(path);
+    std::filesystem::remove(graphPath);
     std::cout << "runtime AI tests passed\n";
     return 0;
 }

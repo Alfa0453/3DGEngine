@@ -90,6 +90,8 @@ const SkinnedModel* RuntimeAssetManager::LoadSkinnedModel(
         key += '\n';
         key += source.name;
         key += source.stripRootMotion ? "|1|" : "|0|";
+        key += source.sourceName;
+        key += '|';
         key += source.path;
     }
 
@@ -105,7 +107,8 @@ const SkinnedModel* RuntimeAssetManager::LoadSkinnedModel(
         for (const SkinnedAnimationSource& source : extraAnimations) {
             if (source.path.empty()) continue;
             try {
-                model->AddAnimationsFromFile(source.path, source.stripRootMotion, source.name);
+                model->AddAnimationsFromFile(
+                    source.path, source.stripRootMotion, source.name, source.sourceName);
             } catch (const std::exception& ex) {
                 // Keep whatever clips loaded; report the first failure but don't abort.
                 if (mergeError.empty()) mergeError = ex.what();
@@ -261,7 +264,20 @@ RuntimeAssetManager::ResolveReport RuntimeAssetManager::ResolveRegistryAssets(ec
     registry.view<ecs::SkinnedModelAsset>().each([&](ecs::Entity entity, ecs::SkinnedModelAsset& asset) {
         const bool wasCached = FindSkinnedModel(asset.path) != nullptr;
         std::string error;
-        const SkinnedModel* model = LoadSkinnedModel(asset.path, &error);
+        // Merge separate FBX clips (idle/walk/run) onto the model, or the character has
+        // no clips at runtime and stays in the bind (T-)pose.
+        const SkinnedModel* model = nullptr;
+        if (asset.animationSources.empty()) {
+            model = LoadSkinnedModel(asset.path, &error);
+        } else {
+            std::vector<SkinnedAnimationSource> sources;
+            sources.reserve(asset.animationSources.size());
+            for (const ecs::SkinnedModelAsset::AnimationSourceFile& s : asset.animationSources) {
+                sources.push_back(SkinnedAnimationSource{
+                    s.path, s.clipName, s.stripRootMotion, s.sourceClipName});
+            }
+            model = LoadSkinnedModel(asset.path, sources, &error);
+        }
         if (!model) {
             report.errors.push_back(error);
             return;
@@ -306,7 +322,7 @@ RuntimeAssetManager::ResolveReport RuntimeAssetManager::ResolveRegistryAssets(ec
                 continue;
             }
             animated.events.push_back(AnimEvent{
-                std::max(notify.clipIndex, 0),
+                resolveClip(std::max(notify.clipIndex, 0), notify.clipName),
                 std::max(notify.time, 0.0f),
                 notify.name
             });
@@ -369,6 +385,17 @@ RuntimeAssetManager::ResolveReport RuntimeAssetManager::ResolveRegistryAssets(ec
                     transitionDesc.exitTime     = transition.exitTime;
                     transitionDesc.priority     = transition.priority;
                     transitionDesc.canInterrupt = transition.canInterrupt;
+                    transitionDesc.requireAllConditions = transition.requireAllConditions;
+                    transitionDesc.additionalConditions.reserve(
+                        transition.additionalConditions.size());
+                    for (const auto& condition : transition.additionalConditions) {
+                        transitionDesc.additionalConditions.push_back({
+                            condition.parameter,
+                            static_cast<AnimationGraphDesc::TransitionDesc::Compare>(
+                                std::clamp(condition.compare, 0, 3)),
+                            condition.threshold
+                        });
+                    }
                     desc.transitions.push_back(std::move(transitionDesc));
                 }
                 BuildAnimationController(animated.controller, desc, resolveClip, clipSeconds);
@@ -393,6 +420,53 @@ RuntimeAssetManager::ResolveReport RuntimeAssetManager::ResolveRegistryAssets(ec
                 });
             }
         }
+        // Resolve socketed attachments (weapons/shields): load each static model and
+        // find its bone, so DrawAnimatedModelAttachments can ride the animated bone.
+        const Skeleton& skeleton = model->GetSkeleton();
+        for (const ecs::SkinnedModelAsset::Attachment& a : asset.attachments) {
+            const int socketBone = skeleton.Find(a.boneName);
+            const glm::mat4 socketBind = (socketBone >= 0)
+                ? glm::inverse(skeleton.bones[static_cast<std::size_t>(socketBone)].offset)
+                : glm::mat4(1.0f);
+            const glm::mat4 socketOffset =
+                MakeAttachmentOffset(a.position, a.eulerDegrees, a.scale);
+            if (!a.socketName.empty()) {
+                const auto existing = std::find_if(
+                    animated.sockets.begin(), animated.sockets.end(),
+                    [&a](const NamedModelSocket& socket) {
+                        return socket.name == a.socketName;
+                    });
+                NamedModelSocket resolvedSocket{
+                    a.socketName, socketBone, socketBind, socketOffset};
+                if (existing == animated.sockets.end())
+                    animated.sockets.push_back(std::move(resolvedSocket));
+                else
+                    *existing = std::move(resolvedSocket);
+            }
+            if (a.path.empty()) continue;
+            std::string attachError;
+            const Model* attachModel = LoadModel(a.path, &attachError);
+            if (!attachModel) {
+                report.errors.push_back(attachError);
+                continue;
+            }
+            ModelAttachment resolved;
+            resolved.model = attachModel;
+            resolved.bone = socketBone;
+            resolved.boneBind = socketBind;
+            resolved.localOffset = socketOffset;
+            if (!a.materialPath.empty()) {
+                std::string matError;
+                if (const RuntimeMaterialAsset* mat = LoadMaterial(a.materialPath, &matError)) {
+                    resolved.tint = mat->material.albedo;
+                    if (!mat->albedoMapPath.empty()) {
+                        resolved.albedoOverride = LoadTexture(mat->albedoMapPath, &matError);
+                    }
+                }
+            }
+            animated.attachments.push_back(resolved);
+        }
+
         registry.Add<AnimatedModel>(entity, std::move(animated));
         ++report.modelsAssigned;
     });
@@ -477,6 +551,19 @@ RuntimeAssetManager::ResolveReport RuntimeAssetManager::ResolveRegistryAssets(ec
         loaded.material.normalMap = loaded.normalMap;
         loaded.material.metalRoughMap = loaded.metalRoughMap;
         loaded.material.heightMap = loaded.heightMap;
+
+        // Skinned characters: the default skinned draw path reads the AnimatedModel's
+        // own surface fields, not LoadedMaterialAsset (only a custom skinned shader is
+        // read from the material). So a plain .3dgmat would do nothing to a character.
+        // Copy the material's look onto the AnimatedModel so assigning a material
+        // actually changes it.
+        if (AnimatedModel* animated = registry.TryGet<AnimatedModel>(entity)) {
+            animated->tint = loaded.material.albedo;
+            animated->metallic = loaded.material.metallic;
+            animated->roughness = loaded.material.roughness;
+            animated->emissive = loaded.material.emissive;
+            if (loaded.albedoMap) animated->albedoOverride = loaded.albedoMap;
+        }
         registry.Add<ecs::LoadedMaterialAsset>(entity, loaded);
     });
 

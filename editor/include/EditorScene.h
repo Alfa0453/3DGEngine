@@ -39,6 +39,7 @@ public:
 
     struct PlayerControllerSettings {
         bool firstPerson = false;
+        int cameraMode = 0;          // 0 = third person, 1 = first person, 2 = isometric
         float walkSpeed = 4.0f;
         float runSpeed = 7.0f;
         float jumpSpeed = 5.0f;
@@ -48,6 +49,9 @@ public:
         float eyeHeight = 0.6f;
         float cameraDistance = 5.0f;
         float cameraTargetHeight = 1.0f;
+        float isometricYaw = -45.0f;
+        float isometricPitch = -35.0f;
+        float isometricDistance = 12.0f;
         bool cameraCollision = true;
         float cameraProbeRadius = 0.20f;
         float cameraCollisionPadding = 0.08f;
@@ -63,14 +67,44 @@ public:
         float lockOnTrackingSpeed = 10.0f;
         float maxSlopeDegrees = 50.0f;
         float stepHeight = 0.35f;
+        int facingMode = 0;          // 0 = face camera, 1 = face movement (free-orbit camera)
+        float turnSpeed = 12.0f;     // how fast the body turns to face travel (face-movement)
     };
 
     using ScriptField = engine::ScriptField;
+    struct ScriptBinding {
+        bool enabled = true;
+        std::string className;
+        std::string path;
+        std::vector<ScriptField> fields;
+    };
 
     struct AnimationEvent {
         int clipIndex = 0;
         float time = 0.0f;
         std::string name;
+        std::string clipName;  // optional stable alias; preferred over clipIndex
+    };
+
+    // A separate animation file (e.g. Idle.fbx / Walk.fbx) merged onto the model by
+    // bone name. Carried into the runtime scene so clips exist in Play, not just in the
+    // Character Editor preview.
+    struct AnimationSource {
+        std::string file;
+        std::string clipName;       // runtime alias used by states
+        bool        stripRootMotion = false;
+        std::string sourceClipName; // take inside the source file
+    };
+
+    // A static model socketed to a character bone (weapon, shield, hat...).
+    struct ModelAttachment {
+        std::string modelPath;
+        std::string boneName;
+        glm::vec3   position{0.0f};
+        glm::vec3   eulerDegrees{0.0f};
+        glm::vec3   scale{1.0f};
+        std::string materialPath;   // optional .3dgmat applied to the attachment model
+        std::string socketName;     // named gameplay point exposed to scripts
     };
 
     struct AnimationActionProfile {
@@ -121,6 +155,11 @@ public:
             Equal = 2,
             NotEqual = 3
         };
+        struct Condition {
+            std::string parameter = "Speed";
+            Compare compare = Compare::GreaterOrEqual;
+            float threshold = 0.0f;
+        };
 
         std::string fromState;
         std::string toState;
@@ -131,6 +170,8 @@ public:
         float exitTime = 0.0f;
         int priority = 0;
         bool canInterrupt = false;
+        bool requireAllConditions = true;
+        std::vector<Condition> additionalConditions;
     };
 
     struct Object {
@@ -168,6 +209,9 @@ public:
         std::vector<AnimationStateNode> animationStates;
         std::vector<AnimationParameter> animationParameters;
         std::vector<AnimationStateTransition> animationTransitions;
+        std::vector<AnimationSource> animationSources;   // separate FBX clips merged by bone name
+        std::vector<ModelAttachment> modelAttachments;   // static models socketed to bones
+        std::string characterAssetPath;                  // source .3dgcharacter (for live editor sync)
         bool linearVelocityEnabled = false;
         bool angularVelocityEnabled = false;
         glm::vec3 linearVelocity{0.0f};
@@ -208,6 +252,7 @@ public:
         std::string scriptClassName;
         std::string scriptPath;
         std::vector<ScriptField> scriptFields;
+        std::vector<ScriptBinding> additionalScripts;
         bool audioSourceEnabled = false;
         std::string audioAssetPath;
         engine::AudioBus audioBus = engine::AudioBus::SFX;
@@ -466,12 +511,25 @@ public:
         bool selectedPhysicsGuideOnly = false;
     };
 
+    struct GameModeSettings {
+        std::string playerObjectName;  // empty = first object with Player Controller
+        bool playerInputEnabled = true;
+        bool startPaused = false;
+        bool allowPause = true;
+        bool allowRestart = true;
+        bool loseOnPlayerDeath = true;
+        int initialScore = 0;
+        bool cameraOverride = false;
+        int cameraMode = 0;            // 0 = third person, 1 = first person, 2 = isometric
+    };
+
     struct Snapshot {
         std::vector<ObjectSnapshot> objects;
         std::vector<PhysicsJoint> joints;
         std::vector<CameraPreset> cameraPresets;
         std::vector<CameraSequence> cameraSequences;
         Environment environment;
+        GameModeSettings gameMode;
         int selectedIndex = -1;
         int nextCubeNumber = 1;
     };
@@ -491,12 +549,17 @@ public:
     void MarkDirty() { m_dirty = true; }
 
     int SelectedIndex() const { return m_selectedIndex; }
+    // While suppressed, edits do not push undo snapshots (used for live drag-sync from
+    // the Character Editor, which would otherwise spam the undo stack every frame).
+    void SuppressUndo(bool suppress) { m_undoSuppressed = suppress; }
     const Object* SelectedObject() const;
     engine::ecs::Transform* SelectedTransform();
     const engine::ecs::Transform* TryGetTransform(engine::ecs::Entity entity) const;
     const engine::ecs::MeshRenderer* TryGetMeshRenderer(engine::ecs::Entity entity) const;
     const engine::ecs::Light* TryGetLight(engine::ecs::Entity entity) const;
     const Environment& GetEnvironment() const { return m_environment; }
+    const GameModeSettings& GetGameModeSettings() const { return m_gameMode; }
+    void SetGameModeSettings(const GameModeSettings& settings);
     bool IsVisible(engine::ecs::Entity entity) const;
     bool SelectedLocked() const;
 
@@ -574,6 +637,13 @@ public:
     bool SetSelectedAnimationStateGraph(const std::vector<AnimationStateNode>& states,
                                         const std::vector<AnimationStateTransition>& transitions,
                                         const std::vector<AnimationParameter>& parameters = {});
+    // Separate FBX clips merged onto the model by bone name; carried into Play so the
+    // character animates instead of falling back to the bind (T-)pose.
+    bool SetSelectedAnimationSources(const std::vector<AnimationSource>& sources);
+    // Static models socketed to the character's bones (weapons, shields...).
+    bool SetSelectedModelAttachments(const std::vector<ModelAttachment>& attachments);
+    // Record the source .3dgcharacter path so the editor can live-sync edits to it.
+    bool SetSelectedCharacterAssetPath(const std::string& path);
     bool SetSelectedLight(const engine::ecs::Light& light);
     void SetEnvironment(const Environment& environment);
     bool SetSelectedLinearVelocityEnabled(bool enabled);
@@ -609,6 +679,7 @@ public:
     bool SetSelectedHealthEnabled(bool enabled);
     bool SetSelectedHealth(const engine::Health& health);
     bool SetSelectedScript(const std::string& className, const std::string& path, bool enabled);
+    bool SetSelectedAdditionalScripts(const std::vector<ScriptBinding>& scripts);
     bool SetSelectedAudioSource(bool enabled, const std::string& path,
                                 float volume, float pitch, bool spatial,
                                 bool loop, bool autoplay, float minDistance,
@@ -704,9 +775,11 @@ private:
     std::vector<Snapshot> m_undoStack;
     std::vector<Snapshot> m_redoStack;
     Environment m_environment;
+    GameModeSettings m_gameMode;
     int m_selectedIndex = -1;
     int m_nextCubeNumber = 1;
     bool m_dirty = false;
+    bool m_undoSuppressed = false;
     bool m_transformEditOpen = false;
     bool m_particleEditOpen = false;
 };

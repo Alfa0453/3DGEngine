@@ -349,7 +349,9 @@ void SkinnedRenderer::Draw(const SkinnedModel& model,
                            const glm::mat4& modelMatrix,
                            const Camera& camera, float aspect,
                            const glm::vec3& sunDir, const glm::vec3& sunColor,
-                           const glm::vec3& ambient) {
+                           const glm::vec3& ambient,
+                           const glm::vec3& tint,
+                           const Texture* albedoOverride) {
     m_shader->Bind();
     m_shader->SetMat4("uViewProj", camera.ProjectionMatrix(aspect) * camera.ViewMatrix());
     m_shader->SetMat4("uModel", modelMatrix);
@@ -370,11 +372,17 @@ void SkinnedRenderer::Draw(const SkinnedModel& model,
             color = m.diffuse; specular = m.specular; emissive = m.emissive;
             shininess = m.shininess; diffuseMap = m.diffuseMap;
         }
-        m_shader->SetVec3("uColor", color);
+        // A material override (from a .3dgmat) tints the base colour and can replace the
+        // albedo map, so the character preview reflects an assigned material.
+        m_shader->SetVec3("uColor", albedoOverride ? tint : (color * tint));
         m_shader->SetVec3("uSpecular", specular);
         m_shader->SetVec3("uEmissive", emissive);
         m_shader->SetFloat("uShininess", shininess);
-        if (diffuseMap >= 0 && diffuseMap < static_cast<int>(texs.size()) && texs[static_cast<std::size_t>(diffuseMap)]) {
+        if (albedoOverride) {
+            albedoOverride->Bind(0);
+            m_shader->SetInt("uDiffuseTex", 0);
+            m_shader->SetInt("uHasDiffuse", 1);
+        } else if (diffuseMap >= 0 && diffuseMap < static_cast<int>(texs.size()) && texs[static_cast<std::size_t>(diffuseMap)]) {
             texs[static_cast<std::size_t>(diffuseMap)]->Bind(0);
             m_shader->SetInt("uDiffuseTex", 0);
             m_shader->SetInt("uHasDiffuse", 1);

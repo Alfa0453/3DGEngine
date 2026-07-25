@@ -45,6 +45,8 @@
 #include "ShaderEditorPanel.h"
 #include "HudEditorPanel.h"
 #include "CharacterEditorPanel.h"
+#include "ClipEditorPanel.h"
+#include "AnimationGraphEditorPanel.h"
 
 #include "EditorAssets.h"
 #include "EditorContentController.h"
@@ -119,6 +121,7 @@ private:
     struct PlayAgent {
         engine::ecs::Entity entity = engine::ecs::kNull;
         engine::ecs::Entity targetEntity = engine::ecs::kNull;   // chase target (M2)
+        engine::ecs::Entity configuredTargetEntity = engine::ecs::kNull;
         std::string         name;                                // scene object name (debug label)
         int                 team = 0;                            // faction id (0 = neutral)
         bool                autoTarget = false;                  // acquire nearest hostile each tick
@@ -165,6 +168,8 @@ private:
     void DrawShaderEditorPanel();
     void DrawHudEditorPanel();
     void DrawCharacterEditorPanel();
+    void DrawClipEditorPanel();
+    void DrawGraphEditorPanel();
     void DrawPlayHud();
     void SyncHudFromScene();   // load the scene's referenced .hud into m_hud
     void ScanHudImages();      // recursively list content-folder images for the picker
@@ -225,7 +230,8 @@ private:
     void AddTriggerVolume();
     void AddNavMeshBoundsVolume();
     void AddPlayerStart();
-    void AddCharacterToScene(const CharacterAsset& character, const glm::vec3& position);   // instantiate a .3dgcharacter
+    void AddCharacterToScene(const CharacterAsset& character, const glm::vec3& position,
+                             const std::string& assetPath = std::string());   // instantiate a .3dgcharacter
     void AddGameplayDoor();
     void AddGameplayPickup();
     void AddGameplayDamageZone();
@@ -260,6 +266,9 @@ private:
     void ExportRuntimeScene();
     void ValidateRuntimeScene();
     void TriggerAnimationPreviewAction();
+    void UpdateEditParticlePreviews(float dt);
+    void DrawEditParticlePreviews();
+    void ClearEditParticlePreviews();
     void EnterPlayMode();
     void ExitPlayMode();
     bool BuildPlayRuntimePreview(std::string* error);
@@ -383,6 +392,8 @@ private:
     ShaderEditorPanel                    m_shaderEditor;
     HudEditorPanel                       m_hudPanel;
     CharacterEditorPanel                 m_characterEditor;
+    ClipEditorPanel                      m_clipEditor;
+    AnimationGraphEditorPanel            m_graphEditor;
     engine::HudDocument                  m_hud;              // active HUD document (in memory)
     std::string                          m_hudPath;          // last saved/loaded .hud path
     std::unordered_map<std::string, float>       m_hudFloats;   // named numeric HUD values
@@ -394,6 +405,9 @@ private:
     std::optional<EditorScene::Snapshot> m_editSnapshot;
     std::optional<engine::Camera> m_editCameraBeforePlay;
     engine::RuntimeAssetManager m_editAssets;
+    engine::ecs::Registry m_editParticlePreviewRegistry;
+    std::unordered_map<engine::ecs::Entity, engine::ecs::Entity>
+        m_editParticlePreviewEntities;
     engine::PhysicsWorld m_playPhysics;
     std::optional<engine::ecs::Registry> m_playRegistry;
     std::optional<engine::RuntimeAssetManager> m_playAssets;
@@ -443,6 +457,7 @@ private:
     engine::ai::NavMesh m_editorNavMesh;
     bool m_showNavigationPreview = false;
     bool m_showGrid = true;               // reference ground grid + world axes (edit mode)
+    bool m_previewSceneAnimations = false; // advance character animations in the edit viewport (off = paused idle)
 
     float m_fps = 60.0f;
     float m_elapsed = 0.0f;

@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Animated Character Setup — FBX Idle / Walk / Run</title>
+<style>
+  :root{
+    --ink:#1b2430; --muted:#5a6675; --line:#d8dee7;
+    --brand:#2b6cb0; --brand-dark:#1f4e7a;
+    --tip:#2f855a; --tip-bg:#e9f6ee;
+    --warn:#b7791f; --warn-bg:#fbf3e3;
+    --danger:#c0392b; --danger-bg:#fbeceb;
+    --code-bg:#f4f6f9; --chip:#eef2f7;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    font-family:"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    color:var(--ink); font-size:11pt; line-height:1.5;
+    background:#eceff3;
+  }
+  .page{
+    background:#fff; width:210mm; min-height:297mm;
+    margin:12px auto; padding:20mm 18mm; position:relative;
+  }
+  h1,h2,h3{line-height:1.2; color:var(--ink);}
+  h1{font-size:26pt; margin:0 0 4px;}
+  h2{font-size:15.5pt; margin:26px 0 8px; padding-bottom:5px; border-bottom:2px solid var(--brand); color:var(--brand-dark);}
+  h3{font-size:12.5pt; margin:16px 0 4px; color:var(--brand-dark);}
+  p{margin:6px 0;}
+  ul,ol{margin:6px 0 6px 20px; padding:0;}
+  li{margin:4px 0;}
+  code{font-family:"Consolas","SFMono-Regular",Menlo,monospace; background:var(--code-bg);
+       border:1px solid var(--line); border-radius:4px; padding:0 4px; font-size:9.6pt;}
+  .lead{color:var(--muted); font-size:11.5pt;}
+  .kicker{letter-spacing:.14em; text-transform:uppercase; color:var(--brand); font-weight:700; font-size:9pt;}
+  .meta{color:var(--muted); font-size:9.2pt; margin-top:8px;}
+  .rule{height:3px;background:linear-gradient(90deg,var(--brand),#63b3ed);border:0;margin:14px 0 0;}
+  .callout{border-radius:7px; padding:10px 14px; margin:12px 0; border:1px solid var(--line); font-size:10.2pt;}
+  .callout .label{font-weight:700; font-size:8.6pt; letter-spacing:.08em; text-transform:uppercase; display:block; margin-bottom:2px;}
+  .tip{background:var(--tip-bg); border-color:#bfe3cd;} .tip .label{color:var(--tip);}
+  .warn{background:var(--warn-bg); border-color:#edddb6;} .warn .label{color:var(--warn);}
+  .danger{background:var(--danger-bg); border-color:#f0c9c5;} .danger .label{color:var(--danger);}
+  .steps{counter-reset:step; list-style:none; margin-left:0;}
+  .steps>li{position:relative; padding-left:34px; margin:12px 0;}
+  .steps>li::before{counter-increment:step; content:counter(step);
+     position:absolute; left:0; top:-1px; width:24px; height:24px; border-radius:50%;
+     background:var(--brand); color:#fff; font-weight:700; font-size:10pt;
+     display:flex; align-items:center; justify-content:center;}
+  table{border-collapse:collapse; width:100%; margin:10px 0; font-size:9.8pt;}
+  th,td{border:1px solid var(--line); padding:6px 9px; text-align:left; vertical-align:top;}
+  th{background:var(--chip); color:var(--brand-dark);}
+  tr:nth-child(even) td{background:#fafbfc;}
+  .path{font-family:"Consolas",monospace; font-size:9.4pt; color:var(--brand-dark);}
+  .tag{display:inline-block; background:var(--chip); border:1px solid var(--line); border-radius:20px;
+       padding:1px 9px; font-size:8.8pt; color:var(--brand-dark); margin:2px 4px 2px 0;}
+  .panel{background:#f7f9fc; border:1px solid var(--line); border-left:4px solid var(--brand);
+         border-radius:6px; padding:10px 14px; margin:10px 0;}
+  .foot{position:absolute; bottom:10mm; left:18mm; right:18mm; border-top:1px solid var(--line);
+        padding-top:5px; color:var(--muted); font-size:8.4pt; display:flex; justify-content:space-between;}
+  .cols{display:flex; gap:14px;} .cols>div{flex:1;}
+  @media print{
+    body{background:#fff;}
+    .page{margin:0; box-shadow:none; width:auto; min-height:auto; padding:16mm 15mm;}
+    .page-break{page-break-before:always;}
+    h2{page-break-after:avoid;} h3{page-break-after:avoid;}
+    table,.callout,.panel{page-break-inside:avoid;}
+    .noprint{display:none;}
+  }
+  .noprint{background:#1f2a37;color:#cbd5e1;padding:9px 14px;font-size:9.4pt;text-align:center;}
+</style>
+</head>
+<body>
+
+<div class="noprint">Print-ready guide &mdash; open in a browser and use <b>Ctrl&#8239;+&#8239;P &rarr; Save as PDF</b> (A4, default margins) to export the document.</div>
+
+<!-- ============ PAGE 1 ============ -->
+<section class="page">
+  <div class="kicker">3DG Engine &middot; Character Pipeline</div>
+  <h1>Setting Up a Fully Animated Character</h1>
+  <p class="lead">Building a playable character from a skeletal model and separate FBX clips &mdash; Idle, Walk and Run &mdash; that blends automatically in Play mode.</p>
+  <hr class="rule">
+  <p class="meta">Applies to the Character Editor, Model Transform, Locomotion graph and Play mode &middot; low-poly / Mixamo-style rigs</p>
+
+  <h2>What you'll build</h2>
+  <p>A reusable <b>character asset</b> (<span class="path">.3dgcharacter</span>) that carries the visible mesh, three merged FBX animations, a capsule collider, a player controller, and a one-dimensional locomotion blend space. Once placed in a scene and set as the player, it walks and runs under keyboard control while the animation cross-fades <b>Idle&nbsp;&rarr;&nbsp;Walk&nbsp;&rarr;&nbsp;Run</b> based on how fast it is moving.</p>
+
+  <div class="panel">
+    <b>The core idea.</b> Your model and your animations live in <i>separate</i> FBX files. The Character Editor merges each animation onto the model <b>by bone name</b>, so a shared rig (e.g. Mixamo) lets one skeleton play many clips. A 1D <b>blend space</b> keyed on a single <code>Speed</code> value chooses between Idle, Walk and Run &mdash; and in Play mode the engine drives that <code>Speed</code> for you from the character's movement.
+  </div>
+
+  <h2>Before you start &mdash; assets you need</h2>
+  <ul>
+    <li><b>One skeletal model</b> &mdash; the character mesh with its skeleton (FBX/glTF). This is the "base" rig.</li>
+    <li><b>Three animation files</b> &mdash; separate FBX exports of <b>Idle</b>, <b>Walk</b> and <b>Run</b> that use the <i>same skeleton / bone names</i> as the model.</li>
+  </ul>
+  <div class="callout tip"><span class="label">Tip &mdash; Mixamo workflow</span>
+    Upload your rig to Mixamo, then download the Idle, Walk and Run animations as <b>FBX, "Without Skin"</b>, keeping identical bone names. They'll merge cleanly onto your model. In-place variants are ideal; if only "in motion" versions exist, use <b>Strip Root Motion</b> (below) to keep the character from sliding.
+  </div>
+
+  <h3>Put the files in the project's Content folder</h3>
+  <p>Copy the model and the three animation FBX files into your project, e.g.:</p>
+  <p class="path">FirstGame/Content/Assets/Characters/&nbsp; (model + Idle.fbx, Walk.fbx, Run.fbx)</p>
+  <p>Use the <b>Assets</b> panel &rarr; <b>Import file</b> if they aren't there yet, then <b>Refresh</b>. Only assets inside <span class="path">Content</span> appear in the editor's searchable pickers.</p>
+
+  <div class="foot"><span>3DG Engine &mdash; Animated Character Setup</span><span>Page 1</span></div>
+</section>
+
+<!-- ============ PAGE 2 ============ -->
+<section class="page page-break">
+  <h2>Step-by-step: create the character asset</h2>
+  <p>Open <b>Panels &rarr; Character Editor</b> (or the Character Editor button). Work through the component tabs down the left side. Nothing here touches the scene until you add the character to it, so you can iterate freely.</p>
+
+  <ol class="steps">
+    <li><b>Mesh tab &mdash; pick the model.</b> Set <b>Skeletal Model</b> to your character mesh, and optionally a <b>Material</b> (a <span class="path">.3dgmat</span> from the Material Maker). The live preview loads the rig in its bind (T&#8209;)pose.</li>
+
+    <li><b>Mesh tab &mdash; add the animation sources.</b> Under <b>Animation Sources (separate files)</b>, add one row per clip:
+      <ul>
+        <li><b>File</b> &rarr; pick <span class="path">Idle.fbx</span>; <b>Clip Name</b> &rarr; <code>Idle</code></li>
+        <li>Add <span class="path">Walk.fbx</span> &rarr; <code>Walk</code>, and tick <b>Strip Root Motion</b></li>
+        <li>Add <span class="path">Run.fbx</span> &rarr; <code>Run</code>, and tick <b>Strip Root Motion</b></li>
+      </ul>
+      Each file is merged onto the model by bone name. Naming them exactly <code>Idle</code>&nbsp;/&nbsp;<code>Walk</code>&nbsp;/&nbsp;<code>Run</code> lets the one-click locomotion builder wire them up automatically.
+    </li>
+
+    <li><b>Mesh tab &mdash; Model Transform &amp; facing.</b> Scroll to <b>Model Transform</b>. If the rig imports lying down (Z&#8209;up), click <b>Stand up (Z-up)</b> (sets <code>Model Rot = -90, 0, 0</code>). Then rotate <b>Model Rot</b> Y (e.g. <code>180</code>) until the mesh's face points along the <b>cyan forward arrow</b>. This is render-only &mdash; the collider stays upright.</li>
+
+    <li><b>Collision tab.</b> Keep <b>Collider Enabled</b> with shape <b>Capsule</b>. Set <b>Radius</b> and <b>Half Height</b> to wrap the body (e.g. 0.4 / 0.9). Layer stays <b>Player</b>.</li>
+
+    <li><b>Movement tab.</b> Enable the <b>Player Controller</b>. Set <b>Walk Speed</b> and <b>Run Speed</b> (e.g. <code>3</code> and <code>6</code>). These are the speeds that will drive the animation blend, so remember them for Step&nbsp;7.</li>
+  </ol>
+
+  <div class="callout warn"><span class="label">Why Strip Root Motion</span>
+    Walk/Run clips often bake forward travel into the root bone. Since the player controller moves the capsule itself, leaving root motion in makes the mesh "double-move" and slide. Stripping it keeps the feet planted relative to the body while the controller does the travelling.
+  </div>
+
+  <div class="foot"><span>3DG Engine &mdash; Animated Character Setup</span><span>Page 2</span></div>
+</section>
+
+<!-- ============ PAGE 3 ============ -->
+<section class="page page-break">
+  <h2>Step-by-step: build the locomotion state machine</h2>
+  <p>Switch to the <b>Animation</b> tab. This is where Idle/Walk/Run become a single blendable state.</p>
+
+  <ol class="steps" start="6">
+    <li><b>Create the blend space.</b> With your three sources named <code>Idle</code>/<code>Walk</code>/<code>Run</code>, click <b>Create 1D Locomotion</b>. The editor builds a <b>Locomotion</b> state: a one-dimensional blend space driven by the <code>Speed</code> parameter, with Idle at 0, Walk at a mid speed and Run at the top. <b>Synchronize Animation Cycles</b> keeps the feet in phase as it blends.</li>
+
+    <li><b>Match the blend to your speeds.</b> Open the <b>Locomotion</b> state and check the blend samples. The <code>Speed</code> values where Walk and Run sit should line up with the <b>Walk/Run Speed</b> you set in the Movement tab (Step&nbsp;5). Rule of thumb: <code>Idle&nbsp;&rarr;&nbsp;0</code>, <code>Walk&nbsp;&rarr;&nbsp;walkSpeed</code>, <code>Run&nbsp;&rarr;&nbsp;runSpeed</code>.</li>
+
+    <li><b>Preview it.</b> In the preview, drag the <code>Speed</code> parameter (or the Live Graph Preview) from 0 upward and watch the character ease from Idle into Walk into Run. Use <b>Play</b>/<b>Pause</b> and orbit to inspect foot contact.</li>
+
+    <li><b>Save the character.</b> Use the panel's menu to <b>Save</b> the <span class="path">.3dgcharacter</span> asset into <span class="path">Content/Assets/Characters</span>.</li>
+  </ol>
+
+  <div class="callout tip"><span class="label">Prefer explicit states? Use the graph instead</span>
+    Rather than one blend space, you can author three separate <b>States</b> (Idle, Walk, Run) plus <b>Transitions</b> between them that compare the <code>Speed</code> parameter against thresholds (e.g. <i>Idle&rarr;Walk when Speed&nbsp;&gt;&nbsp;0.1</i>, <i>Walk&rarr;Run when Speed&nbsp;&gt;&nbsp;4</i>, and the reverse). Add a <code>Speed</code> float under <b>Parameters</b> first. The blend space is simpler and smoother for pure locomotion; explicit states give you more control for combat or one-shots.
+  </div>
+
+  <h2>How the states are driven in Play mode</h2>
+  <p>You never set <code>Speed</code> by hand at runtime. When the character is the active player, the engine updates its animation parameters every frame from the controller's movement:</p>
+  <table>
+    <tr><th>Parameter</th><th>Type</th><th>Driven from</th></tr>
+    <tr><td><code>Speed</code></td><td>float</td><td>Move input &times; (sprinting ? Run Speed : Walk Speed) &mdash; the locomotion driver</td></tr>
+    <tr><td><code>Direction</code></td><td>float</td><td>Strafe angle in degrees (for 2D/directional blends)</td></tr>
+    <tr><td><code>IsMoving</code> / <code>IsStopping</code></td><td>bool</td><td>Whether Speed is above / dropping below the move threshold</td></tr>
+    <tr><td><code>IsGrounded</code> / <code>IsFalling</code></td><td>bool</td><td>Character controller ground state</td></tr>
+    <tr><td><code>VerticalSpeed</code></td><td>float</td><td>Vertical velocity (jump / fall)</td></tr>
+    <tr><td><code>Acceleration</code> / <code>Deceleration</code> / <code>TurnRate</code></td><td>float</td><td>Rate of change of speed and look yaw</td></tr>
+  </table>
+  <p>For basic Idle/Walk/Run you only need <code>Speed</code> &mdash; the rest are there for richer graphs (starts/stops, jumps, strafing). AI characters get the same <code>Speed</code> driven from their nav velocity, so the identical graph works for NPCs.</p>
+
+  <div class="foot"><span>3DG Engine &mdash; Animated Character Setup</span><span>Page 3</span></div>
+</section>
+
+<!-- ============ PAGE 4 ============ -->
+<section class="page page-break">
+  <h2>Step-by-step: place it and make it the player</h2>
+  <ol class="steps" start="10">
+    <li><b>Add to the scene.</b> With a scene open, drag the <span class="path">.3dgcharacter</span> from the <b>Assets</b> panel into the viewport, or use <b>Add to Scene</b> in the Character Editor. It spawns auto-sized (~1.8&nbsp;units tall) standing on the drop point.</li>
+    <li><b>Check the forward arrow.</b> The selected character shows a cyan ground arrow for its forward (&#8209;Z). Confirm the mesh's face points along it; if not, adjust <b>Model&nbsp;Rot</b> in the Inspector's <b>Model Transform</b> (or fix it once in the Character Editor so every instance is correct).</li>
+    <li><b>Confirm it's the player.</b> Because the character has <b>Player Controller</b> enabled, it becomes the controlled player when you enter Play (the first player-controller object in the scene is chosen). No separate PlayerStart wiring is required.</li>
+    <li><b>Give it ground.</b> Make sure there's a floor/terrain with a collider under it so the capsule has something to stand and walk on.</li>
+  </ol>
+
+  <h2>Play it</h2>
+  <ol class="steps" start="14">
+    <li><b>Enter Play mode.</b> The camera attaches to the character (third-person by default).</li>
+    <li><b>Move.</b> <span class="tag">W A S D</span> walk, <span class="tag">Shift</span> sprint (Run), <span class="tag">Space</span> jump, <span class="tag">Mouse</span> look. As you accelerate, the character blends Idle&rarr;Walk&rarr;Run; releasing the keys eases it back to Idle.</li>
+    <li><b>Verify.</b> Feet should track the ground without sliding, the body should face its travel direction, and the shadow should sit on the floor.</li>
+  </ol>
+
+  <h2>Troubleshooting</h2>
+  <table>
+    <tr><th>Symptom</th><th>Cause &amp; fix</th></tr>
+    <tr><td>Character stays in T&#8209;pose / never animates</td><td>Clip names don't match, or no locomotion was built. Re-check the source <b>Clip Names</b> and click <b>Create 1D Locomotion</b>. Ensure the model actually has bones matching the animation files.</td></tr>
+    <tr><td>Feet slide across the ground</td><td>Root motion still baked in. Tick <b>Strip Root Motion</b> on the Walk and Run sources.</td></tr>
+    <tr><td>Only Idle plays, Walk/Run never trigger</td><td>Blend-space speeds don't match movement speeds. Align the blend samples' <code>Speed</code> with the Movement tab's <b>Walk/Run Speed</b>.</td></tr>
+    <tr><td>Mesh faces backward / sideways</td><td>Rotate <b>Model Rot</b> Y by 180&deg; (or &plusmn;90&deg;) until the face aligns with the cyan forward arrow.</td></tr>
+    <tr><td>Mesh lies down / faces the camera on spawn</td><td>Z&#8209;up rig. Use <b>Stand up (Z-up)</b>, then adjust yaw. This is render-only; the capsule stays upright.</td></tr>
+    <tr><td>Character is huge or tiny</td><td>Spawns auto-scaled to ~1.8&nbsp;units; adjust the object <b>Scale</b> in the Inspector if your world uses a different unit scale.</td></tr>
+    <tr><td>Doesn't move in Play</td><td>Player Controller not enabled on the character, or no ground collider beneath it.</td></tr>
+    <tr><td>Character sinks / floats above the floor</td><td>Tune the capsule <b>Half Height</b> / <b>Radius</b> so the capsule bottom meets the feet.</td></tr>
+  </table>
+
+  <div class="callout tip"><span class="label">Reuse</span>
+    Because all of this lives in the <span class="path">.3dgcharacter</span> asset, you can drop the same character into any scene and it arrives fully rigged, collided, controllable and animated. Duplicate the asset and swap the model/clips to spin up variants (enemies, NPCs) that share the graph.
+  </div>
+
+  <div class="foot"><span>3DG Engine &mdash; Animated Character Setup</span><span>Page 4</span></div>
+</section>
+
+</body>
+</html>

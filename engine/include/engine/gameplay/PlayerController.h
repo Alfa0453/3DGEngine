@@ -23,7 +23,7 @@ struct PlayerInput {
     float lookPitch   = 0.0f;   // mouse dy this frame (down = look down)
     bool  jump        = false;
     bool  sprint      = false;
-    bool  toggleView  = false;  // held state; the controller edge-detects it
+    bool  toggleView  = false;  // deprecated: camera mode is fixed before gameplay
     bool  toggleShoulder = false; // switch left/right third-person shoulder
 };
 
@@ -34,10 +34,23 @@ struct PlayerInput {
 // for rendering. This is the human-player analogue of the AiAgent controller.
 class PlayerController {
 public:
-    enum class View { FirstPerson, ThirdPerson };
+    enum class View { FirstPerson, ThirdPerson, Isometric };
+
+    // How the character body turns in third person.
+    //   CameraRelative  - the body always faces where the camera looks (strafe style);
+    //                     rotating the camera rotates the character. (default)
+    //   MovementDirection - the body turns to face its travel direction and the camera
+    //                     orbits freely around it; it only rotates while moving.
+    enum class FacingMode { CameraRelative, MovementDirection };
 
     CharacterController body;           // the kinematic capsule (position/size live here)
     View view = View::ThirdPerson;
+    FacingMode facingMode = FacingMode::CameraRelative;
+    float turnSpeed = 12.0f;            // MovementDirection: how fast the body turns to face travel
+    float stairSmoothingSpeed = 12.0f;  // visual/camera easing after a physical step-up
+    float isometricYaw = -45.0f;
+    float isometricPitch = -35.0f;
+    float isometricDistance = 12.0f;
 
     // Tunables;
     float walkSpeed        = 4.0f;
@@ -64,11 +77,26 @@ public:
     float tpMinPitch = -35.0f, tpMaxPitch = 75.0f;   // third-person pitch clamp
 
     // Place the player (capsule centre) and optionally set the capsule size.
-    void SetPosition(const glm::vec3& p) { body.position = p; }
+    void SetPosition(const glm::vec3& p) {
+        body.position = p;
+        m_stepVisualOffset = glm::vec3(0.0f);
+    }
     void SetCapsule(float radius, float height) { body.radius = radius; body.height = height; }
     void ToggleView() {
-        view = (view == View::FirstPerson) ? View::ThirdPerson : View::FirstPerson;
+        view = view == View::ThirdPerson ? View::FirstPerson
+             : view == View::FirstPerson ? View::Isometric
+                                         : View::ThirdPerson;
         m_cameraArmInitialized = false;
+    }
+    void SetIsometricView(float yawDegrees, float pitchDegrees, float distance) {
+        isometricYaw = yawDegrees;
+        isometricPitch = glm::clamp(pitchDegrees, -89.0f, 89.0f);
+        isometricDistance = glm::max(distance, 0.0f);
+        if (view == View::Isometric) {
+            m_yaw = isometricYaw;
+            m_pitch = isometricPitch;
+            m_cameraArmInitialized = false;
+        }
     }
     void ToggleShoulder() { rightShoulder = !rightShoulder; }
     void SetLockOnTarget(const glm::vec3& target) { m_lockOnTarget = target; }
@@ -94,24 +122,29 @@ public:
     glm::mat4 ViewMatrix() const;         // ready for the renderer
     glm::quat Facing() const;             // yaw-only orientation for the capsule mesh
     float CurrentCameraDistance() const {
-        return m_cameraArmInitialized ? m_currentCameraDistance : camDistance;
+        return m_cameraArmInitialized ? m_currentCameraDistance
+            : (view == View::Isometric ? isometricDistance : camDistance);
     }
 
     // A Transform-friendly view: centre position + facing rotation. (Kept as raw
     // members to avoid pulling in the ECS Transform type here.)
-    glm::vec3 CapsulePosition() const { return body.position; }
+    glm::vec3 CapsulePosition() const {
+        return body.position + m_stepVisualOffset;
+    }
     glm::quat CapsuleRotation() const { return Facing(); }
 
 private:
-    float m_yaw   = -90.0f;   // degrees; -90 looks toward -Z (matches Camera)
+    float m_yaw   = -90.0f;   // degrees; camera yaw (-90 looks toward -Z, matches Camera)
+    float m_facingYaw = -90.0f; // degrees; the body's facing yaw (may lag the camera)
+    bool  m_facingInitialized = false;
     float m_pitch =   0.0f;
-    bool  m_prevToggle = false;
     bool  m_prevShoulderToggle = false;
     float m_currentCameraDistance = 5.0f;
     bool  m_cameraArmInitialized = false;
     float m_currentShoulderOffset = 0.0f;
     bool m_shoulderInitialized = false;
     std::optional<glm::vec3> m_lockOnTarget;
+    glm::vec3 m_stepVisualOffset{0.0f};
 
     glm::vec3 ThirdPersonAnchor() const;
     glm::vec3 ThirdPersonOffset(float distance) const;

@@ -64,6 +64,11 @@ struct AnimationGraphDesc {
 
     struct TransitionDesc {
         enum class Compare { GreaterOrEqual = 0, Less = 1, Equal = 2, NotEqual = 3 };
+        struct Condition {
+            std::string parameter = "Speed";
+            Compare compare = Compare::GreaterOrEqual;
+            float threshold = 0.0f;
+        };
         std::string fromState;            // empty = "any state"
         std::string toState;
         std::string parameter = "Speed";
@@ -73,6 +78,8 @@ struct AnimationGraphDesc {
         float       exitTime = 0.0f;
         int         priority = 0;
         bool        canInterrupt = false;
+        bool        requireAllConditions = true;
+        std::vector<Condition> additionalConditions;
     };
 
     std::vector<StateDesc>      states;
@@ -131,7 +138,7 @@ inline void BuildAnimationController(
             || to == stateIndices.end()) {
             continue;
         }
-        out.AddTransition(AnimationController::Transition{
+        AnimationController::Transition runtimeTransition{
             transition.fromState.empty() ? -1 : from->second,
             to->second,
             transition.parameter,
@@ -142,7 +149,20 @@ inline void BuildAnimationController(
             std::clamp(transition.exitTime, 0.0f, 1.0f),
             transition.priority,
             transition.canInterrupt
-        });
+        };
+        runtimeTransition.requireAllConditions = transition.requireAllConditions;
+        runtimeTransition.additionalConditions.reserve(
+            transition.additionalConditions.size());
+        for (const AnimationGraphDesc::TransitionDesc::Condition& condition
+             : transition.additionalConditions) {
+            runtimeTransition.additionalConditions.push_back({
+                condition.parameter,
+                static_cast<AnimationController::Transition::Compare>(
+                    std::clamp(static_cast<int>(condition.compare), 0, 3)),
+                condition.threshold
+            });
+        }
+        out.AddTransition(runtimeTransition);
     }
 }
 

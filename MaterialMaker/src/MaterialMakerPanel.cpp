@@ -794,6 +794,8 @@ void MaterialMakerPanel::DrawPreview() {
         s.envYawDeg      = m_previewEnvYawApplied;
         s.lightIntensity = m_previewLight;
         s.groundPlane    = m_previewGround;
+        s.distance       = 2.9f / std::max(0.4f, m_previewZoom);   // wheel zoom
+        s.hdriPath       = m_hdriPath;
         s.background     = glm::vec3(m_previewBg[0], m_previewBg[1], m_previewBg[2]);
         s.albedoMapPath     = m_material.albedoMap;
         s.normalMapPath     = m_material.normalMap;
@@ -809,11 +811,17 @@ void MaterialMakerPanel::DrawPreview() {
         ImGui::Image((ImTextureID)(std::intptr_t)texture,
                      imageSize, ImVec2(0.0f, 1.0f), ImVec2(1.0f, 0.0f));
 
-        // Drag on the image to orbit the camera.
-        if (ImGui::IsItemHovered() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
-            const ImVec2 delta = ImGui::GetIO().MouseDelta;
-            m_previewYaw += delta.x * 0.4f;
-            m_previewPitch = std::max(-85.0f, std::min(85.0f, m_previewPitch - delta.y * 0.4f));
+        // Drag on the image to orbit the camera; wheel to zoom.
+        if (ImGui::IsItemHovered()) {
+            if (ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+                const ImVec2 delta = ImGui::GetIO().MouseDelta;
+                m_previewYaw += delta.x * 0.4f;
+                m_previewPitch = std::max(-85.0f, std::min(85.0f, m_previewPitch - delta.y * 0.4f));
+            }
+            const float wheel = ImGui::GetIO().MouseWheel;
+            if (wheel != 0.0f) {
+                m_previewZoom = std::max(0.4f, std::min(3.0f, m_previewZoom + wheel * 0.12f));
+            }
         }
 
         const char* shapes[]   = {"Sphere", "Cube", "Plane"};
@@ -830,8 +838,33 @@ void MaterialMakerPanel::DrawPreview() {
             ImGui::SliderFloat("Rotate", &m_previewEnvYaw, -180.0f, 180.0f, "%.0f deg");
             if (ImGui::IsItemDeactivatedAfterEdit()) m_previewEnvYawApplied = m_previewEnvYaw;
             ImGui::SliderFloat("Light", &m_previewLight, 0.0f, 3.0f, "%.2f");
+            if (ImGui::SliderFloat("Zoom", &m_previewZoom, 0.4f, 3.0f, "%.2fx")) {
+                m_previewZoom = std::max(0.4f, std::min(3.0f, m_previewZoom));
+            }
             ImGui::Checkbox("Ground + shadow", &m_previewGround);
             ImGui::ColorEdit3("Background", m_previewBg, ImGuiColorEditFlags_NoInputs);
+
+            ImGui::Separator();
+            ImGui::TextUnformatted("Environment image (HDRI / panorama)");
+            ImGui::SetNextItemWidth(-120.0f);
+            if (ImGui::InputText("##hdri", m_hdriPathBuffer, sizeof(m_hdriPathBuffer))) {
+                m_hdriPath = m_hdriPathBuffer;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Paste##hdri")) {
+                const char* clip = ImGui::GetClipboardText();
+                const std::string picked = TrimClipboardPath(clip ? clip : "");
+                if (!picked.empty()) {
+                    CopyToBuffer(m_hdriPathBuffer, sizeof(m_hdriPathBuffer), picked);
+                    m_hdriPath = picked;
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Clear##hdri")) {
+                m_hdriPathBuffer[0] = '\0';
+                m_hdriPath.clear();
+            }
+            ImGui::TextDisabled("Equirectangular image lights the material and fills the background.");
             ImGui::TreePop();
         }
         return;

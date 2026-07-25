@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <functional>
+#include <iomanip>
 #include <memory>
 #include <sstream>
 #include <unordered_set>
@@ -91,8 +92,8 @@ const char* BtNodeTypeParamLabel(BtNodeType t) {
         case BtNodeType::Wait:          return "Seconds";
         case BtNodeType::Repath:        return "Interval (s)";
         case BtNodeType::ScriptService: return "Interval (s)";
-        case BtNodeType::BbSetBool:     return "Value (0/1)";
-        case BtNodeType::BbCheckBool:   return "Equals (0/1)";
+        case BtNodeType::BbSetBool:     return "Value";
+        case BtNodeType::BbCheckBool:   return "Expected Value";
         case BtNodeType::BbSetFloat:    return "Value";
         case BtNodeType::BbCheckFloat:  return "At least";
         case BtNodeType::BbFloatBelow:  return "Below";
@@ -222,6 +223,7 @@ Ptr FailNode() {
 }
 
 Ptr MakeBlackboardNode(BtNodeType type, const std::string& key, float param);   // defined below
+Ptr MakeAction(BtNodeType type, float param);   // defined below
 
 // Records a node's per-tick status into c.nodeStatus[index] for the live debugger,
 // then passes the child's result through unchanged.
@@ -413,6 +415,13 @@ Ptr WrapDecorator(const BtAttachment& d, Ptr child) {
             v.push_back(std::move(child));
             return std::make_unique<detail::Sequence<AgentContext>>(std::move(v));
         }
+        case BtNodeType::HealthBelow:
+        case BtNodeType::TargetDead: {
+            std::vector<Ptr> v;
+            v.push_back(MakeAction(d.type, d.param));
+            v.push_back(std::move(child));
+            return std::make_unique<detail::Sequence<AgentContext>>(std::move(v));
+        }
         case BtNodeType::Cooldown:     return std::make_unique<CooldownNode>(d.param, std::move(child));
         case BtNodeType::TimeLimit:    return std::make_unique<TimeLimitNode>(d.param, std::move(child));
         case BtNodeType::RandomChance: return std::make_unique<RandomChanceNode>(d.param, std::move(child));
@@ -489,7 +498,7 @@ Ptr MakeAction(BtNodeType type, float param) {
             return Bt<AgentContext>::Action([](AgentContext& c, float) {
                 const float targetDistance = HorizontalDistance(
                     c.targetPos, c.agent.position);
-                if (targetDistance <= c.reachRadius) {
+                if (targetDistance <= c.navigationAcceptanceRadius) {
                     c.steer = glm::vec3(0.0f);
                     c.agent.velocity = glm::vec3(0.0f);
                     c.path.clear();
@@ -498,7 +507,8 @@ Ptr MakeAction(BtNodeType type, float param) {
                     return BtStatus::Success;
                 }
                 c.repathTimer += c.dt;
-                const float goalRefreshDistance = std::max(0.15f, c.reachRadius * 0.25f);
+                const float goalRefreshDistance = std::max(
+                    0.15f, c.navigationAcceptanceRadius * 0.5f);
                 const bool targetMoved = !c.pathGoalValid
                     || HorizontalDistance(c.targetPos, c.pathGoal) > goalRefreshDistance;
                 if (c.path.empty() || targetMoved || c.repathTimer > c.repathInterval) {
@@ -511,7 +521,9 @@ Ptr MakeAction(BtNodeType type, float param) {
                 if (c.seesTarget && glm::length(c.targetPos - c.agent.position) < c.chargeRadius) {
                     c.steer = Seek(c.agent, c.targetPos);
                 } else {
-                    c.steer = FollowPath(c.agent, c.path, c.pathIndex, c.reachRadius);
+                    c.steer = FollowPath(
+                        c.agent, c.path, c.pathIndex,
+                        c.navigationAcceptanceRadius);
                 }
                 return BtStatus::Running;
             });
@@ -519,7 +531,7 @@ Ptr MakeAction(BtNodeType type, float param) {
         case BtNodeType::MoveToTarget:
             return Bt<AgentContext>::Action([](AgentContext& c, float) {
                 if (HorizontalDistance(c.targetPos, c.agent.position)
-                    <= c.reachRadius) {
+                    <= c.navigationAcceptanceRadius) {
                     c.steer = glm::vec3(0.0f);
                     c.agent.velocity = glm::vec3(0.0f);
                     c.path.clear();
@@ -527,7 +539,8 @@ Ptr MakeAction(BtNodeType type, float param) {
                     c.pathGoalValid = false;
                     return BtStatus::Success;
                 }
-                const float goalRefreshDistance = std::max(0.15f, c.reachRadius * 0.25f);
+                const float goalRefreshDistance = std::max(
+                    0.15f, c.navigationAcceptanceRadius * 0.5f);
                 const bool targetMoved = !c.pathGoalValid
                     || HorizontalDistance(c.targetPos, c.pathGoal) > goalRefreshDistance;
                 if (c.path.empty() || targetMoved) {
@@ -536,14 +549,18 @@ Ptr MakeAction(BtNodeType type, float param) {
                     c.pathGoal = c.targetPos;
                     c.pathGoalValid = true;
                 }
-                c.steer = FollowPath(c.agent, c.path, c.pathIndex, c.reachRadius);
+                c.steer = FollowPath(
+                    c.agent, c.path, c.pathIndex,
+                    c.navigationAcceptanceRadius);
                 return BtStatus::Running;
             });
 
         case BtNodeType::Patrol:
             return Bt<AgentContext>::Action([](AgentContext& c, float) {
                 if (c.patrol.empty()) return BtStatus::Failure;
-                c.steer = FollowPath(c.agent, c.patrol, c.patrolIndex, c.reachRadius, 1.5f);
+                c.steer = FollowPath(
+                    c.agent, c.patrol, c.patrolIndex,
+                    c.navigationAcceptanceRadius, 1.5f);
                 if (c.patrolIndex >= c.patrol.size()) c.patrolIndex = 0;   // loop
                 return BtStatus::Running;
             });
@@ -695,7 +712,7 @@ BehaviorTree<AgentContext> BuildBehaviorTree(const BehaviorGraph& graph,
 // ------------------------------ serialization -------------------------------
 //
 // Text format (whitespace-separated), version 1:
-//   3DGBehaviorGraph 2
+//   3DGBehaviorGraph 6
 //   root <int>
 //   nodes <count>
 //   <typeInt> <param> <canvasX> <canvasY> <childCount> [<child> ...]
@@ -708,7 +725,7 @@ bool SaveBehaviorGraph(const std::string& path, const BehaviorGraph& graph, std:
         return false;
     }
     auto tok = [](const std::string& s) -> std::string { return s.empty() ? "-" : s; };
-    out << "3DGBehaviorGraph 5\n";
+    out << "3DGBehaviorGraph 6\n";
     out << "root " << graph.root << "\n";
     out << "nodes " << graph.nodes.size() << "\n";
     auto writeAttachment = [&](const BtAttachment& a) {
@@ -724,7 +741,8 @@ bool SaveBehaviorGraph(const std::string& path, const BehaviorGraph& graph, std:
         for (const BtAttachment& a : n.decorators) writeAttachment(a);
         out << ' ' << n.services.size();
         for (const BtAttachment& a : n.services) writeAttachment(a);
-        out << ' ' << tok(n.script) << ' ' << tok(n.key);
+        out << ' ' << tok(n.script) << ' ' << tok(n.key)
+            << ' ' << std::quoted(n.displayName);
         out << '\n';
     }
     // Blackboard schema (v4+): count, then one line per entry.
@@ -750,7 +768,7 @@ bool LoadBehaviorGraph(const std::string& path, BehaviorGraph& outGraph, std::st
     std::string magic;
     int version = 0;
     in >> magic >> version;
-    if (magic != "3DGBehaviorGraph" || version < 1 || version > 5) {
+    if (magic != "3DGBehaviorGraph" || version < 1 || version > 6) {
         if (error) *error = "not a recognised behaviour-graph file.";
         return false;
     }
@@ -820,6 +838,9 @@ bool LoadBehaviorGraph(const std::string& path, BehaviorGraph& outGraph, std::st
                 std::string ky;
                 in >> ky;
                 if (ky != "-") node.key = ky;
+            }
+            if (version >= 6) {
+                in >> std::quoted(node.displayName);
             }
             if (!in) {
                 if (error) *error = "truncated attachment list.";

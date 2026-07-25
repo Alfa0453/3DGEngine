@@ -132,9 +132,10 @@ public:
         const engine::ecs::Transform* me = Transform();
         if (!me) return;
 
-        // Spawn a fireball a little in front of the mage's chest.
-        const glm::vec3 fwd = me->rotation * glm::vec3(0.0f, 0.0f, 1.0f);   // capsule forward
-        const glm::vec3 tip = me->position + glm::vec3(0.0f, 0.9f, 0.0f) + fwd * 0.6f;
+        // Add a Character Editor socket named StaffTip and position it at the
+        // end of the staff. It follows the animated hand automatically.
+        glm::vec3 tip;
+        if (!SocketPosition("StaffTip", &tip)) return;
         engine::ecs::Entity fb = SpawnFromObject("Fireball", tip);
 
         // Aim it: the projectile script flies along the copy's forward.
@@ -157,7 +158,7 @@ public:
     void OnUpdate(float dt) override {
         engine::ecs::Transform* t = Transform();
         if (!t) return;
-        const glm::vec3 fwd = t->rotation * glm::vec3(0.0f, 0.0f, 1.0f);
+        const glm::vec3 fwd = t->rotation * glm::vec3(0.0f, 0.0f, -1.0f);
         t->position += fwd * (14.0f * dt);        // fly
         m_dist += 14.0f * dt;
 
@@ -195,8 +196,8 @@ public:
 
 > These use the real `engine::Script` API (`WasMouseButtonPressed`, `Transform()`,
 > `Registry()`, `SpawnFromObject`, `Destroy`/`DestroySelf`, `Delay`, `PlayAudioCue`) —
-> see `engine/gameplay/Script.h`. The `+Z` forward convention matches the capsule/sphere
-> meshes; if your fireball flies backward, negate it.
+> see `engine/gameplay/Script.h`. Characters use local `-Z` as their gameplay-forward
+> direction, matching the forward arrow displayed by the editor.
 
 ---
 

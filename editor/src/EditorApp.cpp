@@ -28,6 +28,7 @@
 #include "ParticleAsset.h"
 
 #include <GLFW/glfw3.h>
+#include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <imgui.h>
@@ -605,8 +606,13 @@ void EditorApp::OnUpdate(float dt)
     if (skipHeld && !m_cinematicSkipPrev) m_cameraDirector.Skip();
     m_cinematicSkipPrev = skipHeld;
 
-    const bool playInputEnabled = !keyboardCaptured && !m_cameraDirector.InputLocked();
-    if (m_mode == EditorMode::Play && m_playRegistry) {
+    const bool playInputEnabled =
+        m_scene.GetGameModeSettings().playerInputEnabled
+        && !keyboardCaptured
+        && !m_cameraDirector.InputLocked();
+    if (m_mode == EditorMode::Play && m_playRegistry
+        && !m_physicsPaused
+        && engine::GameMode::Instance().IsPlaying()) {
         const engine::ScriptInputState scriptInput =
             CapturePlayScriptInput(playInputEnabled, true);
         engine::UpdateScripts(
@@ -624,6 +630,8 @@ void EditorApp::OnUpdate(float dt)
     }
     if (m_mode == EditorMode::Play && m_playRegistry)
         engine::UpdateParticleSystems(*m_playRegistry, dt);
+    else if (m_mode == EditorMode::Edit)
+        UpdateEditParticlePreviews(dt);
     m_audio.SetListener(m_camera.Position(), m_camera.Front());
     m_audio.UpdateMixer(dt);
     if (m_mode == EditorMode::Play) UpdatePlayAudioSources();
@@ -871,6 +879,20 @@ void EditorApp::DrawEditModeModels(const glm::mat4 & viewProj)
                 }
                 continue;
             }
+            // Merge the separate FBX clips so the edit preview animates too. The plain
+            // model above stays cached, so selection picking (which looks it up by path)
+            // still resolves the mesh bounds.
+            if (!object.animationSources.empty()) {
+                std::vector<engine::RuntimeAssetManager::SkinnedAnimationSource> sources;
+                sources.reserve(object.animationSources.size());
+                for (const EditorScene::AnimationSource& s : object.animationSources) {
+                    sources.push_back({s.file, s.clipName, s.stripRootMotion, s.sourceClipName});
+                }
+                if (const engine::SkinnedModel* merged =
+                        m_editAssets.LoadSkinnedModel(object.modelAssetPath, sources, &error)) {
+                    model = merged;
+                }
+            }
 
             engine::AnimatedModel animated;
             animated.SetModel(model);
@@ -881,6 +903,32 @@ void EditorApp::DrawEditModeModels(const glm::mat4 & viewProj)
             animated.renderOffset = engine::MakeModelRenderOffset(
                 object.modelOffsetPosition, object.modelOrientationEuler,
                 object.modelOffsetScale, model->Center());
+            // Resolve socketed attachments (weapons/shields) for the edit preview.
+            for (const EditorScene::ModelAttachment& a : object.modelAttachments) {
+                if (a.modelPath.empty()) continue;
+                std::string attachError;
+                if (const engine::Model* attachModel =
+                        m_editAssets.LoadModel(a.modelPath, &attachError)) {
+                    engine::ModelAttachment resolved;
+                    resolved.model = attachModel;
+                    resolved.bone = model->GetSkeleton().Find(a.boneName);
+                    resolved.boneBind = resolved.bone >= 0
+                        ? glm::inverse(model->GetSkeleton().bones[static_cast<std::size_t>(resolved.bone)].offset)
+                        : glm::mat4(1.0f);
+                    resolved.localOffset = engine::MakeAttachmentOffset(a.position, a.eulerDegrees, a.scale);
+                    if (!a.materialPath.empty()) {
+                        std::string matError;
+                        if (const engine::RuntimeMaterialAsset* mat =
+                                m_editAssets.LoadMaterial(a.materialPath, &matError)) {
+                            resolved.tint = mat->material.albedo;
+                            if (!mat->albedoMapPath.empty()) {
+                                resolved.albedoOverride = m_editAssets.LoadTexture(mat->albedoMapPath, &matError);
+                            }
+                        }
+                    }
+                    animated.attachments.push_back(resolved);
+                }
+            }
             if (model->AnimationCount() > 0) {
                 auto resolveClip = [&](int fallback, const std::string& name) {
                     int clip = fallback;
@@ -926,7 +974,9 @@ void EditorApp::DrawEditModeModels(const glm::mat4 & viewProj)
                 }
             }
             float& previewTime = m_animationPreviewTimes[object.entity];
-            if (object.animationAutoplay) {
+            // In the editor the character holds a paused idle by default; only advance
+            // when the user turns on "Animate Characters in Editor".
+            if (object.animationAutoplay && m_previewSceneAnimations) {
                 previewTime += m_dt;
             }
             engine::ecs::Registry previewRegistry;
@@ -999,6 +1049,16 @@ void EditorApp::DrawEditModeModels(const glm::mat4 & viewProj)
                                             sky.keyLightDirection,
                                             sky.keyLightColor * environment.sunIntensity,
                                             sky.ambient * environment.skyLightIntensity);
+                }
+                // Draw socketed attachments (weapons/shields) on the animated bones.
+                if (m_modelShader && !preview->attachments.empty()) {
+                    m_modelShader->Bind();
+                    m_modelShader->SetMat4("uViewProj", viewProj);
+                    m_modelShader->SetVec3("uLightPos", m_camera.Position() + glm::vec3(-4.0f, 6.0f, 4.0f));
+                    m_modelShader->SetVec3("uLightColor", glm::vec3(1.0f));
+                    m_modelShader->SetVec3("uViewPos", m_camera.Position());
+                    engine::DrawAnimatedModelAttachments(
+                        *preview, transform->Model() * preview->renderOffset, *m_modelShader);
                 }
             }
             continue;
@@ -1198,6 +1258,7 @@ void EditorApp::DrawEditorOverlay()
     dockspaceContext.terrainBrushStrength = &m_terrainBrushStrength;
     dockspaceContext.showNavigationPreview = &m_showNavigationPreview;
     dockspaceContext.showGrid = &m_showGrid;
+    dockspaceContext.previewAnimations = &m_previewSceneAnimations;
     dockspaceContext.showParticleDebug = &m_showParticleDebug;
     dockspaceContext.particleDebugSelectedOnly = &m_particleDebugSelectedOnly;
     dockspaceContext.particleDebugShapes = &m_particleDebugShapes;
@@ -1353,6 +1414,8 @@ void EditorApp::DrawEditorOverlay()
     DrawShaderEditorPanel();
     DrawHudEditorPanel();
     DrawCharacterEditorPanel();
+    DrawClipEditorPanel();
+    DrawGraphEditorPanel();
     DrawDirtyScenePrompt();
     if (selectedRuntimeAudio != engine::AudioEngine::InvalidSource) {
         if (dockspaceContext.runtimeAudioRestartRequested) m_audio.PlaySource(selectedRuntimeAudio, true);
@@ -1517,6 +1580,16 @@ void EditorApp::DrawEditorOverlay()
             m_characterEditor.QueueOpen(path);
             m_log.Info("Opening character: " + path);
             break;
+        case EditorAssets::Type::AnimationClip:
+            m_panels.SetOpen(EditorPanels::Panel::ClipEditor, true);
+            m_clipEditor.QueueOpen(path);
+            m_log.Info("Opening animation clip: " + path);
+            break;
+        case EditorAssets::Type::AnimationGraph:
+            m_panels.SetOpen(EditorPanels::Panel::GraphEditor, true);
+            m_graphEditor.QueueOpen(path);
+            m_log.Info("Opening animation graph: " + path);
+            break;
         case EditorAssets::Type::Model:
         case EditorAssets::Type::SkeletalModel:
             m_panels.SetOpen(EditorPanels::Panel::AnimationPreview, true);
@@ -1543,6 +1616,11 @@ void EditorApp::DrawEditorOverlay()
     }
     if (dockspaceContext.physicsPauseToggleRequested && m_mode == EditorMode::Play) {
         m_physicsPaused = !m_physicsPaused;
+        if (m_physicsPaused) {
+            engine::GameMode::Instance().Pause();
+        } else {
+            engine::GameMode::Instance().Resume();
+        }
         m_log.Info(m_physicsPaused ? "Play physics paused" : "Play physics resumed");
     }
     if (dockspaceContext.physicsStepRequested && m_mode == EditorMode::Play) {
@@ -1913,7 +1991,35 @@ void EditorApp::DrawCharacterEditorPanel() {
         // Drop the character a few units in front of the camera so it's visible.
         glm::vec3 spawn = m_camera.Position() + m_camera.Front() * 6.0f;
         spawn.y = 0.0f;
-        AddCharacterToScene(m_characterEditor.Asset(), spawn);
+        AddCharacterToScene(m_characterEditor.Asset(), spawn, m_characterEditor.Path());
+    }
+    if (!message.empty()) m_log.Info(message);
+}
+
+void EditorApp::DrawClipEditorPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::ClipEditor)) return;
+    bool open = true;
+    bool assetSaved = false;
+    std::string message;
+    m_clipEditor.Draw(m_project.AssetRoot(), &open, &assetSaved, &message, m_dt);
+    m_panels.SetOpen(EditorPanels::Panel::ClipEditor, open);
+    if (assetSaved) {
+        std::string error;
+        if (!m_assets.Refresh(m_project.AssetRoot(), &error)) m_log.Warning(error);
+    }
+    if (!message.empty()) m_log.Info(message);
+}
+
+void EditorApp::DrawGraphEditorPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::GraphEditor)) return;
+    bool open = true;
+    bool assetSaved = false;
+    std::string message;
+    m_graphEditor.Draw(m_project.AssetRoot(), &open, &assetSaved, &message, m_dt);
+    m_panels.SetOpen(EditorPanels::Panel::GraphEditor, open);
+    if (assetSaved) {
+        std::string error;
+        if (!m_assets.Refresh(m_project.AssetRoot(), &error)) m_log.Warning(error);
     }
     if (!message.empty()) m_log.Info(message);
 }
@@ -1988,7 +2094,12 @@ void EditorApp::DrawPlayHud() {
 
     switch (result.clickedAction) {
         case engine::HudButtonAction::ExitPlay:    ExitPlayMode(); break;
-        case engine::HudButtonAction::RestartPlay: ExitPlayMode(); EnterPlayMode(); break;
+        case engine::HudButtonAction::RestartPlay:
+            if (m_scene.GetGameModeSettings().allowRestart) {
+                ExitPlayMode();
+                EnterPlayMode();
+            }
+            break;
         case engine::HudButtonAction::EmitEvent:
             if (!result.clickedKey.empty()) m_hudFloats[result.clickedKey] = 1.0f;
             break;
@@ -2826,6 +2937,20 @@ void EditorApp::DrawPlayScene(const glm::mat4 & viewProj)
         lighting.fogHeightFalloff = environment.fogHeightFalloff;
         m_skinnedRenderer->DrawScene(
             *m_playRegistry, m_camera, window.AspectRatio(), lighting);
+
+        // Socketed attachments (weapons/shields) ride the animated bones.
+        if (m_modelShader) {
+            m_modelShader->Bind();
+            m_modelShader->SetMat4("uViewProj", viewProj);
+            m_modelShader->SetVec3("uLightPos", m_camera.Position() + glm::vec3(-4.0f, 6.0f, 4.0f));
+            m_modelShader->SetVec3("uLightColor", glm::vec3(1.0f));
+            m_modelShader->SetVec3("uViewPos", m_camera.Position());
+            m_playRegistry->view<Transform, engine::AnimatedModel>().each(
+                [&](Entity, Transform& t, engine::AnimatedModel& am) {
+                    if (am.attachments.empty()) return;
+                    engine::DrawAnimatedModelAttachments(am, t.Model() * am.renderOffset, *m_modelShader);
+                });
+        }
     }
 
     if (m_particleRenderer && m_playRegistry) {
@@ -2909,6 +3034,175 @@ void EditorApp::DrawPlayScene(const glm::mat4 & viewProj)
             m_viewport.DrawNavGridOverlay(m_renderer, *m_shader, *m_cube, m_playNavGrid, viewProj);
         }
     }
+}
+
+void EditorApp::UpdateEditParticlePreviews(float dt)
+{
+    std::unordered_set<Entity> activeSceneEntities;
+
+    auto syncPreviewSystem = [](engine::ParticleSystemComponent& preview,
+                                const engine::ParticleSystemComponent& authored,
+                                bool newlyCreated) {
+        preview.config = authored.config;
+        preview.enabled = authored.enabled;
+        preview.prewarm = authored.prewarm;
+        preview.duration = authored.duration;
+        preview.simulationSpeed = authored.simulationSpeed;
+        preview.localSpace = authored.localSpace;
+        preview.burstCount = authored.burstCount;
+        preview.burstInterval = authored.burstInterval;
+
+        // Authoring previews must remain observable even when the gameplay asset is
+        // configured for script-only playback or as a one-shot. These overrides live
+        // only in the preview registry; the saved scene values are never modified.
+        preview.autoplay = true;
+        preview.loop = true;
+        preview.startDelay = 0.0f;
+        if (newlyCreated) {
+            preview.initialized = false;
+            preview.playing = preview.enabled;
+        }
+    };
+
+    for (const EditorScene::Object& object : m_scene.Objects()) {
+        const bool hasSystem = object.particleSystemEnabled;
+        const bool hasEffect = !object.particleEffectLayers.empty();
+        if (!hasSystem && !hasEffect) continue;
+
+        const Transform* authoredTransform = m_scene.TryGetTransform(object.entity);
+        if (!authoredTransform) continue;
+        activeSceneEntities.insert(object.entity);
+
+        Entity previewEntity = engine::ecs::kNull;
+        auto previewIt = m_editParticlePreviewEntities.find(object.entity);
+        if (previewIt == m_editParticlePreviewEntities.end()
+            || !m_editParticlePreviewRegistry.Valid(previewIt->second)) {
+            previewEntity = m_editParticlePreviewRegistry.Create();
+            m_editParticlePreviewEntities[object.entity] = previewEntity;
+            m_editParticlePreviewRegistry.Add<Transform>(previewEntity, *authoredTransform);
+        } else {
+            previewEntity = previewIt->second;
+            *m_editParticlePreviewRegistry.TryGet<Transform>(previewEntity) =
+                *authoredTransform;
+        }
+
+        if (hasSystem) {
+            engine::ParticleSystemComponent authored;
+            authored.config = object.particleConfig;
+            authored.enabled = true;
+            authored.autoplay = object.particleAutoplay;
+            authored.loop = object.particleLoop;
+            authored.prewarm = object.particlePrewarm;
+            authored.duration = object.particleDuration;
+            authored.startDelay = object.particleStartDelay;
+            authored.simulationSpeed = object.particleSimulationSpeed;
+            authored.localSpace = object.particleLocalSpace;
+            authored.burstCount = object.particleBurstCount;
+            authored.burstInterval = object.particleBurstInterval;
+
+            engine::ParticleSystemComponent* preview =
+                m_editParticlePreviewRegistry.TryGet<engine::ParticleSystemComponent>(
+                    previewEntity);
+            if (!preview) {
+                engine::ParticleSystemComponent created;
+                syncPreviewSystem(created, authored, true);
+                m_editParticlePreviewRegistry.Add<engine::ParticleSystemComponent>(
+                    previewEntity, std::move(created));
+            } else {
+                syncPreviewSystem(*preview, authored, false);
+            }
+        } else {
+            m_editParticlePreviewRegistry.Remove<engine::ParticleSystemComponent>(
+                previewEntity);
+        }
+
+        if (hasEffect) {
+            engine::ParticleEffectComponent* preview =
+                m_editParticlePreviewRegistry.TryGet<engine::ParticleEffectComponent>(
+                    previewEntity);
+            if (!preview) {
+                engine::ParticleEffectComponent created;
+                created.enabled = true;
+                created.layers = object.particleEffectLayers;
+                for (engine::ParticleEffectLayer& layer : created.layers) {
+                    const engine::ParticleSystemComponent authored = layer.system;
+                    layer.system = {};
+                    syncPreviewSystem(layer.system, authored, true);
+                }
+                m_editParticlePreviewRegistry.Add<engine::ParticleEffectComponent>(
+                    previewEntity, std::move(created));
+            } else {
+                preview->enabled = true;
+                if (preview->layers.size() != object.particleEffectLayers.size()) {
+                    preview->layers = object.particleEffectLayers;
+                    for (engine::ParticleEffectLayer& layer : preview->layers) {
+                        const engine::ParticleSystemComponent authored = layer.system;
+                        layer.system = {};
+                        syncPreviewSystem(layer.system, authored, true);
+                    }
+                } else {
+                    for (std::size_t i = 0; i < preview->layers.size(); ++i) {
+                        engine::ParticleEffectLayer& layer = preview->layers[i];
+                        const engine::ParticleEffectLayer& authored =
+                            object.particleEffectLayers[i];
+                        layer.name = authored.name;
+                        layer.assetPath = authored.assetPath;
+                        layer.offset = authored.offset;
+                        layer.enabled = authored.enabled;
+                        syncPreviewSystem(layer.system, authored.system, false);
+                    }
+                }
+            }
+        } else {
+            m_editParticlePreviewRegistry.Remove<engine::ParticleEffectComponent>(
+                previewEntity);
+        }
+    }
+
+    for (auto it = m_editParticlePreviewEntities.begin();
+         it != m_editParticlePreviewEntities.end();) {
+        if (activeSceneEntities.find(it->first) == activeSceneEntities.end()) {
+            m_editParticlePreviewRegistry.Destroy(it->second);
+            it = m_editParticlePreviewEntities.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    if (!m_editParticlePreviewEntities.empty()) {
+        engine::UpdateParticleSystems(
+            m_editParticlePreviewRegistry, std::max(dt, 0.0f));
+    }
+}
+
+void EditorApp::DrawEditParticlePreviews()
+{
+    if (!m_particleRenderer || m_editParticlePreviewEntities.empty()) return;
+
+    const engine::Window& window = GetWindow();
+    m_particleRenderer->ResetStats();
+    m_editParticlePreviewRegistry.view<engine::ParticleSystemComponent>().each(
+        [&](Entity, engine::ParticleSystemComponent& system) {
+            ResolveParticleGraphShader(system, m_editAssets);
+            m_particleRenderer->Draw(
+                system, m_camera, window.AspectRatio());
+        });
+    m_editParticlePreviewRegistry.view<engine::ParticleEffectComponent>().each(
+        [&](Entity, engine::ParticleEffectComponent& effect) {
+            if (!effect.enabled) return;
+            for (engine::ParticleEffectLayer& layer : effect.layers) {
+                if (!layer.enabled) continue;
+                ResolveParticleGraphShader(layer.system, m_editAssets);
+                m_particleRenderer->Draw(
+                    layer.system, m_camera, window.AspectRatio());
+            }
+        });
+}
+
+void EditorApp::ClearEditParticlePreviews()
+{
+    m_editParticlePreviewRegistry = engine::ecs::Registry{};
+    m_editParticlePreviewEntities.clear();
 }
 
 void EditorApp::DrawEditScene(const glm::mat4 & viewProj)
@@ -3030,6 +3324,7 @@ void EditorApp::DrawEditScene(const glm::mat4 & viewProj)
         m_pbrRenderer->Render(pbrRegistry, m_camera, window.AspectRatio(), m_renderW, m_renderH, options);
     }
     DrawEditModeModels(viewProj);
+    DrawEditParticlePreviews();
     if (m_showGrid && m_shader && m_cube) {
         m_viewport.DrawWorldGrid(m_renderer, *m_shader, *m_cube, viewProj);
     }
@@ -3047,19 +3342,21 @@ void EditorApp::DrawEditScene(const glm::mat4 & viewProj)
             m_viewport.DrawCameraSequenceGuides(
                 m_renderer, *m_shader, *m_cube, m_scene, viewProj);
         }
-        if (m_showParticleDebug) {
-            m_viewport.DrawParticleSystemGuides(m_renderer, *m_shader, *m_cube, m_scene, viewProj,
-                m_particleDebugSelectedOnly, m_particleDebugShapes, m_particleDebugDirections,
-                m_particleDebugBounds, m_particleDebugCullingState);
-        }
+    }
+    if (m_showParticleDebug) {
+        m_viewport.DrawParticleSystemGuides(
+            m_scene, viewProj, m_particleDebugSelectedOnly,
+            m_particleDebugShapes, m_particleDebugDirections,
+            m_particleDebugBounds, m_particleDebugCullingState);
     }
     if (m_shader && m_cube && environment.showLightGuides) {
         m_viewport.DrawSelectedLightGuide(m_renderer, *m_shader, *m_cube, m_scene, viewProj, environment.selectedLightGuideOnly);
     }
+    if (environment.showPhysicsGuides) {
+        m_viewport.DrawPhysicsColliderGuides(
+            m_scene, viewProj, environment.selectedPhysicsGuideOnly);
+    }
     if (m_shader && m_cube && environment.showPhysicsGuides) {
-        m_viewport.DrawPhysicsColliderGuides(m_renderer, *m_shader, *m_cube, m_scene, viewProj,
-            environment.selectedPhysicsGuideOnly);
-        
         std::vector<EditorViewport::PhysicsJointGuide> jointGuides;
         for (const EditorScene::PhysicsJoint& joint : m_scene.PhysicsJoints()) {
             const EditorScene::Object* objectA = nullptr;
@@ -3887,14 +4184,15 @@ void EditorApp::DropPayloadOnScene()
             m_dragDrop.Clear();
             return;
         }
-        AddCharacterToScene(character, SceneDropPosition());
+        AddCharacterToScene(character, SceneDropPosition(), payload.path);
     } else {
         m_log.Warning("Asset type cannot be dropped on the scene yet");
     }
     m_dragDrop.Clear();
 }
 
-void EditorApp::AddCharacterToScene(const CharacterAsset& character, const glm::vec3& position)
+void EditorApp::AddCharacterToScene(const CharacterAsset& character, const glm::vec3& position,
+                                   const std::string& assetPath)
 {
     if (!m_cube) {
         m_log.Error("Character add failed: editor meshes are not ready");
@@ -3954,6 +4252,10 @@ void EditorApp::AddCharacterToScene(const CharacterAsset& character, const glm::
         // Skipped when the asset already carries its own offset (Apply set it above).
         if (modelIsZUp) {
             m_scene.SetSelectedModelOffset(glm::vec3(0.0f), glm::vec3(-90.0f, 0.0f, 0.0f), glm::vec3(1.0f));
+        }
+        // Link the object to its source asset so Character Editor edits can live-sync.
+        if (!assetPath.empty()) {
+            m_scene.SetSelectedCharacterAssetPath(assetPath);
         }
         m_log.Info("Added character to scene: "
             + (character.name.empty() ? std::string("Character") : character.name));
@@ -4555,6 +4857,7 @@ void EditorApp::AddPlayerStart()
 
     EditorScene::PlayerControllerSettings player;
     player.firstPerson = false;
+    player.cameraMode = 0;
     player.walkSpeed = 4.0f;
     player.runSpeed = 7.0f;
     player.jumpSpeed = 5.0f;
@@ -5094,6 +5397,7 @@ void EditorApp::PerformNewScene()
         return;
     }
 
+    ClearEditParticlePreviews();
     m_scene.BuildDefault(*m_cube, *m_plane, *m_sphere, *m_capsule, *m_cylinder, *m_cone, *m_pyramid, *m_torus, *m_staircase);
     std::error_code ec;
     std::filesystem::create_directories(m_project.ScenesRoot(), ec);
@@ -5120,6 +5424,7 @@ void EditorApp::PerformLoadSceneFromPath(const std::string& path) {
         return;
     }
 
+    ClearEditParticlePreviews();
     const std::string previousPath = m_project.ScenePath();
     m_project.SetScenePath(m_project.ResolveScenePath(path));
     if (m_runtime.LoadScene(m_scene, m_project, *m_cube, *m_plane, *m_sphere, *m_capsule, *m_cylinder, *m_cone, *m_pyramid, *m_torus, *m_staircase, m_log)) {
@@ -5289,6 +5594,7 @@ void EditorApp::TriggerAnimationPreviewAction() {
 
 void EditorApp::EnterPlayMode()
 {
+    ClearEditParticlePreviews();
     RestoreCameraBeforeShake();
     m_cameraShake.Clear();
     m_cameraSequence.Stop();
@@ -5296,6 +5602,11 @@ void EditorApp::EnterPlayMode()
     m_cameraDirector.ClearEvents();
     m_cameraDirector.TakeCommands();
     engine::GameMode::Instance().Reset();
+    const EditorScene::GameModeSettings& gameModeSettings =
+        m_scene.GetGameModeSettings();
+    engine::GameMode::Instance().loseOnPlayerDeath =
+        gameModeSettings.loseOnPlayerDeath;
+    engine::GameMode::Instance().SetScore(gameModeSettings.initialScore);
     m_hudFloats.clear();
     m_hudStrings.clear();
     m_cinematicSkipPrev = false;
@@ -5303,7 +5614,10 @@ void EditorApp::EnterPlayMode()
     m_cameraSequencePaused = false;
     m_editSnapshot = m_scene.CreateSnapshot();
     m_editCameraBeforePlay = m_camera;
-    m_physicsPaused = false;
+    m_physicsPaused = gameModeSettings.startPaused;
+    if (gameModeSettings.startPaused) {
+        engine::GameMode::Instance().Pause();
+    }
     m_physicsStepRequested = false;
     m_physicsAccumulator = 0.0f;
     m_physicsStepsLastFrame = 0;
@@ -5660,13 +5974,26 @@ void EditorApp::BuildPlayAgents(const std::unordered_map<std::string, engine::ec
         if (!object.navAgentTargetName.empty()) {
             const auto target = playEntitiesByName.find(object.navAgentTargetName);
             if (target != playEntitiesByName.end()) {
+                playAgent.configuredTargetEntity = target->second;
                 playAgent.targetEntity = target->second;
+            } else {
+                m_log.Warning("AI: '" + object.name + "' chase target '"
+                    + object.navAgentTargetName + "' was not found in the Play scene");
             }
         }
         glm::vec3 startPos(0.0f);
+        glm::vec3 startFacing(0.0f, 0.0f, -1.0f);
         if (const engine::ecs::Transform* t = m_playRegistry->TryGet<engine::ecs::Transform>(entity)) {
             startPos = t->position;
+            startFacing = t->rotation * glm::vec3(0.0f, 0.0f, -1.0f);
+            startFacing.y = 0.0f;
+            if (glm::dot(startFacing, startFacing) <= 1.0e-6f) {
+                startFacing = glm::vec3(0.0f, 0.0f, -1.0f);
+            } else {
+                startFacing = glm::normalize(startFacing);
+            }
             playAgent.brain.SetPosition(startPos);
+            playAgent.brain.SetFacing(startFacing);
         }
 
         // M7: if the agent references a behaviour-tree asset, load it and drive the
@@ -5679,6 +6006,7 @@ void EditorApp::BuildPlayAgents(const std::unordered_map<std::string, engine::ec
                 playAgent.ctx.agent.maxSpeed = std::max(object.navAgentSpeed, 0.0f);
                 playAgent.ctx.agent.maxForce = std::max(object.navAgentMaxForce, 0.0f);
                 playAgent.ctx.agent.position = startPos;
+                playAgent.ctx.facing = startFacing;
                 playAgent.ctx.reachRadius = std::max(object.navAgentReachRadius, 0.05f);
                 playAgent.ctx.repathInterval = std::max(object.navAgentRepathInterval, 0.05f);
                 playAgent.ctx.patrol = object.patrolPoints;
@@ -5686,6 +6014,30 @@ void EditorApp::BuildPlayAgents(const std::unordered_map<std::string, engine::ec
                 playAgent.ctx.nodeStatus.assign(graph.nodes.size(), 0);   // debugger buffer
                 playAgent.tree = engine::ai::BuildBehaviorTree(graph, resolveSubtree);
                 m_log.Info("AI: '" + object.name + "' running behaviour tree " + object.navAgentBrainAsset);
+                for (const engine::ai::BtGraphNode& node : graph.nodes) {
+                    if (node.type == engine::ai::BtNodeType::ScriptTask
+                        && !node.script.empty()
+                        && !engine::ai::BtScriptRegistry::Instance().Has(node.script)) {
+                        m_log.Warning("AI: behavior task script '" + node.script
+                            + "' is not registered; rebuild and restart the editor");
+                    }
+                    for (const engine::ai::BtAttachment& attachment : node.decorators) {
+                        if (attachment.type == engine::ai::BtNodeType::ScriptDecorator
+                            && !attachment.script.empty()
+                            && !engine::ai::BtScriptRegistry::Instance().Has(attachment.script)) {
+                            m_log.Warning("AI: behavior decorator script '" + attachment.script
+                                + "' is not registered; rebuild and restart the editor");
+                        }
+                    }
+                    for (const engine::ai::BtAttachment& attachment : node.services) {
+                        if (attachment.type == engine::ai::BtNodeType::ScriptService
+                            && !attachment.script.empty()
+                            && !engine::ai::BtScriptRegistry::Instance().Has(attachment.script)) {
+                            m_log.Warning("AI: behavior service script '" + attachment.script
+                                + "' is not registered; rebuild and restart the editor");
+                        }
+                    }
+                }
             } else {
                 m_log.Warning("AI: could not load brain '" + object.navAgentBrainAsset + "': " + err);
             }
@@ -5724,9 +6076,27 @@ void EditorApp::BakePlayNavGrid()
         if (authoredBounds) return;
         mn = glm::min(mn, lo); mx = glm::max(mx, hi); anyBounds = true;
     };
+    auto isGameplayActor = [&](engine::ecs::Entity entity,
+                               const engine::ecs::Collider& collider) {
+        if (entity == m_playPlayerEntity) return true;
+        for (const PlayAgent& agent : m_playAgents) {
+            if (agent.entity == entity) return true;
+        }
+        constexpr std::uint32_t actorLayers =
+            engine::ecs::CollisionLayer::Player
+            | engine::ecs::CollisionLayer::Enemy
+            | engine::ecs::CollisionLayer::Collectible
+            | engine::ecs::CollisionLayer::Projectile
+            | engine::ecs::CollisionLayer::Trigger;
+        return (collider.layer & actorLayers) != 0;
+    };
 
     m_playRegistry->view<engine::ecs::Transform, engine::ecs::Collider>().each(
         [&](engine::ecs::Entity e, engine::ecs::Transform& t, engine::ecs::Collider& c) {
+            // Navigation is baked from permanent world geometry. Characters and
+            // other gameplay actors move at runtime and must not carve blocked
+            // cells underneath themselves or at the current chase destination.
+            if (isGameplayActor(e, c)) return;
             const engine::ecs::RigidBody* rb = m_playRegistry->TryGet<engine::ecs::RigidBody>(e);
             const bool dynamic = rb && rb->invMass > 0.0f;
             const glm::vec2 pos(t.position.x, t.position.z);
@@ -5812,9 +6182,24 @@ void EditorApp::BakePlayNavMesh()
         if (authoredBounds) return;
         mn = glm::min(mn, lo); mx = glm::max(mx, hi); anyBounds = true;
     };
+    auto isGameplayActor = [&](engine::ecs::Entity entity,
+                               const engine::ecs::Collider& collider) {
+        if (entity == m_playPlayerEntity) return true;
+        for (const PlayAgent& agent : m_playAgents) {
+            if (agent.entity == entity) return true;
+        }
+        constexpr std::uint32_t actorLayers =
+            engine::ecs::CollisionLayer::Player
+            | engine::ecs::CollisionLayer::Enemy
+            | engine::ecs::CollisionLayer::Collectible
+            | engine::ecs::CollisionLayer::Projectile
+            | engine::ecs::CollisionLayer::Trigger;
+        return (collider.layer & actorLayers) != 0;
+    };
 
     m_playRegistry->view<engine::ecs::Transform, engine::ecs::Collider>().each(
         [&](engine::ecs::Entity e, engine::ecs::Transform& t, engine::ecs::Collider& c) {
+            if (isGameplayActor(e, c)) return;
             const engine::ecs::RigidBody* rb = m_playRegistry->TryGet<engine::ecs::RigidBody>(e);
             const bool dynamic = rb && rb->invMass > 0.0f;
             const glm::vec2 pos(t.position.x, t.position.z);
@@ -5893,6 +6278,14 @@ void EditorApp::BakeEditorNavMesh()
             }
         }
         if (!object.colliderEnabled || object.collider.isTrigger) continue;
+        if (object.navAgentEnabled || object.playerControllerEnabled) continue;
+        constexpr std::uint32_t actorLayers =
+            engine::ecs::CollisionLayer::Player
+            | engine::ecs::CollisionLayer::Enemy
+            | engine::ecs::CollisionLayer::Collectible
+            | engine::ecs::CollisionLayer::Projectile
+            | engine::ecs::CollisionLayer::Trigger;
+        if ((object.collider.layer & actorLayers) != 0) continue;
         if (object.rigidBodyEnabled && object.rigidBody.invMass > 0.0f) continue;
 
         const engine::ecs::Collider& collider = object.collider;
@@ -5973,9 +6366,14 @@ void EditorApp::UpdateAI(float dt)
         const bool movementLocked = animated && animated->BlocksMovement();
         const glm::vec3 lockedPosition = t->position;
 
-        // Faction auto-targeting: acquire the nearest living agent on a different
-        // non-zero team as this agent's chase target (re-evaluated each tick).
-        if (playAgent.autoTarget && playAgent.team != 0) {
+        // An explicitly assigned scene target always wins. Faction auto-targeting
+        // is a fallback for agents that do not have a configured Chase Target.
+        // This also permits the player to be targeted without requiring the player
+        // character to carry a Nav Agent component.
+        if (playAgent.configuredTargetEntity != engine::ecs::kNull
+            && m_playRegistry->Valid(playAgent.configuredTargetEntity)) {
+            playAgent.targetEntity = playAgent.configuredTargetEntity;
+        } else if (playAgent.autoTarget && playAgent.team != 0) {
             engine::ecs::Entity best = engine::ecs::kNull;
             float bestDist = 1.0e18f;
             for (const PlayAgent& other : m_playAgents) {
@@ -6012,7 +6410,7 @@ void EditorApp::UpdateAI(float dt)
                 glm::vec3 forward = agentFacing;
                 forward.y = 0.0f;
                 forward = (glm::dot(forward, forward) > 1.0e-6f) ? glm::normalize(forward)
-                                                                 : glm::vec3(0.0f, 0.0f, 1.0f);
+                                                                 : glm::vec3(0.0f, 0.0f, -1.0f);
                 const glm::vec3 eye = agentPos + glm::vec3(0.0f, 0.6f, 0.0f) + forward * 0.6f;
                 seesTarget = engine::ai::CanSee(eye, forward, playAgent.brain.vision,
                                                 targetPos, playAgent.targetEntity,
@@ -6025,11 +6423,10 @@ void EditorApp::UpdateAI(float dt)
         if (!playAgent.movement.IsFlying()) movementTarget.y = agentPos.y;
         const bool hasValidTarget = playAgent.targetEntity != engine::ecs::kNull
             && m_playRegistry->Valid(playAgent.targetEntity);
-        const float stopRange = playAgent.useGraph
-            ? playAgent.ctx.reachRadius : playAgent.brain.reachRadius;
-        const bool targetWithinReach = hasValidTarget
+        const bool targetWithinReach = !playAgent.useGraph && hasValidTarget
             && glm::length(glm::vec2(targetPos.x - agentPos.x,
-                                     targetPos.z - agentPos.z)) <= stopRange;
+                                     targetPos.z - agentPos.z))
+                <= playAgent.brain.reachRadius;
         glm::vec3 facing;
         if (playAgent.useGraph) {
             // Data-driven behaviour tree drives the steering body.
@@ -6115,8 +6512,21 @@ void EditorApp::UpdateAI(float dt)
             }
         }
         if (glm::dot(facing, facing) > 1e-6f) {
-            const float yaw = std::atan2(facing.x, facing.z);
-            t->rotation = glm::angleAxis(yaw, glm::vec3(0.0f, 1.0f, 0.0f));
+            // Characters face object-local -Z. Add 180 degrees so that axis, rather
+            // than local +Z, is rotated onto the world-space AI facing direction.
+            const float yaw = std::atan2(facing.x, facing.z) + glm::pi<float>();
+            glm::quat targetRotation =
+                glm::angleAxis(yaw, glm::vec3(0.0f, 1.0f, 0.0f));
+            // Keep quaternion interpolation on the shortest hemisphere and use
+            // exponential damping so AI turns consistently at any frame rate.
+            if (glm::dot(t->rotation, targetRotation) < 0.0f) {
+                targetRotation = -targetRotation;
+            }
+            constexpr float kAiTurnResponse = 9.0f;
+            const float turnAlpha =
+                1.0f - std::exp(-kAiTurnResponse * std::max(dt, 0.0f));
+            t->rotation = glm::normalize(
+                glm::slerp(t->rotation, targetRotation, turnAlpha));
         }
     }
 
@@ -6170,8 +6580,24 @@ void EditorApp::ConfigurePlayPlayerController(const std::unordered_map<std::stri
         return;
     }
 
+    const EditorScene::GameModeSettings& gameMode =
+        m_scene.GetGameModeSettings();
+    bool configuredPlayerExists = false;
+    if (!gameMode.playerObjectName.empty()) {
+        for (const EditorScene::Object& candidate : m_scene.Objects()) {
+            if (candidate.playerControllerEnabled
+                && candidate.name == gameMode.playerObjectName) {
+                configuredPlayerExists = true;
+                break;
+            }
+        }
+    }
     for (const EditorScene::Object& object : m_scene.Objects()) {
         if (!object.playerControllerEnabled) {
+            continue;
+        }
+        if (configuredPlayerExists
+            && object.name != gameMode.playerObjectName) {
             continue;
         }
 
@@ -6182,9 +6608,14 @@ void EditorApp::ConfigurePlayPlayerController(const std::unordered_map<std::stri
 
         const EditorScene::PlayerControllerSettings& settings = object.playerController;
         engine::PlayerController controller;
-        controller.view = settings.firstPerson
-            ? engine::PlayerController::View::FirstPerson
-            : engine::PlayerController::View::ThirdPerson;
+        const int authoredCameraMode =
+            settings.firstPerson ? 1 : std::clamp(settings.cameraMode, 0, 2);
+        const int cameraMode = gameMode.cameraOverride
+            ? std::clamp(gameMode.cameraMode, 0, 2)
+            : authoredCameraMode;
+        controller.view = cameraMode == 1 ? engine::PlayerController::View::FirstPerson
+                        : cameraMode == 2 ? engine::PlayerController::View::Isometric
+                                          : engine::PlayerController::View::ThirdPerson;
         controller.walkSpeed = settings.walkSpeed;
         controller.runSpeed = settings.runSpeed;
         controller.jumpSpeed = settings.jumpSpeed;
@@ -6192,6 +6623,8 @@ void EditorApp::ConfigurePlayPlayerController(const std::unordered_map<std::stri
         controller.eyeHeight = settings.eyeHeight;
         controller.camDistance = settings.cameraDistance;
         controller.camTargetHeight = settings.cameraTargetHeight;
+        controller.SetIsometricView(settings.isometricYaw, settings.isometricPitch,
+                                    settings.isometricDistance);
         controller.camCollision = settings.cameraCollision;
         controller.camProbeRadius = settings.cameraProbeRadius;
         controller.camCollisionPadding = settings.cameraCollisionPadding;
@@ -6205,6 +6638,10 @@ void EditorApp::ConfigurePlayPlayerController(const std::unordered_map<std::stri
         controller.lockOnViewAngle = settings.lockOnViewAngle;
         controller.lockOnTargetHeight = settings.lockOnTargetHeight;
         controller.lockOnTrackingSpeed = settings.lockOnTrackingSpeed;
+        controller.facingMode = settings.facingMode == 1
+            ? engine::PlayerController::FacingMode::MovementDirection
+            : engine::PlayerController::FacingMode::CameraRelative;
+        controller.turnSpeed = settings.turnSpeed;
         controller.body.stepHeight = settings.stepHeight;
         controller.body.SetMaxSlopeDegrees(settings.maxSlopeDegrees);
         controller.SetCapsule(settings.capsuleRadius, settings.capsuleHeight);
@@ -6612,7 +7049,6 @@ void EditorApp::UpdatePlayPlayerController(float dt, bool inputEnabled)
         if (window.IsKeyPressed(GLFW_KEY_A)) input.moveRight -= 1.0f;
         input.jump = window.IsKeyPressed(GLFW_KEY_SPACE);
         input.sprint = window.IsKeyPressed(GLFW_KEY_LEFT_SHIFT) || window.IsKeyPressed(GLFW_KEY_RIGHT_SHIFT);
-        input.toggleView = window.IsKeyPressed(GLFW_KEY_V);
         input.toggleShoulder = window.IsKeyPressed(GLFW_KEY_Q);
 
         // With the cursor captured in play mode, mouse movement always drives the
@@ -7003,10 +7439,11 @@ void EditorApp::StepPlayPhysics(float dt, bool inputEnabled)
             *m_playRegistry, step, &scriptInput, &m_runtimeAudio,
             &m_cameraShake, &m_cameraDirector);
         engine::ecs::UpdateGameplay(*m_playRegistry, step);
-        engine::UpdateHealth(*m_playRegistry);
         engine::ecs::UpdateRuntimeMotion(*m_playRegistry, step);
         m_playAnimationEvents.clear();
         UpdateAI(step);
+        engine::UpdateProjectiles(*m_playRegistry, step);
+        engine::UpdateHealth(*m_playRegistry);
         engine::UpdateAnimations(*m_playRegistry, step);
         ApplyWaterBuoyancy(step);
         m_playPhysics.Step(*m_playRegistry, step);
@@ -7036,9 +7473,10 @@ void EditorApp::StepPlayPhysics(float dt, bool inputEnabled)
             *m_playRegistry, step, &scriptInput, &m_runtimeAudio,
             &m_cameraShake, &m_cameraDirector);
         engine::ecs::UpdateGameplay(*m_playRegistry, step);
-        engine::UpdateHealth(*m_playRegistry);
         engine::ecs::UpdateRuntimeMotion(*m_playRegistry, step);
         UpdateAI(step);
+        engine::UpdateProjectiles(*m_playRegistry, step);
+        engine::UpdateHealth(*m_playRegistry);
         engine::UpdateAnimations(*m_playRegistry, step);
         ApplyWaterBuoyancy(step);
         m_playPhysics.Step(*m_playRegistry, step);

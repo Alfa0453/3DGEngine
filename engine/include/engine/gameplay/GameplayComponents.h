@@ -20,15 +20,16 @@ struct Health {
 };
 
 // A moving projectile entity. Travels along `dir` at `speed`, expiring past `range`
-// or when it strikes a Health entity within `radius` (its `owner` is ignored). The
-// projectile system moves it (updating its Transform) and applies the damage.
+// or when its swept collision sphere strikes a solid collider (its `owner` is
+// ignored). Damage is applied only when that first collider has a living Health
+// component; walls consume the projectile without damaging actors behind them.
 struct Projectile {
     glm::vec3   dir{0.0f, 0.0f, 1.0f};
     float       speed    = 10.0f;
     float       range    = 12.0f;
     float       traveled = 0.0f;
     float       damage   = 25.0f;
-    float       radius   = 1.0f;
+    float       radius   = 0.12f;
     ecs::Entity owner    = ecs::kNull;
 };
 

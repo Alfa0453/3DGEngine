@@ -575,7 +575,10 @@ enum class ScriptTemplate {
     PlayerMovement = 1,
     DoorOpener = 2,
     Pickup = 3,
-    DamageZone = 4
+    DamageZone = 4,
+    AiTask = 5,
+    AiDecorator = 6,
+    AiService = 7
 };
 
 ScriptTemplate ScriptTemplateFromIndex(int index) {
@@ -584,7 +587,34 @@ ScriptTemplate ScriptTemplateFromIndex(int index) {
     case 2: return ScriptTemplate::DoorOpener;
     case 3: return ScriptTemplate::Pickup;
     case 4: return ScriptTemplate::DamageZone;
+    case 5: return ScriptTemplate::AiTask;
+    case 6: return ScriptTemplate::AiDecorator;
+    case 7: return ScriptTemplate::AiService;
     default: return ScriptTemplate::Empty;
+    }
+}
+
+bool IsBehaviorTreeTemplate(ScriptTemplate scriptTemplate) {
+    return scriptTemplate == ScriptTemplate::AiTask
+        || scriptTemplate == ScriptTemplate::AiDecorator
+        || scriptTemplate == ScriptTemplate::AiService;
+}
+
+const char* BehaviorTreeTemplateFile(ScriptTemplate scriptTemplate) {
+    switch (scriptTemplate) {
+    case ScriptTemplate::AiTask:      return "TaskTemplate.h";
+    case ScriptTemplate::AiDecorator: return "DecoratorTemplate.h";
+    case ScriptTemplate::AiService:   return "ServiceTemplate.h";
+    default:                          return "";
+    }
+}
+
+const char* BehaviorTreeTemplatePlaceholder(ScriptTemplate scriptTemplate) {
+    switch (scriptTemplate) {
+    case ScriptTemplate::AiTask:      return "MyTask";
+    case ScriptTemplate::AiDecorator: return "MyDecorator";
+    case ScriptTemplate::AiService:   return "MyService";
+    default:                          return "";
     }
 }
 
@@ -617,6 +647,9 @@ std::vector<EditorScene::ScriptField> DefaultFieldsForTemplate(ScriptTemplate sc
         add("target", Field::Type::String, "PlayerStart");
         add("damagePerSecond", Field::Type::Float, "10.0");
         break;
+    case ScriptTemplate::AiTask:
+    case ScriptTemplate::AiDecorator:
+    case ScriptTemplate::AiService:
     case ScriptTemplate::Empty:
         break;
     }
@@ -629,6 +662,9 @@ std::string ScriptTemplateDescription(ScriptTemplate scriptTemplate) {
     case ScriptTemplate::DoorOpener: return "Moves a named target upward while E is held.";
     case ScriptTemplate::Pickup: return "Collects on a trigger overlap, awards score, and plays audio and particles.";
     case ScriptTemplate::DamageZone: return "Damages a named Health target every update.";
+    case ScriptTemplate::AiTask: return "Behavior-tree Task that performs an action and returns Running, Success, or Failure.";
+    case ScriptTemplate::AiDecorator: return "Behavior-tree Decorator that allows or blocks its attached node.";
+    case ScriptTemplate::AiService: return "Behavior-tree Service that updates background state while its branch is active.";
     case ScriptTemplate::Empty: return "Blank script with helper comments.";
     }
     return "Blank script with helper comments.";
@@ -686,6 +722,10 @@ void WriteTemplateUpdateBody(std::ostringstream& source, ScriptTemplate scriptTe
                << "    if (auto* health = TryGet<engine::Health>(target)) {\n"
                << "        health->Damage(damage);\n"
                << "    }\n";
+        break;
+    case ScriptTemplate::AiTask:
+    case ScriptTemplate::AiDecorator:
+    case ScriptTemplate::AiService:
         break;
     case ScriptTemplate::Empty:
         source << "    (void)dt;\n"
@@ -789,6 +829,12 @@ bool IsGameModuleRoot(const std::filesystem::path& path) {
 }
 
 std::filesystem::path GameModuleRootFor(const EditorDockspace::Context& context) {
+#ifdef THREEDG_GAME_MODULE_DIR
+    const std::filesystem::path configured(THREEDG_GAME_MODULE_DIR);
+    if (IsGameModuleRoot(configured)) {
+        return configured;
+    }
+#endif
     std::vector<std::filesystem::path> starts;
     if (context.assets && !context.assets->RootPath().empty()) {
         std::error_code ec;
@@ -874,6 +920,14 @@ std::vector<SavedScriptEntry> SavedScriptsFor(const EditorDockspace::Context& co
         for (std::filesystem::directory_iterator it(root, ec), end;
              !ec && it != end; it.increment(ec)) {
             if (!it->is_regular_file(ec) || it->path().extension() != ".h") continue;
+            {
+                std::ifstream source(it->path(), std::ios::binary);
+                const std::string contents((std::istreambuf_iterator<char>(source)),
+                                           std::istreambuf_iterator<char>());
+                if (contents.find("engine::ai::BtScript") != std::string::npos) {
+                    continue;
+                }
+            }
             const std::string stem = it->path().stem().string();
             const std::string className = SanitizeScriptClassName(stem);
             if (className.empty() || className != stem) continue;
@@ -906,53 +960,140 @@ bool WriteTextFile(const std::filesystem::path& path, const std::string& text, s
     return true;
 }
 
+struct GeneratedScriptRegistration {
+    std::string className;
+    bool behaviorTree = false;
+};
+
 bool UpdateEditorScriptRegistry(const std::filesystem::path& gameRoot,
                                 const std::filesystem::path& scriptRoot,
                                 const std::string& newClassName,
+                                bool newBehaviorTree,
                                 std::string* error) {
     const std::filesystem::path listPath = gameRoot / "EditorScripts.list";
-    std::vector<std::string> classes;
+    std::vector<GeneratedScriptRegistration> registrations;
     {
         std::ifstream input(listPath);
         std::string line;
         while (std::getline(input, line)) {
             if (line.empty() || line.front() == '#') continue;
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            bool behaviorTree = false;
+            if (line.rfind("bt ", 0) == 0) {
+                behaviorTree = true;
+                line.erase(0, 3);
+            } else if (line.rfind("gameplay ", 0) == 0) {
+                line.erase(0, 9);
+            }
             const std::string className = SanitizeScriptClassName(line);
-            if (!className.empty()) classes.push_back(className);
+            if (!className.empty()) registrations.push_back({className, behaviorTree});
         }
     }
-    classes.push_back(newClassName);
-    std::sort(classes.begin(), classes.end());
-    classes.erase(std::unique(classes.begin(), classes.end()), classes.end());
-    classes.erase(std::remove_if(classes.begin(), classes.end(),
-        [&scriptRoot](const std::string& className) {
+    registrations.erase(std::remove_if(registrations.begin(), registrations.end(),
+        [&newClassName](const GeneratedScriptRegistration& registration) {
+            return registration.className == newClassName;
+        }), registrations.end());
+    registrations.push_back({newClassName, newBehaviorTree});
+    std::sort(registrations.begin(), registrations.end(),
+        [](const GeneratedScriptRegistration& a, const GeneratedScriptRegistration& b) {
+            return a.className < b.className;
+        });
+    registrations.erase(std::unique(registrations.begin(), registrations.end(),
+        [](const GeneratedScriptRegistration& a, const GeneratedScriptRegistration& b) {
+            return a.className == b.className;
+        }), registrations.end());
+    registrations.erase(std::remove_if(registrations.begin(), registrations.end(),
+        [&scriptRoot](const GeneratedScriptRegistration& registration) {
             std::error_code ec;
             return !std::filesystem::exists(
-                scriptRoot / (className + ".h"), ec);
-        }), classes.end());
+                scriptRoot / (registration.className + ".h"), ec);
+        }), registrations.end());
 
     std::ostringstream list;
-    list << "# One generated gameplay-script class name per line.\n"
+    list << "# Generated script registrations: `gameplay ClassName` or `bt ClassName`.\n"
          << "# This file is maintained by the editor. Empty lines and comments are ignored.\n";
-    for (const std::string& className : classes) list << className << '\n';
+    for (const GeneratedScriptRegistration& registration : registrations) {
+        list << (registration.behaviorTree ? "bt " : "gameplay ")
+             << registration.className << '\n';
+    }
     if (!WriteTextFile(listPath, list.str(), error)) return false;
 
     std::ostringstream registry;
     registry << "#pragma once\n\n"
              << "#include <engine/gameplay/Script.h>\n"
+             << "#include <engine/ai/BtScript.h>\n"
              << "#include <memory>\n";
-    for (const std::string& className : classes) {
-        registry << "#include <Scripts/" << className << ".h>\n";
+    for (const GeneratedScriptRegistration& registration : registrations) {
+        std::error_code ec;
+        const std::filesystem::path header = std::filesystem::absolute(
+            scriptRoot / (registration.className + ".h"), ec).lexically_normal();
+        registry << "#include \"" << header.generic_string() << "\"\n";
     }
     registry << "\n// Generated by the editor. Changes are replaced when scripts are created.\n"
              << "inline void RegisterEditorGeneratedScripts(engine::ScriptRegistry& scripts) {\n";
-    for (const std::string& className : classes) {
-        registry << "    scripts.Register(\"" << className << "\", [] { return std::make_unique<"
-                 << className << ">(); });\n";
+    for (const GeneratedScriptRegistration& registration : registrations) {
+        if (registration.behaviorTree) continue;
+        registry << "    scripts.Register(\"" << registration.className
+                 << "\", [] { return std::make_unique<" << registration.className
+                 << ">(); });\n";
+    }
+    registry << "}\n\n"
+             << "inline void RegisterEditorGeneratedBtScripts(engine::ai::BtScriptRegistry& scripts) {\n";
+    for (const GeneratedScriptRegistration& registration : registrations) {
+        if (!registration.behaviorTree) continue;
+        registry << "    scripts.Register(\"" << registration.className
+                 << "\", [] { return std::make_unique<" << registration.className
+                 << ">(); });\n";
     }
     registry << "}\n";
     return WriteTextFile(gameRoot / "include" / "game" / "EditorGeneratedScripts.h",
                          registry.str(), error);
+}
+
+bool LoadBehaviorTreeTemplate(const std::filesystem::path& gameRoot,
+                              ScriptTemplate scriptTemplate,
+                              const std::string& className,
+                              std::string* source,
+                              std::string* error) {
+    const std::filesystem::path relative =
+        std::filesystem::path("editor") / "btscripts" / "templates"
+        / BehaviorTreeTemplateFile(scriptTemplate);
+    const std::filesystem::path candidates[] = {
+#ifdef THREEDG_BT_SCRIPT_TEMPLATE_DIR
+        std::filesystem::path(THREEDG_BT_SCRIPT_TEMPLATE_DIR)
+            / BehaviorTreeTemplateFile(scriptTemplate),
+#endif
+        std::filesystem::current_path() / relative,
+        std::filesystem::current_path().parent_path() / relative,
+        gameRoot.parent_path() / relative
+    };
+
+    std::ifstream input;
+    for (const std::filesystem::path& candidate : candidates) {
+        input.open(candidate, std::ios::binary);
+        if (input) {
+            break;
+        }
+        input.clear();
+    }
+    if (!input) {
+        if (error) {
+            *error = "Could not find AI script template "
+                + std::string(BehaviorTreeTemplateFile(scriptTemplate))
+                + " in editor/btscripts/templates.";
+        }
+        return false;
+    }
+
+    *source = std::string((std::istreambuf_iterator<char>(input)),
+                          std::istreambuf_iterator<char>());
+    const std::string placeholder = BehaviorTreeTemplatePlaceholder(scriptTemplate);
+    std::size_t offset = 0;
+    while ((offset = source->find(placeholder, offset)) != std::string::npos) {
+        source->replace(offset, placeholder.size(), className);
+        offset += className.size();
+    }
+    return true;
 }
 
 bool LoadScriptSource(const std::string& path, std::string* error) {
@@ -1040,42 +1181,64 @@ bool CreateScriptFiles(const EditorDockspace::Context& context,
     }
 
     if (!std::filesystem::exists(headerPath)) {
-        std::ostringstream header;
-        header << "#pragma once\n\n"
-               << "#include <engine/gameplay/GameMode.h>\n"
-               << "#include <engine/gameplay/GameplayComponents.h>\n"
-               << "#include <engine/gameplay/Script.h>\n\n"
-               << "#include <algorithm>\n"
-               << "#include <glm/geometric.hpp>\n"
-               << "#include <string>\n\n"
-               << "class " << className << " final : public engine::Script {\n"
-               << "public:\n"
-               << "    void OnCreate() override {\n"
-               << "    // Called when the object enters Play mode.\n"
-               << "    // Example: if (auto* transform = Transform()) { transform->position.y += 1.0f; }\n"
-               << "    }\n\n"
-               << "    void OnUpdate(float dt) override {\n";
-        WriteTemplateUpdateBody(header, scriptTemplate);
-        header << "    }\n";
-        if (scriptTemplate == ScriptTemplate::Pickup) {
-            header << "\nprivate:\n"
-                   << "    bool m_collected = false;\n";
-        }
-        header << "};\n";
-        if (!WriteTextFile(headerPath, header.str(), error)) {
-            return false;
+        if (IsBehaviorTreeTemplate(scriptTemplate)) {
+            std::string source;
+            if (!LoadBehaviorTreeTemplate(gameRoot, scriptTemplate, className, &source, error)
+                || !WriteTextFile(headerPath, source, error)) {
+                return false;
+            }
+        } else {
+            std::ostringstream header;
+            header << "#pragma once\n\n"
+                   << "#include <engine/gameplay/GameMode.h>\n"
+                   << "#include <engine/gameplay/GameplayComponents.h>\n"
+                   << "#include <engine/gameplay/Script.h>\n\n"
+                   << "#include <algorithm>\n"
+                   << "#include <glm/geometric.hpp>\n"
+                   << "#include <string>\n\n"
+                   << "class " << className << " final : public engine::Script {\n"
+                   << "public:\n"
+                   << "    void OnCreate() override {\n"
+                   << "    // Called when the object enters Play mode.\n"
+                   << "    // Example: if (auto* transform = Transform()) { transform->position.y += 1.0f; }\n"
+                   << "    }\n\n"
+                   << "    void OnUpdate(float dt) override {\n";
+            WriteTemplateUpdateBody(header, scriptTemplate);
+            header << "    }\n";
+            if (scriptTemplate == ScriptTemplate::Pickup) {
+                header << "\nprivate:\n"
+                       << "    bool m_collected = false;\n";
+            }
+            header << "};\n";
+            if (!WriteTextFile(headerPath, header.str(), error)) {
+                return false;
+            }
         }
     }
 
-    if (!UpdateEditorScriptRegistry(gameRoot, scriptRoot, className, error)) return false;
+    if (!UpdateEditorScriptRegistry(gameRoot, scriptRoot, className,
+                                    IsBehaviorTreeTemplate(scriptTemplate), error)) {
+        return false;
+    }
 
     if (!std::filesystem::exists(docPath)) {
         std::ostringstream doc;
         doc << "# " << className << "\n\n"
             << "## What It Does\n\n"
-            << "Gameplay script template generated by the editor. " << ScriptTemplateDescription(scriptTemplate) << " It derives from `engine::Script` so it can be attached to a scene object and run in Play mode after registration.\n\n"
-            << "## How To Use It\n\n"
-            << "Use `OnCreate()` for one-time setup when the object enters Play mode. Use `OnUpdate(float dt)` for per-frame behavior. The editor registers this class automatically in the shared game module; rebuild and restart the editor before Play mode can run newly compiled code. The standalone player receives the same class on its next build. Common helpers include `GetFieldFloat()`, `GetFieldInt()`, `GetFieldBool()`, `GetFieldString()`, `Self()`, `Transform()`, `FindObject()`, `FindTransform()`, `IsKeyDown()`, `WasKeyPressed()`, `PlayAudio()`, `StopAudio()`, `PlayParticles()`, `StopParticles()`, `RestartParticles()`, `BurstParticles()`, `SetParticleRate()`, `ShakeCamera()`, `PlayCameraSequence()`, `WasCameraSequenceEvent()`, `WasCameraSequenceFinished()`, and `DestroySelf()`. Pass an entity returned by `FindObject()` to control another object's Audio Source or Particle System.\n";
+            << (IsBehaviorTreeTemplate(scriptTemplate)
+                ? "Behavior-tree script template generated by the editor. "
+                : "Gameplay script template generated by the editor. ")
+            << ScriptTemplateDescription(scriptTemplate);
+        if (IsBehaviorTreeTemplate(scriptTemplate)) {
+            doc << " It derives from `engine::ai::BtScript` and is selected from the Script Class dropdown on a Behavior Graph script task, decorator, or service.\n\n"
+                << "## How To Use It\n\n"
+                << "Edit the generated methods, compile scripts, then open the Behavior Graph. Add the matching Script Task, Script Decorator, or Script Service and choose `" << className
+                << "` from its Script Class dropdown. The editor registers the class in the shared game module, so it works in both Play mode and built projects.\n";
+        } else {
+            doc << " It derives from `engine::Script` so it can be attached to a scene object and run in Play mode after registration.\n\n"
+                << "## How To Use It\n\n"
+                << "Use `OnCreate()` for one-time setup when the object enters Play mode. Use `OnUpdate(float dt)` for per-frame behavior. The editor registers this class automatically in the shared game module; rebuild and restart the editor before Play mode can run newly compiled code. The standalone player receives the same class on its next build. Common helpers include `GetFieldFloat()`, `GetFieldInt()`, `GetFieldBool()`, `GetFieldString()`, `Self()`, `Transform()`, `FindObject()`, `FindTransform()`, `SocketPosition()`, `SocketTransform()`, `IsKeyDown()`, `WasKeyPressed()`, `PlayAudio()`, `StopAudio()`, `PlayParticles()`, `StopParticles()`, `RestartParticles()`, `BurstParticles()`, `SetParticleRate()`, `ShakeCamera()`, `PlayCameraSequence()`, `WasCameraSequenceEvent()`, `WasCameraSequenceFinished()`, and `DestroySelf()`. Pass an entity returned by `FindObject()` to control another object's Audio Source or Particle System.\n";
+        }
         if (!WriteTextFile(docPath, doc.str(), error)) {
             return false;
         }
@@ -2239,6 +2402,91 @@ void DrawWorldSettings(EditorScene& scene, EditorDockspace::Context& context, bo
     ImGui::End();
 }
 
+void DrawGameModeSettings(EditorScene& scene, bool* open) {
+    if (!ImGui::Begin(
+            EditorPanels::Name(EditorPanels::Panel::GameModeSettings), open)) {
+        ImGui::End();
+        return;
+    }
+
+    EditorScene::GameModeSettings settings = scene.GetGameModeSettings();
+    bool changed = false;
+
+    if (ImGui::CollapsingHeader("Player", ImGuiTreeNodeFlags_DefaultOpen)) {
+        const char* playerPreview = settings.playerObjectName.empty()
+            ? "First Player Controller in scene"
+            : settings.playerObjectName.c_str();
+        if (ImGui::BeginCombo("Player Object", playerPreview)) {
+            const bool automatic = settings.playerObjectName.empty();
+            if (ImGui::Selectable(
+                    "First Player Controller in scene", automatic)) {
+                settings.playerObjectName.clear();
+                changed = true;
+            }
+            for (const EditorScene::Object& object : scene.Objects()) {
+                if (!object.playerControllerEnabled) {
+                    continue;
+                }
+                const bool selected = settings.playerObjectName == object.name;
+                if (ImGui::Selectable(object.name.c_str(), selected)) {
+                    settings.playerObjectName = object.name;
+                    changed = true;
+                }
+            }
+            ImGui::EndCombo();
+        }
+        changed |= ImGui::Checkbox(
+            "Enable Player Input", &settings.playerInputEnabled);
+        ImGui::TextDisabled(
+            "The selected object supplies movement, collision, and camera tuning.");
+    }
+
+    if (ImGui::CollapsingHeader("Game Rules", ImGuiTreeNodeFlags_DefaultOpen)) {
+        changed |= ImGui::Checkbox("Start Paused", &settings.startPaused);
+        changed |= ImGui::Checkbox("Allow Pause", &settings.allowPause);
+        changed |= ImGui::Checkbox("Allow Restart", &settings.allowRestart);
+        changed |= ImGui::Checkbox(
+            "Lose When Player Dies", &settings.loseOnPlayerDeath);
+        changed |= ImGui::DragInt(
+            "Initial Score", &settings.initialScore, 1.0f, 0, 1000000);
+    }
+
+    if (ImGui::CollapsingHeader(
+            "Camera Override", ImGuiTreeNodeFlags_DefaultOpen)) {
+        changed |= ImGui::Checkbox(
+            "Override Player Camera", &settings.cameraOverride);
+        ImGui::BeginDisabled(!settings.cameraOverride);
+        static constexpr const char* kCameraModes[] = {
+            "Third Person", "First Person", "Isometric"
+        };
+        settings.cameraMode = std::clamp(settings.cameraMode, 0, 2);
+        changed |= ImGui::Combo(
+            "Camera Mode", &settings.cameraMode, kCameraModes,
+            static_cast<int>(std::size(kCameraModes)));
+        ImGui::EndDisabled();
+        ImGui::TextWrapped(
+            "Camera mode is fixed when Play begins. Gameplay input cannot switch it.");
+    }
+
+    if (ImGui::CollapsingHeader("Game UI")) {
+        EditorScene::Environment environment = scene.GetEnvironment();
+        char hudAsset[512]{};
+        std::snprintf(
+            hudAsset, sizeof(hudAsset), "%s", environment.hudAsset.c_str());
+        if (ImGui::InputText("HUD Asset", hudAsset, sizeof(hudAsset))) {
+            environment.hudAsset = hudAsset;
+            scene.SetEnvironment(environment);
+        }
+        ImGui::TextDisabled("Optional .hud asset loaded when Play begins.");
+    }
+
+    if (changed) {
+        scene.SetGameModeSettings(settings);
+    }
+
+    ImGui::End();
+}
+
 void DrawPhysicsStatus(EditorDockspace::Context& context, bool* open) {
     if (!ImGui::Begin(EditorPanels::Name(EditorPanels::Panel::PhysicsStatus), open)) {
         ImGui::End();
@@ -2972,6 +3220,10 @@ void DrawAnimationPreview(EditorDockspace::Context& context, bool* open) {
                             if (parameter.type == EditorScene::AnimationParameter::Type::Trigger) {
                                 transition.compare = EditorScene::AnimationStateTransition::Compare::NotEqual;
                                 transition.threshold = 0.0f;
+                            } else if (parameter.type == EditorScene::AnimationParameter::Type::Bool) {
+                                // Bools need an equality test; the >= 0 default always passes.
+                                transition.compare = EditorScene::AnimationStateTransition::Compare::Equal;
+                                transition.threshold = 1.0f;
                             }
                             changed = true;
                         }
@@ -2987,6 +3239,15 @@ void DrawAnimationPreview(EditorDockspace::Context& context, bool* open) {
 
                 auto parameterType = EditorScene::AnimationParameter::Type::Float;
                 for (const auto& parameter : parameters) if (parameter.name == transition.parameter) { parameterType = parameter.type; break; }
+                // A bool compared with >= / < never actually tests the value (0 and 1 are
+                // both >= 0). Normalise legacy/default transitions to an equality test.
+                if (parameterType == EditorScene::AnimationParameter::Type::Bool
+                    && (transition.compare == EditorScene::AnimationStateTransition::Compare::GreaterOrEqual
+                        || transition.compare == EditorScene::AnimationStateTransition::Compare::Less)) {
+                    transition.compare = EditorScene::AnimationStateTransition::Compare::Equal;
+                    if (transition.threshold != 0.0f && transition.threshold != 1.0f) transition.threshold = 1.0f;
+                    changed = true;
+                }
                 int compare = static_cast<int>(transition.compare);
                 compare = std::clamp(compare, 0, 3);
                 if (parameterType != EditorScene::AnimationParameter::Type::Trigger && ImGui::BeginCombo("Compare", compareLabels[compare])) {
@@ -3637,30 +3898,6 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
     } else if (ImGui::CollapsingHeader("Rendering", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Text("Model: %s", selected->modelAssetPath.empty() ? "-" : selected->modelAssetPath.c_str());
         ImGui::Text("Material: %s", selected->materialAssetPath.empty() ? "-" : selected->materialAssetPath.c_str());
-
-        // Render-only model orientation: stands up an off-axis rig (e.g. a Z-up
-        // import) without rotating the object transform, so the collider stays upright.
-        // Applies to skeletal (animated) models.
-        if (selected->skeletalModel) {
-            glm::vec3 position = selected->modelOffsetPosition;
-            glm::vec3 orient = selected->modelOrientationEuler;
-            glm::vec3 scale = selected->modelOffsetScale;
-            bool changed = false;
-            ImGui::TextDisabled("Model Transform (render-only; collider stays upright)");
-            changed |= ImGui::DragFloat3("Offset Pos", &position.x, 0.01f, -100.0f, 100.0f);
-            changed |= ImGui::DragFloat3("Model Rot (deg)", &orient.x, 0.5f, -180.0f, 180.0f);
-            changed |= ImGui::DragFloat3("Model Scale", &scale.x, 0.01f, 0.001f, 100.0f);
-            if (changed) {
-                context.scene->SetSelectedModelOffset(position, orient, scale);
-            }
-            if (ImGui::SmallButton("Stand up (Z-up)")) {
-                context.scene->SetSelectedModelOffset(position, glm::vec3(-90.0f, 0.0f, 0.0f), scale);
-            }
-            ImGui::SameLine();
-            if (ImGui::SmallButton("Reset Transform")) {
-                context.scene->SetSelectedModelOffset(glm::vec3(0.0f), glm::vec3(0.0f), glm::vec3(1.0f));
-            }
-        }
 
         const engine::ecs::MeshRenderer* renderer = context.scene->TryGetMeshRenderer(selected->entity);
         if (renderer) {
@@ -4795,7 +5032,16 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
         if (playerEnabled) {
             EditorScene::PlayerControllerSettings player = selected->playerController;
             bool changed = false;
-            changed |= ImGui::Checkbox("First Person", &player.firstPerson);
+            const char* cameraModes[] = { "Third Person", "First Person", "Isometric" };
+            int cameraMode = std::clamp(player.cameraMode, 0, 2);
+            if (player.firstPerson && cameraMode == 0) cameraMode = 1; // legacy scene
+            if (ImGui::Combo("Camera Mode", &cameraMode, cameraModes, IM_ARRAYSIZE(cameraModes))) {
+                player.cameraMode = cameraMode;
+                player.firstPerson = cameraMode == 1;
+                changed = true;
+            }
+            const bool firstPerson = cameraMode == 1;
+            const bool isometric = cameraMode == 2;
             changed |= ImGui::DragFloat("Walk Speed", &player.walkSpeed, 0.05f, 0.0f, 100.0f);
             changed |= ImGui::DragFloat("Run Speed", &player.runSpeed, 0.05f, 0.0f, 100.0f);
             changed |= ImGui::DragFloat("Jump Speed", &player.jumpSpeed, 0.05f, 0.0f, 100.0f);
@@ -4803,9 +5049,20 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             changed |= ImGui::DragFloat("Capsule Radius", &player.capsuleRadius, 0.01f, 0.01f, 100.0f);
             changed |= ImGui::DragFloat("Capsule Height", &player.capsuleHeight, 0.01f, 0.02f, 100.0f);
             changed |= ImGui::DragFloat("Eye Height", &player.eyeHeight, 0.01f, 0.0f, 100.0f);
-            changed |= ImGui::DragFloat("Camera Distance", &player.cameraDistance, 0.05f, 0.0f, 100.0f);
             changed |= ImGui::DragFloat("Camera Target Height", &player.cameraTargetHeight, 0.01f, 0.0f, 100.0f);
-            if (!player.firstPerson && ImGui::TreeNodeEx("Camera Collision",
+            if (isometric) {
+                changed |= ImGui::DragFloat("Isometric Distance", &player.isometricDistance,
+                                            0.1f, 0.0f, 500.0f);
+                changed |= ImGui::SliderFloat("Isometric Yaw", &player.isometricYaw,
+                                              -180.0f, 180.0f, "%.1f deg");
+                changed |= ImGui::SliderFloat("Isometric Pitch", &player.isometricPitch,
+                                              -89.0f, -5.0f, "%.1f deg");
+                ImGui::TextDisabled("Fixed-angle camera; movement remains camera-relative.");
+            } else if (!firstPerson) {
+                changed |= ImGui::DragFloat("Camera Distance", &player.cameraDistance,
+                                            0.05f, 0.0f, 100.0f);
+            }
+            if (!firstPerson && ImGui::TreeNodeEx("Camera Collision",
                     ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_SpanAvailWidth)) {
                 changed |= ImGui::Checkbox("Collision Enabled", &player.cameraCollision);
                 ImGui::BeginDisabled(!player.cameraCollision);
@@ -4819,7 +5076,22 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                 ImGui::EndDisabled();
                 ImGui::TreePop();
             }
-            if (!player.firstPerson && ImGui::TreeNodeEx("Shoulder Camera",
+            if (!firstPerson && ImGui::TreeNodeEx("Rotation",
+                    ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_SpanAvailWidth)) {
+                const char* facingModes[] = { "Face Camera (strafe)", "Face Movement (free camera)" };
+                int facing = (player.facingMode == 1) ? 1 : 0;
+                if (ImGui::Combo("Orientation", &facing, facingModes, IM_ARRAYSIZE(facingModes))) {
+                    player.facingMode = facing; changed = true;
+                }
+                if (player.facingMode == 1) {
+                    changed |= ImGui::DragFloat("Turn Speed", &player.turnSpeed, 0.25f, 0.0f, 40.0f);
+                    ImGui::TextDisabled("Character turns toward its travel direction; the camera orbits freely.");
+                } else {
+                    ImGui::TextDisabled("Character always faces the camera direction.");
+                }
+                ImGui::TreePop();
+            }
+            if (cameraMode == 0 && ImGui::TreeNodeEx("Shoulder Camera",
                     ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_SpanAvailWidth)) {
                 changed |= ImGui::Checkbox("Shoulder Camera Enabled", &player.shoulderCamera);
                 ImGui::BeginDisabled(!player.shoulderCamera);
@@ -4832,7 +5104,7 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                 ImGui::EndDisabled();
                 ImGui::TreePop();
             }
-            if (!player.firstPerson && ImGui::TreeNodeEx("Lock-On Targeting",
+            if (cameraMode == 0 && ImGui::TreeNodeEx("Lock-On Targeting",
                     ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_SpanAvailWidth)) {
                 changed |= ImGui::Checkbox("Lock-On Enabled", &player.lockOnEnabled);
                 ImGui::BeginDisabled(!player.lockOnEnabled);
@@ -4979,8 +5251,15 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
         }
         ImGui::InputText("Script Class", g_scriptClassBuffer.data(), g_scriptClassBuffer.size());
         ImGui::Text("Script Path: %s", selected->scriptPath.empty() ? "-" : selected->scriptPath.c_str());
-        const char* scriptTemplates[] = {"Empty", "Player Movement", "Door Opener", "Pickup", "Damage Zone"};
-        ImGui::Combo("Template", &g_scriptTemplateIndex, scriptTemplates, 5);
+        const char* scriptTemplates[] = {
+            "Empty",
+            "Player Movement",
+            "Door Opener",
+            "Pickup",
+            "Damage Zone"
+        };
+        ImGui::Combo("Template", &g_scriptTemplateIndex, scriptTemplates,
+                     IM_ARRAYSIZE(scriptTemplates));
 
         if (ImGui::Button("Create Script")) {
             const std::string className = SanitizeScriptClassName(g_scriptClassBuffer.data());
@@ -4993,8 +5272,10 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                 std::string scriptPath;
                 std::string error;
                 if (CreateScriptFiles(context, className, scriptTemplate, &scriptPath, &error)) {
-                    context.scene->SetSelectedScript(className, scriptPath, true);
-                    context.scene->SetSelectedScriptFields(DefaultFieldsForTemplate(scriptTemplate));
+                    if (!IsBehaviorTreeTemplate(scriptTemplate)) {
+                        context.scene->SetSelectedScript(className, scriptPath, true);
+                        context.scene->SetSelectedScriptFields(DefaultFieldsForTemplate(scriptTemplate));
+                    }
                     std::snprintf(g_scriptClassBuffer.data(), g_scriptClassBuffer.size(), "%s", className.c_str());
                     std::string sourceError;
                     if (!LoadScriptSource(scriptPath, &sourceError)) {
@@ -5008,7 +5289,13 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                         context.assets->Refresh(context.assets->RootPath(), &refreshError);
                     }
                     if (context.log) {
-                        context.log->Info("Created script: " + scriptPath);
+                        if (IsBehaviorTreeTemplate(scriptTemplate)) {
+                            context.log->Info(
+                                "Created AI script: " + scriptPath
+                                + " (compile it, then select the class in the Behavior Graph)");
+                        } else {
+                            context.log->Info("Created script: " + scriptPath);
+                        }
                     }
                 } else if (context.log) {
                     context.log->Error("Script create failed: " + error);
@@ -5034,7 +5321,14 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                         context.log->Info("Attached script: " + className);
                     }
                 } else if (context.log) {
-                    context.log->Warning("Script attach failed: selected object is locked");
+                    const EditorScene::Object* current = context.scene->SelectedObject();
+                    if (current && current->scriptEnabled
+                        && current->scriptClassName == className
+                        && current->scriptPath == scriptPath) {
+                        context.log->Info("Script is already attached: " + className);
+                    } else {
+                        context.log->Warning("Script attach failed: no selected object");
+                    }
                 }
             }
         }
@@ -7774,6 +8068,12 @@ bool EditorDockspace::Draw(Context& context) {
                     *context.showGrid = !shown;
                 }
             }
+            if (context.previewAnimations) {
+                bool on = *context.previewAnimations;
+                if (ImGui::MenuItem("Animate Characters in Editor", nullptr, on)) {
+                    *context.previewAnimations = !on;
+                }
+            }
             if (context.showAiDebug) {
                 bool shown = *context.showAiDebug;
                 if (ImGui::MenuItem("AI Agent Debug", nullptr, shown)) {
@@ -7856,6 +8156,11 @@ bool EditorDockspace::Draw(Context& context) {
                 DrawWorldSettings(*context.scene, context, &open);
             }
             break;
+        case EditorPanels::Panel::GameModeSettings:
+            if (context.scene) {
+                DrawGameModeSettings(*context.scene, &open);
+            }
+            break;
         case EditorPanels::Panel::Assets:
             DrawAssets(context, &open);
             break;
@@ -7880,6 +8185,10 @@ bool EditorDockspace::Draw(Context& context) {
             break; // drawn by EditorApp::DrawHudEditorPanel (owns the HUD document)
         case EditorPanels::Panel::CharacterEditor:
             break; // drawn by EditorApp (owns the reusable character asset)
+        case EditorPanels::Panel::ClipEditor:
+            break; // drawn by EditorApp (owns the clip preview renderer)
+        case EditorPanels::Panel::GraphEditor:
+            break; // drawn by EditorApp (owns the graph preview renderer)
         case EditorPanels::Panel::PhysicsStatus:
             DrawPhysicsStatus(context, &open);
             break;

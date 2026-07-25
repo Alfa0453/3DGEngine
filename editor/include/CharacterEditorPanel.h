@@ -30,6 +30,8 @@ public:
 
     // The currently edited character (used to instantiate it into the scene).
     const CharacterAsset& Asset() const { return m_asset; }
+    // Path of the .3dgcharacter being edited (links placed scene objects for live sync).
+    const std::string& Path() const { return m_path; }
     // True once if the user asked to add the character to the scene as a new object.
     bool ConsumeAddToSceneRequest() {
         const bool requested = m_addToSceneRequested;
@@ -64,11 +66,18 @@ private:
     std::array<char, 128> m_idleBuffer{};
     std::array<char, 128> m_walkBuffer{};
     std::array<char, 128> m_runBuffer{};
-    std::array<char, 260> m_behaviorBuffer{};
+    std::array<char, 128> m_behaviorSearch{};
     std::array<char, 128> m_scriptClassBuffer{};
     std::array<char, 260> m_scriptPathBuffer{};
+    std::array<char, 128> m_scriptSearch{};
     std::vector<AssetChoice> m_modelChoices;
     std::vector<AssetChoice> m_materialChoices;
+    std::vector<AssetChoice> m_clipChoices;   // saved .3dgclip animation-clip assets
+    std::array<char, 128> m_clipSearch{};
+    std::vector<AssetChoice> m_graphChoices;  // saved .3dggraph animation-graph assets
+    std::array<char, 128> m_graphSearch{};
+    std::vector<AssetChoice> m_behaviorChoices; // saved .btgraph behavior trees
+    std::vector<AssetChoice> m_scriptChoices; // saved Content/Scripts/*.h gameplay scripts
     std::string m_scannedAssetRoot;
 
     engine::RuntimeAssetManager m_previewAssets;
@@ -92,14 +101,19 @@ private:
     int  m_gizmoMode = 0;            // 0 = Move, 1 = Rotate, 2 = Scale
     int  m_activeGizmoAxis = -1;     // 0 = X, 1 = Y, 2 = Z while dragging; -1 = none
     bool m_gizmoDragging = false;
+    int  m_selectedSocket = -1;      // socket edited by the preview gizmo
+    int  m_selectedAttachment = -1;  // selecting a prop selects its socket
     glm::mat4 m_previewViewProj{1.0f};   // camera view-projection used for the preview
     glm::mat4 m_previewModelMatrix{1.0f};// mesh model matrix (frame * offset)
     glm::mat4 m_previewGizmoFrame{1.0f}; // orbit * fit; columns give the offset axes
     glm::vec3 m_previewModelCenter{0.0f};
+    std::vector<glm::mat4> m_previewSocketWorld;
+    std::vector<glm::mat4> m_previewSocketParentWorld;
     bool m_previewGraphDirty = true;
     engine::AnimationController m_previewController;
     std::unordered_map<std::string, float> m_previewGraphParameters;
     std::unique_ptr<engine::Shader> m_colliderGuideShader;
+    std::unique_ptr<engine::Shader> m_attachmentShader;   // lit shader for socketed props
     std::optional<engine::Mesh> m_colliderGuideMesh;
     engine::ecs::Collider m_cachedGuideCollider;
     bool m_colliderGuideDirty = true;

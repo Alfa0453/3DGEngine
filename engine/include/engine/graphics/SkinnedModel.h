@@ -39,7 +39,8 @@ public:
     // Throws std::runtime_error if the file can't be read.
     std::size_t AddAnimationsFromFile(const std::string& path,
                                       bool stripRootMotion = false,
-                                      const std::string& nameOverride = "");
+                                      const std::string& nameOverride = "",
+                                      const std::string& sourceClipName = "");
 
     SkinnedModel(const SkinnedModel&)            = delete;
     SkinnedModel& operator=(const SkinnedModel&) = delete;

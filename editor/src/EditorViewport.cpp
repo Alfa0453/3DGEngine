@@ -1,4 +1,5 @@
 #include "EditorViewport.h"
+#include "EditorLineRenderer.h"
 
 #include <engine/ai/NavGrid.h>
 #include <engine/ai/NavMesh.h>
@@ -427,9 +428,7 @@ glm::vec3 PhysicsGuideColor(const EditorScene::Object& object) {
     return glm::vec3(0.24f, 1.0f, 0.58f);
 }
 
-void DrawBoxColliderGuide(engine::Renderer& renderer,
-                          engine::Shader& shader,
-                          const engine::Mesh& cube,
+void DrawBoxColliderGuide(EditorLineRenderer& lines,
                           const engine::ecs::Transform& transform,
                           const engine::ecs::Collider& collider,
                           const glm::vec3& color) {
@@ -456,13 +455,11 @@ void DrawBoxColliderGuide(engine::Renderer& renderer,
         {0, 4}, {1, 5}, {2, 6}, {3, 7}
     };
     for (const auto& edge : edges) {
-        DrawGuideSegment(renderer, shader, cube, world[edge[0]], world[edge[1]], 0.025f, color);
+        lines.AddLine(world[edge[0]], world[edge[1]], color);
     }
 }
 
-void DrawPlaneColliderGuide(engine::Renderer& renderer,
-                            engine::Shader& shader,
-                            const engine::Mesh& cube,
+void DrawPlaneColliderGuide(EditorLineRenderer& lines,
                             const engine::ecs::Collider& collider,
                             const glm::vec3& color) {
     glm::vec3 normal = collider.planeNormal;
@@ -484,35 +481,20 @@ void DrawPlaneColliderGuide(engine::Renderer& renderer,
         center + right * -size + up *  size
     };
 
-    DrawGuideSegment(renderer, shader, cube, corners[0], corners[1], 0.025f, color);
-    DrawGuideSegment(renderer, shader, cube, corners[1], corners[2], 0.025f, color);
-    DrawGuideSegment(renderer, shader, cube, corners[2], corners[3], 0.025f, color);
-    DrawGuideSegment(renderer, shader, cube, corners[3], corners[0], 0.025f, color);
-    DrawGuideSegment(renderer, shader, cube, center - right * size, center + right * size, 0.018f, color);
-    DrawGuideSegment(renderer, shader, cube, center - up * size, center + up * size, 0.018f, color);
-    DrawGuideSegment(renderer, shader, cube, center, center + normal * 0.75f, 0.035f, color);
+    lines.AddLine(corners[0], corners[1], color);
+    lines.AddLine(corners[1], corners[2], color);
+    lines.AddLine(corners[2], corners[3], color);
+    lines.AddLine(corners[3], corners[0], color);
+    lines.AddLine(center - right * size, center + right * size, color);
+    lines.AddLine(center - up * size, center + up * size, color);
+    lines.AddLine(center, center + normal * 0.75f, color);
 }
 
-void DrawSphereColliderGuide(engine::Renderer& renderer,
-                             engine::Shader& shader,
-                             const engine::Mesh& cube,
-                             const engine::ecs::Transform& transform,
-                             const engine::ecs::Collider& collider,
-                             const glm::vec3& color) {
-    const float radius = std::max(collider.radius, 0.001f);
-    DrawGuideRing(renderer, shader, cube, transform.position, EditorGizmo::Axis::X, radius, 0.035f, color);
-    DrawGuideRing(renderer, shader, cube, transform.position, EditorGizmo::Axis::Y, radius, 0.035f, color);
-    DrawGuideRing(renderer, shader, cube, transform.position, EditorGizmo::Axis::Z, radius, 0.035f, color);
-}
-
-void DrawBasisRing(engine::Renderer& renderer,
-                   engine::Shader& shader,
-                   const engine::Mesh& cube,
+void DrawBasisRing(EditorLineRenderer& lines,
                    const glm::vec3& center,
                    const glm::vec3& right,
                    const glm::vec3& up,
                    float radius,
-                   float thickness,
                    const glm::vec3& color) {
     if (radius <= 0.0001f) {
         return;
@@ -525,13 +507,40 @@ void DrawBasisRing(engine::Renderer& renderer,
         const float b = (static_cast<float>(i + 1) / static_cast<float>(segments)) * 2.0f * pi;
         const glm::vec3 p0 = center + right * std::cos(a) * radius + up * std::sin(a) * radius;
         const glm::vec3 p1 = center + right * std::cos(b) * radius + up * std::sin(b) * radius;
-        DrawGuideSegment(renderer, shader, cube, p0, p1, thickness, color);
+        lines.AddLine(p0, p1, color);
     }
 }
 
-void DrawCapsuleColliderGuide(engine::Renderer& renderer,
-                              engine::Shader& shader,
-                              const engine::Mesh& cube,
+void DrawSphereColliderGuide(EditorLineRenderer& lines,
+                             const engine::ecs::Transform& transform,
+                             const engine::ecs::Collider& collider,
+                             const glm::vec3& color) {
+    const float radius = std::max(collider.radius, 0.001f);
+    DrawBasisRing(lines, transform.position, glm::vec3(0, 1, 0),
+        glm::vec3(0, 0, 1), radius, color);
+    DrawBasisRing(lines, transform.position, glm::vec3(1, 0, 0),
+        glm::vec3(0, 0, 1), radius, color);
+    DrawBasisRing(lines, transform.position, glm::vec3(1, 0, 0),
+        glm::vec3(0, 1, 0), radius, color);
+}
+
+void DrawHalfRing(EditorLineRenderer& lines, const glm::vec3& center,
+                  const glm::vec3& radial, const glm::vec3& axis,
+                  float radius, bool upper, const glm::vec3& color) {
+    constexpr int segments = 24;
+    constexpr float pi = 3.14159265359f;
+    const float start = upper ? 0.0f : pi;
+    for (int i = 0; i < segments; ++i) {
+        const float a = start + pi * static_cast<float>(i) / segments;
+        const float b = start + pi * static_cast<float>(i + 1) / segments;
+        lines.AddLine(
+            center + radial * std::cos(a) * radius + axis * std::sin(a) * radius,
+            center + radial * std::cos(b) * radius + axis * std::sin(b) * radius,
+            color);
+    }
+}
+
+void DrawCapsuleColliderGuide(EditorLineRenderer& lines,
                               const engine::ecs::Transform& transform,
                               const engine::ecs::Collider& collider,
                               const glm::vec3& color) {
@@ -550,19 +559,19 @@ void DrawCapsuleColliderGuide(engine::Renderer& renderer,
     const glm::vec3 a = transform.position - axis * halfHeight;
     const glm::vec3 b = transform.position + axis * halfHeight;
 
-    DrawBasisRing(renderer, shader, cube, a, right, forward, radius, 0.028f, color);
-    DrawBasisRing(renderer, shader, cube, b, right, forward, radius, 0.028f, color);
-    DrawGuideSegment(renderer, shader, cube, a + right * radius, b + right * radius, 0.028f, color);
-    DrawGuideSegment(renderer, shader, cube, a - right * radius, b - right * radius, 0.028f, color);
-    DrawGuideSegment(renderer, shader, cube, a + forward * radius, b + forward * radius, 0.028f, color);
-    DrawGuideSegment(renderer, shader, cube, a - forward * radius, b - forward * radius, 0.028f, color);
-    DrawGuideRing(renderer, shader, cube, a, EditorGizmo::Axis::X, radius, 0.024f, color);
-    DrawGuideRing(renderer, shader, cube, b, EditorGizmo::Axis::X, radius, 0.024f, color);
+    DrawBasisRing(lines, a, right, forward, radius, color);
+    DrawBasisRing(lines, b, right, forward, radius, color);
+    lines.AddLine(a + right * radius, b + right * radius, color);
+    lines.AddLine(a - right * radius, b - right * radius, color);
+    lines.AddLine(a + forward * radius, b + forward * radius, color);
+    lines.AddLine(a - forward * radius, b - forward * radius, color);
+    DrawHalfRing(lines, b, right, axis, radius, true, color);
+    DrawHalfRing(lines, b, forward, axis, radius, true, color);
+    DrawHalfRing(lines, a, right, axis, radius, false, color);
+    DrawHalfRing(lines, a, forward, axis, radius, false, color);
 }
 
-void DrawCylinderColliderGuide(engine::Renderer& renderer,
-                               engine::Shader& shader,
-                               const engine::Mesh& cube,
+void DrawCylinderColliderGuide(EditorLineRenderer& lines,
                                const engine::ecs::Transform& transform,
                                const engine::ecs::Collider& collider,
                                const glm::vec3& color) {
@@ -578,15 +587,82 @@ void DrawCylinderColliderGuide(engine::Renderer& renderer,
 
     // Two circular cap rims and straight side generators make the flat ends
     // visually distinct from the rounded capsule guide.
-    DrawBasisRing(renderer, shader, cube, bottom, right, forward, radius, 0.028f, color);
-    DrawBasisRing(renderer, shader, cube, top, right, forward, radius, 0.028f, color);
+    DrawBasisRing(lines, bottom, right, forward, radius, color);
+    DrawBasisRing(lines, top, right, forward, radius, color);
     constexpr int sideLines = 8;
     constexpr float twoPi = 6.28318530718f;
     for (int i = 0; i < sideLines; ++i) {
         const float angle = twoPi * static_cast<float>(i) / static_cast<float>(sideLines);
         const glm::vec3 radial = right * std::cos(angle) * radius
             + forward * std::sin(angle) * radius;
-        DrawGuideSegment(renderer, shader, cube, bottom + radial, top + radial, 0.026f, color);
+        lines.AddLine(bottom + radial, top + radial, color);
+    }
+}
+
+void DrawConeColliderGuide(EditorLineRenderer& lines,
+                           const engine::ecs::Transform& transform,
+                           const engine::ecs::Collider& collider,
+                           const glm::vec3& color) {
+    const glm::mat3 rotation = glm::mat3_cast(transform.rotation);
+    const glm::vec3 axis = rotation * glm::vec3(0, 1, 0);
+    const glm::vec3 right = rotation * glm::vec3(1, 0, 0);
+    const glm::vec3 forward = rotation * glm::vec3(0, 0, 1);
+    const float halfHeight = std::max(collider.halfHeight, 0.001f);
+    const float radius = std::max(collider.radius, 0.001f);
+    const glm::vec3 base = transform.position - axis * halfHeight;
+    const glm::vec3 tip = transform.position + axis * halfHeight;
+    DrawBasisRing(lines, base, right, forward, radius, color);
+    constexpr int sides = 12;
+    for (int i = 0; i < sides; ++i) {
+        const float angle = 6.28318530718f * static_cast<float>(i) / sides;
+        lines.AddLine(base + (right * std::cos(angle)
+            + forward * std::sin(angle)) * radius, tip, color);
+    }
+}
+
+void DrawPyramidColliderGuide(EditorLineRenderer& lines,
+                              const engine::ecs::Transform& transform,
+                              const engine::ecs::Collider& collider,
+                              const glm::vec3& color) {
+    const glm::mat3 rotation = glm::mat3_cast(transform.rotation);
+    const glm::vec3 ext = glm::max(collider.halfExtents, glm::vec3(0.001f));
+    const glm::vec3 local[] = {
+        {-ext.x, -ext.y, -ext.z}, {ext.x, -ext.y, -ext.z},
+        {ext.x, -ext.y, ext.z}, {-ext.x, -ext.y, ext.z},
+        {0.0f, ext.y, 0.0f}
+    };
+    glm::vec3 world[5];
+    for (int i = 0; i < 5; ++i)
+        world[i] = transform.position + rotation * local[i];
+    for (int i = 0; i < 4; ++i) {
+        lines.AddLine(world[i], world[(i + 1) % 4], color);
+        lines.AddLine(world[i], world[4], color);
+    }
+}
+
+void DrawTorusColliderGuide(EditorLineRenderer& lines,
+                            const engine::ecs::Transform& transform,
+                            const engine::ecs::Collider& collider,
+                            const glm::vec3& color) {
+    constexpr int majorSegments = 32;
+    constexpr int minorSegments = 10;
+    const float major = std::max(collider.majorRadius, 0.001f);
+    const float minor = std::max(collider.minorRadius, 0.001f);
+    const glm::mat3 rotation = glm::mat3_cast(transform.rotation);
+    auto point = [&](int majorIndex, int minorIndex) {
+        const float a = 6.28318530718f * majorIndex / majorSegments;
+        const float b = 6.28318530718f * minorIndex / minorSegments;
+        const float ringRadius = major + minor * std::cos(b);
+        const glm::vec3 local(
+            std::cos(a) * ringRadius, std::sin(b) * minor,
+            std::sin(a) * ringRadius);
+        return transform.position + rotation * local;
+    };
+    for (int i = 0; i < majorSegments; ++i) {
+        for (int j = 0; j < minorSegments; ++j) {
+            lines.AddLine(point(i, j), point((i + 1) % majorSegments, j), color);
+            lines.AddLine(point(i, j), point(i, (j + 1) % minorSegments), color);
+        }
     }
 }
 
@@ -625,6 +701,13 @@ void DrawGizmoRing(engine::Renderer& renderer,
 }
 
 } // namespace
+
+EditorViewport::EditorViewport()
+    : m_colliderLines(std::make_unique<EditorLineRenderer>())
+{
+}
+
+EditorViewport::~EditorViewport() = default;
 
 bool EditorViewport::ContainsPoint(float x, float y, int width, int height) const {
     return x > 380.0f
@@ -839,10 +922,7 @@ void EditorViewport::DrawWorldGrid(engine::Renderer& renderer,
     shader.SetVec3("uEmissive", glm::vec3(0.0f));   // reset for subsequent guides
 }
 
-void EditorViewport::DrawPhysicsColliderGuides(engine::Renderer& renderer,
-                                               engine::Shader& shader,
-                                               const engine::Mesh& cube,
-                                               const EditorScene& scene,
+void EditorViewport::DrawPhysicsColliderGuides(const EditorScene& scene,
                                                const glm::mat4& viewProj,
                                                bool selectedOnly) const {
     const EditorScene::Object* selected = scene.SelectedObject();
@@ -850,10 +930,8 @@ void EditorViewport::DrawPhysicsColliderGuides(engine::Renderer& renderer,
         return;
     }
 
-    shader.Bind();
-    shader.SetMat4("uViewProj", viewProj);
-    shader.SetVec3("uLightDir", glm::normalize(glm::vec3(-0.4f, -1.0f, -0.3f)));
-    shader.SetInt("uHasDiffuse", 0);
+    if (!m_colliderLines) return;
+    m_colliderLines->Clear();
 
     for (const EditorScene::Object& object : scene.Objects()) {
         if (!object.colliderEnabled || !object.visible) {
@@ -873,60 +951,32 @@ void EditorViewport::DrawPhysicsColliderGuides(engine::Renderer& renderer,
         const glm::vec3 color = selectedCollider
             ? baseColor
             : glm::mix(glm::vec3(0.30f), baseColor, 0.48f);
-        shader.SetVec3("uEmissive", color * (selectedCollider ? 0.36f : 0.12f));
 
         switch (object.collider.shape) {
         case engine::ecs::ColliderShape::Sphere:
-            DrawSphereColliderGuide(renderer, shader, cube, *transform, object.collider, color);
+            DrawSphereColliderGuide(*m_colliderLines, *transform, object.collider, color);
             break;
         case engine::ecs::ColliderShape::Box:
-            DrawBoxColliderGuide(renderer, shader, cube, *transform, object.collider, color);
+            DrawBoxColliderGuide(*m_colliderLines, *transform, object.collider, color);
             break;
         case engine::ecs::ColliderShape::Plane:
-            DrawPlaneColliderGuide(renderer, shader, cube, object.collider, color);
+            DrawPlaneColliderGuide(*m_colliderLines, object.collider, color);
             break;
         case engine::ecs::ColliderShape::Capsule:
-            DrawCapsuleColliderGuide(renderer, shader, cube, *transform, object.collider, color);
+            DrawCapsuleColliderGuide(*m_colliderLines, *transform, object.collider, color);
             break;
-        case engine::ecs::ColliderShape::Cylinder: {
-            DrawCylinderColliderGuide(renderer, shader, cube, *transform, object.collider, color);
+        case engine::ecs::ColliderShape::Cylinder:
+            DrawCylinderColliderGuide(*m_colliderLines, *transform, object.collider, color);
             break;
-        }
         case engine::ecs::ColliderShape::Cone:
-        case engine::ecs::ColliderShape::Pyramid: {
-            constexpr int layers = 12;
-            for (int i = 0; i < layers; ++i) {
-                const float y0 = -object.collider.halfExtents.y
-                    + (2.0f * object.collider.halfExtents.y * i) / layers;
-                const float y1 = -object.collider.halfExtents.y
-                    + (2.0f * object.collider.halfExtents.y * (i + 1)) / layers;
-                const float fraction = std::max(1.0f - static_cast<float>(i + 1) / layers, 0.02f);
-                const float x = (object.collider.shape == engine::ecs::ColliderShape::Cone
-                    ? object.collider.radius : object.collider.halfExtents.x) * fraction;
-                const float z = (object.collider.shape == engine::ecs::ColliderShape::Cone
-                    ? object.collider.radius : object.collider.halfExtents.z) * fraction;
-                engine::ecs::Transform piece = *transform;
-                piece.position += transform->rotation * glm::vec3(0.0f, (y0 + y1) * 0.5f, 0.0f);
-                piece.scale = glm::vec3(1.0f);
-                DrawBoxColliderGuide(renderer, shader, cube, piece,
-                    engine::ecs::Collider::MakeBox(glm::vec3(x, (y1 - y0) * 0.5f, z)), color);
-            }
+            DrawConeColliderGuide(*m_colliderLines, *transform, object.collider, color);
             break;
-        }
-        case engine::ecs::ColliderShape::Torus: {
-            constexpr int segments = 20;
-            for (int i = 0; i < segments; ++i) {
-                const float a = 6.28318530718f * static_cast<float>(i) / segments;
-                engine::ecs::Transform piece = *transform;
-                piece.position += transform->rotation * glm::vec3(
-                    std::cos(a) * object.collider.majorRadius, 0.0f,
-                    std::sin(a) * object.collider.majorRadius);
-                piece.scale = glm::vec3(1.0f);
-                DrawSphereColliderGuide(renderer, shader, cube, piece,
-                    engine::ecs::Collider::MakeSphere(object.collider.minorRadius), color);
-            }
+        case engine::ecs::ColliderShape::Pyramid:
+            DrawPyramidColliderGuide(*m_colliderLines, *transform, object.collider, color);
             break;
-        }
+        case engine::ecs::ColliderShape::Torus:
+            DrawTorusColliderGuide(*m_colliderLines, *transform, object.collider, color);
+            break;
         case engine::ecs::ColliderShape::Staircase: {
             const int steps = glm::clamp(object.collider.steps, 1, 32);
             const float slice = object.collider.halfExtents.z * 2.0f / steps;
@@ -938,7 +988,7 @@ void EditorViewport::DrawPhysicsColliderGuides(engine::Renderer& renderer,
                     -object.collider.halfExtents.y + ext.y,
                     -object.collider.halfExtents.z + slice * (static_cast<float>(i) + 0.5f));
                 piece.scale = glm::vec3(1.0f);
-                DrawBoxColliderGuide(renderer, shader, cube, piece,
+                DrawBoxColliderGuide(*m_colliderLines, piece,
                     engine::ecs::Collider::MakeBox(ext), color);
             }
             break;
@@ -946,7 +996,7 @@ void EditorViewport::DrawPhysicsColliderGuides(engine::Renderer& renderer,
         }
     }
 
-    shader.SetVec3("uEmissive", glm::vec3(0.0f));
+    m_colliderLines->Draw(viewProj, 1.5f, true);
 }
 
 void EditorViewport::DrawCharacterFacingArrows(engine::Renderer& renderer,
@@ -1192,7 +1242,10 @@ void EditorViewport::DrawNavAgentGuides(engine::Renderer& renderer,
         const glm::vec3 coneColor(0.95f, 0.8f, 0.3f);
         shader.SetVec3("uEmissive", coneColor * 0.3f);
         const glm::vec3 eye = transform->position + glm::vec3(0.0f, 0.5f, 0.0f);
-        const glm::vec3 forward = glm::normalize(transform->rotation * glm::vec3(0.0f, 0.0f, 1.0f));
+        // Skeletal characters use object-local -Z as forward (the same convention
+        // as the cyan character-facing arrow and the runtime AI rotation).
+        const glm::vec3 forward = glm::normalize(
+            transform->rotation * glm::vec3(0.0f, 0.0f, -1.0f));
         const float range = selected->navAgentVisionRange;
         const float half = glm::radians(selected->navAgentVisionHalfAngle);
         const glm::vec3 up(0.0f, 1.0f, 0.0f);
@@ -1270,10 +1323,7 @@ void EditorViewport::DrawAudioSourceGuides(engine::Renderer& renderer,
     shader.SetVec3("uEmissive", glm::vec3(0.0f));
 }
 
-void EditorViewport::DrawParticleSystemGuides(engine::Renderer& renderer,
-                                               engine::Shader& shader,
-                                               const engine::Mesh& cube,
-                                               const EditorScene& scene,
+void EditorViewport::DrawParticleSystemGuides(const EditorScene& scene,
                                                const glm::mat4& viewProj,
                                                bool selectedOnly,
                                                bool showShapes,
@@ -1282,16 +1332,13 @@ void EditorViewport::DrawParticleSystemGuides(engine::Renderer& renderer,
                                                bool showCullingState) const {
     const EditorScene::Object* selected = scene.SelectedObject();
     if (selectedOnly && (!selected || !selected->particleSystemEnabled)) return;
-    shader.Bind();
-    shader.SetMat4("uViewProj", viewProj);
-    shader.SetVec3("uLightDir", glm::normalize(glm::vec3(-0.4f, -1.0f, -0.3f)));
-    shader.SetInt("uHasDiffuse", 0);
+    if (!m_colliderLines) return;
+    m_colliderLines->Clear();
     const glm::vec3 shapeColor(1.0f, 0.48f, 0.12f);
     const glm::vec3 cullingColor(0.15f, 0.85f, 1.0f);
     const glm::vec3 uncullableColor(0.72f, 0.32f, 0.92f);
-    constexpr float marker = 0.025f;
     for (const EditorScene::Object& object : scene.Objects()) {
-        if (!object.visible || !object.particleSystemEnabled) continue;
+        if (!object.particleSystemEnabled) continue;
         if (selectedOnly && &object != selected) continue;
         const engine::ecs::Transform* transform = scene.TryGetTransform(object.entity);
         if (!transform) continue;
@@ -1301,25 +1348,35 @@ void EditorViewport::DrawParticleSystemGuides(engine::Renderer& renderer,
             ? cullingColor : uncullableColor;
         if (showBounds) {
             const float bounds = std::max(object.particleConfig.boundsRadius, 0.01f);
-            shader.SetVec3("uEmissive", boundsColor * 0.3f);
-            DrawGuideRing(renderer, shader, cube, center, EditorGizmo::Axis::X, bounds, marker, boundsColor);
-            DrawGuideRing(renderer, shader, cube, center, EditorGizmo::Axis::Y, bounds, marker, boundsColor);
-            DrawGuideRing(renderer, shader, cube, center, EditorGizmo::Axis::Z, bounds, marker, boundsColor);
+            DrawBasisRing(*m_colliderLines, center, glm::vec3(0, 1, 0),
+                glm::vec3(0, 0, 1), bounds, boundsColor);
+            DrawBasisRing(*m_colliderLines, center, glm::vec3(1, 0, 0),
+                glm::vec3(0, 0, 1), bounds, boundsColor);
+            DrawBasisRing(*m_colliderLines, center, glm::vec3(1, 0, 0),
+                glm::vec3(0, 1, 0), bounds, boundsColor);
         }
         if (showCullingState) {
-            shader.SetVec3("uEmissive", boundsColor * 0.65f);
-            DrawGizmoBox(renderer, shader, cube, center, glm::vec3(0.10f), boundsColor);
+            constexpr float crossSize = 0.12f;
+            m_colliderLines->AddLine(center - glm::vec3(crossSize, 0, 0),
+                center + glm::vec3(crossSize, 0, 0), boundsColor);
+            m_colliderLines->AddLine(center - glm::vec3(0, crossSize, 0),
+                center + glm::vec3(0, crossSize, 0), boundsColor);
+            m_colliderLines->AddLine(center - glm::vec3(0, 0, crossSize),
+                center + glm::vec3(0, 0, crossSize), boundsColor);
         }
 
         const float radius = std::max(object.particleConfig.shapeRadius, 0.08f);
         if (showShapes) {
-            shader.SetVec3("uEmissive", shapeColor * 0.4f);
             if (object.particleConfig.shape == engine::EmitShape::Sphere) {
-                DrawGuideRing(renderer, shader, cube, center, EditorGizmo::Axis::X, radius, marker, shapeColor);
-                DrawGuideRing(renderer, shader, cube, center, EditorGizmo::Axis::Y, radius, marker, shapeColor);
-                DrawGuideRing(renderer, shader, cube, center, EditorGizmo::Axis::Z, radius, marker, shapeColor);
+                DrawBasisRing(*m_colliderLines, center, glm::vec3(0, 1, 0),
+                    glm::vec3(0, 0, 1), radius, shapeColor);
+                DrawBasisRing(*m_colliderLines, center, glm::vec3(1, 0, 0),
+                    glm::vec3(0, 0, 1), radius, shapeColor);
+                DrawBasisRing(*m_colliderLines, center, glm::vec3(1, 0, 0),
+                    glm::vec3(0, 1, 0), radius, shapeColor);
             } else {
-                DrawGuideRing(renderer, shader, cube, center, EditorGizmo::Axis::Y, radius, marker, shapeColor);
+                DrawBasisRing(*m_colliderLines, center, glm::vec3(1, 0, 0),
+                    glm::vec3(0, 0, 1), radius, shapeColor);
             }
         }
         if (showDirections) {
@@ -1327,11 +1384,19 @@ void EditorViewport::DrawParticleSystemGuides(engine::Renderer& renderer,
             if (glm::dot(direction, direction) < 1.0e-6f) direction = glm::vec3(0, 1, 0);
             direction = glm::normalize(direction);
             const float length = object.particleConfig.shape == engine::EmitShape::Cone ? 1.5f : 0.8f;
-            DrawGuideSegment(renderer, shader, cube, center, center + direction * length,
-                             marker, shapeColor);
+            const glm::vec3 tip = center + direction * length;
+            m_colliderLines->AddLine(center, tip, shapeColor);
+            glm::vec3 arrowRight;
+            glm::vec3 arrowUp;
+            BuildBasis(direction, &arrowRight, &arrowUp);
+            const float head = std::min(length * 0.18f, 0.20f);
+            m_colliderLines->AddLine(tip,
+                tip - direction * head + arrowRight * head * 0.45f, shapeColor);
+            m_colliderLines->AddLine(tip,
+                tip - direction * head - arrowRight * head * 0.45f, shapeColor);
         }
     }
-    shader.SetVec3("uEmissive", glm::vec3(0.0f));
+    m_colliderLines->Draw(viewProj, 1.5f, true);
 }
 
 void EditorViewport::DrawAiAgentDebugGuides(engine::Renderer& renderer,

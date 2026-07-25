@@ -10,6 +10,8 @@
 #include "engine/physics/PhysicsComponents.h"
 
 #include <algorithm>
+#include <cctype>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
@@ -96,14 +98,33 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
         return false;
     }
 
+    // A runtime scene normally lives under Content/Scenes. Remember that
+    // Content directory so gameplay and behavior-tree scripts can load assets
+    // by project-relative path regardless of the process working directory.
+    std::error_code pathError;
+    std::filesystem::path cursor =
+        std::filesystem::absolute(path, pathError).parent_path();
+    while (!cursor.empty()) {
+        std::string name = cursor.filename().string();
+        std::transform(name.begin(), name.end(), name.begin(),
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (name == "content") {
+            SetParticleAssetContentRoot(cursor.string());
+            break;
+        }
+        const std::filesystem::path parent = cursor.parent_path();
+        if (parent == cursor) break;
+        cursor = parent;
+    }
+
     std::string magic;
     int version = 0;
     in >> magic >> version;
-    if (magic != "3DGRuntimeScene" || version < 1 || version > 61) {
+    if (magic != "3DGRuntimeScene" || version < 1 || version > 72) {
         if (error) {
             *error = "Runtime scene file has an unknown format: "
                 + magic + " " + std::to_string(version)
-                + " (expected 3DGRuntimeScene 1..61).";
+                + " (expected 3DGRuntimeScene 1..72).";
         }
         return false;
     }
@@ -119,6 +140,27 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
         std::istringstream record(line);
         std::string recordType;
         record >> recordType;
+        if (recordType == "game_mode" && version >= 69) {
+            record >> std::quoted(loaded.gameMode.playerObjectName)
+                   >> loaded.gameMode.playerInputEnabled
+                   >> loaded.gameMode.startPaused
+                   >> loaded.gameMode.allowPause
+                   >> loaded.gameMode.allowRestart
+                   >> loaded.gameMode.loseOnPlayerDeath
+                   >> loaded.gameMode.initialScore
+                   >> loaded.gameMode.cameraOverride
+                   >> loaded.gameMode.cameraMode;
+            if (loaded.gameMode.playerObjectName == "-") {
+                loaded.gameMode.playerObjectName.clear();
+            }
+            loaded.gameMode.cameraMode = std::clamp(
+                loaded.gameMode.cameraMode, 0, 2);
+            if (!record) {
+                if (error) *error = "Runtime scene has invalid Game Mode settings.";
+                return false;
+            }
+            continue;
+        }
         if (recordType == "skylight_occlusion" && version >= 54) {
             int enabled = 1;
             record >> enabled
@@ -420,7 +462,21 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                    >> pc.lockOnRange >> pc.lockOnViewAngle
                    >> pc.lockOnTargetHeight >> pc.lockOnTrackingSpeed
                    >> pc.maxSlopeDegrees >> pc.stepHeight;
+            if (version >= 63) {
+                record >> pc.facingMode >> pc.turnSpeed;
+            }
+            if (version >= 68) {
+                record >> pc.cameraMode
+                       >> pc.isometricYaw >> pc.isometricPitch
+                       >> pc.isometricDistance;
+            } else {
+                pc.cameraMode = firstPerson != 0 ? 1 : 0;
+            }
             pc.firstPerson = firstPerson != 0;
+            pc.cameraMode = std::clamp(pc.cameraMode, 0, 2);
+            pc.firstPerson = pc.cameraMode == 1;
+            pc.isometricPitch = std::clamp(pc.isometricPitch, -89.0f, 89.0f);
+            pc.isometricDistance = std::max(pc.isometricDistance, 0.0f);
             pc.cameraCollision = cameraCollision != 0;
             pc.shoulderCamera = shoulderCamera != 0;
             pc.rightShoulder = rightShoulder != 0;
@@ -611,11 +667,13 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                 record >> event.clipIndex
                        >> event.time
                        >> std::quoted(event.name);
+                if (version >= 71) record >> std::quoted(event.clipName);
                 event.clipIndex = std::max(event.clipIndex, 0);
                 event.time = std::max(event.time, 0.0f);
                 if (event.name == "-") {
                     event.name.clear();
                 }
+                if (event.clipName == "-") event.clipName.clear();
                 entity.animationEvents.push_back(event);
             }
         }
@@ -730,6 +788,18 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                     record >> transition.priority
                            >> transition.canInterrupt;
                 }
+                if (version >= 67) {
+                    std::size_t conditionCount = 0;
+                    record >> transition.requireAllConditions >> conditionCount;
+                    for (std::size_t c = 0; c < conditionCount; ++c) {
+                        AnimationTransitionDesc::Condition condition;
+                        record >> std::quoted(condition.parameter)
+                               >> condition.compare >> condition.threshold;
+                        if (condition.parameter == "-") condition.parameter.clear();
+                        condition.compare = std::clamp(condition.compare, 0, 3);
+                        transition.additionalConditions.push_back(std::move(condition));
+                    }
+                }
                 if (transition.fromState == "-") {
                     transition.fromState.clear();
                 }
@@ -743,6 +813,43 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                 transition.fade = std::max(transition.fade, 0.0f);
                 transition.exitTime = std::clamp(transition.exitTime, 0.0f, 1.0f);
                 entity.animationTransitions.push_back(transition);
+            }
+        }
+        if (version >= 62) {
+            std::size_t sourceCount = 0;
+            record >> sourceCount;
+            for (std::size_t i = 0; i < sourceCount; ++i) {
+                AnimationSourceDesc source;
+                int strip = 0;
+                record >> std::quoted(source.path) >> std::quoted(source.clipName) >> strip;
+                if (version >= 66) record >> std::quoted(source.sourceClipName);
+                if (source.path == "-") source.path.clear();
+                if (source.clipName == "-") source.clipName.clear();
+                if (source.sourceClipName == "-") source.sourceClipName.clear();
+                source.stripRootMotion = strip != 0;
+                entity.animationSources.push_back(std::move(source));
+            }
+        }
+        if (version >= 64) {
+            std::size_t attachmentCount = 0;
+            record >> attachmentCount;
+            for (std::size_t i = 0; i < attachmentCount; ++i) {
+                AttachmentDesc a;
+                record >> std::quoted(a.path) >> std::quoted(a.boneName)
+                       >> a.position.x >> a.position.y >> a.position.z
+                       >> a.eulerDegrees.x >> a.eulerDegrees.y >> a.eulerDegrees.z
+                       >> a.scale.x >> a.scale.y >> a.scale.z;
+                if (version >= 65) {
+                    record >> std::quoted(a.materialPath);
+                    if (a.materialPath == "-") a.materialPath.clear();
+                }
+                if (version >= 70) {
+                    record >> std::quoted(a.socketName);
+                    if (a.socketName == "-") a.socketName.clear();
+                }
+                if (a.path == "-") a.path.clear();
+                if (a.boneName == "-") a.boneName.clear();
+                entity.attachments.push_back(std::move(a));
             }
         }
         if (version >= 3) {
@@ -875,6 +982,32 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                         field.type = ScriptField::Type::Float;
                     }
                     entity.scriptFields.push_back(field);
+                }
+            }
+            if (version >= 72) {
+                std::size_t additionalCount = 0;
+                record >> additionalCount;
+                entity.additionalScripts.reserve(additionalCount);
+                for (std::size_t scriptIndex = 0; scriptIndex < additionalCount; ++scriptIndex) {
+                    RuntimeSceneLoader::EntityDesc::AdditionalScript script;
+                    int enabled = 1;
+                    std::size_t fieldCount = 0;
+                    record >> enabled >> std::quoted(script.className)
+                           >> std::quoted(script.path) >> fieldCount;
+                    script.enabled = enabled != 0;
+                    if (script.className == "-") script.className.clear();
+                    if (script.path == "-") script.path.clear();
+                    for (std::size_t fieldIndex = 0; fieldIndex < fieldCount; ++fieldIndex) {
+                        ScriptField field;
+                        int fieldType = 0;
+                        record >> std::quoted(field.name) >> fieldType >> std::quoted(field.value);
+                        if (field.name == "-") field.name.clear();
+                        if (field.value == "-") field.value.clear();
+                        field.type = static_cast<ScriptField::Type>(
+                            std::clamp(fieldType, 0, 3));
+                        script.fields.push_back(std::move(field));
+                    }
+                    entity.additionalScripts.push_back(std::move(script));
                 }
             }
         }
@@ -1197,7 +1330,8 @@ bool RuntimeSceneLoader::Instantiate(const Scene &scene, ecs::Registry &registry
                 notifies.push_back(ecs::SkinnedModelAsset::Notify{
                     event.clipIndex,
                     event.time,
-                    event.name
+                    event.name,
+                    event.clipName
                 });
             }
             std::vector<ecs::SkinnedModelAsset::ActionProfile> actionProfiles;
@@ -1267,7 +1401,7 @@ bool RuntimeSceneLoader::Instantiate(const Scene &scene, ecs::Registry &registry
                 if (from < -1 || to < 0 || from == to) {
                     continue;
                 }
-                transitions.push_back(ecs::SkinnedModelAsset::AnimationTransition{
+                ecs::SkinnedModelAsset::AnimationTransition runtimeTransition{
                     from,
                     to,
                     transition.parameter,
@@ -1277,7 +1411,30 @@ bool RuntimeSceneLoader::Instantiate(const Scene &scene, ecs::Registry &registry
                     transition.exitTime,
                     transition.priority,
                     transition.canInterrupt
-                });
+                };
+                runtimeTransition.requireAllConditions = transition.requireAllConditions;
+                runtimeTransition.additionalConditions.reserve(
+                    transition.additionalConditions.size());
+                for (const AnimationTransitionDesc::Condition& condition
+                     : transition.additionalConditions) {
+                    runtimeTransition.additionalConditions.push_back({
+                        condition.parameter, condition.compare, condition.threshold});
+                }
+                transitions.push_back(std::move(runtimeTransition));
+            }
+            std::vector<ecs::SkinnedModelAsset::AnimationSourceFile> animationSourceFiles;
+            animationSourceFiles.reserve(desc.animationSources.size());
+            for (const AnimationSourceDesc& source : desc.animationSources) {
+                if (source.path.empty()) continue;
+                animationSourceFiles.push_back(ecs::SkinnedModelAsset::AnimationSourceFile{
+                    source.path, source.clipName, source.stripRootMotion, source.sourceClipName});
+            }
+            std::vector<ecs::SkinnedModelAsset::Attachment> attachmentDescs;
+            attachmentDescs.reserve(desc.attachments.size());
+            for (const AttachmentDesc& a : desc.attachments) {
+                attachmentDescs.push_back(ecs::SkinnedModelAsset::Attachment{
+                    a.path, a.boneName, a.position, a.eulerDegrees, a.scale,
+                    a.materialPath, a.socketName});
             }
             registry.Add<ecs::SkinnedModelAsset>(entity, ecs::SkinnedModelAsset{
                 desc.modelPath,
@@ -1302,7 +1459,9 @@ bool RuntimeSceneLoader::Instantiate(const Scene &scene, ecs::Registry &registry
                 std::move(actionProfiles),
                 std::move(states),
                 std::move(parameters),
-                std::move(transitions)
+                std::move(transitions),
+                std::move(animationSourceFiles),
+                std::move(attachmentDescs)
             });
         } else if (!desc.modelPath.empty()) {
             // Non-skeletal model -> static model asset. A skeletal character must NOT
@@ -1352,6 +1511,28 @@ bool RuntimeSceneLoader::Instantiate(const Scene &scene, ecs::Registry &registry
             script.className = desc.scriptClassName;
             script.sourcePath = desc.scriptPath;
             script.fields = desc.scriptFields;
+            for (const RuntimeSceneLoader::EntityDesc::AdditionalScript& authored
+                 : desc.additionalScripts) {
+                NativeScriptSlot additional;
+                additional.enabled = authored.enabled;
+                additional.className = authored.className;
+                additional.sourcePath = authored.path;
+                additional.fields = authored.fields;
+                script.additional.push_back(std::move(additional));
+            }
+            registry.Add<NativeScriptComponent>(entity, std::move(script));
+        } else if (!desc.additionalScripts.empty()) {
+            NativeScriptComponent script;
+            script.enabled = false;
+            for (const RuntimeSceneLoader::EntityDesc::AdditionalScript& authored
+                 : desc.additionalScripts) {
+                NativeScriptSlot additional;
+                additional.enabled = authored.enabled;
+                additional.className = authored.className;
+                additional.sourcePath = authored.path;
+                additional.fields = authored.fields;
+                script.additional.push_back(std::move(additional));
+            }
             registry.Add<NativeScriptComponent>(entity, std::move(script));
         }
         if (desc.audioSourceEnabled && !desc.audioSource.path.empty()) {

@@ -70,8 +70,10 @@ private:
     float m_previewEnvApplied = 0.42f; // last slider values committed for IBL baking
     float m_previewEnvYawApplied = 0.0f;
     float m_previewLight   = 1.0f;    // key-light intensity multiplier
+    float m_previewZoom    = 1.0f;    // mouse-wheel zoom (higher = closer)
     bool  m_previewGround  = false;   // ground plane + contact shadow
     float m_previewBg[3]   = {0.05f, 0.06f, 0.08f};
+    std::string m_hdriPath;           // equirectangular environment image (optional)
 
     char m_nameBuffer[128]{};
     char m_outputDirectoryBuffer[1024]{};
@@ -80,6 +82,7 @@ private:
     char m_metalRoughMapBuffer[1024]{};
     char m_heightMapBuffer[1024]{};
     char m_shaderPathBuffer[1024]{};
+    char m_hdriPathBuffer[1024]{};
 
     // ORM channel-packer source paths.
     std::string m_packMetallic;

@@ -3,7 +3,8 @@
 
 namespace engine {
 
-void DrawModel(const Model& model, Shader& shader) {
+void DrawModel(const Model& model, Shader& shader,
+               const glm::vec3& tint, const Texture* albedoOverride) {
     const auto& mats = model.Materials();
 
     // Sampler units are fixed for the lifetime of the shader's use here.
@@ -17,7 +18,9 @@ void DrawModel(const Model& model, Shader& shader) {
         const Material def;
         const Material& m = valid ? mats[static_cast<std::size_t>(sm.material)] : def;
 
-        shader.SetVec3("uColor",      m.diffuse);
+        // A material override (from a .3dgmat) tints the base colour; with an albedo
+        // map it also replaces the diffuse (so uColor becomes a pure multiplier).
+        shader.SetVec3("uColor",      albedoOverride ? tint : (m.diffuse * tint));
         shader.SetVec3("uSpecular",   m.specular);
         shader.SetVec3("uEmissive",   m.emissive);
         shader.SetFloat("uShininess", m.shininess);
@@ -27,7 +30,13 @@ void DrawModel(const Model& model, Shader& shader) {
             shader.SetInt(flag, has ? 1 : 0);
             if (has) model.Textures()[static_cast<std::size_t>(idx)]->Bind(static_cast<unsigned>(unit));
         };
-        bind(m.diffuseMap,  0, "uHasDiffuse");
+        if (albedoOverride) {
+            albedoOverride->Bind(0);
+            shader.SetInt("uDiffuseTex", 0);
+            shader.SetInt("uHasDiffuse", 1);
+        } else {
+            bind(m.diffuseMap, 0, "uHasDiffuse");
+        }
         bind(m.normalMap,   1, "uhasNormal");
         bind(m.specularMap, 2, "uHasSpecular");
         bind(m.emissiveMap, 3, "uHasEmissive");

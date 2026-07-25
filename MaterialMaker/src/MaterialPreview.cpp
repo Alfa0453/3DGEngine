@@ -101,6 +101,40 @@ void main() {
 
 )GLSL";
 
+// Equirectangular environment sky. Draws a cube whose interior samples an equirect
+// panorama by view direction. Used both to bake the IBL and to fill the visible
+// background behind the object.
+const char* kEquirectVert = R"GLSL(
+#version 330 core
+layout(location = 0) in vec3 aPos;
+uniform mat4 uView;
+uniform mat4 uProj;
+uniform int  uInfinite;
+out vec3 vDir;
+void main() {
+    vDir = aPos;
+    vec4 p = uProj * uView * vec4(aPos, 1.0);
+    gl_Position = (uInfinite == 1) ? p.xyww : p;
+}
+)GLSL";
+
+const char* kEquirectFrag = R"GLSL(
+#version 330 core
+in vec3 vDir;
+out vec4 FragColor;
+uniform sampler2D uEquirect;
+uniform float uYaw;       // environment rotation (radians)
+void main() {
+    vec3 d = normalize(vDir);
+    float c = cos(uYaw), s = sin(uYaw);
+    d = vec3(c * d.x + s * d.z, d.y, -s * d.x + c * d.z);   // rotate about Y
+    vec2 uv = vec2(atan(d.z, d.x), asin(clamp(d.y, -1.0, 1.0)));
+    uv *= vec2(0.15915494, 0.31830989);   // 1/(2pi), 1/pi
+    uv += 0.5;
+    FragColor = vec4(texture(uEquirect, uv).rgb, 1.0);
+}
+)GLSL";
+
 struct GLStateGuard {
     GLint framebuffer = 0, viewport[4]{}, program = 0, vao = 0, arrayBuffer = 0, activeTexture = 0;
     GLint depthFunc = GL_LESS;
@@ -170,6 +204,7 @@ void MaterialPreview::EnsureInitialized() {
     m_ibl.emplace(128);
     m_sky.emplace();
     m_debug.emplace(kDebugVert, kDebugFrag);
+    m_equirectSky.emplace(kEquirectVert, kEquirectFrag);
 
     // Directional key light (its direction / colour / intensity are driven per
     // frame from the environment sample).
@@ -203,7 +238,8 @@ void MaterialPreview::EnsureInitialized() {
     m_ready = true;
 }
 
-void MaterialPreview::RegenerateEnvironment(float envTime, float envYawDeg) {
+void MaterialPreview::RegenerateEnvironment(float envTime, float envYawDeg,
+                                            const std::string& hdriPath) {
     engine::DayNightCycle::Sample s = engine::DayNightCycle::At(envTime);
 
     // Rotate the environment about Y: spin the sun/moon/key directions so both the
@@ -214,13 +250,39 @@ void MaterialPreview::RegenerateEnvironment(float envTime, float envYawDeg) {
     s.sunToward         = rot * s.sunToward;
     s.moonToward        = rot * s.moonToward;
 
-    m_sample  = s;
-    m_envTime = envTime;
-    m_envYaw  = envYawDeg;
+    m_sample    = s;
+    m_envTime   = envTime;
+    m_envYaw    = envYawDeg;
+    m_bakedHdri = hdriPath;
 
-    m_ibl->Generate([&](const glm::mat4& view, const glm::mat4& proj) {
-        m_sky->Draw(view, proj, m_sample, /*tonemap=*/false);
-    });
+    // Bake the IBL from the HDRI when one is set, otherwise from the procedural sky.
+    const engine::Texture* hdri = ResolveMap(hdriPath);
+    if (hdri) {
+        const float yawRad = glm::radians(envYawDeg);
+        m_ibl->Generate([&](const glm::mat4& view, const glm::mat4& proj) {
+            DrawEquirectSky(view, proj, *hdri, yawRad, /*infinite=*/false);
+        });
+    } else {
+        m_ibl->Generate([&](const glm::mat4& view, const glm::mat4& proj) {
+            m_sky->Draw(view, proj, m_sample, /*tonemap=*/false);
+        });
+    }
+}
+
+void MaterialPreview::DrawEquirectSky(const glm::mat4& view, const glm::mat4& proj,
+                                      const engine::Texture& equirect, float yawRadians,
+                                      bool infinite) {
+    const GLboolean cull = glIsEnabled(GL_CULL_FACE);
+    glDisable(GL_CULL_FACE);   // we view the cube from the inside
+    m_equirectSky->Bind();
+    m_equirectSky->SetMat4("uView", view);
+    m_equirectSky->SetMat4("uProj", proj);
+    m_equirectSky->SetFloat("uYaw", yawRadians);
+    m_equirectSky->SetInt("uInfinite", infinite ? 1 : 0);
+    m_equirectSky->SetInt("uEquirect", 0);
+    equirect.Bind(0);
+    m_cube->Draw();
+    if (cull) glEnable(GL_CULL_FACE);
 }
 
 MaterialPreview::MapInfo MaterialPreview::AcquireMap(const std::string& path) {
@@ -334,8 +396,9 @@ unsigned int MaterialPreview::RenderUnchecked(const PbrMaterial& material, const
         m_size = size;
     }
     if (std::abs(settings.envTime - m_envTime) > 1.0e-4f ||
-        std::abs(settings.envYawDeg - m_envYaw) > 1.0e-3f) {
-        RegenerateEnvironment(settings.envTime, settings.envYawDeg);
+        std::abs(settings.envYawDeg - m_envYaw) > 1.0e-3f ||
+        settings.hdriPath != m_bakedHdri) {
+        RegenerateEnvironment(settings.envTime, settings.envYawDeg, settings.hdriPath);
     }
 
     // Live material + selected mesh on the preview object.
@@ -370,7 +433,8 @@ unsigned int MaterialPreview::RenderUnchecked(const PbrMaterial& material, const
     const float yaw   = glm::radians(settings.yawDeg);
     const float pitch = glm::radians(std::max(-89.0f, std::min(89.0f, settings.pitchDeg)));
     const glm::vec3 dir(std::cos(pitch) * std::cos(yaw), std::sin(pitch), std::cos(pitch) * std::sin(yaw));
-    engine::Camera cam(dir * 2.9f);
+    const float distance = std::max(0.6f, settings.distance);   // wheel zoom
+    engine::Camera cam(dir * distance);
     cam.LookAt(glm::vec3(0.0f));
     const float aspect = 1.0f;
 
@@ -389,7 +453,19 @@ unsigned int MaterialPreview::RenderUnchecked(const PbrMaterial& material, const
         opt.spotShadows        = false;
         opt.frustumCull        = false;
         m_pbr->Render(m_reg, cam, aspect, size, size, opt);
-        m_sky->Draw(cam.ViewMatrix(), cam.ProjectionMatrix(aspect), m_sample, /*tonemap=*/true);
+        // Visible background: the HDRI panorama when set, otherwise the procedural sky.
+        const engine::Texture* hdri = ResolveMap(settings.hdriPath);
+        if (hdri) {
+            glDepthFunc(GL_LEQUAL);
+            glDepthMask(GL_FALSE);
+            DrawEquirectSky(glm::mat4(glm::mat3(cam.ViewMatrix())),
+                            cam.ProjectionMatrix(aspect), *hdri,
+                            glm::radians(settings.envYawDeg), /*infinite=*/true);
+            glDepthMask(GL_TRUE);
+            glDepthFunc(GL_LESS);
+        } else {
+            m_sky->Draw(cam.ViewMatrix(), cam.ProjectionMatrix(aspect), m_sample, /*tonemap=*/true);
+        }
     } else {
         const glm::mat4 viewProj = cam.ProjectionMatrix(aspect) * cam.ViewMatrix();
         RenderChannel(material, settings, viewProj);
@@ -400,12 +476,12 @@ unsigned int MaterialPreview::RenderUnchecked(const PbrMaterial& material, const
 
 void MaterialPreview::Retry() {
     m_textures.clear();
-    m_debug.reset(); m_sky.reset(); m_ibl.reset(); m_pbr.reset(); m_fbo.reset();
+    m_debug.reset(); m_equirectSky.reset(); m_sky.reset(); m_ibl.reset(); m_pbr.reset(); m_fbo.reset();
     m_groundMesh.reset(); m_plane.reset(); m_cube.reset(); m_sphere.reset();
     m_reg = engine::ecs::Registry{};
     m_object = m_sun = m_ground = engine::ecs::kNull;
     m_ready = false; m_failed = false; m_error.clear();
-    m_envTime = -1.0f; m_envYaw = -1.0e9f; m_size = 0;
+    m_envTime = -1.0f; m_envYaw = -1.0e9f; m_bakedHdri = "\x01"; m_size = 0;
 }
 
 } // namespace material_maker

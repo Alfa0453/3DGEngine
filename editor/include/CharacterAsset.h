@@ -14,12 +14,40 @@ struct CharacterAnimationSource {
     bool        stripRootMotion = false;
 };
 
+// A named mount point on the skeleton: a bone plus a render-only offset transform.
+// Attachments reference a socket by name, so you tune the socket's transform without
+// ever touching the bone / skeleton.
+struct CharacterSocket {
+    std::string name = "Socket";
+    std::string boneName;
+    glm::vec3   position{0.0f};
+    glm::vec3   eulerDegrees{0.0f};
+    glm::vec3   scale{1.0f};
+};
+
+struct CharacterScript {
+    bool enabled = true;
+    std::string className;
+    std::string path;
+};
+
+// A static model (weapon, shield, hat...) mounted to a named socket.
+struct CharacterAttachment {
+    std::string modelPath;
+    std::string socketName;
+    std::string materialPath;   // optional .3dgmat applied to the attachment model
+};
+
 struct CharacterAsset {
-    int version = 7;
+    int version = 18;
     std::string name = "Character";
     std::string modelAssetPath;
     std::string materialAssetPath;
-    std::vector<CharacterAnimationSource> animationSources;  // extra clips from separate files
+    std::string animationGraphPath;                          // .3dggraph supplying ALL animation (clips + logic)
+    std::vector<std::string> actionClipAssets;               // standalone action .3dgclip assets
+    std::vector<CharacterAnimationSource> animationSources;  // legacy inline clips (used only when no graph is set)
+    std::vector<CharacterSocket> sockets;                    // named mount points on the skeleton
+    std::vector<CharacterAttachment> attachments;            // static models mounted to sockets
 
     // Render-only model offset transform (applied to the mesh, NOT the collider): the
     // mesh is placed at position, rotated by these Euler degrees, and scaled, all about
@@ -86,6 +114,7 @@ struct CharacterAsset {
     bool scriptEnabled = false;
     std::string scriptClassName;
     std::string scriptPath;
+    std::vector<CharacterScript> scripts;
 
     void Capture(const EditorScene::Object& object);
     bool Apply(EditorScene& scene) const;

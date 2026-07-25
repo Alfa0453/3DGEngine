@@ -36,6 +36,7 @@ const char *EditorPanels::Name(Panel panel)
     case Panel::Hierarchy: return "Hierarchy";
     case Panel::Inspector: return "Inspector";
     case Panel::WorldSettings: return "World Settings";
+    case Panel::GameModeSettings: return "Game Mode Settings";
     case Panel::Assets:     return "Assets";
     case Panel::Console:   return "Console";
     case Panel::MaterialMaker: return "Material Maker";
@@ -51,6 +52,8 @@ const char *EditorPanels::Name(Panel panel)
     case Panel::ShaderEditor: return "Shader Editor";
     case Panel::Hud: return "HUD Editor";
     case Panel::CharacterEditor: return "Character Editor";
+    case Panel::ClipEditor: return "Clip Editor";
+    case Panel::GraphEditor: return "Graph Editor";
     case Panel::Count:     break;
     }
     return "Panel";

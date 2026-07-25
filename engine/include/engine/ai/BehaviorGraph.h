@@ -35,7 +35,8 @@ struct AgentContext {
     Agent     agent;                        // steering body (position/velocity/limits)
     glm::vec3 targetPos{0.0f};              // pursued point (e.g. the player)
     bool      seesTarget = false;           // perception result for this tick
-    float     reachRadius = 0.6f;
+    float     reachRadius = 0.6f;            // gameplay/attack interaction range
+    float     navigationAcceptanceRadius = 0.3f; // path arrival tolerance
     float     chargeRadius = 4.0f;          // within this + visible -> seek straight in
     float     repathInterval = 0.3f;
     float     dt = 0.0f;                     // set each tick before Tick()
@@ -61,7 +62,7 @@ struct AgentContext {
 
     // Outputs, read by the host after Tick().
     glm::vec3 steer{0.0f};                   // desired steering acceleration this tick
-    glm::vec3 facing{0.0f, 0.0f, 1.0f};
+    glm::vec3 facing{0.0f, 0.0f, -1.0f};
     bool      focusTarget = false;            // persistent override controlled by focus tasks
 
     // Runtime path scratch used by Chase/MoveTo actions.
@@ -147,6 +148,7 @@ struct BtAttachment {
 // One authored node. Children index into BehaviorGraph::nodes.
 struct BtGraphNode {
     BtNodeType       type = BtNodeType::Sequence;
+    std::string      displayName;         // optional editor label (especially useful for composites)
     std::vector<int> children;          // ordered child indices
     float            param = 0.0f;      // Repeat count / TargetWithin range / Wait seconds
     std::string      script;            // BtScript class name (ScriptTask nodes only)

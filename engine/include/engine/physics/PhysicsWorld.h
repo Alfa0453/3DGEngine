@@ -160,7 +160,8 @@ public:
                           float radius,
                           ecs::Entity ignored = ecs::kNull,
                           std::uint32_t layerMask = 0xFFFFFFFFu,
-                          std::uint32_t queryLayer = 0u) const;
+                          std::uint32_t queryLayer = 0u,
+                          ecs::Entity alsoIgnored = ecs::kNull) const;
 
     // Collect every collider overlapping a world-space sphere (AoE queries:
     // explosions, detection). Trigger volumes are included. Filtered by layerMask.

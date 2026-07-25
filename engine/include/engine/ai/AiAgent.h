@@ -31,6 +31,12 @@ public:
     float                  chargeRadius   = 4.0f;  // within this + visible -> charge straight in
 
     void SetPosition(const glm::vec3& p) { agent.position = p; }
+    void SetFacing(const glm::vec3& direction) {
+        glm::vec3 horizontal(direction.x, 0.0f, direction.z);
+        if (glm::dot(horizontal, horizontal) > 1.0e-6f) {
+            m_facing = glm::normalize(horizontal);
+        }
+    }
     State GetState() const { return m_state; }
     bool SeesTarget() const { return m_sawTarget; }
     const glm::vec3& Position() const { return agent.position; }
@@ -59,7 +65,7 @@ private:
     bool        m_pathGoalValid = false;
     glm::vec3   m_lastKnown{0.0f};
     float       m_repathTimer = 0.0f;
-    glm::vec3   m_facing{1.0f, 0.0f, 0.0f};
+    glm::vec3   m_facing{0.0f, 0.0f, -1.0f};
     bool        m_sawTarget = false;
 };
 

@@ -22,8 +22,10 @@ add_executable(3DGEditor
     src/EditorPanels.cpp
     src/EditorDockspace.cpp
     src/EditorViewport.cpp
+    src/EditorLineRenderer.cpp
     src/EditorContentController.cpp
     src/EditorScriptTools.cpp
+    src/EditorGeneratedScriptTools.cpp
     src/EditorCameraController.cpp
     src/EditorMouseController.cpp
     src/EditorRuntimeController.cpp
@@ -34,6 +36,10 @@ add_executable(3DGEditor
     src/HudEditorPanel.cpp
     src/CharacterAsset.cpp
     src/CharacterEditorPanel.cpp
+    src/AnimationClipAsset.cpp
+    src/ClipEditorPanel.cpp
+    src/AnimationGraphAsset.cpp
+    src/AnimationGraphEditorPanel.cpp
     src/ParticleAsset.cpp
     src/NativeDialog.cpp
     src/GameBtScripts.cpp
@@ -43,6 +49,9 @@ target_include_directories(3DGEditor PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/btscripts
     ${CMAKE_SOURCE_DIR}/engine/include)
+target_compile_definitions(3DGEditor PRIVATE
+    THREEDG_BT_SCRIPT_TEMPLATE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/btscripts/templates"
+    THREEDG_GAME_MODULE_DIR="${CMAKE_SOURCE_DIR}/game")
 target_link_libraries(3DGEditor PRIVATE engine MaterialMaker game)
 if(WIN32)
     # shell32 + ole32: IFileDialog folder picker; comdlg32: GetOpenFileName.

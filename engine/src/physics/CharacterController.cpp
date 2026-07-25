@@ -197,10 +197,11 @@ void CharacterController::Move(ecs::Registry& reg, const glm::vec3& wishVel, flo
     const bool blockedByWall = ResolvePenetrations(reg);
 
     // Step-up: if we were on the ground but an obstacle blocked our horizontal
-    // motion, try to climb it. Lift by stepHeight, nudge forward far enough to
-    // clear the ledge edge (per-frame motion is too small on its own), then drop
-    // back down. A wall taller than stepHeight still blocks the forward nudge and
-    // the attempt is reverted.
+    // motion, try to climb it. Lift by stepHeight, clear the ledge by the capsule
+    // radius, then drop back down. Sharp box treads require this clearance before
+    // the downward capsule test can resolve onto their top instead of their front
+    // edge. PlayerController retains the pre-step presentation and eases toward
+    // this authoritative collision position, so the clearance is not a camera pop.
     const glm::vec3 horizWanted(disp.x, 0.0f, disp.z);
     const glm::vec3 horizGot(position.x - startPos.x, 0.0f, position.z - startPos.z);
     if (wasGrounded && blockedByWall && glm::length(horizWanted) > 1e-5f &&
@@ -210,7 +211,7 @@ void CharacterController::Move(ecs::Registry& reg, const glm::vec3& wishVel, flo
         const glm::vec3 dir = glm::normalize(horizWanted);
         position = startPos + glm::vec3(0, stepHeight, 0);
         ResolvePenetrations(reg);
-        position += dir * (radius + 0.05f);             // clear the ledge edge
+        position += dir * (radius + 0.005f);            // clear the sharp ledge edge
         ResolvePenetrations(reg);
         position += glm::vec3(0, -(stepHeight + 0.02f), 0);     // drop onto the step
         ResolvePenetrations(reg);

@@ -82,6 +82,16 @@ inline void BuildAnimationController(
         d.exitTime     = t.exitTime;
         d.priority     = t.priority;
         d.canInterrupt = t.canInterrupt;
+        d.requireAllConditions = t.requireAllConditions;
+        d.additionalConditions.reserve(t.additionalConditions.size());
+        for (const auto& condition : t.additionalConditions) {
+            d.additionalConditions.push_back({
+                condition.parameter,
+                static_cast<engine::AnimationGraphDesc::TransitionDesc::Compare>(
+                    condition.compare),
+                condition.threshold
+            });
+        }
         desc.transitions.push_back(std::move(d));
     }
 

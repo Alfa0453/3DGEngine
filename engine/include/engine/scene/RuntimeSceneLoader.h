@@ -28,6 +28,24 @@ public:
         int clipIndex = 0;
         float time = 0.0f;
         std::string name;
+        std::string clipName;
+    };
+
+    struct AnimationSourceDesc {
+        std::string path;
+        std::string clipName;
+        bool        stripRootMotion = false;
+        std::string sourceClipName;
+    };
+
+    struct AttachmentDesc {
+        std::string path;
+        std::string boneName;
+        glm::vec3   position{0.0f};
+        glm::vec3   eulerDegrees{0.0f};
+        glm::vec3   scale{1.0f};
+        std::string materialPath;   // optional .3dgmat applied to the attachment model
+        std::string socketName;
     };
 
     struct AnimationActionProfileDesc {
@@ -71,6 +89,11 @@ public:
     };
 
     struct AnimationTransitionDesc {
+        struct Condition {
+            std::string parameter = "Speed";
+            int compare = 0;
+            float threshold = 0.0f;
+        };
         std::string fromState;
         std::string toState;
         std::string parameter = "Speed";
@@ -80,12 +103,15 @@ public:
         float exitTime = 0.0f;
         int priority = 0;
         bool canInterrupt = false;
+        bool requireAllConditions = true;
+        std::vector<Condition> additionalConditions;
     };
 
-    // Authored first/third-person player settings (matches the editor's
+    // Authored first/third-person/isometric player settings (matches the editor's
     // PlayerControllerSettings; the standalone player applies these).
     struct PlayerControllerDesc {
         bool  firstPerson = false;
+        int   cameraMode = 0;
         float walkSpeed = 4.0f;
         float runSpeed = 7.0f;
         float jumpSpeed = 5.0f;
@@ -95,6 +121,9 @@ public:
         float eyeHeight = 0.6f;
         float cameraDistance = 5.0f;
         float cameraTargetHeight = 1.0f;
+        float isometricYaw = -45.0f;
+        float isometricPitch = -35.0f;
+        float isometricDistance = 12.0f;
         bool  cameraCollision = true;
         float cameraProbeRadius = 0.20f;
         float cameraCollisionPadding = 0.08f;
@@ -110,6 +139,8 @@ public:
         float lockOnTrackingSpeed = 10.0f;
         float maxSlopeDegrees = 50.0f;
         float stepHeight = 0.35f;
+        int   facingMode = 0;        // 0 = face camera, 1 = face movement
+        float turnSpeed = 12.0f;
     };
 
     struct EntityDesc {
@@ -147,6 +178,8 @@ public:
         std::vector<AnimationStateDesc> animationStates;
         std::vector<AnimationParameterDesc> animationParameters;
         std::vector<AnimationTransitionDesc> animationTransitions;
+        std::vector<AnimationSourceDesc> animationSources;   // separate FBX clips merged by bone name
+        std::vector<AttachmentDesc> attachments;             // static models socketed to bones
         bool linearVelocityEnabled = false;
         bool angularVelocityEnabled = false;
         glm::vec3 linearVelocity{0.0f};
@@ -166,6 +199,13 @@ public:
         std::string scriptClassName;
         std::string scriptPath;
         std::vector<ScriptField> scriptFields;
+        struct AdditionalScript {
+            bool enabled = true;
+            std::string className;
+            std::string path;
+            std::vector<ScriptField> fields;
+        };
+        std::vector<AdditionalScript> additionalScripts;
         bool audioSourceEnabled = false;
         engine::ecs::AudioSource audioSource;
         bool triggerAudioEnabled = false;
@@ -325,7 +365,20 @@ public:
             std::vector<PostProcessEffect> postProcessEffects;
         };
 
+        struct GameModeSettings {
+            std::string playerObjectName;
+            bool playerInputEnabled = true;
+            bool startPaused = false;
+            bool allowPause = true;
+            bool allowRestart = true;
+            bool loseOnPlayerDeath = true;
+            int initialScore = 0;
+            bool cameraOverride = false;
+            int cameraMode = 0;
+        };
+
         Environment environment;
+        GameModeSettings gameMode;
         std::vector<NavBounds> navBounds;
         std::vector<NavAgentDesc> navAgents;
         std::vector<TriggerActionDesc> triggerActions;

@@ -82,6 +82,10 @@ private:
 //   uColor/uSpecular/uEmissive (vec3), uShininess (float)
 //   uHasDiffuse/uHasNormal/uHasSpecular/uHasEmissive (int 0/1)
 //   uDiffuseTex/uNormalTex/uSpecularTex/uEmissiveTex (sampler2D, units 0..3)
-void DrawModel(const Model& model, Shader& shader);
+// `tint` multiplies each submesh's base colour; `albedoOverride`, when set, replaces
+// the diffuse map on every submesh (used to apply a .3dgmat to an attachment).
+void DrawModel(const Model& model, Shader& shader,
+               const glm::vec3& tint = glm::vec3(1.0f),
+               const Texture* albedoOverride = nullptr);
 
 } // namespace engine

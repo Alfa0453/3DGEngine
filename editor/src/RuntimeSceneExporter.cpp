@@ -3,6 +3,7 @@
 #include <engine/ecs/Components.h>
 #include <engine/physics/PhysicsComponents.h>
 
+#include <algorithm>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
@@ -58,7 +59,7 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         return false;
     }
 
-    out << "3DGRuntimeScene 61\n";
+    out << "3DGRuntimeScene 72\n";
     out << "# Runtime export from 3DGEditor. Editor-only flags are omitted.\n";
     const EditorScene::Environment& environment = scene.GetEnvironment();
     out << "environment "
@@ -83,6 +84,17 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         << environment.physicsTimeToSleep << ' '
         << std::quoted(environment.hudAsset) << ' '
         << environment.shadowDistance << '\n';
+    const EditorScene::GameModeSettings& gameMode = scene.GetGameModeSettings();
+    out << "game_mode "
+        << StoredPath(gameMode.playerObjectName) << ' '
+        << gameMode.playerInputEnabled << ' '
+        << gameMode.startPaused << ' '
+        << gameMode.allowPause << ' '
+        << gameMode.allowRestart << ' '
+        << gameMode.loseOnPlayerDeath << ' '
+        << gameMode.initialScore << ' '
+        << gameMode.cameraOverride << ' '
+        << std::clamp(gameMode.cameraMode, 0, 2) << '\n';
     out << "clouds "
         << (environment.clouds ? 1 : 0) << ' '
         << environment.cloudCoverage << ' '
@@ -227,7 +239,8 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         for (const EditorScene::AnimationEvent& event : object.animationEvents) {
             out << event.clipIndex << ' '
                 << event.time << ' '
-                << StoredPath(event.name) << ' ';
+                << StoredPath(event.name) << ' '
+                << StoredPath(event.clipName) << ' ';
         }
         out << object.animationActionProfiles.size() << ' ';
         for (const EditorScene::AnimationActionProfile& profile : object.animationActionProfiles) {
@@ -277,7 +290,30 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
                 << transition.fade << ' '
                 << transition.exitTime << ' '
                 << transition.priority << ' '
-                << (transition.canInterrupt ? 1 : 0) << ' ';
+                << (transition.canInterrupt ? 1 : 0) << ' '
+                << (transition.requireAllConditions ? 1 : 0) << ' '
+                << transition.additionalConditions.size() << ' ';
+            for (const auto& condition : transition.additionalConditions) {
+                out << StoredPath(condition.parameter) << ' '
+                    << static_cast<int>(condition.compare) << ' '
+                    << condition.threshold << ' ';
+            }
+        }
+        out << object.animationSources.size() << ' ';
+        for (const EditorScene::AnimationSource& source : object.animationSources) {
+            out << StoredPath(source.file) << ' '
+                << StoredPath(source.clipName) << ' '
+                << (source.stripRootMotion ? 1 : 0) << ' '
+                << StoredPath(source.sourceClipName) << ' ';
+        }
+        out << object.modelAttachments.size() << ' ';
+        for (const EditorScene::ModelAttachment& a : object.modelAttachments) {
+            out << StoredPath(a.modelPath) << ' ' << StoredPath(a.boneName) << ' '
+                << a.position.x << ' ' << a.position.y << ' ' << a.position.z << ' '
+                << a.eulerDegrees.x << ' ' << a.eulerDegrees.y << ' ' << a.eulerDegrees.z << ' '
+                << a.scale.x << ' ' << a.scale.y << ' ' << a.scale.z << ' '
+                << StoredPath(a.materialPath) << ' '
+                << StoredPath(a.socketName) << ' ';
         }
         out
             << object.linearVelocity.x << ' ' << object.linearVelocity.y << ' ' << object.linearVelocity.z << ' '
@@ -328,6 +364,18 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
                 << StoredPath(field.name) << ' '
                 << static_cast<int>(field.type) << ' '
                 << StoredPath(field.value);
+        }
+        out << ' ' << object.additionalScripts.size();
+        for (const EditorScene::ScriptBinding& script : object.additionalScripts) {
+            out << ' ' << (script.enabled ? 1 : 0)
+                << ' ' << StoredPath(script.className)
+                << ' ' << StoredPath(script.path)
+                << ' ' << script.fields.size();
+            for (const EditorScene::ScriptField& field : script.fields) {
+                out << ' ' << StoredPath(field.name)
+                    << ' ' << static_cast<int>(field.type)
+                    << ' ' << StoredPath(field.value);
+            }
         }
         out << ' '
             << (object.audioSourceEnabled ? 1 : 0) << ' '
@@ -440,8 +488,9 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
     for (const EditorScene::Object& object : scene.Objects()) {
         if (!object.playerControllerEnabled) continue;
         const EditorScene::PlayerControllerSettings& s = object.playerController;
+        const int cameraMode = s.firstPerson ? 1 : std::clamp(s.cameraMode, 0, 2);
         out << "player_controller " << std::quoted(object.name) << ' '
-            << (s.firstPerson ? 1 : 0) << ' '
+            << (cameraMode == 1 ? 1 : 0) << ' '
             << s.walkSpeed << ' ' << s.runSpeed << ' ' << s.jumpSpeed << ' '
             << s.lookSensitivity << ' '
             << s.capsuleRadius << ' ' << s.capsuleHeight << ' ' << s.eyeHeight << ' '
@@ -454,7 +503,11 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
             << (s.lockOnEnabled ? 1 : 0) << ' '
             << s.lockOnRange << ' ' << s.lockOnViewAngle << ' '
             << s.lockOnTargetHeight << ' ' << s.lockOnTrackingSpeed << ' '
-            << s.maxSlopeDegrees << ' ' << s.stepHeight << '\n';
+            << s.maxSlopeDegrees << ' ' << s.stepHeight << ' '
+            << s.facingMode << ' ' << s.turnSpeed << ' '
+            << cameraMode << ' '
+            << s.isometricYaw << ' ' << s.isometricPitch << ' '
+            << s.isometricDistance << '\n';
     }
 
     for (const EditorScene::Object& object : scene.Objects()) {

@@ -1,4 +1,5 @@
 #include "EditorAssets.h"
+#include "AnimationClipAsset.h"
 
 #include <cstdlib>
 #include <filesystem>
@@ -68,6 +69,39 @@ int main() {
           "case-only folder rename succeeds");
     Check(fs::is_directory(root / "renamed"), "case-only rename reaches requested spelling");
     Check(!assets.RenameSelectedFolder("..", &error), "invalid parent folder name is rejected");
+
+    AnimationClipAsset action;
+    action.name = "StaffAttack";
+    action.sourceFile = "Content/Animations/StaffAttack.fbx";
+    action.clipName = "Attack_01";
+    action.stripRootMotion = true;
+    action.loop = true;
+    action.speed = 1.25f;
+    action.action = true;
+    action.maskRootBone = "Spine";
+    action.fadeIn = 0.06f;
+    action.fadeOut = 0.18f;
+    action.events.push_back({0.42f, "CastFireball"});
+    action.events.push_back({0.76f, "AttackFinished"});
+    const fs::path actionPath = root / "StaffAttack.3dgclip";
+    Check(action.Save(actionPath.string(), &error),
+          "save standalone action clip metadata");
+    AnimationClipAsset loadedAction;
+    Check(loadedAction.Load(actionPath.string(), &error),
+          "load standalone action clip metadata");
+    Check(loadedAction.action && !loadedAction.loop
+          && loadedAction.name == "StaffAttack"
+          && loadedAction.sourceFile == action.sourceFile
+          && loadedAction.clipName == "Attack_01"
+          && loadedAction.maskRootBone == "Spine"
+          && loadedAction.fadeIn == action.fadeIn
+          && loadedAction.fadeOut == action.fadeOut
+          && loadedAction.speed == action.speed
+          && loadedAction.events.size() == 2
+          && loadedAction.events[0].time == 0.42f
+          && loadedAction.events[0].name == "CastFireball"
+          && loadedAction.events[1].name == "AttackFinished",
+          "action clip preserves source, mask, fades, speed, events and one-shot behavior");
 
     fs::remove_all(root, ec);
     std::cout << "editor assets tests passed\n";

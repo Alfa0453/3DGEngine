@@ -2,8 +2,12 @@
 
 #include "engine/animation/Animator.h"
 #include "engine/graphics/SkinnedModel.h"
+#include "engine/graphics/Model.h"
+#include "engine/graphics/Shader.h"
 #include "engine/ecs/Registry.h"
 #include "engine/ecs/Components.h"
+
+#include <glm/gtc/matrix_inverse.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -30,7 +34,41 @@ void AnimatedModel::PlayAction(int clip, std::vector<float> mask, std::vector<An
     action.active    = (clip >= 0);
     action.mask      = std::move(mask);
     action.events    = std::move(events);
+    std::sort(action.events.begin(), action.events.end(),
+        [](const AnimEvent& a, const AnimEvent& b) { return a.time < b.time; });
     action.nextEvent = 0;
+}
+
+bool AnimatedModel::SocketWorldTransform(const ecs::Transform& character,
+                                         const std::string& name,
+                                         glm::mat4* world) const {
+    if (!world || name.empty()) return false;
+    for (const NamedModelSocket& named : sockets) {
+        if (named.name != name) continue;
+        glm::mat4 socket = character.Model() * renderOffset;
+        if (named.bone >= 0 && named.bone < static_cast<int>(pose.size())) {
+            socket *= pose[static_cast<std::size_t>(named.bone)] * named.boneBind;
+        }
+        *world = socket * named.localOffset;
+        return true;
+    }
+    return false;
+}
+
+void DrawAnimatedModelAttachments(const AnimatedModel& animated,
+                                  const glm::mat4& characterMatrix, Shader& shader) {
+    for (const ModelAttachment& att : animated.attachments) {
+        if (!att.model) continue;
+        // Socket the attachment to the bone's animated mesh-space transform.
+        glm::mat4 socket = characterMatrix;
+        if (att.bone >= 0 && att.bone < static_cast<int>(animated.pose.size())) {
+            socket = characterMatrix * animated.pose[static_cast<std::size_t>(att.bone)] * att.boneBind;
+        }
+        const glm::mat4 world = socket * att.localOffset;
+        shader.SetMat4("uModel", world);
+        shader.SetMat3("uNormalMat", glm::mat3(glm::transpose(glm::inverse(world))));
+        DrawModel(*att.model, shader, att.tint, att.albedoOverride);
+    }
 }
 
 void UpdateAnimations(ecs::Registry& reg, float dt) {

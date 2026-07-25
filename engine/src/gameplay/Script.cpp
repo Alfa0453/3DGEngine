@@ -64,6 +64,21 @@ ecs::Transform* Script::FindTransform(const std::string& name) {
     return entity == ecs::kNull ? nullptr : TryGet<ecs::Transform>(entity);
 }
 
+bool Script::SocketTransform(const std::string& name, glm::mat4* world) const {
+    const ecs::Transform* character = Transform();
+    const AnimatedModel* animated = TryGet<AnimatedModel>();
+    return character && animated
+        && animated->SocketWorldTransform(*character, name, world);
+}
+
+bool Script::SocketPosition(const std::string& name, glm::vec3* position) const {
+    if (!position) return false;
+    glm::mat4 world(1.0f);
+    if (!SocketTransform(name, &world)) return false;
+    *position = glm::vec3(world[3]);
+    return true;
+}
+
 void Script::DestroySelf() {
     Destroy(m_context.entity);
 }
@@ -182,9 +197,13 @@ bool Script::PlayAnimationAction(int clipIndex, float fadeIn, float fadeOut, flo
         return false;
     }
 
+    std::vector<AnimEvent> actionEvents;
+    for (const AnimEvent& event : animated->events) {
+        if (event.clip < 0 || event.clip == clipIndex) actionEvents.push_back(event);
+    }
     animated->PlayAction(clipIndex,
         {},
-        {},
+        std::move(actionEvents),
         std::max(fadeIn, 0.0f),
         std::max(fadeOut, 0.0f),
         std::max(speed, 0.0f));
@@ -228,9 +247,13 @@ bool Script::PlayMaskedAnimationAction(int clipIndex,
         return false;
     }
 
+    std::vector<AnimEvent> actionEvents;
+    for (const AnimEvent& event : animated->events) {
+        if (event.clip < 0 || event.clip == clipIndex) actionEvents.push_back(event);
+    }
     animated->PlayAction(clipIndex,
         Animator::BuildMask(skeleton, rootBone),
-        {},
+        std::move(actionEvents),
         std::max(fadeIn, 0.0f),
         std::max(fadeOut, 0.0f),
         std::max(speed, 0.0f));
@@ -276,14 +299,28 @@ bool Script::PlayAnimationProfile(const std::string& profileName) {
         }
         if (!profile.maskRootBone.empty()) {
             if (!profile.clipName.empty()) {
-                return PlayMaskedAnimationAction(profile.clipName,
+                if (PlayMaskedAnimationAction(profile.clipName,
                     profile.maskRootBone,
+                    profile.fadeIn,
+                    profile.fadeOut,
+                    profile.speed)) {
+                    return true;
+                }
+                // A renamed or missing mask bone should not make an otherwise valid
+                // action silently fail. Fall back to full-body playback.
+                return PlayAnimationAction(profile.clipName,
                     profile.fadeIn,
                     profile.fadeOut,
                     profile.speed);
             }
-            return PlayMaskedAnimationAction(profile.clipIndex,
+            if (PlayMaskedAnimationAction(profile.clipIndex,
                 profile.maskRootBone,
+                profile.fadeIn,
+                profile.fadeOut,
+                profile.speed)) {
+                return true;
+            }
+            return PlayAnimationAction(profile.clipIndex,
                 profile.fadeIn,
                 profile.fadeOut,
                 profile.speed);
@@ -300,6 +337,10 @@ bool Script::PlayAnimationProfile(const std::string& profileName) {
             profile.speed);
     }
     return false;
+}
+
+bool Script::PlayActionClip(const std::string& actionName) {
+    return PlayAnimationProfile(actionName);
 }
 
 bool Script::SetAnimationParameter(const std::string& name, float value) {
@@ -715,11 +756,10 @@ bool Script::WasCameraSequenceEvent(
 }
 
 std::string Script::GetFieldString(const std::string& name, const std::string& fallback) const {
-    const NativeScriptComponent* script = TryGet<NativeScriptComponent>();
-    if (!script) {
+    if (!m_context.fields) {
         return fallback;
     }
-    for (const ScriptField& field : script->fields) {
+    for (const ScriptField& field : *m_context.fields) {
         if (field.name == name) {
             return field.value;
         }
@@ -784,7 +824,7 @@ namespace {
 // Run a script callback, isolating exceptions so one misbehaving script cannot
 // take down the whole update loop. A throwing script is disabled and logged once.
 template <class Fn>
-void RunGuarded(NativeScriptComponent& script, Fn&& fn) {
+void RunGuarded(NativeScriptSlot& script, Fn&& fn) {
     try {
         fn();
     } catch (const std::exception& e) {
@@ -802,7 +842,7 @@ void RunGuarded(NativeScriptComponent& script, Fn&& fn) {
 // context every call — destroyQueue/input are per-call, so the pointers captured
 // at creation time would otherwise dangle. Returns the instance, or nullptr if the
 // script is disabled or its factory is missing.
-Script* PrepareScript(ecs::Registry& registry, ecs::Entity entity, NativeScriptComponent& script,
+Script* PrepareScript(ecs::Registry& registry, ecs::Entity entity, NativeScriptSlot& script,
                       std::vector<ecs::Entity>& destroyQueue, const ScriptInputState* input,
                       RuntimeAudioSystem* audio, CameraShake* cameraShake,
                       CameraDirector* cameraDirector) {
@@ -824,7 +864,8 @@ Script* PrepareScript(ecs::Registry& registry, ecs::Entity entity, NativeScriptC
         }
     }
     script.instance->SetContext(
-        ScriptContext{&registry, entity, &destroyQueue, input, audio, cameraShake, cameraDirector});
+        ScriptContext{&registry, entity, &destroyQueue, input, audio, cameraShake,
+                      cameraDirector, &script.fields});
     if (!script.created) {
         RunGuarded(script, [&] { script.instance->OnCreate(); });
         script.created = true;
@@ -842,6 +883,11 @@ void FlushDestroyQueue(ecs::Registry& registry, const std::vector<ecs::Entity>& 
             if (script->instance && script->created) {
                 RunGuarded(*script, [&] { script->instance->OnDestroy(); });
             }
+            for (NativeScriptSlot& additional : script->additional) {
+                if (additional.instance && additional.created) {
+                    RunGuarded(additional, [&] { additional.instance->OnDestroy(); });
+                }
+            }
         }
         registry.Destroy(entity);
     }
@@ -855,14 +901,18 @@ void UpdateScripts(ecs::Registry& registry, float dt, const ScriptInputState* in
     std::vector<ecs::Entity> destroyQueue;
     registry.view<NativeScriptComponent>().each(
         [&](ecs::Entity entity, NativeScriptComponent& script) {
-            if (Script* instance = PrepareScript(
-                    registry, entity, script, destroyQueue, input, audio,
-                    cameraShake, cameraDirector)) {
-                RunGuarded(script, [&] {
-                    instance->TickTimers(dt);
-                    instance->OnUpdate(dt);
-                });
-            }
+            auto update = [&](NativeScriptSlot& slot) {
+                if (Script* instance = PrepareScript(
+                        registry, entity, slot, destroyQueue, input, audio,
+                        cameraShake, cameraDirector)) {
+                    RunGuarded(slot, [&] {
+                        instance->TickTimers(dt);
+                        instance->OnUpdate(dt);
+                    });
+                }
+            };
+            update(script);
+            for (NativeScriptSlot& additional : script.additional) update(additional);
         });
     FlushDestroyQueue(registry, destroyQueue);
 }
@@ -873,14 +923,16 @@ void FixedUpdateScripts(ecs::Registry& registry, float dt, const ScriptInputStat
     std::vector<ecs::Entity> destroyQueue;
     registry.view<NativeScriptComponent>().each(
         [&](ecs::Entity entity, NativeScriptComponent& script) {
-            // Creation + OnCreate happen in UpdateScripts; only run already-live scripts.
-            if (!script.enabled || !script.instance || !script.created) {
-                return;
-            }
-            script.instance->SetContext(
-                ScriptContext{&registry, entity, &destroyQueue, input, audio,
-                              cameraShake, cameraDirector});
-            RunGuarded(script, [&] { script.instance->OnFixedUpdate(dt); });
+            auto fixedUpdate = [&](NativeScriptSlot& slot) {
+                // Creation + OnCreate happen in UpdateScripts; only run live scripts.
+                if (!slot.enabled || !slot.instance || !slot.created) return;
+                slot.instance->SetContext(
+                    ScriptContext{&registry, entity, &destroyQueue, input, audio,
+                                  cameraShake, cameraDirector, &slot.fields});
+                RunGuarded(slot, [&] { slot.instance->OnFixedUpdate(dt); });
+            };
+            fixedUpdate(script);
+            for (NativeScriptSlot& additional : script.additional) fixedUpdate(additional);
         });
     FlushDestroyQueue(registry, destroyQueue);
 }
@@ -888,14 +940,19 @@ void FixedUpdateScripts(ecs::Registry& registry, float dt, const ScriptInputStat
 void ShutdownScripts(ecs::Registry& registry) {
     registry.view<NativeScriptComponent>().each(
         [&](ecs::Entity entity, NativeScriptComponent& script) {
-            if (script.instance && script.created) {
-                // No destroy queue / input during teardown.
-                script.instance->SetContext(
-                    ScriptContext{&registry, entity, nullptr, nullptr, nullptr, nullptr, nullptr});
-                RunGuarded(script, [&] { script.instance->OnDestroy(); });
-            }
-            script.instance.reset();
-            script.created = false;
+            auto shutdown = [&](NativeScriptSlot& slot) {
+                if (slot.instance && slot.created) {
+                    // No destroy queue / input during teardown.
+                    slot.instance->SetContext(
+                        ScriptContext{&registry, entity, nullptr, nullptr, nullptr,
+                                      nullptr, nullptr, &slot.fields});
+                    RunGuarded(slot, [&] { slot.instance->OnDestroy(); });
+                }
+                slot.instance.reset();
+                slot.created = false;
+            };
+            shutdown(script);
+            for (NativeScriptSlot& additional : script.additional) shutdown(additional);
         });
 }
 
