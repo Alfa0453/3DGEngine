@@ -80,7 +80,7 @@ SSR::SSR(int width, int height)
 
 void SSR::Resize(int width, int height) {
     if (width == m_width && height == m_height) return;
-    m_width = width; m_height == height;
+    m_width = width; m_height = height;
     m_result.Resize(width, height);
 }
 
