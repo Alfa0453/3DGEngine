@@ -22,6 +22,8 @@ class CameraDirector;
 class ScriptInputApi;
 class ScriptCameraApi;
 class ScriptParticlesApi;
+class ScriptAudioApi;
+class ScriptAnimApi;
 
 struct ScriptAnimationEvent {
     ecs::Entity entity = ecs::kNull;
@@ -79,6 +81,8 @@ public:
     friend class ScriptInputApi;
     friend class ScriptCameraApi;
     friend class ScriptParticlesApi;
+    friend class ScriptAudioApi;
+    friend class ScriptAnimApi;
 
 protected:
     ScriptContext& Context() { return m_context; }
@@ -89,6 +93,8 @@ protected:
     ScriptInputApi Input();
     ScriptCameraApi Camera();
     ScriptParticlesApi Particles();
+    ScriptAudioApi Audio();
+    ScriptAnimApi Anim();
 
     ecs::Entity Self() const { return m_context.entity; }
     ecs::Registry* Registry() const { return m_context.registry; }
@@ -371,6 +377,103 @@ private:
 inline ScriptInputApi Script::Input() { return ScriptInputApi(this); }
 inline ScriptCameraApi Script::Camera() { return ScriptCameraApi(this); }
 inline ScriptParticlesApi Script::Particles() { return ScriptParticlesApi(this); }
+
+class ScriptAudioApi {
+public:
+    explicit ScriptAudioApi(Script* s) : m_s(s) {}
+    bool Play(bool restart = false) { return m_s->PlayAudio(restart); }
+    bool Play(ecs::Entity e, bool restart = false) { return m_s->PlayAudio(e, restart); }
+    bool Pause() { return m_s->PauseAudio(); }
+    bool Pause(ecs::Entity e) { return m_s->PauseAudio(e); }
+    bool Resume() { return m_s->ResumeAudio(); }
+    bool Resume(ecs::Entity e) { return m_s->ResumeAudio(e); }
+    bool Stop() { return m_s->StopAudio(); }
+    bool Stop(ecs::Entity e) { return m_s->StopAudio(e); }
+    bool Seek(float seconds) { return m_s->SeekAudio(seconds); }
+    bool Seek(ecs::Entity e, float seconds) { return m_s->SeekAudio(e, seconds); }
+    bool IsPlaying() const { return m_s->IsAudioPlaying(); }
+    bool IsPlaying(ecs::Entity e) const { return m_s->IsAudioPlaying(e); }
+    bool IsPaused() const { return m_s->IsAudioPaused(); }
+    bool IsPaused(ecs::Entity e) const { return m_s->IsAudioPaused(e); }
+    float CursorSeconds() const { return m_s->AudioCursorSeconds(); }
+    float CursorSeconds(ecs::Entity e) const { return m_s->AudioCursorSeconds(e); }
+    bool SetVolume(float volume) { return m_s->SetAudioVolume(volume); }
+    bool SetVolume(ecs::Entity e, float volume) { return m_s->SetAudioVolume(e, volume); }
+    bool SetPitch(float pitch) { return m_s->SetAudioPitch(pitch); }
+    bool SetPitch(ecs::Entity e, float pitch) { return m_s->SetAudioPitch(e, pitch); }
+    bool SetLooping(bool looping) { return m_s->SetAudioLooping(looping); }
+    bool SetLooping(ecs::Entity e, bool looping) { return m_s->SetAudioLooping(e, looping); }
+    bool SetSpatial(bool spatial) { return m_s->SetAudioSpatial(spatial); }
+    bool SetSpatial(ecs::Entity e, bool spatial) { return m_s->SetAudioSpatial(e, spatial); }
+    bool SetBus(AudioBus bus) { return m_s->SetAudioBus(bus); }
+    bool SetBus(ecs::Entity e, AudioBus bus) { return m_s->SetAudioBus(e, bus); }
+    bool ApplySnapshot(AudioSnapshotPreset preset, float transitionSeconds = 0.25f) {
+        return m_s->ApplyAudioSnapshot(preset, transitionSeconds);
+    }
+    bool SetDialogueDucking(bool enabled) { return m_s->SetDialogueDucking(enabled); }
+    bool PlayCue(const std::string& path, bool spatial = true) { return m_s->PlayAudioCue(path, spatial); }
+    bool LoadMusic(const std::string& path) { return m_s->LoadAdaptiveMusic(path); }
+    bool SetMusicState(const std::string& stateName, bool synchronizeToBeat = true) {
+        return m_s->SetMusicState(stateName, synchronizeToBeat);
+    }
+    bool SetAttenuation(float minDistance, float maxDistance, float rolloff) {
+        return m_s->SetAudioAttenuation(minDistance, maxDistance, rolloff);
+    }
+    bool SetAttenuation(ecs::Entity e, float minDistance, float maxDistance, float rolloff) {
+        return m_s->SetAudioAttenuation(e, minDistance, maxDistance, rolloff);
+    }
+    bool SetDoppler(float factor) { return m_s->SetAudioDoppler(factor); }
+    bool SetDoppler(ecs::Entity e, float factor) { return m_s->SetAudioDoppler(e, factor); }
+    bool SetCone(float innerDegrees, float outerDegrees, float outerGain) {
+        return m_s->SetAudioCone(innerDegrees, outerDegrees, outerGain);
+    }
+    bool SetCone(ecs::Entity e, float innerDegrees, float outerDegrees, float outerGain) {
+        return m_s->SetAudioCone(e, innerDegrees, outerDegrees, outerGain);
+    }
+    bool SetOcclusion(float amount) { return m_s->SetAudioOcclusion(amount); }
+    bool SetOcclusion(ecs::Entity e, float amount) { return m_s->SetAudioOcclusion(e, amount); }
+    bool SetPriority(int priority) { return m_s->SetAudioPriority(priority); }
+    bool SetPriority(ecs::Entity e, int priority) { return m_s->SetAudioPriority(e, priority); }
+private:
+    Script* m_s;
+};
+
+class ScriptAnimApi {
+public:
+    explicit ScriptAnimApi(Script* s) : m_s(s) {}
+    bool PlayAction(int clipIndex, float fadeIn = 0.1f, float fadeOut = 0.2f, float speed = 1.0f) {
+        return m_s->PlayAnimationAction(clipIndex, fadeIn, fadeOut, speed);
+    }
+    bool PlayAction(const std::string& clipName, float fadeIn = 0.1f, float fadeOut = 0.2f, float speed = 1.0f) {
+        return m_s->PlayAnimationAction(clipName, fadeIn, fadeOut, speed);
+    }
+    bool PlayMaskedAction(int clipIndex, const std::string& rootBone,
+                          float fadeIn = 0.1f, float fadeOut = 0.2f, float speed = 1.0f) {
+        return m_s->PlayMaskedAnimationAction(clipIndex, rootBone, fadeIn, fadeOut, speed);
+    }
+    bool PlayMaskedAction(const std::string& clipName, const std::string& rootBone,
+                          float fadeIn = 0.1f, float fadeOut = 0.2f, float speed = 1.0f) {
+        return m_s->PlayMaskedAnimationAction(clipName, rootBone, fadeIn, fadeOut, speed);
+    }
+    bool PlayActionClip(const std::string& actionName) { return m_s->PlayActionClip(actionName); }
+    bool PlayProfile(const std::string& profileName) { return m_s->PlayAnimationProfile(profileName); }
+    bool SetParameter(const std::string& name, float value) { return m_s->SetAnimationParameter(name, value); }
+    bool SetBool(const std::string& name, bool value) { return m_s->SetAnimationBool(name, value); }
+    bool SetTrigger(const std::string& name) { return m_s->SetAnimationTrigger(name); }
+    float GetParameter(const std::string& name, float fallback = 0.0f) const {
+        return m_s->GetAnimationParameter(name, fallback);
+    }
+    bool GetBool(const std::string& name, bool fallback = false) const {
+        return m_s->GetAnimationBool(name, fallback);
+    }
+    bool IsActionPlaying() const { return m_s->IsAnimationActionPlaying(); }
+    bool IsMovementLocked() const { return m_s->IsAnimationMovementLocked(); }
+private:
+    Script* m_s;
+};
+
+inline ScriptAudioApi Script::Audio() { return ScriptAudioApi(this); }
+inline ScriptAnimApi Script::Anim() { return ScriptAnimApi(this); }
 
 struct NativeScriptSlot {
     bool enabled = true;
