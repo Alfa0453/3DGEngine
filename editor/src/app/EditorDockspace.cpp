@@ -635,7 +635,10 @@ enum class ScriptTemplate {
     DamageZone = 4,
     AiTask = 5,
     AiDecorator = 6,
-    AiService = 7
+    AiService = 7,
+    Patrol = 8,
+    Follow = 9,
+    Projectile = 10
 };
 
 ScriptTemplate ScriptTemplateFromIndex(int index) {
@@ -644,9 +647,12 @@ ScriptTemplate ScriptTemplateFromIndex(int index) {
     case 2: return ScriptTemplate::DoorOpener;
     case 3: return ScriptTemplate::Pickup;
     case 4: return ScriptTemplate::DamageZone;
-    case 5: return ScriptTemplate::AiTask;
-    case 6: return ScriptTemplate::AiDecorator;
-    case 7: return ScriptTemplate::AiService;
+    case 5: return ScriptTemplate::Patrol;
+    case 6: return ScriptTemplate::Follow;
+    case 7: return ScriptTemplate::Projectile;
+    case 8: return ScriptTemplate::AiTask;
+    case 9: return ScriptTemplate::AiDecorator;
+    case 10: return ScriptTemplate::AiService;
     default: return ScriptTemplate::Empty;
     }
 }
@@ -704,6 +710,21 @@ std::vector<EditorScene::ScriptField> DefaultFieldsForTemplate(ScriptTemplate sc
         add("target", Field::Type::String, "PlayerStart");
         add("damagePerSecond", Field::Type::Float, "10.0");
         break;
+    case ScriptTemplate::Patrol:
+        add("axis", Field::Type::Vec3, "1 0 0");
+        add("distance", Field::Type::Float, "3.0");
+        add("speed", Field::Type::Float, "2.0");
+        break;
+    case ScriptTemplate::Follow:
+        add("target", Field::Type::Entity, "");
+        add("speed", Field::Type::Float, "3.0");
+        add("stopDistance", Field::Type::Float, "1.5");
+        break;
+    case ScriptTemplate::Projectile:
+        add("direction", Field::Type::Vec3, "0 0 -1");
+        add("speed", Field::Type::Float, "12.0");
+        add("lifetime", Field::Type::Float, "3.0");
+        break;
     case ScriptTemplate::AiTask:
     case ScriptTemplate::AiDecorator:
     case ScriptTemplate::AiService:
@@ -719,6 +740,9 @@ std::string ScriptTemplateDescription(ScriptTemplate scriptTemplate) {
     case ScriptTemplate::DoorOpener: return "Moves a named target upward while E is held.";
     case ScriptTemplate::Pickup: return "Collects on a trigger overlap, awards score, and plays audio and particles.";
     case ScriptTemplate::DamageZone: return "Damages a named Health target every update.";
+    case ScriptTemplate::Patrol: return "Moves back and forth along an axis around its start position.";
+    case ScriptTemplate::Follow: return "Moves toward a target object, stopping within a distance.";
+    case ScriptTemplate::Projectile: return "Moves along a direction and self-destructs after a lifetime.";
     case ScriptTemplate::AiTask: return "Behavior-tree Task that performs an action and returns Running, Success, or Failure.";
     case ScriptTemplate::AiDecorator: return "Behavior-tree Decorator that allows or blocks its attached node.";
     case ScriptTemplate::AiService: return "Behavior-tree Service that updates background state while its branch is active.";
@@ -780,6 +804,41 @@ void WriteTemplateUpdateBody(std::ostringstream& source, ScriptTemplate scriptTe
                << "        health->Damage(damage);\n"
                << "    }\n";
         break;
+    case ScriptTemplate::Patrol:
+        source << "    auto* transform = Transform();\n"
+               << "    if (!transform) return;\n"
+               << "    if (!m_started) { m_origin = transform->position; m_started = true; }\n"
+               << "    glm::vec3 axis = GetFieldVec3(\"axis\", glm::vec3(1.0f, 0.0f, 0.0f));\n"
+               << "    if (glm::length(axis) < 1e-4f) axis = glm::vec3(1.0f, 0.0f, 0.0f);\n"
+               << "    axis = glm::normalize(axis);\n"
+               << "    transform->position += axis * (m_dir * GetFieldFloat(\"speed\", 2.0f) * dt);\n"
+               << "    const float offset = glm::dot(transform->position - m_origin, axis);\n"
+               << "    if (offset > GetFieldFloat(\"distance\", 3.0f)) m_dir = -1.0f;\n"
+               << "    else if (offset < 0.0f) m_dir = 1.0f;\n";
+        break;
+    case ScriptTemplate::Follow:
+        source << "    auto* self = Transform();\n"
+               << "    const engine::ecs::Entity target = GetFieldEntity(\"target\");\n"
+               << "    if (!self || target == engine::ecs::kNull) return;\n"
+               << "    auto* targetTransform = TryGet<engine::ecs::Transform>(target);\n"
+               << "    if (!targetTransform) return;\n"
+               << "    const glm::vec3 toTarget = targetTransform->position - self->position;\n"
+               << "    const float distance = glm::length(toTarget);\n"
+               << "    if (distance > GetFieldFloat(\"stopDistance\", 1.5f) && distance > 1e-4f) {\n"
+               << "        self->position += (toTarget / distance) * GetFieldFloat(\"speed\", 3.0f) * dt;\n"
+               << "    }\n";
+        break;
+    case ScriptTemplate::Projectile:
+        source << "    auto* transform = Transform();\n"
+               << "    if (!transform) return;\n"
+               << "    if (!m_started) { m_life = GetFieldFloat(\"lifetime\", 3.0f); m_started = true; }\n"
+               << "    glm::vec3 direction = GetFieldVec3(\"direction\", glm::vec3(0.0f, 0.0f, -1.0f));\n"
+               << "    if (glm::length(direction) > 1e-4f) {\n"
+               << "        transform->position += glm::normalize(direction) * GetFieldFloat(\"speed\", 12.0f) * dt;\n"
+               << "    }\n"
+               << "    m_life -= dt;\n"
+               << "    if (m_life <= 0.0f) DestroySelf();\n";
+        break;
     case ScriptTemplate::AiTask:
     case ScriptTemplate::AiDecorator:
     case ScriptTemplate::AiService:
@@ -788,6 +847,24 @@ void WriteTemplateUpdateBody(std::ostringstream& source, ScriptTemplate scriptTe
         source << "    (void)dt;\n"
                << "    // Called every Play-mode update.\n"
                << "    // Helpers: GetFieldFloat(\"speed\", 1.0f), IsKeyDown(key), WasKeyPressed(key), Transform(), FindObject(\"Door\"), DestroySelf().\n";
+        break;
+    }
+}
+
+// Per-template private member block (state a template's OnUpdate relies on).
+void WriteTemplatePrivateMembers(std::ostringstream& source, ScriptTemplate scriptTemplate) {
+    switch (scriptTemplate) {
+    case ScriptTemplate::Pickup:
+        source << "\nprivate:\n    bool m_collected = false;\n";
+        break;
+    case ScriptTemplate::Patrol:
+        source << "\nprivate:\n    glm::vec3 m_origin{0.0f};\n"
+               << "    bool m_started = false;\n    float m_dir = 1.0f;\n";
+        break;
+    case ScriptTemplate::Projectile:
+        source << "\nprivate:\n    float m_life = 0.0f;\n    bool m_started = false;\n";
+        break;
+    default:
         break;
     }
 }
@@ -1262,10 +1339,7 @@ bool CreateScriptFiles(const EditorDockspace::Context& context,
                    << "    void OnUpdate(float dt) override {\n";
             WriteTemplateUpdateBody(header, scriptTemplate);
             header << "    }\n";
-            if (scriptTemplate == ScriptTemplate::Pickup) {
-                header << "\nprivate:\n"
-                       << "    bool m_collected = false;\n";
-            }
+            WriteTemplatePrivateMembers(header, scriptTemplate);
             header << "};\n";
             if (!WriteTextFile(headerPath, header.str(), error)) {
                 return false;
@@ -5368,7 +5442,10 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                 "Player Movement",
                 "Door Opener",
                 "Pickup",
-                "Damage Zone"
+                "Damage Zone",
+                "Patrol",
+                "Follow",
+                "Projectile"
             };
             ImGui::Combo("New Script Template", &g_scriptTemplateIndex, scriptTemplates,
                          IM_ARRAYSIZE(scriptTemplates));
@@ -6970,6 +7047,106 @@ void DrawScriptBuildLog() {
             g_scriptBuildLog.size() + 1, ImVec2(-1.0f, -1.0f),
             ImGuiInputTextFlags_ReadOnly);
     }
+    ImGui::End();
+}
+
+void DrawScriptApiBrowser(EditorDockspace::Context& /*context*/, bool* open) {
+    if (!ImGui::Begin(EditorPanels::Name(EditorPanels::Panel::ScriptApi), open)) {
+        ImGui::End();
+        return;
+    }
+
+    struct ApiEntry { const char* group; const char* signature; const char* description; };
+    static const ApiEntry entries[] = {
+        {"Core", "Entity Self()", "This script's own entity."},
+        {"Core", "Transform* Transform()", "This entity's transform (position/rotation/scale)."},
+        {"Core", "Entity FindObject(\"Name\")", "Find another scene object by name."},
+        {"Core", "void DestroySelf()", "Destroy this entity at end of frame."},
+        {"Core", "void Destroy(entity)", "Destroy another entity."},
+        {"Core", "Entity SpawnFromObject(\"Proto\", pos)", "Spawn a copy of a named object at a position."},
+        {"Core", "int Delay(seconds, fn)", "Run fn once after a delay."},
+        {"Core", "int SetTimer(seconds, fn, repeat=false)", "Run fn after a delay, optionally repeating."},
+        {"Core", "void ClearTimer(id)", "Cancel a running timer."},
+        {"Core", "void RequestSceneLoad(\"path\")", "Load a runtime scene next frame."},
+
+        {"Components", "T* TryGet<T>()", "Component T on this entity, or nullptr."},
+        {"Components", "bool Has<T>()", "Does this entity have component T."},
+        {"Components", "T& Add<T>(value)", "Add component T to this entity."},
+        {"Components", "void Remove<T>()", "Remove component T from this entity."},
+
+        {"Input", "bool Input().KeyDown(key)", "Key currently held."},
+        {"Input", "bool Input().KeyPressed(key)", "Key pressed this frame."},
+        {"Input", "bool Input().MouseDown(button)", "Mouse button held."},
+        {"Input", "bool Input().MousePressed(button)", "Mouse button pressed this frame."},
+        {"Input", "float Input().MouseDeltaX()", "Mouse X movement this frame."},
+        {"Input", "float Input().MouseDeltaY()", "Mouse Y movement this frame."},
+
+        {"Anim", "bool Anim().PlayAction(clip)", "Play a one-shot action by index or name."},
+        {"Anim", "bool Anim().PlayMaskedAction(clip, rootBone)", "Play an action on part of the skeleton."},
+        {"Anim", "bool Anim().PlayActionClip(\"Name\")", "Play a named Action Clip."},
+        {"Anim", "bool Anim().SetParameter(name, value)", "Set a float animation parameter."},
+        {"Anim", "bool Anim().SetBool(name, value)", "Set a bool animation parameter."},
+        {"Anim", "bool Anim().SetTrigger(name)", "Fire an animation trigger."},
+        {"Anim", "float Anim().GetParameter(name)", "Read a float animation parameter."},
+        {"Anim", "bool Anim().IsActionPlaying()", "Is a one-shot action currently playing."},
+
+        {"Audio", "bool Audio().Play(restart=false)", "Play this entity's audio source."},
+        {"Audio", "bool Audio().Stop()", "Stop this entity's audio."},
+        {"Audio", "bool Audio().SetVolume(v)", "Set audio volume (0..1)."},
+        {"Audio", "bool Audio().SetPitch(p)", "Set audio pitch."},
+        {"Audio", "bool Audio().PlayCue(\"path\", spatial=true)", "Fire a one-shot sound."},
+        {"Audio", "bool Audio().SetMusicState(\"state\")", "Switch adaptive-music state."},
+
+        {"Camera", "bool Camera().Shake(intensity, dur, freq)", "Camera shake."},
+        {"Camera", "bool Camera().PlaySequence(\"name\")", "Play an authored camera sequence."},
+        {"Camera", "bool Camera().StopSequence()", "Stop the active camera sequence."},
+        {"Camera", "bool Camera().IsSequencePlaying()", "Is a camera sequence running."},
+
+        {"Particles", "bool Particles().Play(restart=false)", "Start this entity's particle system."},
+        {"Particles", "bool Particles().Stop(clear=false)", "Stop emitting particles."},
+        {"Particles", "bool Particles().Burst(count=0)", "Emit a burst of particles."},
+        {"Particles", "int Particles().Count()", "Live particle count."},
+
+        {"Fields", "float GetFieldFloat(\"Name\", fallback)", "Read a Float inspector field."},
+        {"Fields", "int GetFieldInt(\"Name\", fallback)", "Read an Int field."},
+        {"Fields", "bool GetFieldBool(\"Name\", fallback)", "Read a Bool field."},
+        {"Fields", "std::string GetFieldString(\"Name\")", "Read a String field."},
+        {"Fields", "glm::vec3 GetFieldVec3(\"Name\")", "Read a Vec3 field."},
+        {"Fields", "glm::vec3 GetFieldColor(\"Name\")", "Read a Color field."},
+        {"Fields", "Entity GetFieldEntity(\"Name\")", "Read an Entity-reference field."},
+        {"Fields", "std::string GetFieldAsset(\"Name\")", "Read an Asset-path field."},
+    };
+
+    static std::array<char, 64> searchBuffer{};
+    ImGui::SetNextItemWidth(-1.0f);
+    ImGui::InputTextWithHint("##scriptapisearch", "Search the script API...",
+                             searchBuffer.data(), searchBuffer.size());
+    const auto toLower = [](std::string s) {
+        for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return s;
+    };
+    const std::string filter = toLower(searchBuffer.data());
+
+    ImGui::TextDisabled("Click a signature to copy it; hover for a description.");
+    ImGui::Separator();
+    ImGui::BeginChild("##scriptapilist");
+    std::string currentGroup;
+    for (const ApiEntry& entry : entries) {
+        if (!filter.empty()) {
+            const std::string hay = toLower(std::string(entry.signature) + ' '
+                                            + entry.description + ' ' + entry.group);
+            if (hay.find(filter) == std::string::npos) continue;
+        }
+        if (currentGroup != entry.group) {
+            currentGroup = entry.group;
+            ImGui::SeparatorText(entry.group);
+        }
+        if (ImGui::Selectable(entry.signature)) {
+            ImGui::SetClipboardText(entry.signature);
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", entry.description);
+    }
+    ImGui::EndChild();
     ImGui::End();
 }
 
@@ -8784,6 +8961,9 @@ bool EditorDockspace::Draw(Context& context) {
             break;
         case EditorPanels::Panel::Console:
             DrawConsole(context, &open);
+            break;
+        case EditorPanels::Panel::ScriptApi:
+            DrawScriptApiBrowser(context, &open);
             break;
         case EditorPanels::Panel::MaterialMaker:
             break;
