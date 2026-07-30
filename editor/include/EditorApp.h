@@ -174,6 +174,7 @@ private:
     void DrawClipEditorPanel();
     void DrawGraphEditorPanel();
     void DrawPrefabEditorPanel();   // author a reusable object template (.3dgprefab)
+    void DrawScriptDebugPanel();    // live per-entity script field inspector (Play mode)
     void DrawViewportPanel();   // scene rendered into a dockable, interactive panel
     // Maps a main-window cursor position into scene render-pixel space when the Viewport
     // panel owns input; returns false (and passes the point through) otherwise.

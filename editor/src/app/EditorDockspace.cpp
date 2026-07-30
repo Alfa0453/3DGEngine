@@ -7067,6 +7067,8 @@ void DrawScriptApiBrowser(EditorDockspace::Context& /*context*/, bool* open) {
         {"Core", "int Delay(seconds, fn)", "Run fn once after a delay."},
         {"Core", "int SetTimer(seconds, fn, repeat=false)", "Run fn after a delay, optionally repeating."},
         {"Core", "void ClearTimer(id)", "Cancel a running timer."},
+        {"Core", "Sequence().Do(fn).Wait(sec).Do(fn)", "Run steps across frames (coroutine-style)."},
+        {"Core", "Sequence().WaitUntil(pred).Do(fn)", "Wait for a condition, then run steps."},
         {"Core", "void RequestSceneLoad(\"path\")", "Load a runtime scene next frame."},
 
         {"Components", "T* TryGet<T>()", "Component T on this entity, or nullptr."},
@@ -8991,6 +8993,8 @@ bool EditorDockspace::Draw(Context& context) {
             break; // drawn by EditorApp::DrawViewportPanel (owns the scene FBO)
         case EditorPanels::Panel::Prefab:
             break; // drawn by EditorApp::DrawPrefabEditorPanel (owns the prefab asset)
+        case EditorPanels::Panel::ScriptDebug:
+            break; // drawn by EditorApp::DrawScriptDebugPanel (needs the play registry)
         case EditorPanels::Panel::PhysicsStatus:
             DrawPhysicsStatus(context, &open);
             break;

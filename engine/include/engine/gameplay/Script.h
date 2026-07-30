@@ -76,6 +76,60 @@ struct ScriptField {
     std::string group;   // editor-only: inspector collapsible-section name ("" = ungrouped)
 };
 
+// A lightweight scripted sequence: chain steps that run top-to-bottom across frames
+// instead of nesting timer callbacks. Build one with Script::Sequence():
+//   Sequence().Do([&]{ OpenDoor(); }).Wait(2.0f).Do([&]{ CloseDoor(); });
+//   Sequence().WaitUntil([&]{ return PlayerNear(); }).Do([&]{ Trigger(); });
+class ScriptSequence {
+public:
+    ScriptSequence& Do(std::function<void()> action) {
+        m_steps.push_back(Step{Step::Kind::Action, std::move(action), 0.0f, {}});
+        return *this;
+    }
+    ScriptSequence& Wait(float seconds) {
+        m_steps.push_back(Step{Step::Kind::WaitTime, {}, seconds, {}});
+        return *this;
+    }
+    ScriptSequence& WaitUntil(std::function<bool()> condition) {
+        m_steps.push_back(Step{Step::Kind::WaitUntil, {}, 0.0f, std::move(condition)});
+        return *this;
+    }
+    // Advance by dt; driven by the owning Script every update. Actions run and advance
+    // immediately; waits hold until their time elapses or their condition is true.
+    void Tick(float dt) {
+        while (m_current < m_steps.size()) {
+            Step& step = m_steps[m_current];
+            if (step.kind == Step::Kind::Action) {
+                if (step.action) step.action();
+                ++m_current;
+                continue;
+            }
+            if (step.kind == Step::Kind::WaitTime) {
+                m_timer += dt;
+                if (m_timer < step.seconds) return;
+                m_timer = 0.0f;
+                ++m_current;
+                continue;
+            }
+            if (step.condition && !step.condition()) return;   // WaitUntil
+            ++m_current;
+        }
+    }
+    bool Done() const { return m_current >= m_steps.size(); }
+
+private:
+    struct Step {
+        enum class Kind { Action, WaitTime, WaitUntil };
+        Kind kind = Kind::Action;
+        std::function<void()> action;
+        float seconds = 0.0f;
+        std::function<bool()> condition;
+    };
+    std::vector<Step> m_steps;
+    std::size_t m_current = 0;
+    float m_timer = 0.0f;
+};
+
 class Script {
 public:
     virtual ~Script() = default;
@@ -130,6 +184,8 @@ protected:
         return SetTimer(seconds, std::move(callback), false);
     }
     void ClearTimer(int timerId);
+    // Start a multi-step sequence (Do / Wait / WaitUntil), ticked automatically each update.
+    ScriptSequence& Sequence();
     bool IsKeyDown(int key) const;
     bool WasKeyPressed(int key) const;
     bool IsMouseButtonDown(int button) const;
@@ -310,6 +366,7 @@ private:
     ScriptContext m_context;
     std::vector<Timer> m_timers;
     int m_nextTimerId = 1;
+    std::vector<std::unique_ptr<ScriptSequence>> m_sequences;
 };
 
 // ---- Grouped script API proxies -------------------------------------------------

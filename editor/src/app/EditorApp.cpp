@@ -1479,6 +1479,7 @@ void EditorApp::DrawEditorOverlay()
     DrawClipEditorPanel();
     DrawGraphEditorPanel();
     DrawPrefabEditorPanel();
+    DrawScriptDebugPanel();
     DrawViewportPanel();
     DrawDirtyScenePrompt();
     if (selectedRuntimeAudio != engine::AudioEngine::InvalidSource) {

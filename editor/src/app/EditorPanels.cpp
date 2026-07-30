@@ -57,6 +57,7 @@ const char *EditorPanels::Name(Panel panel)
     case Panel::Viewport: return "Viewport";
     case Panel::Prefab: return "Prefab Editor";
     case Panel::ScriptApi: return "Script API";
+    case Panel::ScriptDebug: return "Script Debug";
     case Panel::Count:     break;
     }
     return "Panel";

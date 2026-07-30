@@ -492,6 +492,23 @@ void Script::TickTimers(float dt) {
                        [](const Timer& timer) { return timer.cancelled; }),
         m_timers.end());
     for (auto& callback : callbacks) callback();
+
+    // Index-based over the initial count: an action may start a new sequence (push_back),
+    // which could reallocate and invalidate a range-for iterator. The sequence objects
+    // themselves are heap-stable via unique_ptr, so ticking through indices is safe.
+    const std::size_t sequenceCount = m_sequences.size();
+    for (std::size_t i = 0; i < sequenceCount; ++i) {
+        if (m_sequences[i]) m_sequences[i]->Tick(dt);
+    }
+    m_sequences.erase(
+        std::remove_if(m_sequences.begin(), m_sequences.end(),
+            [](const std::unique_ptr<ScriptSequence>& s) { return !s || s->Done(); }),
+        m_sequences.end());
+}
+
+ScriptSequence& Script::Sequence() {
+    m_sequences.push_back(std::make_unique<ScriptSequence>());
+    return *m_sequences.back();
 }
 
 bool Script::IsAnimationMovementLocked() const {
