@@ -1431,6 +1431,44 @@ void EditorViewport::DrawAiAgentDebugGuides(engine::Renderer& renderer,
             }
             DrawGizmoBox(renderer, shader, cube, guide.path.back(), glm::vec3(0.1f), color);
         }
+
+        // Vision cone on the ground: two edge rays + a closing arc. Warmer/brighter when
+        // the agent currently sees the target, cool blue otherwise.
+        if (guide.visionRange > 0.05f && guide.visionHalfAngleDeg > 0.5f) {
+            glm::vec3 forward(guide.facing.x, 0.0f, guide.facing.z);
+            if (glm::dot(forward, forward) < 1e-5f) forward = glm::vec3(0.0f, 0.0f, 1.0f);
+            forward = glm::normalize(forward);
+            const glm::vec3 up(0.0f, 1.0f, 0.0f);
+            const glm::vec3 base = guide.position + glm::vec3(0.0f, 0.05f, 0.0f);
+            const glm::vec3 visionColor = guide.seesTarget
+                ? glm::vec3(1.0f, 0.85f, 0.30f) : glm::vec3(0.35f, 0.70f, 1.0f);
+            shader.SetVec3("uEmissive", visionColor * (guide.seesTarget ? 0.50f : 0.28f));
+            const float half = glm::radians(guide.visionHalfAngleDeg);
+            const glm::vec3 edgeL = glm::angleAxis(half, up) * forward;
+            const glm::vec3 edgeR = glm::angleAxis(-half, up) * forward;
+            DrawGuideSegment(renderer, shader, cube, base, base + edgeL * guide.visionRange, 0.02f, visionColor);
+            DrawGuideSegment(renderer, shader, cube, base, base + edgeR * guide.visionRange, 0.02f, visionColor);
+            constexpr int arcSegments = 12;
+            glm::vec3 previous = base + edgeR * guide.visionRange;
+            for (int i = 1; i <= arcSegments; ++i) {
+                const float t = static_cast<float>(i) / static_cast<float>(arcSegments);
+                const glm::vec3 dir = glm::angleAxis(-half + t * 2.0f * half, up) * forward;
+                const glm::vec3 point = base + dir * guide.visionRange;
+                DrawGuideSegment(renderer, shader, cube, previous, point, 0.02f, visionColor);
+                previous = point;
+            }
+        }
+
+        // Line of sight to the pursued target: green when visible, red when blocked.
+        if (guide.hasTarget) {
+            const glm::vec3 losColor = guide.seesTarget
+                ? glm::vec3(0.30f, 0.95f, 0.40f) : glm::vec3(0.95f, 0.30f, 0.25f);
+            shader.SetVec3("uEmissive", losColor * 0.45f);
+            DrawGuideSegment(renderer, shader, cube,
+                             guide.position + glm::vec3(0.0f, 0.6f, 0.0f),
+                             guide.targetPosition + glm::vec3(0.0f, 0.6f, 0.0f),
+                             0.02f, losColor);
+        }
     }
 
     shader.SetVec3("uEmissive", glm::vec3(0.0f));

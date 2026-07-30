@@ -634,7 +634,7 @@ void EditorApp::OnUpdate(float dt)
             CapturePlayScriptInput(playInputEnabled, true);
         engine::UpdateScripts(
             *m_playRegistry, dt, &scriptInput, &m_runtimeAudio,
-            &m_cameraShake, &m_cameraDirector);
+            &m_cameraShake, &m_cameraDirector, &engine::GameMode::Instance());
         // Camera events are frame events. Every script has now had one opportunity
         // to observe them; fixed updates receive held input and simulation events.
         m_cameraDirector.ClearEvents();
@@ -850,6 +850,10 @@ void EditorApp::OnRender()
 void EditorApp::OnShutdown()
 {
     engine::SetScriptErrorHandler(nullptr);   // drop the 'this'-capturing sink
+    // Clear script factories before the loaded module (their DLL) unloads, so the static
+    // ScriptRegistry singleton doesn't destroy DLL-owned callables after FreeLibrary.
+    engine::ScriptRegistry::Instance().Clear();
+    m_scriptModule.Unload();
     m_imgui.Shutdown();
     if (m_hasProjectFile) {
         m_project.Save(m_projectConfig);
@@ -1409,6 +1413,9 @@ void EditorApp::DrawEditorOverlay()
                 }
             }
         }
+    }
+    if (dockspaceContext.scriptHotReloadRequested) {
+        HotReloadScripts();
     }
     if (dockspaceContext.cameraBlendRequested && m_mode == EditorMode::Edit) {
         BeginCameraBlend(dockspaceContext.cameraBlendPreset);
@@ -3204,6 +3211,21 @@ void EditorApp::DrawPlayScene(const glm::mat4 & viewProj)
                 guide.seesTarget = playAgent.brain.SeesTarget();
             }
             guide.hasTarget = playAgent.targetEntity != engine::ecs::kNull;
+            if (guide.hasTarget) {
+                if (const Transform* targetTransform =
+                        m_playRegistry->TryGet<Transform>(playAgent.targetEntity)) {
+                    guide.targetPosition = targetTransform->position;
+                } else {
+                    guide.hasTarget = false;
+                }
+            }
+            for (const EditorScene::Object& object : m_scene.Objects()) {
+                if (object.name == playAgent.name) {
+                    guide.visionRange = object.navAgentVisionRange;
+                    guide.visionHalfAngleDeg = object.navAgentVisionHalfAngle;
+                    break;
+                }
+            }
             aiGuides.push_back(std::move(guide));
         }
         m_viewport.DrawAiAgentDebugGuides(m_renderer, *m_shader, *m_cube, aiGuides, viewProj);
@@ -6211,6 +6233,8 @@ void EditorApp::BuildPlayAgents(const std::unordered_map<std::string, engine::ec
     m_playAgents.clear();
     m_playNavGrid = engine::ai::NavGrid{};
     m_playBtGraphCache.clear();
+    m_playSoundField.Clear();
+    m_prevPlayerPosValid = false;
     if (!m_playRegistry) {
         return;
     }
@@ -6258,6 +6282,10 @@ void EditorApp::BuildPlayAgents(const std::unordered_map<std::string, engine::ec
         playAgent.brain.patrol = object.patrolPoints;
         playAgent.brain.vision.range = std::max(object.navAgentVisionRange, 0.0f);
         playAgent.brain.vision.halfAngleDegrees = object.navAgentVisionHalfAngle;
+        // Hearing is omnidirectional and reaches about as far as sight (min 6m). No
+        // dedicated scene field yet, so derive it from the vision range for now.
+        playAgent.hearingRange = std::max(object.navAgentVisionRange, 6.0f);
+        playAgent.brain.hearingRange = playAgent.hearingRange;
         if (!object.navAgentTargetName.empty()) {
             const auto target = playEntitiesByName.find(object.navAgentTargetName);
             if (target != playEntitiesByName.end()) {
@@ -6640,6 +6668,26 @@ void EditorApp::UpdateAI(float dt)
     if (!m_playRegistry || m_playAgents.empty()) {
         return;
     }
+
+    // Hearing: age transient noises, then emit a "footstep" noise when the player
+    // moves fast enough. Sneaking slowly stays quiet; running carries farther.
+    m_playSoundField.Update(dt);
+    if (m_playPlayerEntity != engine::ecs::kNull && m_playRegistry->Valid(m_playPlayerEntity)) {
+        if (const engine::ecs::Transform* pt =
+                m_playRegistry->TryGet<engine::ecs::Transform>(m_playPlayerEntity)) {
+            if (m_prevPlayerPosValid && dt > 1.0e-4f) {
+                const float speed = glm::length(pt->position - m_prevPlayerPos) / dt;
+                if (speed > 2.0f) {
+                    const float radius   = glm::clamp(speed * 2.0f, 6.0f, 18.0f);
+                    const float loudness = glm::clamp(speed / 6.0f, 0.2f, 1.0f);
+                    m_playSoundField.Emit(pt->position, radius, loudness, 0.4f);
+                }
+            }
+            m_prevPlayerPos = pt->position;
+            m_prevPlayerPosValid = true;
+        }
+    }
+
     for (PlayAgent& playAgent : m_playAgents) {
         if (!m_playRegistry->Valid(playAgent.entity)) {
             continue;
@@ -6703,6 +6751,20 @@ void EditorApp::UpdateAI(float dt)
                                                 targetPos, playAgent.targetEntity,
                                                 m_playPhysics, *m_playRegistry,
                                                 playAgent.entity);
+            }
+        }
+
+        // Hearing: if the agent can't see its target, the loudest noise it can hear
+        // becomes a point of interest. Graph agents read it via the HeardNoise?/
+        // Investigate nodes; the built-in brain routes to it through its search state.
+        {
+            glm::vec3 noisePos;
+            const bool heard = playAgent.hearingRange > 0.0f && !seesTarget
+                && m_playSoundField.LoudestAudible(agentPos, playAgent.hearingRange, &noisePos);
+            playAgent.ctx.heardNoise = heard;
+            if (heard) {
+                playAgent.ctx.heardPosition = noisePos;
+                if (!playAgent.useGraph) playAgent.brain.Hear(noisePos);
             }
         }
 
@@ -7502,7 +7564,7 @@ void EditorApp::StepPlayPhysics(float dt, bool inputEnabled)
         UpdatePlayPlayerController(step, inputEnabled);
         engine::FixedUpdateScripts(
             *m_playRegistry, step, &scriptInput, &m_runtimeAudio,
-            &m_cameraShake, &m_cameraDirector);
+            &m_cameraShake, &m_cameraDirector, &engine::GameMode::Instance());
         engine::ecs::UpdateGameplay(*m_playRegistry, step);
         engine::ecs::UpdateRuntimeMotion(*m_playRegistry, step);
         m_playAnimationEvents.clear();
@@ -7538,7 +7600,7 @@ void EditorApp::StepPlayPhysics(float dt, bool inputEnabled)
         UpdatePlayPlayerController(step, inputEnabled);
         engine::FixedUpdateScripts(
             *m_playRegistry, step, &scriptInput, &m_runtimeAudio,
-            &m_cameraShake, &m_cameraDirector);
+            &m_cameraShake, &m_cameraDirector, &engine::GameMode::Instance());
         engine::ecs::UpdateGameplay(*m_playRegistry, step);
         engine::ecs::UpdateRuntimeMotion(*m_playRegistry, step);
         UpdateAI(step);

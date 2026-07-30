@@ -169,6 +169,7 @@ public:
         const char* modeName = "Edit";
         bool playMode = false;
         bool scriptCompileAndRestartRequested = false;
+        bool scriptHotReloadRequested = false;
         bool physicsPaused = false;
         bool physicsPauseToggleRequested = false;
         bool physicsStepRequested = false;

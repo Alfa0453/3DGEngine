@@ -3,12 +3,15 @@
 // running script's field storage, which its next GetField* call reads.
 
 #include "EditorApp.h"
+#include "EditorScriptTools.h"
 
 #include <imgui.h>
 
 #include <array>
 #include <cstdio>
+#include <filesystem>
 #include <string>
+#include <system_error>
 
 namespace {
 
@@ -135,4 +138,49 @@ void EditorApp::DrawScriptDebugPanel() {
     ImGui::EndChild();
     ImGui::End();
     m_panels.SetOpen(EditorPanels::Panel::ScriptDebug, open);
+}
+
+void EditorApp::HotReloadScripts() {
+    if (m_mode != EditorMode::Edit) {
+        m_log.Warning("Exit Play mode before hot-reloading scripts.");
+        return;
+    }
+
+    std::error_code ec;
+    const std::filesystem::path projectRoot =
+        std::filesystem::absolute(m_project.AssetRoot(), ec).parent_path();
+    std::string buildError;
+    m_log.Info("Building game_scripts.dll for hot reload...");
+    if (!EditorScriptTools::BuildTarget(projectRoot, "Debug", "game_scripts", &buildError)) {
+        m_log.Error("Hot reload build failed: " + buildError);
+        return;
+    }
+
+    const std::filesystem::path binDir = EditorScriptTools::ExecutableDirectory();
+    const std::filesystem::path builtDll = binDir / "game_scripts.dll";
+    if (binDir.empty() || !std::filesystem::exists(builtDll, ec)) {
+        m_log.Error("Hot reload: built DLL not found next to the editor: " + builtDll.string());
+        return;
+    }
+
+    // Drop everything owned by the currently-loaded module BEFORE unloading it: the script
+    // factories (and any live instances) run code that lives inside the DLL.
+    engine::ScriptRegistry::Instance().Clear();
+    m_scriptModule.Unload();
+
+    // Load a private copy so the original DLL stays rebuildable (Windows locks a loaded DLL).
+    const std::filesystem::path loadDll = binDir / "game_scripts_hot.dll";
+    std::filesystem::copy_file(builtDll, loadDll,
+        std::filesystem::copy_options::overwrite_existing, ec);
+    if (ec) {
+        m_log.Error("Hot reload: could not stage the DLL copy: " + ec.message());
+        return;
+    }
+
+    std::string loadError;
+    if (!m_scriptModule.Load(loadDll.string(), engine::ScriptRegistry::Instance(), &loadError)) {
+        m_log.Error("Hot reload failed: " + loadError);
+        return;
+    }
+    m_log.Info("Scripts hot-reloaded from game_scripts.dll - Play to run the new code.");
 }

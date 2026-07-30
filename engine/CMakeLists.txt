@@ -91,6 +91,7 @@ add_library(engine STATIC
     src/gameplay/RagdollSystem.cpp
     src/gameplay/GameMode.cpp
     src/gameplay/Script.cpp
+    src/gameplay/ScriptModule.cpp
 )
 
 # PUBLIC headers live under include/ so consumers write:  #include <engine/...>

@@ -18,6 +18,17 @@ float HorizontalDistance(const glm::vec3& a, const glm::vec3& b) {
 void AiAgent::Step(float dt, const glm::vec3& targetPos, bool seesTarget, const Planner& plan) {
     m_sawTarget = seesTarget;
 
+    // A heard noise the agent isn't already chasing toward becomes a point of interest:
+    // route to it and search there. Seeing the target always outranks a noise.
+    if (m_heardPending && !seesTarget && m_state != State::Chase) {
+        m_state = State::Search;
+        m_lastKnown = m_heardPos;
+        m_path = plan(agent.position, m_lastKnown);
+        m_pathIndex = 0; m_searchTimer = 0.0f;
+        m_pathGoal = m_lastKnown; m_pathGoalValid = true;
+    }
+    m_heardPending = false;
+
     // --- transitions ---
     switch (m_state) {
         case State::Patrol:
@@ -33,7 +44,7 @@ void AiAgent::Step(float dt, const glm::vec3& targetPos, bool seesTarget, const 
             else {
                 m_state = State::Search;
                 m_path = plan(agent.position, m_lastKnown);
-                m_pathIndex = 0;
+                m_pathIndex = 0; m_searchTimer = 0.0f;
                 m_pathGoal = m_lastKnown; m_pathGoalValid = true;
             }
             break;
@@ -42,10 +53,13 @@ void AiAgent::Step(float dt, const glm::vec3& targetPos, bool seesTarget, const 
             if (seesTarget) {
                 m_state = State::Chase; m_lastKnown = targetPos;
                 m_path = plan(agent.position, m_lastKnown);
-                m_pathIndex = 0; m_repathTimer = 0.0f;
+                m_pathIndex = 0; m_repathTimer = 0.0f; m_searchTimer = 0.0f;
                 m_pathGoal = m_lastKnown; m_pathGoalValid = true;
-            } else if (glm::length(m_lastKnown - agent.position) < reachRadius) {
-                m_state = State::Patrol;
+            } else if (HorizontalDistance(m_lastKnown, agent.position) < reachRadius) {
+                // Reached the last-known spot: dwell and scan before giving up, so the
+                // agent doesn't instantly forget the target the moment it arrives.
+                m_searchTimer += dt;
+                if (m_searchTimer >= searchLookDuration) { m_state = State::Patrol; m_searchTimer = 0.0f; }
             }
             break;
     }
@@ -84,7 +98,19 @@ void AiAgent::Step(float dt, const glm::vec3& targetPos, bool seesTarget, const 
             break;
         }
         case State::Search:
-            steer = FollowPath(agent, m_path, m_pathIndex, reachRadius, 1.0f);
+            if (HorizontalDistance(m_lastKnown, agent.position) < reachRadius) {
+                // Arrived: hold position and sweep the facing in place, as if scanning
+                // the area. Velocity stays zero so the end-of-step facing update below
+                // leaves this scan rotation intact.
+                agent.velocity = glm::vec3(0.0f);
+                m_path.clear(); m_pathIndex = 0;
+                const float scanRate = 1.6f;                        // rad/s
+                const float c = std::cos(scanRate * dt), s = std::sin(scanRate * dt);
+                m_facing = glm::normalize(glm::vec3(c * m_facing.x + s * m_facing.z, 0.0f,
+                                                    -s * m_facing.x + c * m_facing.z));
+            } else {
+                steer = FollowPath(agent, m_path, m_pathIndex, reachRadius, 1.0f);
+            }
             break;
     }
 

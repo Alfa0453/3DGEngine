@@ -5,7 +5,10 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/constants.hpp>
 
+#include <algorithm>
 #include <cmath>
+#include <cstddef>
+#include <vector>
 
 namespace engine {
 class PhysicsWorld;
@@ -37,6 +40,100 @@ bool CanSee(const glm::vec3& eye, const glm::vec3& forward, const VisionCone& co
             const glm::vec3& target, ecs::Entity targetEntity,
             PhysicsWorld& world, ecs::Registry& registry,
             ecs::Entity observerEntity = ecs::kNull);
+
+// ----------------------------------- hearing --------------------------------
+//
+// Sound is modelled as point stimuli that carry out to a radius and attenuate
+// linearly to the source. Unlike vision, hearing ignores occlusion (noise travels
+// around corners), so these are pure-maths helpers -- no physics needed.
+
+// A single noise: a footstep, a gunshot, a thrown object landing.
+struct SoundStimulus {
+    glm::vec3 position{0.0f};
+    float     radius   = 0.0f;   // how far the noise carries (0 = silent)
+    float     loudness = 1.0f;   // relative intensity at the source
+};
+
+// Can an ear at 'ear' with acuity 'hearingRange' (<=0 => unlimited) hear 's'?
+// Writes the perceived loudness (source loudness attenuated by distance) if given.
+inline bool CanHear(const glm::vec3& ear, float hearingRange, const SoundStimulus& s,
+                    float* perceivedLoudness = nullptr) {
+    const float dist  = glm::length(s.position - ear);
+    const float reach = (hearingRange > 0.0f) ? std::min(hearingRange, s.radius) : s.radius;
+    if (s.radius <= 0.0f || dist > reach) {
+        if (perceivedLoudness) *perceivedLoudness = 0.0f;
+        return false;
+    }
+    if (perceivedLoudness) {
+        const float falloff = 1.0f - (dist / s.radius);   // linear to the source radius
+        *perceivedLoudness = s.loudness * (falloff > 0.0f ? falloff : 0.0f);
+    }
+    return true;
+}
+
+// A short-lived pool of noises. The host emits stimuli (on footsteps, weapons,
+// impacts), calls Update() once per frame to age them out, and each agent queries
+// LoudestAudible() to find the strongest noise it can currently hear -- typically
+// fed into its "investigate" behaviour as a point of interest.
+class SoundField {
+public:
+    // Emit a noise that fades out over 'ttlSeconds' (its loudness scales with the
+    // remaining lifetime, so it dies away smoothly). A tiny default keeps a one-shot
+    // "ping" alive for roughly a frame or two.
+    void Emit(const glm::vec3& position, float radius, float loudness = 1.0f,
+              float ttlSeconds = 0.2f) {
+        Entry e;
+        e.stimulus = SoundStimulus{position, radius, loudness};
+        e.ttl = e.timeLeft = (ttlSeconds > 0.0f) ? ttlSeconds : 0.2f;
+        m_entries.push_back(e);
+    }
+
+    // Age every stimulus and drop the ones that have expired. Call once per frame.
+    void Update(float dt) {
+        for (Entry& e : m_entries) e.timeLeft -= dt;
+        m_entries.erase(std::remove_if(m_entries.begin(), m_entries.end(),
+                        [](const Entry& e) { return e.timeLeft <= 0.0f; }),
+                        m_entries.end());
+    }
+
+    // Find the loudest stimulus this ear can hear right now. Returns false if none
+    // are audible; otherwise writes the noise position (and perceived loudness).
+    bool LoudestAudible(const glm::vec3& ear, float hearingRange,
+                        glm::vec3* outPosition, float* outLoudness = nullptr) const {
+        bool found = false;
+        float best = -1.0f;
+        glm::vec3 bestPos{0.0f};
+        for (const Entry& e : m_entries) {
+            const SoundStimulus s = e.Current();
+            float perceived = 0.0f;
+            if (CanHear(ear, hearingRange, s, &perceived) && perceived > best) {
+                best = perceived; bestPos = s.position; found = true;
+            }
+        }
+        if (found) {
+            if (outPosition) *outPosition = bestPos;
+            if (outLoudness) *outLoudness = best;
+        }
+        return found;
+    }
+
+    void        Clear()        { m_entries.clear(); }
+    std::size_t Count()  const { return m_entries.size(); }
+
+private:
+    struct Entry {
+        SoundStimulus stimulus;
+        float         ttl      = 0.0f;
+        float         timeLeft = 0.0f;
+        // Loudness fades with the fraction of lifetime remaining.
+        SoundStimulus Current() const {
+            SoundStimulus s = stimulus;
+            if (ttl > 0.0f) s.loudness *= (timeLeft > 0.0f ? timeLeft / ttl : 0.0f);
+            return s;
+        }
+    };
+    std::vector<Entry> m_entries;
+};
 
 } // namespace ai
 } // namespace engine

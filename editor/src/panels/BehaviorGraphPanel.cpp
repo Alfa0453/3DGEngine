@@ -102,12 +102,15 @@ bool CreationMenu(BtNodeType* out) {
     if (ImGui::BeginMenu("Composite")) {
         item(BtNodeType::Selector);
         item(BtNodeType::Sequence);
+        item(BtNodeType::ParallelAll);   // run all children; all must succeed
+        item(BtNodeType::ParallelOne);   // run all children; first success wins
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("Task")) {
         item(BtNodeType::Chase);
         item(BtNodeType::Patrol);
         item(BtNodeType::MoveToTarget);
+        item(BtNodeType::Investigate);  // go to the last heard noise
         item(BtNodeType::Wait);
         item(BtNodeType::Idle);
         item(BtNodeType::Flee);
@@ -122,6 +125,7 @@ bool CreationMenu(BtNodeType* out) {
     }
     if (ImGui::BeginMenu("Condition")) {
         item(BtNodeType::SeesTarget);
+        item(BtNodeType::HeardNoise);    // reacted to a noise this tick
         item(BtNodeType::TargetWithin);
         item(BtNodeType::HealthBelow);   // self HP low
         item(BtNodeType::TargetDead);    // target killed
@@ -133,7 +137,9 @@ bool CreationMenu(BtNodeType* out) {
     if (ImGui::BeginMenu("Decorator")) {
         item(BtNodeType::Inverter);
         item(BtNodeType::Succeeder);
+        item(BtNodeType::Failer);
         item(BtNodeType::Repeat);
+        item(BtNodeType::Retry);     // re-run a failing child up to N times
         ImGui::EndMenu();
     }
     item(BtNodeType::Subtree);   // runs another .btgraph
@@ -838,6 +844,7 @@ void BehaviorGraphPanel::DrawInspector() {
         switch (t) {
             case engine::ai::BtNodeType::TargetWithin: return 5.0f;
             case engine::ai::BtNodeType::Repeat:       return 1.0f;
+            case engine::ai::BtNodeType::Retry:        return 3.0f;
             case engine::ai::BtNodeType::Repath:       return 0.5f;
             default:                                   return 0.0f;
         }
@@ -904,7 +911,8 @@ void BehaviorGraphPanel::DrawInspector() {
     static const engine::ai::BtNodeType kDecoratorChoices[] = {
         engine::ai::BtNodeType::SeesTarget,   engine::ai::BtNodeType::TargetWithin,
         engine::ai::BtNodeType::Inverter,     engine::ai::BtNodeType::Succeeder,
-        engine::ai::BtNodeType::Repeat,       engine::ai::BtNodeType::ScriptDecorator,
+        engine::ai::BtNodeType::Failer,       engine::ai::BtNodeType::Repeat,
+        engine::ai::BtNodeType::Retry,        engine::ai::BtNodeType::ScriptDecorator,
         engine::ai::BtNodeType::BbCheckBool,  engine::ai::BtNodeType::BbCheckFloat,
         engine::ai::BtNodeType::BbFloatBelow, engine::ai::BtNodeType::Cooldown,
         engine::ai::BtNodeType::TimeLimit,    engine::ai::BtNodeType::RandomChance,
@@ -913,7 +921,7 @@ void BehaviorGraphPanel::DrawInspector() {
         engine::ai::BtNodeType::Repath, engine::ai::BtNodeType::ScriptService};
 
     attachmentSection("Decorators (gate / modify this node):", node.decorators,
-                      kDecoratorChoices, 14, "+ Decorator", "add_dec", 2000);
+                      kDecoratorChoices, 16, "+ Decorator", "add_dec", 2000);
     attachmentSection("Services (tick while active):", node.services,
                       kServiceChoices, 2, "+ Service", "add_svc", 3000);
 

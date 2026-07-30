@@ -36,6 +36,8 @@ struct AgentContext {
     Agent     agent;                        // steering body (position/velocity/limits)
     glm::vec3 targetPos{0.0f};              // pursued point (e.g. the player)
     bool      seesTarget = false;           // perception result for this tick
+    bool      heardNoise = false;           // did the agent hear a noise this tick?
+    glm::vec3 heardPosition{0.0f};          // where the loudest audible noise came from
     float     reachRadius = 0.6f;            // gameplay/attack interaction range
     float     navigationAcceptanceRadius = 0.3f; // path arrival tolerance
     float     chargeRadius = 4.0f;          // within this + visible -> seek straight in
@@ -122,6 +124,14 @@ enum class BtNodeType {
     Attack,           // task: deal `param` damage to the target if within reach radius
     FocusTarget,      // task: face a visible target until ClearFocus runs
     ClearFocus,       // task: release the target-facing override
+    // hearing
+    HeardNoise,       // condition: Success if the agent heard a noise this tick
+    Investigate,      // task: path to the last heard noise; Success when reached
+    // extra reactive control-flow nodes
+    Failer,           // decorator: force Failure once the child finishes
+    Retry,            // decorator: re-run a *failing* child `param` times (<1 => forever)
+    ParallelAll,      // composite: tick all children; fail on first failure, succeed when all succeed
+    ParallelOne,      // composite: tick all children; succeed on first success, fail when all fail
 
     Count
 };

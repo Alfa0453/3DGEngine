@@ -63,7 +63,8 @@ target_include_directories(3DGEditor PRIVATE
     ${CMAKE_SOURCE_DIR}/engine/include)
 target_compile_definitions(3DGEditor PRIVATE
     THREEDG_BT_SCRIPT_TEMPLATE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/btscripts/templates"
-    THREEDG_GAME_MODULE_DIR="${CMAKE_SOURCE_DIR}/game")
+    THREEDG_GAME_MODULE_DIR="${CMAKE_SOURCE_DIR}/game"
+    _CRT_SECURE_NO_WARNINGS)   # editor tool code uses sscanf/snprintf; silence MSVC C4996
 target_link_libraries(3DGEditor PRIVATE engine MaterialMaker game)
 if(WIN32)
     # shell32 + ole32: IFileDialog folder picker; comdlg32: GetOpenFileName.

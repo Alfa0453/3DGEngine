@@ -22,6 +22,28 @@ float Heuristic(int dx, int dy, bool diag) {
     return static_cast<float>(dx + dy) * kOrtho;    // manhattan
 }
 
+// True if a straight line from cell a to cell b crosses only walkable cells.
+// Walks the grid with integer Bresenham; on a diagonal step it forbids clipping a
+// blocked orthogonal corner, matching the pathfinder's own corner rule.
+bool LineOfSight(const NavGrid& grid, glm::ivec2 a, glm::ivec2 b) {
+    int x = a.x, y = a.y;
+    const int dx = std::abs(b.x - a.x), dy = std::abs(b.y - a.y);
+    const int sx = a.x < b.x ? 1 : -1, sy = a.y < b.y ? 1 : -1;
+    if (!grid.Walkable(x, y)) return false;
+    int err = dx - dy;
+    while (x != b.x || y != b.y) {
+        const int e2 = 2 * err;
+        bool stepX = false, stepY = false;
+        if (e2 > -dy) { err -= dy; x += sx; stepX = true; }
+        if (e2 <  dx) { err += dx; y += sy; stepY = true; }
+        if (stepX && stepY) {   // diagonal: don't cut through a blocked corner
+            if (!grid.Walkable(x - sx, y) || !grid.Walkable(x, y - sy)) return false;
+        }
+        if (!grid.Walkable(x, y)) return false;
+    }
+    return true;
+}
+
 } // namespace
 
 std::vector<glm::ivec2> AStar::FindPath(const NavGrid& grid, glm::ivec2 start, glm::ivec2 goal, bool allowDiagonal) {
@@ -81,9 +103,28 @@ std::vector<glm::ivec2> AStar::FindPath(const NavGrid& grid, glm::ivec2 start, g
     return path;
 }
 
+std::vector<glm::ivec2> AStar::SmoothPath(const NavGrid& grid, const std::vector<glm::ivec2>& cells) {
+    if (cells.size() <= 2) return cells;
+    std::vector<glm::ivec2> out;
+    out.reserve(cells.size());
+    out.push_back(cells.front());
+    std::size_t anchor = 0;                         // last kept vertex
+    for (std::size_t i = 1; i + 1 < cells.size(); ++i) {
+        // If the anchor can still see the *next* cell, cells[i] is a redundant
+        // interior point on a straight run — skip it. Otherwise the path bends
+        // here, so keep cells[i] and re-anchor to it.
+        if (!LineOfSight(grid, cells[anchor], cells[i + 1])) {
+            out.push_back(cells[i]);
+            anchor = i;
+        }
+    }
+    out.push_back(cells.back());
+    return out;
+}
+
 std::vector<glm::vec3> AStar::FindPathWorld(const NavGrid& grid, const glm::vec3& start, const glm::vec3& goal, bool allowDiagonal) {
     const glm::ivec2 s = grid.WorldToCell(start), gg = grid.WorldToCell(goal);
-    const std::vector<glm::ivec2> cells = FindPath(grid, s, gg, allowDiagonal);
+    const std::vector<glm::ivec2> cells = SmoothPath(grid, FindPath(grid, s, gg, allowDiagonal));
     std::vector<glm::vec3> world;
     world.reserve(cells.size());
     for (const glm::ivec2& c : cells) world.push_back(grid.CellToWorld(c.x, c.y));

@@ -1,35 +1,5 @@
-Create: begin w=128 h=48 smooth=0 rgba=000001BBBF3B9240 thisId=0
+Create: begin w=128 h=48 smooth=0 rgba=0000025CAE418EE0 thisId=0
 Create: glGenTextures -> id=11
 Create: params set, glTexImage2D...
 Create: glTexImage2D done
-Create: end
-Create: begin w=2048 h=2048 smooth=1 rgba=000001BBC78FF080 thisId=0
-Create: glGenTextures -> id=12
-Create: params set, glTexImage2D...
-Create: glTexImage2D done
-Create: glGenerateMipmap done
-Create: end
-Create: begin w=2048 h=2048 smooth=1 rgba=000001BBC78FF080 thisId=0
-Create: glGenTextures -> id=13
-Create: params set, glTexImage2D...
-Create: glTexImage2D done
-Create: glGenerateMipmap done
-Create: end
-Create: begin w=2048 h=2048 smooth=1 rgba=000001BBC78F2080 thisId=0
-Create: glGenTextures -> id=14
-Create: params set, glTexImage2D...
-Create: glTexImage2D done
-Create: glGenerateMipmap done
-Create: end
-Create: begin w=256 h=256 smooth=1 rgba=000001BBC38EB7A0 thisId=0
-Create: glGenTextures -> id=19
-Create: params set, glTexImage2D...
-Create: glTexImage2D done
-Create: glGenerateMipmap done
-Create: end
-Create: begin w=256 h=256 smooth=1 rgba=000001BBC38EB7A0 thisId=0
-Create: glGenTextures -> id=20
-Create: params set, glTexImage2D...
-Create: glTexImage2D done
-Create: glGenerateMipmap done
 Create: end

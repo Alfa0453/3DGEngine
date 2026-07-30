@@ -1442,7 +1442,7 @@ void RuntimePlayerApp::OnUpdate(float dt) {
             CaptureScriptInput(inputEnabled, true);
         engine::UpdateScripts(
             m_registry, dt, &input, &m_runtimeAudio,
-            &m_cameraShake, &m_cameraDirector);
+            &m_cameraShake, &m_cameraDirector, &engine::GameMode::Instance());
         if (std::string requestedScene = engine::ConsumeScriptSceneLoadRequest();
             !requestedScene.empty()) {
             std::filesystem::path requested(requestedScene);
@@ -1550,7 +1550,7 @@ void RuntimePlayerApp::OnFixedUpdate(float h) {
         CaptureScriptInput(inputEnabled, false);
     engine::FixedUpdateScripts(
         m_registry, h, &input, &m_runtimeAudio,
-        &m_cameraShake, &m_cameraDirector);
+        &m_cameraShake, &m_cameraDirector, &engine::GameMode::Instance());
     UpdateAI(h);
     engine::UpdateProjectiles(m_registry, h);
     engine::ecs::UpdateGameplay(m_registry, h);        // rotators + movers

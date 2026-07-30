@@ -19,6 +19,7 @@ namespace ecs { class Registry; }
 class RuntimeAudioSystem;
 class CameraShake;
 class CameraDirector;
+class GameMode;
 class ScriptInputApi;
 class ScriptCameraApi;
 class ScriptParticlesApi;
@@ -39,6 +40,8 @@ struct ScriptContext {
     CameraShake* cameraShake = nullptr;
     CameraDirector* cameraDirector = nullptr;
     const std::vector<struct ScriptField>* fields = nullptr;
+    GameMode* gameMode = nullptr;              // host-owned; scripts reach it via Game()
+    std::string* sceneLoadRequest = nullptr;   // where RequestSceneLoad writes when the host sets it
 };
 
 struct ScriptInputState {
@@ -162,6 +165,7 @@ protected:
 
     ecs::Entity Self() const { return m_context.entity; }
     ecs::Registry* Registry() const { return m_context.registry; }
+    GameMode* Game() const { return m_context.gameMode; }   // scene score/state (host-owned)
     ecs::Transform* Transform();
     const ecs::Transform* Transform() const;
     ecs::Entity FindObject(const std::string& name) const;
@@ -569,6 +573,7 @@ public:
     void Register(const std::string& className, Factory factory);
     bool Has(const std::string& className) const;
     std::unique_ptr<Script> Create(const std::string& className) const;
+    void Clear() { m_factories.clear(); }   // hot-reload: drop factories before unloading their DLL
 
 private:
     std::unordered_map<std::string, Factory> m_factories;
@@ -577,13 +582,13 @@ private:
 // Per-frame update: creates instances, calls OnCreate once, then OnUpdate(dt).
 void UpdateScripts(ecs::Registry& registry, float dt, const ScriptInputState* input = nullptr,
                    RuntimeAudioSystem* audio = nullptr, CameraShake* cameraShake = nullptr,
-                   CameraDirector* cameraDirector = nullptr);
+                   CameraDirector* cameraDirector = nullptr, GameMode* gameMode = nullptr);
 
 // Per-physics-step update: calls OnFixedUpdate(dt) on already-created scripts. Call
 // this from the fixed-timestep loop; instance creation stays in UpdateScripts.
 void FixedUpdateScripts(ecs::Registry& registry, float dt, const ScriptInputState* input = nullptr,
                         RuntimeAudioSystem* audio = nullptr, CameraShake* cameraShake = nullptr,
-                        CameraDirector* cameraDirector = nullptr);
+                        CameraDirector* cameraDirector = nullptr, GameMode* gameMode = nullptr);
 
 // Calls OnDestroy() on every live script and releases the instances. Call when
 // leaving Play mode or unloading the scene so scripts can clean up.

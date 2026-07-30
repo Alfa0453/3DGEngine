@@ -31,6 +31,9 @@ bool BuildTarget(const std::filesystem::path& projectRoot,
                  const std::string& target,
                  std::string* error = nullptr);
 
+// Directory of the running editor executable (where game_scripts.dll is emitted).
+std::filesystem::path ExecutableDirectory();
+
 std::string ReadLastBuildLog(const std::filesystem::path& projectRoot);
 std::string ReadLastBuildStatus(const std::filesystem::path& projectRoot);
 

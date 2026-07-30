@@ -785,7 +785,7 @@ void WriteTemplateUpdateBody(std::ostringstream& source, ScriptTemplate scriptTe
                << "    const engine::ecs::Entity target = FindObject(GetFieldString(\"target\", \"PlayerStart\"));\n"
                << "    if (target == engine::ecs::kNull || !WasTriggerEntered(target)) return;\n\n"
                << "    m_collected = true;\n"
-               << "    engine::GameMode::Instance().AddScore(GetFieldInt(\"score\", 10));\n"
+               << "    if (auto* game = Game()) game->AddScore(GetFieldInt(\"score\", 10));\n"
                << "    PlayAudio(true);\n"
                << "    BurstParticles(GetFieldInt(\"particleBurst\", 16));\n"
                << "    Delay(0.12f, [this] { DestroySelf(); });\n";
@@ -6932,6 +6932,22 @@ void DrawStandaloneScriptEditor(EditorDockspace::Context& context) {
     ImGui::EndDisabled();
     if (context.playMode && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
         ImGui::SetTooltip("Exit Play mode before compiling scripts.");
+    }
+    ImGui::SameLine();
+    ImGui::BeginDisabled(context.playMode);
+    if (ImGui::Button("Hot Reload (dev)")) {
+        std::string error;
+        bool saved = true;
+        if (g_scriptSourceDirty) {
+            saved = WriteTextFile(g_scriptSourcePath, g_scriptSourceBuffer.data(), &error);
+            if (saved) g_scriptSourceDirty = false;
+        }
+        if (saved) context.scriptHotReloadRequested = true;
+        else if (context.log) context.log->Error("Script source save failed: " + error);
+    }
+    ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip("Rebuild game_scripts.dll and reload it without restarting the editor.");
     }
     ImGui::SameLine();
     if (ImGui::Button("Last Build Log")) {

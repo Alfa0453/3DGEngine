@@ -29,8 +29,15 @@ public:
     float                  repathInterval = 0.3f;  // seconds between chase re-plans
     float                  reachRadius    = 1.0f;  // "arrived at a waypoint" distance
     float                  chargeRadius   = 4.0f;  // within this + visible -> charge straight in
+    float                  searchLookDuration = 2.5f; // seconds to dwell + scan at last-known before giving up
+
+    float                  hearingRange = 0.0f;    // how far the agent hears noises (0 = deaf)
 
     void SetPosition(const glm::vec3& p) { agent.position = p; }
+    // Report a noise the agent heard this tick. If it isn't already chasing a visible
+    // target, it will treat the noise as its new point of interest and go investigate
+    // it (reusing the search state), which is exactly how a guard reacts to a sound.
+    void Hear(const glm::vec3& noisePosition) { m_heardPos = noisePosition; m_heardPending = true; }
     void SetFacing(const glm::vec3& direction) {
         glm::vec3 horizontal(direction.x, 0.0f, direction.z);
         if (glm::dot(horizontal, horizontal) > 1.0e-6f) {
@@ -65,6 +72,9 @@ private:
     bool        m_pathGoalValid = false;
     glm::vec3   m_lastKnown{0.0f};
     float       m_repathTimer = 0.0f;
+    float       m_searchTimer = 0.0f;   // time spent dwelling/scanning at the last-known spot
+    glm::vec3   m_heardPos{0.0f};        // last reported noise position
+    bool        m_heardPending = false;  // a noise is waiting to be investigated
     glm::vec3   m_facing{0.0f, 0.0f, -1.0f};
     bool        m_sawTarget = false;
 };

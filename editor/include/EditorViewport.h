@@ -52,6 +52,9 @@ public:
         int  state = 0;                // 0 patrol, 1 chase, 2 search
         bool seesTarget = false;
         bool hasTarget = false;
+        float visionRange = 0.0f;         // perception distance (0 = no cone drawn)
+        float visionHalfAngleDeg = 0.0f;  // half the vision cone's angular width
+        glm::vec3 targetPosition{0.0f};   // pursued target's world position (when hasTarget)
     };
 
     bool ContainsPoint(float x, float y, int width, int height) const;

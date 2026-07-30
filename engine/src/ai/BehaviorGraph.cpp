@@ -64,16 +64,24 @@ const char* BtNodeTypeName(BtNodeType type) {
         case BtNodeType::Attack:          return "Attack";
         case BtNodeType::FocusTarget:     return "Focus Target";
         case BtNodeType::ClearFocus:      return "Clear Focus";
+        case BtNodeType::HeardNoise:      return "Heard Noise?";
+        case BtNodeType::Investigate:     return "Investigate";
+        case BtNodeType::Failer:          return "Failer";
+        case BtNodeType::Retry:           return "Retry";
+        case BtNodeType::ParallelAll:     return "Parallel (All)";
+        case BtNodeType::ParallelOne:     return "Parallel (Any)";
         case BtNodeType::Count:        break;
     }
     return "?";
 }
 
 bool BtNodeTypeIsComposite(BtNodeType t) {
-    return t == BtNodeType::Sequence || t == BtNodeType::Selector;
+    return t == BtNodeType::Sequence || t == BtNodeType::Selector ||
+           t == BtNodeType::ParallelAll || t == BtNodeType::ParallelOne;
 }
 bool BtNodeTypeIsDecorator(BtNodeType t) {
-    return t == BtNodeType::Inverter || t == BtNodeType::Succeeder || t == BtNodeType::Repeat;
+    return t == BtNodeType::Inverter || t == BtNodeType::Succeeder ||
+           t == BtNodeType::Repeat   || t == BtNodeType::Failer || t == BtNodeType::Retry;
 }
 bool BtNodeTypeIsLeaf(BtNodeType t) {
     return !BtNodeTypeIsComposite(t) && !BtNodeTypeIsDecorator(t);
@@ -86,11 +94,13 @@ bool BtNodeTypeUsesParam(BtNodeType t) {
            t == BtNodeType::BbCheckBool || t == BtNodeType::BbCheckFloat ||
            t == BtNodeType::Cooldown   || t == BtNodeType::TimeLimit ||
            t == BtNodeType::RandomChance || t == BtNodeType::BbFloatBelow ||
-           t == BtNodeType::HealthBelow || t == BtNodeType::Attack;
+           t == BtNodeType::HealthBelow || t == BtNodeType::Attack ||
+           t == BtNodeType::Retry;
 }
 const char* BtNodeTypeParamLabel(BtNodeType t) {
     switch (t) {
         case BtNodeType::Repeat:        return "Times (<1 = forever)";
+        case BtNodeType::Retry:         return "Attempts (<1 = forever)";
         case BtNodeType::TargetWithin:  return "Range (m)";
         case BtNodeType::Wait:          return "Seconds";
         case BtNodeType::Repath:        return "Interval (s)";
@@ -405,8 +415,11 @@ Ptr WrapDecorator(const BtAttachment& d, Ptr child) {
         }
         case BtNodeType::Inverter:  return Bt<AgentContext>::Inverter(std::move(child));
         case BtNodeType::Succeeder: return Bt<AgentContext>::Succeeder(std::move(child));
+        case BtNodeType::Failer:    return Bt<AgentContext>::Failer(std::move(child));
         case BtNodeType::Repeat:
             return Bt<AgentContext>::Repeat(std::move(child), (d.param < 1.0f) ? -1 : static_cast<int>(d.param));
+        case BtNodeType::Retry:
+            return Bt<AgentContext>::Retry(std::move(child), (d.param < 1.0f) ? -1 : static_cast<int>(d.param));
         case BtNodeType::ScriptDecorator:
             return std::make_unique<ScriptGateNode>(BtScriptRegistry::Instance().Create(d.script),
                                                     std::move(child));
@@ -642,6 +655,35 @@ Ptr MakeAction(BtNodeType type, float param) {
                 return BtStatus::Success;
             });
 
+        case BtNodeType::HeardNoise:
+            return Bt<AgentContext>::Condition([](AgentContext& c) { return c.heardNoise; });
+
+        case BtNodeType::Investigate:
+            return Bt<AgentContext>::Action([](AgentContext& c, float) {
+                const glm::vec3 goal = c.heardPosition;
+                if (HorizontalDistance(goal, c.agent.position) <= c.navigationAcceptanceRadius) {
+                    c.steer = glm::vec3(0.0f);
+                    c.agent.velocity = glm::vec3(0.0f);
+                    c.path.clear();
+                    c.pathIndex = 0;
+                    c.pathGoalValid = false;
+                    return BtStatus::Success;   // reached the noise
+                }
+                const float goalRefreshDistance = std::max(
+                    0.15f, c.navigationAcceptanceRadius * 0.5f);
+                const bool goalMoved = !c.pathGoalValid
+                    || HorizontalDistance(goal, c.pathGoal) > goalRefreshDistance;
+                if (c.path.empty() || goalMoved) {
+                    c.path = c.Plan(c.agent.position, goal);
+                    c.pathIndex = 0;
+                    c.pathGoal = goal;
+                    c.pathGoalValid = true;
+                }
+                c.steer = FollowPath(
+                    c.agent, c.path, c.pathIndex, c.navigationAcceptanceRadius);
+                return BtStatus::Running;
+            });
+
         default:
             return FailNode();
     }
@@ -675,6 +717,12 @@ BehaviorTree<AgentContext> BuildBehaviorTree(const BehaviorGraph& graph,
                 base = FailNode();
             } else if (node.type == BtNodeType::Sequence) {
                 base = std::make_unique<detail::Sequence<AgentContext>>(std::move(kids));
+            } else if (node.type == BtNodeType::ParallelAll) {
+                base = std::make_unique<detail::Parallel<AgentContext>>(
+                    ParallelPolicy::RequireAll, std::move(kids));
+            } else if (node.type == BtNodeType::ParallelOne) {
+                base = std::make_unique<detail::Parallel<AgentContext>>(
+                    ParallelPolicy::RequireOne, std::move(kids));
             } else {
                 base = std::make_unique<detail::Selector<AgentContext>>(std::move(kids));
             }
@@ -683,9 +731,15 @@ BehaviorTree<AgentContext> BuildBehaviorTree(const BehaviorGraph& graph,
             switch (node.type) {
                 case BtNodeType::Inverter:  base = Bt<AgentContext>::Inverter(std::move(child)); break;
                 case BtNodeType::Succeeder: base = Bt<AgentContext>::Succeeder(std::move(child)); break;
+                case BtNodeType::Failer:    base = Bt<AgentContext>::Failer(std::move(child)); break;
                 case BtNodeType::Repeat: {
                     const int times = (node.param < 1.0f) ? -1 : static_cast<int>(node.param);
                     base = Bt<AgentContext>::Repeat(std::move(child), times);
+                    break;
+                }
+                case BtNodeType::Retry: {
+                    const int times = (node.param < 1.0f) ? -1 : static_cast<int>(node.param);
+                    base = Bt<AgentContext>::Retry(std::move(child), times);
                     break;
                 }
                 default: base = std::move(child); break;

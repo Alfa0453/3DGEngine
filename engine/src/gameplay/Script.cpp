@@ -415,7 +415,10 @@ ecs::Entity Script::SpawnFromObject(
 }
 
 void Script::RequestSceneLoad(const std::string& runtimeScenePath) {
-    if (!runtimeScenePath.empty()) g_scriptSceneLoadRequest = runtimeScenePath;
+    if (runtimeScenePath.empty()) return;
+    // Prefer the host-owned sink (DLL-safe); fall back to the module-local global.
+    if (m_context.sceneLoadRequest) *m_context.sceneLoadRequest = runtimeScenePath;
+    else g_scriptSceneLoadRequest = runtimeScenePath;
 }
 
 bool Script::SaveValue(const std::string& key, const std::string& value) {
@@ -945,7 +948,7 @@ void RunGuarded(NativeScriptSlot& script, Fn&& fn) {
 Script* PrepareScript(ecs::Registry& registry, ecs::Entity entity, NativeScriptSlot& script,
                       std::vector<ecs::Entity>& destroyQueue, const ScriptInputState* input,
                       RuntimeAudioSystem* audio, CameraShake* cameraShake,
-                      CameraDirector* cameraDirector) {
+                      CameraDirector* cameraDirector, GameMode* gameMode) {
     if (!script.enabled || script.className.empty()) {
         return nullptr;
     }
@@ -965,7 +968,7 @@ Script* PrepareScript(ecs::Registry& registry, ecs::Entity entity, NativeScriptS
     }
     script.instance->SetContext(
         ScriptContext{&registry, entity, &destroyQueue, input, audio, cameraShake,
-                      cameraDirector, &script.fields});
+                      cameraDirector, &script.fields, gameMode});
     if (!script.created) {
         RunGuarded(script, [&] { script.instance->OnCreate(); });
         script.created = true;
@@ -997,14 +1000,14 @@ void FlushDestroyQueue(ecs::Registry& registry, const std::vector<ecs::Entity>& 
 
 void UpdateScripts(ecs::Registry& registry, float dt, const ScriptInputState* input,
                    RuntimeAudioSystem* audio, CameraShake* cameraShake,
-                   CameraDirector* cameraDirector) {
+                   CameraDirector* cameraDirector, GameMode* gameMode) {
     std::vector<ecs::Entity> destroyQueue;
     registry.view<NativeScriptComponent>().each(
         [&](ecs::Entity entity, NativeScriptComponent& script) {
             auto update = [&](NativeScriptSlot& slot) {
                 if (Script* instance = PrepareScript(
                         registry, entity, slot, destroyQueue, input, audio,
-                        cameraShake, cameraDirector)) {
+                        cameraShake, cameraDirector, gameMode)) {
                     RunGuarded(slot, [&] {
                         instance->TickTimers(dt);
                         instance->OnUpdate(dt);
@@ -1019,7 +1022,7 @@ void UpdateScripts(ecs::Registry& registry, float dt, const ScriptInputState* in
 
 void FixedUpdateScripts(ecs::Registry& registry, float dt, const ScriptInputState* input,
                         RuntimeAudioSystem* audio, CameraShake* cameraShake,
-                        CameraDirector* cameraDirector) {
+                        CameraDirector* cameraDirector, GameMode* gameMode) {
     std::vector<ecs::Entity> destroyQueue;
     registry.view<NativeScriptComponent>().each(
         [&](ecs::Entity entity, NativeScriptComponent& script) {
@@ -1028,7 +1031,7 @@ void FixedUpdateScripts(ecs::Registry& registry, float dt, const ScriptInputStat
                 if (!slot.enabled || !slot.instance || !slot.created) return;
                 slot.instance->SetContext(
                     ScriptContext{&registry, entity, &destroyQueue, input, audio,
-                                  cameraShake, cameraDirector, &slot.fields});
+                                  cameraShake, cameraDirector, &slot.fields, gameMode});
                 RunGuarded(slot, [&] { slot.instance->OnFixedUpdate(dt); });
             };
             fixedUpdate(script);

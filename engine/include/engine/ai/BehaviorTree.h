@@ -16,6 +16,11 @@ namespace ai {
 // (e.g. "if you see the player, chase") preempts a lower one automatically.
 enum class BtStatus { Success, Failure, Running };
 
+// Completion rule for a Parallel composite: RequireAll succeeds only when every
+// child has succeeded (fails the moment one fails); RequireOne succeeds as soon as
+// any child succeeds (fails only when all have failed).
+enum class ParallelPolicy { RequireAll, RequireOne };
+
 template <class Ctx>
 class BtNode {
 public:
@@ -137,6 +142,124 @@ private:
     int m_done  = 0;
 };
 
+template <class Ctx>
+class Failer : public BtNode<Ctx> {          // always Failure once the child finishes
+public:
+    explicit Failer(std::unique_ptr<BtNode<Ctx>> ch) : m_ch(std::move(ch)) {}
+    BtStatus Tick(Ctx& c, float dt) override {
+        const BtStatus s = m_ch->Tick(c, dt);
+        return (s == BtStatus::Running) ? BtStatus::Running : BtStatus::Failure;
+    }
+    void Reset() override { m_ch->Reset(); }
+private:
+    std::unique_ptr<BtNode<Ctx>> m_ch;
+};
+
+template <class Ctx>
+class Wait : public BtNode<Ctx> {   // Running until 'seconds' elapse, then Success
+public:
+    explicit Wait(float seconds) : m_seconds(seconds) {}
+    BtStatus Tick(Ctx&, float dt) override {
+        m_elapsed += dt;
+        return (m_elapsed >= m_seconds) ? BtStatus::Success : BtStatus::Running;
+    }
+    void Reset() override { m_elapsed = 0.0f; }
+private:
+    float m_seconds = 0.0f;
+    float m_elapsed = 0.0f;
+};
+
+template <class Ctx>
+class Cooldown : public BtNode<Ctx> {   // gate: after the child succeeds, block for 'seconds'
+public:
+    Cooldown(std::unique_ptr<BtNode<Ctx>> ch, float seconds)
+        : m_ch(std::move(ch)), m_seconds(seconds) {}
+    BtStatus Tick(Ctx& c, float dt) override {
+        if (m_cooling) {
+            m_elapsed += dt;
+            if (m_elapsed < m_seconds) return BtStatus::Failure;   // still cooling down
+            m_cooling = false; m_elapsed = 0.0f;
+        }
+        const BtStatus s = m_ch->Tick(c, dt);
+        if (s == BtStatus::Success) { m_cooling = true; m_elapsed = 0.0f; }
+        return s;
+    }
+    void Reset() override { m_ch->Reset(); m_cooling = false; m_elapsed = 0.0f; }
+private:
+    std::unique_ptr<BtNode<Ctx>> m_ch;
+    float m_seconds = 0.0f;
+    float m_elapsed = 0.0f;
+    bool  m_cooling = false;
+};
+
+template <class Ctx>
+class Timeout : public BtNode<Ctx> {   // fail (and reset) the child if it runs too long
+public:
+    Timeout(std::unique_ptr<BtNode<Ctx>> ch, float seconds)
+        : m_ch(std::move(ch)), m_seconds(seconds) {}
+    BtStatus Tick(Ctx& c, float dt) override {
+        m_elapsed += dt;
+        if (m_elapsed >= m_seconds) { m_ch->Reset(); m_elapsed = 0.0f; return BtStatus::Failure; }
+        const BtStatus s = m_ch->Tick(c, dt);
+        if (s != BtStatus::Running) m_elapsed = 0.0f;   // finished in time
+        return s;
+    }
+    void Reset() override { m_ch->Reset(); m_elapsed = 0.0f; }
+private:
+    std::unique_ptr<BtNode<Ctx>> m_ch;
+    float m_seconds = 0.0f;
+    float m_elapsed = 0.0f;
+};
+
+template <class Ctx>
+class Retry : public BtNode<Ctx> {   // re-run a failing child up to N times (times < 0 = forever)
+public:
+    Retry(std::unique_ptr<BtNode<Ctx>> ch, int times) : m_ch(std::move(ch)), m_times(times) {}
+    BtStatus Tick(Ctx& c, float dt) override {
+        const BtStatus s = m_ch->Tick(c, dt);
+        if (s == BtStatus::Running) return BtStatus::Running;
+        if (s == BtStatus::Success) { m_done = 0; return BtStatus::Success; }
+        ++m_done; m_ch->Reset();
+        if (m_times >= 0 && m_done >= m_times) { m_done = 0; return BtStatus::Failure; }
+        return BtStatus::Running;   // try again next tick
+    }
+    void Reset() override { m_done = 0; m_ch->Reset(); }
+private:
+    std::unique_ptr<BtNode<Ctx>> m_ch;
+    int m_times = 1;
+    int m_done  = 0;
+};
+
+template <class Ctx>
+class Parallel : public BtNode<Ctx> {   // tick every child each tick; resolve by policy
+public:
+    Parallel(ParallelPolicy policy, std::vector<std::unique_ptr<BtNode<Ctx>>> kids)
+        : m_kids(std::move(kids)), m_policy(policy) {}
+    BtStatus Tick(Ctx& c, float dt) override {
+        std::size_t succeeded = 0, failed = 0;
+        for (auto& k : m_kids) {
+            const BtStatus s = k->Tick(c, dt);
+            if (s == BtStatus::Success) ++succeeded;
+            else if (s == BtStatus::Failure) ++failed;
+        }
+        const std::size_t n = m_kids.size();
+        BtStatus result = BtStatus::Running;
+        if (m_policy == ParallelPolicy::RequireOne) {
+            if (succeeded > 0)  result = BtStatus::Success;
+            else if (failed == n) result = BtStatus::Failure;
+        } else { // RequireAll
+            if (failed > 0)     result = BtStatus::Failure;
+            else if (succeeded == n) result = BtStatus::Success;
+        }
+        if (result != BtStatus::Running) Reset();   // start clean next time
+        return result;
+    }
+    void Reset() override { for (auto& k : m_kids) k->Reset(); }
+private:
+    std::vector<std::unique_ptr<BtNode<Ctx>>> m_kids;
+    ParallelPolicy m_policy = ParallelPolicy::RequireAll;
+};
+
 } // namespace detail
 
 // Fluent factory: fix the context once (using B = Bt<MyCtx>;) then build the tree.
@@ -160,7 +283,20 @@ struct Bt {
     }
     static Ptr Inverter(Ptr ch)  { return std::make_unique<detail::Inverter<Ctx>>(std::move(ch)); }
     static Ptr Succeeder(Ptr ch) { return std::make_unique<detail::Succeeder<Ctx>>(std::move(ch)); }
+    static Ptr Failer(Ptr ch)    { return std::make_unique<detail::Failer<Ctx>>(std::move(ch)); }
     static Ptr Repeat(Ptr ch, int times) { return std::make_unique<detail::Repeat<Ctx>>(std::move(ch), times); }
+    static Ptr Retry(Ptr ch, int times)  { return std::make_unique<detail::Retry<Ctx>>(std::move(ch), times); }
+    static Ptr Wait(float seconds)       { return std::make_unique<detail::Wait<Ctx>>(seconds); }
+    static Ptr Cooldown(Ptr ch, float seconds) {
+        return std::make_unique<detail::Cooldown<Ctx>>(std::move(ch), seconds);
+    }
+    static Ptr Timeout(Ptr ch, float seconds) {
+        return std::make_unique<detail::Timeout<Ctx>>(std::move(ch), seconds);
+    }
+    template <class... N> static Ptr Parallel(ParallelPolicy policy, N&&... kids) {
+        std::vector<Ptr> v; (v.push_back(std::forward<N>(kids)), ...);
+        return std::make_unique<detail::Parallel<Ctx>>(policy, std::move(v));
+    }
 };
 
 // Owns a root node; tick it each frame. Resets when a whole tree finishes so it

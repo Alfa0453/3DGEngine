@@ -174,6 +174,21 @@ bool BuildTarget(const std::filesystem::path& projectRoot,
 #endif
 }
 
+std::filesystem::path ExecutableDirectory() {
+#if defined(_WIN32)
+    std::wstring buffer(32768, L'\0');
+    const DWORD length = GetModuleFileNameW(nullptr, buffer.data(),
+                                            static_cast<DWORD>(buffer.size()));
+    if (length == 0 || static_cast<std::size_t>(length) >= buffer.size()) {
+        return {};
+    }
+    buffer.resize(length);
+    return std::filesystem::path(buffer).parent_path();
+#else
+    return {};
+#endif
+}
+
 std::string ReadLastBuildLog(const std::filesystem::path& projectRoot) {
     return ReadFile(projectRoot / "build" / "script_compile.log");
 }

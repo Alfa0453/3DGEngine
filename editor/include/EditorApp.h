@@ -39,6 +39,7 @@
 #include <engine/gameplay/CameraDirector.h>
 #include <engine/physics/PhysicsComponents.h>
 #include <engine/gameplay/Script.h>
+#include <engine/gameplay/ScriptModule.h>
 #include <engine/physics/PhysicsWorld.h>
 #include <engine/ui/ImGuiLayer.h>
 #include <MaterialMaker/MaterialMakerPanel.h>
@@ -128,6 +129,7 @@ private:
         std::string         name;                                // scene object name (debug label)
         int                 team = 0;                            // faction id (0 = neutral)
         bool                autoTarget = false;                  // acquire nearest hostile each tick
+        float               hearingRange = 0.0f;                 // how far this agent hears noises (0 = deaf)
         engine::ai::AiAgent brain;                               // built-in patrol/chase/search
         engine::ai::AiMovementComponent movement;
         // M7: optional data-driven behaviour tree. When useGraph is set, 'tree' + 'ctx'
@@ -175,6 +177,7 @@ private:
     void DrawGraphEditorPanel();
     void DrawPrefabEditorPanel();   // author a reusable object template (.3dgprefab)
     void DrawScriptDebugPanel();    // live per-entity script field inspector (Play mode)
+    void HotReloadScripts();        // rebuild + reload game_scripts.dll without restart (dev)
     void DrawViewportPanel();   // scene rendered into a dockable, interactive panel
     // Maps a main-window cursor position into scene render-pixel space when the Viewport
     // panel owns input; returns false (and passes the point through) otherwise.
@@ -420,6 +423,7 @@ private:
     AnimationGraphEditorPanel            m_graphEditor;
     PrefabAsset                          m_prefabAsset;      // prefab being authored in the Prefab Editor
     std::string                          m_prefabPath;       // current .3dgprefab path ("" = unsaved)
+    engine::ScriptModule                 m_scriptModule;     // loaded hot-reload script DLL (dev)
     engine::HudDocument                  m_hud;              // active HUD document (in memory)
     std::string                          m_hudPath;          // last saved/loaded .hud path
     std::unordered_map<std::string, float>       m_hudFloats;   // named numeric HUD values
@@ -476,6 +480,9 @@ private:
     std::optional<EditorScene::CameraPreset> m_playCameraOverride;
     std::vector<PlayAgent> m_playAgents;
     std::vector<PlayAudioSource> m_playAudioSources;
+    engine::ai::SoundField m_playSoundField;   // transient noises agents can hear (footsteps, etc.)
+    glm::vec3 m_prevPlayerPos{0.0f};           // for detecting player movement -> footstep noise
+    bool m_prevPlayerPosValid = false;
     engine::ai::NavGrid m_playNavGrid;   // used by chase/search (M2); patrol needs none
     engine::ai::NavMesh m_playNavMesh;   // funnel-smoothed nav source (M6) when m_useNavMesh
     bool m_useNavMesh = false;           // route chase/search through the navmesh agent overload

@@ -19,3 +19,20 @@ target_include_directories(game
     PRIVATE ${CMAKE_SOURCE_DIR}/Content
 )
 target_link_libraries(game PUBLIC engine)
+
+# ---------------------------------------------------------------------------
+# Hot-reloadable script DLL (opt-in). The SAME scripts compiled into a shared
+# library the editor can load / reload at runtime (see engine ScriptModule),
+# registering into the host's registry via the exported RegisterScriptModule.
+# It links a private copy of engine; shared mutable state (GameMode, scene-load)
+# reaches scripts through ScriptContext, so the two engine copies stay consistent.
+# Nothing links this yet — Stage 3 wires the editor's reload path to it.
+# ---------------------------------------------------------------------------
+add_library(game_scripts SHARED src/ScriptModuleExport.cpp)
+target_include_directories(game_scripts
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${CMAKE_SOURCE_DIR}/Content
+)
+target_link_libraries(game_scripts PRIVATE engine)
+set_target_properties(game_scripts PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/editor")
