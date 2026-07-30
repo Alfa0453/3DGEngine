@@ -3792,6 +3792,11 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
         return;
     }
 
+    // Characters are authored in the Character Editor panel, so the inspector hides the
+    // inline Animation / Runtime Components / Gameplay Components / AI sections for them.
+    const bool isCharacter = selected->skeletalModel
+        || !selected->characterAssetPath.empty();
+
     if (ImGui::CollapsingHeader("Object", ImGuiTreeNodeFlags_DefaultOpen)) {
         if (g_objectNameEntity != selected->entity) {
             std::snprintf(g_objectNameBuffer.data(), g_objectNameBuffer.size(), "%s", selected->name.c_str());
@@ -3993,7 +3998,7 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
         }
     }
 
-    if (!selected->modelAssetPath.empty()
+    if (!isCharacter && !selected->modelAssetPath.empty()
         && ImGui::CollapsingHeader("Animation", ImGuiTreeNodeFlags_DefaultOpen)) {
         bool skeletalModel = selected->skeletalModel;
         int clipIndex = selected->animationClipIndex;
@@ -4555,7 +4560,7 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
     }
 #endif
 
-    if (ImGui::CollapsingHeader("Runtime Components", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (!isCharacter && ImGui::CollapsingHeader("Runtime Components", ImGuiTreeNodeFlags_DefaultOpen)) {
         // Velocity components are shown only when the object actually has them; add them
         // from "+ Add Component" (Linear/Angular Velocity) when needed.
         if (selected->linearVelocityEnabled || selected->angularVelocityEnabled) {
@@ -4995,7 +5000,7 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
         }
     }
 
-    if (ImGui::CollapsingHeader("Gameplay Components", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (!isCharacter && ImGui::CollapsingHeader("Gameplay Components", ImGuiTreeNodeFlags_DefaultOpen)) {
         bool rotatorEnabled = selected->rotatorEnabled;
         if (ImGui::Checkbox("Rotator", &rotatorEnabled)) {
             context.scene->SetSelectedRotatorEnabled(rotatorEnabled);
@@ -5624,7 +5629,7 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
         }
     }
 
-    if (ImGui::CollapsingHeader("AI Agent", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (!isCharacter && ImGui::CollapsingHeader("AI Agent", ImGuiTreeNodeFlags_DefaultOpen)) {
         bool  enabled  = selected->navAgentEnabled;
         float speed    = selected->navAgentSpeed;
         float maxForce = selected->navAgentMaxForce;
