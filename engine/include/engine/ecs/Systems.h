@@ -18,6 +18,25 @@
 namespace engine {
 namespace ecs {
 
+inline ModelMaterialOverride LoadedModelMaterialOverride(
+    const LoadedMaterialAsset& loaded) {
+    const PbrMaterial& source = loaded.material;
+    ModelMaterialOverride result;
+    result.diffuse = source.albedo;
+    const glm::vec3 dielectric(
+        std::clamp(source.specularLevel, 0.0f, 1.0f) * 0.08f);
+    result.specular = glm::mix(
+        dielectric, source.albedo,
+        std::clamp(source.metallic, 0.0f, 1.0f));
+    result.emissive = source.emissive;
+    const float roughness = std::clamp(source.roughness, 0.02f, 1.0f);
+    result.shininess = std::clamp(
+        2.0f / (roughness * roughness) - 2.0f, 1.0f, 2048.0f);
+    result.diffuseMap = loaded.albedoMap;
+    result.normalMap = loaded.normalMap;
+    return result;
+}
+
 inline std::vector<float> ParseShaderParameterNumbers(std::string value) {
     std::replace(value.begin(), value.end(), ',', ' ');
     std::replace(value.begin(), value.end(), '(', ' ');
@@ -122,7 +141,14 @@ inline void RenderLoadedModels(
                 glDisable(GL_BLEND);
                 glDepthMask(GL_TRUE);
             }
-            DrawModel(*loaded.model, *shader);
+            ModelMaterialOverride modelMaterial;
+            const ModelMaterialOverride* modelMaterialPtr = nullptr;
+            if (material) {
+                modelMaterial = LoadedModelMaterialOverride(*material);
+                modelMaterialPtr = &modelMaterial;
+            }
+            DrawModel(*loaded.model, *shader, glm::vec3(1.0f), nullptr,
+                      modelMaterialPtr);
         }
     );
     // Restore GL state after rendering loaded models

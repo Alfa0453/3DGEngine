@@ -4,6 +4,7 @@
 #include "engine/assets/AssetRegistry.h"
 #include "engine/assets/ShaderAsset.h"
 #include "engine/assets/TextureAsset.h"
+#include "engine/ecs/Systems.h"
 
 #include <filesystem>
 #include <iostream>
@@ -87,6 +88,20 @@ int main()
            && runtimeLoaded.shaderParameters[2].name == "UseDetail"
            && runtimeLoaded.shaderParameters[2].value == "false",
            "runtime loader must preserve shader parameter names, types, and values");
+
+    engine::ecs::LoadedMaterialAsset importedModelMaterial;
+    importedModelMaterial.material.albedo = {0.15f, 0.35f, 0.75f};
+    importedModelMaterial.material.metallic = 0.8f;
+    importedModelMaterial.material.roughness = 0.25f;
+    importedModelMaterial.material.emissive = {0.5f, 0.1f, 0.0f};
+    const engine::ModelMaterialOverride importedOverride =
+        engine::ecs::LoadedModelMaterialOverride(importedModelMaterial);
+    Expect(importedOverride.diffuse
+               == importedModelMaterial.material.albedo
+           && importedOverride.emissive
+               == importedModelMaterial.material.emissive
+           && importedOverride.shininess > 1.0f,
+           "imported static models must receive the assigned scene material");
 
     // A material saved inside Content converts raw image maps to native
     // .3dgtex assets and records stable, slot-specific dependencies.

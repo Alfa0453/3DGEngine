@@ -35,6 +35,7 @@ public:
         AnimationClip,
         AnimationGraph,
         BehaviorGraph,
+        Prefab,
         Script,
         Other
     };

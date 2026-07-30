@@ -921,6 +921,7 @@ const char *EditorAssets::TypeName(Type type)
         case Type::AnimationClip: return "Animation Clip";
         case Type::AnimationGraph: return "Animation Graph";
         case Type::BehaviorGraph: return "Behavior Tree";
+        case Type::Prefab: return "Prefab";
         case Type::Script: return "Script";
         case Type::Other: return "Other";
     }
@@ -977,6 +978,9 @@ EditorAssets::Type EditorAssets::ClassifyExtension(const std::string &extension)
     }
     if (extension == ".3dgcharacter") {
         return Type::Character;
+    }
+    if (extension == ".3dgprefab") {
+        return Type::Prefab;
     }
     if (extension == ".3dgclip") {
         return Type::AnimationClip;

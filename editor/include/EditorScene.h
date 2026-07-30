@@ -219,6 +219,8 @@ public:
         std::vector<ModelAttachment> modelAttachments;   // static models socketed to bones
         std::string characterAssetPath;                  // source .3dgcharacter (for live editor sync)
         engine::AssetHandle characterAssetId;
+        std::string prefabAssetPath;                     // source .3dgprefab (editor live-sync link; not scene-serialized yet)
+        engine::AssetHandle prefabAssetId;
         bool linearVelocityEnabled = false;
         bool angularVelocityEnabled = false;
         glm::vec3 linearVelocity{0.0f};
@@ -662,6 +664,7 @@ public:
     // Record the source .3dgcharacter path so the editor can live-sync edits to it.
     bool SetSelectedCharacterAssetPath(
         const std::string& path, engine::AssetHandle id = {});
+    bool SetSelectedPrefabAssetPath(const std::string& path, engine::AssetHandle id);
     bool SetSelectedLight(const engine::ecs::Light& light);
     void SetEnvironment(const Environment& environment);
     bool SetSelectedLinearVelocityEnabled(bool enabled);

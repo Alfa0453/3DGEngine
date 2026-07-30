@@ -48,6 +48,7 @@
 #include "HudEditorPanel.h"
 #include "CharacterEditorPanel.h"
 #include "ClipEditorPanel.h"
+#include "PrefabAsset.h"
 #include "AnimationGraphEditorPanel.h"
 
 #include "EditorAssets.h"
@@ -172,6 +173,7 @@ private:
     void DrawCharacterEditorPanel();
     void DrawClipEditorPanel();
     void DrawGraphEditorPanel();
+    void DrawPrefabEditorPanel();   // author a reusable object template (.3dgprefab)
     void DrawViewportPanel();   // scene rendered into a dockable, interactive panel
     // Maps a main-window cursor position into scene render-pixel space when the Viewport
     // panel owns input; returns false (and passes the point through) otherwise.
@@ -238,6 +240,9 @@ private:
     void AddPlayerStart();
     void AddCharacterToScene(const CharacterAsset& character, const glm::vec3& position,
                              const std::string& assetPath = std::string());   // instantiate a .3dgcharacter
+    void AddPrefabToScene(const PrefabAsset& prefab, const glm::vec3& position,
+                          const std::string& assetPath = std::string());   // instantiate a .3dgprefab
+    void SyncPrefabInstances(const std::string& prefabPath, const PrefabAsset& prefab);   // re-apply to linked instances
     void AddGameplayDoor();
     void AddGameplayPickup();
     void AddGameplayDamageZone();
@@ -412,6 +417,8 @@ private:
     CharacterEditorPanel                 m_characterEditor;
     ClipEditorPanel                      m_clipEditor;
     AnimationGraphEditorPanel            m_graphEditor;
+    PrefabAsset                          m_prefabAsset;      // prefab being authored in the Prefab Editor
+    std::string                          m_prefabPath;       // current .3dgprefab path ("" = unsaved)
     engine::HudDocument                  m_hud;              // active HUD document (in memory)
     std::string                          m_hudPath;          // last saved/loaded .hud path
     std::unordered_map<std::string, float>       m_hudFloats;   // named numeric HUD values

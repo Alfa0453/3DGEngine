@@ -444,20 +444,37 @@ bool AssetRegistry::SynchronizeAuthoredAssets(
             return false;
         }
         if (!it->is_regular_file(ec)) continue;
-        const AssetType type = AuthoredAssetType(it->path());
-        if (type == AssetType::Unknown) continue;
         NativeAssetHeader header;
         std::string metadataError;
-        if (!ReadAuthoredMetadata(
-                it->path(), type, &header, &metadataError))
-            continue; // Legacy asset: path fallback remains valid until next save.
+        const bool native = IsNativePath(it->path());
+        const AssetType authoredType = AuthoredAssetType(it->path());
+        if (native) {
+            if (!ReadNativeAssetHeaderFile(
+                    it->path().string(), &header, &metadataError)) {
+                SetError(error, "Could not read native asset metadata: "
+                    + it->path().string() + ": " + metadataError);
+                return false;
+            }
+        } else {
+            if (authoredType == AssetType::Unknown) continue;
+            if (!ReadAuthoredMetadata(
+                    it->path(), authoredType, &header, &metadataError))
+                continue; // Legacy asset gains an identity on its next save.
+        }
         AssetRegistryEntry entry;
         entry.id = header.id;
-        entry.type = type;
+        entry.type = native ? header.type : authoredType;
         entry.virtualPath = NormalizeVirtualPath(
             std::filesystem::relative(it->path(), root, ec).generic_string());
-        entry.importerVersion = 1;
+        entry.sourceHash = header.sourceHash;
+        entry.importerVersion = header.importerVersion;
         entry.dependencies = header.dependencies;
+        if (const AssetRegistryEntry* previous = Find(header.id)) {
+            entry.sourcePath = previous->sourcePath;
+            if (entry.sourceHash == 0) entry.sourceHash = previous->sourceHash;
+            if (entry.importerVersion == 0)
+                entry.importerVersion = previous->importerVersion;
+        }
         if (const AssetRegistryEntry* previous =
                 FindByPath(entry.virtualPath);
             previous && previous->id != entry.id)
@@ -471,9 +488,9 @@ bool AssetRegistry::SynchronizeAuthoredAssets(
     }
     std::vector<AssetHandle> removed;
     for (const AssetRegistryEntry& entry : m_entries) {
-        if (AuthoredAssetType(
-                std::filesystem::path(entry.virtualPath))
-                != AssetType::Unknown
+        const std::filesystem::path registeredPath(entry.virtualPath);
+        if ((IsNativePath(registeredPath)
+             || AuthoredAssetType(registeredPath) != AssetType::Unknown)
             && discovered.find(entry.id) == discovered.end())
             removed.push_back(entry.id);
     }

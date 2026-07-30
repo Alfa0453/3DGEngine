@@ -19,6 +19,9 @@ namespace ecs { class Registry; }
 class RuntimeAudioSystem;
 class CameraShake;
 class CameraDirector;
+class ScriptInputApi;
+class ScriptCameraApi;
+class ScriptParticlesApi;
 
 struct ScriptAnimationEvent {
     ecs::Entity entity = ecs::kNull;
@@ -73,9 +76,19 @@ public:
 
     void SetContext(ScriptContext context) { m_context = context; }
 
+    friend class ScriptInputApi;
+    friend class ScriptCameraApi;
+    friend class ScriptParticlesApi;
+
 protected:
     ScriptContext& Context() { return m_context; }
     const ScriptContext& Context() const { return m_context; }
+
+    // Grouped, discoverable sugar over the flat helpers below (fully backward-compatible;
+    // the flat methods stay): Input().KeyDown(k), Camera().Shake(), Particles().Burst().
+    ScriptInputApi Input();
+    ScriptCameraApi Camera();
+    ScriptParticlesApi Particles();
 
     ecs::Entity Self() const { return m_context.entity; }
     ecs::Registry* Registry() const { return m_context.registry; }
@@ -278,6 +291,86 @@ private:
     std::vector<Timer> m_timers;
     int m_nextTimerId = 1;
 };
+
+// ---- Grouped script API proxies -------------------------------------------------
+// Thin, zero-overhead sugar that forwards to Script's flat helpers. They exist only to
+// make the large Script surface discoverable (`Camera().Shake()` reads better than a
+// wall of Shake*/*Camera* methods). Every original method still works unchanged.
+class ScriptInputApi {
+public:
+    explicit ScriptInputApi(Script* s) : m_s(s) {}
+    bool KeyDown(int key) const { return m_s->IsKeyDown(key); }
+    bool KeyPressed(int key) const { return m_s->WasKeyPressed(key); }
+    bool MouseDown(int button) const { return m_s->IsMouseButtonDown(button); }
+    bool MousePressed(int button) const { return m_s->WasMouseButtonPressed(button); }
+    float MouseDeltaX() const { return m_s->MouseDeltaX(); }
+    float MouseDeltaY() const { return m_s->MouseDeltaY(); }
+private:
+    Script* m_s;
+};
+
+class ScriptCameraApi {
+public:
+    explicit ScriptCameraApi(Script* s) : m_s(s) {}
+    bool Shake(float intensity = 1.0f, float duration = 0.35f, float frequency = 18.0f) {
+        return m_s->ShakeCamera(intensity, duration, frequency);
+    }
+    bool ShakeAdvanced(float translationAmplitude, float rotationDegrees,
+                       float duration = 0.35f, float frequency = 18.0f, float fovAmplitude = 0.0f) {
+        return m_s->ShakeCameraAdvanced(translationAmplitude, rotationDegrees, duration,
+                                        frequency, fovAmplitude);
+    }
+    bool PlaySequence(const std::string& name, bool lockInput = true, bool skippable = true) {
+        return m_s->PlayCameraSequence(name, lockInput, skippable);
+    }
+    bool StopSequence() { return m_s->StopCameraSequence(); }
+    bool SkipSequence() { return m_s->SkipCameraSequence(); }
+    bool IsSequencePlaying(const std::string& name = {}) const {
+        return m_s->IsCameraSequencePlaying(name);
+    }
+    bool WasSequenceFinished(const std::string& name) const {
+        return m_s->WasCameraSequenceFinished(name);
+    }
+    bool WasSequenceSkipped(const std::string& name) const {
+        return m_s->WasCameraSequenceSkipped(name);
+    }
+    bool WasSequenceEvent(const std::string& sequenceName, const std::string& eventName) const {
+        return m_s->WasCameraSequenceEvent(sequenceName, eventName);
+    }
+private:
+    Script* m_s;
+};
+
+class ScriptParticlesApi {
+public:
+    explicit ScriptParticlesApi(Script* s) : m_s(s) {}
+    bool Play(bool restart = false) { return m_s->PlayParticles(restart); }
+    bool Play(ecs::Entity e, bool restart = false) { return m_s->PlayParticles(e, restart); }
+    bool Stop(bool clear = false) { return m_s->StopParticles(clear); }
+    bool Stop(ecs::Entity e, bool clear = false) { return m_s->StopParticles(e, clear); }
+    bool Restart() { return m_s->RestartParticles(); }
+    bool Restart(ecs::Entity e) { return m_s->RestartParticles(e); }
+    bool Burst(int count = 0) { return m_s->BurstParticles(count); }
+    bool Burst(ecs::Entity e, int count = 0) { return m_s->BurstParticles(e, count); }
+    bool Clear() { return m_s->ClearParticles(); }
+    bool Clear(ecs::Entity e) { return m_s->ClearParticles(e); }
+    bool SetEnabled(bool enabled) { return m_s->SetParticlesEnabled(enabled); }
+    bool SetEnabled(ecs::Entity e, bool enabled) { return m_s->SetParticlesEnabled(e, enabled); }
+    bool SetRate(float perSecond) { return m_s->SetParticleRate(perSecond); }
+    bool SetRate(ecs::Entity e, float perSecond) { return m_s->SetParticleRate(e, perSecond); }
+    bool SetSpeed(float simulationSpeed) { return m_s->SetParticleSpeed(simulationSpeed); }
+    bool SetSpeed(ecs::Entity e, float simulationSpeed) { return m_s->SetParticleSpeed(e, simulationSpeed); }
+    bool IsPlaying() const { return m_s->AreParticlesPlaying(); }
+    bool IsPlaying(ecs::Entity e) const { return m_s->AreParticlesPlaying(e); }
+    int Count() const { return m_s->ParticleCount(); }
+    int Count(ecs::Entity e) const { return m_s->ParticleCount(e); }
+private:
+    Script* m_s;
+};
+
+inline ScriptInputApi Script::Input() { return ScriptInputApi(this); }
+inline ScriptCameraApi Script::Camera() { return ScriptCameraApi(this); }
+inline ScriptParticlesApi Script::Particles() { return ScriptParticlesApi(this); }
 
 struct NativeScriptSlot {
     bool enabled = true;

@@ -14,6 +14,7 @@ add_executable(3DGEditor
     src/app/main.cpp
     src/app/EditorApp.cpp
     src/app/EditorApp_Camera.cpp
+    src/app/EditorApp_Prefab.cpp
     src/app/EditorLog.cpp
     src/app/EditorProject.cpp
     src/app/EditorPanels.cpp
@@ -35,6 +36,7 @@ add_executable(3DGEditor
     src/assets/AnimationClipAsset.cpp
     src/assets/AnimationGraphAsset.cpp
     src/assets/ParticleAsset.cpp
+    src/assets/PrefabAsset.cpp
     # dockable editor panels
     src/panels/BehaviorGraphPanel.cpp
     src/panels/ParticleEditorPanel.cpp

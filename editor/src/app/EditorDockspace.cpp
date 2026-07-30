@@ -2875,8 +2875,9 @@ void DrawAnimationPreview(EditorDockspace::Context& context, bool* open) {
         return;
     }
 
-    ImGui::Text("Object: %s", state.selectedName.c_str());
-    ImGui::Text("Mode: %s", state.playMode ? "Play" : "Edit");
+    ImGui::Text("%s", state.selectedName.c_str());
+    ImGui::SameLine();
+    ImGui::TextDisabled("(%s mode)", state.playMode ? "Play" : "Edit");
     if (!state.skeletalModel) {
         ImGui::TextUnformatted("Selected object is not marked as a skeletal model.");
         ImGui::End();
@@ -2950,7 +2951,7 @@ void DrawAnimationPreview(EditorDockspace::Context& context, bool* open) {
         }
     }
 
-    if (ImGui::CollapsingHeader("Authored", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (false /* legacy read-only settings dump — authored in the Character/Graph editors */) {
         ImGui::Text("Default Clip: %d %s", state.defaultClipIndex,
             state.defaultClipName.empty() ? "" : state.defaultClipName.c_str());
         ImGui::Text("Autoplay: %s", state.autoplay ? "Yes" : "No");
@@ -3048,7 +3049,7 @@ void DrawAnimationPreview(EditorDockspace::Context& context, bool* open) {
         }
     }
 
-    if (ImGui::CollapsingHeader("State Graph", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (false /* legacy inline state-machine editor — now in the Graph Editor panel */) {
         if (state.playMode || !context.scene) {
             ImGui::TextUnformatted("State graphs are edited in Edit mode.");
         } else if (state.clips.empty()) {
@@ -3320,7 +3321,7 @@ void DrawAnimationPreview(EditorDockspace::Context& context, bool* open) {
         }
     }
 
-    if (ImGui::CollapsingHeader("Graph View", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (false /* legacy state-graph visualization — now in the Graph Editor panel */) {
         const ImVec2 origin = ImGui::GetCursorScreenPos();
         const float width = std::max(ImGui::GetContentRegionAvail().x, 240.0f);
         const float height = std::max(180.0f, 90.0f * std::ceil(static_cast<float>(std::max<std::size_t>(state.states.size(), 1)) / 3.0f));
@@ -3998,7 +3999,11 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
         }
     }
 
-    if (!isCharacter && !selected->modelAssetPath.empty()
+    // Animation controls only apply to imported skeletal meshes. Keep character
+    // assets in the dedicated Character Editor, and do not show these controls
+    // for static meshes merely because they have a model asset path.
+    if (selected->skeletalModel && selected->characterAssetPath.empty()
+        && !selected->modelAssetPath.empty()
         && ImGui::CollapsingHeader("Animation", ImGuiTreeNodeFlags_DefaultOpen)) {
         bool skeletalModel = selected->skeletalModel;
         int clipIndex = selected->animationClipIndex;
@@ -5295,21 +5300,48 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
         }
         ImGui::InputText("Script Class", g_scriptClassBuffer.data(), g_scriptClassBuffer.size());
         ImGui::Text("Script Path: %s", selected->scriptPath.empty() ? "-" : selected->scriptPath.c_str());
-        const char* scriptTemplates[] = {
-            "Empty",
-            "Player Movement",
-            "Door Opener",
-            "Pickup",
-            "Damage Zone"
-        };
-        ImGui::Combo("Template", &g_scriptTemplateIndex, scriptTemplates,
-                     IM_ARRAYSIZE(scriptTemplates));
+        const std::string currentClass = SanitizeScriptClassName(g_scriptClassBuffer.data());
+        const bool classExists = std::any_of(savedScripts.begin(), savedScripts.end(),
+            [&currentClass](const SavedScriptEntry& entry) {
+                return entry.className == currentClass;
+            });
 
-        if (ImGui::Button("Create Script")) {
-            const std::string className = SanitizeScriptClassName(g_scriptClassBuffer.data());
+        // The template picker only matters when creating a brand-new script.
+        if (!classExists) {
+            const char* scriptTemplates[] = {
+                "Empty",
+                "Player Movement",
+                "Door Opener",
+                "Pickup",
+                "Damage Zone"
+            };
+            ImGui::Combo("New Script Template", &g_scriptTemplateIndex, scriptTemplates,
+                         IM_ARRAYSIZE(scriptTemplates));
+        }
+
+        // One context-aware action replaces the old Create/Attach split: attach the class
+        // if it already exists in Content/Scripts, otherwise create it from the template.
+        if (ImGui::Button(classExists ? "Attach Script" : "Create + Attach")) {
+            const std::string className = currentClass;
             if (className.empty()) {
-                if (context.log) {
-                    context.log->Warning("Script create failed: enter a class name");
+                if (context.log) context.log->Warning("Enter a script class name first");
+            } else if (classExists) {
+                const auto saved = std::find_if(savedScripts.begin(), savedScripts.end(),
+                    [&className](const SavedScriptEntry& entry) {
+                        return entry.className == className;
+                    });
+                const std::string scriptPath = saved != savedScripts.end()
+                    ? saved->storedPath : ScriptHeaderPathFor(context, className);
+                if (context.scene->SetSelectedScript(className, scriptPath, true)) {
+                    if (context.log) context.log->Info("Attached script: " + className);
+                } else if (context.log) {
+                    const EditorScene::Object* current = context.scene->SelectedObject();
+                    if (current && current->scriptEnabled
+                        && current->scriptClassName == className) {
+                        context.log->Info("Script is already attached: " + className);
+                    } else {
+                        context.log->Warning("Script attach failed: no unlocked object selected");
+                    }
                 }
             } else {
                 const ScriptTemplate scriptTemplate = ScriptTemplateFromIndex(g_scriptTemplateIndex);
@@ -5334,8 +5366,7 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                     }
                     if (context.log) {
                         if (IsBehaviorTreeTemplate(scriptTemplate)) {
-                            context.log->Info(
-                                "Created AI script: " + scriptPath
+                            context.log->Info("Created AI script: " + scriptPath
                                 + " (compile it, then select the class in the Behavior Graph)");
                         } else {
                             context.log->Info("Created script: " + scriptPath);
@@ -5343,36 +5374,6 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                     }
                 } else if (context.log) {
                     context.log->Error("Script create failed: " + error);
-                }
-            }
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Attach Selected")) {
-            const std::string className = SanitizeScriptClassName(g_scriptClassBuffer.data());
-            if (className.empty()) {
-                if (context.log) {
-                    context.log->Warning("Script attach failed: enter a class name");
-                }
-            } else {
-                const auto saved = std::find_if(savedScripts.begin(), savedScripts.end(),
-                    [&className](const SavedScriptEntry& entry) {
-                        return entry.className == className;
-                    });
-                const std::string scriptPath = saved != savedScripts.end()
-                    ? saved->storedPath : ScriptHeaderPathFor(context, className);
-                if (context.scene->SetSelectedScript(className, scriptPath, true)) {
-                    if (context.log) {
-                        context.log->Info("Attached script: " + className);
-                    }
-                } else if (context.log) {
-                    const EditorScene::Object* current = context.scene->SelectedObject();
-                    if (current && current->scriptEnabled
-                        && current->scriptClassName == className
-                        && current->scriptPath == scriptPath) {
-                        context.log->Info("Script is already attached: " + className);
-                    } else {
-                        context.log->Warning("Script attach failed: no selected object");
-                    }
                 }
             }
         }
@@ -8534,6 +8535,8 @@ bool EditorDockspace::Draw(Context& context) {
             break; // drawn by EditorApp (owns the graph preview renderer)
         case EditorPanels::Panel::Viewport:
             break; // drawn by EditorApp::DrawViewportPanel (owns the scene FBO)
+        case EditorPanels::Panel::Prefab:
+            break; // drawn by EditorApp::DrawPrefabEditorPanel (owns the prefab asset)
         case EditorPanels::Panel::PhysicsStatus:
             DrawPhysicsStatus(context, &open);
             break;

@@ -37,6 +37,20 @@ struct SubMesh {
     int  material = -1;     // index into Model::Materials(), or -1 for a default
 };
 
+// Complete object-level material replacement used when a scene object assigns
+// a .3dgmat to an imported model. Unlike `tint`, this replaces the model's
+// embedded import material rather than multiplying it.
+struct ModelMaterialOverride {
+    glm::vec3 diffuse{0.8f};
+    glm::vec3 specular{0.2f};
+    glm::vec3 emissive{0.0f};
+    float shininess = 32.0f;
+    const Texture* diffuseMap = nullptr;
+    const Texture* normalMap = nullptr;
+    const Texture* specularMap = nullptr;
+    const Texture* emissiveMap = nullptr;
+};
+
 // A model loaded from disk via Assimp. Move-only: it owns GPU resources (the
 // sub-meshes' buffers and the textures). Mesh vertex format is
 // position3 / normal3 / uv2 / tangent3 (VertexLayout{3,3,2,3}).
@@ -86,6 +100,7 @@ private:
 // the diffuse map on every submesh (used to apply a .3dgmat to an attachment).
 void DrawModel(const Model& model, Shader& shader,
                const glm::vec3& tint = glm::vec3(1.0f),
-               const Texture* albedoOverride = nullptr);
+               const Texture* albedoOverride = nullptr,
+               const ModelMaterialOverride* materialOverride = nullptr);
 
 } // namespace engine

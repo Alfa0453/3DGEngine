@@ -189,12 +189,15 @@ int main() {
             << "\nASSET_DEPS 0\n";
     }
     Check(references.SynchronizeAuthoredAssets(root.string(), &error)
+          && references.Find(nativeHeader.id)
+          && references.Find(nativeHeader.id)->type
+                 == engine::AssetType::StaticMesh
           && references.Find(clipId)
           && references.Find(clipId)->type
                  == engine::AssetType::AnimationClip
           && references.Find(clipId)->dependencies.size() == 1
           && references.Find(clipId)->dependencies[0] == referencedMesh.id,
-          "Content synchronization registers authored asset IDs and dependencies");
+          "Content synchronization registers native and authored asset IDs and dependencies");
     Check(references.Find(hudId)
               && references.Find(hudId)->type == engine::AssetType::Hud
           && references.Find(behaviorId)

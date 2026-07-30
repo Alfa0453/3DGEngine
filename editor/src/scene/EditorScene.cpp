@@ -395,7 +395,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         return false;
     }
 
-    out << "3DGEditorScene 106 " << m_assetId.ToString() << '\n';
+    out << "3DGEditorScene 107 " << m_assetId.ToString() << '\n';
     out << "environment "
         << m_environment.timeOfDay << ' '
         << m_environment.skyLightIntensity << ' '
@@ -675,6 +675,9 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         out << StoredPath(object.characterAssetPath) << ' '
             << (object.characterAssetId.Valid()
                 ? object.characterAssetId.ToString() : std::string("-")) << ' ';
+        out << StoredPath(object.prefabAssetPath) << ' '
+            << (object.prefabAssetId.Valid()
+                ? object.prefabAssetId.ToString() : std::string("-")) << ' ';
         out
             << object.linearVelocity.x << ' ' << object.linearVelocity.y << ' ' << object.linearVelocity.z << ' '
             << object.angularVelocityAxis.x << ' ' << object.angularVelocityAxis.y << ' ' << object.angularVelocityAxis.z << ' '
@@ -1142,7 +1145,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             return false;
         }
     }
-    if (magic != "3DGEditorScene" ||(version < 1 || version > 106)) {
+    if (magic != "3DGEditorScene" ||(version < 1 || version > 107)) {
         if (error) *error = "Scene file has an unknown format.";
         return false;
     }
@@ -1815,6 +1818,8 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         std::vector<ModelAttachment> modelAttachments;
         std::string characterAssetPath;
         engine::AssetHandle characterAssetId;
+        std::string prefabAssetPath;
+        engine::AssetHandle prefabAssetId;
         glm::vec3 linearVelocity{0.0f};
         glm::vec3 angularVelocityAxis{0.0f, 1.0f, 0.0f};
         float angularVelocityRadians = 0.0f;
@@ -2222,6 +2227,15 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                     in.setstate(std::ios::failbit);
             }
             if (characterAssetPath == "-") characterAssetPath.clear();
+        }
+        if (version >= 107) {
+            in >> std::quoted(prefabAssetPath);
+            std::string prefabId;
+            in >> prefabId;
+            if (prefabId != "-"
+                && !engine::AssetHandle::Parse(prefabId, &prefabAssetId))
+                in.setstate(std::ios::failbit);
+            if (prefabAssetPath == "-") prefabAssetPath.clear();
         }
         if (version >= 6) {
             in >> linearVelocity.x >> linearVelocity.y >> linearVelocity.z
@@ -2752,6 +2766,8 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         m_objects.back().modelAttachments = modelAttachments;
         m_objects.back().characterAssetPath = characterAssetPath;
         m_objects.back().characterAssetId = characterAssetId;
+        m_objects.back().prefabAssetPath = prefabAssetPath;
+        m_objects.back().prefabAssetId = prefabAssetId;
         m_objects.back().linearVelocityEnabled = linearVelocityEnabled != 0;
         m_objects.back().angularVelocityEnabled = angularVelocityEnabled != 0;
         m_objects.back().linearVelocity = linearVelocity;
@@ -3765,6 +3781,18 @@ bool EditorScene::SetSelectedCharacterAssetPath(
     Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
     selected.characterAssetPath = path;   // metadata; no undo snapshot needed
     selected.characterAssetId = id;
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedPrefabAssetPath(
+    const std::string& path, engine::AssetHandle id) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    selected.prefabAssetPath = path;   // metadata; no undo snapshot needed
+    selected.prefabAssetId = id;
     m_dirty = true;
     return true;
 }
@@ -5256,6 +5284,8 @@ bool EditorScene::DuplicateSelected(const engine::Mesh & cube, const engine::Mes
     m_objects.back().animationSources = selectedCopy.animationSources;
     m_objects.back().modelAttachments = selectedCopy.modelAttachments;
     m_objects.back().characterAssetPath = selectedCopy.characterAssetPath;
+    m_objects.back().prefabAssetPath = selectedCopy.prefabAssetPath;
+    m_objects.back().prefabAssetId = selectedCopy.prefabAssetId;
     m_objects.back().animationActionProfiles = selectedCopy.animationActionProfiles;
     m_objects.back().animationStates = selectedCopy.animationStates;
     m_objects.back().animationParameters = selectedCopy.animationParameters;

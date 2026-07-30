@@ -507,7 +507,14 @@ void EditorApp::OnInit()
                 vec3 ambient = base * uLightColor * 0.18;
                 vec3 diffuse = base * uLightColor * diffuseAmount;
                 vec3 specular = specularColor * uLightColor * specularAmount;
-                FragColor = vec4(ambient + diffuse + specular + emissiveColor, 1.0);
+                vec3 linearColor = max(
+                    ambient + diffuse + specular + emissiveColor, vec3(0.0));
+                // Imported models share the same linear material values as the
+                // PBR renderer. Convert to display space here as well; otherwise
+                // dark but valid materials appear almost black.
+                vec3 mapped = linearColor / (linearColor + vec3(1.0));
+                mapped = pow(mapped, vec3(1.0 / 2.2));
+                FragColor = vec4(mapped, 1.0);
             }
         )glsl"
     );
@@ -1464,6 +1471,7 @@ void EditorApp::DrawEditorOverlay()
     DrawCharacterEditorPanel();
     DrawClipEditorPanel();
     DrawGraphEditorPanel();
+    DrawPrefabEditorPanel();
     DrawViewportPanel();
     DrawDirtyScenePrompt();
     if (selectedRuntimeAudio != engine::AudioEngine::InvalidSource) {
@@ -1639,6 +1647,17 @@ void EditorApp::DrawEditorOverlay()
             m_graphEditor.QueueOpen(path);
             m_log.Info("Opening animation graph: " + path);
             break;
+        case EditorAssets::Type::Prefab: {
+            std::string prefabError;
+            if (m_prefabAsset.Load(path, &prefabError)) {
+                m_prefabPath = path;
+                m_panels.SetOpen(EditorPanels::Panel::Prefab, true);
+                m_log.Info("Opened prefab: " + path);
+            } else {
+                m_log.Error("Prefab load failed: " + prefabError);
+            }
+            break;
+        }
         case EditorAssets::Type::Model:
         case EditorAssets::Type::SkeletalModel:
             m_panels.SetOpen(EditorPanels::Panel::AnimationPreview, true);
@@ -2091,11 +2110,11 @@ void EditorApp::DrawViewportPanel() {
         m_sceneViewValid = false;
         return;
     }
-    bool open = true;
-
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
-    const bool visible = ImGui::Begin("Viewport", &open,
-                 ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    // No close button (nullptr) and no collapse arrow: the Viewport is always present.
+    const bool visible = ImGui::Begin("Viewport", nullptr,
+                 ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse
+                 | ImGuiWindowFlags_NoCollapse);
 
     if (visible) {
         // The default framebuffer is 4x MSAA (GLFW_SAMPLES=4). A multisample resolve blit
@@ -2149,7 +2168,6 @@ void EditorApp::DrawViewportPanel() {
 
     ImGui::End();
     ImGui::PopStyleVar();
-    m_panels.SetOpen(EditorPanels::Panel::Viewport, open);
 }
 
 bool EditorApp::RemapViewportMouse(float winX, float winY, float& outX, float& outY) {
@@ -4342,6 +4360,15 @@ void EditorApp::DropPayloadOnScene()
             return;
         }
         AddCharacterToScene(character, SceneDropPosition(), payload.path);
+    } else if (payload.typeName == "Prefab") {
+        PrefabAsset prefab;
+        std::string error;
+        if (!prefab.Load(payload.path, &error)) {
+            m_log.Error("Prefab drop failed: " + error);
+            m_dragDrop.Clear();
+            return;
+        }
+        AddPrefabToScene(prefab, SceneDropPosition(), payload.path);
     } else {
         m_log.Warning("Asset type cannot be dropped on the scene yet");
     }
@@ -5417,6 +5444,16 @@ void EditorApp::LoadProjectAssetRegistry() {
 
     if (std::filesystem::is_regular_file(registryPath, ec)
         && m_assetRegistry.Load(registryPath, &error)) {
+        // Reconcile both native binaries and authored assets before validation.
+        // This repairs older registries whose materials reference valid native
+        // textures that were copied or moved inside Content.
+        if (!m_assetRegistry.SynchronizeAuthoredAssets(
+                m_project.AssetRoot(), &error)
+            || !m_assetRegistry.Save(registryPath, &error)) {
+            m_log.Warning(
+                "Asset registry synchronization failed: " + error);
+            error.clear();
+        }
         m_log.Info("Loaded asset registry: "
                    + std::to_string(m_assetRegistry.Entries().size()) + " native asset(s)");
     } else {

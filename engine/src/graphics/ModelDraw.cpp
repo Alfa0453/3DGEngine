@@ -4,7 +4,8 @@
 namespace engine {
 
 void DrawModel(const Model& model, Shader& shader,
-               const glm::vec3& tint, const Texture* albedoOverride) {
+               const glm::vec3& tint, const Texture* albedoOverride,
+               const ModelMaterialOverride* materialOverride) {
     const auto& mats = model.Materials();
 
     // Sampler units are fixed for the lifetime of the shader's use here.
@@ -18,28 +19,53 @@ void DrawModel(const Model& model, Shader& shader,
         const Material def;
         const Material& m = valid ? mats[static_cast<std::size_t>(sm.material)] : def;
 
-        // A material override (from a .3dgmat) tints the base colour; with an albedo
-        // map it also replaces the diffuse (so uColor becomes a pure multiplier).
-        shader.SetVec3("uColor",      albedoOverride ? tint : (m.diffuse * tint));
-        shader.SetVec3("uSpecular",   m.specular);
-        shader.SetVec3("uEmissive",   m.emissive);
-        shader.SetFloat("uShininess", m.shininess);
+        // A scene material is authoritative for the complete imported model.
+        // Legacy attachment calls can still use the tint/albedo-only path.
+        shader.SetVec3("uColor", materialOverride
+            ? materialOverride->diffuse
+            : albedoOverride ? tint : (m.diffuse * tint));
+        shader.SetVec3("uSpecular", materialOverride
+            ? materialOverride->specular : m.specular);
+        shader.SetVec3("uEmissive", materialOverride
+            ? materialOverride->emissive : m.emissive);
+        shader.SetFloat("uShininess", materialOverride
+            ? materialOverride->shininess : m.shininess);
 
         auto bind = [&](int idx, int unit, const char* flag) {
             const bool has = idx >= 0;
             shader.SetInt(flag, has ? 1 : 0);
             if (has) model.Textures()[static_cast<std::size_t>(idx)]->Bind(static_cast<unsigned>(unit));
         };
-        if (albedoOverride) {
+        auto bindOverride = [&](const Texture* texture, int unit,
+                                const char* sampler, const char* flag) {
+            shader.SetInt(flag, texture ? 1 : 0);
+            if (texture) {
+                texture->Bind(static_cast<unsigned>(unit));
+                shader.SetInt(sampler, unit);
+            }
+        };
+        if (materialOverride) {
+            bindOverride(materialOverride->diffuseMap, 0,
+                         "uDiffuseTex", "uHasDiffuse");
+            bindOverride(materialOverride->normalMap, 1,
+                         "uNormalTex", "uHasNormal");
+            bindOverride(materialOverride->specularMap, 2,
+                         "uSpecularTex", "uHasSpecular");
+            bindOverride(materialOverride->emissiveMap, 3,
+                         "uEmissiveTex", "uHasEmissive");
+        } else if (albedoOverride) {
             albedoOverride->Bind(0);
             shader.SetInt("uDiffuseTex", 0);
             shader.SetInt("uHasDiffuse", 1);
+            bind(m.normalMap,   1, "uHasNormal");
+            bind(m.specularMap, 2, "uHasSpecular");
+            bind(m.emissiveMap, 3, "uHasEmissive");
         } else {
             bind(m.diffuseMap, 0, "uHasDiffuse");
+            bind(m.normalMap,   1, "uHasNormal");
+            bind(m.specularMap, 2, "uHasSpecular");
+            bind(m.emissiveMap, 3, "uHasEmissive");
         }
-        bind(m.normalMap,   1, "uHasNormal");
-        bind(m.specularMap, 2, "uHasSpecular");
-        bind(m.emissiveMap, 3, "uHasEmissive");
 
         sm.mesh.Draw();
     }
