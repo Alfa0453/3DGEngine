@@ -23,6 +23,14 @@ bool LaunchCompileAndRestart(const std::filesystem::path& projectRoot,
                              const std::string& configuration,
                              std::string* error = nullptr);
 
+// Synchronously builds a single CMake target (e.g. "player") and waits for it to finish.
+// Output goes to <projectRoot>/build/target_build.log. Used at cook time so the packaged
+// player has current scripts even though the iterate loop only rebuilds the editor.
+bool BuildTarget(const std::filesystem::path& projectRoot,
+                 const std::string& configuration,
+                 const std::string& target,
+                 std::string* error = nullptr);
+
 std::string ReadLastBuildLog(const std::filesystem::path& projectRoot);
 std::string ReadLastBuildStatus(const std::filesystem::path& projectRoot);
 

@@ -395,7 +395,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         return false;
     }
 
-    out << "3DGEditorScene 107 " << m_assetId.ToString() << '\n';
+    out << "3DGEditorScene 109 " << m_assetId.ToString() << '\n';
     out << "environment "
         << m_environment.timeOfDay << ' '
         << m_environment.skyLightIntensity << ' '
@@ -774,7 +774,10 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
             out << ' '
                 << StoredPath(field.name) << ' '
                 << static_cast<int>(field.type) << ' '
-                << StoredPath(field.value);
+                << StoredPath(field.value) << ' '
+                << field.minValue << ' ' << field.maxValue << ' '
+                << StoredPath(field.tooltip) << ' '
+                << StoredPath(field.group);
         }
         out << ' ' << object.additionalScripts.size();
         for (const ScriptBinding& script : object.additionalScripts) {
@@ -785,7 +788,10 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
             for (const ScriptField& field : script.fields) {
                 out << ' ' << StoredPath(field.name)
                     << ' ' << static_cast<int>(field.type)
-                    << ' ' << StoredPath(field.value);
+                    << ' ' << StoredPath(field.value)
+                    << ' ' << field.minValue << ' ' << field.maxValue
+                    << ' ' << StoredPath(field.tooltip)
+                    << ' ' << StoredPath(field.group);
             }
         }
         // NavAgent (scene version 37+).
@@ -1145,7 +1151,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             return false;
         }
     }
-    if (magic != "3DGEditorScene" ||(version < 1 || version > 107)) {
+    if (magic != "3DGEditorScene" ||(version < 1 || version > 109)) {
         if (error) *error = "Scene file has an unknown format.";
         return false;
     }
@@ -2414,14 +2420,14 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                     if (field.value == "-") {
                         field.value.clear();
                     }
-                    if (fieldType == static_cast<int>(ScriptField::Type::Int)) {
-                        field.type = ScriptField::Type::Int;
-                    } else if (fieldType == static_cast<int>(ScriptField::Type::Bool)) {
-                        field.type = ScriptField::Type::Bool;
-                    } else if (fieldType == static_cast<int>(ScriptField::Type::String)) {
-                        field.type = ScriptField::Type::String;
-                    } else {
-                        field.type = ScriptField::Type::Float;
+                    field.type = static_cast<ScriptField::Type>(std::clamp(fieldType, 0, 7));
+                    if (version >= 108) {
+                        in >> field.minValue >> field.maxValue >> std::quoted(field.tooltip);
+                        if (field.tooltip == "-") field.tooltip.clear();
+                    }
+                    if (version >= 109) {
+                        in >> std::quoted(field.group);
+                        if (field.group == "-") field.group.clear();
                     }
                     scriptFields.push_back(field);
                 }
@@ -2446,7 +2452,15 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                         if (field.name == "-") field.name.clear();
                         if (field.value == "-") field.value.clear();
                         field.type = static_cast<ScriptField::Type>(
-                            std::clamp(fieldType, 0, 3));
+                            std::clamp(fieldType, 0, 7));
+                        if (version >= 108) {
+                            in >> field.minValue >> field.maxValue >> std::quoted(field.tooltip);
+                            if (field.tooltip == "-") field.tooltip.clear();
+                        }
+                        if (version >= 109) {
+                            in >> std::quoted(field.group);
+                            if (field.group == "-") field.group.clear();
+                        }
                         script.fields.push_back(std::move(field));
                     }
                     additionalScripts.push_back(std::move(script));

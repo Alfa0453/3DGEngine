@@ -17,9 +17,14 @@
 #include <fstream>
 #include <iomanip>
 #include <sstream>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+#if defined(_WIN32)
+#include <excpt.h>   // __try/__except for isolating script hardware faults
+#endif
 
 namespace engine {
 namespace {
@@ -798,6 +803,32 @@ bool Script::GetFieldBool(const std::string& name, bool fallback) const {
     return fallback;
 }
 
+glm::vec3 Script::GetFieldVec3(const std::string& name, const glm::vec3& fallback) const {
+    const std::string value = GetFieldString(name);
+    if (value.empty()) return fallback;
+    glm::vec3 result = fallback;
+    const char* p = value.c_str();
+    char* end = nullptr;
+    result.x = std::strtof(p, &end); if (end == p) return fallback; p = end;
+    result.y = std::strtof(p, &end); if (end == p) return fallback; p = end;
+    result.z = std::strtof(p, &end); if (end == p) return fallback;
+    return result;
+}
+
+glm::vec3 Script::GetFieldColor(const std::string& name, const glm::vec3& fallback) const {
+    return GetFieldVec3(name, fallback);   // a colour is stored just like a vec3 (r g b)
+}
+
+ecs::Entity Script::GetFieldEntity(const std::string& name) const {
+    const std::string value = GetFieldString(name);
+    return value.empty() ? ecs::kNull : FindObject(value);
+}
+
+std::string Script::GetFieldAsset(const std::string& name, const std::string& fallback) const {
+    const std::string value = GetFieldString(name);
+    return value.empty() ? fallback : value;
+}
+
 ScriptRegistry& ScriptRegistry::Instance() {
     static ScriptRegistry registry;
     return registry;
@@ -821,21 +852,73 @@ std::unique_ptr<Script> ScriptRegistry::Create(const std::string& className) con
 
 namespace {
 
-// Run a script callback, isolating exceptions so one misbehaving script cannot
-// take down the whole update loop. A throwing script is disabled and logged once.
+std::function<void(const std::string&)>& ScriptErrorSink() {
+    static std::function<void(const std::string&)> sink;
+    return sink;
+}
+
+void ReportScriptError(const std::string& message) {
+    std::fprintf(stderr, "[Script] %s\n", message.c_str());
+    if (const auto& sink = ScriptErrorSink()) sink(message);
+}
+
+#if defined(_WIN32)
+// Runs invoke(userData) under Structured Exception Handling: a hardware fault (access
+// violation from a null/out-of-bounds access, divide-by-zero, etc.) is caught here, while
+// a C++ exception is declined (CONTINUE_SEARCH) so the caller's C++ handler still receives
+// it with its message. Holds NO C++ objects that need unwinding (MSVC C2712).
+constexpr unsigned long kCppExceptionCode = 0xE06D7363u;
+bool RunUnderSeh(void (*invoke)(void*), void* userData, unsigned long* faultCode) {
+    __try {
+        invoke(userData);
+        return true;
+    } __except (GetExceptionCode() == kCppExceptionCode
+                    ? EXCEPTION_CONTINUE_SEARCH : EXCEPTION_EXECUTE_HANDLER) {
+        *faultCode = GetExceptionCode();
+        return false;
+    }
+}
+#endif
+
+// Run a script callback, isolating failures so one misbehaving script cannot take down
+// the update loop. Thrown C++ exceptions AND (on Windows) hardware faults disable the
+// script and are logged once.
 template <class Fn>
 void RunGuarded(NativeScriptSlot& script, Fn&& fn) {
+#if defined(_WIN32)
+    using FnType = std::remove_reference_t<Fn>;
+    FnType* fnPtr = &fn;
+    unsigned long faultCode = 0;
+    bool ok = true;
+    try {
+        ok = RunUnderSeh([](void* p) { (*static_cast<FnType*>(p))(); }, fnPtr, &faultCode);
+    } catch (const std::exception& e) {
+        script.enabled = false;
+        ReportScriptError("'" + script.className + "' disabled after exception: " + e.what());
+        return;
+    } catch (...) {
+        script.enabled = false;
+        ReportScriptError("'" + script.className + "' disabled after unknown exception");
+        return;
+    }
+    if (!ok) {
+        script.enabled = false;
+        char code[16];
+        std::snprintf(code, sizeof(code), "0x%08lX", faultCode);
+        ReportScriptError("'" + script.className + "' disabled after a hardware fault ("
+                          + code + ") — likely a null or out-of-bounds access");
+    }
+#else
     try {
         fn();
     } catch (const std::exception& e) {
         script.enabled = false;
-        std::fprintf(stderr, "[Script] '%s' disabled after exception: %s\n",
-                     script.className.c_str(), e.what());
+        ReportScriptError("'" + script.className + "' disabled after exception: " + e.what());
     } catch (...) {
         script.enabled = false;
-        std::fprintf(stderr, "[Script] '%s' disabled after unknown exception\n",
-                     script.className.c_str());
+        ReportScriptError("'" + script.className + "' disabled after unknown exception");
     }
+#endif
 }
 
 // Ensure the script has a live instance and has run OnCreate, and REFRESH its
@@ -960,6 +1043,10 @@ std::string ConsumeScriptSceneLoadRequest() {
     std::string request = std::move(g_scriptSceneLoadRequest);
     g_scriptSceneLoadRequest.clear();
     return request;
+}
+
+void SetScriptErrorHandler(std::function<void(const std::string&)> handler) {
+    ScriptErrorSink() = std::move(handler);
 }
 
 } // namespace engine

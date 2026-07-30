@@ -58,12 +58,22 @@ struct ScriptField {
         Float = 0,
         Int = 1,
         Bool = 2,
-        String = 3
+        String = 3,
+        Vec3 = 4,     // "x y z"      -> GetFieldVec3
+        Color = 5,    // "r g b"      -> GetFieldColor
+        Entity = 6,   // object name  -> GetFieldEntity
+        Asset = 7     // asset path   -> GetFieldAsset
     };
 
     std::string name;
     Type type = Type::Float;
     std::string value = "0";
+    // Editor-only inspector metadata (ignored by the runtime): a Float/Int slider range
+    // (min >= max means no slider, plain drag/input) and a hover tooltip.
+    float minValue = 0.0f;
+    float maxValue = 0.0f;
+    std::string tooltip;
+    std::string group;   // editor-only: inspector collapsible-section name ("" = ungrouped)
 };
 
 class Script {
@@ -241,6 +251,10 @@ protected:
     float GetFieldFloat(const std::string& name, float fallback = 0.0f) const;
     int GetFieldInt(const std::string& name, int fallback = 0) const;
     bool GetFieldBool(const std::string& name, bool fallback = false) const;
+    glm::vec3 GetFieldVec3(const std::string& name, const glm::vec3& fallback = glm::vec3(0.0f)) const;
+    glm::vec3 GetFieldColor(const std::string& name, const glm::vec3& fallback = glm::vec3(1.0f)) const;
+    ecs::Entity GetFieldEntity(const std::string& name) const;   // resolves the named object
+    std::string GetFieldAsset(const std::string& name, const std::string& fallback = {}) const;
 
     template <class T>
     T* TryGet() {
@@ -517,6 +531,11 @@ void FixedUpdateScripts(ecs::Registry& registry, float dt, const ScriptInputStat
 // Calls OnDestroy() on every live script and releases the instances. Call when
 // leaving Play mode or unloading the scene so scripts can clean up.
 void ShutdownScripts(ecs::Registry& registry);
+
+// Optional sink for script errors (a script that threw and was disabled). The editor
+// wires this to its console so failures are visible instead of only hitting stderr.
+// Pass nullptr to clear. Not thread-safe; set it once during startup.
+void SetScriptErrorHandler(std::function<void(const std::string&)> handler);
 
 // Scene requests are queued by scripts and consumed by the runtime host after the
 // current script update, avoiding registry destruction from inside a callback.

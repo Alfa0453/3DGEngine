@@ -22,9 +22,12 @@ bool RunBuild(const std::filesystem::path& root, const std::wstring& configurati
         FILE_ATTRIBUTE_NORMAL, nullptr);
     if (log == INVALID_HANDLE_VALUE) return false;
 
+    // Fast iterate loop: build ONLY the editor, in parallel across all cores (/m). The
+    // standalone player is (re)built at cook/package time (EditorApp::CookProject), so a
+    // routine script edit no longer pays a second executable link here.
     std::wstring command = L"cmake --build " + Quote(root / "build")
         + L" --config \"" + configuration
-        + L"\" --target 3DGEditor player -- /m:1";
+        + L"\" --target 3DGEditor -- /m";
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);
     startup.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;

@@ -284,6 +284,12 @@ void EditorApp::OnInit()
     m_renderer.Init();
     m_renderer.SetClearColor({0.08f, 0.09f, 0.11f, 1.0f});
 
+    // Surface script crashes (a script that threw and was auto-disabled) in the Console
+    // instead of only stderr, so failures are visible while iterating.
+    engine::SetScriptErrorHandler([this](const std::string& message) {
+        m_log.Error("Script: " + message);
+    });
+
     // Push the far clip plane out so objects don't vanish when the camera zooms out
     // (the engine default is 100). Kept editor-local so demo shadow tuning is untouched.
     m_camera.nearPlane = 0.1f;
@@ -843,6 +849,7 @@ void EditorApp::OnRender()
 
 void EditorApp::OnShutdown()
 {
+    engine::SetScriptErrorHandler(nullptr);   // drop the 'this'-capturing sink
     m_imgui.Shutdown();
     if (m_hasProjectFile) {
         m_project.Save(m_projectConfig);
@@ -1395,7 +1402,7 @@ void EditorApp::DrawEditorOverlay()
                 std::string error;
                 if (EditorScriptTools::LaunchCompileAndRestart(
                         projectRoot, "Debug", &error)) {
-                    m_log.Info("Script compiler started; rebuilding editor and player");
+                    m_log.Info("Script compiler started; rebuilding editor (player rebuilds at cook time)");
                     GetWindow().SetShouldClose(true);
                 } else {
                     m_log.Error("Script compiler: " + error);
@@ -5762,6 +5769,21 @@ void EditorApp::CookProject()
     // Capture any newly saved authored asset dependencies before walking the
     // graph. Refresh is non-destructive and leaves imported native entries intact.
     m_content.Refresh(m_assets, m_project, m_log);
+
+    // The script iterate loop now rebuilds only the editor, so bring the standalone player
+    // up to date here (synchronously) to guarantee the packaged build ships current
+    // scripts. A build failure is non-fatal to cooking but is surfaced to the user.
+    std::error_code ec;
+    const std::filesystem::path projectRoot =
+        std::filesystem::absolute(m_project.AssetRoot(), ec).parent_path();
+    std::string buildError;
+    m_log.Info("Building standalone player with current scripts...");
+    if (EditorScriptTools::BuildTarget(projectRoot, "Debug", "player", &buildError)) {
+        m_log.Info("Player build complete");
+    } else {
+        m_log.Warning("Player build failed; packaged scripts may be stale: " + buildError);
+    }
+
     m_runtime.CookProject(m_scene, m_project, m_assetRegistry, m_log);
 }
 

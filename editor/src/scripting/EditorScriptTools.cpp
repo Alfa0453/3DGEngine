@@ -123,6 +123,57 @@ bool LaunchCompileAndRestart(const std::filesystem::path& projectRoot,
 #endif
 }
 
+bool BuildTarget(const std::filesystem::path& projectRoot,
+                 const std::string& configuration,
+                 const std::string& target,
+                 std::string* error) {
+#if defined(_WIN32)
+    const std::filesystem::path buildDir = projectRoot / "build";
+    const std::filesystem::path logPath = buildDir / "target_build.log";
+    HANDLE log = CreateFileW(logPath.wstring().c_str(), GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, CREATE_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL, nullptr);
+
+    std::wstring command = L"cmake --build \"" + buildDir.wstring()
+        + L"\" --config \"" + std::wstring(configuration.begin(), configuration.end())
+        + L"\" --target " + std::wstring(target.begin(), target.end()) + L" -- /m";
+
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    if (log != INVALID_HANDLE_VALUE) {
+        startup.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+        startup.wShowWindow = SW_HIDE;
+        startup.hStdOutput = log;
+        startup.hStdError = log;
+        startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    }
+    PROCESS_INFORMATION process{};
+    std::wstring mutableCommand = command;
+    const BOOL launched = CreateProcessW(nullptr, mutableCommand.data(), nullptr, nullptr,
+        TRUE, CREATE_NO_WINDOW, nullptr, projectRoot.wstring().c_str(), &startup, &process);
+    if (log != INVALID_HANDLE_VALUE) CloseHandle(log);
+    if (!launched) {
+        if (error) *error = "Could not start cmake to build target: " + target;
+        return false;
+    }
+    WaitForSingleObject(process.hProcess, INFINITE);
+    DWORD exitCode = 1;
+    GetExitCodeProcess(process.hProcess, &exitCode);
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    if (exitCode != 0) {
+        if (error) *error = "cmake build of '" + target + "' failed (exit "
+            + std::to_string(exitCode) + "); see build/target_build.log";
+        return false;
+    }
+    return true;
+#else
+    (void)projectRoot; (void)configuration; (void)target;
+    if (error) *error = "Building targets is not implemented on this platform.";
+    return false;
+#endif
+}
+
 std::string ReadLastBuildLog(const std::filesystem::path& projectRoot) {
     return ReadFile(projectRoot / "build" / "script_compile.log");
 }

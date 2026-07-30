@@ -549,6 +549,10 @@ const char* ScriptFieldTypeName(EditorScene::ScriptField::Type type) {
     case EditorScene::ScriptField::Type::Int: return "Int";
     case EditorScene::ScriptField::Type::Bool: return "Bool";
     case EditorScene::ScriptField::Type::String: return "String";
+    case EditorScene::ScriptField::Type::Vec3: return "Vec3";
+    case EditorScene::ScriptField::Type::Color: return "Color";
+    case EditorScene::ScriptField::Type::Entity: return "Entity";
+    case EditorScene::ScriptField::Type::Asset: return "Asset";
     }
     return "Float";
 }
@@ -558,6 +562,10 @@ EditorScene::ScriptField::Type ScriptFieldTypeFromIndex(int index) {
     case 1: return EditorScene::ScriptField::Type::Int;
     case 2: return EditorScene::ScriptField::Type::Bool;
     case 3: return EditorScene::ScriptField::Type::String;
+    case 4: return EditorScene::ScriptField::Type::Vec3;
+    case 5: return EditorScene::ScriptField::Type::Color;
+    case 6: return EditorScene::ScriptField::Type::Entity;
+    case 7: return EditorScene::ScriptField::Type::Asset;
     default: return EditorScene::ScriptField::Type::Float;
     }
 }
@@ -568,8 +576,55 @@ int ScriptFieldTypeIndex(EditorScene::ScriptField::Type type) {
     case EditorScene::ScriptField::Type::Int: return 1;
     case EditorScene::ScriptField::Type::Bool: return 2;
     case EditorScene::ScriptField::Type::String: return 3;
+    case EditorScene::ScriptField::Type::Vec3: return 4;
+    case EditorScene::ScriptField::Type::Color: return 5;
+    case EditorScene::ScriptField::Type::Entity: return 6;
+    case EditorScene::ScriptField::Type::Asset: return 7;
     }
     return 0;
+}
+
+// Auto-detect a script's fields by scanning its source for GetFieldXxx("Name", ...) calls.
+// The field name is the first string-literal argument; the type comes from the accessor.
+std::vector<EditorScene::ScriptField> DetectScriptFields(const std::string& source) {
+    using FT = EditorScene::ScriptField::Type;
+    struct Accessor { const char* call; FT type; const char* defaultValue; };
+    static const Accessor accessors[] = {
+        {"GetFieldFloat",  FT::Float,  "0"},
+        {"GetFieldInt",    FT::Int,    "0"},
+        {"GetFieldBool",   FT::Bool,   "0"},
+        {"GetFieldString", FT::String, "-"},
+        {"GetFieldVec3",   FT::Vec3,   "0 0 0"},
+        {"GetFieldColor",  FT::Color,  "1 1 1"},
+        {"GetFieldEntity", FT::Entity, "-"},
+        {"GetFieldAsset",  FT::Asset,  "-"},
+    };
+    std::vector<EditorScene::ScriptField> fields;
+    const auto seen = [&](const std::string& name) {
+        return std::any_of(fields.begin(), fields.end(),
+            [&](const EditorScene::ScriptField& f) { return f.name == name; });
+    };
+    for (const Accessor& accessor : accessors) {
+        const std::string call = accessor.call;
+        for (std::size_t pos = 0; (pos = source.find(call, pos)) != std::string::npos; ) {
+            pos += call.size();
+            const std::size_t open = source.find('(', pos);
+            if (open == std::string::npos) break;
+            const std::size_t nameStart = source.find('"', open);
+            if (nameStart == std::string::npos) break;
+            const std::size_t nameEnd = source.find('"', nameStart + 1);
+            if (nameEnd == std::string::npos) break;
+            const std::string name = source.substr(nameStart + 1, nameEnd - nameStart - 1);
+            pos = nameEnd + 1;
+            if (name.empty() || seen(name)) continue;
+            EditorScene::ScriptField field;
+            field.name = name;
+            field.type = accessor.type;
+            field.value = accessor.defaultValue;
+            fields.push_back(std::move(field));
+        }
+    }
+    return fields;
 }
 
 enum class ScriptTemplate {
@@ -5435,8 +5490,51 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                 context.log->Warning("Script field add failed: selected object is locked");
             }
         }
+        ImGui::SameLine();
+        if (ImGui::Button("Detect Fields from Source")) {
+            if (selected->scriptPath.empty()) {
+                if (context.log) context.log->Warning("Attach or create a script first, then detect fields");
+            } else {
+                std::string sourceError;
+                if (!LoadScriptSource(selected->scriptPath, &sourceError)) {
+                    if (context.log) context.log->Error("Detect fields failed: " + sourceError);
+                } else {
+                    const std::vector<EditorScene::ScriptField> detected =
+                        DetectScriptFields(g_scriptSourceBuffer.data());
+                    std::vector<EditorScene::ScriptField> merged = selected->scriptFields;
+                    int added = 0;
+                    for (const EditorScene::ScriptField& d : detected) {
+                        const bool exists = std::any_of(merged.begin(), merged.end(),
+                            [&](const EditorScene::ScriptField& f) { return f.name == d.name; });
+                        if (!exists) { merged.push_back(d); ++added; }
+                    }
+                    if (added > 0) context.scene->SetSelectedScriptFields(merged);
+                    if (context.log) context.log->Info("Detected "
+                        + std::to_string(detected.size()) + " field(s) from source; added "
+                        + std::to_string(added) + " new");
+                }
+            }
+        }
 
-        for (std::size_t i = 0; i < selected->scriptFields.size(); ++i) {
+        // Group fields under collapsible headers by their (editor-only) group name; the
+        // ungrouped set ("") renders first with no header.
+        std::vector<std::string> scriptFieldGroups;
+        for (const EditorScene::ScriptField& groupField : selected->scriptFields) {
+            if (std::find(scriptFieldGroups.begin(), scriptFieldGroups.end(), groupField.group)
+                == scriptFieldGroups.end()) {
+                scriptFieldGroups.push_back(groupField.group);
+            }
+        }
+        bool scriptFieldRemoved = false;
+        for (const std::string& scriptFieldGroup : scriptFieldGroups) {
+            if (scriptFieldRemoved) break;
+            if (!scriptFieldGroup.empty()
+                && !ImGui::CollapsingHeader((scriptFieldGroup + "##scriptfieldgroup").c_str(),
+                                            ImGuiTreeNodeFlags_DefaultOpen)) {
+                continue;
+            }
+            for (std::size_t i = 0; i < selected->scriptFields.size(); ++i) {
+                if (selected->scriptFields[i].group != scriptFieldGroup) continue;
             const EditorScene::ScriptField& sourceField = selected->scriptFields[i];
             EditorScene::ScriptField field = sourceField;
             ImGui::PushID(static_cast<int>(i));
@@ -5454,8 +5552,9 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             }
 
             int typeIndex = ScriptFieldTypeIndex(field.type);
-            const char* fieldTypes[] = {"Float", "Int", "Bool", "String"};
-            if (ImGui::Combo("Type", &typeIndex, fieldTypes, 4)) {
+            const char* fieldTypes[] = {"Float", "Int", "Bool", "String",
+                                        "Vec3", "Color", "Entity", "Asset"};
+            if (ImGui::Combo("Type", &typeIndex, fieldTypes, IM_ARRAYSIZE(fieldTypes))) {
                 field.type = ScriptFieldTypeFromIndex(typeIndex);
                 if (field.type == EditorScene::ScriptField::Type::Bool
                     && field.value != "0"
@@ -5465,18 +5564,93 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                 changed = true;
             }
 
-            if (field.type == EditorScene::ScriptField::Type::Bool) {
+            using FieldType = EditorScene::ScriptField::Type;
+            if (field.type == FieldType::Bool) {
                 bool value = field.value == "1" || field.value == "true" || field.value == "True";
                 if (ImGui::Checkbox("Value", &value)) {
                     field.value = value ? "1" : "0";
                     changed = true;
                 }
+            } else if (field.type == FieldType::Vec3 || field.type == FieldType::Color) {
+                float v[3] = {0.0f, 0.0f, 0.0f};
+                std::sscanf(field.value.c_str(), "%f %f %f", &v[0], &v[1], &v[2]);
+                const bool edited = field.type == FieldType::Color
+                    ? ImGui::ColorEdit3("Value", v)
+                    : ImGui::DragFloat3("Value", v, 0.05f);
+                if (edited) {
+                    std::array<char, 96> out{};
+                    std::snprintf(out.data(), out.size(), "%g %g %g", v[0], v[1], v[2]);
+                    field.value = out.data();
+                    changed = true;
+                }
+            } else if (field.type == FieldType::Entity) {
+                const char* preview = field.value.empty() ? "None" : field.value.c_str();
+                if (ImGui::BeginCombo("Value", preview)) {
+                    if (ImGui::Selectable("None", field.value.empty())) {
+                        field.value.clear();
+                        changed = true;
+                    }
+                    for (const EditorScene::Object& object : context.scene->Objects()) {
+                        if (ImGui::Selectable(object.name.c_str(), object.name == field.value)) {
+                            field.value = object.name;
+                            changed = true;
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+            } else if ((field.type == FieldType::Float || field.type == FieldType::Int)
+                       && field.maxValue > field.minValue) {
+                // A range was set, so present a bounded slider instead of a free input.
+                if (field.type == FieldType::Float) {
+                    float v = 0.0f;
+                    std::sscanf(field.value.c_str(), "%f", &v);
+                    if (ImGui::SliderFloat("Value", &v, field.minValue, field.maxValue)) {
+                        std::array<char, 64> out{};
+                        std::snprintf(out.data(), out.size(), "%g", v);
+                        field.value = out.data();
+                        changed = true;
+                    }
+                } else {
+                    int v = 0;
+                    std::sscanf(field.value.c_str(), "%d", &v);
+                    if (ImGui::SliderInt("Value", &v,
+                            static_cast<int>(field.minValue), static_cast<int>(field.maxValue))) {
+                        field.value = std::to_string(v);
+                        changed = true;
+                    }
+                }
             } else if (ImGui::InputText("Value", valueBuffer.data(), valueBuffer.size())) {
+                // Float / Int / String / Asset are edited as text (Asset holds a path).
                 field.value = valueBuffer.data();
                 if (field.value.empty()) {
-                    field.value = field.type == EditorScene::ScriptField::Type::String ? "-" : "0";
+                    field.value = (field.type == FieldType::String
+                                   || field.type == FieldType::Asset) ? "-" : "0";
                 }
                 changed = true;
+            }
+            if (!field.tooltip.empty() && ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("%s", field.tooltip.c_str());
+            }
+
+            if (ImGui::TreeNode("Field settings")) {
+                std::array<char, 64> groupBuffer{};
+                std::snprintf(groupBuffer.data(), groupBuffer.size(), "%s", field.group.c_str());
+                if (ImGui::InputText("Group", groupBuffer.data(), groupBuffer.size())) {
+                    field.group = groupBuffer.data();
+                    changed = true;
+                }
+                if (field.type == FieldType::Float || field.type == FieldType::Int) {
+                    if (ImGui::DragFloat("Min", &field.minValue, 0.1f)) changed = true;
+                    if (ImGui::DragFloat("Max", &field.maxValue, 0.1f)) changed = true;
+                    ImGui::TextDisabled("Set Max > Min to show a slider.");
+                }
+                std::array<char, 160> tipBuffer{};
+                std::snprintf(tipBuffer.data(), tipBuffer.size(), "%s", field.tooltip.c_str());
+                if (ImGui::InputText("Tooltip", tipBuffer.data(), tipBuffer.size())) {
+                    field.tooltip = tipBuffer.data();
+                    changed = true;
+                }
+                ImGui::TreePop();
             }
 
             if (changed) {
@@ -5486,9 +5660,11 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             if (ImGui::Button("Remove Field")) {
                 context.scene->RemoveSelectedScriptField(i);
                 ImGui::PopID();
+                scriptFieldRemoved = true;
                 break;
             }
             ImGui::PopID();
+            }
         }
 
         if (selected->colliderEnabled && selected->collider.isTrigger) {
@@ -6689,9 +6865,107 @@ void DrawStandaloneScriptEditor(EditorDockspace::Context& context) {
     ImGui::End();
 }
 
+struct CompileDiagnostic {
+    bool error = true;
+    std::string file;
+    int line = 0;
+    std::string message;   // e.g. "error C2065: 'foo': undeclared identifier"
+};
+
+// Parse MSVC/MSBuild output into structured diagnostics: lines of the form
+// "path(line): error C####: msg" (or "warning", "fatal error"), plus file-less
+// linker/tool errors ("LINK : fatal error LNK1120: ...").
+std::vector<CompileDiagnostic> ParseCompileDiagnostics(const std::string& log) {
+    std::vector<CompileDiagnostic> diagnostics;
+    std::size_t start = 0;
+    while (start < log.size()) {
+        std::size_t end = log.find('\n', start);
+        if (end == std::string::npos) end = log.size();
+        std::string text = log.substr(start, end - start);
+        start = end + 1;
+        if (!text.empty() && text.back() == '\r') text.pop_back();
+
+        const std::size_t errPos = text.find(": error ");
+        const std::size_t fatalPos = text.find(": fatal error ");
+        const std::size_t warnPos = text.find(": warning ");
+        std::size_t sevPos = std::string::npos;
+        bool isError = true;
+        auto consider = [&](std::size_t pos, bool err) {
+            if (pos != std::string::npos && (sevPos == std::string::npos || pos < sevPos)) {
+                sevPos = pos;
+                isError = err;
+            }
+        };
+        consider(errPos, true);
+        consider(fatalPos, true);
+        consider(warnPos, false);
+        if (sevPos == std::string::npos) continue;
+
+        CompileDiagnostic diagnostic;
+        diagnostic.error = isError;
+        diagnostic.message = text.substr(sevPos + 2);   // skip ": "
+
+        std::string before = text.substr(0, sevPos);
+        const std::size_t open = before.rfind('(');
+        const std::size_t close = before.rfind(')');
+        if (open != std::string::npos && close != std::string::npos && close > open) {
+            diagnostic.file = before.substr(0, open);
+            std::sscanf(before.substr(open + 1, close - open - 1).c_str(), "%d", &diagnostic.line);
+        } else {
+            diagnostic.file = before;   // file-less (e.g. "LINK")
+        }
+        while (!diagnostic.file.empty()
+               && (diagnostic.file.back() == ' ' || diagnostic.file.back() == '\t')) {
+            diagnostic.file.pop_back();
+        }
+        diagnostics.push_back(std::move(diagnostic));
+    }
+    return diagnostics;
+}
+
 void DrawScriptBuildLog() {
     if (!g_scriptBuildLogOpen) return;
     if (ImGui::Begin("Script Compiler Output", &g_scriptBuildLogOpen)) {
+        const std::vector<CompileDiagnostic> diagnostics =
+            ParseCompileDiagnostics(g_scriptBuildLog);
+        int errors = 0, warnings = 0;
+        for (const CompileDiagnostic& d : diagnostics) (d.error ? errors : warnings) += 1;
+
+        if (diagnostics.empty()) {
+            ImGui::TextDisabled("No errors or warnings parsed from the last build.");
+        } else {
+            ImGui::Text("%d error(s), %d warning(s) - click one to open its file",
+                        errors, warnings);
+            ImGui::BeginChild("##scriptdiagnostics", ImVec2(0.0f, 180.0f), true);
+            for (std::size_t i = 0; i < diagnostics.size(); ++i) {
+                const CompileDiagnostic& d = diagnostics[i];
+                ImGui::PushID(static_cast<int>(i));
+                ImGui::PushStyleColor(ImGuiCol_Text, d.error
+                    ? ImVec4(1.0f, 0.45f, 0.40f, 1.0f)
+                    : ImVec4(1.0f, 0.80f, 0.35f, 1.0f));
+                std::string label = d.file.empty()
+                    ? std::string("(build)")
+                    : std::filesystem::path(d.file).filename().string();
+                if (d.line > 0) label += "(" + std::to_string(d.line) + ")";
+                label += ": " + d.message;
+                const bool clicked = ImGui::Selectable(label.c_str());
+                ImGui::PopStyleColor();
+                if (!d.file.empty() && ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("%s", d.file.c_str());
+                }
+                if (clicked && !d.file.empty()) {
+                    std::string sourceError;
+                    if (LoadScriptSource(d.file, &sourceError)) {
+                        g_scriptEditorWindowOpen = true;
+                    }
+                }
+                ImGui::PopID();
+            }
+            ImGui::EndChild();
+        }
+
+        ImGui::Separator();
+        ImGui::TextDisabled("Raw output");
         ImGui::InputTextMultiline("##ScriptBuildLog", g_scriptBuildLog.data(),
             g_scriptBuildLog.size() + 1, ImVec2(-1.0f, -1.0f),
             ImGuiInputTextFlags_ReadOnly);
