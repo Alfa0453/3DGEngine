@@ -27,12 +27,6 @@ void EditorTransformController::UpdateKeyboardShortcuts(engine::Window& window,
         if (window.IsKeyPressed(GLFW_KEY_RIGHT)) scene.MoveSelected(glm::vec3(objectSpeed, 0.0f, 0.0f));
         if (window.IsKeyPressed(GLFW_KEY_UP)) scene.MoveSelected(glm::vec3(0.0f, 0.0f, -objectSpeed));
         if (window.IsKeyPressed(GLFW_KEY_DOWN)) scene.MoveSelected(glm::vec3(0.0f, 0.0f, objectSpeed));
-        if (window.IsKeyPressed(GLFW_KEY_A)) scene.MoveSelected(glm::vec3(-objectSpeed, 0.0f, 0.0f));
-        if (window.IsKeyPressed(GLFW_KEY_D)) scene.MoveSelected(glm::vec3(objectSpeed, 0.0f, 0.0f));
-        if (window.IsKeyPressed(GLFW_KEY_W)) scene.MoveSelected(glm::vec3(0.0f, 0.0f, -objectSpeed));
-        if (window.IsKeyPressed(GLFW_KEY_S)) scene.MoveSelected(glm::vec3(0.0f, 0.0f, objectSpeed));
-        if (window.IsKeyPressed(GLFW_KEY_Q)) scene.MoveSelected(glm::vec3(0.0f, objectSpeed, 0.0f));
-        if (window.IsKeyPressed(GLFW_KEY_E)) scene.MoveSelected(glm::vec3(0.0f, -objectSpeed, 0.0f));
         if (window.IsKeyPressed(GLFW_KEY_J)) scene.RotateSelectedYaw(-90.0f * dt);
         if (window.IsKeyPressed(GLFW_KEY_L)) scene.RotateSelectedYaw(90.0f * dt);
         if (window.IsKeyPressed(GLFW_KEY_EQUAL) || window.IsKeyPressed(GLFW_KEY_KP_ADD)) {
@@ -142,12 +136,6 @@ bool EditorTransformController::IsTransformEditActive(const engine::Window& wind
         || window.IsKeyPressed(GLFW_KEY_RIGHT)
         || window.IsKeyPressed(GLFW_KEY_UP)
         || window.IsKeyPressed(GLFW_KEY_DOWN)
-        || window.IsKeyPressed(GLFW_KEY_A)
-        || window.IsKeyPressed(GLFW_KEY_D)
-        || window.IsKeyPressed(GLFW_KEY_W)
-        || window.IsKeyPressed(GLFW_KEY_S)
-        || window.IsKeyPressed(GLFW_KEY_Q)
-        || window.IsKeyPressed(GLFW_KEY_E)
         || window.IsKeyPressed(GLFW_KEY_J)
         || window.IsKeyPressed(GLFW_KEY_L)
         || window.IsKeyPressed(GLFW_KEY_EQUAL)

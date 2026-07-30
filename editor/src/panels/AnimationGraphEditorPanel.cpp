@@ -45,6 +45,38 @@ std::string UniqueClipAlias(const std::vector<AnimationGraphClip>& clips,
     while (exists(desired)) desired = base + " " + std::to_string(suffix++);
     return desired;
 }
+// Like UniqueClipAlias, but ignore the clip at `skipIndex` (used when renaming a clip
+// in place so it doesn't collide with its own current name).
+std::string UniqueClipAliasExcept(const std::vector<AnimationGraphClip>& clips,
+                                  std::size_t skipIndex, std::string desired) {
+    if (desired.empty()) desired = "Clip";
+    const std::string base = desired;
+    int suffix = 2;
+    const auto exists = [&](const std::string& candidate) {
+        const std::string lowered = Lower(candidate);
+        for (std::size_t i = 0; i < clips.size(); ++i) {
+            if (i == skipIndex) continue;
+            if (Lower(clips[i].clipName) == lowered) return true;
+        }
+        return false;
+    };
+    while (exists(desired)) desired = base + " " + std::to_string(suffix++);
+    return desired;
+}
+// Propagate a clip rename to everything that references the clip by name, so existing
+// states / blend samples / actions keep pointing at the same animation.
+void RenameClipReferences(AnimationGraphAsset& asset,
+                          const std::string& oldName, const std::string& newName) {
+    if (oldName.empty() || oldName == newName) return;
+    for (EditorScene::AnimationStateNode& s : asset.states) {
+        if (s.clipName == oldName) s.clipName = newName;
+        if (s.blendClipName == oldName) s.blendClipName = newName;
+        for (EditorScene::AnimationStateNode::BlendSample& bs : s.blendSamples)
+            if (bs.clipName == oldName) bs.clipName = newName;
+    }
+    for (EditorScene::AnimationActionProfile& a : asset.actions)
+        if (a.clipName == oldName) a.clipName = newName;
+}
 }  // namespace
 
 AnimationGraphEditorPanel::~AnimationGraphEditorPanel() = default;
@@ -332,12 +364,27 @@ void AnimationGraphEditorPanel::Draw(const std::string& assetRoot, bool* open, b
     if (ImGui::InputText("Name", m_nameBuffer.data(), m_nameBuffer.size())) m_asset.name = m_nameBuffer.data();
 
     ImGui::SeparatorText("Clips (from .3dgclip)");
+    ImGui::TextDisabled("Rename clips (e.g. Idle / Walk / Run) — states, samples and the "
+                        "locomotion presets reference these names.");
     int removeClip = -1;
     for (std::size_t i = 0; i < m_asset.clips.size(); ++i) {
         auto& c = m_asset.clips[i];
         ImGui::PushID(4000 + static_cast<int>(i));
-        ImGui::BulletText("%s  [%s / %s]",
-            c.clipName.empty() ? "(clip)" : c.clipName.c_str(),
+        std::array<char, 64> cn{}; Copy(cn, c.clipName);
+        ImGui::SetNextItemWidth(170);
+        ImGui::InputText("##clipname", cn.data(), cn.size());
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
+            // Commit on focus-out/Enter: keep the alias unique and carry existing
+            // references along with the rename.
+            const std::string unique = UniqueClipAliasExcept(m_asset.clips, i, cn.data());
+            if (unique != c.clipName) {
+                RenameClipReferences(m_asset, c.clipName, unique);
+                c.clipName = unique;
+                m_controllerDirty = true;
+            }
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("[%s / %s]",
             std::filesystem::path(c.sourceFile).filename().string().c_str(),
             c.sourceClipName.empty() ? "first take" : c.sourceClipName.c_str());
         ImGui::SameLine();

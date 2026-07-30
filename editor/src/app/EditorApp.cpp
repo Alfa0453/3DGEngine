@@ -1,5 +1,6 @@
 #include "EditorApp.h"
 
+#include <glad/glad.h>
 #include <engine/ecs/Registry.h>
 #include <engine/ecs/RuntimeSystems.h>
 #include <engine/gameplay/GameplayComponents.h>
@@ -40,6 +41,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -1462,6 +1464,7 @@ void EditorApp::DrawEditorOverlay()
     DrawCharacterEditorPanel();
     DrawClipEditorPanel();
     DrawGraphEditorPanel();
+    DrawViewportPanel();
     DrawDirtyScenePrompt();
     if (selectedRuntimeAudio != engine::AudioEngine::InvalidSource) {
         if (dockspaceContext.runtimeAudioRestartRequested) m_audio.PlaySource(selectedRuntimeAudio, true);
@@ -2081,6 +2084,97 @@ void EditorApp::DrawGraphEditorPanel() {
         if (!m_assets.Refresh(m_project.AssetRoot(), &error)) m_log.Warning(error);
     }
     if (!message.empty()) m_log.Info(message);
+}
+
+void EditorApp::DrawViewportPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::Viewport)) {
+        m_sceneViewValid = false;
+        return;
+    }
+    bool open = true;
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+    const bool visible = ImGui::Begin("Viewport", &open,
+                 ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+
+    if (visible) {
+        // The default framebuffer is 4x MSAA (GLFW_SAMPLES=4). A multisample resolve blit
+        // is only legal when source and destination rectangles are the SAME size, so the
+        // FBO matches the window and we blit 1:1 with GL_NEAREST; ImGui::Image scales it.
+        const int srcW = std::max(1, GetWindow().Width());
+        const int srcH = std::max(1, GetWindow().Height());
+        if (!m_viewportFbo) {
+            m_viewportFbo.emplace(srcW, srcH, GL_RGBA8, false);
+        } else if (m_viewportFbo->Width() != srcW || m_viewportFbo->Height() != srcH) {
+            m_viewportFbo->Resize(srcW, srcH);
+        }
+
+        // The scene is already in the default framebuffer this frame (this runs during the
+        // ImGui build phase, before ImGui renders). Resolve it into the FBO.
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_viewportFbo->FboId());
+        glBlitFramebuffer(0, 0, srcW, srcH, 0, 0, srcW, srcH,
+                          GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+        // Fill the panel with no letterbox bars. The panel usually has a different aspect
+        // than the window render, so centre-crop the texture to the panel's aspect. With a
+        // fixed vertical FOV this matches a native panel-aspect render when the panel is
+        // narrower than the window (the common case), so there's no distortion.
+        const ImVec2 avail = ImGui::GetContentRegionAvail();
+        const float dispW = std::max(1.0f, avail.x);
+        const float dispH = std::max(1.0f, avail.y);
+        const float winAspect   = static_cast<float>(srcW) / static_cast<float>(srcH);
+        const float panelAspect = dispW / dispH;
+        float cropU = 1.0f, cropV = 1.0f;
+        if (panelAspect > winAspect) cropV = winAspect / panelAspect;   // crop top/bottom
+        else                         cropU = panelAspect / winAspect;   // crop left/right
+        const float u0 = (1.0f - cropU) * 0.5f, u1 = 1.0f - u0;
+        const float vLo = (1.0f - cropV) * 0.5f, vHi = 1.0f - vLo;
+        const ImVec2 imgMin = ImGui::GetCursorScreenPos();
+        ImGui::Image((ImTextureID)(std::intptr_t)m_viewportFbo->ColorTexture(),
+                     ImVec2(dispW, dispH), ImVec2(u0, vHi), ImVec2(u1, vLo));  // crop + flip V
+
+        // Record the image rect (main-window pixel space) so scene input routes here.
+        const ImGuiViewport* mainVp = ImGui::GetMainViewport();
+        m_sceneViewValid = (ImGui::GetWindowViewport() == mainVp);
+        m_sceneViewX = imgMin.x - mainVp->Pos.x;
+        m_sceneViewY = imgMin.y - mainVp->Pos.y;
+        m_sceneViewW = dispW;
+        m_sceneViewH = dispH;
+        m_sceneViewHovered = ImGui::IsItemHovered();
+    } else {
+        m_sceneViewValid = false;
+    }
+
+    ImGui::End();
+    ImGui::PopStyleVar();
+    m_panels.SetOpen(EditorPanels::Panel::Viewport, open);
+}
+
+bool EditorApp::RemapViewportMouse(float winX, float winY, float& outX, float& outY) {
+    if (!m_sceneViewValid || m_sceneViewW <= 0.0f || m_sceneViewH <= 0.0f) {
+        outX = winX;
+        outY = winY;
+        return false;
+    }
+    // The panel centre-crops the window render to its aspect, so map a panel-local point
+    // into the visible window-render pixel region (keeps picking in window space).
+    const engine::Window& window = GetWindow();
+    const float srcW = static_cast<float>(window.Width());
+    const float srcH = static_cast<float>(window.Height());
+    const float winAspect   = srcW / srcH;
+    const float panelAspect = m_sceneViewW / m_sceneViewH;
+    float cropU = 1.0f, cropV = 1.0f;
+    if (panelAspect > winAspect) cropV = winAspect / panelAspect;
+    else                         cropU = panelAspect / winAspect;
+    const float cropX0 = (1.0f - cropU) * 0.5f * srcW;
+    const float cropY0 = (1.0f - cropV) * 0.5f * srcH;
+    const float lx = (winX - m_sceneViewX) / m_sceneViewW;   // 0..1 across the panel
+    const float ly = (winY - m_sceneViewY) / m_sceneViewH;
+    outX = cropX0 + lx * cropU * srcW;
+    outY = cropY0 + ly * cropV * srcH;
+    return true;
 }
 
 void EditorApp::DrawPlayHud() {
@@ -3617,6 +3711,8 @@ void EditorApp::HandleMouseViewportSelection()
     const EditorMouseController::ButtonState left = m_mouse.UpdateViewportLeft(leftDown);
     const float x = static_cast<float>(cursorX);
     const float y = static_cast<float>(cursorY);
+    float px = x, py = y;                 // px,py = scene render-pixel space (panel-aware)
+    RemapViewportMouse(x, y, px, py);
 
     const bool activeLeftGizmo =  m_mouse.GizmoActiveFor(GLFW_MOUSE_BUTTON_LEFT);
     if (m_dragDrop.HasPayload() || (!IsViewportDropPosition(x, y) && !activeLeftGizmo)) {
@@ -3626,14 +3722,14 @@ void EditorApp::HandleMouseViewportSelection()
     const glm::mat4 viewProj = m_camera.ProjectionMatrix(window.AspectRatio()) * m_camera.ViewMatrix();
 
     if (left.pressed) {
-        if (m_viewport.PickGizmoHandle(m_gizmo, m_scene, x, y, viewProj,
+        if (m_viewport.PickGizmoHandle(m_gizmo, m_scene, px, py, viewProj,
                 window.Width(), window.Height(), m_camera)) {
-            m_mouse.BeginGizmoDrag(GLFW_MOUSE_BUTTON_LEFT, x, y);
+            m_mouse.BeginGizmoDrag(GLFW_MOUSE_BUTTON_LEFT, px, py);
             m_transformController.BeginGizmoDrag();
             m_scene.BeginTransformEdit();
             m_log.Info(std::string("Mouse gizmo: ") + m_gizmo.ModeName() + " " + m_gizmo.AxisName());
         } else {
-            const int picked = m_viewport.PickSceneObject(m_scene, m_editAssets, x, y, viewProj, window.Width(), window.Height());
+            const int picked = m_viewport.PickSceneObject(m_scene, m_editAssets, px, py, viewProj, window.Width(), window.Height());
             if (picked >= 0) {
                 m_scene.SelectIndex(picked);
                 if (const EditorScene::Object* selected = m_scene.SelectedObject()) {
@@ -3647,15 +3743,15 @@ void EditorApp::HandleMouseViewportSelection()
     }
 
     if (left.down && m_mouse.GizmoActiveFor(GLFW_MOUSE_BUTTON_LEFT)) {
-        const float dx = x - m_mouse.GizmoLastX();
-        const float dy = y - m_mouse.GizmoLastY();
+        const float dx = px - m_mouse.GizmoLastX();
+        const float dy = py - m_mouse.GizmoLastY();
         const float pixels = ProjectGizmoDrag(dx, dy, viewProj, window.Width(), window.Height());
 
         if (pixels != 0.0f) {
             m_transformController.ApplyGizmoDrag(m_scene, m_gizmo, pixels);
         }
 
-        m_mouse.UpdateGizmoLast(x, y);
+        m_mouse.UpdateGizmoLast(px, py);
     }
 
     if (left.released && m_mouse.GizmoActiveFor(GLFW_MOUSE_BUTTON_LEFT)) {
@@ -4028,6 +4124,8 @@ void EditorApp::HandleMouseViewportGizmo()
     const EditorMouseController::ButtonState right = m_mouse.UpdateRight(rightDown);
     const float x = static_cast<float>(cursorX);
     const float y = static_cast<float>(cursorY);
+    float px = x, py = y;                 // px,py = scene render-pixel space (panel-aware)
+    RemapViewportMouse(x, y, px, py);
 
     if (right.pressed
         && !m_mouse.GizmoActive()
@@ -4035,15 +4133,15 @@ void EditorApp::HandleMouseViewportGizmo()
         && m_scene.SelectedObject()
         && !m_scene.SelectedLocked()
         && IsViewportDropPosition(x, y)) {
-        m_mouse.BeginGizmoDrag(GLFW_MOUSE_BUTTON_RIGHT, x, y);
+        m_mouse.BeginGizmoDrag(GLFW_MOUSE_BUTTON_RIGHT, px, py);
         m_transformController.BeginGizmoDrag();
         m_scene.BeginTransformEdit();
         m_log.Info(std::string("Mouse gizmo: ") + m_gizmo.ModeName() + " " + m_gizmo.AxisName());
     }
 
     if (right.down && m_mouse.GizmoActiveFor(GLFW_MOUSE_BUTTON_RIGHT)) {
-        const float dx = x - m_mouse.GizmoLastX();
-        const float dy = y - m_mouse.GizmoLastY();
+        const float dx = px - m_mouse.GizmoLastX();
+        const float dy = py - m_mouse.GizmoLastY();
         const glm::mat4 viewProj = m_camera.ProjectionMatrix(window.AspectRatio()) * m_camera.ViewMatrix();
         const float pixels = ProjectGizmoDrag(dx, dy, viewProj, window.Width(), window.Height());
 
@@ -4051,7 +4149,7 @@ void EditorApp::HandleMouseViewportGizmo()
             m_transformController.ApplyGizmoDrag(m_scene, m_gizmo, pixels);
         }
 
-        m_mouse.UpdateGizmoLast(x, y);
+        m_mouse.UpdateGizmoLast(px, py);
     }
 
     if (right.released && m_mouse.GizmoActiveFor(GLFW_MOUSE_BUTTON_RIGHT)) {
@@ -4333,21 +4431,35 @@ glm::vec3 EditorApp::SceneDropPosition()
     double cursorY = 0.0;
     glfwGetCursorPos(window.Native(), &cursorX, &cursorY);
 
-    return m_viewport.SceneDropPosition(static_cast<float>(cursorX),
-        static_cast<float>(cursorY),
-        viewProj,
+    float px = static_cast<float>(cursorX);
+    float py = static_cast<float>(cursorY);
+    RemapViewportMouse(px, py, px, py);   // panel-aware: map to scene render-pixel space
+
+    return m_viewport.SceneDropPosition(px, py, viewProj,
         window.Width(),
         window.Height());
 }
 
 bool EditorApp::IsViewportDropPosition(float x, float y)
 {
+    const engine::Window& window = GetWindow();
+
+    // New model: the Viewport panel owns the scene. Route interaction there when the
+    // cursor is over its image (ImGui reports WantCaptureMouse for the panel, but that
+    // is exactly where we DO want scene input). A mouse-driven asset drag drops by
+    // geometry alone so a momentary hover loss doesn't cancel it.
+    if (m_sceneViewValid && m_sceneViewW > 0.0f && m_sceneViewH > 0.0f) {
+        const bool inImage = x >= m_sceneViewX && x < m_sceneViewX + m_sceneViewW
+                          && y >= m_sceneViewY && y < m_sceneViewY + m_sceneViewH;
+        if (m_dragDrop.IsMouseDriven()) return inImage;
+        return m_sceneViewHovered && inImage;
+    }
+
+    // Legacy passthrough model: the scene is the window background behind the panels.
     const ImGuiIO& io = ImGui::GetIO();
     if (io.WantCaptureMouse && !m_dragDrop.IsMouseDriven()) {
         return false;
     }
-
-    const engine::Window& window = GetWindow();
     return m_viewport.ContainsPoint(x, y, window.Width(), window.Height());
 }
 
@@ -5325,8 +5437,14 @@ void EditorApp::LoadProjectAssetRegistry() {
     }
 
     for (const engine::AssetRegistryIssue& issue : m_assetRegistry.Validate()) {
-        const std::string message = "Asset registry " + issue.asset.ToString()
-            + ": " + issue.message;
+        // Name the offending asset by its content path (not just its GUID) so the
+        // warning is actionable.
+        std::string who = issue.asset.ToString();
+        if (const engine::AssetRegistryEntry* entry = m_assetRegistry.Find(issue.asset);
+            entry && !entry->virtualPath.empty()) {
+            who = entry->virtualPath + " (" + issue.asset.ToString() + ")";
+        }
+        const std::string message = "Asset registry " + who + ": " + issue.message;
         if (issue.severity == engine::AssetRegistryIssue::Severity::Error) {
             m_log.Error(message);
         } else {

@@ -32,6 +32,7 @@
 #include <engine/graphics/SSR.h>
 #include <engine/graphics/Terrain.h>
 #include <engine/graphics/Water.h>
+#include <engine/graphics/Framebuffer.h>
 #include <engine/graphics/GpuProfiler.h>
 #include <engine/graphics/TextRenderer.h>
 #include <engine/gameplay/PlayerController.h>
@@ -171,6 +172,10 @@ private:
     void DrawCharacterEditorPanel();
     void DrawClipEditorPanel();
     void DrawGraphEditorPanel();
+    void DrawViewportPanel();   // scene rendered into a dockable, interactive panel
+    // Maps a main-window cursor position into scene render-pixel space when the Viewport
+    // panel owns input; returns false (and passes the point through) otherwise.
+    bool RemapViewportMouse(float winX, float winY, float& outX, float& outY);
     void DrawPlayHud();
     void SyncHudFromScene();   // load the scene's referenced .hud into m_hud
     void ScanHudImages();      // recursively list content-folder images for the picker
@@ -365,6 +370,15 @@ private:
     std::optional<engine::IBL>           m_ibl;
     std::optional<engine::SSAO>          m_ssao;
     std::optional<engine::SSR>           m_ssr;
+    std::optional<engine::Framebuffer>   m_viewportFbo;   // scene-in-a-panel display target
+    // Scene-viewport panel rect in main-window pixel space (set each frame by
+    // DrawViewportPanel). When valid, mouse picking / camera / gizmo route here.
+    float m_sceneViewX = 0.0f;
+    float m_sceneViewY = 0.0f;
+    float m_sceneViewW = 0.0f;
+    float m_sceneViewH = 0.0f;
+    bool  m_sceneViewValid = false;     // panel visible & docked in the main window
+    bool  m_sceneViewHovered = false;   // image is the top hovered item
     // Cached generated terrain per object; regenerated when the object's params change.
     struct TerrainCache {
         engine::Terrain terrain;

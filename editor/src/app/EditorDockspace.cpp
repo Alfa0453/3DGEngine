@@ -14,6 +14,7 @@
 
 #include <glm/gtc/quaternion.hpp>
 #include <imgui.h>
+#include <imgui_internal.h>   // DockBuilder API for the default layout
 
 #include <algorithm>
 #include <array>
@@ -4555,6 +4556,9 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
 #endif
 
     if (ImGui::CollapsingHeader("Runtime Components", ImGuiTreeNodeFlags_DefaultOpen)) {
+        // Velocity components are shown only when the object actually has them; add them
+        // from "+ Add Component" (Linear/Angular Velocity) when needed.
+        if (selected->linearVelocityEnabled || selected->angularVelocityEnabled) {
         bool linearVelocityEnabled = selected->linearVelocityEnabled;
         if (ImGui::Checkbox("LinearVelocity", &linearVelocityEnabled)) {
             context.scene->SetSelectedLinearVelocityEnabled(linearVelocityEnabled);
@@ -4590,6 +4594,7 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
         }
 
         ImGui::Separator();
+        }   // end velocity components (shown only when present)
         const engine::ecs::Transform* selectedTransform = context.scene->TryGetTransform(selected->entity);
         if (ImGui::Button("Dynamic Body")) {
             engine::ecs::RigidBody rigidBody = engine::ecs::RigidBody::Dynamic(1.0f);
@@ -4871,8 +4876,16 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             }
         }
 
-        ImGui::Separator();
-        if (ImGui::CollapsingHeader("Physics Joints", ImGuiTreeNodeFlags_DefaultOpen)) {
+        // Physics joints connect rigid bodies, so only surface this section when the
+        // object is a rigid body or already participates in a joint (otherwise it's noise).
+        const std::vector<EditorScene::PhysicsJoint>& allJoints = context.scene->PhysicsJoints();
+        const bool showJoints = selected->rigidBodyEnabled
+            || std::any_of(allJoints.begin(), allJoints.end(),
+                [&](const EditorScene::PhysicsJoint& j) {
+                    return j.objectA == selected->name || j.objectB == selected->name;
+                });
+        if (showJoints) ImGui::Separator();
+        if (showJoints && ImGui::CollapsingHeader("Physics Joints", ImGuiTreeNodeFlags_DefaultOpen)) {
             static int jointTargetIndex = 0;
             const std::vector<EditorScene::Object>& objects = context.scene->Objects();
             if (jointTargetIndex >= static_cast<int>(objects.size())) {
@@ -8019,8 +8032,9 @@ bool EditorDockspace::Draw(Context& context) {
         | ImGuiWindowFlags_NoResize
         | ImGuiWindowFlags_NoMove
         | ImGuiWindowFlags_NoBringToFrontOnFocus
-        | ImGuiWindowFlags_NoNavFocus
-        | ImGuiWindowFlags_NoBackground;
+        | ImGuiWindowFlags_NoNavFocus;
+    // The scene now lives in the dockable Viewport panel, so the dockspace host stays
+    // opaque — the old see-through background scene is gone.
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
@@ -8033,6 +8047,33 @@ bool EditorDockspace::Draw(Context& context) {
     }
 
     const ImGuiID dockspaceId = ImGui::GetID("3DGEditorDockspaceRoot");
+
+    // First run (no saved layout in imgui.ini): build a sensible default so the Viewport
+    // lands centered with the tool panels docked around it, instead of opening floating.
+    // A saved layout already has a node, so existing user arrangements are preserved.
+    static bool s_defaultLayoutBuilt = false;
+    if (!s_defaultLayoutBuilt && ImGui::DockBuilderGetNode(dockspaceId) == nullptr) {
+        s_defaultLayoutBuilt = true;
+        ImGui::DockBuilderRemoveNode(dockspaceId);
+        ImGui::DockBuilderAddNode(dockspaceId, ImGuiDockNodeFlags_DockSpace);
+        ImGui::DockBuilderSetNodeSize(dockspaceId, viewport->WorkSize);
+
+        ImGuiID center = dockspaceId;
+        const ImGuiID left   = ImGui::DockBuilderSplitNode(center, ImGuiDir_Left,  0.18f, nullptr, &center);
+        const ImGuiID right  = ImGui::DockBuilderSplitNode(center, ImGuiDir_Right, 0.22f, nullptr, &center);
+        const ImGuiID bottom = ImGui::DockBuilderSplitNode(center, ImGuiDir_Down,  0.26f, nullptr, &center);
+
+        using P = EditorPanels::Panel;
+        ImGui::DockBuilderDockWindow(EditorPanels::Name(P::Viewport),      center);
+        ImGui::DockBuilderDockWindow(EditorPanels::Name(P::Hierarchy),     left);
+        ImGui::DockBuilderDockWindow(EditorPanels::Name(P::CameraManager), left);
+        ImGui::DockBuilderDockWindow(EditorPanels::Name(P::Inspector),     right);
+        ImGui::DockBuilderDockWindow(EditorPanels::Name(P::Gizmo),         right);
+        ImGui::DockBuilderDockWindow(EditorPanels::Name(P::Assets),        bottom);
+        ImGui::DockBuilderDockWindow(EditorPanels::Name(P::Console),       bottom);
+        ImGui::DockBuilderFinish(dockspaceId);
+    }
+
     ImGui::DockSpace(dockspaceId, ImVec2(0.0f, 0.0f), ImGuiDockNodeFlags_PassthruCentralNode);
     if (context.dragDrop && ImGui::BeginDragDropTarget()) {
         if (ImGui::AcceptDragDropPayload("3DGEDITOR_ASSET")) {
@@ -8486,6 +8527,8 @@ bool EditorDockspace::Draw(Context& context) {
             break; // drawn by EditorApp (owns the clip preview renderer)
         case EditorPanels::Panel::GraphEditor:
             break; // drawn by EditorApp (owns the graph preview renderer)
+        case EditorPanels::Panel::Viewport:
+            break; // drawn by EditorApp::DrawViewportPanel (owns the scene FBO)
         case EditorPanels::Panel::PhysicsStatus:
             DrawPhysicsStatus(context, &open);
             break;
