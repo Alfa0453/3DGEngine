@@ -1,5 +1,6 @@
 #include "EditorDockspace.h"
 #include "EditorScriptTools.h"
+#include "NativeDialog.h"
 #include "ParticlePresets.h"
 #include "ParticleAsset.h"
 
@@ -2224,6 +2225,7 @@ void DrawWorldSettings(EditorScene& scene, EditorDockspace::Context& context, bo
             } else {
                 EditorScene::Environment::PostProcessEffect effect;
                 effect.shaderPath = path;
+                effect.shaderAssetId = shader.assetId;
                 for (const engine::ShaderParameter& reflected :
                      shader.parameters) {
                     effect.parameters.push_back({
@@ -5190,6 +5192,30 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             if (changed) {
                 context.scene->SetSelectedHealth(health);
             }
+
+            bool ragdollEnabled = selected->ragdollEnabled;
+            if (ImGui::Checkbox("Ragdoll On Death", &ragdollEnabled)) {
+                context.scene->SetSelectedRagdollEnabled(ragdollEnabled);
+            }
+            if (ragdollEnabled) {
+                engine::Ragdoll ragdoll = selected->ragdoll;
+                bool ragdollChanged = false;
+                ragdollChanged |= ImGui::DragFloat(
+                    "Ragdoll Mass", &ragdoll.totalMass, 1.0f, 1.0f, 500.0f, "%.1f kg");
+                ragdollChanged |= ImGui::SliderInt(
+                    "Physics Bodies", &ragdoll.maxBodies, 4, 32);
+                ragdollChanged |= ImGui::SliderFloat(
+                    "Body Thickness", &ragdoll.bodyRadiusScale, 0.04f, 0.4f);
+                ragdollChanged |= ImGui::DragFloat(
+                    "Death Impulse", &ragdoll.deathImpulse, 0.05f, 0.0f, 20.0f);
+                ragdollChanged |= ImGui::DragFloat(
+                    "Linear Damping", &ragdoll.linearDamping, 0.02f, 0.0f, 10.0f);
+                ragdollChanged |= ImGui::DragFloat(
+                    "Angular Damping", &ragdoll.angularDamping, 0.02f, 0.0f, 20.0f);
+                if (ragdollChanged) context.scene->SetSelectedRagdoll(ragdoll);
+                ImGui::TextDisabled(
+                    "Replaces animation with connected physics bodies at zero HP.");
+            }
         }
         
         ImGui::Separator();
@@ -6108,11 +6134,22 @@ void DrawAssets(EditorDockspace::Context& context, bool* open) {
         }
     }
     ImGui::SameLine();
+    if (ImGui::Button("Cut")) {
+        std::string error;
+        if (context.assets->CutSelected(&error)) {
+            if (context.log) context.log->Info("Cut Content entry: " + context.assets->CopiedDisplayName()
+                + " (Paste to move it here)");
+        } else if (context.log) {
+            context.log->Warning(error);
+        }
+    }
+    ImGui::SameLine();
     if (ImGui::Button("Paste")) {
         std::string error;
+        const bool wasCut = context.assets->HasCopiedEntry() && context.assets->CopiedEntryIsCut();
         if (context.assets->PasteCopied(&error)) {
             if (context.log) {
-                context.log->Info("Pasted Content entry");
+                context.log->Info(wasCut ? "Moved Content entry" : "Pasted Content entry");
             }
         } else if (context.log) {
             context.log->Warning(error);
@@ -6141,6 +6178,52 @@ void DrawAssets(EditorDockspace::Context& context, bool* open) {
             context.log->Warning(error);
         }
     }
+    const EditorAssets::Asset* selectedForReimport = context.assets->SelectedAsset();
+    const bool canReimportStaticMesh = selectedForReimport
+        && selectedForReimport->type == EditorAssets::Type::Model
+        && std::filesystem::path(selectedForReimport->relativePath).extension()
+               == ".3dgmesh";
+    const bool canReimportSkeletalMesh = selectedForReimport
+        && selectedForReimport->type == EditorAssets::Type::SkeletalModel
+        && std::filesystem::path(selectedForReimport->relativePath).extension()
+               == ".3dgskmesh";
+    const bool canReimportTexture = selectedForReimport
+        && selectedForReimport->type == EditorAssets::Type::Texture
+        && std::filesystem::path(selectedForReimport->relativePath).extension()
+               == ".3dgtex";
+    ImGui::SameLine();
+    if (!canReimportStaticMesh && !canReimportSkeletalMesh
+        && !canReimportTexture) ImGui::BeginDisabled();
+    if (ImGui::Button("Reimport")) {
+        std::string error;
+        const bool reimported = canReimportTexture
+            ? context.assets->ReimportSelectedTexture(&error)
+            : canReimportSkeletalMesh
+                ? context.assets->ReimportSelectedSkeletalAssets(&error)
+                : context.assets->ReimportSelectedStaticMesh(&error);
+        if (reimported) {
+            const std::string meshPath = context.assets->SelectedAssetFullPath();
+            const bool liveReloadFailed = context.runtimeAssets
+                && !canReimportTexture
+                && ((canReimportSkeletalMesh
+                        && context.runtimeAssets->FindSkinnedModel(meshPath)
+                        && !context.runtimeAssets->ReloadSkinnedModel(meshPath, &error))
+                    || (canReimportStaticMesh
+                        && context.runtimeAssets->FindModel(meshPath)
+                        && !context.runtimeAssets->ReloadModel(meshPath, &error)));
+            if (liveReloadFailed) {
+                if (context.log) {
+                    context.log->Error("Mesh was reimported but its live "
+                                       "preview could not reload: " + error);
+                }
+            }
+            if (context.log) context.log->Info(context.assets->LastImportMessage());
+        } else if (context.log) {
+            context.log->Error(error);
+        }
+    }
+    if (!canReimportStaticMesh && !canReimportSkeletalMesh
+        && !canReimportTexture) ImGui::EndDisabled();
     if (ImGui::BeginPopupModal("Rename Content Folder", nullptr,
                                ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::TextUnformatted("New folder name");
@@ -6187,19 +6270,221 @@ void DrawAssets(EditorDockspace::Context& context, bool* open) {
         }
     }
 
-    static char importPath[512] = "";
-    ImGui::InputText("Import file", importPath, sizeof(importPath));
-    ImGui::SameLine();
-    if (ImGui::Button("Import")) {
-        std::string error;
-        if (context.assets->ImportAsset(importPath, &error)) {
-            if (context.log) {
-                context.log->Info(std::string("Imported asset: ") + importPath);
+    static std::string importSource;
+    static std::string importDestination;
+    static char importFolderName[128] = "";
+    static int importModelMode =
+        static_cast<int>(EditorAssets::ModelImportMode::Automatic);
+    static engine::ModelSourceInfo importModelInfo;
+    static bool importModelInspected = false;
+    static std::string importInspectionError;
+    const auto prepareImportSource = [&](const std::string& selected) {
+        importSource = selected;
+        importModelInfo = {};
+        importModelInspected = false;
+        importInspectionError.clear();
+        importModelMode =
+            static_cast<int>(EditorAssets::ModelImportMode::Automatic);
+        const std::string extension = LowerExtension(selected);
+        const bool isModel = extension == ".obj" || extension == ".fbx"
+            || extension == ".gltf" || extension == ".glb"
+            || extension == ".dae" || extension == ".ply"
+            || extension == ".stl";
+        if (isModel) {
+            importModelInspected = engine::InspectModelSource(
+                selected, &importModelInfo, &importInspectionError);
+            if (importModelInspected) {
+                importModelMode = static_cast<int>(
+                    importModelInfo.IsSkeletal()
+                        ? EditorAssets::ModelImportMode::SkeletalMesh
+                        : EditorAssets::ModelImportMode::StaticMesh);
             }
-            importPath[0] = '\0';
-        } else if (context.log) {
-            context.log->Error(error);
         }
+    };
+    if (ImGui::Button("Import Asset...")) {
+        const std::string selected =
+            editor::OpenAssetImportDialog("Import Asset into Content");
+        if (!selected.empty()) {
+            prepareImportSource(selected);
+            importDestination = context.assets->CurrentFolder();
+            importFolderName[0] = '\0';
+            ImGui::OpenPopup("Asset Import Settings##ContentBrowser");
+        }
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("Browse system files, then choose a project folder.");
+
+    if (ImGui::BeginPopupModal("Asset Import Settings##ContentBrowser", nullptr,
+                               ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextUnformatted("Source file");
+        ImGui::SetNextItemWidth(520.0f);
+        ImGui::InputText("##ImportSource", importSource.data(),
+                         importSource.size() + 1,
+                         ImGuiInputTextFlags_ReadOnly);
+        ImGui::SameLine();
+        if (ImGui::Button("Browse...##ImportSource")) {
+            const std::string selected =
+                editor::OpenAssetImportDialog("Import Asset into Content");
+            if (!selected.empty()) prepareImportSource(selected);
+        }
+
+        const std::string importExtension = LowerExtension(importSource);
+        const bool importingModel = importExtension == ".obj"
+            || importExtension == ".fbx" || importExtension == ".gltf"
+            || importExtension == ".glb" || importExtension == ".dae"
+            || importExtension == ".ply" || importExtension == ".stl";
+        const bool importingTexture = importExtension == ".png"
+            || importExtension == ".jpg" || importExtension == ".jpeg"
+            || importExtension == ".tga";
+        const bool importingAudio = importExtension == ".wav"
+            || importExtension == ".ogg" || importExtension == ".mp3"
+            || importExtension == ".flac";
+
+        ImGui::SeparatorText("Asset Settings");
+        if (importingModel) {
+            const char* importAs = importModelMode
+                    == static_cast<int>(EditorAssets::ModelImportMode::SkeletalMesh)
+                ? "Skeletal Mesh" : "Static Mesh";
+            ImGui::SetNextItemWidth(260.0f);
+            if (ImGui::BeginCombo("Import As", importAs)) {
+                const bool staticSelected = importModelMode
+                    == static_cast<int>(EditorAssets::ModelImportMode::StaticMesh);
+                if (ImGui::Selectable("Static Mesh", staticSelected))
+                    importModelMode = static_cast<int>(
+                        EditorAssets::ModelImportMode::StaticMesh);
+                const bool skeletalSelected = importModelMode
+                    == static_cast<int>(EditorAssets::ModelImportMode::SkeletalMesh);
+                if (ImGui::Selectable("Skeletal Mesh", skeletalSelected))
+                    importModelMode = static_cast<int>(
+                        EditorAssets::ModelImportMode::SkeletalMesh);
+                ImGui::EndCombo();
+            }
+            if (importModelInspected) {
+                ImGui::TextDisabled(
+                    "Detected: %zu mesh(es), %zu animation(s), bones: %s",
+                    importModelInfo.meshCount, importModelInfo.animationCount,
+                    importModelInfo.hasBones ? "yes" : "no");
+            } else if (!importInspectionError.empty()) {
+                ImGui::TextColored(
+                    ImVec4(1.0f, 0.55f, 0.25f, 1.0f), "%s",
+                    importInspectionError.c_str());
+            }
+
+            if (importModelMode
+                == static_cast<int>(EditorAssets::ModelImportMode::SkeletalMesh)) {
+                engine::SkeletalImportOptions& settings =
+                    context.assets->SkeletalImportSettings();
+                ImGui::DragFloat("Uniform Scale", &settings.uniformScale,
+                                 0.01f, 0.001f, 1000.0f, "%.3f");
+                ImGui::Checkbox("Generate Smooth Normals",
+                                &settings.generateSmoothNormals);
+                ImGui::Checkbox("Join Identical Vertices",
+                                &settings.joinIdenticalVertices);
+                ImGui::Checkbox("Flip UVs", &settings.flipUVs);
+                ImGui::Checkbox("Import Embedded Animations",
+                                &settings.importEmbeddedAnimations);
+                ImGui::TextDisabled(
+                    "Creates skeletal mesh, skeleton, and animation assets.");
+            } else {
+                engine::StaticMeshImportOptions& settings =
+                    context.assets->StaticMeshImportSettings();
+                ImGui::DragFloat("Uniform Scale", &settings.uniformScale,
+                                 0.01f, 0.001f, 1000.0f, "%.3f");
+                ImGui::Checkbox("Generate Smooth Normals",
+                                &settings.generateSmoothNormals);
+                ImGui::Checkbox("Generate Tangents",
+                                &settings.generateTangents);
+                ImGui::Checkbox("Join Identical Vertices",
+                                &settings.joinIdenticalVertices);
+                ImGui::Checkbox("Flip UVs", &settings.flipUVs);
+            }
+        } else if (importingTexture) {
+            engine::TextureImportOptions& settings =
+                context.assets->TextureImportSettings();
+            ImGui::Checkbox("sRGB Color Texture", &settings.srgb);
+            ImGui::Checkbox("Smooth Filtering", &settings.smooth);
+            ImGui::TextDisabled(
+                "Disable sRGB for normal, roughness, metallic, and data maps.");
+        } else if (importingAudio) {
+            ImGui::TextUnformatted("Audio");
+            ImGui::TextDisabled(
+                "The source audio is preserved for the Audio Editor.");
+        } else {
+            ImGui::TextUnformatted("Project Asset");
+            ImGui::TextDisabled(
+                "This asset will be copied into the selected Content folder.");
+        }
+
+        ImGui::TextUnformatted("Store in project");
+        const std::string destinationLabel = importDestination.empty()
+            ? std::string("Content/")
+            : std::string("Content/") + importDestination;
+        ImGui::SetNextItemWidth(520.0f);
+        if (ImGui::BeginCombo("##ImportDestination",
+                              destinationLabel.c_str())) {
+            const std::vector<std::string> folders =
+                context.assets->ContentFolderPaths();
+            for (const std::string& folder : folders) {
+                const bool selected = folder == importDestination;
+                const std::string label = folder.empty()
+                    ? std::string("Content/")
+                    : std::string("Content/") + folder;
+                if (ImGui::Selectable(label.c_str(), selected)) {
+                    importDestination = folder;
+                }
+                if (selected) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+
+        ImGui::SeparatorText("Create destination folder");
+        ImGui::SetNextItemWidth(390.0f);
+        ImGui::InputText("##ImportNewFolder", importFolderName,
+                         sizeof(importFolderName));
+        ImGui::SameLine();
+        if (ImGui::Button("Create and use")) {
+            std::string createdFolder;
+            std::string error;
+            if (context.assets->CreateFolderAt(
+                    importDestination, importFolderName,
+                    &createdFolder, &error)) {
+                importDestination = createdFolder;
+                importFolderName[0] = '\0';
+                if (context.log) {
+                    context.log->Info("Created Content folder: "
+                                      + createdFolder);
+                }
+            } else if (context.log) {
+                context.log->Error(error);
+            }
+        }
+
+        ImGui::Spacing();
+        const bool canImport = !importSource.empty();
+        if (!canImport) ImGui::BeginDisabled();
+        if (ImGui::Button("Import", ImVec2(120.0f, 0.0f))) {
+            std::string error;
+            if (context.assets->ImportAssetToFolder(
+                    importSource, importDestination,
+                    static_cast<EditorAssets::ModelImportMode>(
+                        importModelMode),
+                    &error)) {
+                if (context.log) {
+                    context.log->Info(context.assets->LastImportMessage());
+                }
+                importSource.clear();
+                ImGui::CloseCurrentPopup();
+            } else if (context.log) {
+                context.log->Error(error);
+            }
+        }
+        if (!canImport) ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(120.0f, 0.0f))) {
+            importSource.clear();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
     }
     ImGui::Separator();
 
@@ -6410,12 +6695,21 @@ void DrawConsole(EditorDockspace::Context& context, bool* open) {
     ImGui::Text("Latest: %s", context.log->LatestMessage().c_str());
     ImGui::Separator();
 
-    for (const EditorLog::Entry& entry : context.log->Entries()) {
-        ImGui::TextColored(LogColor(entry.level), "[%s] %s",
-            EditorLog::LevelName(entry.level), entry.message.c_str());
+    const std::vector<EditorLog::Entry>& entries = context.log->Entries();
+    const bool followTail =
+        ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 1.0f;
+    ImGuiListClipper clipper;
+    clipper.Begin(static_cast<int>(entries.size()));
+    while (clipper.Step()) {
+        for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
+            const EditorLog::Entry& entry =
+                entries[static_cast<std::size_t>(i)];
+            ImGui::TextColored(LogColor(entry.level), "[%s] %s",
+                EditorLog::LevelName(entry.level), entry.message.c_str());
+        }
     }
 
-    if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY()) {
+    if (followTail) {
         ImGui::SetScrollHereY(1.0f);
     }
 
@@ -7817,6 +8111,9 @@ bool EditorDockspace::Draw(Context& context) {
             }
             if (ImGui::MenuItem("Export Runtime")) {
                 context.exportRuntimeRequested = true;
+            }
+            if (ImGui::MenuItem("Cook Project")) {
+                context.cookProjectRequested = true;
             }
             if (ImGui::MenuItem("Validate Runtime")) {
                 context.validateRuntimeRequested = true;

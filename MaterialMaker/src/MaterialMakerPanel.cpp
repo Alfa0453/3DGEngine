@@ -63,7 +63,9 @@ std::string LowerExtension(const std::filesystem::path& path) {
 
 bool IsSupportedTexturePath(const std::filesystem::path& path) {
     const std::string extension = LowerExtension(path);
-    return extension == ".png" || extension == ".jpg" || extension == ".jpeg" || extension == ".tga";
+    return extension == ".png" || extension == ".jpg"
+        || extension == ".jpeg" || extension == ".tga"
+        || extension == ".3dgtex";
 }
 
 // Starter presets. Metal entries use measured base reflectances (F0), which is the
@@ -200,6 +202,7 @@ bool MaterialMakerPanel::SetShaderAsset(const std::string& path) {
         parameter.name = source.name;
         parameter.type = static_cast<int>(source.type);
         parameter.value = source.defaultValue;
+        parameter.assetId = source.assetId;
         m_material.shaderParameters.push_back(std::move(parameter));
     }
     CopyToBuffer(m_shaderPathBuffer, sizeof(m_shaderPathBuffer), path);
@@ -225,6 +228,23 @@ void MaterialMakerPanel::DrawShaderControls() {
                 parameter.value = enabled ? "true" : "false";
         } else if (ImGui::InputText(parameter.name.c_str(), value.data(), value.size())) {
             parameter.value = value.data();
+        }
+        if (parameter.type == static_cast<int>(
+                engine::ShaderValueType::Texture2D)
+            && ImGui::BeginDragDropTarget()) {
+            if (const ImGuiPayload* payload =
+                    ImGui::AcceptDragDropPayload("3DGEDITOR_ASSET")) {
+                const char* path = static_cast<const char*>(payload->Data);
+                if (path && IsSupportedTexturePath(path)) {
+                    parameter.value = path;
+                    parameter.assetId = {};
+                    m_status = "Assigned engine texture to shader parameter "
+                        + parameter.name + ".";
+                } else {
+                    m_status = "Shader texture parameters require a supported texture asset.";
+                }
+            }
+            ImGui::EndDragDropTarget();
         }
         ImGui::PopID();
     }
@@ -447,7 +467,8 @@ void MaterialMakerPanel::DrawTextureControls() {
         }
     };
 
-    ImGui::TextDisabled("Type/paste a path, or drag a texture from the Content browser.");
+    ImGui::TextDisabled(
+        "Type/paste a path, or drag an engine .3dgtex from the Content browser.");
 
     if (ImGui::InputText("Albedo Map", m_albedoMapBuffer, sizeof(m_albedoMapBuffer))) {
         m_material.albedoMap = m_albedoMapBuffer;
@@ -497,7 +518,8 @@ void MaterialMakerPanel::DrawOrmPacker() {
         return;
     }
     ImGui::TextWrapped("Combine separate grayscale maps into one ORM texture "
-                       "(R = AO, G = roughness, B = metallic). PNG/JPG sources.");
+                       "(R = AO, G = roughness, B = metallic). Engine textures "
+                       "and PNG/JPG/TGA sources are supported.");
 
     auto sourceRow = [&](const char* label, std::string& target, const char* pasteId) {
         ImGui::TextUnformatted(label);
@@ -539,8 +561,9 @@ void MaterialMakerPanel::DrawModelImport() {
     if (!ImGui::CollapsingHeader("Import from Model")) {
         return;
     }
-    ImGui::TextWrapped("Read a material (colours + external texture maps) from a "
-                       "model file (glTF / OBJ / FBX). Embedded textures are skipped.");
+    ImGui::TextWrapped(
+        "Read material values from an engine static/skeletal mesh or a source "
+        "model (glTF / OBJ / FBX). Embedded source textures are skipped.");
 
     ImGui::TextUnformatted("Model:");
     ImGui::SameLine();

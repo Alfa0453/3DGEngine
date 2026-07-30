@@ -10,39 +10,48 @@
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../MaterialMaker" "${CMAKE_CURRENT_BINARY_DIR}/MaterialMaker")
 
 add_executable(3DGEditor
-    src/main.cpp
-    src/EditorApp.cpp
-    src/EditorLog.cpp
-    src/EditorAssets.cpp
-    src/EditorProject.cpp
-    src/EditorScene.cpp
-    src/RuntimeSceneExporter.cpp
-    src/EditorGizmo.cpp
-    src/EditorDragDrop.cpp
-    src/EditorPanels.cpp
-    src/EditorDockspace.cpp
-    src/EditorViewport.cpp
-    src/EditorLineRenderer.cpp
-    src/EditorContentController.cpp
-    src/EditorScriptTools.cpp
-    src/EditorGeneratedScriptTools.cpp
-    src/EditorCameraController.cpp
-    src/EditorMouseController.cpp
-    src/EditorRuntimeController.cpp
-    src/EditorTransformController.cpp
-    src/BehaviorGraphPanel.cpp
-    src/ParticleEditorPanel.cpp
-    src/ShaderEditorPanel.cpp
-    src/HudEditorPanel.cpp
-    src/CharacterAsset.cpp
-    src/CharacterEditorPanel.cpp
-    src/AnimationClipAsset.cpp
-    src/ClipEditorPanel.cpp
-    src/AnimationGraphAsset.cpp
-    src/AnimationGraphEditorPanel.cpp
-    src/ParticleAsset.cpp
-    src/NativeDialog.cpp
-    src/GameBtScripts.cpp
+    # app / core shell
+    src/app/main.cpp
+    src/app/EditorApp.cpp
+    src/app/EditorApp_Camera.cpp
+    src/app/EditorLog.cpp
+    src/app/EditorProject.cpp
+    src/app/EditorPanels.cpp
+    src/app/EditorDockspace.cpp
+    # interaction controllers
+    src/controllers/EditorGizmo.cpp
+    src/controllers/EditorDragDrop.cpp
+    src/controllers/EditorContentController.cpp
+    src/controllers/EditorCameraController.cpp
+    src/controllers/EditorMouseController.cpp
+    src/controllers/EditorRuntimeController.cpp
+    src/controllers/EditorTransformController.cpp
+    # scene + serialization
+    src/scene/EditorScene.cpp
+    src/scene/RuntimeSceneExporter.cpp
+    # asset data + serialization (.3dgcharacter / .3dgclip / .3dggraph / particle)
+    src/assets/EditorAssets.cpp
+    src/assets/CharacterAsset.cpp
+    src/assets/AnimationClipAsset.cpp
+    src/assets/AnimationGraphAsset.cpp
+    src/assets/ParticleAsset.cpp
+    # dockable editor panels
+    src/panels/BehaviorGraphPanel.cpp
+    src/panels/ParticleEditorPanel.cpp
+    src/panels/ShaderEditorPanel.cpp
+    src/panels/HudEditorPanel.cpp
+    src/panels/CharacterEditorPanel.cpp
+    src/panels/ClipEditorPanel.cpp
+    src/panels/AnimationGraphEditorPanel.cpp
+    # viewport rendering
+    src/render/EditorViewport.cpp
+    src/render/EditorLineRenderer.cpp
+    # scripting tools
+    src/scripting/EditorScriptTools.cpp
+    src/scripting/EditorGeneratedScriptTools.cpp
+    src/scripting/GameBtScripts.cpp
+    # platform integration
+    src/platform/NativeDialog.cpp
 )
 
 target_include_directories(3DGEditor PRIVATE
@@ -62,7 +71,7 @@ endif()
 set_target_properties(3DGEditor PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/editor")
 
-add_executable(3DGScriptCompiler src/ScriptCompilerHelper.cpp)
+add_executable(3DGScriptCompiler src/scripting/ScriptCompilerHelper.cpp)
 add_dependencies(3DGEditor 3DGScriptCompiler)
 set_target_properties(3DGScriptCompiler PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/editor")

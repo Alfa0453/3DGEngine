@@ -1,4 +1,6 @@
 #include "engine/ai/BehaviorGraph.h"
+#include "engine/assets/AssetReference.h"
+#include "engine/assets/AssetRegistry.h"
 
 #include "engine/ai/AStar.h"
 #include "engine/ai/BtScript.h"
@@ -9,6 +11,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <iomanip>
@@ -718,14 +721,46 @@ BehaviorTree<AgentContext> BuildBehaviorTree(const BehaviorGraph& graph,
 //   <typeInt> <param> <canvasX> <canvasY> <childCount> [<child> ...]
 //       <decCount> [<typeInt> <param> ...] <svcCount> [<typeInt> <param> ...]   (v2+)
 
-bool SaveBehaviorGraph(const std::string& path, const BehaviorGraph& graph, std::string* error) {
+bool SaveBehaviorGraph(const std::string& path, BehaviorGraph& graph, std::string* error) {
+    const std::string contentRoot = FindContentRootForAsset(path);
+    AssetRegistry registry;
+    std::string registryError;
+    const std::string registryPath = contentRoot.empty()
+        ? std::string() : AssetRegistry::DefaultRegistryPath(contentRoot);
+    std::error_code ec;
+    if (!registryPath.empty() && std::filesystem::exists(registryPath, ec)
+        && !registry.Load(registryPath, &registryError)) {
+        if (error) *error = "could not load behavior asset registry: "
+            + registryError;
+        return false;
+    }
+    if (!graph.assetId.Valid() && std::filesystem::is_regular_file(path, ec)) {
+        std::ifstream existing(path);
+        std::string magic, idText;
+        int version = 0;
+        if (existing >> magic >> version >> idText
+            && magic == "3DG_BEHAVIOR_GRAPH" && version >= 7)
+            AssetHandle::Parse(idText, &graph.assetId);
+    }
+    if (!graph.assetId.Valid()) graph.assetId = AssetHandle::Generate();
+    std::vector<AssetHandle> dependencies;
+    for (BtGraphNode& node : graph.nodes) {
+        if (!BtNodeTypeIsSubtree(node.type) || node.script.empty()) continue;
+        const AssetReference reference = MakeAssetReference(
+            &registry, contentRoot, node.script, AssetType::BehaviorTree);
+        if (reference.id.Valid()) node.subtreeAssetId = reference.id;
+        if (node.subtreeAssetId.Valid()
+            && std::find(dependencies.begin(), dependencies.end(),
+                         node.subtreeAssetId) == dependencies.end())
+            dependencies.push_back(node.subtreeAssetId);
+    }
     std::ofstream out(path, std::ios::trunc);
     if (!out) {
         if (error) *error = "could not open '" + path + "' for writing.";
         return false;
     }
     auto tok = [](const std::string& s) -> std::string { return s.empty() ? "-" : s; };
-    out << "3DGBehaviorGraph 6\n";
+    out << "3DG_BEHAVIOR_GRAPH 7 " << graph.assetId.ToString() << "\n";
     out << "root " << graph.root << "\n";
     out << "nodes " << graph.nodes.size() << "\n";
     auto writeAttachment = [&](const BtAttachment& a) {
@@ -742,7 +777,9 @@ bool SaveBehaviorGraph(const std::string& path, const BehaviorGraph& graph, std:
         out << ' ' << n.services.size();
         for (const BtAttachment& a : n.services) writeAttachment(a);
         out << ' ' << tok(n.script) << ' ' << tok(n.key)
-            << ' ' << std::quoted(n.displayName);
+            << ' ' << std::quoted(n.displayName) << ' '
+            << (n.subtreeAssetId.Valid()
+                    ? n.subtreeAssetId.ToString() : std::string("-"));
         out << '\n';
     }
     // Blackboard schema (v4+): count, then one line per entry.
@@ -752,10 +789,31 @@ bool SaveBehaviorGraph(const std::string& path, const BehaviorGraph& graph, std:
             << (e.b ? 1 : 0) << ' ' << e.i << ' ' << e.f << ' '
             << e.v.x << ' ' << e.v.y << ' ' << e.v.z << ' ' << tok(e.s) << '\n';
     }
+    out << "ASSET_DEPS " << dependencies.size();
+    for (AssetHandle dependency : dependencies)
+        out << ' ' << dependency.ToString();
+    out << '\n';
     if (!out) {
         if (error) *error = "write failed for '" + path + "'.";
         return false;
     }
+    out.close();
+    if (!contentRoot.empty()) {
+        AssetRegistryEntry entry;
+        entry.id = graph.assetId;
+        entry.type = AssetType::BehaviorTree;
+        entry.virtualPath = AssetRegistry::NormalizeVirtualPath(
+            std::filesystem::relative(path, contentRoot, ec).generic_string());
+        entry.importerVersion = 1;
+        entry.dependencies = dependencies;
+        if (ec || !registry.Register(std::move(entry), &registryError)
+            || !registry.Save(registryPath, &registryError)) {
+            if (error) *error = "behavior graph saved, but registration failed: "
+                + (ec ? ec.message() : registryError);
+            return false;
+        }
+    }
+    if (error) error->clear();
     return true;
 }
 
@@ -768,12 +826,20 @@ bool LoadBehaviorGraph(const std::string& path, BehaviorGraph& outGraph, std::st
     std::string magic;
     int version = 0;
     in >> magic >> version;
-    if (magic != "3DGBehaviorGraph" || version < 1 || version > 6) {
+    BehaviorGraph graph;
+    if (magic == "3DG_BEHAVIOR_GRAPH") {
+        std::string idText;
+        if (version < 7 || version > 7 || !(in >> idText)
+            || !AssetHandle::Parse(idText, &graph.assetId)) {
+            if (error) *error = "not a recognised behaviour-graph file.";
+            return false;
+        }
+    } else if (magic != "3DGBehaviorGraph"
+               || version < 1 || version > 6) {
         if (error) *error = "not a recognised behaviour-graph file.";
         return false;
     }
 
-    BehaviorGraph graph;
     std::string key;
     std::size_t count = 0;
     in >> key >> graph.root;      // "root <int>"
@@ -842,6 +908,17 @@ bool LoadBehaviorGraph(const std::string& path, BehaviorGraph& outGraph, std::st
             if (version >= 6) {
                 in >> std::quoted(node.displayName);
             }
+            if (version >= 7) {
+                std::string subtreeId;
+                in >> subtreeId;
+                if (subtreeId != "-"
+                    && !AssetHandle::Parse(
+                        subtreeId, &node.subtreeAssetId)) {
+                    if (error) *error =
+                        "invalid behavior subtree asset identity.";
+                    return false;
+                }
+            }
             if (!in) {
                 if (error) *error = "truncated attachment list.";
                 return false;
@@ -872,6 +949,20 @@ bool LoadBehaviorGraph(const std::string& path, BehaviorGraph& outGraph, std::st
         }
     }
 
+    const std::string contentRoot = FindContentRootForAsset(path);
+    AssetRegistry registry;
+    std::string ignored;
+    if (!contentRoot.empty()
+        && registry.Load(
+            AssetRegistry::DefaultRegistryPath(contentRoot), &ignored)) {
+        for (BtGraphNode& node : graph.nodes) {
+            if (!node.subtreeAssetId.Valid()) continue;
+            node.script = ResolveAssetReference(
+                &registry, contentRoot,
+                {node.subtreeAssetId, node.script},
+                AssetType::BehaviorTree);
+        }
+    }
     outGraph = std::move(graph);
     return true;
 }

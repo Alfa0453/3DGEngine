@@ -209,6 +209,7 @@ void ClipEditorPanel::Draw(const std::string& assetRoot, bool* open, bool* asset
     // Searchable asset picker.
     const auto drawPicker = [&](const char* label, std::array<char, 128>& search,
                                 std::string& value) {
+        bool picked = false;
         const std::string preview = value.empty() ? std::string("None")
             : std::filesystem::path(value).filename().string();
         ImGui::SetNextItemWidth(-1.0f);
@@ -216,17 +217,20 @@ void ClipEditorPanel::Draw(const std::string& assetRoot, bool* open, bool* asset
             ImGui::SetNextItemWidth(-1.0f);
             ImGui::InputTextWithHint("##search", "Search...", search.data(), search.size());
             ImGui::Separator();
-            if (ImGui::Selectable("None", value.empty())) { value.clear(); ImGui::CloseCurrentPopup(); }
+            if (ImGui::Selectable("None", value.empty())) {
+                value.clear(); picked = true; ImGui::CloseCurrentPopup();
+            }
             const std::string filter = Lower(search.data());
             for (const AssetChoice& choice : m_modelChoices) {
                 if (!filter.empty() && Lower(choice.displayName).find(filter) == std::string::npos) continue;
                 if (ImGui::Selectable(choice.displayName.c_str(), value == choice.path)) {
-                    value = choice.path; ImGui::CloseCurrentPopup();
+                    value = choice.path; picked = true; ImGui::CloseCurrentPopup();
                 }
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", choice.path.c_str());
             }
             ImGui::EndCombo();
         }
+        return picked;
     };
 
     // Live preview on the left.
@@ -264,7 +268,8 @@ void ClipEditorPanel::Draw(const std::string& assetRoot, bool* open, bool* asset
     if (ImGui::InputText("Name", m_nameBuffer.data(), m_nameBuffer.size())) m_asset.name = m_nameBuffer.data();
 
     ImGui::SeparatorText("Source");
-    drawPicker("Source File", m_sourceSearch, m_asset.sourceFile);
+    if (drawPicker("Source File", m_sourceSearch, m_asset.sourceFile))
+        m_asset.sourceAssetId = {};
     if (ImGui::Button("Refresh Files")) RefreshChoices(assetRoot);
 
     // Clip selection from the source's embedded clips.

@@ -3,13 +3,19 @@
 #include "AnimationGraphAsset.h"
 #include "AnimationClipAsset.h"
 
+#include <engine/assets/AssetReference.h>
+#include <engine/assets/AssetRegistry.h>
+
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 
 void CharacterAsset::Capture(const EditorScene::Object& o) {
-    name = o.name; modelAssetPath = o.modelAssetPath; materialAssetPath = o.materialAssetPath;
+    name = o.name; modelAssetPath = o.modelAssetPath;
+    modelAssetId = o.modelAssetId;
+    materialAssetPath = o.materialAssetPath;
+    materialAssetId = o.materialAssetId;
     modelOffsetPosition = o.modelOffsetPosition; modelOrientationEuler = o.modelOrientationEuler;
     modelOffsetScale = o.modelOffsetScale;
     colliderEnabled = o.colliderEnabled; collider = o.collider;
@@ -29,8 +35,12 @@ void CharacterAsset::Capture(const EditorScene::Object& o) {
     animationEvents = o.animationEvents;
     animationSources.clear();
     for (const EditorScene::AnimationSource& source : o.animationSources) {
-        animationSources.push_back(CharacterAnimationSource{
-            source.file, source.clipName, source.stripRootMotion});
+        CharacterAnimationSource captured;
+        captured.file = source.file;
+        captured.assetId = source.assetId;
+        captured.clipName = source.clipName;
+        captured.stripRootMotion = source.stripRootMotion;
+        animationSources.push_back(std::move(captured));
     }
     // Rebuild named sockets and their optional visible attachments from the baked
     // scene records. Socket-only records intentionally have an empty model path.
@@ -55,11 +65,21 @@ void CharacterAsset::Capture(const EditorScene::Object& o) {
             sockets.push_back(std::move(s));
         }
         if (!a.modelPath.empty()) {
-            attachments.push_back(
-                CharacterAttachment{a.modelPath, socketName, a.materialPath});
+            CharacterAttachment captured;
+            captured.modelPath = a.modelPath;
+            captured.modelAssetId = a.modelAssetId;
+            captured.materialAssetId = a.materialAssetId;
+            captured.socketName = socketName;
+            captured.materialPath = a.materialPath;
+            attachments.push_back(std::move(captured));
         }
     }
     healthEnabled = o.healthEnabled; health = o.health;
+    ragdollEnabled = o.ragdollEnabled; ragdoll = o.ragdoll;
+    ragdoll.active = false;
+    ragdoll.parts.clear();
+    ragdoll.boneDrivers.clear();
+    ragdoll.boneFromBody.clear();
     navAgentEnabled = o.navAgentEnabled; navSpeed = o.navAgentSpeed;
     navMaxForce = o.navAgentMaxForce; navReachRadius = o.navAgentReachRadius;
     navRepathInterval = o.navAgentRepathInterval; navTargetName = o.navAgentTargetName;
@@ -81,8 +101,8 @@ void CharacterAsset::Capture(const EditorScene::Object& o) {
 bool CharacterAsset::Apply(EditorScene& scene) const {
     if (!scene.SelectedObject() || scene.SelectedLocked()) return false;
     scene.SetSelectedName(name);
-    scene.SetSelectedModelAsset(modelAssetPath);
-    scene.SetSelectedMaterialAsset(materialAssetPath);
+    scene.SetSelectedModelAsset(modelAssetPath, modelAssetId);
+    scene.SetSelectedMaterialAsset(materialAssetPath, materialAssetId);
     scene.SetSelectedModelOffset(modelOffsetPosition, modelOrientationEuler, modelOffsetScale);
     scene.SetSelectedColliderEnabled(colliderEnabled);
     if (colliderEnabled) scene.SetSelectedCollider(collider);
@@ -100,8 +120,13 @@ bool CharacterAsset::Apply(EditorScene& scene) const {
         std::vector<EditorScene::AnimationSource> graphSources;
         graphSources.reserve(graph.clips.size());
         for (const AnimationGraphClip& c : graph.clips) {
-            graphSources.push_back(EditorScene::AnimationSource{
-                c.sourceFile, c.clipName, c.stripRootMotion, c.sourceClipName});
+            EditorScene::AnimationSource source;
+            source.file = c.sourceFile;
+            source.assetId = c.sourceAssetId;
+            source.clipName = c.clipName;
+            source.stripRootMotion = c.stripRootMotion;
+            source.sourceClipName = c.sourceClipName;
+            graphSources.push_back(std::move(source));
         }
         scene.SetSelectedAnimationSources(graphSources);
         scene.SetSelectedAnimationLocomotion(false, 0, "", 0, "", 0, "", 0.15f, 3.0f);
@@ -113,8 +138,12 @@ bool CharacterAsset::Apply(EditorScene& scene) const {
         std::vector<EditorScene::AnimationSource> sceneSources;
         sceneSources.reserve(animationSources.size());
         for (const CharacterAnimationSource& source : animationSources) {
-            sceneSources.push_back(EditorScene::AnimationSource{
-                source.file, source.clipName, source.stripRootMotion});
+            EditorScene::AnimationSource baked;
+            baked.file = source.file;
+            baked.assetId = source.assetId;
+            baked.clipName = source.clipName;
+            baked.stripRootMotion = source.stripRootMotion;
+            sceneSources.push_back(std::move(baked));
         }
         scene.SetSelectedAnimationSources(sceneSources);
     }
@@ -136,6 +165,8 @@ bool CharacterAsset::Apply(EditorScene& scene) const {
     for (const CharacterAttachment& a : attachments) {
         EditorScene::ModelAttachment m;
         m.modelPath = a.modelPath;
+        m.modelAssetId = a.modelAssetId;
+        m.materialAssetId = a.materialAssetId;
         m.materialPath = a.materialPath;
         for (const CharacterSocket& s : sockets) {
             if (s.name == a.socketName) {
@@ -184,9 +215,13 @@ bool CharacterAsset::Apply(EditorScene& scene) const {
                     return event.clipName == alias;
                 }),
             resolvedEvents.end());
-        resolvedSources.push_back(EditorScene::AnimationSource{
-            actionClip.sourceFile, alias, actionClip.stripRootMotion,
-            actionClip.clipName});
+        EditorScene::AnimationSource resolved;
+        resolved.file = actionClip.sourceFile;
+        resolved.assetId = actionClip.sourceAssetId;
+        resolved.clipName = alias;
+        resolved.stripRootMotion = actionClip.stripRootMotion;
+        resolved.sourceClipName = actionClip.clipName;
+        resolvedSources.push_back(std::move(resolved));
         resolvedActions.push_back(EditorScene::AnimationActionProfile{
             alias, 0, alias, actionClip.maskRootBone,
             actionClip.fadeIn, actionClip.fadeOut, actionClip.speed});
@@ -201,6 +236,8 @@ bool CharacterAsset::Apply(EditorScene& scene) const {
     scene.SetSelectedAnimationEvents(resolvedEvents);
     scene.SetSelectedHealthEnabled(healthEnabled);
     if (healthEnabled) scene.SetSelectedHealth(health);
+    scene.SetSelectedRagdollEnabled(ragdollEnabled);
+    if (ragdollEnabled) scene.SetSelectedRagdoll(ragdoll);
     scene.SetSelectedNavAgent(navAgentEnabled, navSpeed, navMaxForce, navReachRadius,
         navRepathInterval, navTargetName, navVisionRange, navVisionHalfAngle);
     if (navAgentEnabled) {
@@ -224,7 +261,57 @@ bool CharacterAsset::Apply(EditorScene& scene) const {
     return true;
 }
 
-bool CharacterAsset::Save(const std::string& path, std::string* error) const {
+bool CharacterAsset::Save(const std::string& path, std::string* error) {
+    if (!assetId.Valid()) assetId = engine::AssetHandle::Generate();
+    version = 20;
+    const std::string contentRoot = engine::FindContentRootForAsset(path);
+    engine::AssetRegistry registry;
+    bool haveRegistry = false;
+    if (!contentRoot.empty()) {
+        std::string ignored;
+        haveRegistry = registry.Load(
+            engine::AssetRegistry::DefaultRegistryPath(contentRoot), &ignored);
+        const engine::AssetHandle currentModel =
+            engine::MakeAssetReference(
+                &registry, contentRoot, modelAssetPath,
+                skeletalModel ? engine::AssetType::SkeletalMesh
+                              : engine::AssetType::StaticMesh).id;
+        if (currentModel.Valid()) modelAssetId = currentModel;
+        const engine::AssetHandle currentMaterial =
+            engine::MakeAssetReference(
+                &registry, contentRoot, materialAssetPath,
+                engine::AssetType::Material).id;
+        if (currentMaterial.Valid()) materialAssetId = currentMaterial;
+        const engine::AssetHandle currentGraph =
+            engine::MakeAssetReference(
+                &registry, contentRoot, animationGraphPath,
+                engine::AssetType::AnimationGraph).id;
+        if (currentGraph.Valid()) animationGraphAssetId = currentGraph;
+        for (CharacterAnimationSource& source : animationSources)
+            if (const engine::AssetHandle current =
+                    engine::MakeAssetReference(
+                        &registry, contentRoot, source.file).id)
+                source.assetId = current;
+        for (CharacterAttachment& attachment : attachments) {
+            if (const engine::AssetHandle current =
+                    engine::MakeAssetReference(
+                        &registry, contentRoot, attachment.modelPath,
+                        engine::AssetType::StaticMesh).id)
+                attachment.modelAssetId = current;
+            if (const engine::AssetHandle current =
+                    engine::MakeAssetReference(
+                        &registry, contentRoot, attachment.materialPath,
+                        engine::AssetType::Material).id)
+                attachment.materialAssetId = current;
+        }
+        actionClipAssetIds.resize(actionClipAssets.size());
+        for (std::size_t i = 0; i < actionClipAssets.size(); ++i)
+            if (const engine::AssetHandle current =
+                    engine::MakeAssetReference(
+                        &registry, contentRoot, actionClipAssets[i],
+                        engine::AssetType::AnimationClip).id)
+                actionClipAssetIds[i] = current;
+    }
     std::error_code ec;
     const std::filesystem::path p(path);
     if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path(), ec);
@@ -232,7 +319,7 @@ bool CharacterAsset::Save(const std::string& path, std::string* error) const {
     if (!out) { if (error) *error = "Could not write character asset: " + path; return false; }
     const CharacterScript legacy{scriptEnabled, scriptClassName, scriptPath};
     const CharacterScript* primary = !scripts.empty() ? &scripts.front() : &legacy;
-    out << "3DG_CHARACTER 18\n"
+    out << "3DG_CHARACTER 21 " << assetId.ToString() << '\n'
         << std::quoted(name) << '\n' << std::quoted(modelAssetPath) << '\n' << std::quoted(materialAssetPath) << '\n'
         << colliderEnabled << ' ' << static_cast<int>(collider.shape) << ' '
         << collider.halfExtents.x << ' ' << collider.halfExtents.y << ' ' << collider.halfExtents.z << ' '
@@ -357,6 +444,62 @@ bool CharacterAsset::Save(const std::string& path, std::string* error) const {
     for (const std::string& actionPath : actionClipAssets) {
         out << ' ' << std::quoted(actionPath.empty() ? std::string("-") : actionPath);
     }
+    out << '\n'
+        << "RAGDOLL " << ragdollEnabled << ' '
+        << ragdoll.enabled << ' ' << ragdoll.activateOnDeath << ' '
+        << ragdoll.totalMass << ' ' << ragdoll.bodyRadiusScale << ' '
+        << ragdoll.linearDamping << ' ' << ragdoll.angularDamping << ' '
+        << ragdoll.deathImpulse << ' ' << ragdoll.maxBodies << '\n'
+        << "ASSET_REFS "
+        << (modelAssetId.Valid() ? modelAssetId.ToString() : std::string("-"))
+        << ' ' << (animationGraphAssetId.Valid()
+            ? animationGraphAssetId.ToString() : std::string("-"))
+        << ' ' << (materialAssetId.Valid()
+            ? materialAssetId.ToString() : std::string("-"))
+        << ' ' << animationSources.size();
+    for (const CharacterAnimationSource& source : animationSources)
+        out << ' ' << (source.assetId.Valid()
+            ? source.assetId.ToString() : std::string("-"));
+    out << ' ' << attachments.size();
+    for (const CharacterAttachment& attachment : attachments) {
+        out << ' ' << (attachment.modelAssetId.Valid()
+            ? attachment.modelAssetId.ToString() : std::string("-"))
+            << ' ' << (attachment.materialAssetId.Valid()
+                ? attachment.materialAssetId.ToString() : std::string("-"));
+    }
+    out << ' ' << actionClipAssets.size();
+    for (std::size_t i = 0; i < actionClipAssets.size(); ++i) {
+        const engine::AssetHandle id = i < actionClipAssetIds.size()
+            ? actionClipAssetIds[i] : engine::AssetHandle{};
+        out << ' ' << (id.Valid() ? id.ToString() : std::string("-"));
+    }
+    std::vector<engine::AssetHandle> dependencies;
+    const auto addDependency = [&](engine::AssetHandle id) {
+        if (id.Valid()
+            && std::find(dependencies.begin(), dependencies.end(), id)
+                   == dependencies.end())
+            dependencies.push_back(id);
+    };
+    addDependency(modelAssetId);
+    addDependency(materialAssetId);
+    addDependency(animationGraphAssetId);
+    if (haveRegistry)
+        addDependency(engine::MakeAssetReference(
+            &registry, contentRoot, materialAssetPath,
+            engine::AssetType::Material).id);
+    for (const CharacterAnimationSource& source : animationSources)
+        addDependency(source.assetId);
+    for (const CharacterAttachment& attachment : attachments) {
+        addDependency(attachment.modelAssetId);
+        addDependency(attachment.materialAssetId);
+        if (haveRegistry)
+            addDependency(engine::MakeAssetReference(
+                &registry, contentRoot, attachment.materialPath,
+                engine::AssetType::Material).id);
+    }
+    for (engine::AssetHandle id : actionClipAssetIds) addDependency(id);
+    out << '\n' << "ASSET_DEPS " << dependencies.size();
+    for (engine::AssetHandle id : dependencies) out << ' ' << id.ToString();
     out << '\n';
     return static_cast<bool>(out);
 }
@@ -366,6 +509,15 @@ bool CharacterAsset::Load(const std::string& path, std::string* error) {
     std::string magic; int loadedVersion = 0;
     if (!(in >> magic >> loadedVersion) || magic != "3DG_CHARACTER" || loadedVersion < 1) {
         if (error) *error = "Invalid character asset: " + path; return false;
+    }
+    assetId = {};
+    if (loadedVersion >= 19) {
+        std::string id;
+        in >> id;
+        if (!engine::AssetHandle::Parse(id, &assetId)) {
+            if (error) *error = "Character asset has an invalid stable ID: " + path;
+            return false;
+        }
     }
     int shape = 0, movementMode = 0;
     in >> std::quoted(name) >> std::quoted(modelAssetPath) >> std::quoted(materialAssetPath)
@@ -384,7 +536,11 @@ bool CharacterAsset::Load(const std::string& path, std::string* error) {
     if (!in) { if (error) *error = "Character asset is incomplete: " + path; return false; }
     collider.shape = static_cast<engine::ecs::ColliderShape>(shape);
     navMovementMode = static_cast<engine::ai::AiMovementMode>(movementMode);
-    version = 18; // Upgrade legacy assets when they are next saved.
+    version = 21; // Upgrade legacy assets when they are next saved.
+    modelAssetId = {};
+    materialAssetId = {};
+    animationGraphAssetId = {};
+    actionClipAssetIds.clear();
     scripts.clear();
     if (loadedVersion >= 18) {
         std::string scriptsTag;
@@ -651,6 +807,160 @@ bool CharacterAsset::Load(const std::string& path, std::string* error) {
                 std::string actionPath;
                 in >> std::quoted(actionPath);
                 if (actionPath != "-") actionClipAssets.push_back(std::move(actionPath));
+            }
+        }
+    }
+    ragdollEnabled = true;
+    ragdoll = engine::Ragdoll{};
+    if (loadedVersion >= 21) {
+        std::string tag;
+        in >> tag >> ragdollEnabled
+           >> ragdoll.enabled >> ragdoll.activateOnDeath
+           >> ragdoll.totalMass >> ragdoll.bodyRadiusScale
+           >> ragdoll.linearDamping >> ragdoll.angularDamping
+           >> ragdoll.deathImpulse >> ragdoll.maxBodies;
+        if (!in || tag != "RAGDOLL") {
+            if (error) *error = "Character ragdoll data is invalid: " + path;
+            return false;
+        }
+    }
+    if (loadedVersion >= 19) {
+        std::string tag;
+        std::string id;
+        std::size_t count = 0;
+        in >> tag >> id;
+        if (!in || tag != "ASSET_REFS"
+            || (id != "-" && !engine::AssetHandle::Parse(id, &modelAssetId))) {
+            if (error) *error = "Character asset references are invalid: " + path;
+            return false;
+        }
+        in >> id;
+        if (!in || (id != "-"
+            && !engine::AssetHandle::Parse(id, &animationGraphAssetId))) {
+            if (error) *error = "Character graph identity is invalid: " + path;
+            return false;
+        }
+        if (loadedVersion >= 20) {
+            in >> id;
+            if (!in || (id != "-"
+                && !engine::AssetHandle::Parse(id, &materialAssetId))) {
+                if (error) *error =
+                    "Character material identity is invalid: " + path;
+                return false;
+            }
+        }
+        in >> count;
+        if (!in || count != animationSources.size()) {
+            if (error) *error = "Character animation reference count is invalid: " + path;
+            return false;
+        }
+        for (CharacterAnimationSource& source : animationSources) {
+            in >> id;
+            if (!in || (id != "-"
+                && !engine::AssetHandle::Parse(id, &source.assetId))) {
+                if (error) *error = "Character animation identity is invalid: " + path;
+                return false;
+            }
+        }
+        in >> count;
+        if (!in || count != attachments.size()) {
+            if (error) *error = "Character attachment reference count is invalid: " + path;
+            return false;
+        }
+        for (CharacterAttachment& attachment : attachments) {
+            in >> id;
+            if (!in || (id != "-"
+                && !engine::AssetHandle::Parse(id, &attachment.modelAssetId))) {
+                if (error) *error = "Character attachment identity is invalid: " + path;
+                return false;
+            }
+            if (loadedVersion >= 20) {
+                in >> id;
+                if (!in || (id != "-"
+                    && !engine::AssetHandle::Parse(
+                        id, &attachment.materialAssetId))) {
+                    if (error) *error =
+                        "Character attachment material identity is invalid: "
+                        + path;
+                    return false;
+                }
+            }
+        }
+        in >> count;
+        if (!in || count != actionClipAssets.size()) {
+            if (error) *error = "Character action reference count is invalid: " + path;
+            return false;
+        }
+        actionClipAssetIds.resize(count);
+        for (engine::AssetHandle& actionId : actionClipAssetIds) {
+            in >> id;
+            if (!in || (id != "-"
+                && !engine::AssetHandle::Parse(id, &actionId))) {
+                if (error) *error = "Character action identity is invalid: " + path;
+                return false;
+            }
+        }
+    }
+    if (loadedVersion >= 19) {
+        const std::string contentRoot = engine::FindContentRootForAsset(path);
+        engine::AssetRegistry registry;
+        std::string ignored;
+        if (!contentRoot.empty()
+            && registry.Load(
+                engine::AssetRegistry::DefaultRegistryPath(contentRoot),
+                &ignored)) {
+            if (modelAssetId.Valid()) {
+                const std::string resolved = engine::ResolveAssetReference(
+                    &registry, contentRoot, {modelAssetId, modelAssetPath},
+                    skeletalModel ? engine::AssetType::SkeletalMesh
+                                  : engine::AssetType::StaticMesh);
+                if (!resolved.empty()) modelAssetPath = resolved;
+            }
+            if (materialAssetId.Valid()) {
+                const std::string resolved = engine::ResolveAssetReference(
+                    &registry, contentRoot,
+                    {materialAssetId, materialAssetPath},
+                    engine::AssetType::Material);
+                if (!resolved.empty()) materialAssetPath = resolved;
+            }
+            if (animationGraphAssetId.Valid()) {
+                const std::string resolved = engine::ResolveAssetReference(
+                    &registry, contentRoot,
+                    {animationGraphAssetId, animationGraphPath},
+                    engine::AssetType::AnimationGraph);
+                if (!resolved.empty()) animationGraphPath = resolved;
+            }
+            for (CharacterAnimationSource& source : animationSources) {
+                if (!source.assetId.Valid()) continue;
+                const std::string resolved = engine::ResolveAssetReference(
+                    &registry, contentRoot, {source.assetId, source.file});
+                if (!resolved.empty()) source.file = resolved;
+            }
+            for (CharacterAttachment& attachment : attachments) {
+                if (attachment.modelAssetId.Valid()) {
+                    const std::string resolved = engine::ResolveAssetReference(
+                        &registry, contentRoot,
+                        {attachment.modelAssetId, attachment.modelPath},
+                        engine::AssetType::StaticMesh);
+                    if (!resolved.empty()) attachment.modelPath = resolved;
+                }
+                if (attachment.materialAssetId.Valid()) {
+                    const std::string resolved = engine::ResolveAssetReference(
+                        &registry, contentRoot,
+                        {attachment.materialAssetId, attachment.materialPath},
+                        engine::AssetType::Material);
+                    if (!resolved.empty()) attachment.materialPath = resolved;
+                }
+            }
+            for (std::size_t i = 0;
+                 i < actionClipAssets.size()
+                     && i < actionClipAssetIds.size(); ++i) {
+                if (!actionClipAssetIds[i].Valid()) continue;
+                const std::string resolved = engine::ResolveAssetReference(
+                    &registry, contentRoot,
+                    {actionClipAssetIds[i], actionClipAssets[i]},
+                    engine::AssetType::AnimationClip);
+                if (!resolved.empty()) actionClipAssets[i] = resolved;
             }
         }
     }

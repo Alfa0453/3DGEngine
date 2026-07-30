@@ -19,7 +19,8 @@ struct PackResult {
 // material's scalar factor remains effective. Provided maps must share dimensions.
 // Each source
 // is read from its red channel (grayscale maps store the value in every channel).
-// PNG, JPG and uncompressed TGA sources are supported. Returns ok=false on failure.
+// Engine .3dgtex, PNG, JPG and uncompressed TGA sources are supported.
+// Returns ok=false on failure.
 PackResult PackMetalRoughAO(const std::string& metallicPath,
                             const std::string& roughnessPath,
                             const std::string& aoPath,

@@ -4,6 +4,7 @@
 #include "engine/animation/AnimationGraphDesc.h"
 #include "engine/ecs/Components.h"
 #include "engine/assets/ShaderGraphCompiler.h"
+#include "engine/assets/TextureAsset.h"
 
 #include <glm/gtc/quaternion.hpp>
 
@@ -48,6 +49,25 @@ const Model* RuntimeAssetManager::LoadModel(const std::string &path, std::string
     }
 }
 
+const Model* RuntimeAssetManager::ReloadModel(
+    const std::string& path, std::string* error) {
+    if (path.empty()) {
+        SetError(error, "RuntimeAssetManager: model path is empty");
+        return nullptr;
+    }
+    const auto existing = m_models.find(path);
+    if (existing == m_models.end()) return LoadModel(path, error);
+    try {
+        Model replacement = Model::FromFile(path);
+        *existing->second = std::move(replacement);
+        SetError(error, {});
+        return existing->second.get();
+    } catch (const std::exception& ex) {
+        SetError(error, ex.what());
+        return nullptr;
+    }
+}
+
 const SkinnedModel* RuntimeAssetManager::LoadSkinnedModel(const std::string& path, std::string* error) {
     if (path.empty()) {
         SetError(error, "RuntimeAssetManager: skinned model path is empty");
@@ -66,6 +86,25 @@ const SkinnedModel* RuntimeAssetManager::LoadSkinnedModel(const std::string& pat
         m_skinnedModels.emplace(path, std::move(model));
         SetError(error, std::string{});
         return result;
+    } catch (const std::exception& ex) {
+        SetError(error, ex.what());
+        return nullptr;
+    }
+}
+
+const SkinnedModel* RuntimeAssetManager::ReloadSkinnedModel(
+    const std::string& path, std::string* error) {
+    if (path.empty()) {
+        SetError(error, "RuntimeAssetManager: skinned model path is empty");
+        return nullptr;
+    }
+    const auto existing = m_skinnedModels.find(path);
+    if (existing == m_skinnedModels.end()) return LoadSkinnedModel(path, error);
+    try {
+        SkinnedModel replacement = SkinnedModel::FromFile(path);
+        *existing->second = std::move(replacement);
+        SetError(error, {});
+        return existing->second.get();
     } catch (const std::exception& ex) {
         SetError(error, ex.what());
         return nullptr;
@@ -138,7 +177,20 @@ const Texture* RuntimeAssetManager::LoadTexture(const std::string &path, std::st
     }
 
     try {
-        auto texture = std::make_unique<Texture>(path);
+        std::unique_ptr<Texture> texture;
+        if (std::filesystem::path(path).extension() == ".3dgtex") {
+            TextureAssetData asset;
+            std::string loadError;
+            if (!LoadTextureAsset(path, &asset, &loadError)) {
+                SetError(error, loadError);
+                return nullptr;
+            }
+            texture = std::make_unique<Texture>(
+                asset.rgba.data(), static_cast<int>(asset.width),
+                static_cast<int>(asset.height), asset.smooth);
+        } else {
+            texture = std::make_unique<Texture>(path);
+        }
         const Texture* result = texture.get();
         m_textures.emplace(path, std::move(texture));
         SetError(error, std::string{});
@@ -198,6 +250,15 @@ const Shader* RuntimeAssetManager::LoadShader(
                 : asset->second.domain == ShaderDomain::Particle
                     ? "particle"
                     : "unlit";
+    // LoadShader is called from the render submission path for every object
+    // using a graph material. Once a variant has compiled, returning it here
+    // avoids regenerating graph source, validating nodes, and hashing the full
+    // program every frame. Explicit asset reload/manager Clear still invalidates
+    // this cache in the normal editor refresh workflow.
+    if (const Shader* cached = m_shaderPrograms.Find(path, variant)) {
+        SetError(error, {});
+        return cached;
+    }
     const GeneratedShaderSource generated =
         GenerateShaderSource(
             asset->second,

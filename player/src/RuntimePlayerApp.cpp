@@ -4,6 +4,7 @@
 #include <engine/graphics/Primitives.h>
 #include <engine/gameplay/Script.h>
 #include <engine/gameplay/GameplaySystems.h>
+#include <engine/gameplay/RagdollSystem.h>
 #include <engine/gameplay/GameplayComponents.h>
 #include <engine/gameplay/GameMode.h>
 #include <engine/ai/BtScript.h>
@@ -1480,8 +1481,15 @@ void RuntimePlayerApp::OnUpdate(float dt) {
 }
 
 void RuntimePlayerApp::OnFixedUpdate(float h) {
-    // Freeze the simulation while paused or once the run is over/won (GameMode).
-    if (!m_simReady || m_paused || !engine::GameMode::Instance().IsPlaying()) return;
+    if (!m_simReady || m_paused) return;
+    // Keep physics alive after a win/loss so a newly activated death ragdoll can
+    // fall and settle instead of freezing on its first frame.
+    if (!engine::GameMode::Instance().IsPlaying()) {
+        engine::UpdateRagdollsBeforePhysics(m_registry, m_physics);
+        m_physics.Step(m_registry, h);
+        engine::UpdateRagdollsAfterPhysics(m_registry);
+        return;
+    }
     const bool inputEnabled =
         m_scene.gameMode.playerInputEnabled
         && !m_cameraDirector.InputLocked();
@@ -1547,9 +1555,11 @@ void RuntimePlayerApp::OnFixedUpdate(float h) {
     engine::UpdateProjectiles(m_registry, h);
     engine::ecs::UpdateGameplay(m_registry, h);        // rotators + movers
     engine::UpdateHealth(m_registry);
+    engine::UpdateRagdollsBeforePhysics(m_registry, m_physics);
     engine::ecs::UpdateRuntimeMotion(m_registry, h);   // linear/angular velocity
     engine::UpdateAnimations(m_registry, h);
     m_physics.Step(m_registry, h);
+    engine::UpdateRagdollsAfterPhysics(m_registry);
     ProcessLevelPhysicsEvents();
     m_runtimeAudio.ProcessCollisionEvents(m_registry, m_physics.Events());
     engine::ProcessParticleCollisionEvents(m_registry, m_physics.Events());
@@ -1673,6 +1683,11 @@ void RuntimePlayerApp::OnRender() {
             });
     }
     m_post->RenderToScreen(w.Width(), w.Height(), m_dt);
+
+    engine::DrawWorldHealthBars(
+        *m_text, m_registry,
+        cam.ProjectionMatrix(aspect) * cam.ViewMatrix(),
+        w.Width(), w.Height(), m_playerEntity);
 
     // Game HUD (the scene's .hud), drawn on the presented scene.
     DrawHudOverlay();

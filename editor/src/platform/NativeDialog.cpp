@@ -107,6 +107,42 @@ std::string OpenFileDialog(const std::string& title, const std::string& filterNa
     return {};
 }
 
+std::string OpenAssetImportDialog(const std::string& title) {
+    wchar_t file[4096] = L"";
+    std::wstring filter;
+    const auto addFilter = [&filter](const wchar_t* name, const wchar_t* pattern) {
+        filter += name;
+        filter.push_back(L'\0');
+        filter += pattern;
+        filter.push_back(L'\0');
+    };
+    addFilter(L"Supported Assets",
+              L"*.fbx;*.obj;*.gltf;*.glb;*.dae;*.ply;*.stl;"
+              L"*.png;*.jpg;*.jpeg;*.tga;"
+              L"*.wav;*.ogg;*.mp3;*.flac;"
+              L"*.3dgmesh;*.3dgskmesh;*.3dgskel;*.3dganim;*.3dgtex;"
+              L"*.3dgmat;*.3dgshader;*.particle;*.particlefx;*.hud;"
+              L"*.3dgcharacter;*.3dgclip;*.3dggraph;*.btgraph");
+    addFilter(L"3D Models", L"*.fbx;*.obj;*.gltf;*.glb;*.dae;*.ply;*.stl");
+    addFilter(L"Images", L"*.png;*.jpg;*.jpeg;*.tga");
+    addFilter(L"Audio", L"*.wav;*.ogg;*.mp3;*.flac");
+    addFilter(L"All Files", L"*.*");
+    filter.push_back(L'\0');
+
+    const std::wstring wtitle = Utf8ToWide(title);
+    OPENFILENAMEW ofn;
+    ZeroMemory(&ofn, sizeof(ofn));
+    ofn.lStructSize = sizeof(ofn);
+    ofn.lpstrFile = file;
+    ofn.nMaxFile = static_cast<DWORD>(sizeof(file) / sizeof(file[0]));
+    ofn.lpstrFilter = filter.c_str();
+    ofn.nFilterIndex = 1;
+    ofn.lpstrTitle = title.empty() ? nullptr : wtitle.c_str();
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST
+        | OFN_NOCHANGEDIR | OFN_EXPLORER;
+    return GetOpenFileNameW(&ofn) ? WideToUtf8(file) : std::string();
+}
+
 } // namespace editor
 
 #else  // ---- non-Windows: no native dialog available -----------------------
@@ -115,6 +151,7 @@ namespace editor {
 
 std::string PickFolderDialog(const std::string&) { return {}; }
 std::string OpenFileDialog(const std::string&, const std::string&, const std::string&) { return {}; }
+std::string OpenAssetImportDialog(const std::string&) { return {}; }
 
 } // namespace editor
 

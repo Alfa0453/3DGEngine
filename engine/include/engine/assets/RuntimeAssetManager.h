@@ -37,7 +37,12 @@ public:
     };
 
     const Model* LoadModel(const std::string& path, std::string* error = nullptr);
+    // Replaces a cached model's GPU data in place so existing ECS pointers remain
+    // valid after an editor reimport.
+    const Model* ReloadModel(const std::string& path, std::string* error = nullptr);
     const SkinnedModel* LoadSkinnedModel(const std::string& path, std::string* error = nullptr);
+    const SkinnedModel* ReloadSkinnedModel(
+        const std::string& path, std::string* error = nullptr);
     // Load a skinned model and merge extra animation files onto it. Cached under a
     // key combining the model path and the sources, so each unique model+clip set
     // is a distinct instance (the plain overload above is unaffected).

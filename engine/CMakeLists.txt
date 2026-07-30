@@ -48,6 +48,13 @@ add_library(engine STATIC
     src/graphics/GpuProfiler.cpp
     src/scene/RuntimeSceneLoader.cpp
     src/assets/RuntimeAssetManager.cpp
+    src/assets/AssetIdentity.cpp
+    src/assets/AssetCooker.cpp
+    src/assets/AssetReference.cpp
+    src/assets/AssetRegistry.cpp
+    src/assets/StaticMeshAsset.cpp
+    src/assets/TextureAsset.cpp
+    src/assets/SkeletalAsset.cpp
     src/assets/MaterialAssetLoader.cpp
     src/assets/ParticleAsset.cpp
     src/assets/ShaderAsset.cpp
@@ -81,6 +88,7 @@ add_library(engine STATIC
     src/gameplay/PlayerController.cpp
     src/gameplay/CameraDirector.cpp
     src/gameplay/GameplaySystems.cpp
+    src/gameplay/RagdollSystem.cpp
     src/gameplay/GameMode.cpp
     src/gameplay/Script.cpp
 )

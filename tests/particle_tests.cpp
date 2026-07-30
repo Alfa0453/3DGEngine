@@ -4,6 +4,7 @@
 #include <engine/ecs/Registry.h>
 #include <engine/graphics/ParticleSystem.h>
 #include <engine/graphics/RuntimeParticleSystem.h>
+#include <engine/assets/AssetRegistry.h>
 #include <engine/assets/ParticleAsset.h>
 #include <engine/physics/PhysicsWorld.h>
 #include <engine/physics/PhysicsComponents.h>
@@ -453,8 +454,16 @@ void TestAssetRoundTripAndCompatibility() {
     engine::NormalizeParticleModuleStack(source.config, true);
     std::string error;
     Check(particle_asset::Save(currentAsset.string(), source, &error), "Particle asset saves");
+    const engine::AssetHandle originalAssetId = source.assetId;
+    Check(originalAssetId.Valid(), "Particle assets receive a stable engine asset ID");
     engine::ParticleSystemComponent loaded;
     Check(particle_asset::Load(currentAsset.string(), &loaded, &error), "Particle asset reloads");
+    Check(loaded.assetId == originalAssetId,
+          "Particle asset ID survives a save and load");
+    source.config.rate += 1.0f;
+    Check(particle_asset::Save(currentAsset.string(), source, &error)
+          && source.assetId == originalAssetId,
+          "Overwriting a particle asset preserves its stable ID");
     Check(engine::SaveParticleAsset(runtimeAsset.string(), source, &error),
           "Engine particle asset saver writes runtime-compatible assets");
     engine::ParticleSystemComponent runtimeLoaded;
@@ -546,12 +555,17 @@ void TestAssetRoundTripAndCompatibility() {
     effectLayers[1].assetPath = currentAsset.string();
     effectLayers[1].offset = glm::vec3(1.0f, 2.0f, 3.0f);
     effectLayers[1].enabled = false;
-    Check(particle_asset::SaveEffect(effectAsset.string(), effectLayers, &error),
+    engine::AssetHandle effectAssetId;
+    Check(particle_asset::SaveEffect(
+              effectAsset.string(), effectLayers, &effectAssetId, &error),
           "Particle effect asset saves layer references");
     std::vector<engine::ParticleEffectLayer> loadedEffect;
-    Check(particle_asset::LoadEffect(effectAsset.string(), &loadedEffect, &error),
+    engine::AssetHandle loadedEffectId;
+    Check(particle_asset::LoadEffect(
+              effectAsset.string(), &loadedEffect, &loadedEffectId, &error),
           "Particle effect asset reloads referenced emitters");
-    Check(loadedEffect.size() == 2 && loadedEffect[1].name == "Offset Smoke"
+    Check(effectAssetId.Valid() && loadedEffectId == effectAssetId
+          && loadedEffect.size() == 2 && loadedEffect[1].name == "Offset Smoke"
           && !loadedEffect[1].enabled && Near(loadedEffect[1].offset.y, 2.0f),
           "Effect round trip preserves layer order, state, and offsets");
 
@@ -575,6 +589,133 @@ void TestAssetRoundTripAndCompatibility() {
     std::filesystem::remove_all(folder, ec);
 }
 
+void TestNativeAssetIdentityDependenciesAndMoves() {
+    namespace fs = std::filesystem;
+    const fs::path root =
+        fs::temp_directory_path() / "3dg_particle_native_asset_tests";
+    const fs::path content = root / "Project" / "Content";
+    const fs::path texture = content / "Textures" / "Spark.3dgtex";
+    const fs::path mesh = content / "Meshes" / "Shard.3dgmesh";
+    const fs::path shader = content / "Shaders" / "Magic.3dgshader";
+    const fs::path particle = content / "Particles" / "Magic.particle";
+    const fs::path effect = content / "Particles" / "MagicImpact.particlefx";
+    std::error_code ec;
+    fs::remove_all(root, ec);
+    fs::create_directories(texture.parent_path(), ec);
+    fs::create_directories(mesh.parent_path(), ec);
+    fs::create_directories(shader.parent_path(), ec);
+    fs::create_directories(particle.parent_path(), ec);
+    std::ofstream(texture) << "texture";
+    std::ofstream(mesh) << "mesh";
+    std::ofstream(shader) << "shader";
+
+    const engine::AssetHandle textureId = engine::AssetHandle::Generate();
+    const engine::AssetHandle meshId = engine::AssetHandle::Generate();
+    const engine::AssetHandle shaderId = engine::AssetHandle::Generate();
+    engine::AssetRegistry registry;
+    std::string error;
+    Check(registry.Register(
+              {textureId, engine::AssetType::Texture,
+               "/Game/Textures/Spark.3dgtex"}, &error)
+          && registry.Register(
+              {meshId, engine::AssetType::StaticMesh,
+               "/Game/Meshes/Shard.3dgmesh"}, &error)
+          && registry.Register(
+              {shaderId, engine::AssetType::Shader,
+               "/Game/Shaders/Magic.3dgshader"}, &error)
+          && registry.Save(
+              engine::AssetRegistry::DefaultRegistryPath(content.string()),
+              &error),
+          "Particle dependency fixtures register in the asset database");
+
+    engine::ParticleSystemComponent authored;
+    authored.config.texturePath = texture.string();
+    authored.config.meshPath = mesh.string();
+    authored.config.shaderPath = shader.string();
+    authored.config.renderMode = engine::ParticleRenderMode::Mesh;
+    authored.config.meshShape = engine::ParticleMeshShape::Model;
+    Check(engine::SaveParticleAsset(particle.string(), authored, &error),
+          "Engine particle asset saves registered dependencies");
+    Check(authored.assetId.Valid()
+          && authored.config.textureAssetId == textureId
+          && authored.config.meshAssetId == meshId
+          && authored.config.shaderAssetId == shaderId,
+          "Particle asset captures stable IDs for texture, mesh, and shader");
+
+    engine::AssetRegistry registered;
+    Check(registered.Load(
+              engine::AssetRegistry::DefaultRegistryPath(content.string()),
+              &error),
+          "Particle registry reloads");
+    const engine::AssetRegistryEntry* particleEntry =
+        registered.Find(authored.assetId);
+    Check(particleEntry
+          && particleEntry->type == engine::AssetType::Particle
+          && particleEntry->dependencies.size() == 3,
+          "Particle registry entry records all renderer dependencies");
+
+    const fs::path movedShader =
+        content / "Shaders" / "Moved" / "Magic.3dgshader";
+    fs::create_directories(movedShader.parent_path(), ec);
+    fs::rename(shader, movedShader, ec);
+    Check(!ec
+          && registered.Move(
+              shaderId, "/Game/Shaders/Moved/Magic.3dgshader", &error)
+          && registered.Save(
+              engine::AssetRegistry::DefaultRegistryPath(content.string()),
+              &error),
+          "Particle shader dependency can be moved through the registry");
+    engine::ParticleSystemComponent movedDependency;
+    Check(engine::LoadParticleAsset(
+              particle.string(), &movedDependency, &error)
+          && fs::path(movedDependency.config.shaderPath).lexically_normal()
+                 == movedShader.lexically_normal(),
+          "Particle loader recovers a moved shader by stable ID");
+
+    std::vector<engine::ParticleEffectLayer> layers(1);
+    layers[0].name = "Magic";
+    layers[0].assetPath = particle.string();
+    engine::AssetHandle effectId;
+    Check(particle_asset::SaveEffect(
+              effect.string(), layers, &effectId, &error)
+          && effectId.Valid()
+          && layers[0].assetId == authored.assetId,
+          "Particle effect captures the stable ID of each emitter layer");
+    Check(registered.Load(
+              engine::AssetRegistry::DefaultRegistryPath(content.string()),
+              &error),
+          "Particle effect registry reloads");
+    const engine::AssetRegistryEntry* effectEntry = registered.Find(effectId);
+    Check(effectEntry
+          && effectEntry->type == engine::AssetType::ParticleEffect
+          && effectEntry->dependencies.size() == 1
+          && effectEntry->dependencies[0] == authored.assetId,
+          "Particle effect registry entry records its layer dependency");
+
+    const fs::path movedParticle =
+        content / "Particles" / "Moved" / "Magic.particle";
+    fs::create_directories(movedParticle.parent_path(), ec);
+    fs::rename(particle, movedParticle, ec);
+    Check(!ec
+          && registered.Move(
+              authored.assetId,
+              "/Game/Particles/Moved/Magic.particle", &error)
+          && registered.Save(
+              engine::AssetRegistry::DefaultRegistryPath(content.string()),
+              &error),
+          "Particle layer can be moved through the registry");
+    std::vector<engine::ParticleEffectLayer> movedLayers;
+    engine::AssetHandle loadedEffectId;
+    Check(particle_asset::LoadEffect(
+              effect.string(), &movedLayers, &loadedEffectId, &error)
+          && loadedEffectId == effectId && movedLayers.size() == 1
+          && fs::path(movedLayers[0].assetPath).lexically_normal()
+                 == movedParticle.lexically_normal(),
+          "Particle effect recovers a moved emitter layer by stable ID");
+
+    fs::remove_all(root, ec);
+}
+
 } // namespace
 
 int main() {
@@ -583,6 +724,7 @@ int main() {
     TestProjectRelativeParticleAssetResolution();
     TestShapeParityAndValidation();
     TestParticleCollisionResponses();
+    TestNativeAssetIdentityDependenciesAndMoves();
     TestTrailHistory();
     TestRuntimeControlsAndEntityCleanup();
     TestRuntimeColliderIntegration();

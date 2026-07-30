@@ -1,5 +1,6 @@
 #include "engine/graphics/Texture.h"
 #include "engine/graphics/ImageDecode.h"
+#include "engine/assets/TextureAsset.h"
 
 #include <glad/glad.h>
 
@@ -168,7 +169,14 @@ Texture::Texture(const std::string& path, bool smooth) {
         if      (sig[0] == 0x89 && sig[1] == 0x50 && sig[2] == 0x4E) kind = "png";   // \x89PNG
         else if (sig[0] == 0xFF && sig[1] == 0xD8)                   kind = "jpg";   // JPEG SOI
     }
-    if (kind == "png" || kind == "jpg" || kind == "jpeg") {
+    if (kind == "3dgtex") {
+        TextureAssetData asset;
+        std::string error;
+        if (!LoadTextureAsset(path, &asset, &error))
+            throw std::runtime_error("Texture: " + error);
+        Create(asset.rgba.data(), static_cast<int>(asset.width),
+               static_cast<int>(asset.height), asset.smooth);
+    } else if (kind == "png" || kind == "jpg" || kind == "jpeg") {
         engine::image::Image im = (kind == "png") ? engine::image::DecodePNG(path)
                                                   : engine::image::DecodeJPEG(path);
         FlipRowsRGBA(im.rgba, im.width, im.height);

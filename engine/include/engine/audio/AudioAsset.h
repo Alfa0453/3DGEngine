@@ -1,5 +1,6 @@
 #pragma once
 
+#include "engine/assets/AssetIdentity.h"
 #include "engine/audio/AudioTypes.h"
 
 #include <cstdint>
@@ -23,6 +24,7 @@ struct AudioCueClip {
 };
 
 struct AudioCueAsset {
+    AssetHandle assetId;
     std::string name = "Audio Cue";
     AudioCueMode mode = AudioCueMode::Random;
     AudioBus bus = AudioBus::SFX;
@@ -39,6 +41,7 @@ struct AudioCueAsset {
 };
 
 struct AudioMixerPreset {
+    AssetHandle assetId;
     std::string name = "Mixer";
     std::vector<float> volumes;
     std::vector<bool> muted;
@@ -55,21 +58,22 @@ struct AdaptiveMusicState {
 };
 
 struct AdaptiveMusicAsset {
+    AssetHandle assetId;
     std::string name = "Adaptive Music";
     std::vector<AdaptiveMusicState> states;
 };
 
 bool LoadAudioCue(const std::string& path, AudioCueAsset* output,
                   std::string* error = nullptr);
-bool SaveAudioCue(const std::string& path, const AudioCueAsset& cue,
+bool SaveAudioCue(const std::string& path, AudioCueAsset& cue,
                   std::string* error = nullptr);
 bool LoadAudioMixerPreset(const std::string& path, AudioMixerPreset* output,
                           std::string* error = nullptr);
-bool SaveAudioMixerPreset(const std::string& path, const AudioMixerPreset& preset,
+bool SaveAudioMixerPreset(const std::string& path, AudioMixerPreset& preset,
                           std::string* error = nullptr);
 bool LoadAdaptiveMusic(const std::string& path, AdaptiveMusicAsset* output,
                        std::string* error = nullptr);
-bool SaveAdaptiveMusic(const std::string& path, const AdaptiveMusicAsset& music,
+bool SaveAdaptiveMusic(const std::string& path, AdaptiveMusicAsset& music,
                        std::string* error = nullptr);
 
 } // namespace engine

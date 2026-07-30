@@ -1,5 +1,8 @@
 #include "engine/assets/MaterialAssetLoader.h"
 
+#include "engine/assets/AssetReference.h"
+#include "engine/assets/AssetRegistry.h"
+
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -166,6 +169,16 @@ bool LoadMaterialAssetFile(const std::string& path, RuntimeMaterialAsset* materi
     }
 
     RuntimeMaterialAsset loaded;
+    std::string idText;
+    if (FindString(text, "assetId", &idText))
+        AssetHandle::Parse(idText, &loaded.id);
+    if (!loaded.id.Valid()) {
+        std::istringstream header(text);
+        std::string magic;
+        int version = 0;
+        if (header >> magic >> version >> idText && magic == "3DG_MATERIAL")
+            AssetHandle::Parse(idText, &loaded.id);
+    }
     std::string schema;
     if (!FindString(text, "schema", &schema) || schema != "3DGEngine.PbrMaterial") {
         if (error) {
@@ -218,9 +231,19 @@ bool LoadMaterialAssetFile(const std::string& path, RuntimeMaterialAsset* materi
     loaded.normalMapPath = ResolveMapPath(path, normalMap);
     loaded.metalRoughMapPath = ResolveMapPath(path, metalRoughMap);
     loaded.heightMapPath = ResolveMapPath(path, heightMap);
+    if (FindString(text, "albedoAssetId", &idText))
+        AssetHandle::Parse(idText, &loaded.albedoMapAssetId);
+    if (FindString(text, "normalAssetId", &idText))
+        AssetHandle::Parse(idText, &loaded.normalMapAssetId);
+    if (FindString(text, "metalRoughAssetId", &idText))
+        AssetHandle::Parse(idText, &loaded.metalRoughMapAssetId);
+    if (FindString(text, "heightAssetId", &idText))
+        AssetHandle::Parse(idText, &loaded.heightMapAssetId);
     std::string shaderPath;
     if (FindString(text, "shader", &shaderPath))
         loaded.shaderPath = ResolveMapPath(path, shaderPath);
+    if (FindString(text, "shaderAssetId", &idText))
+        AssetHandle::Parse(idText, &loaded.shaderAssetId);
     std::size_t parameterCursor = 0;
     while ((parameterCursor = text.find("\"parameterName\"", parameterCursor))
            != std::string::npos) {
@@ -233,10 +256,42 @@ bool LoadMaterialAssetFile(const std::string& path, RuntimeMaterialAsset* materi
         if (colon == std::string::npos) break;
         parameter.type = static_cast<int>(
             std::strtol(text.c_str() + colon + 1, nullptr, 10));
+        std::string parameterId;
+        if (FindStringFrom(
+                text, "parameterAssetId", parameterCursor, &parameterId))
+            AssetHandle::Parse(parameterId, &parameter.assetId);
         if (parameter.type == 7)
             parameter.value = ResolveMapPath(path, parameter.value);
         loaded.shaderParameters.push_back(std::move(parameter));
         parameterCursor = colon + 1;
+    }
+
+    const std::string contentRoot = FindContentRootForAsset(path);
+    AssetRegistry registry;
+    std::string registryError;
+    if (!contentRoot.empty()
+        && registry.Load(
+            AssetRegistry::DefaultRegistryPath(contentRoot), &registryError)) {
+        auto resolve = [&](AssetHandle id, std::string& fallback,
+                           AssetType type) {
+            if (!id.Valid()) return;
+            const std::string resolved = ResolveAssetReference(
+                &registry, contentRoot, {id, fallback}, type);
+            if (!resolved.empty()) fallback = resolved;
+        };
+        resolve(loaded.albedoMapAssetId, loaded.albedoMapPath,
+                AssetType::Texture);
+        resolve(loaded.normalMapAssetId, loaded.normalMapPath,
+                AssetType::Texture);
+        resolve(loaded.metalRoughMapAssetId, loaded.metalRoughMapPath,
+                AssetType::Texture);
+        resolve(loaded.heightMapAssetId, loaded.heightMapPath,
+                AssetType::Texture);
+        resolve(loaded.shaderAssetId, loaded.shaderPath, AssetType::Shader);
+        for (RuntimeShaderParameter& parameter : loaded.shaderParameters) {
+            if (parameter.type == 7)
+                resolve(parameter.assetId, parameter.value, AssetType::Texture);
+        }
     }
 
     *material = loaded;

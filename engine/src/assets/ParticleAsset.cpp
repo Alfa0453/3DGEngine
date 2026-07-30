@@ -1,5 +1,10 @@
 #include "engine/assets/ParticleAsset.h"
 
+#include "engine/assets/AssetReference.h"
+#include "engine/assets/AssetRegistry.h"
+#include "engine/assets/ShaderAsset.h"
+#include "engine/assets/TextureAsset.h"
+
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
@@ -83,7 +88,9 @@ bool LoadParticleAsset(const std::string& path, ParticleSystemComponent* output,
     std::ifstream in(resolvedPath);
     std::string magic;
     int version = 0;
-    if (!(in >> magic >> version) || magic != "3DGParticle" || version < 1 || version > 12) {
+    if (!(in >> magic >> version)
+        || (magic != "3DGParticle" && magic != "3DG_PARTICLE")
+        || version < 1 || version > 14) {
         if (error) {
             *error = "Unsupported, missing, or malformed particle asset: " + path;
             if (resolvedPath != path) *error += " (resolved to " + resolvedPath + ")";
@@ -91,6 +98,13 @@ bool LoadParticleAsset(const std::string& path, ParticleSystemComponent* output,
         return false;
     }
     ParticleSystemComponent s;
+    if (magic == "3DG_PARTICLE") {
+        std::string assetId;
+        if (!(in >> assetId) || !AssetHandle::Parse(assetId, &s.assetId)) {
+            if (error) *error = "Particle asset has an invalid stable ID: " + path;
+            return false;
+        }
+    }
     EmitterConfig& p = s.config;
     int enabled = 1, autoplay = 1, loop = 1, prewarm = 0, localSpace = 1;
     int shape = 0, blend = 0, useSizeCurve = 0, useColorCurve = 0, textureLoop = 1;
@@ -187,7 +201,32 @@ bool LoadParticleAsset(const std::string& path, ParticleSystemComponent* output,
             in >> std::quoted(parameter.name)
                >> parameter.type
                >> std::quoted(parameter.value);
+            if (version >= 14) {
+                std::string textureId;
+                in >> textureId;
+                if (textureId != "-"
+                    && !AssetHandle::Parse(textureId, &parameter.assetId)) {
+                    if (error) *error =
+                        "Particle shader texture reference is invalid: " + path;
+                    return false;
+                }
+            }
             p.shaderParameters.push_back(std::move(parameter));
+        }
+    }
+    if (version >= 13) {
+        std::string textureId, meshId, shaderId;
+        in >> textureId >> meshId >> shaderId;
+        const auto parseOptional = [&](const std::string& text,
+                                       AssetHandle* id) {
+            return text == "-" || AssetHandle::Parse(text, id);
+        };
+        if (!parseOptional(textureId, &p.textureAssetId)
+            || !parseOptional(meshId, &p.meshAssetId)
+            || !parseOptional(shaderId, &p.shaderAssetId)) {
+            if (error) *error = "Particle asset reference metadata is invalid: "
+                + path;
+            return false;
         }
     }
     if (!in) { if (error) *error = "Particle asset data is incomplete: " + path; return false; }
@@ -213,12 +252,33 @@ bool LoadParticleAsset(const std::string& path, ParticleSystemComponent* output,
     p.meshScale = std::max(p.meshScale, 0.001f);
     s.duration = std::max(s.duration, 0.0f); s.startDelay = std::max(s.startDelay, 0.0f);
     s.simulationSpeed = std::max(s.simulationSpeed, 0.0f);
+
+    const std::string contentRoot = FindContentRootForAsset(resolvedPath);
+    AssetRegistry registry;
+    std::string registryError;
+    if (!contentRoot.empty()
+        && registry.Load(
+            AssetRegistry::DefaultRegistryPath(contentRoot), &registryError)) {
+        const auto resolve = [&](AssetHandle id, std::string& fallback,
+                                 AssetType type) {
+            if (!id.Valid()) return;
+            const std::string resolved = ResolveAssetReference(
+                &registry, contentRoot, {id, fallback}, type);
+            if (!resolved.empty()) fallback = resolved;
+        };
+        resolve(p.textureAssetId, p.texturePath, AssetType::Texture);
+        resolve(p.meshAssetId, p.meshPath, AssetType::StaticMesh);
+        resolve(p.shaderAssetId, p.shaderPath, AssetType::Shader);
+        for (ParticleShaderParameter& parameter : p.shaderParameters)
+            if (parameter.type == static_cast<int>(ShaderValueType::Texture2D))
+                resolve(parameter.assetId, parameter.value, AssetType::Texture);
+    }
     *output = std::move(s);
     if (error) error->clear();
     return true;
 }
 
-bool SaveParticleAsset(const std::string& path, const ParticleSystemComponent& source,
+bool SaveParticleAsset(const std::string& path, ParticleSystemComponent& source,
                        std::string* error) {
     std::error_code ec;
     const std::filesystem::path file(path);
@@ -230,13 +290,78 @@ bool SaveParticleAsset(const std::string& path, const ParticleSystemComponent& s
     ParticleSystemComponent s = source;
     SanitizeParticleConfig(s.config);
     NormalizeParticleModuleStack(s.config, true);
-    std::ofstream out(file);
+    const std::string contentRoot = FindContentRootForAsset(path);
+    AssetRegistry registry;
+    std::string registryError;
+    const std::string registryPath = contentRoot.empty()
+        ? std::string() : AssetRegistry::DefaultRegistryPath(contentRoot);
+    if (!registryPath.empty() && std::filesystem::exists(registryPath, ec)
+        && !registry.Load(registryPath, &registryError)) {
+        if (error) *error = "Could not load the particle asset registry: "
+            + registryError;
+        return false;
+    }
+    if (!s.assetId.Valid() && std::filesystem::is_regular_file(file, ec)) {
+        ParticleSystemComponent existing;
+        std::string ignored;
+        if (LoadParticleAsset(path, &existing, &ignored)
+            && existing.assetId.Valid())
+            s.assetId = existing.assetId;
+    }
+    if (!s.assetId.Valid()) s.assetId = AssetHandle::Generate();
+
+    auto capture = [&](std::string& assetPath, AssetHandle& id,
+                       AssetType type) {
+        if (contentRoot.empty() || assetPath.empty()) return true;
+        if (type == AssetType::Texture) {
+            std::string extension =
+                std::filesystem::path(assetPath).extension().string();
+            std::transform(extension.begin(), extension.end(),
+                extension.begin(), [](unsigned char c) {
+                    return static_cast<char>(std::tolower(c));
+                });
+            if (extension == ".png" || extension == ".jpg"
+                || extension == ".jpeg" || extension == ".tga") {
+                std::filesystem::path destination = file.parent_path()
+                    / std::filesystem::path(assetPath).stem();
+                destination.replace_extension(".3dgtex");
+                TextureImportResult imported;
+                if (!ImportTextureToAsset(
+                        assetPath, destination.string(), contentRoot,
+                        &registry, &imported, error))
+                    return false;
+                assetPath = destination.string();
+                id = imported.id;
+                return true;
+            }
+        }
+        const AssetReference reference = MakeAssetReference(
+            &registry, contentRoot, assetPath, type);
+        if (reference.id.Valid()) id = reference.id;
+        return true;
+    };
+    if (!capture(s.config.texturePath, s.config.textureAssetId,
+                 AssetType::Texture)
+        || !capture(s.config.meshPath, s.config.meshAssetId,
+                    AssetType::StaticMesh)
+        || !capture(s.config.shaderPath, s.config.shaderAssetId,
+                    AssetType::Shader))
+        return false;
+    for (ParticleShaderParameter& parameter : s.config.shaderParameters) {
+        if (parameter.type == static_cast<int>(ShaderValueType::Texture2D)
+            && !capture(parameter.value, parameter.assetId,
+                        AssetType::Texture))
+            return false;
+    }
+
+    const std::filesystem::path temporary = file.string() + ".tmp";
+    std::ofstream out(temporary);
     if (!out) {
         if (error) *error = "Could not open particle asset for writing.";
         return false;
     }
     const EmitterConfig& p = s.config;
-    out << "3DGParticle 12\n"
+    out << "3DG_PARTICLE 14 " << s.assetId.ToString() << '\n'
         << (s.enabled ? 1 : 0) << ' ' << (s.autoplay ? 1 : 0) << ' '
         << (s.loop ? 1 : 0) << ' ' << (s.prewarm ? 1 : 0) << ' '
         << s.duration << ' ' << s.startDelay << ' ' << s.simulationSpeed << ' '
@@ -292,12 +417,78 @@ bool SaveParticleAsset(const std::string& path, const ParticleSystemComponent& s
     for (const ParticleShaderParameter& parameter : p.shaderParameters) {
         out << ' ' << std::quoted(parameter.name)
             << ' ' << parameter.type
-            << ' ' << std::quoted(parameter.value);
+            << ' ' << std::quoted(parameter.value)
+            << ' ' << (parameter.assetId.Valid()
+                    ? parameter.assetId.ToString() : std::string("-"));
     }
+    const auto storedId = [](AssetHandle id) {
+        return id.Valid() ? id.ToString() : std::string("-");
+    };
+    out << '\n' << storedId(p.textureAssetId)
+        << ' ' << storedId(p.meshAssetId)
+        << ' ' << storedId(p.shaderAssetId) << '\n';
+    std::vector<AssetHandle> dependencies;
+    for (AssetHandle id :
+         {p.textureAssetId, p.meshAssetId, p.shaderAssetId}) {
+        if (id.Valid()
+            && std::find(dependencies.begin(), dependencies.end(), id)
+                   == dependencies.end())
+            dependencies.push_back(id);
+    }
+    for (const ParticleShaderParameter& parameter : p.shaderParameters) {
+        if (parameter.assetId.Valid()
+            && std::find(dependencies.begin(), dependencies.end(),
+                         parameter.assetId) == dependencies.end())
+            dependencies.push_back(parameter.assetId);
+    }
+    out << "ASSET_DEPS " << dependencies.size();
+    for (AssetHandle id : dependencies) out << ' ' << id.ToString();
     out << '\n';
     if (!out) {
+        out.close();
+        std::filesystem::remove(temporary, ec);
         if (error) *error = "Could not finish writing particle asset.";
         return false;
+    }
+    out.close();
+    const std::filesystem::path backup = file.string() + ".bak";
+    std::filesystem::remove(backup, ec);
+    ec.clear();
+    if (std::filesystem::exists(file, ec)) {
+        std::filesystem::rename(file, backup, ec);
+        if (ec) {
+            std::filesystem::remove(temporary);
+            if (error) *error = "Could not replace particle asset: "
+                + ec.message();
+            return false;
+        }
+    }
+    ec.clear();
+    std::filesystem::rename(temporary, file, ec);
+    if (ec) {
+        std::error_code rollback;
+        if (std::filesystem::exists(backup, rollback))
+            std::filesystem::rename(backup, file, rollback);
+        if (error) *error = "Could not commit particle asset: " + ec.message();
+        return false;
+    }
+    std::filesystem::remove(backup, ec);
+    source = s;
+
+    if (!contentRoot.empty()) {
+        AssetRegistryEntry entry;
+        entry.id = s.assetId;
+        entry.type = AssetType::Particle;
+        entry.virtualPath = AssetRegistry::NormalizeVirtualPath(
+            std::filesystem::relative(file, contentRoot, ec).generic_string());
+        entry.importerVersion = 1;
+        entry.dependencies = dependencies;
+        if (ec || !registry.Register(std::move(entry), &registryError)
+            || !registry.Save(registryPath, &registryError)) {
+            if (error) *error = "Particle saved, but registration failed: "
+                + (ec ? ec.message() : registryError);
+            return false;
+        }
     }
     if (error) error->clear();
     return true;

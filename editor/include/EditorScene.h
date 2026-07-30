@@ -7,6 +7,7 @@
 #include <engine/gameplay/Script.h>
 #include <engine/physics/PhysicsComponents.h>
 #include <engine/ai/AiMovement.h>
+#include <engine/assets/AssetIdentity.h>
 
 #include <glm/glm.hpp>
 
@@ -91,6 +92,7 @@ public:
     // Character Editor preview.
     struct AnimationSource {
         std::string file;
+        engine::AssetHandle assetId;
         std::string clipName;       // runtime alias used by states
         bool        stripRootMotion = false;
         std::string sourceClipName; // take inside the source file
@@ -99,6 +101,8 @@ public:
     // A static model socketed to a character bone (weapon, shield, hat...).
     struct ModelAttachment {
         std::string modelPath;
+        engine::AssetHandle modelAssetId;
+        engine::AssetHandle materialAssetId;
         std::string boneName;
         glm::vec3   position{0.0f};
         glm::vec3   eulerDegrees{0.0f};
@@ -184,7 +188,9 @@ public:
         bool visible = true;
         bool locked = false;
         std::string modelAssetPath;
+        engine::AssetHandle modelAssetId;
         std::string materialAssetPath;
+        engine::AssetHandle materialAssetId;
         std::unordered_map<std::string, std::string> materialParameterOverrides;
         glm::vec3 modelOrientationEuler{0.0f};   // render-only model rotation (deg); collider unaffected
         glm::vec3 modelOffsetPosition{0.0f};     // render-only model position offset; collider unaffected
@@ -212,6 +218,7 @@ public:
         std::vector<AnimationSource> animationSources;   // separate FBX clips merged by bone name
         std::vector<ModelAttachment> modelAttachments;   // static models socketed to bones
         std::string characterAssetPath;                  // source .3dgcharacter (for live editor sync)
+        engine::AssetHandle characterAssetId;
         bool linearVelocityEnabled = false;
         bool angularVelocityEnabled = false;
         glm::vec3 linearVelocity{0.0f};
@@ -248,6 +255,8 @@ public:
         float cameraZoneReturnBlend = 0.35f;
         bool healthEnabled = false;
         engine::Health health;
+        bool ragdollEnabled = false;
+        engine::Ragdoll ragdoll;
         bool scriptEnabled = false;
         std::string scriptClassName;
         std::string scriptPath;
@@ -255,6 +264,7 @@ public:
         std::vector<ScriptBinding> additionalScripts;
         bool audioSourceEnabled = false;
         std::string audioAssetPath;
+        engine::AssetHandle audioAssetId;
         engine::AudioBus audioBus = engine::AudioBus::SFX;
         float audioVolume = 1.0f;
         float audioPitch = 1.0f;
@@ -282,6 +292,7 @@ public:
         int particleBurstCount = 0;
         float particleBurstInterval = 0.0f;
         std::string particleAssetPath;
+        engine::AssetHandle particleAssetId;
         bool particleAssetOverride = false;
         std::vector<engine::ParticleEffectLayer> particleEffectLayers;
         // AI NavAgent (patrol/chase/search brain). M1: patrol only.
@@ -297,6 +308,7 @@ public:
         float navAgentVisionHalfAngle = 45.0f;
         // M7: optional data-driven behaviour-tree asset ("" = built-in patrol/chase brain).
         std::string navAgentBrainAsset;
+        engine::AssetHandle navAgentBrainAssetId;
         // Faction targeting: team id (0 = neutral). With auto-target on, the agent
         // acquires the nearest agent on a different non-zero team as its chase target.
         int  navAgentTeam = 0;
@@ -452,6 +464,7 @@ public:
 
         struct PostProcessEffect {
             std::string shaderPath;
+            engine::AssetHandle shaderAssetId;
             bool enabled = true;
             std::vector<PostProcessParameter> parameters;
         };
@@ -487,6 +500,7 @@ public:
         bool fxaa = true;   // FXAA post pass (SSR/HDR render path)
         float renderScale = 1.0f;   // 3D render resolution fraction (fill-rate control)
         std::string hudAsset;       // reusable .hud file shown during play (empty = none)
+        engine::AssetHandle hudAssetId;
         std::vector<PostProcessEffect> postProcessEffects;
         bool directionalShadows = true;
         bool pointShadows = true;
@@ -545,6 +559,7 @@ public:
     const std::vector<CameraSequence>& CameraSequences() const { return m_cameraSequences; }
     const CameraPreset* PrimaryCameraPreset() const;
     bool IsDirty() const { return m_dirty; }
+    engine::AssetHandle AssetId() const { return m_assetId; }
     void MarkClean() { m_dirty = false; }
     void MarkDirty() { m_dirty = true; }
 
@@ -607,14 +622,16 @@ public:
     bool SetSelectedName(const std::string& name);
     bool SetSelectedColor(const glm::vec3& color);
     bool SetSelectedPrimitive(Primitive primitive, const engine::Mesh& mesh);
-    bool SetSelectedModelAsset(const std::string& path);
+    bool SetSelectedModelAsset(
+        const std::string& path, engine::AssetHandle id = {});
     bool SetSelectedModelOrientation(const glm::vec3& eulerDegrees);
     // Render-only model offset transform (position + Euler rotation + scale). The
     // collider/controller read the object Transform, which is left untouched.
     bool SetSelectedModelOffset(const glm::vec3& position,
                                 const glm::vec3& eulerDegrees,
                                 const glm::vec3& scale);
-    bool SetSelectedMaterialAsset(const std::string& path);
+    bool SetSelectedMaterialAsset(
+        const std::string& path, engine::AssetHandle id = {});
     bool SetSelectedMaterialParameterOverride(const std::string& name,
                                               const std::string& value);
     bool SetSelectedAnimationSettings(bool skeletalModel,
@@ -643,7 +660,8 @@ public:
     // Static models socketed to the character's bones (weapons, shields...).
     bool SetSelectedModelAttachments(const std::vector<ModelAttachment>& attachments);
     // Record the source .3dgcharacter path so the editor can live-sync edits to it.
-    bool SetSelectedCharacterAssetPath(const std::string& path);
+    bool SetSelectedCharacterAssetPath(
+        const std::string& path, engine::AssetHandle id = {});
     bool SetSelectedLight(const engine::ecs::Light& light);
     void SetEnvironment(const Environment& environment);
     bool SetSelectedLinearVelocityEnabled(bool enabled);
@@ -678,6 +696,8 @@ public:
                                bool restoreOnExit, int priority, float returnBlend);
     bool SetSelectedHealthEnabled(bool enabled);
     bool SetSelectedHealth(const engine::Health& health);
+    bool SetSelectedRagdollEnabled(bool enabled);
+    bool SetSelectedRagdoll(const engine::Ragdoll& ragdoll);
     bool SetSelectedScript(const std::string& className, const std::string& path, bool enabled);
     bool SetSelectedAdditionalScripts(const std::vector<ScriptBinding>& scripts);
     bool SetSelectedAudioSource(bool enabled, const std::string& path,
@@ -768,6 +788,7 @@ private:
     void Clear();
 
     engine::ecs::Registry m_registry;
+    engine::AssetHandle m_assetId;
     std::vector<Object> m_objects;
     std::vector<PhysicsJoint> m_joints;
     std::vector<CameraPreset> m_cameraPresets;

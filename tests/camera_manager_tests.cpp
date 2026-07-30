@@ -5,7 +5,9 @@
 #include <engine/graphics/CameraShake.h>
 #include <engine/graphics/CameraSequence.h>
 #include <engine/gameplay/CameraDirector.h>
+#include <engine/ui/Hud.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
@@ -29,6 +31,29 @@ bool Near(float a, float b, float epsilon = 0.0001f) {
 } // namespace
 
 int main() {
+    {
+        const std::filesystem::path hudPath =
+            std::filesystem::temp_directory_path()
+            / "3dg_native_hud_test.hud";
+        engine::HudDocument hud;
+        engine::HudWidget& image =
+            hud.Add(engine::HudWidgetType::Image);
+        image.imageAsset = "Content/Textures/Icon.3dgtex";
+        image.shaderPath = "Content/Shaders/UI.3dgshader";
+        std::string error;
+        Check(hud.Save(hudPath.string(), &error),
+              "save engine-owned HUD asset");
+        const engine::AssetHandle hudId = hud.assetId;
+        engine::HudDocument loadedHud;
+        Check(hudId.Valid()
+              && loadedHud.Load(hudPath.string(), &error)
+              && loadedHud.assetId == hudId,
+              "HUD stable ID survives save and load");
+        Check(hud.Save(hudPath.string(), &error)
+              && hud.assetId == hudId,
+              "HUD overwrite preserves its stable ID");
+        std::filesystem::remove(hudPath);
+    }
     {
         engine::CameraPose from;
         from.position = glm::vec3(0.0f);
@@ -145,6 +170,33 @@ int main() {
     Check(scene.SetSelectedScriptEnabled(false),
           "locked object permits script component toggle");
 
+    engine::ParticleSystemComponent particleSettings;
+    particleSettings.assetId = engine::AssetHandle::Generate();
+    particleSettings.config.texturePath =
+        "Content/Textures/Fireball.3dgtex";
+    particleSettings.config.textureAssetId =
+        engine::AssetHandle::Generate();
+    particleSettings.config.meshPath =
+        "Content/Meshes/Fireball.3dgmesh";
+    particleSettings.config.meshAssetId =
+        engine::AssetHandle::Generate();
+    particleSettings.config.shaderPath =
+        "Content/Shaders/Fireball.3dgshader";
+    particleSettings.config.shaderAssetId =
+        engine::AssetHandle::Generate();
+    particleSettings.config.shaderParameters.push_back(
+        {"Intensity", 0, "2.5"});
+    scene.AddParticleSystem(
+        emptyPlaceholder, {}, "Content/Particles/Fireball.particle",
+        particleSettings);
+    engine::ParticleEffectLayer particleLayer;
+    particleLayer.name = "Impact";
+    particleLayer.assetPath =
+        "Content/Particles/FireballImpact.particle";
+    particleLayer.assetId = engine::AssetHandle::Generate();
+    Check(scene.SetSelectedParticleEffectLayers({particleLayer}),
+          "scene accepts a stable particle effect layer reference");
+
     EditorScene::CameraPreset gameplay;
     gameplay.name = "Gameplay Camera";
     gameplay.position = {2.0f, 4.0f, 8.0f};
@@ -183,6 +235,8 @@ int main() {
     Check(scene.AddCameraSequence(intro) == 0, "add camera sequence");
 
     EditorScene::Environment environment = scene.GetEnvironment();
+    environment.hudAsset = "Content/UI/Gameplay.hud";
+    environment.hudAssetId = engine::AssetHandle::Generate();
     EditorScene::Environment::PostProcessEffect postEffect;
     postEffect.shaderPath = "Content/Shaders/ArcaneGlow.3dgshader";
     postEffect.enabled = true;
@@ -224,7 +278,9 @@ int main() {
     Check(saved.find("\"RevealBoss\"") != std::string::npos,
           "cinematic timeline cue serialized");
     Check(saved.find(
-              "post_effect \"Content/Shaders/ArcaneGlow.3dgshader\" 1 1")
+              "post_effect \"Content/Shaders/ArcaneGlow.3dgshader\"")
+              != std::string::npos
+          && saved.find(" 1 1 \"Intensity\" 0 \"1.75\"")
               != std::string::npos
           && saved.find("\"Intensity\" 0 \"1.75\"") != std::string::npos,
           "post-process stack and parameters are serialized");
@@ -260,6 +316,37 @@ int main() {
           && runtimeScene.gameMode.cameraOverride
           && runtimeScene.gameMode.cameraMode == 2,
           "runtime export preserves Game Mode settings");
+    Check(runtimeScene.environment.hudAssetId
+              == environment.hudAssetId
+          && runtimeScene.environment.hudAsset
+              == environment.hudAsset,
+          "runtime export preserves the stable HUD reference");
+    const auto particleEntity = std::find_if(
+        runtimeScene.entities.begin(), runtimeScene.entities.end(),
+        [](const engine::RuntimeSceneLoader::EntityDesc& entity) {
+            return entity.particleSystemEnabled;
+        });
+    Check(particleEntity != runtimeScene.entities.end(),
+          "runtime scene preserves the particle component");
+    Check(particleEntity->particleSystem.assetId
+              == particleSettings.assetId,
+          "runtime scene preserves the particle asset ID");
+    Check(particleEntity->particleSystem.config.textureAssetId
+              == particleSettings.config.textureAssetId
+          && particleEntity->particleSystem.config.meshAssetId
+              == particleSettings.config.meshAssetId
+          && particleEntity->particleSystem.config.shaderAssetId
+              == particleSettings.config.shaderAssetId,
+          "runtime scene preserves particle renderer dependency IDs");
+    Check(particleEntity->particleSystem.config.shaderPath
+              == particleSettings.config.shaderPath
+          && particleEntity->particleSystem.config.shaderParameters.size()
+              == 1,
+          "runtime scene preserves the particle custom shader and parameters");
+    Check(particleEntity->particleEffect.layers.size() == 1
+          && particleEntity->particleEffect.layers[0].assetId
+              == particleLayer.assetId,
+          "runtime scene preserves particle effect layer IDs");
     std::filesystem::remove(runtimePath);
 
     std::cout << "camera manager tests passed\n";

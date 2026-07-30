@@ -1,6 +1,7 @@
 #pragma once
 
 #include <engine/assets/RuntimeAssetManager.h>
+#include <engine/assets/AssetRegistry.h>
 #include <engine/ecs/Registry.h>
 #include <engine/graphics/Mesh.h>
 
@@ -27,6 +28,8 @@ public:
         const engine::Mesh& staircase,
         EditorLog& log) const;
     bool ExportRuntimeScene(const EditorScene& scene, const EditorProject& project, EditorLog& log) const;
+    bool CookProject(const EditorScene& scene, const EditorProject& project,
+        const engine::AssetRegistry& registry, EditorLog& log) const;
     bool ValidateRuntimeScene(const EditorProject& project,
         const engine::Mesh& cube,
         const engine::Mesh& plane,

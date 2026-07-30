@@ -1,5 +1,7 @@
 #pragma once
 
+#include <engine/assets/AssetIdentity.h>
+
 #include <array>
 #include <string>
 #include <vector>
@@ -10,9 +12,11 @@ struct ShaderParameterDocument {
     std::string name;
     int type = 0;
     std::string value;
+    engine::AssetHandle assetId;
 };
 
 struct MaterialDocument {
+    engine::AssetHandle assetId;
     std::string name = "NewMaterial";
 
     std::array<float, 3> albedo{0.8f, 0.8f, 0.8f};
@@ -43,10 +47,15 @@ struct MaterialDocument {
     std::array<float, 3> subsurfaceColor{1.0f, 1.0f, 1.0f};
 
     std::string albedoMap;
+    engine::AssetHandle albedoMapAssetId;
     std::string normalMap;
+    engine::AssetHandle normalMapAssetId;
     std::string metalRoughMap;
+    engine::AssetHandle metalRoughMapAssetId;
     std::string heightMap;
+    engine::AssetHandle heightMapAssetId;
     std::string shaderPath;
+    engine::AssetHandle shaderAssetId;
     std::vector<ShaderParameterDocument> shaderParameters;
 };
 

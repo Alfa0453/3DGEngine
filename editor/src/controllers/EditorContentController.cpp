@@ -37,7 +37,7 @@ void EditorContentController::CreateFolder(EditorAssets& assets, const std::stri
 void EditorContentController::ImportAsset(EditorAssets& assets, const std::string& sourcePath, EditorLog& log) const {
     std::string error;
     if (assets.ImportAsset(sourcePath, &error)) {
-        log.Info("Imported asset: " + sourcePath);
+        log.Info(assets.LastImportMessage());
     } else {
         log.Error(error);
     }

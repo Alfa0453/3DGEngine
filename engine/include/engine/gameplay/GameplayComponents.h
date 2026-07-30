@@ -4,6 +4,9 @@
 
 #include <glm/glm.hpp>
 
+#include <cstdint>
+#include <vector>
+
 namespace engine {
 
 // --- Reusable gameplay components (data only; behaviour lives in systems) -----
@@ -17,6 +20,33 @@ struct Health {
     bool  justDied = false;         // set for one frame when hp crosses 0
     void  Damage(float d) { if (alive) hp -= d; }
     void  Reset(float full) { hp = maxHp = full; alive = true; justDied = false; }
+};
+
+// Procedural skeletal ragdoll configuration and runtime state. When enabled, the
+// ragdoll system replaces animation with a small set of physics-driven bone
+// bodies after Health reports death. The runtime vectors are built on activation
+// and are intentionally not authored or serialized.
+struct Ragdoll {
+    bool  enabled = true;
+    bool  activateOnDeath = true;
+    bool  active = false;
+    float totalMass = 65.0f;
+    float bodyRadiusScale = 0.18f;
+    float linearDamping = 0.25f;
+    float angularDamping = 1.4f;
+    float deathImpulse = 1.5f;
+    int   maxBodies = 16;
+
+    struct Part {
+        ecs::Entity entity = ecs::kNull;
+        int bone = -1;
+        int parentPart = -1;
+    };
+    std::vector<Part> parts;
+    std::vector<int> boneDrivers;
+    std::vector<glm::mat4> boneFromBody;
+    bool rootColliderWasTrigger = false;
+    std::uint32_t rootColliderMask = 0;
 };
 
 // A moving projectile entity. Travels along `dir` at `speed`, expiring past `range`

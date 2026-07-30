@@ -1,5 +1,9 @@
 #include "MaterialMaker/MaterialDocument.h"
 
+#include <engine/assets/AssetReference.h>
+#include <engine/assets/AssetRegistry.h>
+#include <engine/assets/TextureAsset.h>
+
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -284,7 +288,8 @@ std::string ToJson(const MaterialDocument& material) {
     out << std::fixed << std::setprecision(4);
     out << "{\n";
     out << "  \"schema\": \"3DGEngine.PbrMaterial\",\n";
-    out << "  \"version\": 4,\n";
+    out << "  \"version\": 5,\n";
+    out << "  \"assetId\": \"" << material.assetId.ToString() << "\",\n";
     out << "  \"name\": \"" << EscapeJson(material.name) << "\",\n";
     out << "  \"albedo\": " << Vec3Json(material.albedo) << ",\n";
     out << "  \"metallic\": " << material.metallic << ",\n";
@@ -319,12 +324,15 @@ std::string ToJson(const MaterialDocument& material) {
     out << "  \"subsurface\": " << material.subsurface << ",\n";
     out << "  \"subsurfaceColor\": " << Vec3Json(material.subsurfaceColor) << ",\n";
     out << "  \"shader\": \"" << EscapeJson(material.shaderPath) << "\",\n";
+    out << "  \"shaderAssetId\": \"" << material.shaderAssetId.ToString() << "\",\n";
     out << "  \"shaderParameters\": [\n";
     for (std::size_t i = 0; i < material.shaderParameters.size(); ++i) {
         const auto& parameter = material.shaderParameters[i];
         out << "    {\"parameterName\": \"" << EscapeJson(parameter.name)
             << "\", \"parameterType\": " << parameter.type
-            << ", \"parameterValue\": \"" << EscapeJson(parameter.value) << "\"}"
+            << ", \"parameterValue\": \"" << EscapeJson(parameter.value)
+            << "\", \"parameterAssetId\": \""
+            << parameter.assetId.ToString() << "\"}"
             << (i + 1 < material.shaderParameters.size() ? "," : "") << "\n";
     }
     out << "  ],\n";
@@ -333,6 +341,12 @@ std::string ToJson(const MaterialDocument& material) {
     out << "    \"normal\": \"" << EscapeJson(material.normalMap) << "\",\n";
     out << "    \"metalRough\": \"" << EscapeJson(material.metalRoughMap) << "\",\n";
     out << "    \"height\": \"" << EscapeJson(material.heightMap) << "\"\n";
+    out << "  },\n";
+    out << "  \"mapAssetIds\": {\n";
+    out << "    \"albedoAssetId\": \"" << material.albedoMapAssetId.ToString() << "\",\n";
+    out << "    \"normalAssetId\": \"" << material.normalMapAssetId.ToString() << "\",\n";
+    out << "    \"metalRoughAssetId\": \"" << material.metalRoughMapAssetId.ToString() << "\",\n";
+    out << "    \"heightAssetId\": \"" << material.heightMapAssetId.ToString() << "\"\n";
     out << "  },\n";
     out << "  \"engineMapping\": {\n";
     out << "    \"component\": \"engine::ecs::PbrMaterial\",\n";
@@ -396,15 +410,118 @@ bool SaveMaterialFile(const MaterialDocument& material, const std::string& outpu
             return false;
         }
 
-        // Store texture paths relative to the material file so the material stays
-        // valid when the project moves.
         MaterialDocument stored = material;
+        if (!stored.assetId.Valid() && std::filesystem::is_regular_file(filePath)) {
+            std::ifstream existing(filePath);
+            std::string magic;
+            int version = 0;
+            std::string id;
+            if (existing >> magic >> version >> id
+                && magic == "3DG_MATERIAL")
+                engine::AssetHandle::Parse(id, &stored.assetId);
+        }
+        if (!stored.assetId.Valid())
+            stored.assetId = engine::AssetHandle::Generate();
+
+        const std::string contentRoot =
+            engine::FindContentRootForAsset(filePath.string());
+        engine::AssetRegistry registry;
+        std::string registryError;
+        if (!contentRoot.empty()) {
+            registry.Load(engine::AssetRegistry::DefaultRegistryPath(contentRoot),
+                          &registryError);
+        }
+        auto captureTexture = [&](std::string& texturePath,
+                                  engine::AssetHandle& textureId) -> bool {
+            if (texturePath.empty()) {
+                textureId = {};
+                return true;
+            }
+            std::filesystem::path source(texturePath);
+            std::string extension = source.extension().string();
+            std::transform(extension.begin(), extension.end(), extension.begin(),
+                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (!contentRoot.empty() && extension != ".3dgtex"
+                && (extension == ".png" || extension == ".jpg"
+                    || extension == ".jpeg" || extension == ".tga")) {
+                std::filesystem::path destination = source;
+                std::error_code ec;
+                const std::filesystem::path absoluteSource =
+                    std::filesystem::absolute(source, ec).lexically_normal();
+                const std::filesystem::path absoluteContent =
+                    std::filesystem::absolute(contentRoot, ec).lexically_normal();
+                const std::filesystem::path relative =
+                    absoluteSource.lexically_relative(absoluteContent);
+                if (relative.empty() || relative.is_absolute()
+                    || *relative.begin() == "..")
+                    destination = directory / source.filename();
+                destination.replace_extension(".3dgtex");
+                engine::TextureImportResult imported;
+                if (!engine::ImportTextureToAsset(
+                        source.string(), destination.string(), contentRoot,
+                        &registry, &imported, error))
+                    return false;
+                texturePath = destination.string();
+                textureId = imported.id;
+                return true;
+            }
+            const engine::AssetReference reference =
+                engine::MakeAssetReference(
+                    &registry, contentRoot, texturePath,
+                    engine::AssetType::Texture);
+            if (reference.id.Valid()) textureId = reference.id;
+            return true;
+        };
+        if (!captureTexture(stored.albedoMap, stored.albedoMapAssetId)
+            || !captureTexture(stored.normalMap, stored.normalMapAssetId)
+            || !captureTexture(
+                stored.metalRoughMap, stored.metalRoughMapAssetId)
+            || !captureTexture(stored.heightMap, stored.heightMapAssetId))
+            return false;
+        for (ShaderParameterDocument& parameter : stored.shaderParameters) {
+            if (parameter.type == 7
+                && !captureTexture(parameter.value, parameter.assetId))
+                return false;
+        }
+        const engine::AssetReference shaderReference =
+            engine::MakeAssetReference(
+                &registry, contentRoot, stored.shaderPath,
+                engine::AssetType::Shader);
+        if (shaderReference.id.Valid())
+            stored.shaderAssetId = shaderReference.id;
+
+        // Store paths relative to the material file so the material stays valid
+        // when the project moves. IDs remain authoritative after asset moves.
         stored.albedoMap     = MakeRelativePath(stored.albedoMap, directory.string());
         stored.normalMap     = MakeRelativePath(stored.normalMap, directory.string());
         stored.metalRoughMap = MakeRelativePath(stored.metalRoughMap, directory.string());
         stored.heightMap     = MakeRelativePath(stored.heightMap, directory.string());
         stored.shaderPath    = MakeRelativePath(stored.shaderPath, directory.string());
+        for (ShaderParameterDocument& parameter : stored.shaderParameters) {
+            if (parameter.type == 7)
+                parameter.value =
+                    MakeRelativePath(parameter.value, directory.string());
+        }
+        out << "3DG_MATERIAL 5 " << stored.assetId.ToString() << '\n';
         out << ToJson(stored);
+        std::vector<engine::AssetHandle> dependencies;
+        auto addDependency = [&](engine::AssetHandle id) {
+            if (id.Valid()
+                && std::find(dependencies.begin(), dependencies.end(), id)
+                    == dependencies.end())
+                dependencies.push_back(id);
+        };
+        addDependency(stored.albedoMapAssetId);
+        addDependency(stored.normalMapAssetId);
+        addDependency(stored.metalRoughMapAssetId);
+        addDependency(stored.heightMapAssetId);
+        addDependency(stored.shaderAssetId);
+        for (const ShaderParameterDocument& parameter : stored.shaderParameters)
+            addDependency(parameter.assetId);
+        out << "ASSET_DEPS " << dependencies.size();
+        for (engine::AssetHandle id : dependencies)
+            out << ' ' << id.ToString();
+        out << '\n';
         out.flush();
         if (!out.good()) {
             out.close();
@@ -418,6 +535,22 @@ bool SaveMaterialFile(const MaterialDocument& material, const std::string& outpu
             std::error_code ignored;
             std::filesystem::remove(temporary, ignored);
             return false;
+        }
+        if (!contentRoot.empty()) {
+            engine::AssetRegistryEntry entry;
+            entry.id = stored.assetId;
+            entry.type = engine::AssetType::Material;
+            std::error_code ec;
+            entry.virtualPath = engine::AssetRegistry::NormalizeVirtualPath(
+                std::filesystem::relative(filePath, contentRoot, ec)
+                    .generic_string());
+            entry.importerVersion = 1;
+            entry.dependencies = dependencies;
+            if (ec || !registry.Register(entry, error)
+                || !registry.Save(
+                    engine::AssetRegistry::DefaultRegistryPath(contentRoot),
+                    error))
+                return false;
         }
         if (writtenPath) *writtenPath = filePath.string();
         if (error) error->clear();
@@ -453,7 +586,7 @@ bool LoadMaterialFile(const std::string& path, MaterialDocument* material, std::
     float versionValue = 1.0f;
     FindFloat(text, "version", &versionValue);
     const int version = static_cast<int>(versionValue);
-    if (version < 1 || version > 4 || versionValue != static_cast<float>(version)) {
+    if (version < 1 || version > 5 || versionValue != static_cast<float>(version)) {
         if (error) *error = "Material file uses an unsupported version.";
         return false;
     }
@@ -465,6 +598,17 @@ bool LoadMaterialFile(const std::string& path, MaterialDocument* material, std::
     const std::string top = (mapsStart == std::string::npos) ? text : text.substr(0, mapsStart);
 
     MaterialDocument loaded;
+    std::string idText;
+    if (FindString(top, "assetId", &idText))
+        engine::AssetHandle::Parse(idText, &loaded.assetId);
+    if (!loaded.assetId.Valid()) {
+        std::istringstream header(text);
+        std::string magic;
+        int headerVersion = 0;
+        if (header >> magic >> headerVersion >> idText
+            && magic == "3DG_MATERIAL")
+            engine::AssetHandle::Parse(idText, &loaded.assetId);
+    }
     std::array<float, 3> runtimeEmissive{};
     if (!FindString(top, "name", &loaded.name) ||
         !FindVec3(top, "albedo", &loaded.albedo) ||
@@ -521,6 +665,10 @@ bool LoadMaterialFile(const std::string& path, MaterialDocument* material, std::
                 ? std::string::npos : text.find(':', typeKey);
             if (colon == std::string::npos) break;
             parameter.type = static_cast<int>(std::strtol(text.c_str() + colon + 1, nullptr, 10));
+            std::string parameterId;
+            if (FindStringFrom(
+                    text, "parameterAssetId", cursor, &parameterId))
+                engine::AssetHandle::Parse(parameterId, &parameter.assetId);
             loaded.shaderParameters.push_back(std::move(parameter));
             cursor = colon + 1;
         }
@@ -532,6 +680,16 @@ bool LoadMaterialFile(const std::string& path, MaterialDocument* material, std::
         FindStringFrom(text, "metalRough", mapsStart, &loaded.metalRoughMap);
         FindStringFrom(text, "height", mapsStart, &loaded.heightMap);
     }
+    if (FindString(text, "albedoAssetId", &idText))
+        engine::AssetHandle::Parse(idText, &loaded.albedoMapAssetId);
+    if (FindString(text, "normalAssetId", &idText))
+        engine::AssetHandle::Parse(idText, &loaded.normalMapAssetId);
+    if (FindString(text, "metalRoughAssetId", &idText))
+        engine::AssetHandle::Parse(idText, &loaded.metalRoughMapAssetId);
+    if (FindString(text, "heightAssetId", &idText))
+        engine::AssetHandle::Parse(idText, &loaded.heightMapAssetId);
+    if (FindString(top, "shaderAssetId", &idText))
+        engine::AssetHandle::Parse(idText, &loaded.shaderAssetId);
 
     // Stored paths are relative to the material file; resolve them back to absolute
     // so the loaded material can open its textures regardless of the CWD.
@@ -541,6 +699,10 @@ bool LoadMaterialFile(const std::string& path, MaterialDocument* material, std::
     loaded.metalRoughMap = ResolveRelativePath(loaded.metalRoughMap, baseDir);
     loaded.heightMap     = ResolveRelativePath(loaded.heightMap, baseDir);
     loaded.shaderPath    = ResolveRelativePath(loaded.shaderPath, baseDir);
+    for (ShaderParameterDocument& parameter : loaded.shaderParameters) {
+        if (parameter.type == 7)
+            parameter.value = ResolveRelativePath(parameter.value, baseDir);
+    }
 
     *material = loaded;
     if (error) error->clear();

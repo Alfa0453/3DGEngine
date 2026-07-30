@@ -6,6 +6,7 @@
 #include "engine/graphics/Shader.h"
 #include "engine/ecs/Registry.h"
 #include "engine/ecs/Components.h"
+#include "engine/gameplay/GameplayComponents.h"
 
 #include <glm/gtc/matrix_inverse.hpp>
 
@@ -72,7 +73,11 @@ void DrawAnimatedModelAttachments(const AnimatedModel& animated,
 }
 
 void UpdateAnimations(ecs::Registry& reg, float dt) {
-    reg.view<ecs::Transform, AnimatedModel>().each([&](ecs::Entity, ecs::Transform& transform, AnimatedModel& am) {
+    reg.view<ecs::Transform, AnimatedModel>().each([&](ecs::Entity entity, ecs::Transform& transform, AnimatedModel& am) {
+        if (const Ragdoll* ragdoll = reg.TryGet<Ragdoll>(entity);
+            ragdoll && ragdoll->active) {
+            return;
+        }
         if (!am.model) return;
         const Skeleton& skel = am.model->GetSkeleton();
         const auto& clips = am.model->Animations();

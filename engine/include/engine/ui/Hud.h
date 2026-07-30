@@ -1,5 +1,8 @@
 #pragma once
 
+#include "engine/assets/AssetIdentity.h"
+#include "engine/ecs/Entity.h"
+
 #include <glm/glm.hpp>
 
 #include <functional>
@@ -12,6 +15,7 @@ namespace engine {
 class TextRenderer;
 class Shader;
 class Texture;
+namespace ecs { class Registry; }
 
 // ---------------------------------------------------------------------------
 // Data-driven HUD / game UI (UMG-style). A HudDocument is a flat list of
@@ -78,7 +82,9 @@ struct HudWidget {
     HudButtonAction action = HudButtonAction::None;
 
     std::string imageAsset;   // Image widget: path (relative to content root) of the picture
+    AssetHandle imageAssetId;
     std::string shaderPath;    // optional Unlit/UI shader graph
+    AssetHandle shaderAssetId;
     std::unordered_map<std::string, std::string> shaderParameters;
     std::unordered_map<std::string, int> shaderParameterTypes;
     const Shader* customShader = nullptr; // transient runtime resolution
@@ -88,6 +94,7 @@ struct HudWidget {
 };
 
 struct HudDocument {
+    AssetHandle            assetId;
     glm::vec2              designSize{1920.0f, 1080.0f};  // authoring resolution
     std::vector<HudWidget> widgets;
     int                    nextId = 1;
@@ -96,7 +103,7 @@ struct HudDocument {
     void       Remove(int index);
     void       Clear();
 
-    bool Save(const std::string& path, std::string* error = nullptr) const;
+    bool Save(const std::string& path, std::string* error = nullptr);
     bool Load(const std::string& path, std::string* error = nullptr);
 };
 
@@ -139,6 +146,13 @@ float ResolveHudFraction(const HudWidget& widget, const HudContext& context);
 // screenW/screenH are the framebuffer size in pixels.
 HudDrawResult DrawHud(TextRenderer& text, const HudDocument& doc, const HudContext& ctx,
                       int screenW, int screenH);
+
+// Draw screen-facing health bars above every living Health actor except the
+// supplied local player. Positions are projected from the actor's collider top.
+void DrawWorldHealthBars(TextRenderer& text, ecs::Registry& registry,
+                         const glm::mat4& viewProjection,
+                         int screenW, int screenH,
+                         ecs::Entity localPlayer = ecs::kNull);
 
 // Compute a widget's on-screen rect (pixels) for a given screen size. Exposed
 // so the editor canvas and hit-testing share identical layout math.

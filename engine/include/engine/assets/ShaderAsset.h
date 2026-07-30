@@ -1,5 +1,7 @@
 #pragma once
 
+#include "engine/assets/AssetIdentity.h"
+
 #include <cstdint>
 #include <string>
 #include <utility>
@@ -57,11 +59,15 @@ struct ShaderParameter {
     std::string name;
     ShaderValueType type = ShaderValueType::Float;
     std::string defaultValue = "0";
+    AssetHandle assetId;
 };
 
 struct ShaderAsset {
-    static constexpr int CurrentVersion = 1;
+    static constexpr int CurrentVersion = 3;
     int version = CurrentVersion;
+    AssetHandle assetId;
+    // Graph-local ID seed. This is intentionally separate from the stable
+    // project asset identity above.
     std::uint64_t id = 1;
     std::string name = "New Shader";
     ShaderDomain domain = ShaderDomain::Surface;
@@ -87,7 +93,7 @@ std::vector<ShaderAssetIssue> ValidateShaderAsset(const ShaderAsset& asset);
 bool ShaderAssetHasErrors(const std::vector<ShaderAssetIssue>& issues);
 std::uint64_t HashShaderAsset(const ShaderAsset& asset);
 
-bool SaveShaderAsset(const std::string& path, const ShaderAsset& asset,
+bool SaveShaderAsset(const std::string& path, ShaderAsset& asset,
                      std::string* error = nullptr);
 bool LoadShaderAsset(const std::string& path, ShaderAsset* asset,
                      std::string* error = nullptr);

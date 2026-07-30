@@ -1,6 +1,7 @@
 #pragma once
 
 #include "EditorScene.h"
+#include <engine/assets/AssetIdentity.h>
 
 #include <string>
 #include <vector>
@@ -10,6 +11,7 @@
 // in-place walk/run so the character doesn't slide.
 struct CharacterAnimationSource {
     std::string file;
+    engine::AssetHandle assetId;
     std::string clipName;
     bool        stripRootMotion = false;
 };
@@ -34,17 +36,24 @@ struct CharacterScript {
 // A static model (weapon, shield, hat...) mounted to a named socket.
 struct CharacterAttachment {
     std::string modelPath;
+    engine::AssetHandle modelAssetId;
+    engine::AssetHandle materialAssetId;
     std::string socketName;
     std::string materialPath;   // optional .3dgmat applied to the attachment model
 };
 
 struct CharacterAsset {
-    int version = 18;
+    int version = 21;
+    engine::AssetHandle assetId;
     std::string name = "Character";
     std::string modelAssetPath;
+    engine::AssetHandle modelAssetId;
     std::string materialAssetPath;
+    engine::AssetHandle materialAssetId;
     std::string animationGraphPath;                          // .3dggraph supplying ALL animation (clips + logic)
+    engine::AssetHandle animationGraphAssetId;
     std::vector<std::string> actionClipAssets;               // standalone action .3dgclip assets
+    std::vector<engine::AssetHandle> actionClipAssetIds;
     std::vector<CharacterAnimationSource> animationSources;  // legacy inline clips (used only when no graph is set)
     std::vector<CharacterSocket> sockets;                    // named mount points on the skeleton
     std::vector<CharacterAttachment> attachments;            // static models mounted to sockets
@@ -93,6 +102,8 @@ struct CharacterAsset {
 
     bool healthEnabled = true;
     engine::Health health;
+    bool ragdollEnabled = true;
+    engine::Ragdoll ragdoll;
     bool navAgentEnabled = false;
     float navSpeed = 3.0f;
     float navMaxForce = 20.0f;
@@ -118,6 +129,6 @@ struct CharacterAsset {
 
     void Capture(const EditorScene::Object& object);
     bool Apply(EditorScene& scene) const;
-    bool Save(const std::string& path, std::string* error = nullptr) const;
+    bool Save(const std::string& path, std::string* error = nullptr);
     bool Load(const std::string& path, std::string* error = nullptr);
 };

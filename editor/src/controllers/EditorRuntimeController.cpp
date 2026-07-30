@@ -5,11 +5,13 @@
 #include "EditorScene.h"
 #include "RuntimeSceneExporter.h"
 
+#include <engine/assets/AssetCooker.h>
 #include <engine/ecs/Components.h>
 #include <engine/physics/PhysicsComponents.h>
 #include <engine/scene/RuntimeSceneLoader.h>
 
 #include <cstddef>
+#include <cctype>
 #include <filesystem>
 
 namespace {
@@ -138,6 +140,21 @@ std::filesystem::path AutosavePathFor(const EditorProject& project) {
     return autosavePath;
 }
 
+std::string CookFolderName(const EditorProject& project) {
+    std::string name = project.ProjectName();
+    for (char& c : name) {
+        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '-' && c != '_')
+            c = '_';
+    }
+    return name.empty() ? std::string("Game") : name;
+}
+
+std::filesystem::path ProjectRootFor(const EditorProject& project) {
+    if (project.HasProjectFile())
+        return std::filesystem::path(project.ProjectFilePath()).parent_path();
+    return std::filesystem::path(project.AssetRoot()).parent_path();
+}
+
 } // namespace
 
 bool EditorRuntimeController::SaveScene(EditorScene& scene, const EditorProject& project, EditorLog& log) const {
@@ -199,6 +216,33 @@ bool EditorRuntimeController::ExportRuntimeScene(const EditorScene& scene,
 
     log.Error("Runtime export failed: " + error);
     return false;
+}
+
+bool EditorRuntimeController::CookProject(
+    const EditorScene& scene, const EditorProject& project,
+    const engine::AssetRegistry& registry, EditorLog& log) const {
+    const std::filesystem::path runtimePath = RuntimePathFor(project);
+    std::string error;
+    if (!RuntimeSceneExporter::Export(scene, runtimePath.string(), &error)) {
+        log.Error("Project cook failed during runtime export: " + error);
+        return false;
+    }
+
+    const std::filesystem::path output =
+        ProjectRootFor(project) / "Build" / "Cooked" / CookFolderName(project);
+    engine::AssetCookResult result;
+    if (!engine::AssetCooker::CookRuntimeScene(
+            project.AssetRoot(), runtimePath.string(), output.string(),
+            registry, &result, &error)) {
+        log.Error("Project cook failed: " + error);
+        return false;
+    }
+
+    log.Info("Cooked project to " + result.outputRoot + " ("
+        + std::to_string(result.assets.size())
+        + " required engine asset(s))");
+    log.Info("Cooked startup scene: " + result.runtimeScenePath);
+    return true;
 }
 
 bool EditorRuntimeController::ValidateRuntimeScene(const EditorProject& project,

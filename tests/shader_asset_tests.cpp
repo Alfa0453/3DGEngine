@@ -1,6 +1,9 @@
 #include "engine/assets/RuntimeShaderManager.h"
+#include "engine/assets/AssetReference.h"
+#include "engine/assets/AssetRegistry.h"
 #include "engine/assets/ShaderAsset.h"
 #include "engine/assets/ShaderGraphCompiler.h"
+#include "engine/assets/TextureAsset.h"
 #include "engine/scene/RuntimeSceneLoader.h"
 
 #include <filesystem>
@@ -62,8 +65,13 @@ int main()
            "valid graph must pass validation");
 
     const std::uint64_t originalHash = engine::HashShaderAsset(asset);
+    const std::filesystem::path project =
+        std::filesystem::temp_directory_path() / "3dg_shader_asset_test";
+    const std::filesystem::path content = project / "Content";
     const std::filesystem::path path =
-        std::filesystem::temp_directory_path() / "3dg_shader_asset_test.3dgshader";
+        content / "Shaders" / "surface.3dgshader";
+    std::error_code removeError;
+    std::filesystem::remove_all(project, removeError);
     std::string error;
     Expect(engine::SaveShaderAsset(path.string(), asset, &error),
            "valid asset must save");
@@ -72,12 +80,103 @@ int main()
            "saved asset must load");
     Expect(engine::HashShaderAsset(loaded) == originalHash,
            "shader asset round-trip must be deterministic");
+    Expect(asset.assetId.Valid() && loaded.assetId == asset.assetId,
+           "shader save assigns and reloads a stable project identity");
     Expect(loaded.nodes[0].comment == "Feeds the output"
            && loaded.nodes[0].groupId == 77
            && loaded.nodes[0].value == "0.45",
            "graph comments, groups, and values must survive serialization");
-    std::error_code removeError;
-    std::filesystem::remove(path, removeError);
+    const engine::AssetHandle shaderId = asset.assetId;
+    asset.name = "Test Surface Updated";
+    Expect(engine::SaveShaderAsset(path.string(), asset, &error)
+               && asset.assetId == shaderId,
+           "shader overwrite preserves its stable identity");
+    engine::AssetRegistry shaderRegistry;
+    Expect(shaderRegistry.Load(
+               engine::AssetRegistry::DefaultRegistryPath(content.string()),
+               &error)
+               && shaderRegistry.Find(shaderId)
+               && shaderRegistry.Find(shaderId)->type
+                      == engine::AssetType::Shader,
+           "saved shader is registered as an engine-owned shader asset");
+    const std::filesystem::path movedPath =
+        content / "Effects" / "surface_moved.3dgshader";
+    std::filesystem::create_directories(movedPath.parent_path());
+    std::filesystem::rename(path, movedPath, removeError);
+    Expect(!removeError
+               && shaderRegistry.Move(
+                   shaderId, "/Game/Effects/surface_moved.3dgshader", &error)
+               && shaderRegistry.Save(
+                   engine::AssetRegistry::DefaultRegistryPath(content.string()),
+                   &error),
+           "shader registry identity survives a content move");
+    const std::string resolvedShader = engine::ResolveAssetReference(
+        &shaderRegistry, content.string(),
+        {shaderId, path.string()}, engine::AssetType::Shader, &error);
+    Expect(std::filesystem::path(resolvedShader).lexically_normal()
+               == movedPath.lexically_normal(),
+           "stable shader reference resolves the moved shader path");
+
+    const std::filesystem::path texturePath =
+        content / "Textures" / "detail.3dgtex";
+    engine::TextureAssetData texture;
+    texture.header.id = engine::AssetHandle::Generate();
+    texture.width = 1;
+    texture.height = 1;
+    texture.rgba = {220, 180, 140, 255};
+    Expect(engine::SaveTextureAsset(texturePath.string(), texture, &error),
+           "shader test texture must save as an engine-owned asset");
+    engine::AssetRegistryEntry textureEntry;
+    textureEntry.id = texture.header.id;
+    textureEntry.type = engine::AssetType::Texture;
+    textureEntry.virtualPath = "/Game/Textures/detail.3dgtex";
+    Expect(shaderRegistry.Register(textureEntry, &error)
+               && shaderRegistry.Save(
+                   engine::AssetRegistry::DefaultRegistryPath(content.string()),
+                   &error),
+           "shader test texture must register");
+
+    engine::ShaderAsset textured = ValidAsset();
+    textured.name = "Textured Surface";
+    textured.parameters.push_back(
+        {41, "DetailMap", engine::ShaderValueType::Texture2D,
+         texturePath.string()});
+    const std::filesystem::path texturedShaderPath =
+        content / "Shaders" / "textured.3dgshader";
+    Expect(engine::SaveShaderAsset(
+               texturedShaderPath.string(), textured, &error),
+           "shader with a native texture parameter must save");
+    engine::ShaderAsset loadedTextured;
+    Expect(engine::LoadShaderAsset(
+               texturedShaderPath.string(), &loadedTextured, &error)
+               && loadedTextured.parameters.back().assetId == texture.header.id,
+           "shader texture parameters preserve stable texture identities");
+    engine::AssetRegistry dependencyRegistry;
+    Expect(dependencyRegistry.Load(
+               engine::AssetRegistry::DefaultRegistryPath(content.string()),
+               &error)
+               && dependencyRegistry.Find(textured.assetId)
+               && dependencyRegistry.Find(textured.assetId)->dependencies.size() == 1
+               && dependencyRegistry.Find(textured.assetId)->dependencies.front()
+                      == texture.header.id,
+           "shader registry records native texture dependencies");
+    const std::filesystem::path movedTexturePath =
+        content / "Moved" / "detail.3dgtex";
+    std::filesystem::create_directories(movedTexturePath.parent_path());
+    removeError.clear();
+    std::filesystem::rename(texturePath, movedTexturePath, removeError);
+    Expect(!removeError
+               && dependencyRegistry.Move(
+                   texture.header.id, "/Game/Moved/detail.3dgtex", &error)
+               && dependencyRegistry.Save(
+                   engine::AssetRegistry::DefaultRegistryPath(content.string()),
+                   &error)
+               && engine::LoadShaderAsset(
+                   texturedShaderPath.string(), &loadedTextured, &error)
+               && std::filesystem::path(
+                      loadedTextured.parameters.back().defaultValue)
+                      .lexically_normal() == movedTexturePath.lexically_normal(),
+           "shader texture references resolve by ID after a Content move");
 
     engine::ShaderAsset missingInput = ValidAsset();
     missingInput.links.clear();
@@ -311,6 +410,7 @@ int main()
            && report.diagnostics.front().stage == engine::ShaderStage::File,
            "safe file compilation must return a file diagnostic instead of throwing");
 
+    std::filesystem::remove_all(project, removeError);
     if (failures == 0)
         std::cout << "Shader asset regression tests passed.\n";
     return failures == 0 ? 0 : 1;

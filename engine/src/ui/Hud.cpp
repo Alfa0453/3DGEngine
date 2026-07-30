@@ -1,10 +1,17 @@
 #include "engine/ui/Hud.h"
 
+#include "engine/assets/AssetReference.h"
+#include "engine/assets/AssetRegistry.h"
+#include "engine/ecs/Components.h"
+#include "engine/ecs/Registry.h"
+#include "engine/gameplay/GameplayComponents.h"
 #include "engine/graphics/TextRenderer.h"
 #include "engine/graphics/Shader.h"
+#include "engine/physics/PhysicsComponents.h"
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
@@ -231,6 +238,70 @@ HudDrawResult DrawHud(TextRenderer& text, const HudDocument& doc, const HudConte
     return result;
 }
 
+void DrawWorldHealthBars(TextRenderer& text, ecs::Registry& registry,
+                         const glm::mat4& viewProjection,
+                         int screenW, int screenH, ecs::Entity localPlayer) {
+    if (screenW <= 0 || screenH <= 0) return;
+
+    bool began = false;
+    registry.view<ecs::Transform, Health>().each(
+        [&](ecs::Entity entity, ecs::Transform& transform, Health& health) {
+            if (entity == localPlayer || !health.alive || health.maxHp <= 0.0f) return;
+
+            float top = 1.0f;
+            if (const ecs::Collider* collider = registry.TryGet<ecs::Collider>(entity)) {
+                switch (collider->shape) {
+                    case ecs::ColliderShape::Sphere:
+                        top = collider->radius;
+                        break;
+                    case ecs::ColliderShape::Capsule:
+                        top = collider->halfHeight + collider->radius;
+                        break;
+                    case ecs::ColliderShape::Cylinder:
+                    case ecs::ColliderShape::Cone:
+                        top = collider->halfHeight;
+                        break;
+                    default:
+                        top = collider->halfExtents.y;
+                        break;
+                }
+            }
+
+            const glm::vec4 clip = viewProjection
+                * glm::vec4(transform.position + glm::vec3(0.0f, top + 0.28f, 0.0f), 1.0f);
+            if (clip.w <= 0.001f) return;
+            const glm::vec3 ndc = glm::vec3(clip) / clip.w;
+            if (ndc.z < -1.0f || ndc.z > 1.0f
+                || ndc.x < -1.1f || ndc.x > 1.1f
+                || ndc.y < -1.1f || ndc.y > 1.1f) return;
+
+            if (!began) {
+                text.Begin(screenW, screenH);
+                began = true;
+            }
+
+            const float fraction =
+                std::clamp(health.hp / health.maxHp, 0.0f, 1.0f);
+            const float width = std::clamp(
+                150.0f / std::sqrt(std::max(clip.w, 1.0f)), 72.0f, 124.0f);
+            const float height = std::clamp(width * 0.095f, 7.0f, 11.0f);
+            const float x = (ndc.x * 0.5f + 0.5f) * screenW - width * 0.5f;
+            const float y = (1.0f - (ndc.y * 0.5f + 0.5f)) * screenH;
+
+            const glm::vec3 low(0.90f, 0.12f, 0.08f);
+            const glm::vec3 high(0.15f, 0.82f, 0.24f);
+            const glm::vec3 fill = glm::mix(low, high, fraction);
+            text.FillRect(x - 2.0f, y - 2.0f, width + 4.0f, height + 4.0f,
+                          glm::vec3(0.02f), 0.92f);
+            text.FillRect(x, y, width, height, glm::vec3(0.16f, 0.025f, 0.025f), 0.88f);
+            if (fraction > 0.0f) {
+                text.FillRect(x, y, width * fraction, height, fill, 0.98f);
+            }
+        });
+
+    if (began) text.End();
+}
+
 // ---------------------------------------------------------------------------
 // Names
 // ---------------------------------------------------------------------------
@@ -299,13 +370,49 @@ std::string ReadToken(const std::string& tok) {
 
 } // namespace
 
-bool HudDocument::Save(const std::string& path, std::string* error) const {
+bool HudDocument::Save(const std::string& path, std::string* error) {
+    const std::string contentRoot = FindContentRootForAsset(path);
+    AssetRegistry registry;
+    std::string registryError;
+    const std::string registryPath = contentRoot.empty()
+        ? std::string() : AssetRegistry::DefaultRegistryPath(contentRoot);
+    std::error_code ec;
+    if (!registryPath.empty() && std::filesystem::exists(registryPath, ec)
+        && !registry.Load(registryPath, &registryError)) {
+        if (error) *error = "Could not load HUD asset registry: " + registryError;
+        return false;
+    }
+    if (!assetId.Valid() && std::filesystem::is_regular_file(path, ec)) {
+        std::ifstream existing(path);
+        std::string magic, idText;
+        int version = 0;
+        if (existing >> magic >> version >> idText
+            && magic == "3DG_HUD" && version >= 3)
+            AssetHandle::Parse(idText, &assetId);
+    }
+    if (!assetId.Valid()) assetId = AssetHandle::Generate();
+    std::vector<AssetHandle> dependencies;
+    const auto capture = [&](std::string& assetPath, AssetHandle& id,
+                             AssetType type) {
+        if (contentRoot.empty() || assetPath.empty()) return;
+        const AssetReference reference =
+            MakeAssetReference(&registry, contentRoot, assetPath, type);
+        if (reference.id.Valid()) id = reference.id;
+        if (id.Valid()
+            && std::find(dependencies.begin(), dependencies.end(), id)
+                == dependencies.end())
+            dependencies.push_back(id);
+    };
+    for (HudWidget& widget : widgets) {
+        capture(widget.imageAsset, widget.imageAssetId, AssetType::Texture);
+        capture(widget.shaderPath, widget.shaderAssetId, AssetType::Shader);
+    }
     std::ofstream out(path, std::ios::trunc);
     if (!out) {
         if (error) *error = "Could not open '" + path + "' for writing";
         return false;
     }
-    out << "hud 2\n";
+    out << "3DG_HUD 3 " << assetId.ToString() << '\n';
     out << "design " << designSize.x << ' ' << designSize.y << '\n';
     out << "count " << widgets.size() << '\n';
     for (const HudWidget& w : widgets) {
@@ -327,7 +434,10 @@ bool HudDocument::Save(const std::string& path, std::string* error) const {
             << SanitizeToken(w.bindKey) << ' '
             << SanitizeToken(w.imageAsset) << '\n';
         out << "t " << w.text << '\n';
-        out << "s " << std::quoted(w.shaderPath) << ' ' << w.shaderParameters.size();
+        out << "s " << std::quoted(w.shaderPath) << ' '
+            << (w.imageAssetId.Valid() ? w.imageAssetId.ToString() : std::string("-")) << ' '
+            << (w.shaderAssetId.Valid() ? w.shaderAssetId.ToString() : std::string("-")) << ' '
+            << w.shaderParameters.size();
         for (const auto& [name, value] : w.shaderParameters) {
             const auto type = w.shaderParameterTypes.find(name);
             out << ' ' << std::quoted(name) << ' '
@@ -336,7 +446,29 @@ bool HudDocument::Save(const std::string& path, std::string* error) const {
         }
         out << '\n';
     }
-    return static_cast<bool>(out);
+    out << "ASSET_DEPS " << dependencies.size();
+    for (AssetHandle dependency : dependencies)
+        out << ' ' << dependency.ToString();
+    out << '\n';
+    if (!out) return false;
+    out.close();
+    if (!contentRoot.empty()) {
+        AssetRegistryEntry entry;
+        entry.id = assetId;
+        entry.type = AssetType::Hud;
+        entry.virtualPath = AssetRegistry::NormalizeVirtualPath(
+            std::filesystem::relative(path, contentRoot, ec).generic_string());
+        entry.importerVersion = 1;
+        entry.dependencies = dependencies;
+        if (ec || !registry.Register(std::move(entry), &registryError)
+            || !registry.Save(registryPath, &registryError)) {
+            if (error) *error = "HUD saved, but registration failed: "
+                + (ec ? ec.message() : registryError);
+            return false;
+        }
+    }
+    if (error) error->clear();
+    return true;
 }
 
 bool HudDocument::Load(const std::string& path, std::string* error) {
@@ -358,7 +490,15 @@ bool HudDocument::Load(const std::string& path, std::string* error) {
         std::string tag;
         ls >> tag;
 
-        if (tag == "hud") {
+        if (tag == "3DG_HUD") {
+            std::string idText;
+            ls >> fileVersion >> idText;
+            if (fileVersion < 3
+                || !AssetHandle::Parse(idText, &loaded.assetId)) {
+                if (error) *error = "Malformed HUD asset identity";
+                return false;
+            }
+        } else if (tag == "hud") {
             ls >> fileVersion;
         } else if (tag == "design") {
             ls >> loaded.designSize.x >> loaded.designSize.y;
@@ -397,7 +537,21 @@ bool HudDocument::Load(const std::string& path, std::string* error) {
                     std::istringstream shaderStream(shaderLine);
                     std::string shaderTag;
                     std::size_t parameterCount = 0;
-                    shaderStream >> shaderTag >> std::quoted(w.shaderPath) >> parameterCount;
+                    shaderStream >> shaderTag >> std::quoted(w.shaderPath);
+                    if (fileVersion >= 3) {
+                        std::string imageId, shaderId;
+                        shaderStream >> imageId >> shaderId;
+                        if ((imageId != "-"
+                             && !AssetHandle::Parse(imageId, &w.imageAssetId))
+                            || (shaderId != "-"
+                                && !AssetHandle::Parse(
+                                    shaderId, &w.shaderAssetId))) {
+                            if (error) *error =
+                                "Malformed HUD widget asset identity";
+                            return false;
+                        }
+                    }
+                    shaderStream >> parameterCount;
                     if (shaderTag != "s") {
                         if (error) *error = "Malformed HUD shader record";
                         return false;
@@ -418,6 +572,25 @@ bool HudDocument::Load(const std::string& path, std::string* error) {
 
     (void)declaredCount;
     loaded.nextId = maxId + 1;
+    const std::string contentRoot = FindContentRootForAsset(path);
+    AssetRegistry registry;
+    std::string ignored;
+    if (!contentRoot.empty()
+        && registry.Load(
+            AssetRegistry::DefaultRegistryPath(contentRoot), &ignored)) {
+        for (HudWidget& widget : loaded.widgets) {
+            if (widget.imageAssetId.Valid())
+                widget.imageAsset = ResolveAssetReference(
+                    &registry, contentRoot,
+                    {widget.imageAssetId, widget.imageAsset},
+                    AssetType::Texture);
+            if (widget.shaderAssetId.Valid())
+                widget.shaderPath = ResolveAssetReference(
+                    &registry, contentRoot,
+                    {widget.shaderAssetId, widget.shaderPath},
+                    AssetType::Shader);
+        }
+    }
     *this = std::move(loaded);
     return true;
 }

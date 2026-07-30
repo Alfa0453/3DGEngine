@@ -1,5 +1,7 @@
 #include "RuntimeSceneExporter.h"
 
+#include <engine/assets/AssetReference.h>
+#include <engine/assets/AssetRegistry.h>
 #include <engine/ecs/Components.h>
 #include <engine/physics/PhysicsComponents.h>
 
@@ -59,7 +61,45 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         return false;
     }
 
-    out << "3DGRuntimeScene 72\n";
+    const engine::AssetHandle sceneId = scene.AssetId().Valid()
+        ? scene.AssetId() : engine::AssetHandle::Generate();
+    const std::string contentRoot = engine::FindContentRootForAsset(path);
+    engine::AssetRegistry assetRegistry;
+    std::string ignoredRegistryError;
+    const bool haveRegistry = !contentRoot.empty()
+        && assetRegistry.Load(
+            engine::AssetRegistry::DefaultRegistryPath(contentRoot),
+            &ignoredRegistryError);
+    const auto materialIdFor = [&](const std::string& assetPath,
+                                   engine::AssetHandle current) {
+        if (current.Valid() || !haveRegistry || assetPath.empty())
+            return current;
+        engine::AssetReference reference = engine::MakeAssetReference(
+            &assetRegistry, contentRoot, assetPath,
+            engine::AssetType::Material);
+        if (!reference.id.Valid())
+            reference = engine::MakeAssetReference(
+                &assetRegistry, contentRoot, assetPath,
+                engine::AssetType::Texture);
+        return reference.id;
+    };
+    const auto shaderIdFor = [&](const std::string& assetPath,
+                                 engine::AssetHandle current) {
+        if (current.Valid() || !haveRegistry || assetPath.empty())
+            return current;
+        return engine::MakeAssetReference(
+            &assetRegistry, contentRoot, assetPath,
+            engine::AssetType::Shader).id;
+    };
+    const auto assetIdFor = [&](const std::string& assetPath,
+                                engine::AssetHandle current,
+                                engine::AssetType type) {
+        if (current.Valid() || !haveRegistry || assetPath.empty())
+            return current;
+        return engine::MakeAssetReference(
+            &assetRegistry, contentRoot, assetPath, type).id;
+    };
+    out << "3DGRuntimeScene 78 " << sceneId.ToString() << '\n';
     out << "# Runtime export from 3DGEditor. Editor-only flags are omitted.\n";
     const EditorScene::Environment& environment = scene.GetEnvironment();
     out << "environment "
@@ -83,7 +123,13 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         << environment.physicsSleepAngularVelocity << ' '
         << environment.physicsTimeToSleep << ' '
         << std::quoted(environment.hudAsset) << ' '
-        << environment.shadowDistance << '\n';
+        << environment.shadowDistance << ' '
+        << ([&] {
+               const engine::AssetHandle id = assetIdFor(
+                   environment.hudAsset, environment.hudAssetId,
+                   engine::AssetType::Hud);
+               return id.Valid() ? id.ToString() : std::string("-");
+           }()) << '\n';
     const EditorScene::GameModeSettings& gameMode = scene.GetGameModeSettings();
     out << "game_mode "
         << StoredPath(gameMode.playerObjectName) << ' '
@@ -118,6 +164,11 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
          environment.postProcessEffects) {
         out << "post_effect "
             << std::quoted(effect.shaderPath) << ' '
+            << ([&] {
+                   const engine::AssetHandle id = shaderIdFor(
+                       effect.shaderPath, effect.shaderAssetId);
+                   return id.Valid() ? id.ToString() : std::string("-");
+               }()) << ' '
             << (effect.enabled ? 1 : 0) << ' '
             << effect.parameters.size();
         for (const auto& parameter : effect.parameters) {
@@ -211,6 +262,13 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
             << renderer->color.r << ' ' << renderer->color.g << ' ' << renderer->color.b << ' '
             << StoredPath(object.modelAssetPath) << ' '
             << StoredPath(object.materialAssetPath) << ' '
+            << (object.modelAssetId.Valid()
+                ? object.modelAssetId.ToString() : std::string("-")) << ' '
+            << (materialIdFor(
+                    object.materialAssetPath, object.materialAssetId).Valid()
+                ? materialIdFor(
+                    object.materialAssetPath, object.materialAssetId).ToString()
+                : std::string("-")) << ' '
             << object.modelOrientationEuler.x << ' '
             << object.modelOrientationEuler.y << ' '
             << object.modelOrientationEuler.z << ' '
@@ -302,13 +360,22 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         out << object.animationSources.size() << ' ';
         for (const EditorScene::AnimationSource& source : object.animationSources) {
             out << StoredPath(source.file) << ' '
+                << (source.assetId.Valid()
+                    ? source.assetId.ToString() : std::string("-")) << ' '
                 << StoredPath(source.clipName) << ' '
                 << (source.stripRootMotion ? 1 : 0) << ' '
                 << StoredPath(source.sourceClipName) << ' ';
         }
         out << object.modelAttachments.size() << ' ';
         for (const EditorScene::ModelAttachment& a : object.modelAttachments) {
-            out << StoredPath(a.modelPath) << ' ' << StoredPath(a.boneName) << ' '
+            out << StoredPath(a.modelPath) << ' '
+                << (a.modelAssetId.Valid()
+                    ? a.modelAssetId.ToString() : std::string("-")) << ' '
+                << (materialIdFor(a.materialPath, a.materialAssetId).Valid()
+                    ? materialIdFor(
+                        a.materialPath, a.materialAssetId).ToString()
+                    : std::string("-")) << ' '
+                << StoredPath(a.boneName) << ' '
                 << a.position.x << ' ' << a.position.y << ' ' << a.position.z << ' '
                 << a.eulerDegrees.x << ' ' << a.eulerDegrees.y << ' ' << a.eulerDegrees.z << ' '
                 << a.scale.x << ' ' << a.scale.y << ' ' << a.scale.z << ' '
@@ -470,6 +537,39 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
             for (float key : module.curveValues) out << ' ' << key;
             out << ' ' << (module.curveEnabled ? 1 : 0) << ' ' << static_cast<int>(module.stage);
         }
+        out << ' ' << std::quoted(
+                particle.shaderPath.empty() ? std::string("-")
+                                            : particle.shaderPath)
+            << ' ' << particle.shaderParameters.size();
+        for (const engine::ParticleShaderParameter& parameter :
+             particle.shaderParameters)
+            out << ' ' << std::quoted(parameter.name)
+                << ' ' << parameter.type
+                << ' ' << std::quoted(parameter.value);
+        const auto particleIdText = [](engine::AssetHandle id) {
+            return id.Valid() ? id.ToString() : std::string("-");
+        };
+        out << ' ' << particleIdText(assetIdFor(
+                object.particleAssetPath, object.particleAssetId,
+                engine::AssetType::Particle))
+            << ' ' << particleIdText(assetIdFor(
+                particle.texturePath, particle.textureAssetId,
+                engine::AssetType::Texture))
+            << ' ' << particleIdText(assetIdFor(
+                particle.meshPath, particle.meshAssetId,
+                engine::AssetType::StaticMesh))
+            << ' ' << particleIdText(assetIdFor(
+                particle.shaderPath, particle.shaderAssetId,
+                engine::AssetType::Shader))
+            << ' ' << object.particleEffectLayers.size();
+        for (const engine::ParticleEffectLayer& layer :
+             object.particleEffectLayers)
+            out << ' ' << particleIdText(assetIdFor(
+                layer.assetPath, layer.assetId,
+                engine::AssetType::Particle));
+        out << ' ' << particleIdText(assetIdFor(
+                object.audioAssetPath, object.audioAssetId,
+                engine::AssetType::Audio));
         out << '\n';
     }
 
@@ -531,7 +631,15 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
             << ' ' << object.navMovementMaxFallSpeed
             << ' ' << object.navMovementGroundProbe
             << ' ' << object.navMovementStepHeight
-            << ' ' << object.navMovementMaxSlope;
+            << ' ' << object.navMovementMaxSlope << ' '
+            << ([&] {
+                   const engine::AssetHandle id = assetIdFor(
+                       object.navAgentBrainAsset,
+                       object.navAgentBrainAssetId,
+                       engine::AssetType::BehaviorTree);
+                   return id.Valid() ? id.ToString()
+                                     : std::string("-");
+               }());
         out << '\n';
     }
 
@@ -588,6 +696,88 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
             << joint.restLength << ' ' << (joint.rope ? 1 : 0) << ' '
             << joint.stiffness << ' ' << joint.damping << '\n';
     }
+
+    std::vector<engine::AssetHandle> dependencies;
+    const auto addDependency = [&](engine::AssetHandle id) {
+        if (id.Valid()
+            && std::find(dependencies.begin(), dependencies.end(), id)
+                   == dependencies.end())
+            dependencies.push_back(id);
+    };
+    addDependency(assetIdFor(
+        environment.hudAsset, environment.hudAssetId,
+        engine::AssetType::Hud));
+    const auto addAssetPath = [&](const std::string& assetPath) {
+        if (!haveRegistry || assetPath.empty()) return;
+        engine::AssetReference reference = engine::MakeAssetReference(
+            &assetRegistry, contentRoot, assetPath,
+            engine::AssetType::Material);
+        if (!reference.id.Valid())
+            reference = engine::MakeAssetReference(
+                &assetRegistry, contentRoot, assetPath,
+                engine::AssetType::Texture);
+        addDependency(reference.id);
+    };
+    for (const EditorScene::Object& object : scene.Objects()) {
+        addDependency(object.modelAssetId);
+        addDependency(object.materialAssetId);
+        addDependency(assetIdFor(
+            object.audioAssetPath, object.audioAssetId,
+            engine::AssetType::Audio));
+        addDependency(assetIdFor(
+            object.navAgentBrainAsset, object.navAgentBrainAssetId,
+            engine::AssetType::BehaviorTree));
+        addDependency(assetIdFor(
+            object.particleAssetPath, object.particleAssetId,
+            engine::AssetType::Particle));
+        addDependency(assetIdFor(
+            object.particleConfig.texturePath,
+            object.particleConfig.textureAssetId,
+            engine::AssetType::Texture));
+        addDependency(assetIdFor(
+            object.particleConfig.meshPath,
+            object.particleConfig.meshAssetId,
+            engine::AssetType::StaticMesh));
+        addDependency(assetIdFor(
+            object.particleConfig.shaderPath,
+            object.particleConfig.shaderAssetId,
+            engine::AssetType::Shader));
+        for (const engine::ParticleEffectLayer& layer :
+             object.particleEffectLayers)
+            addDependency(assetIdFor(
+                layer.assetPath, layer.assetId,
+                engine::AssetType::Particle));
+        addAssetPath(object.materialAssetPath);
+        for (const EditorScene::AnimationSource& source : object.animationSources)
+            addDependency(source.assetId);
+        for (const EditorScene::ModelAttachment& attachment :
+             object.modelAttachments) {
+            addDependency(attachment.modelAssetId);
+            addDependency(attachment.materialAssetId);
+            addAssetPath(attachment.materialPath);
+        }
+        for (const std::string& material : object.terrainLayerMaterials)
+            addAssetPath(material);
+    }
+    for (const EditorScene::Object& object : scene.Objects()) {
+        if (!object.visible || !object.ragdollEnabled) continue;
+        out << "ragdoll " << std::quoted(object.name) << ' '
+            << object.ragdoll.enabled << ' '
+            << object.ragdoll.activateOnDeath << ' '
+            << object.ragdoll.totalMass << ' '
+            << object.ragdoll.bodyRadiusScale << ' '
+            << object.ragdoll.linearDamping << ' '
+            << object.ragdoll.angularDamping << ' '
+            << object.ragdoll.deathImpulse << ' '
+            << object.ragdoll.maxBodies << '\n';
+    }
+    for (const EditorScene::Environment::PostProcessEffect& effect :
+         environment.postProcessEffects)
+        addDependency(shaderIdFor(
+            effect.shaderPath, effect.shaderAssetId));
+    out << "ASSET_DEPS " << dependencies.size();
+    for (engine::AssetHandle id : dependencies) out << ' ' << id.ToString();
+    out << '\n';
 
     return true;
 }

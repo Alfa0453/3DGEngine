@@ -40,10 +40,16 @@ int main() {
     cue.clips.push_back({"flame.wav", 1.0f, 1.0f, 1.0f, 0.08f});
     const auto cuePath = folder / "fire.3dgaudio";
     Check(engine::SaveAudioCue(cuePath.string(), cue, &error), "save audio cue");
+    const engine::AssetHandle cueId = cue.assetId;
+    Check(cueId.Valid(), "audio cue receives a stable engine asset ID");
     engine::AudioCueAsset loadedCue;
     Check(engine::LoadAudioCue(cuePath.string(), &loadedCue, &error), "load audio cue");
     Check(loadedCue.name == cue.name && loadedCue.clips.size() == 2,
           "cue identity and layers round trip");
+    Check(loadedCue.assetId == cueId
+          && engine::SaveAudioCue(cuePath.string(), cue, &error)
+          && cue.assetId == cueId,
+          "audio cue preserves its stable ID on load and overwrite");
     Check(loadedCue.mode == engine::AudioCueMode::Layered
           && loadedCue.priority == 80 && Near(loadedCue.clips[1].delaySeconds, 0.08f),
           "cue gameplay settings round trip");
@@ -60,6 +66,8 @@ int main() {
     Check(engine::SaveAudioMixerPreset(mixerPath.string(), mixer, &error), "save mixer");
     engine::AudioMixerPreset loadedMixer;
     Check(engine::LoadAudioMixerPreset(mixerPath.string(), &loadedMixer, &error), "load mixer");
+    Check(mixer.assetId.Valid() && loadedMixer.assetId == mixer.assetId,
+          "audio mixer preserves its stable asset ID");
     Check(Near(loadedMixer.volumes[static_cast<std::size_t>(engine::AudioBus::Music)], 0.65f)
           && Near(loadedMixer.effects[static_cast<std::size_t>(engine::AudioBus::SFX)]
               .compressorRatio, 4.0f), "mixer settings round trip");
@@ -74,6 +82,8 @@ int main() {
     engine::AdaptiveMusicAsset loadedMusic;
     Check(engine::LoadAdaptiveMusic(musicPath.string(), &loadedMusic, &error),
           "load adaptive music");
+    Check(music.assetId.Valid() && loadedMusic.assetId == music.assetId,
+          "adaptive music preserves its stable asset ID");
     Check(loadedMusic.states.size() == 2 && loadedMusic.states[0].stems.size() == 2
           && Near(loadedMusic.states[1].bpm, 140.0f), "music states round trip");
 

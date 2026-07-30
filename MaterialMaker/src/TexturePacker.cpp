@@ -1,6 +1,7 @@
 #include "MaterialMaker/TexturePacker.h"
 
 #include <engine/graphics/ImageDecode.h>
+#include <engine/assets/TextureAsset.h>
 
 #include <algorithm>
 #include <cctype>
@@ -69,7 +70,28 @@ engine::image::Image DecodeAny(const std::string& path) {
     if (ext == "tga") {
         return DecodeTGA(path);
     }
-    throw std::runtime_error("unsupported source format (use PNG, JPG or TGA): " + path);
+    if (ext == "3dgtex") {
+        engine::TextureAssetData asset;
+        std::string error;
+        if (!engine::LoadTextureAsset(path, &asset, &error))
+            throw std::runtime_error(error);
+        engine::image::Image image;
+        image.width = static_cast<int>(asset.width);
+        image.height = static_cast<int>(asset.height);
+        image.rgba = std::move(asset.rgba);
+        // Native textures are stored bottom-up; the packer works top-down.
+        const std::size_t row = static_cast<std::size_t>(image.width) * 4u;
+        for (int y = 0; y < image.height / 2; ++y)
+            std::swap_ranges(
+                image.rgba.begin() + static_cast<std::ptrdiff_t>(y * row),
+                image.rgba.begin() + static_cast<std::ptrdiff_t>((y + 1) * row),
+                image.rgba.begin()
+                    + static_cast<std::ptrdiff_t>(
+                        (image.height - 1 - y) * row));
+        return image;
+    }
+    throw std::runtime_error(
+        "unsupported source format (use .3dgtex, PNG, JPG or TGA): " + path);
 }
 
 // Red channel at (x, y) — grayscale maps store the value in every channel.

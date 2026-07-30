@@ -1,5 +1,6 @@
 #include "engine/graphics/Model.h"
 
+#include "engine/assets/StaticMeshAsset.h"
 #include "engine/graphics/ImageDecode.h"
 #include "engine/graphics/VertexLayout.h"
 
@@ -9,6 +10,8 @@
 
 #include <glm/glm.hpp>
 
+#include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <filesystem>
 #include <functional>
@@ -43,6 +46,52 @@ void FlipRows(image::Image& im) {
 }// namespace
 
 Model Model::FromFile(const std::string& path) {
+    std::string extension = std::filesystem::path(path).extension().string();
+    std::transform(extension.begin(), extension.end(), extension.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (extension == ".3dgmesh") {
+        StaticMeshAssetData asset;
+        std::string error;
+        if (!LoadStaticMeshAsset(path, &asset, &error))
+            throw std::runtime_error("Model: " + error);
+
+        Model model;
+        model.m_materials.reserve(asset.materials.size());
+        for (const StaticMeshMaterialData& source : asset.materials) {
+            Material material;
+            material.name = source.name;
+            material.diffuse = {
+                source.diffuse[0], source.diffuse[1], source.diffuse[2]};
+            material.specular = {
+                source.specular[0], source.specular[1], source.specular[2]};
+            material.emissive = {
+                source.emissive[0], source.emissive[1], source.emissive[2]};
+            material.shininess = source.shininess;
+            material.diffuseMap = source.diffuseMap;
+            material.normalMap = source.normalMap;
+            material.specularMap = source.specularMap;
+            material.emissiveMap = source.emissiveMap;
+            model.m_materials.push_back(std::move(material));
+        }
+        model.m_textures.reserve(asset.textures.size());
+        for (const StaticMeshTextureData& source : asset.textures) {
+            model.m_textures.push_back(std::make_unique<Texture>(
+                source.rgba.data(), static_cast<int>(source.width),
+                static_cast<int>(source.height)));
+        }
+        const VertexLayout layout{{3}, {3}, {2}, {3}};
+        model.m_subMeshes.reserve(asset.subMeshes.size());
+        for (const StaticMeshSubMeshData& source : asset.subMeshes) {
+            model.m_subMeshes.push_back(
+                SubMesh{Mesh(source.vertices, source.indices, layout), source.material});
+        }
+        model.m_min = {
+            asset.minimum[0], asset.minimum[1], asset.minimum[2]};
+        model.m_max = {
+            asset.maximum[0], asset.maximum[1], asset.maximum[2]};
+        return model;
+    }
+
     Assimp::Importer importer;
     const unsigned flags = aiProcess_Triangulate
                          | aiProcess_GenSmoothNormals

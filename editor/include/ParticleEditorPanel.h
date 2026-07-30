@@ -66,6 +66,7 @@ private:
     std::string m_assetName{"NewParticle"};
     std::string m_effectAssetPath;
     std::string m_effectAssetName{"NewParticleEffect"};
+    engine::AssetHandle m_effectAssetId;
     bool m_assetDirty = false;
     bool m_pendingNew = false;
     std::string m_pendingOpenPath;

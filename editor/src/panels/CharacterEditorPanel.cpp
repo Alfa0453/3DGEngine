@@ -957,10 +957,16 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
         ImGui::TextWrapped("A reusable character asset combines the visible mesh with movement, collision, animation and gameplay setup.");
     } else if (m_component == 1) {
         const std::string previousModelPath = m_asset.modelAssetPath;
-        changed |= drawPicker("Skeletal Model", "##ModelSearch", m_modelSearch,
-                              m_modelChoices, m_asset.modelAssetPath);
-        changed |= drawPicker("Material", "##MaterialSearch", m_materialSearch,
-                              m_materialChoices, m_asset.materialAssetPath);
+        const bool pickedModel = drawPicker(
+            "Skeletal Model", "##ModelSearch", m_modelSearch,
+            m_modelChoices, m_asset.modelAssetPath);
+        changed |= pickedModel;
+        if (pickedModel) m_asset.modelAssetId = {};
+        const bool pickedMaterial = drawPicker(
+            "Material", "##MaterialSearch", m_materialSearch,
+            m_materialChoices, m_asset.materialAssetPath);
+        changed |= pickedMaterial;
+        if (pickedMaterial) m_asset.materialAssetId = {};
         if (ImGui::Button("Refresh Asset Lists")) RefreshAssetChoices(assetRoot);
         ImGui::TextDisabled("Type in an opened list to filter by name or folder.");
         if (changed) {
@@ -1078,8 +1084,16 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
                 m_gizmoDragging = false;
                 m_activeGizmoAxis = -1;
             }
-            changed |= drawPicker("Model", "##AttachModelSearch", m_animSearch, m_modelChoices, att.modelPath);
-            changed |= drawPicker("Material", "##AttachMatSearch", m_materialSearch, m_materialChoices, att.materialPath);
+            const bool pickedAttachment = drawPicker(
+                "Model", "##AttachModelSearch", m_animSearch,
+                m_modelChoices, att.modelPath);
+            changed |= pickedAttachment;
+            if (pickedAttachment) att.modelAssetId = {};
+            const bool pickedAttachmentMaterial = drawPicker(
+                "Material", "##AttachMatSearch", m_materialSearch,
+                m_materialChoices, att.materialPath);
+            changed |= pickedAttachmentMaterial;
+            if (pickedAttachmentMaterial) att.materialAssetId = {};
             const char* socketPreview = att.socketName.empty() ? "(choose a socket)" : att.socketName.c_str();
             ImGui::SetNextItemWidth(-1.0f);
             if (ImGui::BeginCombo("Socket", socketPreview)) {
@@ -1290,7 +1304,9 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
             for (const AssetChoice& choice : m_graphChoices) {
                 if (!graphFilter.empty() && Lower(choice.displayName).find(graphFilter) == std::string::npos) continue;
                 if (ImGui::Selectable(choice.displayName.c_str(), m_asset.animationGraphPath == choice.path)) {
-                    m_asset.animationGraphPath = choice.path; changed = true;
+                    m_asset.animationGraphPath = choice.path;
+                    m_asset.animationGraphAssetId = {};
+                    changed = true;
                 }
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", choice.path.c_str());
             }
@@ -1400,6 +1416,7 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
                     if (clip.Load(choice.path, &clipError)) {
                         CharacterAnimationSource s;
                         s.file = clip.sourceFile;
+                        s.assetId = clip.sourceAssetId;
                         s.clipName = clip.clipName;
                         s.stripRootMotion = clip.stripRootMotion;
                         m_asset.animationSources.push_back(std::move(s));
@@ -1416,7 +1433,11 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
         for (std::size_t i = 0; i < m_asset.animationSources.size(); ++i) {
             auto& source = m_asset.animationSources[i];
             ImGui::PushID(9000 + static_cast<int>(i));
-            changed |= drawPicker("File", "##AnimFileSearch", m_animSearch, m_modelChoices, source.file);
+            const bool pickedAnimation = drawPicker(
+                "File", "##AnimFileSearch", m_animSearch,
+                m_modelChoices, source.file);
+            changed |= pickedAnimation;
+            if (pickedAnimation) source.assetId = {};
             std::array<char, 96> nameBuf{}; Copy(nameBuf, source.clipName);
             ImGui::SetNextItemWidth(160.0f);
             if (ImGui::InputText("Clip Name", nameBuf.data(), nameBuf.size())) { source.clipName = nameBuf.data(); changed = true; }
@@ -1769,6 +1790,23 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
         changed |= ImGui::Checkbox("Health", &m_asset.healthEnabled);
         changed |= ImGui::DragFloat("HP", &m_asset.health.hp,1,0,100000);
         changed |= ImGui::DragFloat("Max HP", &m_asset.health.maxHp,1,1,100000);
+        ImGui::SeparatorText("Death Physics");
+        changed |= ImGui::Checkbox("Ragdoll On Death", &m_asset.ragdollEnabled);
+        if (m_asset.ragdollEnabled) {
+            changed |= ImGui::DragFloat(
+                "Ragdoll Mass", &m_asset.ragdoll.totalMass, 1.0f, 1.0f, 500.0f, "%.1f kg");
+            changed |= ImGui::SliderInt(
+                "Physics Bodies", &m_asset.ragdoll.maxBodies, 4, 32);
+            changed |= ImGui::SliderFloat(
+                "Body Thickness", &m_asset.ragdoll.bodyRadiusScale, 0.04f, 0.4f);
+            changed |= ImGui::DragFloat(
+                "Death Impulse", &m_asset.ragdoll.deathImpulse, 0.05f, 0.0f, 20.0f);
+            changed |= ImGui::DragFloat(
+                "Linear Damping", &m_asset.ragdoll.linearDamping, 0.02f, 0.0f, 10.0f);
+            changed |= ImGui::DragFloat(
+                "Angular Damping", &m_asset.ragdoll.angularDamping, 0.02f, 0.0f, 20.0f);
+            ImGui::TextDisabled("Activates automatically when Health reaches zero.");
+        }
     } else if (m_component == 6) {
         changed |= ImGui::Checkbox("AI Agent", &m_asset.navAgentEnabled);
         if (!m_asset.navAgentEnabled) ImGui::BeginDisabled();

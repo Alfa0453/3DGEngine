@@ -163,9 +163,10 @@ endif()
 # ---------------------------------------------------------------------------
 # Packaging the standalone runtime player (the "game mode"). Stage a runnable
 # folder and zip it:
-#     cmake -S . -B build -DPLAYER_GAME_DIR=E:/path/to/exported_game
+#     cmake -S . -B build -DPLAYER_COOKED_DIR=E:/path/to/Build/Cooked/MyGame
 #     cmake --build build --target player
-#     cmake --install build --prefix dist    # -> dist/player[.exe] + player.cfg + game/
+#     cmake --install build --prefix dist --component player
+#       -> dist/player[.exe] + player.cfg + Content/ + CookManifest.3dgmanifest
 #     cd build && cpack                       # -> 3DGPlayer-<ver>-<os>.zip
 #
 # Only the `player` target has install() rules, so the package contains just the

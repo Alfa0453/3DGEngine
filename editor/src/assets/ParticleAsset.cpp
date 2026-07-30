@@ -1,5 +1,9 @@
 #include "ParticleAsset.h"
 
+#include <engine/assets/ParticleAsset.h>
+#include <engine/assets/AssetReference.h>
+#include <engine/assets/AssetRegistry.h>
+
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
@@ -7,7 +11,9 @@
 
 namespace particle_asset {
 
-bool Save(const std::string& path, const engine::ParticleSystemComponent& s, std::string* error) {
+bool Save(const std::string& path, engine::ParticleSystemComponent& s, std::string* error) {
+    return engine::SaveParticleAsset(path, s, error);
+#if 0
     std::error_code ec;
     const std::filesystem::path file(path);
     if (file.has_parent_path()) std::filesystem::create_directories(file.parent_path(), ec);
@@ -74,9 +80,12 @@ bool Save(const std::string& path, const engine::ParticleSystemComponent& s, std
     if (!out) { if (error) *error = "Could not finish writing particle asset."; return false; }
     if (error) error->clear();
     return true;
+#endif
 }
 
 bool Load(const std::string& path, engine::ParticleSystemComponent* output, std::string* error) {
+    return engine::LoadParticleAsset(path, output, error);
+#if 0
     if (!output) { if (error) *error = "Particle asset output is null."; return false; }
     std::ifstream in(path);
     std::string magic;
@@ -219,46 +228,187 @@ bool Load(const std::string& path, engine::ParticleSystemComponent* output, std:
     *output = std::move(s);
     if (error) error->clear();
     return true;
+#endif
 }
 
-bool SaveEffect(const std::string& path, const std::vector<engine::ParticleEffectLayer>& layers,
+bool SaveEffect(const std::string& path,
+                std::vector<engine::ParticleEffectLayer>& layers,
+                engine::AssetHandle* assetId,
                 std::string* error) {
     std::error_code ec;
     const std::filesystem::path file(path);
     if (file.has_parent_path()) std::filesystem::create_directories(file.parent_path(), ec);
-    std::ofstream out(file);
+    if (ec) {
+        if (error) *error =
+            "Could not create particle effect folder: " + ec.message();
+        return false;
+    }
+    engine::AssetHandle id = assetId ? *assetId : engine::AssetHandle{};
+    if (!id.Valid() && std::filesystem::is_regular_file(file, ec)) {
+        std::ifstream existing(file);
+        std::string magic;
+        int version = 0;
+        std::string idText;
+        if (existing >> magic >> version >> idText
+            && magic == "3DG_PARTICLE_EFFECT" && version >= 2)
+            engine::AssetHandle::Parse(idText, &id);
+    }
+    if (!id.Valid()) id = engine::AssetHandle::Generate();
+
+    const std::string contentRoot =
+        engine::FindContentRootForAsset(path);
+    engine::AssetRegistry registry;
+    std::string registryError;
+    const std::string registryPath = contentRoot.empty()
+        ? std::string()
+        : engine::AssetRegistry::DefaultRegistryPath(contentRoot);
+    if (!registryPath.empty() && std::filesystem::exists(registryPath, ec)
+        && !registry.Load(registryPath, &registryError)) {
+        if (error) *error = "Could not load the particle effect registry: "
+            + registryError;
+        return false;
+    }
+    std::vector<engine::AssetHandle> dependencies;
+    for (engine::ParticleEffectLayer& layer : layers) {
+        if (!contentRoot.empty()) {
+            const engine::AssetReference reference =
+                engine::MakeAssetReference(
+                    &registry, contentRoot, layer.assetPath,
+                    engine::AssetType::Particle);
+            if (reference.id.Valid()) layer.assetId = reference.id;
+        }
+        if (layer.assetId.Valid()
+            && std::find(dependencies.begin(), dependencies.end(),
+                         layer.assetId) == dependencies.end())
+            dependencies.push_back(layer.assetId);
+    }
+    const std::filesystem::path temporary = file.string() + ".tmp";
+    std::ofstream out(temporary);
     if (!out) { if (error) *error = "Could not open particle effect for writing."; return false; }
-    out << "3DGParticleEffect 1\n" << layers.size() << '\n';
+    out << "3DG_PARTICLE_EFFECT 2 " << id.ToString() << '\n'
+        << layers.size() << '\n';
     for (const engine::ParticleEffectLayer& layer : layers) {
         out << std::quoted(layer.name) << ' ' << std::quoted(layer.assetPath) << ' '
+            << (layer.assetId.Valid()
+                    ? layer.assetId.ToString() : std::string("-")) << ' '
             << (layer.enabled ? 1 : 0) << ' ' << layer.offset.x << ' '
             << layer.offset.y << ' ' << layer.offset.z << '\n';
     }
-    if (!out) { if (error) *error = "Could not finish writing particle effect."; return false; }
+    out << "ASSET_DEPS " << dependencies.size();
+    for (engine::AssetHandle dependency : dependencies)
+        out << ' ' << dependency.ToString();
+    out << '\n';
+    if (!out) {
+        out.close();
+        std::filesystem::remove(temporary, ec);
+        if (error) *error = "Could not finish writing particle effect.";
+        return false;
+    }
+    out.close();
+    const std::filesystem::path backup = file.string() + ".bak";
+    std::filesystem::remove(backup, ec);
+    ec.clear();
+    if (std::filesystem::exists(file, ec)) {
+        std::filesystem::rename(file, backup, ec);
+        if (ec) {
+            std::filesystem::remove(temporary);
+            if (error) *error = "Could not replace particle effect: "
+                + ec.message();
+            return false;
+        }
+    }
+    ec.clear();
+    std::filesystem::rename(temporary, file, ec);
+    if (ec) {
+        std::error_code rollback;
+        if (std::filesystem::exists(backup, rollback))
+            std::filesystem::rename(backup, file, rollback);
+        if (error) *error = "Could not commit particle effect: "
+            + ec.message();
+        return false;
+    }
+    std::filesystem::remove(backup, ec);
+    if (!contentRoot.empty()) {
+        engine::AssetRegistryEntry entry;
+        entry.id = id;
+        entry.type = engine::AssetType::ParticleEffect;
+        entry.virtualPath = engine::AssetRegistry::NormalizeVirtualPath(
+            std::filesystem::relative(file, contentRoot, ec).generic_string());
+        entry.importerVersion = 1;
+        entry.dependencies = dependencies;
+        if (ec || !registry.Register(std::move(entry), &registryError)
+            || !registry.Save(registryPath, &registryError)) {
+            if (error) *error = "Particle effect saved, but registration failed: "
+                + (ec ? ec.message() : registryError);
+            return false;
+        }
+    }
+    if (assetId) *assetId = id;
     if (error) error->clear();
     return true;
 }
 
 bool LoadEffect(const std::string& path, std::vector<engine::ParticleEffectLayer>* layers,
-                std::string* error) {
+                engine::AssetHandle* assetId, std::string* error) {
     if (!layers) { if (error) *error = "Particle effect output is null."; return false; }
     std::ifstream in(path);
     std::string magic;
     int version = 0;
     std::size_t count = 0;
-    if (!(in >> magic >> version >> count) || magic != "3DGParticleEffect" || version != 1 || count > 64) {
+    engine::AssetHandle id;
+    if (!(in >> magic >> version)
+        || (magic != "3DGParticleEffect"
+            && magic != "3DG_PARTICLE_EFFECT")
+        || version < 1 || version > 2) {
         if (error) *error = "Unsupported or malformed particle effect.";
         return false;
     }
+    if (magic == "3DG_PARTICLE_EFFECT") {
+        std::string idText;
+        if (!(in >> idText) || !engine::AssetHandle::Parse(idText, &id)) {
+            if (error) *error = "Particle effect has an invalid stable ID.";
+            return false;
+        }
+    }
+    if (!(in >> count) || count > 64) {
+        if (error) *error = "Particle effect layer count is invalid.";
+        return false;
+    }
+    const std::string contentRoot =
+        engine::FindContentRootForAsset(path);
+    engine::AssetRegistry registry;
+    std::string registryError;
+    const bool haveRegistry = !contentRoot.empty()
+        && registry.Load(
+            engine::AssetRegistry::DefaultRegistryPath(contentRoot),
+            &registryError);
     std::vector<engine::ParticleEffectLayer> loaded;
     loaded.reserve(count);
     for (std::size_t i = 0; i < count; ++i) {
         engine::ParticleEffectLayer layer;
         int enabled = 1;
-        in >> std::quoted(layer.name) >> std::quoted(layer.assetPath) >> enabled
+        in >> std::quoted(layer.name) >> std::quoted(layer.assetPath);
+        if (version >= 2) {
+            std::string layerId;
+            in >> layerId;
+            if (layerId != "-"
+                && !engine::AssetHandle::Parse(layerId, &layer.assetId)) {
+                if (error) *error =
+                    "Particle effect layer has an invalid asset ID.";
+                return false;
+            }
+        }
+        in >> enabled
            >> layer.offset.x >> layer.offset.y >> layer.offset.z;
         if (!in) { if (error) *error = "Particle effect layer data is incomplete."; return false; }
         layer.enabled = enabled != 0;
+        if (haveRegistry && layer.assetId.Valid()) {
+            const std::string resolved = engine::ResolveAssetReference(
+                &registry, contentRoot,
+                {layer.assetId, layer.assetPath},
+                engine::AssetType::Particle);
+            if (!resolved.empty()) layer.assetPath = resolved;
+        }
         std::string loadError;
         if (!Load(layer.assetPath, &layer.system, &loadError)) {
             if (error) *error = "Layer " + layer.name + ": " + loadError;
@@ -267,6 +417,7 @@ bool LoadEffect(const std::string& path, std::vector<engine::ParticleEffectLayer
         loaded.push_back(std::move(layer));
     }
     *layers = std::move(loaded);
+    if (assetId) *assetId = id;
     if (error) error->clear();
     return true;
 }

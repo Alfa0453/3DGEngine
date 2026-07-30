@@ -37,7 +37,7 @@ void DrawModel(const Model& model, Shader& shader,
         } else {
             bind(m.diffuseMap, 0, "uHasDiffuse");
         }
-        bind(m.normalMap,   1, "uhasNormal");
+        bind(m.normalMap,   1, "uHasNormal");
         bind(m.specularMap, 2, "uHasSpecular");
         bind(m.emissiveMap, 3, "uHasEmissive");
 

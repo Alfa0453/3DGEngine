@@ -1,6 +1,6 @@
 add_executable(particle_tests
     particle_tests.cpp
-    ${CMAKE_SOURCE_DIR}/editor/src/ParticleAsset.cpp)
+    ${CMAKE_SOURCE_DIR}/editor/src/assets/ParticleAsset.cpp)
 
 target_include_directories(particle_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/editor/include)
@@ -29,8 +29,8 @@ add_test(NAME animation_movement_regression COMMAND animation_movement_tests)
 
 add_executable(camera_manager_tests
     camera_manager_tests.cpp
-    ${CMAKE_SOURCE_DIR}/editor/src/EditorScene.cpp
-    ${CMAKE_SOURCE_DIR}/editor/src/RuntimeSceneExporter.cpp)
+    ${CMAKE_SOURCE_DIR}/editor/src/scene/EditorScene.cpp
+    ${CMAKE_SOURCE_DIR}/editor/src/scene/RuntimeSceneExporter.cpp)
 
 target_include_directories(camera_manager_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/editor/include)
@@ -106,13 +106,57 @@ add_test(NAME image_decode_regression COMMAND image_decode_tests)
 
 add_executable(editor_assets_tests
     editor_assets_tests.cpp
-    ${CMAKE_SOURCE_DIR}/editor/src/EditorAssets.cpp
-    ${CMAKE_SOURCE_DIR}/editor/src/AnimationClipAsset.cpp)
+    ${CMAKE_SOURCE_DIR}/editor/src/assets/EditorAssets.cpp
+    ${CMAKE_SOURCE_DIR}/editor/src/assets/AnimationClipAsset.cpp
+    ${CMAKE_SOURCE_DIR}/editor/src/assets/AnimationGraphAsset.cpp)
 target_include_directories(editor_assets_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/editor/include)
+target_link_libraries(editor_assets_tests PRIVATE engine)
 if(MSVC)
     target_compile_options(editor_assets_tests PRIVATE /W4)
 else()
     target_compile_options(editor_assets_tests PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 add_test(NAME editor_assets_regression COMMAND editor_assets_tests)
+
+add_executable(asset_registry_tests
+    asset_registry_tests.cpp)
+target_link_libraries(asset_registry_tests PRIVATE engine)
+if(MSVC)
+    target_compile_options(asset_registry_tests PRIVATE /W4)
+else()
+    target_compile_options(asset_registry_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME asset_registry_regression COMMAND asset_registry_tests)
+
+add_executable(asset_cooker_tests
+    asset_cooker_tests.cpp)
+target_link_libraries(asset_cooker_tests PRIVATE engine)
+if(MSVC)
+    target_compile_options(asset_cooker_tests PRIVATE /W4)
+else()
+    target_compile_options(asset_cooker_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME asset_cooker_regression COMMAND asset_cooker_tests)
+
+add_executable(static_mesh_asset_tests
+    static_mesh_asset_tests.cpp)
+target_link_libraries(static_mesh_asset_tests PRIVATE engine)
+if(MSVC)
+    target_compile_options(static_mesh_asset_tests PRIVATE /W4)
+else()
+    target_compile_options(static_mesh_asset_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME static_mesh_asset_regression COMMAND static_mesh_asset_tests)
+
+add_executable(skeletal_asset_tests
+    skeletal_asset_tests.cpp)
+target_link_libraries(skeletal_asset_tests PRIVATE engine)
+target_compile_definitions(skeletal_asset_tests PRIVATE
+    THREEDG_TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+if(MSVC)
+    target_compile_options(skeletal_asset_tests PRIVATE /W4)
+else()
+    target_compile_options(skeletal_asset_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME skeletal_asset_regression COMMAND skeletal_asset_tests)

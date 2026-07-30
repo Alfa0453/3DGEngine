@@ -1,5 +1,8 @@
 #include "MaterialMaker/ModelMaterialImport.h"
 
+#include <engine/assets/SkeletalAsset.h>
+#include <engine/assets/StaticMeshAsset.h>
+
 #include <assimp/Importer.hpp>
 #include <assimp/scene.h>
 #include <assimp/material.h>
@@ -8,6 +11,7 @@
 #include <filesystem>
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <system_error>
 
 namespace material_maker {
@@ -54,9 +58,42 @@ bool IsGltf(const std::string& path) {
     return extension == ".gltf" || extension == ".glb";
 }
 
+std::string Extension(const std::string& path) {
+    std::string extension = std::filesystem::path(path).extension().string();
+    std::transform(extension.begin(), extension.end(), extension.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return extension;
+}
+
+MaterialDocument NativeMaterial(
+    const engine::StaticMeshMaterialData& source) {
+    MaterialDocument document;
+    document.name = source.name.empty() ? "ImportedMaterial" : source.name;
+    document.albedo = source.diffuse;
+    document.emissive = source.emissive;
+    // Convert legacy/native Phong gloss to a useful PBR roughness estimate.
+    document.roughness = std::clamp(
+        std::sqrt(2.0f / std::max(source.shininess + 2.0f, 2.0f)),
+        0.02f, 1.0f);
+    return document;
+}
+
 } // namespace
 
 int CountModelMaterials(const std::string& modelPath, std::string* error) {
+    const std::string extension = Extension(modelPath);
+    if (extension == ".3dgmesh") {
+        engine::StaticMeshAssetData asset;
+        if (!engine::LoadStaticMeshAsset(modelPath, &asset, error)) return 0;
+        if (error) error->clear();
+        return static_cast<int>(asset.materials.size());
+    }
+    if (extension == ".3dgskmesh") {
+        engine::SkeletalMeshAssetData asset;
+        if (!engine::LoadSkeletalMeshAsset(modelPath, &asset, error)) return 0;
+        if (error) error->clear();
+        return static_cast<int>(asset.materials.size());
+    }
     Assimp::Importer importer;
     const aiScene* scene = Read(importer, modelPath, error);
     if (!scene) {
@@ -71,6 +108,36 @@ ModelImportResult ImportMaterialFromModel(const std::string& modelPath, int mate
     ModelImportResult result;
     if (!out) {
         result.error = "output material pointer was null.";
+        return result;
+    }
+
+    const std::string extension = Extension(modelPath);
+    if (extension == ".3dgmesh") {
+        engine::StaticMeshAssetData asset;
+        if (!engine::LoadStaticMeshAsset(modelPath, &asset, &result.error))
+            return result;
+        result.materialCount = static_cast<int>(asset.materials.size());
+        if (materialIndex < 0 || materialIndex >= result.materialCount) {
+            result.error = "material index out of range.";
+            return result;
+        }
+        *out = NativeMaterial(
+            asset.materials[static_cast<std::size_t>(materialIndex)]);
+        result.ok = true;
+        return result;
+    }
+    if (extension == ".3dgskmesh") {
+        engine::SkeletalMeshAssetData asset;
+        if (!engine::LoadSkeletalMeshAsset(modelPath, &asset, &result.error))
+            return result;
+        result.materialCount = static_cast<int>(asset.materials.size());
+        if (materialIndex < 0 || materialIndex >= result.materialCount) {
+            result.error = "material index out of range.";
+            return result;
+        }
+        *out = NativeMaterial(
+            asset.materials[static_cast<std::size_t>(materialIndex)]);
+        result.ok = true;
         return result;
     }
 

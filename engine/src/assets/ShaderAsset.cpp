@@ -1,5 +1,8 @@
 #include "engine/assets/ShaderAsset.h"
 
+#include "engine/assets/AssetReference.h"
+#include "engine/assets/AssetRegistry.h"
+
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
@@ -226,7 +229,7 @@ std::uint64_t HashShaderAsset(const ShaderAsset& asset) {
     return hash;
 }
 
-bool SaveShaderAsset(const std::string& path, const ShaderAsset& asset, std::string* error) {
+bool SaveShaderAsset(const std::string& path, ShaderAsset& asset, std::string* error) {
     const auto issues = ValidateShaderAsset(asset);
     if (ShaderAssetHasErrors(issues)) {
         if (error) {
@@ -246,13 +249,54 @@ bool SaveShaderAsset(const std::string& path, const ShaderAsset& asset, std::str
         if (error) *error = "Could not create shader asset folder: " + ec.message();
         return false;
     }
-    std::ofstream out(path);
+    if (!asset.assetId.Valid() && std::filesystem::is_regular_file(target, ec)) {
+        ShaderAsset existing;
+        std::string ignored;
+        if (LoadShaderAsset(path, &existing, &ignored)
+            && existing.assetId.Valid())
+            asset.assetId = existing.assetId;
+    }
+    if (!asset.assetId.Valid()) asset.assetId = AssetHandle::Generate();
+    asset.version = ShaderAsset::CurrentVersion;
+
+    const std::string contentRoot = FindContentRootForAsset(path);
+    AssetRegistry registry;
+    std::string registryError;
+    const std::string registryPath = contentRoot.empty()
+        ? std::string()
+        : AssetRegistry::DefaultRegistryPath(contentRoot);
+    if (!registryPath.empty() && std::filesystem::exists(registryPath, ec)
+        && !registry.Load(registryPath, &registryError)) {
+        if (error) *error = "The asset registry could not be loaded: "
+            + registryError;
+        return false;
+    }
+    std::vector<AssetHandle> dependencies;
+    for (ShaderParameter& parameter : asset.parameters) {
+        if (parameter.type != ShaderValueType::Texture2D
+            || parameter.defaultValue.empty()
+            || parameter.defaultValue == "0") {
+            parameter.assetId = {};
+            continue;
+        }
+        const AssetReference reference = MakeAssetReference(
+            &registry, contentRoot, parameter.defaultValue, AssetType::Texture);
+        if (reference.id.Valid()) parameter.assetId = reference.id;
+        if (parameter.assetId.Valid()
+            && std::find(dependencies.begin(), dependencies.end(),
+                         parameter.assetId) == dependencies.end())
+            dependencies.push_back(parameter.assetId);
+    }
+
+    const std::filesystem::path temporary = target.string() + ".tmp";
+    std::ofstream out(temporary);
     if (!out) {
         if (error) *error = "Could not open shader asset for writing.";
         return false;
     }
-    out << "3DGShader " << ShaderAsset::CurrentVersion << '\n'
-        << "asset " << asset.id << ' ' << std::quoted(asset.name) << ' '
+    out << "3DG_SHADER " << ShaderAsset::CurrentVersion << ' '
+        << asset.assetId.ToString() << '\n'
+        << "graph " << asset.id << ' ' << std::quoted(asset.name) << ' '
         << static_cast<int>(asset.domain) << ' ' << asset.blendMode << '\n';
     for (const ShaderGraphNode& node : asset.nodes) {
         out << "node " << node.id << ' ' << std::quoted(node.type) << ' '
@@ -270,10 +314,60 @@ bool SaveShaderAsset(const std::string& path, const ShaderAsset& asset, std::str
     for (const ShaderParameter& parameter : asset.parameters)
         out << "parameter " << parameter.id << ' ' << std::quoted(parameter.name)
             << ' ' << static_cast<int>(parameter.type) << ' '
-            << std::quoted(parameter.defaultValue) << '\n';
+            << std::quoted(parameter.defaultValue) << ' '
+            << (parameter.assetId.Valid()
+                    ? parameter.assetId.ToString() : std::string("-"))
+            << '\n';
+    out << "ASSET_DEPS " << dependencies.size();
+    for (AssetHandle dependency : dependencies)
+        out << ' ' << dependency.ToString();
+    out << '\n';
     if (!out) {
+        out.close();
+        std::filesystem::remove(temporary, ec);
         if (error) *error = "Could not finish writing shader asset.";
         return false;
+    }
+    out.close();
+
+    const std::filesystem::path backup = target.string() + ".bak";
+    std::filesystem::remove(backup, ec);
+    ec.clear();
+    if (std::filesystem::exists(target, ec)) {
+        std::filesystem::rename(target, backup, ec);
+        if (ec) {
+            std::filesystem::remove(temporary);
+            if (error) *error = "Could not replace shader asset: " + ec.message();
+            return false;
+        }
+    }
+    ec.clear();
+    std::filesystem::rename(temporary, target, ec);
+    if (ec) {
+        std::error_code rollback;
+        if (std::filesystem::exists(backup, rollback))
+            std::filesystem::rename(backup, target, rollback);
+        if (error) *error = "Could not commit shader asset: " + ec.message();
+        return false;
+    }
+    std::filesystem::remove(backup, ec);
+
+    if (!contentRoot.empty()) {
+        ec.clear();
+        AssetRegistryEntry entry;
+        entry.id = asset.assetId;
+        entry.type = AssetType::Shader;
+        entry.virtualPath = AssetRegistry::NormalizeVirtualPath(
+            std::filesystem::relative(target, contentRoot, ec).generic_string());
+        entry.sourceHash = HashShaderAsset(asset);
+        entry.importerVersion = 1;
+        entry.dependencies = dependencies;
+        if (ec || !registry.Register(std::move(entry), &registryError)
+            || !registry.Save(registryPath, &registryError)) {
+            if (error) *error = "Shader saved, but registration failed: "
+                + (ec ? ec.message() : registryError);
+            return false;
+        }
     }
     if (error) error->clear();
     return true;
@@ -287,16 +381,24 @@ bool LoadShaderAsset(const std::string& path, ShaderAsset* output, std::string* 
     std::ifstream in(path);
     std::string magic;
     int version = 0;
-    if (!(in >> magic >> version) || magic != "3DGShader"
+    if (!(in >> magic >> version)
+        || (magic != "3DGShader" && magic != "3DG_SHADER")
         || version < 1 || version > ShaderAsset::CurrentVersion) {
         if (error) *error = "Unsupported or malformed shader asset: " + path;
         return false;
     }
     ShaderAsset asset;
     asset.version = version;
+    if (magic == "3DG_SHADER") {
+        std::string assetId;
+        if (!(in >> assetId) || !AssetHandle::Parse(assetId, &asset.assetId)) {
+            if (error) *error = "Shader asset has an invalid stable ID: " + path;
+            return false;
+        }
+    }
     std::string record;
     while (in >> record) {
-        if (record == "asset") {
+        if (record == "asset" || record == "graph") {
             int domain = 0;
             in >> asset.id >> std::quoted(asset.name) >> domain >> asset.blendMode;
             asset.domain = static_cast<ShaderDomain>(std::clamp(domain, 0, 3));
@@ -335,6 +437,16 @@ bool LoadShaderAsset(const std::string& path, ShaderAsset* output, std::string* 
             in >> parameter.id >> std::quoted(parameter.name) >> type
                >> std::quoted(parameter.defaultValue);
             parameter.type = static_cast<ShaderValueType>(std::clamp(type, 0, 7));
+            if (version >= 3) {
+                std::string assetId;
+                in >> assetId;
+                if (assetId != "-"
+                    && !AssetHandle::Parse(assetId, &parameter.assetId)) {
+                    if (error) *error =
+                        "Shader texture parameter has an invalid asset ID.";
+                    return false;
+                }
+            }
             asset.parameters.push_back(std::move(parameter));
         } else {
             std::string ignored;
@@ -349,6 +461,20 @@ bool LoadShaderAsset(const std::string& path, ShaderAsset* output, std::string* 
     if (ShaderAssetHasErrors(issues)) {
         if (error) *error = issues.front().message;
         return false;
+    }
+    const std::string contentRoot = FindContentRootForAsset(path);
+    if (!contentRoot.empty()) {
+        AssetRegistry registry;
+        std::string ignored;
+        registry.Load(AssetRegistry::DefaultRegistryPath(contentRoot), &ignored);
+        for (ShaderParameter& parameter : asset.parameters) {
+            if (parameter.type != ShaderValueType::Texture2D) continue;
+            const std::string resolved = ResolveAssetReference(
+                &registry, contentRoot,
+                {parameter.assetId, parameter.defaultValue},
+                AssetType::Texture);
+            if (!resolved.empty()) parameter.defaultValue = resolved;
+        }
     }
     *output = std::move(asset);
     if (error) error->clear();

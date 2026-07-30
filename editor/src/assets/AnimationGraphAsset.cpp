@@ -1,6 +1,9 @@
 #include "AnimationGraphAsset.h"
 #include "AnimationClipAsset.h"
 
+#include <engine/assets/AssetReference.h>
+#include <engine/assets/AssetRegistry.h>
+
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
@@ -17,21 +20,51 @@ std::string ClipAlias(const AnimationClipAsset& clip, const std::string& path) {
 }
 }  // namespace
 
-bool AnimationGraphAsset::Save(const std::string& path, std::string* error) const {
+bool AnimationGraphAsset::Save(const std::string& path, std::string* error) {
+    if (!assetId.Valid()) assetId = engine::AssetHandle::Generate();
+    version = 5;
+    const std::string contentRoot = engine::FindContentRootForAsset(path);
+    engine::AssetRegistry registry;
+    if (!contentRoot.empty()) {
+        std::string ignored;
+        registry.Load(
+            engine::AssetRegistry::DefaultRegistryPath(contentRoot), &ignored);
+        const engine::AssetHandle currentPreview =
+            engine::MakeAssetReference(
+                &registry, contentRoot, previewModel,
+                engine::AssetType::SkeletalMesh).id;
+        if (currentPreview.Valid()) previewModelAssetId = currentPreview;
+        for (AnimationGraphClip& clip : clips) {
+            const engine::AssetHandle currentClip =
+                engine::MakeAssetReference(
+                    &registry, contentRoot, clip.clipAsset,
+                    engine::AssetType::AnimationClip).id;
+            if (currentClip.Valid()) clip.clipAssetId = currentClip;
+            const engine::AssetHandle currentSource =
+                engine::MakeAssetReference(
+                    &registry, contentRoot, clip.sourceFile).id;
+            if (currentSource.Valid()) clip.sourceAssetId = currentSource;
+        }
+    }
     std::error_code ec;
     const std::filesystem::path p(path);
     if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path(), ec);
     std::ofstream out(path, std::ios::trunc);
     if (!out) { if (error) *error = "Could not write graph asset: " + path; return false; }
 
-    out << "3DG_GRAPH " << version << '\n'
-        << std::quoted(OrDash(name)) << ' ' << std::quoted(OrDash(previewModel)) << '\n';
+    out << "3DG_GRAPH " << version << ' ' << assetId.ToString() << '\n'
+        << std::quoted(OrDash(name)) << ' ' << std::quoted(OrDash(previewModel))
+        << ' ' << (previewModelAssetId.Valid()
+            ? previewModelAssetId.ToString() : std::string("-")) << '\n';
 
     out << "CLIPS " << clips.size() << '\n';
     for (const AnimationGraphClip& c : clips) {
         out << std::quoted(OrDash(c.clipAsset)) << ' ' << std::quoted(OrDash(c.sourceFile)) << ' '
             << std::quoted(OrDash(c.sourceClipName)) << ' ' << std::quoted(OrDash(c.clipName)) << ' '
-            << (c.stripRootMotion ? 1 : 0) << '\n';
+            << (c.stripRootMotion ? 1 : 0) << ' '
+            << (c.clipAssetId.Valid() ? c.clipAssetId.ToString() : std::string("-")) << ' '
+            << (c.sourceAssetId.Valid() ? c.sourceAssetId.ToString() : std::string("-"))
+            << '\n';
     }
 
     out << "GRAPH " << states.size() << ' ' << parameters.size() << ' ' << transitions.size() << '\n';
@@ -68,6 +101,21 @@ bool AnimationGraphAsset::Save(const std::string& path, std::string* error) cons
         }
         out << '\n';
     }
+    std::vector<engine::AssetHandle> dependencies;
+    const auto addDependency = [&](engine::AssetHandle id) {
+        if (id.Valid()
+            && std::find(dependencies.begin(), dependencies.end(), id)
+                   == dependencies.end())
+            dependencies.push_back(id);
+    };
+    addDependency(previewModelAssetId);
+    for (const AnimationGraphClip& clip : clips) {
+        addDependency(clip.clipAssetId);
+        addDependency(clip.sourceAssetId);
+    }
+    out << "ASSET_DEPS " << dependencies.size();
+    for (engine::AssetHandle id : dependencies) out << ' ' << id.ToString();
+    out << '\n';
     return static_cast<bool>(out);
 }
 
@@ -79,8 +127,26 @@ bool AnimationGraphAsset::Load(const std::string& path, std::string* error) {
         if (error) *error = "Invalid graph asset: " + path;
         return false;
     }
+    assetId = {};
+    if (loadedVersion >= 5) {
+        std::string id;
+        in >> id;
+        if (!engine::AssetHandle::Parse(id, &assetId)) {
+            if (error) *error = "Graph asset has an invalid stable ID: " + path;
+            return false;
+        }
+    }
     clips.clear(); states.clear(); parameters.clear(); transitions.clear();
     in >> std::quoted(name) >> std::quoted(previewModel);
+    previewModelAssetId = {};
+    if (loadedVersion >= 5) {
+        std::string id;
+        in >> id;
+        if (id != "-" && !engine::AssetHandle::Parse(id, &previewModelAssetId)) {
+            if (error) *error = "Graph preview model identity is invalid: " + path;
+            return false;
+        }
+    }
     Undash(name); Undash(previewModel);
 
     std::string tag;
@@ -103,6 +169,21 @@ bool AnimationGraphAsset::Load(const std::string& path, std::string* error) {
                 if (c.clipName.empty())
                     c.clipName = std::filesystem::path(c.clipAsset).stem().string();
                 if (c.clipName.empty()) c.clipName = c.sourceClipName;
+            }
+            if (loadedVersion >= 5) {
+                std::string clipId;
+                std::string sourceId;
+                in >> clipId >> sourceId;
+                if ((clipId != "-"
+                        && !engine::AssetHandle::Parse(
+                            clipId, &c.clipAssetId))
+                    || (sourceId != "-"
+                        && !engine::AssetHandle::Parse(
+                            sourceId, &c.sourceAssetId))) {
+                    if (error) *error =
+                        "Graph clip contains an invalid asset identity: " + path;
+                    return false;
+                }
             }
             Undash(c.clipAsset); Undash(c.sourceFile); Undash(c.sourceClipName); Undash(c.clipName);
             c.stripRootMotion = strip != 0;
@@ -201,6 +282,35 @@ bool AnimationGraphAsset::Load(const std::string& path, std::string* error) {
             }
         }
     }
-    version = 3;
+    version = 5;
+    const std::string contentRoot = engine::FindContentRootForAsset(path);
+    engine::AssetRegistry registry;
+    std::string ignored;
+    if (!contentRoot.empty()
+        && registry.Load(
+            engine::AssetRegistry::DefaultRegistryPath(contentRoot), &ignored)) {
+        if (previewModelAssetId.Valid()) {
+            const std::string resolved = engine::ResolveAssetReference(
+                &registry, contentRoot,
+                {previewModelAssetId, previewModel},
+                engine::AssetType::SkeletalMesh);
+            if (!resolved.empty()) previewModel = resolved;
+        }
+        for (AnimationGraphClip& clip : clips) {
+            if (clip.clipAssetId.Valid()) {
+                const std::string resolved = engine::ResolveAssetReference(
+                    &registry, contentRoot,
+                    {clip.clipAssetId, clip.clipAsset},
+                    engine::AssetType::AnimationClip);
+                if (!resolved.empty()) clip.clipAsset = resolved;
+            }
+            if (clip.sourceAssetId.Valid()) {
+                const std::string resolved = engine::ResolveAssetReference(
+                    &registry, contentRoot,
+                    {clip.sourceAssetId, clip.sourceFile});
+                if (!resolved.empty()) clip.sourceFile = resolved;
+            }
+        }
+    }
     return true;   // required GRAPH block loaded; trailing blocks are best-effort
 }

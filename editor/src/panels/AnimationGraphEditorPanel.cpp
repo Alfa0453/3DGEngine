@@ -309,7 +309,10 @@ void AnimationGraphEditorPanel::Draw(const std::string& assetRoot, bool* open, b
     ImGui::SameLine();
     if (m_asset.states.empty()) ImGui::TextDisabled("Add states to see playback.");
     else ImGui::TextDisabled("State: %s", m_controller.CurrentStateName().c_str());
-    assetPicker("Preview Rig", m_modelSearch, m_modelChoices, m_asset.previewModel);
+    if (assetPicker(
+            "Preview Rig", m_modelSearch, m_modelChoices,
+            m_asset.previewModel))
+        m_asset.previewModelAssetId = {};
     ImGui::TextDisabled("Drive parameters:");
     for (std::size_t parameterIndex = 0; parameterIndex < m_asset.parameters.size(); ++parameterIndex) {
         const auto& p = m_asset.parameters[parameterIndex];
@@ -357,7 +360,9 @@ void AnimationGraphEditorPanel::Draw(const std::string& assetRoot, bool* open, b
                 if (clip.Load(choice.path, &err)) {
                     AnimationGraphClip c;
                     c.clipAsset = choice.path;
+                    c.clipAssetId = clip.assetId;
                     c.sourceFile = clip.sourceFile;
+                    c.sourceAssetId = clip.sourceAssetId;
                     c.sourceClipName = clip.clipName;
                     std::string alias = clip.name;
                     if (alias.empty() || alias == "Clip" || alias == clip.clipName)

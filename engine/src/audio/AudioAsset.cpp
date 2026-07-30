@@ -1,4 +1,6 @@
 #include "engine/audio/AudioAsset.h"
+#include "engine/assets/AssetReference.h"
+#include "engine/assets/AssetRegistry.h"
 
 #include <algorithm>
 #include <filesystem>
@@ -43,12 +45,69 @@ AudioBusEffects SafeEffects(AudioBusEffects fx) {
     return fx;
 }
 
+bool PrepareAudioIdentity(const std::string& path, const char* magic,
+                          AssetHandle* id, AssetRegistry* registry,
+                          std::string* contentRoot,
+                          std::string* registryPath,
+                          std::string* error) {
+    *contentRoot = FindContentRootForAsset(path);
+    *registryPath = contentRoot->empty()
+        ? std::string() : AssetRegistry::DefaultRegistryPath(*contentRoot);
+    std::error_code ec;
+    std::string registryError;
+    if (!registryPath->empty()
+        && std::filesystem::exists(*registryPath, ec)
+        && !registry->Load(*registryPath, &registryError)) {
+        if (error) *error = "Could not load audio asset registry: "
+            + registryError;
+        return false;
+    }
+    if (!id->Valid() && std::filesystem::is_regular_file(path, ec)) {
+        std::ifstream existing(path);
+        std::string foundMagic, idText;
+        int version = 0;
+        if (existing >> foundMagic >> version >> idText
+            && foundMagic == magic && version >= 2)
+            AssetHandle::Parse(idText, id);
+    }
+    if (!id->Valid()) *id = AssetHandle::Generate();
+    return true;
+}
+
+bool RegisterAudioIdentity(const std::string& path, AssetHandle id,
+                           const std::string& contentRoot,
+                           const std::string& registryPath,
+                           AssetRegistry& registry,
+                           std::string* error) {
+    if (contentRoot.empty()) return true;
+    std::error_code ec;
+    AssetRegistryEntry entry;
+    entry.id = id;
+    entry.type = AssetType::Audio;
+    entry.virtualPath = AssetRegistry::NormalizeVirtualPath(
+        std::filesystem::relative(path, contentRoot, ec).generic_string());
+    entry.importerVersion = 1;
+    std::string registryError;
+    if (ec || !registry.Register(std::move(entry), &registryError)
+        || !registry.Save(registryPath, &registryError)) {
+        if (error) *error = "Audio asset saved, but registration failed: "
+            + (ec ? ec.message() : registryError);
+        return false;
+    }
+    return true;
+}
+
 } // namespace
 
-bool SaveAudioCue(const std::string& path, const AudioCueAsset& cue, std::string* error) {
+bool SaveAudioCue(const std::string& path, AudioCueAsset& cue, std::string* error) {
+    AssetRegistry registry;
+    std::string contentRoot, registryPath;
+    if (!PrepareAudioIdentity(path, "3DGAUDIO_CUE", &cue.assetId,
+                              &registry, &contentRoot, &registryPath, error))
+        return false;
     std::ofstream out;
     if (!OpenOutput(path, &out, error)) return false;
-    out << "3DGAUDIO_CUE 1\n"
+    out << "3DGAUDIO_CUE 2 " << cue.assetId.ToString() << "\n"
         << "name " << std::quoted(cue.name) << '\n'
         << "settings " << static_cast<int>(cue.mode) << ' ' << static_cast<int>(cue.bus) << ' '
         << cue.volumeMin << ' ' << cue.volumeMax << ' ' << cue.pitchMin << ' ' << cue.pitchMax << ' '
@@ -57,7 +116,11 @@ bool SaveAudioCue(const std::string& path, const AudioCueAsset& cue, std::string
     for (const AudioCueClip& clip : cue.clips)
         out << "clip " << std::quoted(clip.path) << ' ' << clip.weight << ' ' << clip.volume
             << ' ' << clip.pitch << ' ' << clip.delaySeconds << '\n';
-    return static_cast<bool>(out);
+    out << "ASSET_DEPS 0\n";
+    if (!out) return false;
+    out.close();
+    return RegisterAudioIdentity(path, cue.assetId, contentRoot,
+                                 registryPath, registry, error);
 }
 
 bool LoadAudioCue(const std::string& path, AudioCueAsset* output, std::string* error) {
@@ -69,11 +132,19 @@ bool LoadAudioCue(const std::string& path, AudioCueAsset* output, std::string* e
     if (!OpenInput(path, &in, error)) return false;
     std::string magic;
     int version = 0;
-    if (!(in >> magic >> version) || magic != "3DGAUDIO_CUE" || version != 1) {
+    if (!(in >> magic >> version) || magic != "3DGAUDIO_CUE"
+        || version < 1 || version > 2) {
         if (error) *error = "Unsupported audio cue format.";
         return false;
     }
     AudioCueAsset cue;
+    if (version >= 2) {
+        std::string idText;
+        if (!(in >> idText) || !AssetHandle::Parse(idText, &cue.assetId)) {
+            if (error) *error = "Audio cue has an invalid stable ID.";
+            return false;
+        }
+    }
     std::string token;
     while (in >> token) {
         if (token == "name") in >> std::quoted(cue.name);
@@ -115,11 +186,17 @@ bool LoadAudioCue(const std::string& path, AudioCueAsset* output, std::string* e
     return true;
 }
 
-bool SaveAudioMixerPreset(const std::string& path, const AudioMixerPreset& preset,
+bool SaveAudioMixerPreset(const std::string& path, AudioMixerPreset& preset,
                           std::string* error) {
+    AssetRegistry registry;
+    std::string contentRoot, registryPath;
+    if (!PrepareAudioIdentity(path, "3DGAUDIO_MIXER", &preset.assetId,
+                              &registry, &contentRoot, &registryPath, error))
+        return false;
     std::ofstream out;
     if (!OpenOutput(path, &out, error)) return false;
-    out << "3DGAUDIO_MIXER 1\nname " << std::quoted(preset.name) << "\nducking "
+    out << "3DGAUDIO_MIXER 2 " << preset.assetId.ToString()
+        << "\nname " << std::quoted(preset.name) << "\nducking "
         << (preset.dialogueDucking ? 1 : 0) << '\n';
     const std::size_t count = static_cast<std::size_t>(AudioBus::Count);
     for (std::size_t i = 0; i < count; ++i) {
@@ -132,7 +209,11 @@ bool SaveAudioMixerPreset(const std::string& path, const AudioMixerPreset& prese
             << fx.reverbDecay << ' ' << fx.compressorThresholdDb << ' '
             << fx.compressorRatio << '\n';
     }
-    return static_cast<bool>(out);
+    out << "ASSET_DEPS 0\n";
+    if (!out) return false;
+    out.close();
+    return RegisterAudioIdentity(path, preset.assetId, contentRoot,
+                                 registryPath, registry, error);
 }
 
 bool LoadAudioMixerPreset(const std::string& path, AudioMixerPreset* output,
@@ -145,12 +226,20 @@ bool LoadAudioMixerPreset(const std::string& path, AudioMixerPreset* output,
     if (!OpenInput(path, &in, error)) return false;
     std::string magic;
     int version = 0;
-    if (!(in >> magic >> version) || magic != "3DGAUDIO_MIXER" || version != 1) {
+    if (!(in >> magic >> version) || magic != "3DGAUDIO_MIXER"
+        || version < 1 || version > 2) {
         if (error) *error = "Unsupported mixer preset format.";
         return false;
     }
     const std::size_t count = static_cast<std::size_t>(AudioBus::Count);
     AudioMixerPreset preset;
+    if (version >= 2) {
+        std::string idText;
+        if (!(in >> idText) || !AssetHandle::Parse(idText, &preset.assetId)) {
+            if (error) *error = "Mixer preset has an invalid stable ID.";
+            return false;
+        }
+    }
     preset.volumes.assign(count, 1.0f);
     preset.muted.assign(count, false);
     preset.effects.assign(count, AudioBusEffects{});
@@ -182,18 +271,28 @@ bool LoadAudioMixerPreset(const std::string& path, AudioMixerPreset* output,
     return true;
 }
 
-bool SaveAdaptiveMusic(const std::string& path, const AdaptiveMusicAsset& music,
+bool SaveAdaptiveMusic(const std::string& path, AdaptiveMusicAsset& music,
                        std::string* error) {
+    AssetRegistry registry;
+    std::string contentRoot, registryPath;
+    if (!PrepareAudioIdentity(path, "3DGAUDIO_MUSIC", &music.assetId,
+                              &registry, &contentRoot, &registryPath, error))
+        return false;
     std::ofstream out;
     if (!OpenOutput(path, &out, error)) return false;
-    out << "3DGAUDIO_MUSIC 1\nname " << std::quoted(music.name) << '\n';
+    out << "3DGAUDIO_MUSIC 2 " << music.assetId.ToString()
+        << "\nname " << std::quoted(music.name) << '\n';
     for (const AdaptiveMusicState& state : music.states) {
         out << "state " << std::quoted(state.name) << ' ' << state.bpm << ' '
             << state.volume << ' ' << state.crossfadeSeconds << ' ' << state.stems.size();
         for (const std::string& stem : state.stems) out << ' ' << std::quoted(stem);
         out << '\n';
     }
-    return static_cast<bool>(out);
+    out << "ASSET_DEPS 0\n";
+    if (!out) return false;
+    out.close();
+    return RegisterAudioIdentity(path, music.assetId, contentRoot,
+                                 registryPath, registry, error);
 }
 
 bool LoadAdaptiveMusic(const std::string& path, AdaptiveMusicAsset* output,
@@ -206,11 +305,19 @@ bool LoadAdaptiveMusic(const std::string& path, AdaptiveMusicAsset* output,
     if (!OpenInput(path, &in, error)) return false;
     std::string magic;
     int version = 0;
-    if (!(in >> magic >> version) || magic != "3DGAUDIO_MUSIC" || version != 1) {
+    if (!(in >> magic >> version) || magic != "3DGAUDIO_MUSIC"
+        || version < 1 || version > 2) {
         if (error) *error = "Unsupported adaptive music format.";
         return false;
     }
     AdaptiveMusicAsset music;
+    if (version >= 2) {
+        std::string idText;
+        if (!(in >> idText) || !AssetHandle::Parse(idText, &music.assetId)) {
+            if (error) *error = "Adaptive music has an invalid stable ID.";
+            return false;
+        }
+    }
     std::string token;
     while (in >> token) {
         if (token == "name") in >> std::quoted(music.name);

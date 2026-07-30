@@ -17,4 +17,9 @@ std::string OpenFileDialog(const std::string& title,
                            const std::string& filterName,
                            const std::string& filterExt);
 
+// Show a native browser containing the file types accepted by the Content
+// browser importer. The system's normal drives, Quick Access, and search are
+// available. Returns an absolute file path, or empty when cancelled.
+std::string OpenAssetImportDialog(const std::string& title);
+
 } // namespace editor

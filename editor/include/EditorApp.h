@@ -2,6 +2,7 @@
 
 #include <engine/core/Application.h>
 #include <engine/core/Config.h>
+#include <engine/assets/AssetRegistry.h>
 #include <engine/assets/RuntimeAssetManager.h>
 #include <engine/animation/AnimatedModel.h>
 #include <engine/ai/AiAgent.h>
@@ -249,6 +250,7 @@ private:
     void SaveScene();
     void SaveSceneAs(const std::string& path);
     void PersistProject();                                       // save project settings to the right config
+    void LoadProjectAssetRegistry();
     void NewProject(const std::string& location, const std::string& name);
     void OpenProjectFromPath(const std::string& projectFile);
     void SetScenePathDraft(const std::string& path);
@@ -264,6 +266,7 @@ private:
     void CancelPendingSceneAction();
     void LoadSceneFromPath(const std::string& path);
     void ExportRuntimeScene();
+    void CookProject();
     void ValidateRuntimeScene();
     void TriggerAnimationPreviewAction();
     void UpdateEditParticlePreviews(float dt);
@@ -324,6 +327,7 @@ private:
     bool m_cameraSequencePaused = false;
     std::optional<engine::CameraPose> m_cameraBeforeShake;
     EditorAssets          m_assets;
+    engine::AssetRegistry m_assetRegistry;
     EditorDockspace       m_dockspace;
     EditorDragDrop        m_dragDrop;
     EditorGizmo           m_gizmo;

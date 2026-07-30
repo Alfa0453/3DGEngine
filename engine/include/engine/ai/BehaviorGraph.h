@@ -1,5 +1,6 @@
 #pragma once
 
+#include "engine/assets/AssetIdentity.h"
 #include "engine/ai/BehaviorTree.h"
 #include "engine/ai/Blackboard.h"
 #include "engine/ai/Steering.h"
@@ -152,6 +153,7 @@ struct BtGraphNode {
     std::vector<int> children;          // ordered child indices
     float            param = 0.0f;      // Repeat count / TargetWithin range / Wait seconds
     std::string      script;            // BtScript class name (ScriptTask nodes only)
+    AssetHandle      subtreeAssetId;    // stable reference when script stores a subtree path
     std::string      key;               // blackboard key (Bb* nodes only)
     glm::vec2        canvasPos{0.0f};   // editor canvas position (persisted, ignored at runtime)
     // Attachments, evaluated top-to-bottom (top = outermost). Decorators gate entry;
@@ -177,6 +179,7 @@ const char* BlackboardTypeName(BlackboardEntry::Type type);
 
 // The authored graph: a node list plus the root index, and the blackboard schema.
 struct BehaviorGraph {
+    AssetHandle                    assetId;
     std::vector<BtGraphNode>      nodes;
     int                          root = -1;
     std::vector<BlackboardEntry> blackboard;   // authored initial keys/values
@@ -201,7 +204,7 @@ BehaviorTree<AgentContext> BuildBehaviorTree(const BehaviorGraph& graph,
                                              const SubtreeResolver& resolveSubtree = {});
 
 // Text-file persistence (the editor references graphs by path, like materials).
-bool SaveBehaviorGraph(const std::string& path, const BehaviorGraph& graph, std::string* error = nullptr);
+bool SaveBehaviorGraph(const std::string& path, BehaviorGraph& graph, std::string* error = nullptr);
 bool LoadBehaviorGraph(const std::string& path, BehaviorGraph& outGraph, std::string* error = nullptr);
 
 } // namespace ai

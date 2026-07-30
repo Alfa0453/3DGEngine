@@ -1,5 +1,7 @@
 #include "engine/scene/RuntimeSceneLoader.h"
 #include "engine/assets/ParticleAsset.h"
+#include "engine/assets/AssetReference.h"
+#include "engine/assets/AssetRegistry.h"
 
 #include "engine/ecs/Components.h"
 #include "engine/ecs/Registry.h"
@@ -102,6 +104,7 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
     // Content directory so gameplay and behavior-tree scripts can load assets
     // by project-relative path regardless of the process working directory.
     std::error_code pathError;
+    std::string contentRoot;
     std::filesystem::path cursor =
         std::filesystem::absolute(path, pathError).parent_path();
     while (!cursor.empty()) {
@@ -110,6 +113,7 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
         if (name == "content") {
             SetParticleAssetContentRoot(cursor.string());
+            contentRoot = cursor.string();
             break;
         }
         const std::filesystem::path parent = cursor.parent_path();
@@ -120,11 +124,20 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
     std::string magic;
     int version = 0;
     in >> magic >> version;
-    if (magic != "3DGRuntimeScene" || version < 1 || version > 72) {
+    if (version >= 73) {
+        std::string sceneId;
+        AssetHandle parsed;
+        in >> sceneId;
+        if (!AssetHandle::Parse(sceneId, &parsed)) {
+            if (error) *error = "Runtime scene has an invalid stable ID.";
+            return false;
+        }
+    }
+    if (magic != "3DGRuntimeScene" || version < 1 || version > 78) {
         if (error) {
             *error = "Runtime scene file has an unknown format: "
                 + magic + " " + std::to_string(version)
-                + " (expected 3DGRuntimeScene 1..72).";
+                + " (expected 3DGRuntimeScene 1..76).";
         }
         return false;
     }
@@ -140,6 +153,27 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
         std::istringstream record(line);
         std::string recordType;
         record >> recordType;
+        if (recordType == "ragdoll" && version >= 78) {
+            std::string objectName;
+            Ragdoll ragdoll;
+            record >> std::quoted(objectName)
+                   >> ragdoll.enabled >> ragdoll.activateOnDeath
+                   >> ragdoll.totalMass >> ragdoll.bodyRadiusScale
+                   >> ragdoll.linearDamping >> ragdoll.angularDamping
+                   >> ragdoll.deathImpulse >> ragdoll.maxBodies;
+            auto found = std::find_if(
+                loaded.entities.begin(), loaded.entities.end(),
+                [&](const EntityDesc& entity) { return entity.name == objectName; });
+            if (found != loaded.entities.end()) {
+                found->ragdollEnabled = true;
+                found->ragdoll = std::move(ragdoll);
+            }
+            if (!record) {
+                if (error) *error = "Runtime scene has invalid ragdoll settings.";
+                return false;
+            }
+            continue;
+        }
         if (recordType == "game_mode" && version >= 69) {
             record >> std::quoted(loaded.gameMode.playerObjectName)
                    >> loaded.gameMode.playerInputEnabled
@@ -322,6 +356,16 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                 agent.movementMode = movementMode == static_cast<int>(ai::AiMovementMode::Flying)
                     ? ai::AiMovementMode::Flying : ai::AiMovementMode::Grounded;
             }
+            if (version >= 77) {
+                std::string brainId;
+                record >> brainId;
+                if (brainId != "-"
+                    && !AssetHandle::Parse(brainId, &agent.brainAssetId)) {
+                    if (error) *error =
+                        "Runtime scene contains an invalid behavior asset ID.";
+                    return false;
+                }
+            }
             if (!record || agent.entityName.empty()) {
                 if (error) *error = "Runtime scene contains an invalid navigation agent.";
                 return false;
@@ -409,8 +453,19 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             Scene::Environment::PostProcessEffect effect;
             int enabled = 1;
             std::size_t parameterCount = 0;
-            record >> std::quoted(effect.shaderPath)
-                   >> enabled >> parameterCount;
+            record >> std::quoted(effect.shaderPath);
+            if (version >= 75) {
+                std::string shaderId;
+                record >> shaderId;
+                if (shaderId != "-"
+                    && !AssetHandle::Parse(
+                        shaderId, &effect.shaderAssetId)) {
+                    if (error) *error =
+                        "Runtime post-process effect has an invalid shader ID.";
+                    return false;
+                }
+            }
+            record >> enabled >> parameterCount;
             effect.enabled = enabled != 0;
             for (std::size_t i = 0; i < parameterCount; ++i) {
                 Scene::Environment::PostProcessParameter parameter;
@@ -546,6 +601,17 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                 loaded.environment.shadowDistance = std::clamp(
                     loaded.environment.shadowDistance, 10.0f, 5000.0f);
             }
+            if (version >= 77) {
+                std::string hudId;
+                record >> hudId;
+                if (hudId != "-"
+                    && !AssetHandle::Parse(
+                        hudId, &loaded.environment.hudAssetId)) {
+                    if (error) *error =
+                        "Runtime scene contains an invalid HUD asset ID.";
+                    return false;
+                }
+            }
             loaded.environment.driveSunLight = driveSun != 0;
             loaded.environment.fog = fog != 0;
             loaded.environment.physicsBroadPhase = physicsBroadPhase != 0;
@@ -593,6 +659,18 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
 
         if (version >= 2) {
             record >> std::quoted(entity.modelPath) >> std::quoted(entity.materialPath);
+            if (version >= 73) {
+                std::string id;
+                record >> id;
+                if (id != "-" && !AssetHandle::Parse(id, &entity.modelAssetId))
+                    record.setstate(std::ios::failbit);
+                if (version >= 74) {
+                    record >> id;
+                    if (id != "-"
+                        && !AssetHandle::Parse(id, &entity.materialAssetId))
+                        record.setstate(std::ios::failbit);
+                }
+            }
             if (entity.modelPath == "-") {
                 entity.modelPath.clear();
             }
@@ -821,7 +899,14 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             for (std::size_t i = 0; i < sourceCount; ++i) {
                 AnimationSourceDesc source;
                 int strip = 0;
-                record >> std::quoted(source.path) >> std::quoted(source.clipName) >> strip;
+                record >> std::quoted(source.path);
+                if (version >= 73) {
+                    std::string id;
+                    record >> id;
+                    if (id != "-" && !AssetHandle::Parse(id, &source.assetId))
+                        record.setstate(std::ios::failbit);
+                }
+                record >> std::quoted(source.clipName) >> strip;
                 if (version >= 66) record >> std::quoted(source.sourceClipName);
                 if (source.path == "-") source.path.clear();
                 if (source.clipName == "-") source.clipName.clear();
@@ -835,7 +920,20 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             record >> attachmentCount;
             for (std::size_t i = 0; i < attachmentCount; ++i) {
                 AttachmentDesc a;
-                record >> std::quoted(a.path) >> std::quoted(a.boneName)
+                record >> std::quoted(a.path);
+                if (version >= 73) {
+                    std::string id;
+                    record >> id;
+                    if (id != "-" && !AssetHandle::Parse(id, &a.assetId))
+                        record.setstate(std::ios::failbit);
+                    if (version >= 74) {
+                        record >> id;
+                        if (id != "-"
+                            && !AssetHandle::Parse(id, &a.materialAssetId))
+                            record.setstate(std::ios::failbit);
+                    }
+                }
+                record >> std::quoted(a.boneName)
                        >> a.position.x >> a.position.y >> a.position.z
                        >> a.eulerDegrees.x >> a.eulerDegrees.y >> a.eulerDegrees.z
                        >> a.scale.x >> a.scale.y >> a.scale.z;
@@ -1273,6 +1371,71 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             } else {
                 NormalizeParticleModuleStack(particle, false);
             }
+            if (version >= 76) {
+                std::size_t shaderParameterCount = 0;
+                record >> std::quoted(particle.shaderPath)
+                       >> shaderParameterCount;
+                if (particle.shaderPath == "-")
+                    particle.shaderPath.clear();
+                if (!record || shaderParameterCount > 64) {
+                    if (error) *error =
+                        "Runtime particle shader parameter count is invalid.";
+                    return false;
+                }
+                particle.shaderParameters.clear();
+                for (std::size_t parameterIndex = 0;
+                     parameterIndex < shaderParameterCount;
+                     ++parameterIndex) {
+                    ParticleShaderParameter parameter;
+                    record >> std::quoted(parameter.name)
+                           >> parameter.type
+                           >> std::quoted(parameter.value);
+                    particle.shaderParameters.push_back(
+                        std::move(parameter));
+                }
+                const auto readParticleId =
+                    [&](AssetHandle& id) {
+                        std::string text;
+                        record >> text;
+                        return text == "-"
+                            || AssetHandle::Parse(text, &id);
+                    };
+                if (!readParticleId(entity.particleSystem.assetId)
+                    || !readParticleId(particle.textureAssetId)
+                    || !readParticleId(particle.meshAssetId)
+                    || !readParticleId(particle.shaderAssetId)) {
+                    if (error) *error =
+                        "Runtime scene contains invalid particle asset IDs.";
+                    return false;
+                }
+                std::size_t layerIdCount = 0;
+                record >> layerIdCount;
+                if (!record
+                    || layerIdCount != entity.particleEffect.layers.size()) {
+                    if (error) *error =
+                        "Runtime particle layer identity count is invalid.";
+                    return false;
+                }
+                for (ParticleEffectLayer& layer :
+                     entity.particleEffect.layers) {
+                    if (!readParticleId(layer.assetId)) {
+                        if (error) *error =
+                            "Runtime scene contains an invalid particle layer ID.";
+                        return false;
+                    }
+                }
+            }
+            if (version >= 77) {
+                std::string audioId;
+                record >> audioId;
+                if (audioId != "-"
+                    && !AssetHandle::Parse(
+                        audioId, &entity.audioSource.assetId)) {
+                    if (error) *error =
+                        "Runtime scene contains an invalid audio asset ID.";
+                    return false;
+                }
+            }
             entity.particleSystem.burstCount = std::max(entity.particleSystem.burstCount, 0);
             entity.particleSystem.burstInterval = std::max(entity.particleSystem.burstInterval, 0.0f);
         }
@@ -1285,6 +1448,113 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
         }
 
         loaded.entities.push_back(entity);
+    }
+
+    AssetRegistry assetRegistry;
+    std::string registryError;
+    if (!contentRoot.empty()
+        && assetRegistry.Load(
+            AssetRegistry::DefaultRegistryPath(contentRoot), &registryError)) {
+        if (loaded.environment.hudAssetId.Valid()) {
+            const std::string resolved = ResolveAssetReference(
+                &assetRegistry, contentRoot,
+                {loaded.environment.hudAssetId,
+                 loaded.environment.hudAsset},
+                AssetType::Hud);
+            if (!resolved.empty())
+                loaded.environment.hudAsset = resolved;
+        }
+        for (Scene::NavAgentDesc& agent : loaded.navAgents) {
+            if (!agent.brainAssetId.Valid()) continue;
+            const std::string resolved = ResolveAssetReference(
+                &assetRegistry, contentRoot,
+                {agent.brainAssetId, agent.brainAsset},
+                AssetType::BehaviorTree);
+            if (!resolved.empty()) agent.brainAsset = resolved;
+        }
+        for (Scene::Environment::PostProcessEffect& effect :
+             loaded.environment.postProcessEffects) {
+            if (!effect.shaderAssetId.Valid()) continue;
+            const std::string resolved = ResolveAssetReference(
+                &assetRegistry, contentRoot,
+                {effect.shaderAssetId, effect.shaderPath},
+                AssetType::Shader);
+            if (!resolved.empty()) effect.shaderPath = resolved;
+        }
+        for (EntityDesc& entity : loaded.entities) {
+            const auto resolveParticleReference =
+                [&](AssetHandle id, std::string& fallback,
+                    AssetType type) {
+                    if (!id.Valid()) return;
+                    const std::string resolved = ResolveAssetReference(
+                        &assetRegistry, contentRoot,
+                        {id, fallback}, type);
+                    if (!resolved.empty()) fallback = resolved;
+                };
+            resolveParticleReference(
+                entity.particleSystem.config.textureAssetId,
+                entity.particleSystem.config.texturePath,
+                AssetType::Texture);
+            resolveParticleReference(
+                entity.particleSystem.config.meshAssetId,
+                entity.particleSystem.config.meshPath,
+                AssetType::StaticMesh);
+            resolveParticleReference(
+                entity.particleSystem.config.shaderAssetId,
+                entity.particleSystem.config.shaderPath,
+                AssetType::Shader);
+            for (ParticleEffectLayer& layer :
+                 entity.particleEffect.layers)
+                resolveParticleReference(
+                    layer.assetId, layer.assetPath,
+                    AssetType::Particle);
+            resolveParticleReference(
+                entity.audioSource.assetId,
+                entity.audioSource.path,
+                AssetType::Audio);
+            if (entity.modelAssetId.Valid()) {
+                const std::string resolved = ResolveAssetReference(
+                    &assetRegistry, contentRoot,
+                    {entity.modelAssetId, entity.modelPath},
+                    entity.skeletalModel ? AssetType::SkeletalMesh
+                                         : AssetType::StaticMesh);
+                if (!resolved.empty()) entity.modelPath = resolved;
+            }
+            if (entity.materialAssetId.Valid()) {
+                const AssetRegistryEntry* materialEntry =
+                    assetRegistry.Find(entity.materialAssetId);
+                const AssetType materialType =
+                    materialEntry && materialEntry->type == AssetType::Texture
+                        ? AssetType::Texture : AssetType::Material;
+                const std::string resolved = ResolveAssetReference(
+                    &assetRegistry, contentRoot,
+                    {entity.materialAssetId, entity.materialPath},
+                    materialType);
+                if (!resolved.empty()) entity.materialPath = resolved;
+            }
+            for (AnimationSourceDesc& source : entity.animationSources) {
+                if (!source.assetId.Valid()) continue;
+                const std::string resolved = ResolveAssetReference(
+                    &assetRegistry, contentRoot, {source.assetId, source.path});
+                if (!resolved.empty()) source.path = resolved;
+            }
+            for (AttachmentDesc& attachment : entity.attachments) {
+                if (attachment.assetId.Valid()) {
+                    const std::string resolved = ResolveAssetReference(
+                        &assetRegistry, contentRoot,
+                        {attachment.assetId, attachment.path},
+                        AssetType::StaticMesh);
+                    if (!resolved.empty()) attachment.path = resolved;
+                }
+                if (attachment.materialAssetId.Valid()) {
+                    const std::string resolved = ResolveAssetReference(
+                        &assetRegistry, contentRoot,
+                        {attachment.materialAssetId, attachment.materialPath},
+                        AssetType::Material);
+                    if (!resolved.empty()) attachment.materialPath = resolved;
+                }
+            }
+        }
     }
 
     *scene = loaded;
@@ -1504,6 +1774,9 @@ bool RuntimeSceneLoader::Instantiate(const Scene &scene, ecs::Registry &registry
         }
         if (desc.healthEnabled) {
             registry.Add<Health>(entity, desc.health);
+        }
+        if (desc.ragdollEnabled) {
+            registry.Add<Ragdoll>(entity, desc.ragdoll);
         }
         if (desc.scriptEnabled && !desc.scriptClassName.empty()) {
             NativeScriptComponent script;

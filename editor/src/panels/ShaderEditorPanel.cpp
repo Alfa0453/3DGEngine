@@ -30,6 +30,13 @@ struct NodeTemplate {
     engine::ShaderValueType inputType;
 };
 
+std::string LowerExtension(const std::string& path) {
+    std::string extension = std::filesystem::path(path).extension().string();
+    std::transform(extension.begin(), extension.end(), extension.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return extension;
+}
+
 constexpr NodeTemplate kNodeTemplates[] = {
     {"Inputs","UV",engine::ShaderValueType::Vec2,0,engine::ShaderValueType::Float},
     {"Inputs","WorldPosition",engine::ShaderValueType::Vec3,0,engine::ShaderValueType::Float},
@@ -288,7 +295,10 @@ bool ShaderEditorPanel::SaveDocument(EditorAssets& assets, bool saveAs)
             filename += ".3dgshader";
         path = std::filesystem::path(assets.RootPath()) /
             assets.CurrentFolder() / filename;
-        if (saveAs) path = UniquePath(path);
+        if (saveAs) {
+            path = UniquePath(path);
+            m_asset.assetId = {};
+        }
     }
     std::string error;
     if (!engine::SaveShaderAsset(path.string(), m_asset, &error))
@@ -308,6 +318,7 @@ bool ShaderEditorPanel::SaveDocument(EditorAssets& assets, bool saveAs)
 bool ShaderEditorPanel::DuplicateDocument(EditorAssets& assets)
 {
     const std::string oldName = m_asset.name;
+    m_asset.assetId = {};
     m_asset.id += 1;
     m_asset.name = oldName + " Copy";
     std::snprintf(m_name.data(), m_name.size(), "%s", m_asset.name.c_str());
@@ -1050,7 +1061,7 @@ void ShaderEditorPanel::DrawGraphCanvas()
     ImGui::EndChild();
 }
 
-void ShaderEditorPanel::DrawGraphInspector()
+void ShaderEditorPanel::DrawGraphInspector(EditorAssets& assets)
 {
     if (m_selectedNodes.size() != 1) return;
     const std::uint64_t selected = *m_selectedNodes.begin();
@@ -1126,6 +1137,52 @@ void ShaderEditorPanel::DrawGraphInspector()
                 m_dirty = true;
                 m_compilePending = true;
             }
+        }
+    }
+    if (node->type == "ParameterTexture2D") {
+        const auto parameter = std::find_if(
+            m_asset.parameters.begin(), m_asset.parameters.end(),
+            [&](const engine::ShaderParameter& item) {
+                return item.name == node->name;
+            });
+        if (parameter != m_asset.parameters.end()) {
+            std::array<char, 512> texturePath{};
+            std::snprintf(texturePath.data(), texturePath.size(), "%s",
+                          parameter->defaultValue.c_str());
+            if (ImGui::InputText(
+                    "Default Texture", texturePath.data(), texturePath.size())) {
+                parameter->defaultValue = texturePath.data();
+                parameter->assetId = {};
+                m_dirty = true;
+                m_compilePending = true;
+            }
+            if (ImGui::BeginDragDropTarget()) {
+                if (const ImGuiPayload* payload =
+                        ImGui::AcceptDragDropPayload("3DGEDITOR_ASSET")) {
+                    const char* path =
+                        static_cast<const char*>(payload->Data);
+                    if (path && LowerExtension(path) == ".3dgtex") {
+                        parameter->defaultValue = path;
+                        parameter->assetId = {};
+                        m_dirty = true;
+                        m_compilePending = true;
+                    }
+                }
+                ImGui::EndDragDropTarget();
+            }
+            const EditorAssets::Asset* selectedTexture = assets.SelectedAsset();
+            const bool canUseTexture = selectedTexture
+                && selectedTexture->type == EditorAssets::Type::Texture;
+            if (!canUseTexture) ImGui::BeginDisabled();
+            if (ImGui::Button("Use Selected Engine Texture")) {
+                parameter->defaultValue = assets.SelectedAssetFullPath();
+                parameter->assetId = {};
+                m_dirty = true;
+                m_compilePending = true;
+            }
+            if (!canUseTexture) ImGui::EndDisabled();
+            ImGui::TextDisabled(
+                "Accepts engine-owned .3dgtex assets from Content.");
         }
     }
     if (node->type == "ObjectColor") {
@@ -1278,6 +1335,22 @@ unsigned int ShaderEditorPanel::RenderPreview(int width, int height)
         input >> color.x >> color.y >> color.z >> color.w;
         mutableShader.SetVec4("u_" + parameter.name, color);
     }
+    int textureUnit = 8;
+    for (const auto& parameter : m_asset.parameters) {
+        if (parameter.type != engine::ShaderValueType::Texture2D
+            || parameter.defaultValue.empty()
+            || parameter.defaultValue == "0")
+            continue;
+        std::string textureError;
+        if (const engine::Texture* texture = m_previewAssets.LoadTexture(
+                parameter.defaultValue, &textureError)) {
+            texture->Bind(textureUnit);
+            mutableShader.SetInt("u_" + parameter.name, textureUnit);
+            ++textureUnit;
+        } else if (!textureError.empty()) {
+            m_error = textureError;
+        }
+    }
     glm::mat4 model(1.0f);
     if (m_shape == PreviewShape::Plane)
         model = glm::rotate(model, glm::radians(0.0f), glm::vec3(1, 0, 0));
@@ -1293,6 +1366,18 @@ unsigned int ShaderEditorPanel::RenderPreview(int width, int height)
             -m_importedModel->Center());
         mutableShader.SetMat4("uModel", importedModel);
         for (const engine::SubMesh& submesh : m_importedModel->SubMeshes())
+            submesh.mesh.Draw();
+    }
+    else if (m_importedSkinnedModel)
+    {
+        const float radius =
+            std::max(m_importedSkinnedModel->BoundingRadius(), 0.001f);
+        const glm::mat4 importedModel = glm::translate(
+            glm::scale(glm::mat4(1.0f), glm::vec3(0.8f / radius)),
+            -m_importedSkinnedModel->Center());
+        mutableShader.SetMat4("uModel", importedModel);
+        for (const engine::SubMesh& submesh :
+             m_importedSkinnedModel->SubMeshes())
             submesh.mesh.Draw();
     }
     if (m_ground)
@@ -1562,7 +1647,7 @@ void ShaderEditorPanel::Draw(EditorAssets& assets, bool* open)
 
     ImGui::SeparatorText("Typed Shader Graph");
     DrawGraphCanvas();
-    DrawGraphInspector();
+    DrawGraphInspector(assets);
 
     if (ImGui::BeginTable("ShaderWorkspace", 2, ImGuiTableFlags_Resizable))
     {
@@ -1576,14 +1661,21 @@ void ShaderEditorPanel::Draw(EditorAssets& assets, bool* open)
                          || selected->type == EditorAssets::Type::SkeletalModel)
             && ImGui::Button("Use Selected Model"))
         {
-            try
-            {
-                m_importedModel = std::make_unique<engine::Model>(
-                    engine::Model::FromFile(assets.SelectedAssetFullPath()));
-                m_importedModelPath = assets.SelectedAssetFullPath();
+            std::string modelError;
+            m_importedModel = nullptr;
+            m_importedSkinnedModel = nullptr;
+            const std::string path = assets.SelectedAssetFullPath();
+            if (selected->type == EditorAssets::Type::SkeletalModel)
+                m_importedSkinnedModel =
+                    m_previewAssets.LoadSkinnedModel(path, &modelError);
+            else
+                m_importedModel =
+                    m_previewAssets.LoadModel(path, &modelError);
+            if (m_importedModel || m_importedSkinnedModel) {
+                m_importedModelPath = path;
                 m_shape = PreviewShape::ImportedModel;
             }
-            catch (const std::exception& error) { m_error = error.what(); }
+            else m_error = modelError;
         }
         ImGui::SliderFloat("Orbit Yaw", &m_yaw, -180.0f, 180.0f);
         ImGui::SliderFloat("Orbit Pitch", &m_pitch, -80.0f, 80.0f);

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "EditorScene.h"   // AnimationStateNode / AnimationParameter / AnimationStateTransition
+#include <engine/assets/AssetIdentity.h>
 
 #include <string>
 #include <vector>
@@ -10,7 +11,9 @@
 // transitions reference the clip by `clipName` (its name inside the source file).
 struct AnimationGraphClip {
     std::string clipAsset;                 // source .3dgclip (for re-loading in the editor)
+    engine::AssetHandle clipAssetId;
     std::string sourceFile;                // resolved FBX / glTF containing the animation
+    engine::AssetHandle sourceAssetId;
     std::string sourceClipName;            // take name inside the source file
     std::string clipName;                  // unique graph-facing alias (states reference this)
     bool        stripRootMotion = false;
@@ -20,9 +23,11 @@ struct AnimationGraphClip {
 // transitions + blend spaces. The Character Editor references one of these instead of
 // authoring animation itself; the graph is baked onto a character on placement.
 struct AnimationGraphAsset {
-    int         version = 4;
+    int         version = 5;
+    engine::AssetHandle assetId;
     std::string name = "Graph";
     std::string previewModel;   // rig to preview the graph on (editor only, not baked)
+    engine::AssetHandle previewModelAssetId;
 
     std::vector<AnimationGraphClip>                    clips;
     std::vector<EditorScene::AnimationStateNode>       states;
@@ -31,6 +36,6 @@ struct AnimationGraphAsset {
     std::vector<EditorScene::AnimationActionProfile>   actions;
     std::vector<EditorScene::AnimationEvent>           events;
 
-    bool Save(const std::string& path, std::string* error = nullptr) const;
+    bool Save(const std::string& path, std::string* error = nullptr);
     bool Load(const std::string& path, std::string* error = nullptr);
 };

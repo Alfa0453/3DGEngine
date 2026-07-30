@@ -1,5 +1,7 @@
 #pragma once
 
+#include <engine/assets/AssetIdentity.h>
+
 #include <string>
 #include <vector>
 
@@ -12,9 +14,11 @@ struct AnimationClipAsset {
         std::string name;
     };
 
-    int         version = 3;
+    int         version = 4;
+    engine::AssetHandle assetId;
     std::string name = "Clip";
     std::string sourceFile;        // FBX / glTF containing the animation
+    engine::AssetHandle sourceAssetId;
     std::string clipName;          // which clip in the file (empty = first)
     bool        stripRootMotion = false;  // freeze the root so it plays in place
     bool        loop = true;
@@ -25,6 +29,6 @@ struct AnimationClipAsset {
     float       fadeOut = 0.15f;
     std::vector<Event> events;     // action/gameplay notifies authored on this clip
 
-    bool Save(const std::string& path, std::string* error = nullptr) const;
+    bool Save(const std::string& path, std::string* error = nullptr);
     bool Load(const std::string& path, std::string* error = nullptr);
 };

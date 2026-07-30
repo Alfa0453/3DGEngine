@@ -1,5 +1,7 @@
 #pragma once
 
+#include "engine/assets/AssetIdentity.h"
+
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 
@@ -85,6 +87,7 @@ struct ParticleShaderParameter {
     std::string name;
     int type = 0;
     std::string value;
+    AssetHandle assetId;
 };
 
 struct ParticleCollisionShape {
@@ -110,6 +113,7 @@ struct EmitterConfig {
     // Optional graph-authored Particle-domain shader. Runtime pointers are
     // transient and resolved from shaderPath/parameters by the host asset manager.
     std::string shaderPath;
+    AssetHandle shaderAssetId;
     std::vector<ParticleShaderParameter> shaderParameters;
     const Shader* customShader = nullptr;
     std::unordered_map<std::string, const Texture*> shaderTextures;
@@ -143,6 +147,7 @@ struct EmitterConfig {
     std::array<float, 4> colorCurve{{0.0f, 0.333333f, 0.666667f, 1.0f}};
 
     std::string texturePath;
+    AssetHandle textureAssetId;
     int textureColumns = 1;
     int textureRows = 1;
     float textureFps = 0.0f;
@@ -166,6 +171,7 @@ struct EmitterConfig {
     ParticleRenderMode renderMode = ParticleRenderMode::Billboard;
     ParticleMeshShape meshShape = ParticleMeshShape::Cube;
     std::string meshPath;
+    AssetHandle meshAssetId;
     float meshScale = 1.0f;
     bool meshAlignToVelocity = true;
 
@@ -600,6 +606,7 @@ private:
 // Serializable playback wrapper used by runtime ECS scenes. Transient fields
 // are reset when a scene is instantiated and are not written to disk.
 struct ParticleSystemComponent {
+    AssetHandle assetId;
     EmitterConfig config;
     bool enabled = true;
     bool autoplay = true;
@@ -631,6 +638,7 @@ struct ParticleSystemComponent {
 struct ParticleEffectLayer {
     std::string name{"Layer"};
     std::string assetPath;
+    AssetHandle assetId;
     glm::vec3 offset{0.0f};
     bool enabled = true;
     ParticleSystemComponent system;

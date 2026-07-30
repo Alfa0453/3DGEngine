@@ -6,6 +6,7 @@
 #include "engine/gameplay/Script.h"
 #include "engine/physics/PhysicsComponents.h"
 #include "engine/ai/AiMovement.h"
+#include "engine/assets/AssetIdentity.h"
 
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -33,6 +34,7 @@ public:
 
     struct AnimationSourceDesc {
         std::string path;
+        AssetHandle assetId;
         std::string clipName;
         bool        stripRootMotion = false;
         std::string sourceClipName;
@@ -40,6 +42,8 @@ public:
 
     struct AttachmentDesc {
         std::string path;
+        AssetHandle assetId;
+        AssetHandle materialAssetId;
         std::string boneName;
         glm::vec3   position{0.0f};
         glm::vec3   eulerDegrees{0.0f};
@@ -153,7 +157,9 @@ public:
         glm::quat rotation{1.0f, 0.0f, 0.0f, 0.0f};
         glm::vec3 color{1.0f};
         std::string modelPath;
+        AssetHandle modelAssetId;
         std::string materialPath;
+        AssetHandle materialAssetId;
         glm::vec3 modelOrientationEuler{0.0f};   // render-only rotation (deg); collider unaffected
         glm::vec3 modelOffsetPosition{0.0f};     // render-only mesh position offset; collider unaffected
         glm::vec3 modelOffsetScale{1.0f};        // render-only mesh scale (about model centre)
@@ -195,6 +201,8 @@ public:
         engine::ecs::Mover mover;
         bool healthEnabled = false;
         engine::Health health;
+        bool ragdollEnabled = false;
+        engine::Ragdoll ragdoll;
         bool scriptEnabled = false;
         std::string scriptClassName;
         std::string scriptPath;
@@ -234,6 +242,7 @@ public:
             float visionRange = 12.0f;
             float visionHalfAngle = 45.0f;
             std::string brainAsset;
+            AssetHandle brainAssetId;
             int team = 0;
             bool autoTarget = false;
             engine::ai::AiMovementMode movementMode = engine::ai::AiMovementMode::Grounded;
@@ -325,6 +334,7 @@ public:
             };
             struct PostProcessEffect {
                 std::string shaderPath;
+                AssetHandle shaderAssetId;
                 bool enabled = true;
                 std::vector<PostProcessParameter> parameters;
             };
@@ -362,6 +372,7 @@ public:
             float physicsSleepAngularVelocity = 0.15f;
             float physicsTimeToSleep = 0.5f;
             std::string hudAsset;   // reusable .hud drawn during play (empty = none)
+            AssetHandle hudAssetId;
             std::vector<PostProcessEffect> postProcessEffects;
         };
 

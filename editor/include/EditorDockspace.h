@@ -276,6 +276,7 @@ public:
         bool saveAsSceneRequested = false;
         bool loadSceneRequested = false;
         bool exportRuntimeRequested = false;
+        bool cookProjectRequested = false;
         bool validateRuntimeRequested = false;
         bool enterPlayModeRequested = false;
         bool exitPlayModeRequested = false;

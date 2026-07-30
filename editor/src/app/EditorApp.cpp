@@ -4,6 +4,7 @@
 #include <engine/ecs/RuntimeSystems.h>
 #include <engine/gameplay/GameplayComponents.h>
 #include <engine/gameplay/GameplaySystems.h>
+#include <engine/gameplay/RagdollSystem.h>
 #include <engine/gameplay/GameMode.h>
 #include <engine/gameplay/Script.h>
 #include <engine/ecs/Systems.h>
@@ -534,6 +535,7 @@ void EditorApp::OnInit()
     }
     SetScenePathDraft(m_project.ScenePath());
     m_content.Refresh(m_assets, m_project, m_log);
+    LoadProjectAssetRegistry();
     m_materialMaker.SetOutputDirectory(m_project.AssetRoot());
     m_behaviorGraph.SetOutputDirectory(m_project.AssetRoot());
     engine::ai::RegisterExampleBtScripts();   // built-in example scripts (idempotent)
@@ -798,6 +800,11 @@ void EditorApp::OnRender()
 
     // Game HUD overlay (play mode): drawn on the presented scene, under the editor UI.
     if (m_mode == EditorMode::Play) {
+        if (m_playRegistry && m_text) {
+            engine::DrawWorldHealthBars(
+                *m_text, *m_playRegistry, viewProj,
+                window.Width(), window.Height(), m_playPlayerEntity);
+        }
         DrawPlayHud();
     }
 
@@ -842,11 +849,12 @@ void EditorApp::OnShutdown()
 
 void EditorApp::DrawEditModeModels(const glm::mat4 & viewProj)
 {
-    m_editAnimationPoses.clear();
     if (!m_modelShader && !m_skinnedRenderer) {
+        m_editAnimationPoses.clear();
         return;
     }
 
+    std::vector<Entity> activePoseEntities;
     if (m_modelShader) {
         m_modelShader->Bind();
         m_modelShader->SetMat4("uViewProj", viewProj);
@@ -871,6 +879,7 @@ void EditorApp::DrawEditModeModels(const glm::mat4 & viewProj)
 
         std::string error;
         if (object.skeletalModel && m_skinnedRenderer) {
+            activePoseEntities.push_back(object.entity);
             const engine::SkinnedModel* model = m_editAssets.LoadSkinnedModel(object.modelAssetPath, &error);
             if (!model) {
                 if (!m_editModelLoadErrors[object.modelAssetPath]) {
@@ -988,10 +997,29 @@ void EditorApp::DrawEditModeModels(const glm::mat4 & viewProj)
                     preview->controller.SetParameter(entry.first, entry.second);
                 }
             }
-            if (m_animationPreviewAction.active
+            const bool actionPreview =
+                m_animationPreviewAction.active
                 && m_animationPreviewAction.entity == object.entity
                 && m_animationPreviewAction.clip >= 0
-                && m_animationPreviewAction.clip < static_cast<int>(model->AnimationCount())) {
+                && m_animationPreviewAction.clip < static_cast<int>(model->AnimationCount());
+            const bool advancingPreview =
+                object.animationAutoplay && m_previewSceneAnimations;
+            const EditorScene::Object* selectedObject =
+                m_scene.SelectedObject();
+            const bool selectedForEditing =
+                selectedObject && selectedObject->entity == object.entity;
+            const auto cachedPose = m_editAnimationPoses.find(object.entity);
+            if (!actionPreview && !advancingPreview
+                && !selectedForEditing
+                && cachedPose != m_editAnimationPoses.end()) {
+                // A paused editor preview has the same pose until its animation
+                // settings change. Reuse it instead of walking the complete
+                // skeleton and rebuilding bone matrices every frame.
+                if (engine::AnimatedModel* preview =
+                        previewRegistry.TryGet<engine::AnimatedModel>(previewEntity)) {
+                    preview->pose = cachedPose->second;
+                }
+            } else if (actionPreview) {
                 if (engine::AnimatedModel* preview = previewRegistry.TryGet<engine::AnimatedModel>(previewEntity)) {
                     preview->controller.Update(previewTime);
                     preview->PlayAction(m_animationPreviewAction.clip,
@@ -1093,6 +1121,16 @@ void EditorApp::DrawEditModeModels(const glm::mat4 & viewProj)
             previewRegistry, *m_modelShader, viewProj, sky.keyLightDirection,
             std::max({sky.keyLightColor.x, sky.keyLightColor.y,
                       sky.keyLightColor.z}) * environment.sunIntensity);
+    }
+
+    for (auto it = m_editAnimationPoses.begin();
+         it != m_editAnimationPoses.end();) {
+        if (std::find(activePoseEntities.begin(), activePoseEntities.end(),
+                      it->first) == activePoseEntities.end()) {
+            it = m_editAnimationPoses.erase(it);
+        } else {
+            ++it;
+        }
     }
 
     if (m_shader) {
@@ -1245,8 +1283,14 @@ void EditorApp::DrawEditorOverlay()
     dockspaceContext.physicsEventExitCount = m_physicsEventExitCount;
     dockspaceContext.physicsActionCount = m_physicsActionCount;
     dockspaceContext.physicsEventRows = &m_physicsEventRows;
-    dockspaceContext.gameplayDebug = BuildGameplayDebugState();
-    dockspaceContext.animationPreview = BuildAnimationPreviewState();
+    // These builders copy authored animation states, transitions, events, and
+    // action profiles. Do that work only while the corresponding panel is open.
+    if (m_panels.IsOpen(EditorPanels::Panel::GameplayDebug)) {
+        dockspaceContext.gameplayDebug = BuildGameplayDebugState();
+    }
+    if (m_panels.IsOpen(EditorPanels::Panel::AnimationPreview)) {
+        dockspaceContext.animationPreview = BuildAnimationPreviewState();
+    }
     dockspaceContext.showPhysicsEventGuides = &m_showPhysicsEventGuides;
     dockspaceContext.showAiDebug = &m_showAiDebug;
     dockspaceContext.useNavMesh = &m_useNavMesh;
@@ -1388,8 +1432,10 @@ void EditorApp::DrawEditorOverlay()
         m_audio.SetMaxVoices(dockspaceContext.audioMaxVoices);
     if (dockspaceContext.saveAudioMixerPresetRequested) {
         std::string error;
+        engine::AudioMixerPreset preset =
+            m_audio.CaptureMixerPreset("Project Mixer");
         if (!engine::SaveAudioMixerPreset(dockspaceContext.audioMixerPresetPath.data(),
-                m_audio.CaptureMixerPreset("Project Mixer"), &error))
+                preset, &error))
             m_log.Error("Audio mixer: " + error);
         else
             m_log.Info("Saved audio mixer preset: "
@@ -1595,6 +1641,12 @@ void EditorApp::DrawEditorOverlay()
             m_panels.SetOpen(EditorPanels::Panel::AnimationPreview, true);
             m_log.Info("Opened Animation Preview for model asset selection");
             break;
+        case EditorAssets::Type::Skeleton:
+        case EditorAssets::Type::Animation:
+            m_log.Info(std::string("Selected ")
+                + EditorAssets::TypeName(dockspaceContext.editorAssetOpenType)
+                + " asset: " + path);
+            break;
         case EditorAssets::Type::Audio:
             m_panels.SetOpen(EditorPanels::Panel::AudioEditor, true);
             break;
@@ -1610,6 +1662,9 @@ void EditorApp::DrawEditorOverlay()
     }
     if (dockspaceContext.exportRuntimeRequested) {
         ExportRuntimeScene();
+    }
+    if (dockspaceContext.cookProjectRequested) {
+        CookProject();
     }
     if (dockspaceContext.validateRuntimeRequested) {
         ValidateRuntimeScene();
@@ -1951,6 +2006,10 @@ void EditorApp::DrawHudEditorPanel() {
         const std::filesystem::path fp(r.path);
         if (fp.has_parent_path()) std::filesystem::create_directories(fp.parent_path(), ec);
         std::string err;
+        if (!m_hudPath.empty()
+            && std::filesystem::path(m_hudPath).lexically_normal()
+                != std::filesystem::path(r.path).lexically_normal())
+            m_hud.assetId = {};
         if (m_hud.Save(r.path, &err)) { m_hudPath = r.path; m_log.Info("HUD saved: " + r.path); }
         else m_log.Error("HUD save failed: " + err);
     }
@@ -4255,7 +4314,8 @@ void EditorApp::AddCharacterToScene(const CharacterAsset& character, const glm::
         }
         // Link the object to its source asset so Character Editor edits can live-sync.
         if (!assetPath.empty()) {
-            m_scene.SetSelectedCharacterAssetPath(assetPath);
+            m_scene.SetSelectedCharacterAssetPath(
+                assetPath, character.assetId);
         }
         m_log.Info("Added character to scene: "
             + (character.name.empty() ? std::string("Character") : character.name));
@@ -5236,6 +5296,45 @@ void EditorApp::PersistProject() {
     m_config.Save();
 }
 
+void EditorApp::LoadProjectAssetRegistry() {
+    m_assets.SetAssetRegistry(&m_assetRegistry);
+    const std::string registryPath =
+        engine::AssetRegistry::DefaultRegistryPath(m_project.AssetRoot());
+    std::error_code ec;
+    std::string error;
+
+    if (std::filesystem::is_regular_file(registryPath, ec)
+        && m_assetRegistry.Load(registryPath, &error)) {
+        m_log.Info("Loaded asset registry: "
+                   + std::to_string(m_assetRegistry.Entries().size()) + " native asset(s)");
+    } else {
+        if (!error.empty()) {
+            m_log.Warning("Asset registry could not be loaded; rebuilding it: " + error);
+        }
+        if (!m_assetRegistry.RebuildFromContent(m_project.AssetRoot(), &error)) {
+            m_assetRegistry.Clear();
+            m_log.Error("Asset registry rebuild failed: " + error);
+            return;
+        }
+        if (!m_assetRegistry.Save(registryPath, &error)) {
+            m_log.Error("Asset registry save failed: " + error);
+            return;
+        }
+        m_log.Info("Created asset registry: "
+                   + std::to_string(m_assetRegistry.Entries().size()) + " native asset(s)");
+    }
+
+    for (const engine::AssetRegistryIssue& issue : m_assetRegistry.Validate()) {
+        const std::string message = "Asset registry " + issue.asset.ToString()
+            + ": " + issue.message;
+        if (issue.severity == engine::AssetRegistryIssue::Severity::Error) {
+            m_log.Error(message);
+        } else {
+            m_log.Warning(message);
+        }
+    }
+}
+
 void EditorApp::NewProject(const std::string& location, const std::string& name) {
     if (!m_cube || !m_plane || !m_sphere || !m_capsule || !m_cylinder || !m_cone
         || !m_pyramid || !m_torus || !m_staircase) {
@@ -5261,6 +5360,7 @@ void EditorApp::NewProject(const std::string& location, const std::string& name)
     m_materialMaker.SetOutputDirectory(m_project.AssetRoot());
     m_behaviorGraph.SetOutputDirectory(m_project.AssetRoot());
     m_content.Refresh(m_assets, m_project, m_log);
+    LoadProjectAssetRegistry();
 
     // Start the project from a clean default scene and save it into the project.
     m_scene.BuildDefault(*m_cube, *m_plane, *m_sphere, *m_capsule, *m_cylinder,
@@ -5294,6 +5394,7 @@ void EditorApp::OpenProjectFromPath(const std::string& projectFile) {
     m_materialMaker.SetOutputDirectory(m_project.AssetRoot());
     m_behaviorGraph.SetOutputDirectory(m_project.AssetRoot());
     m_content.Refresh(m_assets, m_project, m_log);
+    LoadProjectAssetRegistry();
     SetScenePathDraft(m_project.ScenePath());
 
     std::error_code ec;
@@ -5499,6 +5600,14 @@ void EditorApp::LoadSceneFromPath(const std::string& path) {
 void EditorApp::ExportRuntimeScene()
 {
     m_runtime.ExportRuntimeScene(m_scene, m_project, m_log);
+}
+
+void EditorApp::CookProject()
+{
+    // Capture any newly saved authored asset dependencies before walking the
+    // graph. Refresh is non-destructive and leaves imported native entries intact.
+    m_content.Refresh(m_assets, m_project, m_log);
+    m_runtime.CookProject(m_scene, m_project, m_assetRegistry, m_log);
 }
 
 void EditorApp::ValidateRuntimeScene()
@@ -7133,228 +7242,6 @@ void EditorApp::UpdatePlayPlayerController(float dt, bool inputEnabled)
     m_camera.LookAt(m_playPlayerController->CameraTarget());
 }
 
-void EditorApp::ApplyManagedPlayCamera()
-{
-    const EditorScene::CameraPreset* preset = m_playCameraOverride
-        ? &*m_playCameraOverride
-        : m_scene.PrimaryCameraPreset();
-    if (!preset || (!m_playCameraOverride && !preset->useInPlay)) return;
-
-    engine::CameraPose pose;
-    pose.position = preset->position;
-    pose.target = preset->target;
-    pose.fov = preset->fov;
-    pose.nearPlane = preset->nearPlane;
-    pose.farPlane = preset->farPlane;
-    engine::CameraBlend::Apply(pose, m_camera);
-}
-
-void EditorApp::BeginCameraBlend(const EditorScene::CameraPreset& preset)
-{
-    engine::CameraPose target;
-    target.position = preset.position;
-    target.target = preset.target;
-    target.fov = preset.fov;
-    target.nearPlane = preset.nearPlane;
-    target.farPlane = preset.farPlane;
-    const auto easing = static_cast<engine::CameraBlend::Easing>(
-        std::clamp(preset.blendEasing, 0, 3));
-    m_cameraBlend.Start(engine::CameraBlend::FromCamera(m_camera),
-                        target, preset.blendDuration, easing);
-    engine::CameraBlend::Apply(m_cameraBlend.Current(), m_camera);
-}
-
-void EditorApp::UpdateCameraBlend(float dt)
-{
-    engine::CameraBlend::Apply(m_cameraBlend.Update(dt), m_camera);
-}
-
-void EditorApp::RestoreCameraBeforeShake()
-{
-    if (!m_cameraBeforeShake) return;
-    engine::CameraBlend::Apply(*m_cameraBeforeShake, m_camera);
-    m_cameraBeforeShake.reset();
-}
-
-void EditorApp::UpdateCameraShake(float dt)
-{
-    if (!m_cameraShake.Active()) return;
-    m_cameraBeforeShake = engine::CameraBlend::FromCamera(m_camera);
-    engine::CameraShake::Apply(m_cameraShake.Update(dt), m_camera);
-}
-
-void EditorApp::StartCameraSequence(const EditorScene::CameraSequence& sequence,
-                                    bool lockInput, bool skippable)
-{
-    RestoreCameraBeforeShake();
-    std::vector<engine::CameraSequenceShot> shots;
-    shots.reserve(sequence.shots.size());
-    for (const EditorScene::CameraSequenceShot& source : sequence.shots) {
-        const auto preset = std::find_if(
-            m_scene.CameraPresets().begin(), m_scene.CameraPresets().end(),
-            [&](const EditorScene::CameraPreset& camera) {
-                return camera.name == source.cameraName;
-            });
-        if (preset == m_scene.CameraPresets().end()) {
-            m_log.Warning("Camera sequence '" + sequence.name
-                + "' skipped missing camera: " + source.cameraName);
-            continue;
-        }
-        engine::CameraSequenceShot shot;
-        shot.pose.position = preset->position;
-        shot.pose.target = preset->target;
-        shot.pose.fov = preset->fov;
-        shot.pose.nearPlane = preset->nearPlane;
-        shot.pose.farPlane = preset->farPlane;
-        shot.travelDuration = std::max(source.travelDuration, 0.0f);
-        shot.holdDuration = std::max(source.holdDuration, 0.0f);
-        shot.easing = static_cast<engine::CameraBlend::Easing>(
-            std::clamp(source.easing, 0, 3));
-        shot.path = static_cast<engine::CameraSequenceShot::Path>(
-            std::clamp(source.pathMode, 0, 1));
-        shot.eventName = source.eventName;
-        shots.push_back(shot);
-    }
-    if (shots.empty()) {
-        m_log.Warning("Camera sequence has no valid shots: " + sequence.name);
-        return;
-    }
-    m_cameraBlend.Cancel();
-    m_cameraSequence.Start(
-        engine::CameraBlend::FromCamera(m_camera), std::move(shots), sequence.loop);
-    m_activeCinematicCues = sequence.cues;
-    std::sort(m_activeCinematicCues.begin(), m_activeCinematicCues.end(),
-              [](const auto& a, const auto& b) { return a.time < b.time; });
-    m_cameraSequencePaused = false;
-    m_cameraDirector.SetPlaying(sequence.name, lockInput, skippable);
-    m_log.Info("Camera sequence started: " + sequence.name);
-}
-
-void EditorApp::UpdateCameraSequence(float dt)
-{
-    if (m_cameraSequencePaused) {
-        engine::CameraBlend::Apply(m_cameraSequence.Current(), m_camera);
-        return;
-    }
-    const bool wasActive = m_cameraSequence.Active();
-    const std::string sequenceName = m_cameraDirector.ActiveName();
-    const float previousTime = m_cameraSequence.Time();
-    engine::CameraBlend::Apply(m_cameraSequence.Update(dt), m_camera);
-    const float currentTime = m_cameraSequence.Time();
-    ExecuteCinematicCues(previousTime, currentTime, currentTime < previousTime);
-    for (const std::string& eventName : m_cameraSequence.TakeEvents()) {
-        m_cameraDirector.NotifyTimelineEvent(sequenceName, eventName);
-        m_log.Info("Camera sequence event: " + eventName);
-    }
-    if (wasActive && !m_cameraSequence.Active()) {
-        m_cameraDirector.NotifyFinished(sequenceName, false);
-        m_activeCinematicCues.clear();
-        m_log.Info("Camera sequence finished: " + sequenceName);
-    }
-}
-
-void EditorApp::SkipActiveCameraSequence()
-{
-    if (!m_cameraSequence.Active() || !m_cameraDirector.Skippable()) return;
-    const std::string sequenceName = m_cameraDirector.ActiveName();
-    engine::CameraBlend::Apply(m_cameraSequence.SkipToEnd(), m_camera);
-    m_cameraDirector.NotifyFinished(sequenceName, true);
-    m_activeCinematicCues.clear();
-    m_cameraSequencePaused = false;
-    m_log.Info("Camera sequence skipped: " + sequenceName);
-}
-
-void EditorApp::ProcessCameraDirectorCommands()
-{
-    for (const engine::CameraSequenceCommand& command : m_cameraDirector.TakeCommands()) {
-        if (command.type == engine::CameraSequenceCommand::Type::Stop) {
-            m_cameraSequence.Stop();
-            m_cameraDirector.SetStopped();
-            m_activeCinematicCues.clear();
-            m_cameraSequencePaused = false;
-            m_log.Info("Camera sequence stopped");
-            continue;
-        }
-        if (command.type == engine::CameraSequenceCommand::Type::Skip) {
-            SkipActiveCameraSequence();
-            continue;
-        }
-        const auto sequence = std::find_if(
-            m_scene.CameraSequences().begin(), m_scene.CameraSequences().end(),
-            [&](const EditorScene::CameraSequence& candidate) {
-                return candidate.name == command.name;
-            });
-        if (sequence == m_scene.CameraSequences().end()) {
-            m_log.Warning("Camera sequence was not found: " + command.name);
-            continue;
-        }
-        StartCameraSequence(*sequence, command.lockInput, command.skippable);
-    }
-}
-
-void EditorApp::ExecuteCinematicCues(float previousTime, float currentTime, bool wrapped)
-{
-    for (const EditorScene::CinematicCue& cue : m_activeCinematicCues) {
-        const bool crossed = wrapped
-            ? (cue.time > previousTime || cue.time <= currentTime)
-            : ((cue.time > previousTime && cue.time <= currentTime)
-               || (previousTime == 0.0f && cue.time == 0.0f && currentTime > 0.0f));
-        if (crossed) ExecuteCinematicCue(cue);
-    }
-}
-
-void EditorApp::ExecuteCinematicCue(const EditorScene::CinematicCue& cue)
-{
-    switch (cue.type) {
-    case EditorScene::CinematicCueType::Event:
-        m_cameraDirector.NotifyTimelineEvent(
-            m_cameraDirector.ActiveName(), cue.name);
-        if (!cue.name.empty()) m_log.Info("Cinematic event: " + cue.name);
-        break;
-    case EditorScene::CinematicCueType::Audio:
-        if (!cue.assetPath.empty()) {
-            m_audio.Play(cue.assetPath, 1.0f, std::max(cue.volume, 0.0f),
-                         engine::AudioBus::SFX);
-            m_log.Info("Cinematic audio: " + cue.assetPath);
-        }
-        break;
-    case EditorScene::CinematicCueType::Animation: {
-        if (!m_playRegistry) {
-            m_log.Info("Animation cues execute in Play mode.");
-            break;
-        }
-        engine::ecs::Entity target = engine::ecs::kNull;
-        for (const auto& pair : m_playEntityNames) {
-            if (pair.second == cue.targetObject) {
-                target = pair.first;
-                break;
-            }
-        }
-        engine::AnimatedModel* animated = target == engine::ecs::kNull
-            ? nullptr : m_playRegistry->TryGet<engine::AnimatedModel>(target);
-        if (!animated || !animated->model) {
-            m_log.Warning("Cinematic animation target is unavailable: " + cue.targetObject);
-            break;
-        }
-        int clip = -1;
-        const auto& animations = animated->model->Animations();
-        for (std::size_t i = 0; i < animations.size(); ++i) {
-            if (animations[i].name == cue.animationClip) {
-                clip = static_cast<int>(i);
-                break;
-            }
-        }
-        if (clip < 0) {
-            m_log.Warning("Cinematic animation clip was not found: " + cue.animationClip);
-            break;
-        }
-        animated->PlayAction(clip);
-        m_log.Info("Cinematic animation: " + cue.targetObject + " / " + cue.animationClip);
-        break;
-    }
-    }
-}
-
 engine::ScriptInputState EditorApp::CapturePlayScriptInput(
     bool inputEnabled, bool includeFrameEdges)
 {
@@ -7444,9 +7331,11 @@ void EditorApp::StepPlayPhysics(float dt, bool inputEnabled)
         UpdateAI(step);
         engine::UpdateProjectiles(*m_playRegistry, step);
         engine::UpdateHealth(*m_playRegistry);
+        engine::UpdateRagdollsBeforePhysics(*m_playRegistry, m_playPhysics);
         engine::UpdateAnimations(*m_playRegistry, step);
         ApplyWaterBuoyancy(step);
         m_playPhysics.Step(*m_playRegistry, step);
+        engine::UpdateRagdollsAfterPhysics(*m_playRegistry);
         CapturePlayPhysicsEvents();
         engine::GameMode::Instance().Update(
             *m_playRegistry, m_playPlayerEntity, step);
@@ -7477,9 +7366,11 @@ void EditorApp::StepPlayPhysics(float dt, bool inputEnabled)
         UpdateAI(step);
         engine::UpdateProjectiles(*m_playRegistry, step);
         engine::UpdateHealth(*m_playRegistry);
+        engine::UpdateRagdollsBeforePhysics(*m_playRegistry, m_playPhysics);
         engine::UpdateAnimations(*m_playRegistry, step);
         ApplyWaterBuoyancy(step);
         m_playPhysics.Step(*m_playRegistry, step);
+        engine::UpdateRagdollsAfterPhysics(*m_playRegistry);
         CapturePlayPhysicsEvents();
         engine::GameMode::Instance().Update(
             *m_playRegistry, m_playPlayerEntity, step);

@@ -1,17 +1,33 @@
 #include "AnimationClipAsset.h"
 
+#include <engine/assets/AssetReference.h>
+#include <engine/assets/AssetRegistry.h>
+
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 
-bool AnimationClipAsset::Save(const std::string& path, std::string* error) const {
+bool AnimationClipAsset::Save(const std::string& path, std::string* error) {
+    if (!assetId.Valid()) assetId = engine::AssetHandle::Generate();
+    version = 4;
+    const std::string contentRoot = engine::FindContentRootForAsset(path);
+    engine::AssetRegistry registry;
+    if (!contentRoot.empty()) {
+        std::string ignored;
+        registry.Load(
+            engine::AssetRegistry::DefaultRegistryPath(contentRoot), &ignored);
+        const engine::AssetHandle currentSource =
+            engine::MakeAssetReference(
+                &registry, contentRoot, sourceFile).id;
+        if (currentSource.Valid()) sourceAssetId = currentSource;
+    }
     std::error_code ec;
     const std::filesystem::path p(path);
     if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path(), ec);
     std::ofstream out(path, std::ios::trunc);
     if (!out) { if (error) *error = "Could not write clip asset: " + path; return false; }
-    out << "3DG_CLIP " << version << '\n'
+    out << "3DG_CLIP " << version << ' ' << assetId.ToString() << '\n'
         << std::quoted(name.empty() ? std::string("-") : name) << ' '
         << std::quoted(sourceFile.empty() ? std::string("-") : sourceFile) << ' '
         << std::quoted(clipName.empty() ? std::string("-") : clipName) << ' '
@@ -21,11 +37,17 @@ bool AnimationClipAsset::Save(const std::string& path, std::string* error) const
         << "ACTION " << (action ? 1 : 0) << ' '
         << std::quoted(maskRootBone.empty() ? std::string("-") : maskRootBone) << ' '
         << fadeIn << ' ' << fadeOut << '\n'
+        << "SOURCE_ASSET "
+        << (sourceAssetId.Valid() ? sourceAssetId.ToString() : std::string("-"))
+        << '\n'
         << "EVENTS " << events.size() << '\n';
     for (const Event& event : events) {
         out << std::max(event.time, 0.0f) << ' '
             << std::quoted(event.name.empty() ? std::string("-") : event.name) << '\n';
     }
+    out << "ASSET_DEPS " << (sourceAssetId.Valid() ? 1 : 0);
+    if (sourceAssetId.Valid()) out << ' ' << sourceAssetId.ToString();
+    out << '\n';
     return static_cast<bool>(out);
 }
 
@@ -36,6 +58,15 @@ bool AnimationClipAsset::Load(const std::string& path, std::string* error) {
     if (!(in >> magic >> loadedVersion) || magic != "3DG_CLIP" || loadedVersion < 1) {
         if (error) *error = "Invalid clip asset: " + path;
         return false;
+    }
+    assetId = {};
+    if (loadedVersion >= 4) {
+        std::string id;
+        in >> id;
+        if (!engine::AssetHandle::Parse(id, &assetId)) {
+            if (error) *error = "Clip asset has an invalid stable ID: " + path;
+            return false;
+        }
     }
     int strip = 0, doLoop = 1;
     in >> std::quoted(name) >> std::quoted(sourceFile) >> std::quoted(clipName)
@@ -50,6 +81,7 @@ bool AnimationClipAsset::Load(const std::string& path, std::string* error) {
     maskRootBone.clear();
     fadeIn = 0.08f;
     fadeOut = 0.15f;
+    sourceAssetId = {};
     events.clear();
     if (loadedVersion >= 2) {
         std::string tag;
@@ -61,6 +93,16 @@ bool AnimationClipAsset::Load(const std::string& path, std::string* error) {
         }
         action = isAction != 0;
         if (maskRootBone == "-") maskRootBone.clear();
+    }
+    if (loadedVersion >= 4) {
+        std::string tag;
+        std::string id;
+        in >> tag >> id;
+        if (!in || tag != "SOURCE_ASSET"
+            || (id != "-" && !engine::AssetHandle::Parse(id, &sourceAssetId))) {
+            if (error) *error = "Clip source asset identity is invalid: " + path;
+            return false;
+        }
     }
     if (loadedVersion >= 3) {
         std::string tag;
@@ -87,6 +129,19 @@ bool AnimationClipAsset::Load(const std::string& path, std::string* error) {
     speed = std::max(speed, 0.0f);
     fadeIn = std::max(fadeIn, 0.0f);
     fadeOut = std::max(fadeOut, 0.0f);
-    version = 3;
+    version = 4;
+    if (sourceAssetId.Valid()) {
+        const std::string contentRoot = engine::FindContentRootForAsset(path);
+        engine::AssetRegistry registry;
+        std::string ignored;
+        if (!contentRoot.empty()
+            && registry.Load(
+                engine::AssetRegistry::DefaultRegistryPath(contentRoot),
+                &ignored)) {
+            const std::string resolved = engine::ResolveAssetReference(
+                &registry, contentRoot, {sourceAssetId, sourceFile});
+            if (!resolved.empty()) sourceFile = resolved;
+        }
+    }
     return true;
 }

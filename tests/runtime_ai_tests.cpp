@@ -439,10 +439,14 @@ int main() {
         "Choose Combat Or Patrol";
     Check(engine::ai::SaveBehaviorGraph(graphPath.string(), namedGraph, &error),
           "save behavior graph composite display name");
+    const engine::AssetHandle behaviorId = namedGraph.assetId;
+    Check(behaviorId.Valid(),
+          "behavior graph receives a stable engine asset ID");
     engine::ai::BehaviorGraph loadedNamedGraph;
     Check(engine::ai::LoadBehaviorGraph(graphPath.string(), loadedNamedGraph, &error)
           && loadedNamedGraph.nodes.size() == 1
-          && loadedNamedGraph.nodes[0].displayName == "Choose Combat Or Patrol",
+          && loadedNamedGraph.nodes[0].displayName == "Choose Combat Or Patrol"
+          && loadedNamedGraph.assetId == behaviorId,
           "load behavior graph composite display name with spaces");
 
     movement.mode = engine::ai::AiMovementMode::Flying;

@@ -1,5 +1,7 @@
 #include "EditorScene.h"
 
+#include <engine/assets/AssetReference.h>
+#include <engine/assets/AssetRegistry.h>
 #include <engine/graphics/Mesh.h>
 
 #include <algorithm>
@@ -230,13 +232,170 @@ void EditorScene::BuildDefault(const engine::Mesh & cube, const engine::Mesh & p
 
 bool EditorScene::Save(const std::string & path, std::string * error, bool markClean)
 {
+    if (!m_assetId.Valid()) m_assetId = engine::AssetHandle::Generate();
+    const std::string contentRoot = engine::FindContentRootForAsset(path);
+    engine::AssetRegistry assetRegistry;
+    std::string registryError;
+    const bool haveRegistry = !contentRoot.empty()
+        && assetRegistry.Load(
+            engine::AssetRegistry::DefaultRegistryPath(contentRoot),
+            &registryError);
+    if (haveRegistry) {
+        if (m_environment.hudAsset.empty())
+            m_environment.hudAssetId = {};
+        const engine::AssetHandle hudId = engine::MakeAssetReference(
+            &assetRegistry, contentRoot, m_environment.hudAsset,
+            engine::AssetType::Hud).id;
+        if (hudId.Valid()) m_environment.hudAssetId = hudId;
+        if (m_environment.hudAssetId.Valid()) {
+            const std::string resolved = engine::ResolveAssetReference(
+                &assetRegistry, contentRoot,
+                {m_environment.hudAssetId, m_environment.hudAsset},
+                engine::AssetType::Hud);
+            if (!resolved.empty()) m_environment.hudAsset = resolved;
+        }
+        for (Environment::PostProcessEffect& effect :
+             m_environment.postProcessEffects) {
+            const engine::AssetHandle current = engine::MakeAssetReference(
+                &assetRegistry, contentRoot, effect.shaderPath,
+                engine::AssetType::Shader).id;
+            if (current.Valid()) effect.shaderAssetId = current;
+            if (effect.shaderAssetId.Valid()) {
+                const std::string resolved = engine::ResolveAssetReference(
+                    &assetRegistry, contentRoot,
+                    {effect.shaderAssetId, effect.shaderPath},
+                    engine::AssetType::Shader);
+                if (!resolved.empty()) effect.shaderPath = resolved;
+            }
+        }
+        for (Object& object : m_objects) {
+            const auto captureParticleReference =
+                [&](std::string& assetPath,
+                    engine::AssetType type,
+                    engine::AssetHandle& id) {
+                    if (assetPath.empty()) {
+                        id = {};
+                        return;
+                    }
+                    const engine::AssetHandle current =
+                        engine::MakeAssetReference(
+                            &assetRegistry, contentRoot, assetPath, type).id;
+                    if (current.Valid()) id = current;
+                    if (id.Valid()) {
+                        const std::string resolved =
+                            engine::ResolveAssetReference(
+                                &assetRegistry, contentRoot,
+                                {id, assetPath}, type);
+                        if (!resolved.empty()) assetPath = resolved;
+                    }
+                };
+            captureParticleReference(
+                object.particleAssetPath, engine::AssetType::Particle,
+                object.particleAssetId);
+            captureParticleReference(
+                object.particleConfig.texturePath, engine::AssetType::Texture,
+                object.particleConfig.textureAssetId);
+            captureParticleReference(
+                object.particleConfig.meshPath, engine::AssetType::StaticMesh,
+                object.particleConfig.meshAssetId);
+            captureParticleReference(
+                object.particleConfig.shaderPath, engine::AssetType::Shader,
+                object.particleConfig.shaderAssetId);
+            for (engine::ParticleEffectLayer& layer :
+                 object.particleEffectLayers)
+                captureParticleReference(
+                    layer.assetPath, engine::AssetType::Particle,
+                    layer.assetId);
+            captureParticleReference(
+                object.audioAssetPath, engine::AssetType::Audio,
+                object.audioAssetId);
+            captureParticleReference(
+                object.navAgentBrainAsset,
+                engine::AssetType::BehaviorTree,
+                object.navAgentBrainAssetId);
+            const engine::AssetType modelType = object.skeletalModel
+                ? engine::AssetType::SkeletalMesh
+                : engine::AssetType::StaticMesh;
+            const engine::AssetHandle currentModel =
+                engine::MakeAssetReference(
+                    &assetRegistry, contentRoot, object.modelAssetPath,
+                    modelType).id;
+            if (currentModel.Valid()) object.modelAssetId = currentModel;
+            if (object.modelAssetId.Valid()) {
+                const std::string resolved = engine::ResolveAssetReference(
+                    &assetRegistry, contentRoot,
+                    {object.modelAssetId, object.modelAssetPath}, modelType);
+                if (!resolved.empty()) object.modelAssetPath = resolved;
+            }
+            engine::AssetReference currentMaterial =
+                engine::MakeAssetReference(
+                    &assetRegistry, contentRoot, object.materialAssetPath,
+                    engine::AssetType::Material);
+            if (!currentMaterial.id.Valid())
+                currentMaterial = engine::MakeAssetReference(
+                    &assetRegistry, contentRoot, object.materialAssetPath,
+                    engine::AssetType::Texture);
+            if (currentMaterial.id.Valid())
+                object.materialAssetId = currentMaterial.id;
+            if (object.materialAssetId.Valid()) {
+                const engine::AssetRegistryEntry* materialEntry =
+                    assetRegistry.Find(object.materialAssetId);
+                const std::string resolved = engine::ResolveAssetReference(
+                    &assetRegistry, contentRoot,
+                    {object.materialAssetId, object.materialAssetPath},
+                    materialEntry
+                            && materialEntry->type == engine::AssetType::Texture
+                        ? engine::AssetType::Texture
+                        : engine::AssetType::Material);
+                if (!resolved.empty()) object.materialAssetPath = resolved;
+            }
+            const engine::AssetHandle currentCharacter =
+                engine::MakeAssetReference(
+                    &assetRegistry, contentRoot, object.characterAssetPath,
+                    engine::AssetType::Character).id;
+            if (currentCharacter.Valid())
+                object.characterAssetId = currentCharacter;
+            for (AnimationSource& source : object.animationSources) {
+                const engine::AssetHandle current =
+                    engine::MakeAssetReference(
+                        &assetRegistry, contentRoot, source.file).id;
+                if (current.Valid()) source.assetId = current;
+                if (source.assetId.Valid()) {
+                    const std::string resolved = engine::ResolveAssetReference(
+                        &assetRegistry, contentRoot,
+                        {source.assetId, source.file});
+                    if (!resolved.empty()) source.file = resolved;
+                }
+            }
+            for (ModelAttachment& attachment : object.modelAttachments) {
+                const engine::AssetHandle current =
+                    engine::MakeAssetReference(
+                        &assetRegistry, contentRoot, attachment.modelPath,
+                        engine::AssetType::StaticMesh).id;
+                if (current.Valid()) attachment.modelAssetId = current;
+                if (attachment.modelAssetId.Valid()) {
+                    const std::string resolved = engine::ResolveAssetReference(
+                        &assetRegistry, contentRoot,
+                        {attachment.modelAssetId, attachment.modelPath},
+                        engine::AssetType::StaticMesh);
+                    if (!resolved.empty()) attachment.modelPath = resolved;
+                }
+                const engine::AssetHandle attachmentMaterial =
+                    engine::MakeAssetReference(
+                        &assetRegistry, contentRoot, attachment.materialPath,
+                        engine::AssetType::Material).id;
+                if (attachmentMaterial.Valid())
+                    attachment.materialAssetId = attachmentMaterial;
+            }
+        }
+    }
     std::ofstream out(path);
     if (!out) {
         if (error) *error = "Could not open scene file for writing.";
         return false;
     }
 
-    out << "3DGEditorScene 100\n";
+    out << "3DGEditorScene 106 " << m_assetId.ToString() << '\n';
     out << "environment "
         << m_environment.timeOfDay << ' '
         << m_environment.skyLightIntensity << ' '
@@ -278,7 +437,10 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         << (m_environment.fxaa ? 1 : 0) << ' '
         << m_environment.renderScale << ' '
         << (m_environment.hudAsset.empty() ? std::string("~") : m_environment.hudAsset) << ' '
-        << m_environment.shadowDistance << '\n';
+        << m_environment.shadowDistance << ' '
+        << (m_environment.hudAssetId.Valid()
+                ? m_environment.hudAssetId.ToString() : std::string("-"))
+        << '\n';
     out << "game_mode "
         << std::quoted(m_gameMode.playerObjectName.empty()
             ? std::string("-") : m_gameMode.playerObjectName) << ' '
@@ -313,6 +475,8 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
          m_environment.postProcessEffects) {
         out << "post_effect "
             << std::quoted(effect.shaderPath) << ' '
+            << (effect.shaderAssetId.Valid()
+                    ? effect.shaderAssetId.ToString() : std::string("-")) << ' '
             << (effect.enabled ? 1 : 0) << ' '
             << effect.parameters.size();
         for (const Environment::PostProcessParameter& parameter :
@@ -393,6 +557,10 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
             << (object.locked ? 1 : 0) << ' '
             << StoredPath(object.modelAssetPath) << ' '
             << StoredPath(object.materialAssetPath) << ' '
+            << (object.modelAssetId.Valid()
+                ? object.modelAssetId.ToString() : std::string("-")) << ' '
+            << (object.materialAssetId.Valid()
+                ? object.materialAssetId.ToString() : std::string("-")) << ' '
             << object.modelOrientationEuler.x << ' '
             << object.modelOrientationEuler.y << ' '
             << object.modelOrientationEuler.z << ' '
@@ -484,20 +652,29 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         out << object.animationSources.size() << ' ';
         for (const AnimationSource& source : object.animationSources) {
             out << StoredPath(source.file) << ' '
+                << (source.assetId.Valid()
+                    ? source.assetId.ToString() : std::string("-")) << ' '
                 << StoredPath(source.clipName) << ' '
                 << (source.stripRootMotion ? 1 : 0) << ' '
                 << StoredPath(source.sourceClipName) << ' ';
         }
         out << object.modelAttachments.size() << ' ';
         for (const ModelAttachment& a : object.modelAttachments) {
-            out << StoredPath(a.modelPath) << ' ' << StoredPath(a.boneName) << ' '
+            out << StoredPath(a.modelPath) << ' '
+                << (a.modelAssetId.Valid()
+                    ? a.modelAssetId.ToString() : std::string("-")) << ' '
+                << (a.materialAssetId.Valid()
+                    ? a.materialAssetId.ToString() : std::string("-")) << ' '
+                << StoredPath(a.boneName) << ' '
                 << a.position.x << ' ' << a.position.y << ' ' << a.position.z << ' '
                 << a.eulerDegrees.x << ' ' << a.eulerDegrees.y << ' ' << a.eulerDegrees.z << ' '
                 << a.scale.x << ' ' << a.scale.y << ' ' << a.scale.z << ' '
                 << StoredPath(a.materialPath) << ' '
                 << StoredPath(a.socketName) << ' ';
         }
-        out << StoredPath(object.characterAssetPath) << ' ';
+        out << StoredPath(object.characterAssetPath) << ' '
+            << (object.characterAssetId.Valid()
+                ? object.characterAssetId.ToString() : std::string("-")) << ' ';
         out
             << object.linearVelocity.x << ' ' << object.linearVelocity.y << ' ' << object.linearVelocity.z << ' '
             << object.angularVelocityAxis.x << ' ' << object.angularVelocityAxis.y << ' ' << object.angularVelocityAxis.z << ' '
@@ -728,6 +905,28 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
             for (float key : module.curveValues) out << ' ' << key;
             out << ' ' << (module.curveEnabled ? 1 : 0) << ' ' << static_cast<int>(module.stage);
         }
+        out << ' ' << std::quoted(
+                particle.shaderPath.empty() ? std::string("-")
+                                            : particle.shaderPath)
+            << ' ' << particle.shaderParameters.size();
+        for (const engine::ParticleShaderParameter& parameter :
+             particle.shaderParameters)
+            out << ' ' << std::quoted(parameter.name)
+                << ' ' << parameter.type
+                << ' ' << std::quoted(parameter.value);
+        const auto particleIdText = [](engine::AssetHandle id) {
+            return id.Valid() ? id.ToString() : std::string("-");
+        };
+        out << ' ' << particleIdText(object.particleAssetId)
+            << ' ' << particleIdText(particle.textureAssetId)
+            << ' ' << particleIdText(particle.meshAssetId)
+            << ' ' << particleIdText(particle.shaderAssetId)
+            << ' ' << object.particleEffectLayers.size();
+        for (const engine::ParticleEffectLayer& layer :
+             object.particleEffectLayers)
+            out << ' ' << particleIdText(layer.assetId);
+        out << ' ' << particleIdText(object.audioAssetId)
+            << ' ' << particleIdText(object.navAgentBrainAssetId);
         out << '\n';
     }
 
@@ -846,6 +1045,75 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
             << joint.damping << '\n';
     }
 
+    for (const Object& object : m_objects) {
+        if (!object.ragdollEnabled) continue;
+        out << "ragdoll " << std::quoted(object.name) << ' '
+            << object.ragdoll.enabled << ' '
+            << object.ragdoll.activateOnDeath << ' '
+            << object.ragdoll.totalMass << ' '
+            << object.ragdoll.bodyRadiusScale << ' '
+            << object.ragdoll.linearDamping << ' '
+            << object.ragdoll.angularDamping << ' '
+            << object.ragdoll.deathImpulse << ' '
+            << object.ragdoll.maxBodies << '\n';
+    }
+
+    std::vector<engine::AssetHandle> dependencies;
+    const auto addDependency = [&](engine::AssetHandle id) {
+        if (id.Valid()
+            && std::find(dependencies.begin(), dependencies.end(), id)
+                   == dependencies.end())
+            dependencies.push_back(id);
+    };
+    addDependency(m_environment.hudAssetId);
+    for (const Object& object : m_objects) {
+        addDependency(object.modelAssetId);
+        addDependency(object.materialAssetId);
+        addDependency(object.characterAssetId);
+        addDependency(object.particleAssetId);
+        addDependency(object.particleConfig.textureAssetId);
+        addDependency(object.particleConfig.meshAssetId);
+        addDependency(object.particleConfig.shaderAssetId);
+        addDependency(object.audioAssetId);
+        addDependency(object.navAgentBrainAssetId);
+        for (const engine::ParticleEffectLayer& layer :
+             object.particleEffectLayers)
+            addDependency(layer.assetId);
+        if (haveRegistry) {
+            engine::AssetReference materialReference =
+                engine::MakeAssetReference(
+                    &assetRegistry, contentRoot, object.materialAssetPath,
+                    engine::AssetType::Material);
+            if (!materialReference.id.Valid())
+                materialReference = engine::MakeAssetReference(
+                    &assetRegistry, contentRoot, object.materialAssetPath,
+                    engine::AssetType::Texture);
+            addDependency(materialReference.id);
+        }
+        for (const AnimationSource& source : object.animationSources)
+            addDependency(source.assetId);
+        for (const ModelAttachment& attachment : object.modelAttachments) {
+            addDependency(attachment.modelAssetId);
+            addDependency(attachment.materialAssetId);
+            if (haveRegistry)
+                addDependency(engine::MakeAssetReference(
+                    &assetRegistry, contentRoot, attachment.materialPath,
+                    engine::AssetType::Material).id);
+        }
+        if (haveRegistry) {
+            for (const std::string& material : object.terrainLayerMaterials)
+                addDependency(engine::MakeAssetReference(
+                    &assetRegistry, contentRoot, material,
+                    engine::AssetType::Material).id);
+        }
+    }
+    for (const Environment::PostProcessEffect& effect :
+         m_environment.postProcessEffects)
+        addDependency(effect.shaderAssetId);
+    out << "ASSET_DEPS " << dependencies.size();
+    for (engine::AssetHandle id : dependencies) out << ' ' << id.ToString();
+    out << '\n';
+
     if (markClean) {
         m_dirty = false;
         ClearHistory();
@@ -865,12 +1133,22 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
     std::string magic;
     int version = 0;
     in >> magic >> version;
-    if (magic != "3DGEditorScene" ||(version < 1 || version > 100)) {
+    engine::AssetHandle loadedAssetId;
+    if (version >= 101) {
+        std::string id;
+        in >> id;
+        if (!engine::AssetHandle::Parse(id, &loadedAssetId)) {
+            if (error) *error = "Scene file has an invalid stable ID.";
+            return false;
+        }
+    }
+    if (magic != "3DGEditorScene" ||(version < 1 || version > 106)) {
         if (error) *error = "Scene file has an unknown format.";
         return false;
     }
 
     Clear();
+    m_assetId = loadedAssetId;
 
     std::string recordType;
     while (in >> recordType) {
@@ -943,7 +1221,20 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             Environment::PostProcessEffect effect;
             int enabled = 1;
             std::size_t parameterCount = 0;
-            in >> std::quoted(effect.shaderPath) >> enabled >> parameterCount;
+            in >> std::quoted(effect.shaderPath);
+            if (version >= 103) {
+                std::string shaderId;
+                in >> shaderId;
+                if (shaderId != "-"
+                    && !engine::AssetHandle::Parse(
+                        shaderId, &effect.shaderAssetId)) {
+                    if (error) *error =
+                        "Scene has an invalid post-process shader ID.";
+                    Clear();
+                    return false;
+                }
+            }
+            in >> enabled >> parameterCount;
             effect.enabled = enabled != 0;
             for (std::size_t i = 0; i < parameterCount; ++i) {
                 Environment::PostProcessParameter parameter;
@@ -1062,6 +1353,18 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             }
             if (version >= 84) {
                 in >> m_environment.shadowDistance;
+            }
+            if (version >= 105) {
+                std::string hudId;
+                in >> hudId;
+                if (hudId != "-"
+                    && !engine::AssetHandle::Parse(
+                        hudId, &m_environment.hudAssetId)) {
+                    if (error) *error =
+                        "Scene contains an invalid HUD asset ID.";
+                    Clear();
+                    return false;
+                }
             }
             if (!in) {
                 if (error) *error = "Scene file contains an invalid environment record.";
@@ -1445,6 +1748,28 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             }
             continue;
         }
+        if (recordType == "ragdoll" && version >= 106) {
+            std::string objectName;
+            engine::Ragdoll ragdoll;
+            in >> std::quoted(objectName)
+               >> ragdoll.enabled >> ragdoll.activateOnDeath
+               >> ragdoll.totalMass >> ragdoll.bodyRadiusScale
+               >> ragdoll.linearDamping >> ragdoll.angularDamping
+               >> ragdoll.deathImpulse >> ragdoll.maxBodies;
+            auto found = std::find_if(
+                m_objects.begin(), m_objects.end(),
+                [&](const Object& object) { return object.name == objectName; });
+            if (found != m_objects.end()) {
+                found->ragdollEnabled = true;
+                found->ragdoll = std::move(ragdoll);
+            }
+            if (!in) {
+                if (error) *error = "Scene contains invalid ragdoll settings.";
+                Clear();
+                return false;
+            }
+            continue;
+        }
 
         if (recordType != "object") {
             std::string rest;
@@ -1460,6 +1785,8 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         int visible = 1;
         int locked = 0;
         std::string modelAssetPath;
+        engine::AssetHandle modelAssetId;
+        engine::AssetHandle materialAssetId;
         std::string materialAssetPath;
         glm::vec3 modelOrientationEuler{0.0f};
         glm::vec3 modelOffsetPosition{0.0f};
@@ -1487,6 +1814,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         std::vector<AnimationSource> animationSources;
         std::vector<ModelAttachment> modelAttachments;
         std::string characterAssetPath;
+        engine::AssetHandle characterAssetId;
         glm::vec3 linearVelocity{0.0f};
         glm::vec3 angularVelocityAxis{0.0f, 1.0f, 0.0f};
         float angularVelocityRadians = 0.0f;
@@ -1546,11 +1874,13 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         float navAgentVisionRange = 12.0f;
         float navAgentVisionHalfAngle = 45.0f;
         std::string navAgentBrainAsset;
+        engine::AssetHandle navAgentBrainAssetId;
         int navAgentTeam = 0;
         int navAgentAutoTarget = 0;
         int navMeshBoundsVolume = 0;
         int audioSourceEnabled = 0;
         std::string audioAssetPath;
+        engine::AssetHandle audioAssetId;
         int audioBus = static_cast<int>(engine::AudioBus::SFX);
         int particleSystemEnabled = 0;
         engine::EmitterConfig particleConfig;
@@ -1567,6 +1897,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         int particleBurstCount = 0;
         float particleBurstInterval = 0.0f;
         std::string particleAssetPath;
+        engine::AssetHandle particleAssetId;
         int particleAssetOverride = 0;
         float audioVolume = 1.0f;
         float audioPitch = 1.0f;
@@ -1602,6 +1933,18 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         }
         if (version >= 5) {
             in >> std::quoted(modelAssetPath) >> std::quoted(materialAssetPath);
+            if (version >= 101) {
+                std::string id;
+                in >> id;
+                if (id != "-" && !engine::AssetHandle::Parse(id, &modelAssetId))
+                    in.setstate(std::ios::failbit);
+                if (version >= 102) {
+                    in >> id;
+                    if (id != "-"
+                        && !engine::AssetHandle::Parse(id, &materialAssetId))
+                        in.setstate(std::ios::failbit);
+                }
+            }
             if (version >= 88) {
                 in >> modelOrientationEuler.x >> modelOrientationEuler.y >> modelOrientationEuler.z;
             }
@@ -1815,7 +2158,15 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             for (std::size_t i = 0; i < sourceCount; ++i) {
                 AnimationSource source;
                 int strip = 0;
-                in >> std::quoted(source.file) >> std::quoted(source.clipName) >> strip;
+                in >> std::quoted(source.file);
+                if (version >= 101) {
+                    std::string id;
+                    in >> id;
+                    if (id != "-"
+                        && !engine::AssetHandle::Parse(id, &source.assetId))
+                        in.setstate(std::ios::failbit);
+                }
+                in >> std::quoted(source.clipName) >> strip;
                 if (version >= 94) in >> std::quoted(source.sourceClipName);
                 if (source.file == "-") source.file.clear();
                 if (source.clipName == "-") source.clipName.clear();
@@ -1829,7 +2180,22 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             in >> attachmentCount;
             for (std::size_t i = 0; i < attachmentCount; ++i) {
                 ModelAttachment a;
-                in >> std::quoted(a.modelPath) >> std::quoted(a.boneName)
+                in >> std::quoted(a.modelPath);
+                if (version >= 101) {
+                    std::string id;
+                    in >> id;
+                    if (id != "-"
+                        && !engine::AssetHandle::Parse(id, &a.modelAssetId))
+                        in.setstate(std::ios::failbit);
+                    if (version >= 102) {
+                        in >> id;
+                        if (id != "-"
+                            && !engine::AssetHandle::Parse(
+                                id, &a.materialAssetId))
+                            in.setstate(std::ios::failbit);
+                    }
+                }
+                in >> std::quoted(a.boneName)
                    >> a.position.x >> a.position.y >> a.position.z
                    >> a.eulerDegrees.x >> a.eulerDegrees.y >> a.eulerDegrees.z
                    >> a.scale.x >> a.scale.y >> a.scale.z;
@@ -1848,6 +2214,13 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         }
         if (version >= 93) {
             in >> std::quoted(characterAssetPath);
+            if (version >= 101) {
+                std::string id;
+                in >> id;
+                if (id != "-"
+                    && !engine::AssetHandle::Parse(id, &characterAssetId))
+                    in.setstate(std::ios::failbit);
+            }
             if (characterAssetPath == "-") characterAssetPath.clear();
         }
         if (version >= 6) {
@@ -2258,6 +2631,79 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             } else {
                 engine::NormalizeParticleModuleStack(particleConfig, false);
             }
+            if (version >= 104) {
+                std::size_t shaderParameterCount = 0;
+                in >> std::quoted(particleConfig.shaderPath)
+                   >> shaderParameterCount;
+                if (particleConfig.shaderPath == "-")
+                    particleConfig.shaderPath.clear();
+                if (!in || shaderParameterCount > 64) {
+                    if (error) *error =
+                        "Scene particle shader parameter count is invalid.";
+                    Clear();
+                    return false;
+                }
+                particleConfig.shaderParameters.clear();
+                for (std::size_t parameterIndex = 0;
+                     parameterIndex < shaderParameterCount;
+                     ++parameterIndex) {
+                    engine::ParticleShaderParameter parameter;
+                    in >> std::quoted(parameter.name)
+                       >> parameter.type
+                       >> std::quoted(parameter.value);
+                    particleConfig.shaderParameters.push_back(
+                        std::move(parameter));
+                }
+                const auto readParticleId =
+                    [&](engine::AssetHandle& id) {
+                        std::string text;
+                        in >> text;
+                        return text == "-"
+                            || engine::AssetHandle::Parse(text, &id);
+                    };
+                if (!readParticleId(particleAssetId)
+                    || !readParticleId(particleConfig.textureAssetId)
+                    || !readParticleId(particleConfig.meshAssetId)
+                    || !readParticleId(particleConfig.shaderAssetId)) {
+                    if (error) *error =
+                        "Scene contains invalid particle asset IDs.";
+                    Clear();
+                    return false;
+                }
+                std::size_t layerIdCount = 0;
+                in >> layerIdCount;
+                if (!in || layerIdCount != particleEffectLayers.size()) {
+                    if (error) *error =
+                        "Scene particle layer identity count is invalid.";
+                    Clear();
+                    return false;
+                }
+                for (engine::ParticleEffectLayer& layer :
+                     particleEffectLayers) {
+                    if (!readParticleId(layer.assetId)) {
+                        if (error) *error =
+                            "Scene contains an invalid particle layer ID.";
+                        Clear();
+                        return false;
+                    }
+                }
+            }
+            if (version >= 105) {
+                const auto readAssetId =
+                    [&](engine::AssetHandle& id) {
+                        std::string text;
+                        in >> text;
+                        return text == "-"
+                            || engine::AssetHandle::Parse(text, &id);
+                    };
+                if (!readAssetId(audioAssetId)
+                    || !readAssetId(navAgentBrainAssetId)) {
+                    if (error) *error =
+                        "Scene contains invalid audio or behavior asset IDs.";
+                    Clear();
+                    return false;
+                }
+            }
             particleShape = std::clamp(particleShape,
                 static_cast<int>(engine::EmitShape::Point), static_cast<int>(engine::EmitShape::Cone));
             particleBlend = std::clamp(particleBlend,
@@ -2276,7 +2722,9 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         m_objects.back().visible = visible != 0;
         m_objects.back().locked = locked != 0;
         m_objects.back().modelAssetPath = modelAssetPath;
+        m_objects.back().modelAssetId = modelAssetId;
         m_objects.back().materialAssetPath = materialAssetPath;
+        m_objects.back().materialAssetId = materialAssetId;
         m_objects.back().modelOrientationEuler = modelOrientationEuler;
         m_objects.back().modelOffsetPosition = modelOffsetPosition;
         m_objects.back().modelOffsetScale = modelOffsetScale;
@@ -2303,6 +2751,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         m_objects.back().animationSources = animationSources;
         m_objects.back().modelAttachments = modelAttachments;
         m_objects.back().characterAssetPath = characterAssetPath;
+        m_objects.back().characterAssetId = characterAssetId;
         m_objects.back().linearVelocityEnabled = linearVelocityEnabled != 0;
         m_objects.back().angularVelocityEnabled = angularVelocityEnabled != 0;
         m_objects.back().linearVelocity = linearVelocity;
@@ -2372,11 +2821,13 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         m_objects.back().navAgentVisionRange = navAgentVisionRange;
         m_objects.back().navAgentVisionHalfAngle = navAgentVisionHalfAngle;
         m_objects.back().navAgentBrainAsset = navAgentBrainAsset;
+        m_objects.back().navAgentBrainAssetId = navAgentBrainAssetId;
         m_objects.back().navAgentTeam = navAgentTeam;
         m_objects.back().navAgentAutoTarget = navAgentAutoTarget != 0;
         m_objects.back().navMeshBoundsVolume = navMeshBoundsVolume != 0;
         m_objects.back().audioSourceEnabled = audioSourceEnabled != 0;
         m_objects.back().audioAssetPath = audioAssetPath;
+        m_objects.back().audioAssetId = audioAssetId;
         audioBus = std::clamp(audioBus, static_cast<int>(engine::AudioBus::Master),
                               static_cast<int>(engine::AudioBus::Ambient));
         m_objects.back().audioBus = static_cast<engine::AudioBus>(audioBus);
@@ -2392,8 +2843,21 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         m_objects.back().particleBurstCount = std::max(particleBurstCount, 0);
         m_objects.back().particleBurstInterval = std::max(particleBurstInterval, 0.0f);
         m_objects.back().particleAssetPath = particleAssetPath;
+        m_objects.back().particleAssetId = particleAssetId;
         m_objects.back().particleAssetOverride = particleAssetOverride != 0;
         m_objects.back().particleEffectLayers = std::move(particleEffectLayers);
+        // Older generated particle actors were invisible placeholder cubes,
+        // which caused runtime export to omit the entire emitter. Upgrade only
+        // that generated pattern; intentionally hidden user objects stay
+        // hidden.
+        if (m_objects.back().particleSystemEnabled
+            && !m_objects.back().visible
+            && m_objects.back().primitive == Primitive::Cube
+            && m_objects.back().modelAssetPath.empty()
+            && m_objects.back().name.rfind("ParticleSystem_", 0) == 0) {
+            m_objects.back().primitive = Primitive::Empty;
+            m_objects.back().visible = true;
+        }
         m_objects.back().audioVolume = std::clamp(audioVolume, 0.0f, 4.0f);
         m_objects.back().audioPitch = std::clamp(audioPitch, 0.01f, 4.0f);
         m_objects.back().audioSpatial = audioSpatial != 0;
@@ -2409,6 +2873,119 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         m_objects.back().audioConeOuterGain = std::clamp(audioConeOuterGain, 0.0f, 1.0f);
         m_objects.back().audioOcclusion = std::clamp(audioOcclusion, 0.0f, 1.0f);
         m_objects.back().audioPriority = std::clamp(audioPriority, 0, 100);
+    }
+
+    const std::string contentRoot = engine::FindContentRootForAsset(path);
+    engine::AssetRegistry assetRegistry;
+    std::string ignoredRegistryError;
+    if (!contentRoot.empty()
+        && assetRegistry.Load(
+            engine::AssetRegistry::DefaultRegistryPath(contentRoot),
+            &ignoredRegistryError)) {
+        if (m_environment.hudAssetId.Valid()) {
+            const std::string resolved = engine::ResolveAssetReference(
+                &assetRegistry, contentRoot,
+                {m_environment.hudAssetId, m_environment.hudAsset},
+                engine::AssetType::Hud);
+            if (!resolved.empty()) m_environment.hudAsset = resolved;
+        }
+        for (Environment::PostProcessEffect& effect :
+             m_environment.postProcessEffects) {
+            if (!effect.shaderAssetId.Valid()) continue;
+            const std::string resolved = engine::ResolveAssetReference(
+                &assetRegistry, contentRoot,
+                {effect.shaderAssetId, effect.shaderPath},
+                engine::AssetType::Shader);
+            if (!resolved.empty()) effect.shaderPath = resolved;
+        }
+        for (Object& object : m_objects) {
+            const auto resolveParticleReference =
+                [&](engine::AssetHandle id, std::string& fallback,
+                    engine::AssetType type) {
+                    if (!id.Valid()) return;
+                    const std::string resolved =
+                        engine::ResolveAssetReference(
+                            &assetRegistry, contentRoot,
+                            {id, fallback}, type);
+                    if (!resolved.empty()) fallback = resolved;
+                };
+            resolveParticleReference(
+                object.particleAssetId, object.particleAssetPath,
+                engine::AssetType::Particle);
+            resolveParticleReference(
+                object.particleConfig.textureAssetId,
+                object.particleConfig.texturePath,
+                engine::AssetType::Texture);
+            resolveParticleReference(
+                object.particleConfig.meshAssetId,
+                object.particleConfig.meshPath,
+                engine::AssetType::StaticMesh);
+            resolveParticleReference(
+                object.particleConfig.shaderAssetId,
+                object.particleConfig.shaderPath,
+                engine::AssetType::Shader);
+            for (engine::ParticleEffectLayer& layer :
+                 object.particleEffectLayers)
+                resolveParticleReference(
+                    layer.assetId, layer.assetPath,
+                    engine::AssetType::Particle);
+            resolveParticleReference(
+                object.audioAssetId, object.audioAssetPath,
+                engine::AssetType::Audio);
+            resolveParticleReference(
+                object.navAgentBrainAssetId,
+                object.navAgentBrainAsset,
+                engine::AssetType::BehaviorTree);
+            if (object.modelAssetId.Valid()) {
+                const std::string resolved = engine::ResolveAssetReference(
+                    &assetRegistry, contentRoot,
+                    {object.modelAssetId, object.modelAssetPath},
+                    object.skeletalModel ? engine::AssetType::SkeletalMesh
+                                         : engine::AssetType::StaticMesh);
+                if (!resolved.empty()) object.modelAssetPath = resolved;
+            }
+            if (object.materialAssetId.Valid()) {
+                const engine::AssetRegistryEntry* materialEntry =
+                    assetRegistry.Find(object.materialAssetId);
+                const std::string resolved = engine::ResolveAssetReference(
+                    &assetRegistry, contentRoot,
+                    {object.materialAssetId, object.materialAssetPath},
+                    materialEntry
+                            && materialEntry->type == engine::AssetType::Texture
+                        ? engine::AssetType::Texture
+                        : engine::AssetType::Material);
+                if (!resolved.empty()) object.materialAssetPath = resolved;
+            }
+            if (object.characterAssetId.Valid()) {
+                const std::string resolved = engine::ResolveAssetReference(
+                    &assetRegistry, contentRoot,
+                    {object.characterAssetId, object.characterAssetPath},
+                    engine::AssetType::Character);
+                if (!resolved.empty()) object.characterAssetPath = resolved;
+            }
+            for (AnimationSource& source : object.animationSources) {
+                if (!source.assetId.Valid()) continue;
+                const std::string resolved = engine::ResolveAssetReference(
+                    &assetRegistry, contentRoot, {source.assetId, source.file});
+                if (!resolved.empty()) source.file = resolved;
+            }
+            for (ModelAttachment& attachment : object.modelAttachments) {
+                if (attachment.modelAssetId.Valid()) {
+                    const std::string resolved = engine::ResolveAssetReference(
+                        &assetRegistry, contentRoot,
+                        {attachment.modelAssetId, attachment.modelPath},
+                        engine::AssetType::StaticMesh);
+                    if (!resolved.empty()) attachment.modelPath = resolved;
+                }
+                if (attachment.materialAssetId.Valid()) {
+                    const std::string resolved = engine::ResolveAssetReference(
+                        &assetRegistry, contentRoot,
+                        {attachment.materialAssetId, attachment.materialPath},
+                        engine::AssetType::Material);
+                    if (!resolved.empty()) attachment.materialPath = resolved;
+                }
+            }
+        }
     }
 
     m_selectedIndex = m_objects.empty() ? -1 : 0;
@@ -2988,7 +3565,8 @@ bool EditorScene::SetSelectedPrimitive(Primitive primitive, const engine::Mesh &
     return true;
 }
 
-bool EditorScene::SetSelectedModelAsset(const std::string &path)
+bool EditorScene::SetSelectedModelAsset(
+    const std::string &path, engine::AssetHandle id)
 {
     if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
         return false;
@@ -3001,6 +3579,7 @@ bool EditorScene::SetSelectedModelAsset(const std::string &path)
 
     PushUndoSnapshot();
     selected.modelAssetPath = path;
+    selected.modelAssetId = id;
     m_dirty = true;
     return true;
 }
@@ -3039,7 +3618,8 @@ bool EditorScene::SetSelectedModelOffset(const glm::vec3& position,
     return true;
 }
 
-bool EditorScene::SetSelectedMaterialAsset(const std::string &path)
+bool EditorScene::SetSelectedMaterialAsset(
+    const std::string &path, engine::AssetHandle id)
 {
     if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
         return false;
@@ -3052,6 +3632,7 @@ bool EditorScene::SetSelectedMaterialAsset(const std::string &path)
 
     PushUndoSnapshot();
     selected.materialAssetPath = path;
+    selected.materialAssetId = id;
     selected.materialParameterOverrides.clear();
     m_dirty = true;
     return true;
@@ -3176,12 +3757,14 @@ bool EditorScene::SetSelectedModelAttachments(const std::vector<ModelAttachment>
     return true;
 }
 
-bool EditorScene::SetSelectedCharacterAssetPath(const std::string& path) {
+bool EditorScene::SetSelectedCharacterAssetPath(
+    const std::string& path, engine::AssetHandle id) {
     if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
         return false;
     }
     Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
     selected.characterAssetPath = path;   // metadata; no undo snapshot needed
+    selected.characterAssetId = id;
     m_dirty = true;
     return true;
 }
@@ -3729,6 +4312,36 @@ bool EditorScene::SetSelectedHealth(const engine::Health& health) {
     return true;
 }
 
+bool EditorScene::SetSelectedRagdollEnabled(bool enabled) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked || selected.ragdollEnabled == enabled) return false;
+    PushUndoSnapshot();
+    selected.ragdollEnabled = enabled;
+    selected.ragdoll.active = false;
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedRagdoll(const engine::Ragdoll& ragdoll) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) return false;
+    PushUndoSnapshot();
+    selected.ragdollEnabled = true;
+    selected.ragdoll = ragdoll;
+    selected.ragdoll.active = false;
+    selected.ragdoll.parts.clear();
+    selected.ragdoll.boneDrivers.clear();
+    selected.ragdoll.boneFromBody.clear();
+    m_dirty = true;
+    return true;
+}
+
 bool EditorScene::SetSelectedScript(const std::string& className, const std::string& path, bool enabled) {
     if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
         return false;
@@ -3825,14 +4438,17 @@ void EditorScene::AddParticleSystem(const engine::Mesh& placeholderMesh,
                                     const std::string& assetPath,
                                     const engine::ParticleSystemComponent& settings) {
     PushUndoSnapshot();
-    CreateObject("ParticleSystem_" + std::to_string(m_nextCubeNumber++), Primitive::Cube,
+    CreateObject("ParticleSystem_" + std::to_string(m_nextCubeNumber++), Primitive::Empty,
                  placeholderMesh, transform, glm::vec3(0.35f, 0.55f, 1.0f));
     m_selectedIndex = static_cast<int>(m_objects.size()) - 1;
-    m_objects.back().visible = false;
+    // Empty is a selectable editor actor with no runtime mesh. Keep it visible
+    // so scene export does not discard the particle component.
+    m_objects.back().visible = true;
     m_particleEditOpen = true;
     SetSelectedParticleSystem(true, settings);
     m_particleEditOpen = false;
     m_objects.back().particleAssetPath = assetPath;
+    m_objects.back().particleAssetId = settings.assetId;
     m_objects.back().particleAssetOverride = false;
     m_dirty = true;
 }
@@ -3897,6 +4513,7 @@ bool EditorScene::SetSelectedParticleAsset(const std::string& path,
     if (!SetSelectedParticleSystem(true, settings)) return false;
     Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
     selected.particleAssetPath = path;
+    selected.particleAssetId = settings.assetId;
     selected.particleAssetOverride = instanceOverride;
     return true;
 }
@@ -3918,6 +4535,7 @@ int EditorScene::RefreshParticleAssetInstances(const std::string& path,
         m_selectedIndex = static_cast<int>(i);
         m_particleEditOpen = true;
         SetSelectedParticleSystem(true, settings);
+        object.particleAssetId = settings.assetId;
         object.particleAssetOverride = false;
         ++refreshed;
     }
@@ -4684,6 +5302,12 @@ bool EditorScene::DuplicateSelected(const engine::Mesh & cube, const engine::Mes
     m_objects.back().cameraZoneReturnBlend = selectedCopy.cameraZoneReturnBlend;
     m_objects.back().healthEnabled = selectedCopy.healthEnabled;
     m_objects.back().health = selectedCopy.health;
+    m_objects.back().ragdollEnabled = selectedCopy.ragdollEnabled;
+    m_objects.back().ragdoll = selectedCopy.ragdoll;
+    m_objects.back().ragdoll.active = false;
+    m_objects.back().ragdoll.parts.clear();
+    m_objects.back().ragdoll.boneDrivers.clear();
+    m_objects.back().ragdoll.boneFromBody.clear();
     m_objects.back().scriptEnabled = selectedCopy.scriptEnabled;
     m_objects.back().scriptClassName = selectedCopy.scriptClassName;
     m_objects.back().scriptPath = selectedCopy.scriptPath;
@@ -4691,6 +5315,7 @@ bool EditorScene::DuplicateSelected(const engine::Mesh & cube, const engine::Mes
     m_objects.back().additionalScripts = selectedCopy.additionalScripts;
     m_objects.back().audioSourceEnabled = selectedCopy.audioSourceEnabled;
     m_objects.back().audioAssetPath = selectedCopy.audioAssetPath;
+    m_objects.back().audioAssetId = selectedCopy.audioAssetId;
     m_objects.back().audioBus = selectedCopy.audioBus;
     m_objects.back().audioVolume = selectedCopy.audioVolume;
     m_objects.back().audioPitch = selectedCopy.audioPitch;
@@ -4718,6 +5343,7 @@ bool EditorScene::DuplicateSelected(const engine::Mesh & cube, const engine::Mes
     m_objects.back().particleBurstCount = selectedCopy.particleBurstCount;
     m_objects.back().particleBurstInterval = selectedCopy.particleBurstInterval;
     m_objects.back().particleAssetPath = selectedCopy.particleAssetPath;
+    m_objects.back().particleAssetId = selectedCopy.particleAssetId;
     m_objects.back().particleAssetOverride = selectedCopy.particleAssetOverride;
     m_objects.back().particleEffectLayers = selectedCopy.particleEffectLayers;
     m_objects.back().navAgentEnabled = selectedCopy.navAgentEnabled;
@@ -4730,6 +5356,8 @@ bool EditorScene::DuplicateSelected(const engine::Mesh & cube, const engine::Mes
     m_objects.back().navAgentVisionRange = selectedCopy.navAgentVisionRange;
     m_objects.back().navAgentVisionHalfAngle = selectedCopy.navAgentVisionHalfAngle;
     m_objects.back().navAgentBrainAsset = selectedCopy.navAgentBrainAsset;
+    m_objects.back().navAgentBrainAssetId =
+        selectedCopy.navAgentBrainAssetId;
     m_objects.back().navAgentTeam = selectedCopy.navAgentTeam;
     m_objects.back().navAgentAutoTarget = selectedCopy.navAgentAutoTarget;
     m_objects.back().isTerrain = selectedCopy.isTerrain;
@@ -4868,6 +5496,7 @@ void EditorScene::ClearHistory()
 void EditorScene::Clear()
 {
     m_registry = engine::ecs::Registry{};
+    m_assetId = {};
     m_objects.clear();
     m_joints.clear();
     m_cameraPresets.clear();

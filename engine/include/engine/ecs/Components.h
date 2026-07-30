@@ -1,5 +1,6 @@
 #pragma once
 
+#include "engine/assets/AssetIdentity.h"
 #include "engine/audio/AudioTypes.h"
 #include "engine/graphics/Mesh.h"
 #include "engine/graphics/ParticleSystem.h"
@@ -246,6 +247,7 @@ struct MaterialAsset {
 // receive an independent voice when a RuntimeAudioSystem observes them.
 struct AudioSource {
     std::string path;
+    AssetHandle assetId;
     AudioBus bus = AudioBus::SFX;
     float volume = 1.0f;
     float pitch = 1.0f;

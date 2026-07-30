@@ -4,6 +4,7 @@
 // animation *maths* it feeds (engine/animation/Animator) is separately unit-tested.
 #include "engine/graphics/SkinnedModel.h"
 
+#include "engine/assets/SkeletalAsset.h"
 #include "engine/graphics/ImageDecode.h"
 #include "engine/graphics/VertexLayout.h"
 
@@ -14,6 +15,7 @@
 #include <glm/glm.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <filesystem>
 #include <functional>
@@ -91,6 +93,54 @@ Animation BuildClip(const aiAnimation* a, const Skeleton& skel,
 } // namespace
 
 SkinnedModel SkinnedModel::FromFile(const std::string& path) {
+    std::string extension = std::filesystem::path(path).extension().string();
+    std::transform(extension.begin(), extension.end(), extension.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (extension == ".3dgskmesh") {
+        SkeletalMeshAssetData asset;
+        std::string error;
+        if (!LoadSkeletalMeshAsset(path, &asset, &error))
+            throw std::runtime_error("SkinnedModel: " + error);
+        SkinnedModel model;
+        model.m_skeleton = std::move(asset.skeleton);
+        for (NamedAnimationClipData& clip : asset.embeddedAnimations)
+            model.m_animations.push_back(std::move(clip.animation));
+        model.m_materials.reserve(asset.materials.size());
+        for (const StaticMeshMaterialData& source : asset.materials) {
+            Material material;
+            material.name = source.name;
+            material.diffuse = {
+                source.diffuse[0], source.diffuse[1], source.diffuse[2]};
+            material.specular = {
+                source.specular[0], source.specular[1], source.specular[2]};
+            material.emissive = {
+                source.emissive[0], source.emissive[1], source.emissive[2]};
+            material.shininess = source.shininess;
+            material.diffuseMap = source.diffuseMap;
+            material.normalMap = source.normalMap;
+            material.specularMap = source.specularMap;
+            material.emissiveMap = source.emissiveMap;
+            model.m_materials.push_back(std::move(material));
+        }
+        model.m_textures.reserve(asset.textures.size());
+        for (const StaticMeshTextureData& source : asset.textures) {
+            model.m_textures.push_back(std::make_unique<Texture>(
+                source.rgba.data(), static_cast<int>(source.width),
+                static_cast<int>(source.height)));
+        }
+        const VertexLayout layout{{3}, {3}, {2}, {4}, {4}};
+        model.m_subMeshes.reserve(asset.subMeshes.size());
+        for (const SkeletalMeshSubMeshData& source : asset.subMeshes) {
+            model.m_subMeshes.push_back(
+                SubMesh{Mesh(source.vertices, source.indices, layout), source.material});
+        }
+        model.m_min = {
+            asset.minimum[0], asset.minimum[1], asset.minimum[2]};
+        model.m_max = {
+            asset.maximum[0], asset.maximum[1], asset.maximum[2]};
+        return model;
+    }
+
     Assimp::Importer importer;
     // NB: no aiProcess_PreTransformVertices -- it removes bones. LimitBoneWeights
     // caps each vertex at 4 influences (matching our vertex format).
@@ -256,6 +306,61 @@ std::size_t SkinnedModel::AddAnimationsFromFile(const std::string& path,
                                                 bool stripRootMotion,
                                                 const std::string& nameOverride,
                                                 const std::string& sourceClipName) {
+    std::string extension = std::filesystem::path(path).extension().string();
+    std::transform(extension.begin(), extension.end(), extension.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (extension == ".3dganim") {
+        AnimationAssetData asset;
+        std::string error;
+        if (!LoadAnimationAsset(path, &asset, &error))
+            throw std::runtime_error("SkinnedModel: " + error);
+        std::map<std::string, int> targetBones;
+        for (std::size_t i = 0; i < m_skeleton.bones.size(); ++i)
+            targetBones[m_skeleton.bones[i].name] = static_cast<int>(i);
+        std::size_t added = 0;
+        for (const NamedAnimationClipData& source : asset.clips) {
+            if (!sourceClipName.empty()
+                && source.animation.name != sourceClipName)
+                continue;
+            Animation animation;
+            animation.name = nameOverride.empty()
+                ? source.animation.name : nameOverride;
+            animation.duration = source.animation.duration;
+            animation.ticksPerSecond = source.animation.ticksPerSecond;
+            animation.channels.resize(m_skeleton.bones.size());
+            for (std::size_t i = 0; i < source.animation.channels.size(); ++i) {
+                const auto found = targetBones.find(source.channelBoneNames[i]);
+                if (found != targetBones.end())
+                    animation.channels[static_cast<std::size_t>(found->second)] =
+                        source.animation.channels[i];
+            }
+            if (stripRootMotion) {
+                int root = m_skeleton.Find("root");
+                if (root < 0) {
+                    for (std::size_t i = 0; i < m_skeleton.bones.size(); ++i)
+                        if (m_skeleton.bones[i].parent < 0) {
+                            root = static_cast<int>(i);
+                            break;
+                        }
+                }
+                if (root >= 0) {
+                    auto& positions =
+                        animation.channels[static_cast<std::size_t>(root)].positions;
+                    if (!positions.empty()) {
+                        const glm::vec3 first = positions.front().value;
+                        for (VecKey& key : positions) key.value = first;
+                    }
+                }
+            }
+            m_animations.push_back(std::move(animation));
+            ++added;
+        }
+        if (!sourceClipName.empty() && added == 0)
+            throw std::runtime_error("SkinnedModel: animation take '"
+                + sourceClipName + "' was not found in '" + path + "'");
+        return added;
+    }
+
     Assimp::Importer importer;
     // Clip-only files need no mesh post-processing; keep the node tree intact.
     const aiScene* scene = importer.ReadFile(path, aiProcess_LimitBoneWeights);

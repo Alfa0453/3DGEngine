@@ -1,6 +1,7 @@
 #pragma once
 
 #include <engine/assets/RuntimeShaderManager.h>
+#include <engine/assets/RuntimeAssetManager.h>
 #include <engine/graphics/Framebuffer.h>
 #include <engine/graphics/Mesh.h>
 #include <engine/graphics/Model.h>
@@ -35,7 +36,7 @@ private:
     void RequestNew();
     void GenerateSources();
     void DrawGraphCanvas();
-    void DrawGraphInspector();
+    void DrawGraphInspector(EditorAssets& assets);
     void AddGraphNode(const std::string& type, float x, float y);
     void DeleteSelectedNodes();
     void DuplicateSelectedNodes();
@@ -53,6 +54,7 @@ private:
     engine::ShaderAsset m_asset;
     engine::ShaderAsset m_savedAsset;
     engine::RuntimeShaderManager m_runtime;
+    engine::RuntimeAssetManager m_previewAssets;
     std::string m_path;
     std::string m_vertexSource;
     std::string m_fragmentSource;
@@ -111,7 +113,8 @@ private:
     std::optional<engine::Mesh> m_groundMesh;
     std::optional<engine::Mesh> m_fullscreenQuad;
     std::unique_ptr<engine::Shader> m_previewSurface;
-    std::unique_ptr<engine::Model> m_importedModel;
+    const engine::Model* m_importedModel = nullptr;
+    const engine::SkinnedModel* m_importedSkinnedModel = nullptr;
     std::string m_importedModelPath;
     unsigned int m_previewNormalTexture = 0;
     unsigned int m_previewVelocityTexture = 0;

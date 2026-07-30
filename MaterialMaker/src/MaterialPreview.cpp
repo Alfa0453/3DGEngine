@@ -5,11 +5,13 @@
 
 #include <engine/graphics/Primitives.h>
 #include <engine/graphics/Camera.h>
+#include <engine/assets/TextureAsset.h>
 
 #include <glm/gtc/matrix_transform.hpp>
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <exception>
 #include <filesystem>
@@ -305,7 +307,22 @@ MaterialPreview::MapInfo MaterialPreview::AcquireMap(const std::string& path) {
         cached->fileSize = fileSize;
         try {
             if (!exists) throw std::runtime_error("Texture file does not exist: " + path);
-            cached->texture.emplace(path, /*smooth=*/true);
+            std::string extension = std::filesystem::path(path).extension().string();
+            std::transform(extension.begin(), extension.end(), extension.begin(),
+                [](unsigned char c) {
+                    return static_cast<char>(std::tolower(c));
+                });
+            if (extension == ".3dgtex") {
+                engine::TextureAssetData asset;
+                std::string loadError;
+                if (!engine::LoadTextureAsset(path, &asset, &loadError))
+                    throw std::runtime_error(loadError);
+                cached->texture.emplace(
+                    asset.rgba.data(), static_cast<int>(asset.width),
+                    static_cast<int>(asset.height), asset.smooth);
+            } else {
+                cached->texture.emplace(path, /*smooth=*/true);
+            }
             cached->info.textureId = cached->texture->ID();
             cached->info.width     = cached->texture->Width();
             cached->info.height    = cached->texture->Height();

@@ -74,6 +74,43 @@ bool CurveKeysControl(const char* label, bool& enabled, std::array<float, 4>& ke
     return changed;
 }
 
+std::string LowerExtension(const std::string& path) {
+    std::string extension = std::filesystem::path(path).extension().string();
+    std::transform(extension.begin(), extension.end(), extension.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return extension;
+}
+
+bool AssignParticleTexture(engine::EmitterConfig& config,
+                           const std::string& path,
+                           std::string* error) {
+    if (LowerExtension(path) != ".3dgtex") {
+        if (error) *error = "Particle textures must use an engine-owned .3dgtex asset.";
+        return false;
+    }
+    engine::TextureAssetData texture;
+    if (!engine::LoadTextureAsset(path, &texture, error)) return false;
+    config.texturePath = path;
+    config.textureAssetId = texture.header.id;
+    if (error) error->clear();
+    return true;
+}
+
+bool AssignParticleMesh(engine::EmitterConfig& config,
+                        const std::string& path,
+                        std::string* error) {
+    if (LowerExtension(path) != ".3dgmesh") {
+        if (error) *error = "Particle model renderers require a static .3dgmesh asset.";
+        return false;
+    }
+    engine::StaticMeshAssetData mesh;
+    if (!engine::LoadStaticMeshAsset(path, &mesh, error)) return false;
+    config.meshPath = path;
+    config.meshAssetId = mesh.header.id;
+    if (error) error->clear();
+    return true;
+}
+
 } // namespace
 
 void ParticleEditorPanel::RequestOpen(const std::string& path) {
@@ -780,18 +817,52 @@ bool ParticleEditorPanel::DrawSettings(engine::ParticleSystemComponent& s) {
                 std::array<char, 512> meshPath{};
                 std::snprintf(meshPath.data(), meshPath.size(), "%s", s.config.meshPath.c_str());
                 if (ImGui::InputText("Model Asset", meshPath.data(), meshPath.size())) {
-                    s.config.meshPath = meshPath.data(); changed = true;
+                    s.config.meshPath = meshPath.data();
+                    s.config.meshAssetId = {};
+                    changed = true;
                 }
                 if (ImGui::BeginDragDropTarget()) {
                     if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("3DGEDITOR_ASSET")) {
                         const char* path = static_cast<const char*>(payload->Data);
-                        if (path && *path) { s.config.meshPath = path; changed = true; }
+                        if (path && *path) {
+                            std::string error;
+                            if (AssignParticleMesh(s.config, path, &error)) {
+                                changed = true;
+                                m_error.clear();
+                            } else {
+                                m_error = error;
+                            }
+                        }
                     }
                     ImGui::EndDragDropTarget();
                 }
+                const EditorAssets::Asset* selectedAsset =
+                    m_assetsContext ? m_assetsContext->SelectedAsset() : nullptr;
+                const bool selectedStaticMesh = selectedAsset
+                    && selectedAsset->type == EditorAssets::Type::Model;
+                if (!selectedStaticMesh) ImGui::BeginDisabled();
+                if (ImGui::Button("Use Selected Static Mesh")
+                    && m_assetsContext) {
+                    std::string error;
+                    if (AssignParticleMesh(
+                            s.config,
+                            m_assetsContext->SelectedAssetFullPath(),
+                            &error)) {
+                        changed = true;
+                        m_error.clear();
+                    } else {
+                        m_error = error;
+                    }
+                }
+                if (!selectedStaticMesh) ImGui::EndDisabled();
                 ImGui::SameLine();
-                if (ImGui::SmallButton("Clear Model")) { s.config.meshPath.clear(); changed = true; }
-                ImGui::TextDisabled("Drag a model from Assets. A cube is used if loading fails.");
+                if (ImGui::SmallButton("Clear Model")) {
+                    s.config.meshPath.clear();
+                    s.config.meshAssetId = {};
+                    changed = true;
+                }
+                ImGui::TextDisabled(
+                    "Select or drag an engine-owned static mesh. A cube is used if loading fails.");
             }
         }
         int blend = static_cast<int>(s.config.blend);
@@ -803,17 +874,49 @@ bool ParticleEditorPanel::DrawSettings(engine::ParticleSystemComponent& s) {
         std::array<char, 512> texturePath{};
         std::snprintf(texturePath.data(), texturePath.size(), "%s", s.config.texturePath.c_str());
         if (ImGui::InputText("Texture", texturePath.data(), texturePath.size())) {
-            s.config.texturePath = texturePath.data(); changed = true;
+            s.config.texturePath = texturePath.data();
+            s.config.textureAssetId = {};
+            changed = true;
         }
         if (ImGui::BeginDragDropTarget()) {
             if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("3DGEDITOR_ASSET")) {
                 const char* path = static_cast<const char*>(payload->Data);
-                if (path && *path) { s.config.texturePath = path; changed = true; }
+                if (path && *path) {
+                    std::string error;
+                    if (AssignParticleTexture(s.config, path, &error)) {
+                        changed = true;
+                        m_error.clear();
+                    } else {
+                        m_error = error;
+                    }
+                }
             }
             ImGui::EndDragDropTarget();
         }
+        const EditorAssets::Asset* selectedTextureAsset =
+            m_assetsContext ? m_assetsContext->SelectedAsset() : nullptr;
+        const bool selectedTexture = selectedTextureAsset
+            && selectedTextureAsset->type == EditorAssets::Type::Texture;
+        if (!selectedTexture) ImGui::BeginDisabled();
+        if (ImGui::Button("Use Selected Engine Texture")
+            && m_assetsContext) {
+            std::string error;
+            if (AssignParticleTexture(
+                    s.config, m_assetsContext->SelectedAssetFullPath(),
+                    &error)) {
+                changed = true;
+                m_error.clear();
+            } else {
+                m_error = error;
+            }
+        }
+        if (!selectedTexture) ImGui::EndDisabled();
         ImGui::SameLine();
-        if (ImGui::SmallButton("Clear Texture")) { s.config.texturePath.clear(); changed = true; }
+        if (ImGui::SmallButton("Clear Texture")) {
+            s.config.texturePath.clear();
+            s.config.textureAssetId = {};
+            changed = true;
+        }
         changed |= ImGui::DragInt("Columns", &s.config.textureColumns, 1.0f, 1, 64);
         changed |= ImGui::DragInt("Rows", &s.config.textureRows, 1.0f, 1, 64);
         changed |= ImGui::DragFloat("Frame Rate", &s.config.textureFps, 0.5f, 0.0f, 240.0f, "%.1f fps");
@@ -861,14 +964,44 @@ bool ParticleEditorPanel::DrawSettings(engine::ParticleSystemComponent& s) {
             ImGui::TextDisabled(
                 "Graph shaders use the CPU billboard path for deterministic compatibility.");
             for (auto& parameter : s.config.shaderParameters) {
+                ImGui::PushID(parameter.name.c_str());
                 std::array<char, 384> value{};
                 std::snprintf(value.data(), value.size(), "%s",
                               parameter.value.c_str());
                 if (ImGui::InputText(
-                        parameter.name.c_str(), value.data(), value.size())) {
+                        "Value", value.data(), value.size())) {
                     parameter.value = value.data();
+                    parameter.assetId = {};
                     changed = true;
                 }
+                ImGui::SameLine();
+                ImGui::TextUnformatted(parameter.name.c_str());
+                if (parameter.type == static_cast<int>(
+                        engine::ShaderValueType::Texture2D)) {
+                    if (ImGui::BeginDragDropTarget()) {
+                        if (const ImGuiPayload* payload =
+                                ImGui::AcceptDragDropPayload("3DGEDITOR_ASSET")) {
+                            const char* path =
+                                static_cast<const char*>(payload->Data);
+                            if (path && LowerExtension(path) == ".3dgtex") {
+                                parameter.value = path;
+                                parameter.assetId = {};
+                                changed = true;
+                            }
+                        }
+                        ImGui::EndDragDropTarget();
+                    }
+                    if (!selectedTexture) ImGui::BeginDisabled();
+                    if (ImGui::SmallButton("Use Selected Texture")
+                        && m_assetsContext) {
+                        parameter.value =
+                            m_assetsContext->SelectedAssetFullPath();
+                        parameter.assetId = {};
+                        changed = true;
+                    }
+                    if (!selectedTexture) ImGui::EndDisabled();
+                }
+                ImGui::PopID();
             }
         }
         ImGui::SeparatorText("Bounds / Culling");
@@ -933,7 +1066,8 @@ void ParticleEditorPanel::Draw(EditorScene& scene, EditorAssets& assets, bool* o
         if (std::filesystem::path(path).extension() == ".particlefx") {
             std::vector<engine::ParticleEffectLayer> loadedLayers;
             std::string error;
-            if (particle_asset::LoadEffect(path, &loadedLayers, &error)) {
+            if (particle_asset::LoadEffect(
+                    path, &loadedLayers, &m_effectAssetId, &error)) {
                 m_effectLayers = std::move(loadedLayers);
                 m_effectAssetPath = path;
                 m_effectAssetName = std::filesystem::path(path).stem().string();
@@ -1039,7 +1173,12 @@ void ParticleEditorPanel::Draw(EditorScene& scene, EditorAssets& assets, bool* o
         const std::filesystem::path path = std::filesystem::path(assets.RootPath()) /
             assets.CurrentFolder() / name;
         std::string error;
-        if (particle_asset::SaveEffect(path.string(), layers, &error)) {
+        if (m_effectAssetPath.empty()
+            || std::filesystem::path(m_effectAssetPath).lexically_normal()
+                != path.lexically_normal())
+            m_effectAssetId = {};
+        if (particle_asset::SaveEffect(
+                path.string(), layers, &m_effectAssetId, &error)) {
             m_effectAssetPath = path.string();
             m_effectAssetName = path.stem().string();
             assets.Refresh(assets.RootPath(), &error);
@@ -1053,7 +1192,8 @@ void ParticleEditorPanel::Draw(EditorScene& scene, EditorAssets& assets, bool* o
         std::vector<engine::ParticleEffectLayer> loadedLayers;
         std::string error;
         const std::string path = assets.SelectedAssetFullPath();
-        if (particle_asset::LoadEffect(path, &loadedLayers, &error)) {
+        if (particle_asset::LoadEffect(
+                path, &loadedLayers, &m_effectAssetId, &error)) {
             layers = std::move(loadedLayers);
             m_effectAssetPath = path;
             m_effectAssetName = std::filesystem::path(path).stem().string();

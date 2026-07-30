@@ -2,8 +2,11 @@
 #include <engine/ecs/Components.h>
 #include <engine/ecs/Registry.h>
 #include <engine/gameplay/PlayerController.h>
+#include <engine/gameplay/GameplayComponents.h>
+#include <engine/gameplay/RagdollSystem.h>
 #include <engine/physics/CharacterController.h>
 #include <engine/physics/PhysicsComponents.h>
+#include <engine/physics/PhysicsWorld.h>
 
 #include <cmath>
 #include <iostream>
@@ -367,6 +370,52 @@ void TestGameplayCannotToggleCameraMode() {
           "gameplay input cannot change the configured camera mode");
 }
 
+void TestRagdollActivatesOnDeathWithoutSkeleton() {
+    engine::ecs::Registry registry;
+    const engine::ecs::Entity character = registry.Create();
+    registry.Add<engine::ecs::Transform>(character, {});
+    registry.Add<engine::ecs::Collider>(
+        character, engine::ecs::Collider::MakeCapsule(0.4f, 0.5f));
+    engine::Health health;
+    health.hp = 0.0f;
+    health.alive = false;
+    health.justDied = true;
+    registry.Add<engine::Health>(character, health);
+    registry.Add<engine::Ragdoll>(character, {});
+
+    engine::PhysicsWorld physics;
+    engine::UpdateRagdollsBeforePhysics(registry, physics);
+
+    const engine::Ragdoll& ragdoll =
+        registry.Get<engine::Ragdoll>(character);
+    const engine::ecs::RigidBody* body =
+        registry.TryGet<engine::ecs::RigidBody>(character);
+    Check(ragdoll.active, "death activates the ragdoll component");
+    Check(body && body->invMass > 0.0f && !body->kinematic,
+          "characters without skeletal data use the dynamic-body fallback");
+}
+
+void TestDisabledRagdollDoesNotActivate() {
+    engine::ecs::Registry registry;
+    const engine::ecs::Entity character = registry.Create();
+    registry.Add<engine::ecs::Transform>(character, {});
+    engine::Health health;
+    health.hp = 0.0f;
+    health.alive = false;
+    registry.Add<engine::Health>(character, health);
+    engine::Ragdoll authored;
+    authored.enabled = false;
+    registry.Add<engine::Ragdoll>(character, authored);
+
+    engine::PhysicsWorld physics;
+    engine::UpdateRagdollsBeforePhysics(registry, physics);
+
+    Check(!registry.Get<engine::Ragdoll>(character).active,
+          "disabled ragdoll remains inactive after death");
+    Check(!registry.Has<engine::ecs::RigidBody>(character),
+          "disabled ragdoll does not add a physics body");
+}
+
 } // namespace
 
 int main() {
@@ -385,6 +434,8 @@ int main() {
     TestCollectiblesDoNotBlockPlayerOrCamera();
     TestShoulderSwitchAndLockOnTracking();
     TestGameplayCannotToggleCameraMode();
+    TestRagdollActivatesOnDeathWithoutSkeleton();
+    TestDisabledRagdollDoesNotActivate();
 
     if (g_failures != 0) {
         std::cerr << g_failures << " animation movement test(s) failed\n";
