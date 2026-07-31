@@ -133,11 +133,11 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             return false;
         }
     }
-    if (magic != "3DGRuntimeScene" || version < 1 || version > 78) {
+    if (magic != "3DGRuntimeScene" || version < 1 || version > 80) {
         if (error) {
             *error = "Runtime scene file has an unknown format: "
                 + magic + " " + std::to_string(version)
-                + " (expected 3DGRuntimeScene 1..76).";
+                + " (expected 3DGRuntimeScene 1..80).";
         }
         return false;
     }
@@ -188,7 +188,7 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                 loaded.gameMode.playerObjectName.clear();
             }
             loaded.gameMode.cameraMode = std::clamp(
-                loaded.gameMode.cameraMode, 0, 2);
+                loaded.gameMode.cameraMode, 0, 3);
             if (!record) {
                 if (error) *error = "Runtime scene has invalid Game Mode settings.";
                 return false;
@@ -366,6 +366,9 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                     return false;
                 }
             }
+            if (version >= 79) {
+                record >> agent.hearingRange;   // omnidirectional noise perception
+            }
             if (!record || agent.entityName.empty()) {
                 if (error) *error = "Runtime scene contains an invalid navigation agent.";
                 return false;
@@ -375,6 +378,7 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             agent.reachRadius = std::max(agent.reachRadius, 0.05f);
             agent.repathInterval = std::max(agent.repathInterval, 0.05f);
             agent.visionRange = std::max(agent.visionRange, 0.0f);
+            agent.hearingRange = std::max(agent.hearingRange, 0.0f);
             agent.movementGravity = std::min(agent.movementGravity, 0.0f);
             agent.movementMaxFallSpeed = std::max(agent.movementMaxFallSpeed, 0.0f);
             agent.movementGroundProbe = std::max(agent.movementGroundProbe, 0.02f);
@@ -524,11 +528,12 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                 record >> pc.cameraMode
                        >> pc.isometricYaw >> pc.isometricPitch
                        >> pc.isometricDistance;
+                if (version >= 80) record >> pc.platformerYaw;   // side-view camera axis
             } else {
                 pc.cameraMode = firstPerson != 0 ? 1 : 0;
             }
             pc.firstPerson = firstPerson != 0;
-            pc.cameraMode = std::clamp(pc.cameraMode, 0, 2);
+            pc.cameraMode = std::clamp(pc.cameraMode, 0, 3);
             pc.firstPerson = pc.cameraMode == 1;
             pc.isometricPitch = std::clamp(pc.isometricPitch, -89.0f, 89.0f);
             pc.isometricDistance = std::max(pc.isometricDistance, 0.0f);

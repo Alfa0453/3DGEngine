@@ -50,7 +50,9 @@ void ClipEditorPanel::RefreshChoices(const std::string& assetRoot) {
         std::error_code fileEc;
         if (it->is_regular_file(fileEc)) {
             const std::string ext = Lower(it->path().extension().string());
-            if (ext == ".fbx" || ext == ".gltf" || ext == ".glb" || ext == ".dae" || ext == ".obj") {
+            // Native engine-imported assets only: a .3dgskmesh (skeleton + mesh +
+            // embedded clips) or a .3dganim (individual imported clip).
+            if (ext == ".3dgskmesh" || ext == ".3dganim") {
                 m_modelChoices.push_back({it->path().generic_string(), it->path().filename().string()});
             }
         }
@@ -67,13 +69,34 @@ unsigned int ClipEditorPanel::RenderPreview(int width, int height, float deltaTi
     else m_fbo->Resize(width, height);
     if (!m_renderer) m_renderer = std::make_unique<engine::SkinnedRenderer>();
 
-    // (Re)load the source file for clip enumeration.
-    if (m_loadedSource != m_asset.sourceFile) {
+    // (Re)load the source for clip enumeration. A .3dgskmesh is self-contained
+    // (skeleton + mesh + embedded clips); a .3dganim carries clips only, so it is
+    // merged onto the chosen Preview Mesh's skeleton to enumerate and render it.
+    const std::string sourceExt = Lower(std::filesystem::path(m_asset.sourceFile).extension().string());
+    const bool animOnly = sourceExt == ".3dganim";
+    const std::string loadKey = m_asset.sourceFile + '|' + m_previewMeshPath + '|'
+        + (m_asset.stripRootMotion ? "1" : "0") + '|' + m_asset.clipName;
+    if (m_loadedKey != loadKey) {
         ResetPreview();
+        m_loadedKey = loadKey;
         m_loadedSource = m_asset.sourceFile;
+        m_sourceIsAnimOnly = animOnly;
         m_error.clear();
-        m_sourceModel = m_asset.sourceFile.empty()
-            ? nullptr : m_assets.LoadSkinnedModel(m_asset.sourceFile, &m_error);
+        if (m_asset.sourceFile.empty()) {
+            m_sourceModel = nullptr;
+        } else if (animOnly) {
+            if (m_previewMeshPath.empty()) {
+                m_sourceModel = nullptr;   // needs a Preview Mesh to supply the skeleton
+                m_error = "Pick a Preview Mesh (.3dgskmesh) to view a .3dganim clip.";
+            } else {
+                std::vector<engine::RuntimeAssetManager::SkinnedAnimationSource> src;
+                const std::string alias = m_asset.name.empty() ? m_asset.clipName : m_asset.name;
+                src.push_back({m_asset.sourceFile, alias, m_asset.stripRootMotion, m_asset.clipName});
+                m_sourceModel = m_assets.LoadSkinnedModel(m_previewMeshPath, src, &m_error);
+            }
+        } else {
+            m_sourceModel = m_assets.LoadSkinnedModel(m_asset.sourceFile, &m_error);
+        }
         m_clipIndex = 0;
         if (m_sourceModel && !m_asset.clipName.empty()) {
             const auto& clips = m_sourceModel->Animations();
@@ -92,7 +115,17 @@ unsigned int ClipEditorPanel::RenderPreview(int width, int height, float deltaTi
     int playClip = m_clipIndex;
     const bool sourceHasMesh = m_sourceModel && !m_sourceModel->SubMeshes().empty();
     const std::string previewBase = sourceHasMesh ? m_asset.sourceFile : m_previewMeshPath;
-    if (m_sourceModel && !previewBase.empty()
+    if (m_sourceIsAnimOnly && m_sourceModel) {
+        // Already merged onto the preview mesh in the load step; play the merged clip
+        // (appended last, or matched by name).
+        const auto& anims = m_sourceModel->Animations();
+        playClip = anims.empty() ? -1 : static_cast<int>(anims.size()) - 1;
+        for (std::size_t i = 0; i < anims.size(); ++i)
+            if (!m_asset.clipName.empty() && anims[i].name == m_asset.clipName) {
+                playClip = static_cast<int>(i);
+                break;
+            }
+    } else if (m_sourceModel && !previewBase.empty()
         && (!sourceHasMesh || m_asset.stripRootMotion)) {
         std::vector<engine::RuntimeAssetManager::SkinnedAnimationSource> src;
         const std::string alias = m_asset.name.empty() ? m_asset.clipName : m_asset.name;

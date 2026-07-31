@@ -112,6 +112,7 @@ struct CharacterAsset {
     std::string navTargetName;
     float navVisionRange = 12.0f;
     float navVisionHalfAngle = 45.0f;
+    float navHearingRange = 12.0f;
     std::string behaviorTreeAsset;
     int navTeam = 0;
     bool navAutoTarget = false;

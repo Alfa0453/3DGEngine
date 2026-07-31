@@ -17,9 +17,9 @@ struct AnimationClipAsset {
     int         version = 4;
     engine::AssetHandle assetId;
     std::string name = "Clip";
-    std::string sourceFile;        // FBX / glTF containing the animation
+    std::string sourceFile;        // native engine-imported .3dgskmesh / .3dganim with the clip
     engine::AssetHandle sourceAssetId;
-    std::string clipName;          // which clip in the file (empty = first)
+    std::string clipName;          // which clip in the source (empty = first)
     bool        stripRootMotion = false;  // freeze the root so it plays in place
     bool        loop = true;
     float       speed = 1.0f;

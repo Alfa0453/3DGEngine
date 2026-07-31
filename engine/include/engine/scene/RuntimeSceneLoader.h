@@ -128,6 +128,7 @@ public:
         float isometricYaw = -45.0f;
         float isometricPitch = -35.0f;
         float isometricDistance = 12.0f;
+        float platformerYaw = -90.0f;   // side-view camera axis
         bool  cameraCollision = true;
         float cameraProbeRadius = 0.20f;
         float cameraCollisionPadding = 0.08f;
@@ -241,6 +242,7 @@ public:
             std::string targetName;
             float visionRange = 12.0f;
             float visionHalfAngle = 45.0f;
+            float hearingRange = 12.0f;
             std::string brainAsset;
             AssetHandle brainAssetId;
             int team = 0;

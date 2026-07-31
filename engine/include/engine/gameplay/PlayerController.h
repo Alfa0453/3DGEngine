@@ -34,7 +34,10 @@ struct PlayerInput {
 // for rendering. This is the human-player analogue of the AiAgent controller.
 class PlayerController {
 public:
-    enum class View { FirstPerson, ThirdPerson, Isometric };
+    // Platformer: a side-on camera locked to a world axis, looking at the character
+    // from the side (2.5D). The character moves along the screen axis and faces its
+    // travel direction; the camera does not orbit.
+    enum class View { FirstPerson, ThirdPerson, Isometric, Platformer };
 
     // How the character body turns in third person.
     //   CameraRelative  - the body always faces where the camera looks (strafe style);
@@ -51,6 +54,11 @@ public:
     float isometricYaw = -45.0f;
     float isometricPitch = -35.0f;
     float isometricDistance = 12.0f;
+    // Platformer side-view: camera looks along platformerYaw (-90 => toward -Z, so the
+    // character runs along world X), tilted by platformerPitch, from platformerDistance.
+    float platformerYaw = -90.0f;
+    float platformerPitch = 0.0f;
+    float platformerDistance = 12.0f;
 
     // Tunables;
     float walkSpeed        = 4.0f;
@@ -85,8 +93,25 @@ public:
     void ToggleView() {
         view = view == View::ThirdPerson ? View::FirstPerson
              : view == View::FirstPerson ? View::Isometric
+             : view == View::Isometric   ? View::Platformer
                                          : View::ThirdPerson;
         m_cameraArmInitialized = false;
+    }
+    void SetPlatformerView(float yawDegrees, float pitchDegrees, float distance) {
+        platformerYaw = yawDegrees;
+        platformerPitch = glm::clamp(pitchDegrees, -89.0f, 89.0f);
+        platformerDistance = glm::max(distance, 0.0f);
+        if (view == View::Platformer) {
+            m_yaw = platformerYaw;
+            m_pitch = platformerPitch;
+            m_cameraArmInitialized = false;
+        }
+    }
+    // The authored orbit/side distance for the current view.
+    float AuthoredCameraDistance() const {
+        return view == View::Isometric  ? isometricDistance
+             : view == View::Platformer ? platformerDistance
+                                        : camDistance;
     }
     void SetIsometricView(float yawDegrees, float pitchDegrees, float distance) {
         isometricYaw = yawDegrees;
@@ -123,7 +148,7 @@ public:
     glm::quat Facing() const;             // yaw-only orientation for the capsule mesh
     float CurrentCameraDistance() const {
         return m_cameraArmInitialized ? m_currentCameraDistance
-            : (view == View::Isometric ? isometricDistance : camDistance);
+                                      : AuthoredCameraDistance();
     }
 
     // A Transform-friendly view: centre position + facing rotation. (Kept as raw

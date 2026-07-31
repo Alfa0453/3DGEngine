@@ -53,6 +53,7 @@ public:
         float isometricYaw = -45.0f;
         float isometricPitch = -35.0f;
         float isometricDistance = 12.0f;
+        float platformerYaw = -90.0f;   // side-view camera axis (-90 => run along world X)
         bool cameraCollision = true;
         float cameraProbeRadius = 0.20f;
         float cameraCollisionPadding = 0.08f;
@@ -308,6 +309,9 @@ public:
         std::string navAgentTargetName;      // object to chase when seen ("" = patrol only)
         float navAgentVisionRange = 12.0f;
         float navAgentVisionHalfAngle = 45.0f;
+        float navAgentHearingRange = 12.0f;  // omnidirectional noise perception radius (0 = deaf)
+        float navAgentSquadAlertRadius = 18.0f;  // responds to a teammate's alert within this range
+        float navAgentSquadForgetTime = 6.0f;    // seconds this agent's sighting keeps its squad alerted
         // M7: optional data-driven behaviour-tree asset ("" = built-in patrol/chase brain).
         std::string navAgentBrainAsset;
         engine::AssetHandle navAgentBrainAssetId;
@@ -723,7 +727,9 @@ public:
     bool SetSelectedScriptEnabled(bool enabled);
     bool SetSelectedNavAgent(bool enabled, float speed, float maxForce,
                              float reachRadius, float repathInterval,
-                             const std::string& targetName, float visionRange, float visionHalfAngle);
+                             const std::string& targetName, float visionRange, float visionHalfAngle,
+                             float hearingRange = 12.0f,
+                             float squadAlertRadius = 18.0f, float squadForgetTime = 6.0f);
     bool SetSelectedNavAgentBrain(const std::string& brainAsset);
     bool SetSelectedNavAgentTeam(int team, bool autoTarget);
     bool SetSelectedNavAgentMovement(engine::ai::AiMovementMode mode, float gravity,

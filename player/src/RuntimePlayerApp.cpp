@@ -440,15 +440,17 @@ void RuntimePlayerApp::SetupPlayer() {
     if (desc) {
         const engine::RuntimeSceneLoader::PlayerControllerDesc& pc = desc->playerController;
         const int authoredCameraMode =
-            pc.firstPerson ? 1 : std::clamp(pc.cameraMode, 0, 2);
+            pc.firstPerson ? 1 : std::clamp(pc.cameraMode, 0, 3);
         const int cameraMode = m_scene.gameMode.cameraOverride
-            ? std::clamp(m_scene.gameMode.cameraMode, 0, 2)
+            ? std::clamp(m_scene.gameMode.cameraMode, 0, 3)
             : authoredCameraMode;
         controller.view = cameraMode == 1
             ? engine::PlayerController::View::FirstPerson
             : cameraMode == 2
                 ? engine::PlayerController::View::Isometric
-                : engine::PlayerController::View::ThirdPerson;
+                : cameraMode == 3
+                    ? engine::PlayerController::View::Platformer
+                    : engine::PlayerController::View::ThirdPerson;
         controller.walkSpeed          = pc.walkSpeed;
         controller.runSpeed           = pc.runSpeed;
         controller.jumpSpeed          = pc.jumpSpeed;
@@ -458,6 +460,8 @@ void RuntimePlayerApp::SetupPlayer() {
         controller.camTargetHeight    = pc.cameraTargetHeight;
         controller.SetIsometricView(
             pc.isometricYaw, pc.isometricPitch, pc.isometricDistance);
+        controller.platformerDistance = pc.isometricDistance;   // side offset for platformer
+        controller.platformerYaw      = pc.platformerYaw;       // authored side-view axis
         controller.camCollision       = pc.cameraCollision;
         controller.camProbeRadius     = pc.cameraProbeRadius;
         controller.camCollisionPadding = pc.cameraCollisionPadding;
@@ -482,12 +486,14 @@ void RuntimePlayerApp::SetupPlayer() {
         controller.SetCapsule(0.4f, 1.8f);
     }
     if (m_scene.gameMode.cameraOverride) {
-        const int cameraMode = std::clamp(m_scene.gameMode.cameraMode, 0, 2);
+        const int cameraMode = std::clamp(m_scene.gameMode.cameraMode, 0, 3);
         controller.view = cameraMode == 1
             ? engine::PlayerController::View::FirstPerson
             : cameraMode == 2
                 ? engine::PlayerController::View::Isometric
-                : engine::PlayerController::View::ThirdPerson;
+                : cameraMode == 3
+                    ? engine::PlayerController::View::Platformer
+                    : engine::PlayerController::View::ThirdPerson;
     }
 
     if (const Transform* t = m_registry.TryGet<Transform>(found)) {
@@ -728,6 +734,8 @@ void RuntimePlayerApp::BuildAI() {
         runtime.brain.repathInterval = desc.repathInterval;
         runtime.brain.vision.range = desc.visionRange;
         runtime.brain.vision.halfAngleDegrees = desc.visionHalfAngle;
+        runtime.brain.hearingRange = desc.hearingRange;
+        runtime.hearingRange = desc.hearingRange;
         runtime.brain.patrol = desc.patrolPoints;
 
         glm::vec3 position(0.0f);
@@ -842,6 +850,39 @@ void RuntimePlayerApp::BakeNavigation() {
 
 void RuntimePlayerApp::UpdateAI(float dt) {
     if (m_agents.empty()) return;
+
+    // Hearing: age transient noises, emit a footstep noise when the player moves fast,
+    // and a loud combat noise wherever an entity's HP dropped this frame.
+    m_soundField.Update(dt);
+    if (m_playerEntity != engine::ecs::kNull) {
+        if (const Transform* pt = m_registry.TryGet<Transform>(m_playerEntity)) {
+            if (m_prevPlayerPosValid && dt > 1.0e-4f) {
+                const float speed = glm::length(pt->position - m_prevPlayerPos) / dt;
+                if (speed > 2.0f) {
+                    const float radius   = glm::clamp(speed * 2.0f, 6.0f, 18.0f);
+                    const float loudness = glm::clamp(speed / 6.0f, 0.2f, 1.0f);
+                    m_soundField.Emit(pt->position, radius, loudness, 0.4f);
+                }
+            }
+            m_prevPlayerPos = pt->position;
+            m_prevPlayerPosValid = true;
+        }
+    }
+    {
+        auto emitOnDamage = [&](engine::ecs::Entity entity) {
+            if (entity == engine::ecs::kNull) return;
+            const engine::Health* h = m_registry.TryGet<engine::Health>(entity);
+            const Transform* tr = m_registry.TryGet<Transform>(entity);
+            if (!h || !tr) return;
+            const auto prev = m_prevHp.find(entity);
+            if (prev != m_prevHp.end() && h->hp < prev->second - 0.01f)
+                m_soundField.Emit(tr->position, 22.0f, 1.0f, 0.5f);
+            m_prevHp[entity] = h->hp;
+        };
+        emitOnDamage(m_playerEntity);
+        for (const RuntimeAgent& a : m_agents) emitOnDamage(a.entity);
+    }
+
     for (RuntimeAgent& agent : m_agents) {
         Transform* transform = m_registry.TryGet<Transform>(agent.entity);
         if (!transform) continue;
@@ -889,6 +930,22 @@ void RuntimePlayerApp::UpdateAI(float dt) {
             seesTarget = engine::ai::CanSee(
                 eye, forward, agent.brain.vision, targetPosition,
                 agent.targetEntity, m_physics, m_registry);
+        }
+
+        // Hearing: if the agent can't see its target, the loudest audible noise becomes
+        // a point of interest -- graph agents via HeardNoise?/Investigate, the built-in
+        // brain via its search state.
+        if (agent.hearingRange > 0.0f && !seesTarget) {
+            glm::vec3 noisePos;
+            if (m_soundField.LoudestAudible(position, agent.hearingRange, &noisePos)) {
+                agent.context.heardNoise = true;
+                agent.context.heardPosition = noisePos;
+                if (!agent.useGraph) agent.brain.Hear(noisePos);
+            } else {
+                agent.context.heardNoise = false;
+            }
+        } else {
+            agent.context.heardNoise = false;
         }
 
         glm::vec3 movementTarget = targetPosition;

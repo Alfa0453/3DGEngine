@@ -39,8 +39,7 @@ glm::vec3 PlayerController::CameraTarget() const {
 glm::vec3 PlayerController::CameraPosition() const {
     if (view == View::FirstPerson) return EyePosition();
     const glm::vec3 target = ThirdPersonAnchor();
-    const float authoredDistance =
-        view == View::Isometric ? isometricDistance : camDistance;
+    const float authoredDistance = AuthoredCameraDistance();
     const glm::vec3 authoredOffset = ThirdPersonOffset(std::max(authoredDistance, 0.0f));
     const float authoredLength = glm::length(authoredOffset);
     const float distance = m_cameraArmInitialized ? m_currentCameraDistance : authoredLength;
@@ -84,6 +83,10 @@ void PlayerController::Update(ecs::Registry& reg, const PlayerInput& in, float d
     if (view == View::Isometric) {
         m_yaw = isometricYaw;
         m_pitch = glm::clamp(isometricPitch, -89.0f, 89.0f);
+    } else if (view == View::Platformer) {
+        // Side-on: the camera holds a fixed axis; the player cannot orbit it.
+        m_yaw = platformerYaw;
+        m_pitch = glm::clamp(platformerPitch, -89.0f, 89.0f);
     } else if (m_lockOnTarget) {
         const glm::vec3 origin = ThirdPersonAnchor();
         const glm::vec3 delta = *m_lockOnTarget - origin;
@@ -102,10 +105,11 @@ void PlayerController::Update(ecs::Registry& reg, const PlayerInput& in, float d
         m_yaw   += in.lookYaw   * lookSensitivity;
         m_pitch -= in.lookPitch * lookSensitivity;
     }
+    const bool fixedAngleView = view == View::Isometric || view == View::Platformer;
     const float lo = (view == View::FirstPerson) ? fpMinPitch
-                   : (view == View::Isometric ? -89.0f : tpMinPitch);
+                   : (fixedAngleView ? -89.0f : tpMinPitch);
     const float hi = (view == View::FirstPerson) ? fpMaxPitch
-                   : (view == View::Isometric ? 89.0f : tpMaxPitch);
+                   : (fixedAngleView ? 89.0f : tpMaxPitch);
     m_pitch = std::clamp(m_pitch, lo, hi);
     if (m_yaw > 360.0f) m_yaw -= 360.0f; else if (m_yaw < -360.0f) m_yaw += 360.0f;
 
@@ -114,7 +118,11 @@ void PlayerController::Update(ecs::Registry& reg, const PlayerInput& in, float d
     const glm::vec3 right = glm::normalize(glm::cross(fwd, kWorldUp));
     glm::vec3 wish(0.0f);
     if (movementEnabled) {
-        wish = fwd * in.moveForward + right * in.moveRight;
+        // Platformer: motion is locked to the screen (side) axis only -- left/right
+        // input runs the character along it; forward/back is ignored so it stays 2.5D.
+        wish = (view == View::Platformer)
+            ? right * in.moveRight
+            : fwd * in.moveForward + right * in.moveRight;
     }
     const float wl = glm::length(wish);
     if (wl > 1.0f) wish /= wl;
@@ -126,7 +134,8 @@ void PlayerController::Update(ecs::Registry& reg, const PlayerInput& in, float d
     // orbits freely; it only rotates while moving, and holds its heading when idle.
     if (!m_facingInitialized) { m_facingYaw = m_yaw; m_facingInitialized = true; }
     const bool orientToMovement =
-        (facingMode == FacingMode::MovementDirection || view == View::Isometric)
+        (facingMode == FacingMode::MovementDirection
+            || view == View::Isometric || view == View::Platformer)
         && view != View::FirstPerson && !m_lockOnTarget;
     bool hasFacingTarget = !orientToMovement;
     float targetFacingYaw = m_yaw;
@@ -178,8 +187,7 @@ void PlayerController::Update(ecs::Registry& reg, const PlayerInput& in, float d
     if (view == View::FirstPerson) {
         m_cameraArmInitialized = false;
     } else {
-        const float configuredDistance =
-            view == View::Isometric ? isometricDistance : camDistance;
+        const float configuredDistance = AuthoredCameraDistance();
         const glm::vec3 authoredOffset =
             ThirdPersonOffset(std::max(configuredDistance, 0.0f));
         const float authoredDistance = glm::length(authoredOffset);

@@ -18,9 +18,10 @@ class SkinnedModel;
 class SkinnedRenderer;
 }
 
-// Authors reusable animation-clip assets (.3dgclip): pick a source FBX, choose a clip
-// in it, set strip-root-motion / loop / speed, preview it, and save to Content. The
-// Character Editor then references these clips instead of re-specifying them.
+// Authors reusable animation-clip assets (.3dgclip): pick an engine-imported native
+// source (.3dgskmesh with embedded clips, or a .3dganim clip), choose a clip in it,
+// set strip-root-motion / loop / speed, preview it, and save to Content. The Character
+// Editor then references these clips instead of re-specifying them.
 class ClipEditorPanel {
 public:
     ~ClipEditorPanel();
@@ -54,6 +55,8 @@ private:
     std::optional<engine::Framebuffer> m_fbo;
     const engine::SkinnedModel* m_sourceModel = nullptr;  // for clip enumeration
     std::string m_loadedSource;
+    std::string m_loadedKey;          // source + preview-mesh + strip + clip, to detect reloads
+    bool m_sourceIsAnimOnly = false;  // source is a .3dganim (merged onto the preview mesh)
     std::string m_error;
     std::vector<glm::mat4> m_pose;
     int   m_clipIndex = 0;

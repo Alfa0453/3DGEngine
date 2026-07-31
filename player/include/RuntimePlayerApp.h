@@ -155,6 +155,7 @@ private:
         int team = 0;
         bool autoTarget = false;
         bool useGraph = false;
+        float hearingRange = 0.0f;
         engine::ai::AiAgent brain;
         engine::ai::AiMovementComponent movement;
         engine::ai::AgentContext context;
@@ -162,6 +163,10 @@ private:
     };
     std::vector<RuntimeAgent> m_agents;
     engine::ai::NavMesh m_navMesh;
+    engine::ai::SoundField m_soundField;                   // transient noises agents can hear
+    glm::vec3 m_prevPlayerPos{0.0f};
+    bool m_prevPlayerPosValid = false;
+    std::unordered_map<engine::ecs::Entity, float> m_prevHp;  // HP tracking -> combat noise
     std::unordered_map<std::string, engine::ai::BehaviorGraph> m_behaviorGraphCache;
 
     struct RuntimeTriggerAction {

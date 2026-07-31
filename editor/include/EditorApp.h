@@ -130,6 +130,12 @@ private:
         int                 team = 0;                            // faction id (0 = neutral)
         bool                autoTarget = false;                  // acquire nearest hostile each tick
         float               hearingRange = 0.0f;                 // how far this agent hears noises (0 = deaf)
+        bool                perceivesTarget = false;             // saw its target this frame (for squad alerts)
+        glm::vec3           perceivedTargetPos{0.0f};            // where it last saw the target
+        int                 flankSlot = 0;                       // assigned slot when surrounding a shared target
+        int                 flankCount = 1;                      // how many teammates share that target (1 = solo)
+        float               squadAlertRadius = 18.0f;            // responds to a teammate's alert within this range
+        float               squadForgetTime = 6.0f;              // seconds this agent's sighting keeps its squad alerted
         engine::ai::AiAgent brain;                               // built-in patrol/chase/search
         engine::ai::AiMovementComponent movement;
         // M7: optional data-driven behaviour tree. When useGraph is set, 'tree' + 'ctx'
@@ -483,6 +489,12 @@ private:
     engine::ai::SoundField m_playSoundField;   // transient noises agents can hear (footsteps, etc.)
     glm::vec3 m_prevPlayerPos{0.0f};           // for detecting player movement -> footstep noise
     bool m_prevPlayerPosValid = false;
+    std::unordered_map<engine::ecs::Entity, float> m_prevHp;  // last-frame HP -> emit noise on damage
+    // Squad alert memory (per team): rises to 1 on a sighting, decays over time, and
+    // holds the target's last-known position so a squad keeps searching after losing
+    // sight, then de-escalates to patrol together.
+    struct SquadAlert { float level = 0.0f; glm::vec3 poi{0.0f}; bool valid = false; float forget = 6.0f; };
+    std::unordered_map<int, SquadAlert> m_squadAlerts;
     engine::ai::NavGrid m_playNavGrid;   // used by chase/search (M2); patrol needs none
     engine::ai::NavMesh m_playNavMesh;   // funnel-smoothed nav source (M6) when m_useNavMesh
     bool m_useNavMesh = false;           // route chase/search through the navmesh agent overload

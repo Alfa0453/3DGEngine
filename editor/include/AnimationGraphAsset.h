@@ -12,9 +12,9 @@
 struct AnimationGraphClip {
     std::string clipAsset;                 // source .3dgclip (for re-loading in the editor)
     engine::AssetHandle clipAssetId;
-    std::string sourceFile;                // resolved FBX / glTF containing the animation
+    std::string sourceFile;                // resolved native .3dgskmesh / .3dganim with the animation
     engine::AssetHandle sourceAssetId;
-    std::string sourceClipName;            // take name inside the source file
+    std::string sourceClipName;            // take name inside the source
     std::string clipName;                  // unique graph-facing alias (states reference this)
     bool        stripRootMotion = false;
 };

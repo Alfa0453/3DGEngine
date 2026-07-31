@@ -105,7 +105,8 @@ void AnimationGraphEditorPanel::RefreshChoices(const std::string& assetRoot) {
         if (it->is_regular_file(fileEc)) {
             const std::string ext = Lower(it->path().extension().string());
             AssetChoice choice{it->path().generic_string(), it->path().filename().string()};
-            if (ext == ".fbx" || ext == ".gltf" || ext == ".glb" || ext == ".dae" || ext == ".obj")
+            // Native engine-imported sources (.3dgskmesh / .3dganim) instead of raw models.
+            if (ext == ".3dgskmesh" || ext == ".3dganim")
                 m_modelChoices.push_back(std::move(choice));
             else if (ext == ".3dgclip")
                 m_clipChoices.push_back(std::move(choice));

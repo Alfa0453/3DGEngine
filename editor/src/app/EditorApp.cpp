@@ -3741,7 +3741,14 @@ void EditorApp::HandleMouseAssetDrag()
 void EditorApp::HandleMouseViewportSelection()
 {
     engine::Window& window = GetWindow();
-    if (m_cameraController.MouseLookActive() || m_mode != EditorMode::Edit || !window.Native()) {
+    // Suppress object selection while the right mouse button is held: RMB drives camera
+    // movement, so a left-click during it should not pick/deselect. This is a hard guard
+    // in addition to MouseLookActive(), which only latches when the RMB press started on
+    // a viewport point (misses cases like starting the drag over a gizmo or panel edge).
+    const bool rightDown = window.Native()
+        && glfwGetMouseButton(window.Native(), GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
+    if (m_cameraController.MouseLookActive() || rightDown
+        || m_mode != EditorMode::Edit || !window.Native()) {
         if (m_mouse.GizmoActiveFor(GLFW_MOUSE_BUTTON_LEFT)) {
             m_scene.EndTransformEdit();
             m_transformController.EndGizmoDrag();
@@ -6235,6 +6242,8 @@ void EditorApp::BuildPlayAgents(const std::unordered_map<std::string, engine::ec
     m_playBtGraphCache.clear();
     m_playSoundField.Clear();
     m_prevPlayerPosValid = false;
+    m_prevHp.clear();
+    m_squadAlerts.clear();
     if (!m_playRegistry) {
         return;
     }
@@ -6282,10 +6291,11 @@ void EditorApp::BuildPlayAgents(const std::unordered_map<std::string, engine::ec
         playAgent.brain.patrol = object.patrolPoints;
         playAgent.brain.vision.range = std::max(object.navAgentVisionRange, 0.0f);
         playAgent.brain.vision.halfAngleDegrees = object.navAgentVisionHalfAngle;
-        // Hearing is omnidirectional and reaches about as far as sight (min 6m). No
-        // dedicated scene field yet, so derive it from the vision range for now.
-        playAgent.hearingRange = std::max(object.navAgentVisionRange, 6.0f);
+        // Hearing is omnidirectional; authored per agent in the inspector.
+        playAgent.hearingRange = std::max(object.navAgentHearingRange, 0.0f);
         playAgent.brain.hearingRange = playAgent.hearingRange;
+        playAgent.squadAlertRadius = std::max(object.navAgentSquadAlertRadius, 0.0f);
+        playAgent.squadForgetTime = std::max(object.navAgentSquadForgetTime, 0.1f);
         if (!object.navAgentTargetName.empty()) {
             const auto target = playEntitiesByName.find(object.navAgentTargetName);
             if (target != playEntitiesByName.end()) {
@@ -6688,6 +6698,64 @@ void EditorApp::UpdateAI(float dt)
         }
     }
 
+    // Combat noise: any entity whose HP dropped this frame emits a loud noise at its
+    // position, so gunfire/melee draws nearby guards (covers player and agent attacks).
+    {
+        auto emitOnDamage = [&](engine::ecs::Entity entity) {
+            if (entity == engine::ecs::kNull || !m_playRegistry->Valid(entity)) return;
+            const engine::Health* h = m_playRegistry->TryGet<engine::Health>(entity);
+            const engine::ecs::Transform* tr =
+                m_playRegistry->TryGet<engine::ecs::Transform>(entity);
+            if (!h || !tr) return;
+            const auto prev = m_prevHp.find(entity);
+            if (prev != m_prevHp.end() && h->hp < prev->second - 0.01f) {
+                m_playSoundField.Emit(tr->position, 22.0f, 1.0f, 0.5f);   // combat is loud
+            }
+            m_prevHp[entity] = h->hp;
+        };
+        emitOnDamage(m_playPlayerEntity);
+        for (const PlayAgent& a : m_playAgents) emitOnDamage(a.entity);
+    }
+
+    // Squad coordination + de-escalation: an agent that saw its target raises its
+    // team's alert to full and stores the target's last-known position. The alert
+    // decays over the sighter's authored forget time, so teammates keep converging on
+    // that spot for a while after everyone loses sight, then calm back to patrol.
+    for (auto& kv : m_squadAlerts) {
+        SquadAlert& alert = kv.second;
+        alert.level -= dt / std::max(alert.forget, 0.1f);
+        if (alert.level <= 0.0f) { alert.level = 0.0f; alert.valid = false; }
+    }
+    for (const PlayAgent& a : m_playAgents) {
+        if (!a.perceivesTarget || a.team == 0) continue;
+        SquadAlert& alert = m_squadAlerts[a.team];
+        alert.level = 1.0f;                      // fresh sighting -> full alert
+        alert.poi = a.perceivedTargetPos;
+        alert.valid = true;
+        alert.forget = a.squadForgetTime;        // this sighter sets how long it lingers
+    }
+
+    // Flanking: group engaged agents by the target they share and assign each a slot,
+    // so multiple pursuers surround the target from spread angles instead of stacking
+    // on the same point. "Engaged" = saw the target, or its squad alert is still live.
+    std::unordered_map<engine::ecs::Entity, std::vector<int>> pursuers;
+    for (int i = 0; i < static_cast<int>(m_playAgents.size()); ++i) {
+        PlayAgent& a = m_playAgents[static_cast<std::size_t>(i)];
+        a.flankSlot = 0; a.flankCount = 1;   // reset; default solo (no offset)
+        if (a.targetEntity == engine::ecs::kNull) continue;
+        const auto alertIt = m_squadAlerts.find(a.team);
+        const bool alerted = a.team != 0 && alertIt != m_squadAlerts.end() && alertIt->second.valid;
+        if (a.perceivesTarget || alerted) pursuers[a.targetEntity].push_back(i);
+    }
+    for (const auto& kv : pursuers) {
+        const std::vector<int>& group = kv.second;
+        for (std::size_t s = 0; s < group.size(); ++s) {
+            PlayAgent& a = m_playAgents[static_cast<std::size_t>(group[s])];
+            a.flankSlot = static_cast<int>(s);
+            a.flankCount = static_cast<int>(group.size());
+        }
+    }
+
     for (PlayAgent& playAgent : m_playAgents) {
         if (!m_playRegistry->Valid(playAgent.entity)) {
             continue;
@@ -6754,22 +6822,48 @@ void EditorApp::UpdateAI(float dt)
             }
         }
 
-        // Hearing: if the agent can't see its target, the loudest noise it can hear
-        // becomes a point of interest. Graph agents read it via the HeardNoise?/
-        // Investigate nodes; the built-in brain routes to it through its search state.
-        {
-            glm::vec3 noisePos;
-            const bool heard = playAgent.hearingRange > 0.0f && !seesTarget
-                && m_playSoundField.LoudestAudible(agentPos, playAgent.hearingRange, &noisePos);
-            playAgent.ctx.heardNoise = heard;
-            if (heard) {
-                playAgent.ctx.heardPosition = noisePos;
-                if (!playAgent.useGraph) playAgent.brain.Hear(noisePos);
+        // Remember this frame's sighting so teammates can be alerted next frame.
+        playAgent.perceivesTarget = seesTarget;
+        if (seesTarget) playAgent.perceivedTargetPos = targetPos;
+
+        // Hearing + squad alerts: if the agent can't see its target, the loudest noise
+        // it can hear -- or a teammate's callout about a spotted target -- becomes a
+        // point of interest. Graph agents read it via the HeardNoise?/Investigate
+        // nodes; the built-in brain routes to it through its search state.
+        if (!seesTarget) {
+            glm::vec3 pointOfInterest;
+            bool alerted = playAgent.hearingRange > 0.0f
+                && m_playSoundField.LoudestAudible(agentPos, playAgent.hearingRange, &pointOfInterest);
+            if (!alerted && playAgent.team != 0) {
+                const auto it = m_squadAlerts.find(playAgent.team);
+                if (it != m_squadAlerts.end() && it->second.valid
+                    && glm::length(it->second.poi - agentPos) <= playAgent.squadAlertRadius) {
+                    pointOfInterest = it->second.poi;   // converge on the squad's last-known target
+                    alerted = true;
+                }
             }
+            playAgent.ctx.heardNoise = alerted;
+            if (alerted) {
+                playAgent.ctx.heardPosition = pointOfInterest;
+                if (!playAgent.useGraph) playAgent.brain.Hear(pointOfInterest);
+            }
+        } else {
+            playAgent.ctx.heardNoise = false;
         }
 
         glm::vec3 movementTarget = targetPos;
         if (!playAgent.movement.IsFlying()) movementTarget.y = agentPos.y;
+
+        // Flanking: aim at a slot on a ring around the target (at attack distance) so
+        // squadmates encircle it instead of piling onto the same spot. Solo agents
+        // (flankCount == 1) keep aiming straight at the target.
+        if (playAgent.flankCount > 1) {
+            const float ang = (static_cast<float>(playAgent.flankSlot)
+                               / static_cast<float>(playAgent.flankCount)) * 6.2831853f;
+            const float ring = std::max(playAgent.brain.reachRadius, 1.0f);
+            movementTarget.x = targetPos.x + ring * std::cos(ang);
+            movementTarget.z = targetPos.z + ring * std::sin(ang);
+        }
         const bool hasValidTarget = playAgent.targetEntity != engine::ecs::kNull
             && m_playRegistry->Valid(playAgent.targetEntity);
         const bool targetWithinReach = !playAgent.useGraph && hasValidTarget
@@ -6958,12 +7052,13 @@ void EditorApp::ConfigurePlayPlayerController(const std::unordered_map<std::stri
         const EditorScene::PlayerControllerSettings& settings = object.playerController;
         engine::PlayerController controller;
         const int authoredCameraMode =
-            settings.firstPerson ? 1 : std::clamp(settings.cameraMode, 0, 2);
+            settings.firstPerson ? 1 : std::clamp(settings.cameraMode, 0, 3);
         const int cameraMode = gameMode.cameraOverride
-            ? std::clamp(gameMode.cameraMode, 0, 2)
+            ? std::clamp(gameMode.cameraMode, 0, 3)
             : authoredCameraMode;
         controller.view = cameraMode == 1 ? engine::PlayerController::View::FirstPerson
                         : cameraMode == 2 ? engine::PlayerController::View::Isometric
+                        : cameraMode == 3 ? engine::PlayerController::View::Platformer
                                           : engine::PlayerController::View::ThirdPerson;
         controller.walkSpeed = settings.walkSpeed;
         controller.runSpeed = settings.runSpeed;
@@ -6974,6 +7069,10 @@ void EditorApp::ConfigurePlayPlayerController(const std::unordered_map<std::stri
         controller.camTargetHeight = settings.cameraTargetHeight;
         controller.SetIsometricView(settings.isometricYaw, settings.isometricPitch,
                                     settings.isometricDistance);
+        // Platformer reuses the fixed-camera distance (isometric) for its side offset,
+        // with its own authored axis yaw.
+        controller.platformerDistance = settings.isometricDistance;
+        controller.platformerYaw = settings.platformerYaw;
         controller.camCollision = settings.cameraCollision;
         controller.camProbeRadius = settings.cameraProbeRadius;
         controller.camCollisionPadding = settings.cameraCollisionPadding;

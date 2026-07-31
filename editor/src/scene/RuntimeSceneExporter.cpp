@@ -99,7 +99,7 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         return engine::MakeAssetReference(
             &assetRegistry, contentRoot, assetPath, type).id;
     };
-    out << "3DGRuntimeScene 78 " << sceneId.ToString() << '\n';
+    out << "3DGRuntimeScene 80 " << sceneId.ToString() << '\n';
     out << "# Runtime export from 3DGEditor. Editor-only flags are omitted.\n";
     const EditorScene::Environment& environment = scene.GetEnvironment();
     out << "environment "
@@ -140,7 +140,7 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         << gameMode.loseOnPlayerDeath << ' '
         << gameMode.initialScore << ' '
         << gameMode.cameraOverride << ' '
-        << std::clamp(gameMode.cameraMode, 0, 2) << '\n';
+        << std::clamp(gameMode.cameraMode, 0, 3) << '\n';
     out << "clouds "
         << (environment.clouds ? 1 : 0) << ' '
         << environment.cloudCoverage << ' '
@@ -588,7 +588,7 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
     for (const EditorScene::Object& object : scene.Objects()) {
         if (!object.playerControllerEnabled) continue;
         const EditorScene::PlayerControllerSettings& s = object.playerController;
-        const int cameraMode = s.firstPerson ? 1 : std::clamp(s.cameraMode, 0, 2);
+        const int cameraMode = s.firstPerson ? 1 : std::clamp(s.cameraMode, 0, 3);
         out << "player_controller " << std::quoted(object.name) << ' '
             << (cameraMode == 1 ? 1 : 0) << ' '
             << s.walkSpeed << ' ' << s.runSpeed << ' ' << s.jumpSpeed << ' '
@@ -607,7 +607,8 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
             << s.facingMode << ' ' << s.turnSpeed << ' '
             << cameraMode << ' '
             << s.isometricYaw << ' ' << s.isometricPitch << ' '
-            << s.isometricDistance << '\n';
+            << s.isometricDistance << ' '
+            << s.platformerYaw << '\n';   // runtime scene version 80+
     }
 
     for (const EditorScene::Object& object : scene.Objects()) {
@@ -640,6 +641,8 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
                    return id.Valid() ? id.ToString()
                                      : std::string("-");
                }());
+        // NavAgent hearing range (runtime scene version 79+).
+        out << ' ' << object.navAgentHearingRange;
         out << '\n';
     }
 

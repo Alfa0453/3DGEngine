@@ -2589,9 +2589,9 @@ void DrawGameModeSettings(EditorScene& scene, bool* open) {
             "Override Player Camera", &settings.cameraOverride);
         ImGui::BeginDisabled(!settings.cameraOverride);
         static constexpr const char* kCameraModes[] = {
-            "Third Person", "First Person", "Isometric"
+            "Third Person", "First Person", "Isometric", "Platformer"
         };
-        settings.cameraMode = std::clamp(settings.cameraMode, 0, 2);
+        settings.cameraMode = std::clamp(settings.cameraMode, 0, 3);
         changed |= ImGui::Combo(
             "Camera Mode", &settings.cameraMode, kCameraModes,
             static_cast<int>(std::size(kCameraModes)));
@@ -5186,8 +5186,8 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
         if (playerEnabled) {
             EditorScene::PlayerControllerSettings player = selected->playerController;
             bool changed = false;
-            const char* cameraModes[] = { "Third Person", "First Person", "Isometric" };
-            int cameraMode = std::clamp(player.cameraMode, 0, 2);
+            const char* cameraModes[] = { "Third Person", "First Person", "Isometric", "Platformer" };
+            int cameraMode = std::clamp(player.cameraMode, 0, 3);
             if (player.firstPerson && cameraMode == 0) cameraMode = 1; // legacy scene
             if (ImGui::Combo("Camera Mode", &cameraMode, cameraModes, IM_ARRAYSIZE(cameraModes))) {
                 player.cameraMode = cameraMode;
@@ -5196,6 +5196,7 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             }
             const bool firstPerson = cameraMode == 1;
             const bool isometric = cameraMode == 2;
+            const bool platformer = cameraMode == 3;
             changed |= ImGui::DragFloat("Walk Speed", &player.walkSpeed, 0.05f, 0.0f, 100.0f);
             changed |= ImGui::DragFloat("Run Speed", &player.runSpeed, 0.05f, 0.0f, 100.0f);
             changed |= ImGui::DragFloat("Jump Speed", &player.jumpSpeed, 0.05f, 0.0f, 100.0f);
@@ -5212,6 +5213,14 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                 changed |= ImGui::SliderFloat("Isometric Pitch", &player.isometricPitch,
                                               -89.0f, -5.0f, "%.1f deg");
                 ImGui::TextDisabled("Fixed-angle camera; movement remains camera-relative.");
+            } else if (platformer) {
+                changed |= ImGui::DragFloat("Side Distance", &player.isometricDistance,
+                                            0.1f, 0.0f, 500.0f);
+                changed |= ImGui::SliderFloat("Camera Yaw", &player.platformerYaw,
+                                              -180.0f, 180.0f, "%.1f deg");
+                ImGui::TextDisabled("Side-on 2.5D camera: yaw picks the run axis "
+                                    "(-90 = along X, 0 = along Z); the character faces "
+                                    "its travel direction.");
             } else if (!firstPerson) {
                 changed |= ImGui::DragFloat("Camera Distance", &player.cameraDistance,
                                             0.05f, 0.0f, 100.0f);
@@ -5892,6 +5901,9 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
         std::string targetName = selected->navAgentTargetName;
         float visionRange = selected->navAgentVisionRange;
         float visionHalfAngle = selected->navAgentVisionHalfAngle;
+        float hearingRange = selected->navAgentHearingRange;
+        float squadAlertRadius = selected->navAgentSquadAlertRadius;
+        float squadForgetTime = selected->navAgentSquadForgetTime;
         bool changed = false;
         changed |= ImGui::Checkbox("Nav Agent", &enabled);
         if (enabled) {
@@ -5926,6 +5938,18 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                 changed |= ImGui::DragFloat("Vision Range", &visionRange, 0.1f, 0.0f, 100.0f, "%.1f");
                 changed |= ImGui::DragFloat("Vision Half-Angle", &visionHalfAngle, 0.5f, 1.0f, 180.0f, "%.0f deg");
             }
+            changed |= ImGui::DragFloat("Hearing Range", &hearingRange, 0.1f, 0.0f, 100.0f, "%.1f");
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Omnidirectional radius for hearing noises (footsteps, combat). 0 = deaf.");
+            }
+            changed |= ImGui::DragFloat("Squad Alert Radius", &squadAlertRadius, 0.1f, 0.0f, 100.0f, "%.1f");
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("How close a teammate must be to respond to this agent's alert.");
+            }
+            changed |= ImGui::DragFloat("Squad Forget (s)", &squadForgetTime, 0.1f, 0.1f, 60.0f, "%.1f");
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("How long this agent's sighting keeps its squad alerted after losing the target.");
+            }
 
             // Faction targeting: team id + auto-acquire nearest hostile.
             int  team = selected->navAgentTeam;
@@ -5942,7 +5966,8 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
         }
         if (changed) {
             context.scene->SetSelectedNavAgent(enabled, speed, maxForce, reach, repath,
-                                               targetName, visionRange, visionHalfAngle);
+                                               targetName, visionRange, visionHalfAngle, hearingRange,
+                                               squadAlertRadius, squadForgetTime);
         }
         if (enabled) {
             ImGui::Text("Patrol points: %d", static_cast<int>(selected->patrolPoints.size()));

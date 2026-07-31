@@ -84,6 +84,7 @@ void CharacterAsset::Capture(const EditorScene::Object& o) {
     navMaxForce = o.navAgentMaxForce; navReachRadius = o.navAgentReachRadius;
     navRepathInterval = o.navAgentRepathInterval; navTargetName = o.navAgentTargetName;
     navVisionRange = o.navAgentVisionRange; navVisionHalfAngle = o.navAgentVisionHalfAngle;
+    navHearingRange = o.navAgentHearingRange;
     behaviorTreeAsset = o.navAgentBrainAsset; navTeam = o.navAgentTeam; navAutoTarget = o.navAgentAutoTarget;
     navMovementMode = o.navMovementMode; navGravity = o.navMovementGravity;
     navMaxFallSpeed = o.navMovementMaxFallSpeed; navGroundProbe = o.navMovementGroundProbe;
@@ -239,7 +240,7 @@ bool CharacterAsset::Apply(EditorScene& scene) const {
     scene.SetSelectedRagdollEnabled(ragdollEnabled);
     if (ragdollEnabled) scene.SetSelectedRagdoll(ragdoll);
     scene.SetSelectedNavAgent(navAgentEnabled, navSpeed, navMaxForce, navReachRadius,
-        navRepathInterval, navTargetName, navVisionRange, navVisionHalfAngle);
+        navRepathInterval, navTargetName, navVisionRange, navVisionHalfAngle, navHearingRange);
     if (navAgentEnabled) {
         scene.SetSelectedNavAgentBrain(behaviorTreeAsset);
         scene.SetSelectedNavAgentTeam(navTeam, navAutoTarget);
@@ -319,7 +320,7 @@ bool CharacterAsset::Save(const std::string& path, std::string* error) {
     if (!out) { if (error) *error = "Could not write character asset: " + path; return false; }
     const CharacterScript legacy{scriptEnabled, scriptClassName, scriptPath};
     const CharacterScript* primary = !scripts.empty() ? &scripts.front() : &legacy;
-    out << "3DG_CHARACTER 21 " << assetId.ToString() << '\n'
+    out << "3DG_CHARACTER 23 " << assetId.ToString() << '\n'
         << std::quoted(name) << '\n' << std::quoted(modelAssetPath) << '\n' << std::quoted(materialAssetPath) << '\n'
         << colliderEnabled << ' ' << static_cast<int>(collider.shape) << ' '
         << collider.halfExtents.x << ' ' << collider.halfExtents.y << ' ' << collider.halfExtents.z << ' '
@@ -337,6 +338,7 @@ bool CharacterAsset::Save(const std::string& path, std::string* error) {
         << healthEnabled << ' ' << health.hp << ' ' << health.maxHp << ' ' << health.alive << '\n'
         << navAgentEnabled << ' ' << navSpeed << ' ' << navMaxForce << ' ' << navReachRadius << ' ' << navRepathInterval << ' '
         << std::quoted(navTargetName) << ' ' << navVisionRange << ' ' << navVisionHalfAngle << ' '
+        << navHearingRange << ' '
         << std::quoted(behaviorTreeAsset) << ' ' << navTeam << ' ' << navAutoTarget << '\n'
         << static_cast<int>(navMovementMode) << ' ' << navGravity << ' ' << navMaxFallSpeed << ' '
         << navGroundProbe << ' ' << navStepHeight << ' ' << navMaxSlope << '\n'
@@ -424,7 +426,8 @@ bool CharacterAsset::Save(const std::string& path, std::string* error) {
         << playerController.lockOnRange << ' '
         << playerController.lockOnViewAngle << ' '
         << playerController.lockOnTargetHeight << ' '
-        << playerController.lockOnTrackingSpeed << '\n';
+        << playerController.lockOnTrackingSpeed << ' '
+        << playerController.platformerYaw << '\n';
     out << "SOCKETS " << sockets.size() << '\n';
     for (const CharacterSocket& s : sockets) {
         out << std::quoted(s.name.empty() ? std::string("-") : s.name) << ' '
@@ -530,7 +533,9 @@ bool CharacterAsset::Load(const std::string& path, std::string* error) {
        >> runClipIndex >> std::quoted(runClipName) >> walkAt >> runAt
        >> healthEnabled >> health.hp >> health.maxHp >> health.alive
        >> navAgentEnabled >> navSpeed >> navMaxForce >> navReachRadius >> navRepathInterval >> std::quoted(navTargetName)
-       >> navVisionRange >> navVisionHalfAngle >> std::quoted(behaviorTreeAsset) >> navTeam >> navAutoTarget
+       >> navVisionRange >> navVisionHalfAngle;
+    if (loadedVersion >= 22) in >> navHearingRange;   // character-authored hearing range
+    in >> std::quoted(behaviorTreeAsset) >> navTeam >> navAutoTarget
        >> movementMode >> navGravity >> navMaxFallSpeed >> navGroundProbe >> navStepHeight >> navMaxSlope
        >> scriptEnabled >> std::quoted(scriptClassName) >> std::quoted(scriptPath);
     if (!in) { if (error) *error = "Character asset is incomplete: " + path; return false; }
@@ -717,8 +722,9 @@ bool CharacterAsset::Load(const std::string& path, std::string* error) {
                    >> playerController.lockOnViewAngle
                    >> playerController.lockOnTargetHeight
                    >> playerController.lockOnTrackingSpeed;
+                if (loadedVersion >= 23) in >> playerController.platformerYaw;
             }
-            playerController.cameraMode = std::clamp(playerController.cameraMode, 0, 2);
+            playerController.cameraMode = std::clamp(playerController.cameraMode, 0, 3);
             playerController.firstPerson = playerController.cameraMode == 1;
             playerController.isometricPitch =
                 std::clamp(playerController.isometricPitch, -89.0f, 89.0f);

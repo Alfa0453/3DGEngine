@@ -568,8 +568,8 @@ void CharacterEditorPanel::RefreshAssetChoices(const std::string& assetRoot) {
             const std::filesystem::path& file = it->path();
             const std::string extension = Lower(file.extension().string());
             AssetChoice choice{file.generic_string(), file.filename().string()};
-            if (extension == ".fbx" || extension == ".gltf" || extension == ".glb"
-                || extension == ".dae" || extension == ".obj") {
+            // Native engine-imported skeletal mesh (.3dgskmesh) as the character's base model.
+            if (extension == ".3dgskmesh") {
                 m_modelChoices.push_back(std::move(choice));
             } else if (extension == ".3dgmat") {
                 m_materialChoices.push_back(std::move(choice));
@@ -1231,15 +1231,25 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
         changed |= ImGui::DragFloat("Step Height", &v.stepHeight,.01f,0.0f,5.0f);
         changed |= ImGui::DragFloat("Max Slope", &v.maxSlopeDegrees,.5f,0.0f,89.0f);
         ImGui::SeparatorText("Camera");
-        const char* cameraModes[] = { "Third Person", "First Person", "Isometric" };
-        int cameraMode = std::clamp(v.cameraMode, 0, 2);
+        const char* cameraModes[] = { "Third Person", "First Person", "Isometric", "Platformer" };
+        int cameraMode = std::clamp(v.cameraMode, 0, 3);
         if (v.firstPerson && cameraMode == 0) cameraMode = 1;
         if (ImGui::Combo("Camera Mode", &cameraMode, cameraModes, IM_ARRAYSIZE(cameraModes))) {
             v.cameraMode = cameraMode;
             v.firstPerson = cameraMode == 1;
             changed = true;
         }
-        if (cameraMode == 2) {
+        if (cameraMode == 3) {
+            ImGui::SeparatorText("Platformer Camera");
+            changed |= ImGui::DragFloat("Side Distance", &v.isometricDistance,
+                                        0.1f, 0.0f, 500.0f);
+            changed |= ImGui::SliderFloat("Camera Yaw", &v.platformerYaw,
+                                          -180.0f, 180.0f, "%.1f deg");
+            changed |= ImGui::DragFloat("Target Height", &v.cameraTargetHeight,
+                                        0.01f, -100.0f, 100.0f);
+            ImGui::TextDisabled("Side-on 2.5D: yaw picks the run axis (-90 = along X, "
+                                "0 = along Z); the character faces its travel direction.");
+        } else if (cameraMode == 2) {
             ImGui::SeparatorText("Isometric Camera");
             changed |= ImGui::DragFloat("Isometric Distance", &v.isometricDistance,
                                         0.1f, 0.0f, 500.0f);
@@ -1817,6 +1827,9 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
         changed |= ImGui::DragFloat("Vision Range",&m_asset.navVisionRange,.1f,0,1000);
         changed |= ImGui::DragFloat(
             "Vision Half-Angle", &m_asset.navVisionHalfAngle, .5f, 1, 180, "%.0f deg");
+        changed |= ImGui::DragFloat("Hearing Range",&m_asset.navHearingRange,.1f,0,1000);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Omnidirectional radius for hearing noises (footsteps, combat). 0 = deaf.");
 
         ImGui::SeparatorText("Behavior");
         changed |= drawPicker(

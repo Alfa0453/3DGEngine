@@ -395,7 +395,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         return false;
     }
 
-    out << "3DGEditorScene 109 " << m_assetId.ToString() << '\n';
+    out << "3DGEditorScene 112 " << m_assetId.ToString() << '\n';
     out << "environment "
         << m_environment.timeOfDay << ' '
         << m_environment.skyLightIntensity << ' '
@@ -451,7 +451,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         << m_gameMode.loseOnPlayerDeath << ' '
         << m_gameMode.initialScore << ' '
         << m_gameMode.cameraOverride << ' '
-        << std::clamp(m_gameMode.cameraMode, 0, 2) << '\n';
+        << std::clamp(m_gameMode.cameraMode, 0, 3) << '\n';
     out << "clouds "
         << (m_environment.clouds ? 1 : 0) << ' '
         << m_environment.cloudCoverage << ' '
@@ -936,6 +936,13 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
             out << ' ' << particleIdText(layer.assetId);
         out << ' ' << particleIdText(object.audioAssetId)
             << ' ' << particleIdText(object.navAgentBrainAssetId);
+        // NavAgent hearing range (scene version 110+).
+        out << ' ' << object.navAgentHearingRange;
+        // NavAgent squad coordination tuning (scene version 111+).
+        out << ' ' << object.navAgentSquadAlertRadius
+            << ' ' << object.navAgentSquadForgetTime;
+        // Platformer camera axis (scene version 112+).
+        out << ' ' << object.playerController.platformerYaw;
         out << '\n';
     }
 
@@ -1151,7 +1158,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             return false;
         }
     }
-    if (magic != "3DGEditorScene" ||(version < 1 || version > 109)) {
+    if (magic != "3DGEditorScene" ||(version < 1 || version > 112)) {
         if (error) *error = "Scene file has an unknown format.";
         return false;
     }
@@ -1172,7 +1179,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                >> m_gameMode.cameraOverride
                >> m_gameMode.cameraMode;
             if (m_gameMode.playerObjectName == "-") m_gameMode.playerObjectName.clear();
-            m_gameMode.cameraMode = std::clamp(m_gameMode.cameraMode, 0, 2);
+            m_gameMode.cameraMode = std::clamp(m_gameMode.cameraMode, 0, 3);
             if (!in) {
                 if (error) *error = "Scene file contains invalid Game Mode settings.";
                 Clear();
@@ -1884,6 +1891,9 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         std::string navAgentTargetName;
         float navAgentVisionRange = 12.0f;
         float navAgentVisionHalfAngle = 45.0f;
+        float navAgentHearingRange = 12.0f;
+        float navAgentSquadAlertRadius = 18.0f;
+        float navAgentSquadForgetTime = 6.0f;
         std::string navAgentBrainAsset;
         engine::AssetHandle navAgentBrainAssetId;
         int navAgentTeam = 0;
@@ -2732,6 +2742,18 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                     return false;
                 }
             }
+            // NavAgent hearing range (scene version 110+).
+            if (version >= 110) {
+                in >> navAgentHearingRange;
+            }
+            // NavAgent squad coordination tuning (scene version 111+).
+            if (version >= 111) {
+                in >> navAgentSquadAlertRadius >> navAgentSquadForgetTime;
+            }
+            // Platformer camera axis (scene version 112+).
+            if (version >= 112) {
+                in >> playerController.platformerYaw;
+            }
             particleShape = std::clamp(particleShape,
                 static_cast<int>(engine::EmitShape::Point), static_cast<int>(engine::EmitShape::Cone));
             particleBlend = std::clamp(particleBlend,
@@ -2814,7 +2836,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         m_objects.back().triggerCameraLockInput = triggerCameraLockInput != 0;
         m_objects.back().triggerCameraSkippable = triggerCameraSkippable != 0;
         m_objects.back().playerControllerEnabled = playerControllerEnabled != 0;
-        playerController.cameraMode = std::clamp(playerController.cameraMode, 0, 2);
+        playerController.cameraMode = std::clamp(playerController.cameraMode, 0, 3);
         playerController.isometricPitch =
             std::clamp(playerController.isometricPitch, -89.0f, 89.0f);
         playerController.isometricDistance =
@@ -2850,6 +2872,9 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         m_objects.back().navAgentTargetName = navAgentTargetName;
         m_objects.back().navAgentVisionRange = navAgentVisionRange;
         m_objects.back().navAgentVisionHalfAngle = navAgentVisionHalfAngle;
+        m_objects.back().navAgentHearingRange = navAgentHearingRange;
+        m_objects.back().navAgentSquadAlertRadius = navAgentSquadAlertRadius;
+        m_objects.back().navAgentSquadForgetTime = navAgentSquadForgetTime;
         m_objects.back().navAgentBrainAsset = navAgentBrainAsset;
         m_objects.back().navAgentBrainAssetId = navAgentBrainAssetId;
         m_objects.back().navAgentTeam = navAgentTeam;
@@ -3907,7 +3932,7 @@ void EditorScene::SetEnvironment(const Environment& environment) {
 void EditorScene::SetGameModeSettings(const GameModeSettings& settings) {
     PushUndoSnapshot();
     m_gameMode = settings;
-    m_gameMode.cameraMode = std::clamp(m_gameMode.cameraMode, 0, 2);
+    m_gameMode.cameraMode = std::clamp(m_gameMode.cameraMode, 0, 3);
     m_dirty = true;
 }
 
@@ -4261,7 +4286,7 @@ bool EditorScene::SetSelectedPlayerController(const PlayerControllerSettings& se
     PushUndoSnapshot();
     PlayerControllerSettings safe = settings;
     if (safe.firstPerson && safe.cameraMode == 0) safe.cameraMode = 1;
-    safe.cameraMode = std::clamp(safe.cameraMode, 0, 2);
+    safe.cameraMode = std::clamp(safe.cameraMode, 0, 3);
     safe.firstPerson = safe.cameraMode == 1;
     safe.cameraDistance = std::max(safe.cameraDistance, 0.0f);
     safe.isometricPitch = std::clamp(safe.isometricPitch, -89.0f, 89.0f);
@@ -4623,7 +4648,8 @@ bool EditorScene::SetSelectedScriptEnabled(bool enabled) {
 bool EditorScene::SetSelectedNavAgent(bool enabled, float speed, float maxForce,
                                       float reachRadius, float repathInterval,
                                       const std::string& targetName, float visionRange,
-                                      float visionHalfAngle) {
+                                      float visionHalfAngle, float hearingRange,
+                                      float squadAlertRadius, float squadForgetTime) {
     if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
         return false;
     }
@@ -4640,6 +4666,9 @@ bool EditorScene::SetSelectedNavAgent(bool enabled, float speed, float maxForce,
     selected.navAgentTargetName = targetName;
     selected.navAgentVisionRange = std::max(visionRange, 0.0f);
     selected.navAgentVisionHalfAngle = std::clamp(visionHalfAngle, 1.0f, 180.0f);
+    selected.navAgentHearingRange = std::max(hearingRange, 0.0f);
+    selected.navAgentSquadAlertRadius = std::max(squadAlertRadius, 0.0f);
+    selected.navAgentSquadForgetTime = std::max(squadForgetTime, 0.1f);
     m_dirty = true;
     return true;
 }
@@ -5399,6 +5428,9 @@ bool EditorScene::DuplicateSelected(const engine::Mesh & cube, const engine::Mes
     m_objects.back().navAgentTargetName = selectedCopy.navAgentTargetName;
     m_objects.back().navAgentVisionRange = selectedCopy.navAgentVisionRange;
     m_objects.back().navAgentVisionHalfAngle = selectedCopy.navAgentVisionHalfAngle;
+    m_objects.back().navAgentHearingRange = selectedCopy.navAgentHearingRange;
+    m_objects.back().navAgentSquadAlertRadius = selectedCopy.navAgentSquadAlertRadius;
+    m_objects.back().navAgentSquadForgetTime = selectedCopy.navAgentSquadForgetTime;
     m_objects.back().navAgentBrainAsset = selectedCopy.navAgentBrainAsset;
     m_objects.back().navAgentBrainAssetId =
         selectedCopy.navAgentBrainAssetId;
