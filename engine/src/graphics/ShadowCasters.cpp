@@ -69,7 +69,8 @@ void ShadowCasterBatch::Draw(Shader &sh)
         sh.SetInt("uHasAlbedoMap", 0);
         const GLsizei stride = 16 * static_cast<GLsizei>(sizeof(float));
         for (const Record& r : m_records) {
-            glBindVertexArray(r.mesh->Vao());
+            const int lod = r.mesh->LodForTriangleBudget(50000u);
+            r.mesh->BindLod(lod);
             glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
             const std::size_t base = static_cast<std::size_t>(r.offsetFloats) * sizeof(float);
             for (int c = 0; c < 4; ++c) {
@@ -79,7 +80,8 @@ void ShadowCasterBatch::Draw(Shader &sh)
                                       reinterpret_cast<void*>(base + static_cast<std::size_t>(c) * 4 * sizeof(float)));
                 glVertexAttribDivisor(loc, 1);
             }
-            glDrawElementsInstanced(GL_TRIANGLES, static_cast<GLsizei>(r.mesh->IndexCount()),
+            glDrawElementsInstanced(GL_TRIANGLES,
+                                    static_cast<GLsizei>(r.mesh->IndexCount(lod)),
                                     GL_UNSIGNED_INT, nullptr, r.count);
             for (GLuint loc = 3; loc <= 6; ++loc) {
                 glVertexAttribDivisor(loc, 0);
@@ -104,7 +106,7 @@ void ShadowCasterBatch::Draw(Shader &sh)
             const bool hasMap = pr.material && pr.material->albedoMap;
             sh.SetInt("uHasAlbedoMap", hasMap ? 1 : 0); sh.SetInt("uAlbedoMap", 0);
             if (hasMap) pr.material->albedoMap->Bind(0);
-            pr.mesh->Draw();
+            pr.mesh->DrawLod(pr.mesh->LodForTriangleBudget(50000u));
         }
     }
 }

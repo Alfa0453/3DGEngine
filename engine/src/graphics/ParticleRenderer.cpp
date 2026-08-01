@@ -8,16 +8,15 @@
 #include "engine/graphics/Mesh.h"
 #include "engine/graphics/Model.h"
 #include "engine/graphics/Primitives.h"
+#include "engine/graphics/ShaderParameterBinding.h"
 
 #include <glad/glad.h>
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
-#include <algorithm>
 #include <chrono>
 #include <algorithm>
 #include <vector>
-#include <sstream>
 
 namespace engine {
 namespace {
@@ -123,43 +122,14 @@ void main() {
 }
 )GLSL";
 
-std::vector<float> ShaderNumbers(std::string value) {
-    std::replace(value.begin(), value.end(), ',', ' ');
-    std::replace(value.begin(), value.end(), '(', ' ');
-    std::replace(value.begin(), value.end(), ')', ' ');
-    std::istringstream input(value);
-    std::vector<float> result;
-    float number = 0.0f;
-    while (input >> number) result.push_back(number);
-    return result;
-}
-
 void UploadParticleShaderParameters(Shader& shader, const EmitterConfig& config) {
     int textureUnit = 4;
     for (const ParticleShaderParameter& parameter : config.shaderParameters) {
-        const std::string uniform = "u_" + parameter.name;
-        if (parameter.type == 7) {
-            const auto texture = config.shaderTextures.find(parameter.name);
-            if (texture != config.shaderTextures.end() && texture->second) {
-                texture->second->Bind(static_cast<unsigned int>(textureUnit));
-                shader.SetInt(uniform, textureUnit++);
-            }
-            continue;
-        }
-        const auto values = ShaderNumbers(parameter.value);
-        if (parameter.type == 1 || parameter.type == 2)
-            shader.SetInt(uniform, parameter.value == "true" ? 1
-                : values.empty() ? 0 : static_cast<int>(values[0]));
-        else if (parameter.type == 3 && values.size() >= 2)
-            shader.SetVec2(uniform, {values[0], values[1]});
-        else if (parameter.type == 4 && values.size() >= 3)
-            shader.SetVec3(uniform, {values[0], values[1], values[2]});
-        else if ((parameter.type == 5 || parameter.type == 6)
-                 && values.size() >= 4)
-            shader.SetVec4(
-                uniform, {values[0], values[1], values[2], values[3]});
-        else shader.SetFloat(
-            uniform, values.empty() ? 0.0f : values[0]);
+        const auto texture = config.shaderTextures.find(parameter.name);
+        textureUnit = UploadShaderParameter(
+            shader, parameter.name, parameter.type, parameter.value,
+            texture == config.shaderTextures.end() ? nullptr : texture->second,
+            textureUnit);
     }
 }
 

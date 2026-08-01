@@ -5,8 +5,10 @@ data-oriented ECS, a deterministic physics solver, behaviour-tree AI, skeletal
 animation, audio, a full Dear ImGui editor, and a standalone runtime player that
 ships editor-authored scenes as a game.
 
-This manual is a reference to the engine's architecture and systems. For a
-hands-on walkthrough, see **[TUTORIAL_FirstGame.md](TUTORIAL_FirstGame.md)**.
+This manual is a reference to the engine's architecture and systems. The newer,
+source-audited chapter set is available at
+**[engine-systems/README.md](engine-systems/README.md)**. For a hands-on
+walkthrough, see **[TUTORIAL_FirstGame.md](TUTORIAL_FirstGame.md)**.
 
 ---
 
@@ -199,6 +201,20 @@ engine::ScriptRegistry::Instance().Register("Coin", [] { return std::make_unique
 `engine::FixedUpdateScripts(reg, h)` runs `OnFixedUpdate`; `engine::ShutdownScripts(reg)`
 tears them down.
 
+Timers can use a callback event directly, or a function name:
+
+```cpp
+void OnCreate() override {
+    BindTimerFunction("CastSpell", [this] { CastSpell(); });
+    SetTimerByFunctionName("CastSpell", 0.75f, true);
+    // SetTimerByEvent(0.2f, [this] { SpawnImpact(); });
+}
+```
+
+Use `ClearTimer(handle)`, `ClearTimerByFunctionName(name)`, and
+`IsTimerActive(handle/name)` to manage them. Named Lua functions use
+`Engine.SetTimerByFunctionName`.
+
 **Built-in gameplay systems** (`GameplaySystems.h`, `ecs/RuntimeSystems.h`):
 `UpdateGameplay` (Rotators + Movers), `UpdateHealth` (flips `alive` / `justDied`),
 `UpdateRuntimeMotion` (linear/angular velocity), `UpdateProjectiles`, `UpdateAttachments`.
@@ -215,11 +231,15 @@ clock, and has a built-in "lose when the player dies" rule. Scripts drive it dir
 ```cpp
 engine::GameMode::Instance().AddScore(100);
 if (allCoinsCollected) engine::GameMode::Instance().Win("Level Clear!");
+SetGlobalTimeDilation(0.25f); // script helper: quarter-speed
+HitStop(0.08f);              // real-time 80 ms impact freeze
 ```
 
 The runtime calls `Update(reg, playerEntity, dt)` each step, freezes the simulation once
 the state isn't Playing, and reads `State()` / `Score()` / `Message()` for the HUD and
-end screen.
+end screen. Global dilation scales gameplay, scripts/timers, physics, AI, animation,
+particles, and gameplay cameras. Hit stop is layered over that scale and counts down
+with unscaled time, allowing a complete zero-delta freeze to recover automatically.
 
 ---
 
@@ -310,6 +330,28 @@ Two scene formats:
 
 `Instantiate` produces `MeshRenderer` + asset-reference components; call
 `ResolveRegistryAssets` to turn them into render-ready assets (§12).
+
+### Streamed worlds
+
+A **`.3dgworld`** asset combines one persistent scene with any number of streamed
+level scenes. Open **Panels → World Editor**, create a world, choose its persistent
+level, then add levels with a placement transform and one of these policies:
+
+- **Distance** loads inside `Load Radius` and unloads outside `Unload Radius`.
+- **Always Loaded** loads once and remains resident.
+- **Manual** changes only when gameplay requests it.
+
+The player applies each level's complete location/rotation/scale, activates its
+rendering, physics, terrain, navigation, AI, camera, audio, particle, and script
+data, then calls script `OnDestroy` before unloading its entities. C++ scripts can
+call `RequestLevelLoad("Dungeon")` / `RequestLevelUnload("Dungeon")`; Lua uses
+`Engine.RequestLevelLoad("Dungeon")` / `Engine.RequestLevelUnload("Dungeon")`.
+The identifier may be the manifest path, file name, or file stem.
+
+**Cook World** packages the manifest, every referenced runtime scene, Lua scripts,
+and the union of all engine-owned asset dependencies. The generated `player.cfg`
+boots `Content/Scenes/world.3dgworld`, so streamed-only assets are available in the
+standalone build.
 
 ---
 

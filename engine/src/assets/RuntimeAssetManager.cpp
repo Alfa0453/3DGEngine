@@ -225,6 +225,31 @@ const RuntimeMaterialAsset* RuntimeAssetManager::LoadMaterial(const std::string&
     return result;
 }
 
+const FoliageAssetData* RuntimeAssetManager::LoadFoliage(
+    const std::string& path, std::string* error) {
+    if (path.empty()) {
+        SetError(error, "RuntimeAssetManager: foliage path is empty");
+        return nullptr;
+    }
+    const auto existing = m_foliage.find(path);
+    if (existing != m_foliage.end()) {
+        SetError(error, {});
+        return existing->second.get();
+    }
+    auto foliage = std::make_unique<FoliageAssetData>();
+    if (!LoadFoliageAsset(path, foliage.get(), error)) return nullptr;
+    const FoliageAssetData* result = foliage.get();
+    m_foliage.emplace(path, std::move(foliage));
+    SetError(error, {});
+    return result;
+}
+
+const FoliageAssetData* RuntimeAssetManager::ReloadFoliage(
+    const std::string& path, std::string* error) {
+    m_foliage.erase(path);
+    return LoadFoliage(path, error);
+}
+
 const Shader* RuntimeAssetManager::LoadShader(
     const std::string& path, bool skinned, std::string* error)
 {
@@ -301,6 +326,11 @@ const RuntimeMaterialAsset* RuntimeAssetManager::FindMaterial(const std::string&
 {
     const auto found = m_materials.find(path);
     return found == m_materials.end() ? nullptr : found->second.get();
+}
+
+const FoliageAssetData* RuntimeAssetManager::FindFoliage(const std::string& path) const {
+    const auto found = m_foliage.find(path);
+    return found == m_foliage.end() ? nullptr : found->second.get();
 }
 RuntimeAssetManager::ResolveReport RuntimeAssetManager::ResolveRegistryAssets(ecs::Registry &registry)
 {
@@ -628,6 +658,56 @@ RuntimeAssetManager::ResolveReport RuntimeAssetManager::ResolveRegistryAssets(ec
         registry.Add<ecs::LoadedMaterialAsset>(entity, loaded);
     });
 
+    registry.view<ecs::FoliageComponent>().each(
+        [&](ecs::Entity, ecs::FoliageComponent& component) {
+            if (component.assetPath.empty()) return;
+            const bool wasCached = FindFoliage(component.assetPath) != nullptr;
+            std::string error;
+            const FoliageAssetData* foliage = LoadFoliage(component.assetPath, &error);
+            if (!foliage) {
+                report.errors.push_back(error);
+                return;
+            }
+            if (!wasCached) ++report.foliageAssetsLoaded;
+            component.assetId = foliage->header.id;
+            component.types.clear();
+            component.types.reserve(foliage->types.size());
+            for (const FoliageTypeAsset& source : foliage->types) {
+                ecs::FoliageTypeRuntime type;
+                type.name = source.name;
+                type.meshPath = source.meshPath;
+                type.meshId = source.meshId;
+                type.materialPath = source.materialPath;
+                type.materialId = source.materialId;
+                type.cullStartDistance = source.cullStartDistance;
+                type.cullEndDistance = source.cullEndDistance;
+                type.windStrength = source.windStrength;
+                type.castShadows = source.castShadows;
+                type.collisionEnabled = source.collisionEnabled;
+                type.model = LoadModel(source.meshPath, &error);
+                if (!type.model) {
+                    report.errors.push_back(error);
+                } else if (!source.materialPath.empty()) {
+                    const RuntimeMaterialAsset* material =
+                        LoadMaterial(source.materialPath, &error);
+                    if (!material) {
+                        report.errors.push_back(error);
+                    } else {
+                        type.material = material->material;
+                        if (!material->albedoMapPath.empty())
+                            type.material.albedoMap = LoadTexture(material->albedoMapPath, &error);
+                        if (!material->normalMapPath.empty())
+                            type.material.normalMap = LoadTexture(material->normalMapPath, &error);
+                        if (!material->metalRoughMapPath.empty())
+                            type.material.metalRoughMap = LoadTexture(material->metalRoughMapPath, &error);
+                    }
+                }
+                component.types.push_back(std::move(type));
+            }
+            ++component.revision;
+            ++report.foliageActorsAssigned;
+        });
+
     return report;
 }
 void RuntimeAssetManager::Clear()
@@ -636,6 +716,7 @@ void RuntimeAssetManager::Clear()
     m_skinnedModels.clear();
     m_textures.clear();
     m_materials.clear();
+    m_foliage.clear();
     m_shaderPrograms.Clear();
     m_shaderAssets.clear();
 }

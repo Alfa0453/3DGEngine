@@ -21,6 +21,7 @@
 #include <engine/graphics/Mesh.h>
 #include <engine/graphics/Model.h>
 #include <engine/graphics/PbrRenderer.h>
+#include <engine/graphics/FoliageRenderer.h>
 #include <engine/graphics/ParticleRenderer.h>
 #include <engine/graphics/RuntimeParticleSystem.h>
 #include <engine/graphics/PostProcess.h>
@@ -50,6 +51,8 @@
 #include "CharacterEditorPanel.h"
 #include "ClipEditorPanel.h"
 #include "PrefabAsset.h"
+
+#include <engine/scene/WorldManifest.h>
 #include "AnimationGraphEditorPanel.h"
 
 #include "EditorAssets.h"
@@ -184,6 +187,11 @@ private:
     void DrawPrefabEditorPanel();   // author a reusable object template (.3dgprefab)
     void DrawScriptDebugPanel();    // live per-entity script field inspector (Play mode)
     void HotReloadScripts();        // rebuild + reload game_scripts.dll without restart (dev)
+    void DrawWorldEditorPanel();    // compose a streamed world (.3dgworld) from level scenes
+    // Cook an authoring world (editor-scene refs) into a runnable one: export each level
+    // to a runtime scene, compute bounds, and write the cooked .3dgworld.
+    bool CookWorld(const engine::WorldManifest& authoring, const std::string& authoringDir,
+                   const std::string& outputDir, std::string* error);
     void DrawViewportPanel();   // scene rendered into a dockable, interactive panel
     // Maps a main-window cursor position into scene render-pixel space when the Viewport
     // panel owns input; returns false (and passes the point through) otherwise.
@@ -196,6 +204,13 @@ private:
     void DrawDirtyScenePrompt();
     EditorDockspace::GameplayDebugState BuildGameplayDebugState();
     EditorDockspace::AnimationPreviewState BuildAnimationPreviewState();
+    EditorDockspace::AnimationPreviewState BuildAnimationAssetPreviewState();
+    void OpenAnimationAssetPreview(const std::string& path,
+                                   EditorAssets::Type type);
+    void RefreshAnimationAssetPreviewChoices();
+    unsigned int RenderAnimationAssetPreview(
+        const engine::SkinnedModel& model, int clipIndex,
+        float durationSeconds);
     void DrawAssetOverlay(float x, float y, const glm::vec3& text, const glm::vec3& muted);
     void DrawLogOverlay(float x, float y, const glm::vec3& text, const glm::vec3& muted);
     void HandleGlobalShortcuts(engine::Window& window);
@@ -214,13 +229,15 @@ private:
     void HandleMouseViewportSelection();
     void HandleMouseViewportGizmo();
     void HandleTerrainSculpt();
+    void HandleFoliagePaint();
     void AddTerrainMeshes(engine::ecs::Registry& pbrRegistry);   // shared edit + play terrain draw
-    // Representative albedo colour of a painted-layer material (base colour modulated by
-    // the average of its albedo map); cached by path. Empty path -> default palette.
-    glm::vec3 TerrainLayerMaterialColor(const std::string& materialPath);
+    // PBR surface represented by a painted-layer material. Albedo textures contribute
+    // their average colour while scalar AO/roughness/metallic remain fully effective.
+    engine::TerrainLayerSurface TerrainLayerMaterialSurface(const std::string& materialPath);
     bool AverageImageColor(const std::string& relativePath, glm::vec3& outColor);
     float TerrainSurfaceY(float worldX, float worldZ, bool& over);  // walkable height query
     float WaterSurfaceY(float worldX, float worldZ, bool& over);     // wave height for buoyancy
+    bool UpdateUnderwaterState(const engine::Camera& camera, float dt);
     void ApplyWaterBuoyancy(float dt);                               // float/sink dynamic bodies in water
     void BeginAssetDrag();
     void DropPayloadOnScene();
@@ -240,10 +257,12 @@ private:
     void AddDynamicCube();
     void AddStaticFloor();
     void AddTerrain();
-    void AddWater(int preset = 0);   // 0 generic, 1 lake, 2 ocean, 3 river
+    void AddWater(int preset = 0, bool createRiverSpline = true); // 0 generic, 1 lake, 2 ocean, 3 river
     void DrawWaterBodies(const engine::Camera& camera, float aspect);   // transparent water pass
+    void CaptureWaterSceneBuffers();
     void DrawGrass(const engine::Camera& camera, float aspect);         // instanced grass on terrain
-    void AddSpline();                                     // create an editable Catmull-Rom path
+    void DrawFoliage(const engine::Camera& camera, float aspect);       // instanced mesh foliage actors
+    void AddSpline(int type = 0);                         // create an editable path/river/rail
     void DrawSplines(const glm::mat4& viewProj);          // curve + control-point handles
     void AddTriggerVolume();
     void AddNavMeshBoundsVolume();
@@ -351,6 +370,7 @@ private:
     EditorDockspace       m_dockspace;
     EditorDragDrop        m_dragDrop;
     EditorGizmo           m_gizmo;
+    int                   m_selectedSplinePoint = -1;
     EditorLog             m_log;
     EditorMouseController m_mouse;
     EditorPanels          m_panels;
@@ -379,6 +399,7 @@ private:
     std::optional<engine::Shader>        m_outlineShader;
     std::optional<engine::Shader>        m_skinnedOutlineShader;
     std::optional<engine::PbrRenderer>   m_pbrRenderer;
+    std::optional<engine::FoliageRenderer> m_foliageRenderer;
     std::optional<engine::ParticleRenderer> m_particleRenderer;
     std::optional<engine::PostProcess>   m_postProcess;
     std::optional<engine::ProceduralSky> m_sky;
@@ -386,6 +407,9 @@ private:
     std::optional<engine::SSAO>          m_ssao;
     std::optional<engine::SSR>           m_ssr;
     std::optional<engine::Framebuffer>   m_viewportFbo;   // scene-in-a-panel display target
+    std::optional<engine::Framebuffer>   m_waterSceneCopy; // opaque colour + depth sampled by water
+    engine::PostProcess::UnderwaterSettings m_underwaterVisuals;
+    float m_underwaterBlend = 0.0f;
     // Scene-viewport panel rect in main-window pixel space (set each frame by
     // DrawViewportPanel). When valid, mouse picking / camera / gizmo route here.
     float m_sceneViewX = 0.0f;
@@ -404,12 +428,26 @@ private:
     std::unordered_map<engine::ecs::Entity, TerrainCache> m_terrains;
     std::unordered_map<engine::ecs::Entity, engine::Water> m_waters;   // one Water per water object
     std::unordered_map<engine::ecs::Entity, std::unique_ptr<engine::GrassField>> m_grass;   // one grass field per terrain
-    std::unordered_map<std::string, glm::vec3> m_terrainMaterialColors;   // paint-layer material -> colour cache
+    std::unordered_map<std::string, engine::TerrainLayerSurface> m_terrainMaterialSurfaces;
+    engine::TerrainCameraConstraint m_terrainCameraConstraint;
     bool  m_terrainSculpt = false;        // sculpt mode active (paints the selected terrain)
     int   m_terrainSculptMode = 0;        // 0 raise, 1 lower, 2 smooth, 3 flatten, 4 paint
     int   m_terrainPaintLayer = 1;        // 0 auto/erase, 1 grass, 2 rock, 3 dirt, 4 snow, 5 sand
     float m_terrainBrushRadius = 5.0f;
     float m_terrainBrushStrength = 6.0f;
+    glm::vec2 m_terrainBrushCenterLocal{0.0f};
+    bool  m_terrainBrushHoverValid = false;
+    bool  m_terrainBrushApplying = false;
+    bool  m_foliagePaint = false;
+    bool  m_foliageErase = false;
+    float m_foliageBrushRadius = 4.0f;
+    float m_foliagePaintDensity = 0.5f;
+    int   m_foliageTypeIndex = 0;
+    float m_foliageStrokeCooldown = 0.0f;
+    glm::vec3 m_foliageBrushCenterWorld{0.0f};
+    std::vector<glm::vec3> m_foliageBrushRing;
+    bool m_foliageBrushHoverValid = false;
+    bool m_foliageBrushApplying = false;
     std::optional<engine::TextRenderer>  m_text;
     engine::ImGuiLayer                   m_imgui;
     engine::GpuProfiler                  m_gpuProfiler;   // per-pass GPU timings
@@ -428,6 +466,10 @@ private:
     ClipEditorPanel                      m_clipEditor;
     AnimationGraphEditorPanel            m_graphEditor;
     PrefabAsset                          m_prefabAsset;      // prefab being authored in the Prefab Editor
+    engine::WorldManifest                m_worldAuthoring;   // world being composed in the World Editor
+    std::string                          m_worldAuthoringPath;  // .3dgworld authoring file
+    std::string                          m_worldCookOutputDir;  // where Cook writes runtime scenes + manifest
+    std::string                          m_worldStatus;      // last save/load/cook message
     std::string                          m_prefabPath;       // current .3dgprefab path ("" = unsaved)
     engine::ScriptModule                 m_scriptModule;     // loaded hot-reload script DLL (dev)
     engine::HudDocument                  m_hud;              // active HUD document (in memory)
@@ -525,6 +567,26 @@ private:
     std::unordered_map<engine::ecs::Entity, float> m_animationPreviewTimes;
     std::unordered_map<engine::ecs::Entity, std::vector<glm::mat4>> m_editAnimationPoses;
     std::unordered_map<std::string, float> m_animationPreviewParameters;
+    std::string m_animationAssetPreviewPath;
+    std::string m_animationAssetPreviewMeshPath;
+    EditorAssets::Type m_animationAssetPreviewType = EditorAssets::Type::Other;
+    std::vector<EditorDockspace::AnimationPreviewState::AssetChoice>
+        m_animationAssetPreviewMeshes;
+    std::unordered_map<std::string, std::string> m_animationPreferredRigBySkeleton;
+    engine::RuntimeAssetManager m_animationPreviewAssets;
+    std::optional<engine::Framebuffer> m_animationAssetPreviewFbo;
+    std::unique_ptr<engine::SkinnedRenderer> m_animationAssetPreviewRenderer;
+    std::vector<glm::mat4> m_animationAssetPreviewPose;
+    float m_animationAssetPreviewTime = 0.0f;
+    float m_animationAssetPreviewSpeed = 1.0f;
+    float m_animationAssetPreviewYaw = 0.0f;
+    float m_animationAssetPreviewPitch = 0.0f;
+    float m_animationAssetPreviewZoom = 1.0f;
+    bool m_animationAssetPreviewPlaying = true;
+    bool m_animationAssetPreviewLoop = true;
+    bool m_animationAssetPreviewStripRootMotion = false;
+    bool m_animationAssetPreviewRestartRequested = false;
+    bool m_animationAssetPreviewRefreshRequested = false;
     AnimationPreviewAction m_animationPreviewAction;
     int m_animationActionClip = 0;
     float m_animationActionFadeIn = 0.08f;

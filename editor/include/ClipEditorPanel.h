@@ -26,6 +26,8 @@ class ClipEditorPanel {
 public:
     ~ClipEditorPanel();
     void QueueOpen(const std::string& path);
+    void QueueSource(const std::string& animationPath,
+                     const std::string& previewMeshPath);
     void Draw(const std::string& assetRoot, bool* open, bool* assetSaved,
               std::string* message, float deltaTime);
 
@@ -40,6 +42,8 @@ private:
     AnimationClipAsset m_asset;
     std::string m_path;
     std::string m_pendingOpen;
+    std::string m_pendingSource;
+    std::string m_pendingPreviewMesh;
     std::array<char, 128> m_nameBuffer{};
     std::array<char, 128> m_sourceSearch{};
     std::array<char, 128> m_meshSearch{};

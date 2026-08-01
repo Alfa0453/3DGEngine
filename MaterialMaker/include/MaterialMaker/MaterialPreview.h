@@ -11,6 +11,7 @@
 #include <engine/graphics/IBL.h>
 #include <engine/graphics/ProceduralSky.h>
 #include <engine/graphics/DayNightCycle.h>
+#include <engine/assets/RuntimeAssetManager.h>
 
 #include <glm/glm.hpp>
 
@@ -32,6 +33,7 @@ namespace material_maker {
 // context is only guaranteed current while the ImGui panel is being drawn.
 class MaterialPreview {
 public:
+    ~MaterialPreview();
     enum class Shape   { Sphere, Cube, Plane };
     enum class Channel { Full, Albedo, Metallic, Roughness, Normal, AO };
 
@@ -57,6 +59,10 @@ public:
         std::string normalMapPath;
         std::string metalRoughMapPath;
         std::string heightMapPath;
+        // Optional engine-owned Surface shader and its material-instance values.
+        std::string shaderPath;
+        std::unordered_map<std::string, std::string> shaderParameters;
+        std::unordered_map<std::string, int> shaderParameterTypes;
     };
 
     // Result of loading a texture map, for a thumbnail + status in the panel.
@@ -113,6 +119,7 @@ private:
     std::optional<engine::Mesh>          m_sphere, m_cube, m_plane, m_groundMesh;
     std::optional<engine::Framebuffer>   m_fbo;
     std::optional<engine::PbrRenderer>   m_pbr;
+    std::unique_ptr<engine::RuntimeAssetManager> m_customAssets;
     std::optional<engine::IBL>           m_ibl;
     std::optional<engine::ProceduralSky> m_sky;
     std::optional<engine::Shader>        m_debug;      // unlit channel-view shader

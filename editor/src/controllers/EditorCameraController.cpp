@@ -55,7 +55,8 @@ void EditorCameraController::UpdateCamera(engine::Window& window,
         double cursorY = 0.0;
         glfwGetCursorPos(window.Native(), &cursorX, &cursorY);
         const float scrollY = window.ScrollDeltaY();
-        if (scrollY != 0.0f && isViewportPoint(static_cast<float>(cursorX), static_cast<float>(cursorY))) {
+        if (scrollY != 0.0f
+            && isViewportPoint(static_cast<float>(cursorX), static_cast<float>(cursorY))) {
             const float zoomSpeed = window.IsKeyPressed(GLFW_KEY_LEFT_SHIFT) ? 2.0f : 1.0f;
             camera.MoveForward(scrollY * zoomSpeed);
         }

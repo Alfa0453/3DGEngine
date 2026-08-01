@@ -34,6 +34,7 @@ private:
     bool SaveDocument(EditorAssets& assets, bool saveAs);
     bool DuplicateDocument(EditorAssets& assets);
     void RequestNew();
+    void ApplyDomainChange(engine::ShaderDomain domain);
     void GenerateSources();
     void DrawGraphCanvas();
     void DrawGraphInspector(EditorAssets& assets);
@@ -73,6 +74,7 @@ private:
     bool m_autoCompile = true;
     bool m_compilePending = true;
     bool m_applied = false;
+    int m_pendingDomain = -1;
     double m_compileMilliseconds = 0.0;
     int m_selectedDiagnostic = -1;
     int m_sourceTab = 0;

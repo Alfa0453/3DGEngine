@@ -6,12 +6,12 @@
 #include "engine/graphics/Shader.h"
 #include "engine/graphics/Model.h"
 #include "engine/graphics/Texture.h"
+#include "engine/graphics/ShaderParameterBinding.h"
 
 #include <glad/glad.h>
 #include <glm/glm.hpp>
 
 #include <algorithm>
-#include <sstream>
 #include <string>
 #include <vector>
 
@@ -37,47 +37,18 @@ inline ModelMaterialOverride LoadedModelMaterialOverride(
     return result;
 }
 
-inline std::vector<float> ParseShaderParameterNumbers(std::string value) {
-    std::replace(value.begin(), value.end(), ',', ' ');
-    std::replace(value.begin(), value.end(), '(', ' ');
-    std::replace(value.begin(), value.end(), ')', ' ');
-    std::istringstream input(value);
-    std::vector<float> values;
-    float number = 0.0f;
-    while (input >> number) values.push_back(number);
-    return values;
-}
-
 inline void UploadLoadedMaterialShaderParameters(
     Shader& shader, const LoadedMaterialAsset& material) {
     int textureUnit = 18;
     for (const auto& entry : material.shaderParameters) {
-        const std::string uniform = "u_" + entry.first;
         const auto type = material.shaderParameterTypes.find(entry.first);
         const int valueType =
             type == material.shaderParameterTypes.end() ? 0 : type->second;
-        if (valueType == 7) {
-            const auto texture = material.shaderTextures.find(entry.first);
-            if (texture != material.shaderTextures.end() && texture->second) {
-                texture->second->Bind(static_cast<unsigned int>(textureUnit));
-                shader.SetInt(uniform, textureUnit++);
-            }
-            continue;
-        }
-        const std::vector<float> values =
-            ParseShaderParameterNumbers(entry.second);
-        if (valueType == 1 || valueType == 2)
-            shader.SetInt(uniform, entry.second == "true" ? 1
-                : values.empty() ? 0 : static_cast<int>(values[0]));
-        else if (valueType == 3 && values.size() >= 2)
-            shader.SetVec2(uniform, glm::vec2(values[0], values[1]));
-        else if (valueType == 4 && values.size() >= 3)
-            shader.SetVec3(uniform, glm::vec3(values[0], values[1], values[2]));
-        else if ((valueType == 5 || valueType == 6) && values.size() >= 4)
-            shader.SetVec4(
-                uniform, glm::vec4(values[0], values[1], values[2], values[3]));
-        else
-            shader.SetFloat(uniform, values.empty() ? 0.0f : values[0]);
+        const auto texture = material.shaderTextures.find(entry.first);
+        textureUnit = UploadShaderParameter(
+            shader, entry.first, valueType, entry.second,
+            texture == material.shaderTextures.end() ? nullptr : texture->second,
+            textureUnit);
     }
 }
 

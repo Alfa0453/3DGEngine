@@ -35,6 +35,16 @@ public:
                                  const AssetRegistry& registry,
                                  AssetCookResult* result = nullptr,
                                  std::string* error = nullptr);
+
+    // Builds a relocatable package for a .3dgworld and every runtime scene it
+    // references. Dependencies are unioned across the persistent and streamed
+    // levels, so a level activated later never relies on uncooked editor files.
+    static bool CookRuntimeWorld(const std::string& contentRoot,
+                                 const std::string& runtimeWorldPath,
+                                 const std::string& outputRoot,
+                                 const AssetRegistry& registry,
+                                 AssetCookResult* result = nullptr,
+                                 std::string* error = nullptr);
 };
 
 } // namespace engine

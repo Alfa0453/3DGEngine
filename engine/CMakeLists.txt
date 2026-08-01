@@ -44,6 +44,7 @@ add_library(engine STATIC
     src/graphics/SSR.cpp
     src/graphics/Terrain.cpp
     src/graphics/Water.cpp
+    src/graphics/FoliageRenderer.cpp
     src/math/Spline.cpp
     src/graphics/GpuProfiler.cpp
     src/scene/RuntimeSceneLoader.cpp
@@ -53,6 +54,7 @@ add_library(engine STATIC
     src/assets/AssetReference.cpp
     src/assets/AssetRegistry.cpp
     src/assets/StaticMeshAsset.cpp
+    src/assets/FoliageAsset.cpp
     src/assets/TextureAsset.cpp
     src/assets/SkeletalAsset.cpp
     src/assets/MaterialAssetLoader.cpp
@@ -91,6 +93,7 @@ add_library(engine STATIC
     src/gameplay/RagdollSystem.cpp
     src/gameplay/GameMode.cpp
     src/gameplay/Script.cpp
+    src/gameplay/LuaScript.cpp
     src/gameplay/ScriptModule.cpp
 )
 
@@ -117,6 +120,7 @@ target_link_libraries(engine
         OpenGL::GL
         Threads::Threads
         ${CMAKE_DL_LIBS}
+        lua_static
 )
 
 # Link Assimp (built by FetchContent in the root). Newer Assimp also exports the

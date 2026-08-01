@@ -8,6 +8,7 @@
 #include <engine/graphics/Camera.h>
 #include <engine/graphics/TextRenderer.h>
 #include <engine/graphics/PbrRenderer.h>
+#include <engine/graphics/FoliageRenderer.h>
 #include <engine/graphics/SkinnedRenderer.h>
 #include <engine/graphics/ProceduralSky.h>
 #include <engine/graphics/PostProcess.h>
@@ -19,7 +20,10 @@
 #include <engine/graphics/CameraShake.h>
 #include <engine/graphics/CameraBlend.h>
 #include <engine/graphics/Terrain.h>
+#include <engine/graphics/Water.h>
+#include <engine/graphics/Framebuffer.h>
 #include <engine/scene/RuntimeSceneLoader.h>
+#include <engine/scene/LevelStreamingManager.h>
 #include <engine/physics/PhysicsWorld.h>
 #include <engine/gameplay/PlayerController.h>
 #include <engine/gameplay/CameraDirector.h>
@@ -64,6 +68,20 @@ private:
     void RestartScene();
     unsigned int HudTextureId(const std::string& relPath);
     void SetupPlayer();          // find PlayerStart entity, attach a controller
+    // Per-entity setup (animation-event hookup + MeshPBR conversion), scoped to a list
+    // so both boot and streamed-level activation reuse it.
+    void PostProcessLoadedEntities(const std::vector<engine::ecs::Entity>& entities);
+    void ActivateStreamedLevel(
+        std::size_t levelIndex,
+        const engine::RuntimeSceneLoader::Scene& scene,
+        const std::vector<engine::ecs::Entity>& entities);
+    void PrepareStreamedLevelUnload(
+        std::size_t levelIndex,
+        const engine::RuntimeSceneLoader::Scene& scene,
+        const std::vector<engine::ecs::Entity>& entities);
+    void FinishStreamedLevelUnload(std::size_t levelIndex);
+    void RebuildResidentScene();
+    void RebuildResidentSystems();
     void BuildAI();
     void BakeNavigation();
     void UpdateAI(float dt);
@@ -72,6 +90,12 @@ private:
     void RefreshCameraZone();
     void UpdateLockOn(bool inputEnabled);
     void BuildTerrains();
+    void BuildWaters();
+    void DrawWaters(const engine::Camera& camera, float aspect);
+    void CaptureWaterSceneBuffers();
+    float WaterSurfaceY(float x, float z, bool& over) const;
+    void ApplyWaterBuoyancy(float dt);
+    void UpdateUnderwaterState(const engine::Camera& camera, float dt);
     float TerrainSurfaceY(float x, float z, bool& over) const;
     void ValidateRuntimeScene();
     void GatherPlayerInput();    // fill m_playerInput from the keyboard/mouse
@@ -93,6 +117,7 @@ private:
     std::optional<engine::Mesh> m_cube, m_plane, m_sphere, m_capsule,
                                 m_cylinder, m_cone, m_pyramid, m_torus, m_staircase;
     std::optional<engine::PbrRenderer>   m_pbr;
+    std::optional<engine::FoliageRenderer> m_foliageRenderer;
     std::optional<engine::Shader>        m_modelShader;   // static-model (LoadedModelAsset) pass
     std::optional<engine::SkinnedRenderer> m_skinnedRenderer;  // animated-character pass
     std::optional<engine::ProceduralSky> m_sky;
@@ -115,6 +140,7 @@ private:
 
     engine::ecs::Registry              m_registry;
     engine::RuntimeSceneLoader::Scene  m_scene;
+    engine::RuntimeSceneLoader::Scene  m_persistentScene;
     engine::PhysicsWorld               m_physics;
     engine::RuntimeAssetManager        m_assets;   // resolves HUD image textures
     engine::DayNightCycle::Sample      m_sample{};
@@ -169,6 +195,16 @@ private:
     std::unordered_map<engine::ecs::Entity, float> m_prevHp;  // HP tracking -> combat noise
     std::unordered_map<std::string, engine::ai::BehaviorGraph> m_behaviorGraphCache;
 
+    // Level-as-asset streaming: when booting a .3dgworld, the persistent level loads as
+    // the main scene and the manager streams the rest around the viewer.
+    engine::WorldManifest m_worldManifest;
+    engine::LevelStreamingManager m_streaming;
+    engine::RuntimeSceneLoader::PrimitiveMeshes m_primitiveMeshes;   // stashed for streamed loads
+    std::string m_worldDir;
+    std::string m_lastStreamingError;
+    bool m_streamingEnabled = false;
+    std::unordered_map<std::size_t, engine::RuntimeSceneLoader::Scene> m_streamedScenes;
+
     struct RuntimeTriggerAction {
         engine::ecs::Entity target = engine::ecs::kNull;
         int enterMover = 0, enterRotator = 0, exitMover = 0, exitRotator = 0;
@@ -188,11 +224,24 @@ private:
         engine::ecs::Entity entity = engine::ecs::kNull;
         engine::Terrain terrain;
     };
+    struct RuntimeWater {
+        engine::RuntimeSceneLoader::Scene::WaterDesc desc;
+        engine::Water water;
+        RuntimeWater(engine::RuntimeSceneLoader::Scene::WaterDesc authored,
+                     const engine::WaterConfig& config)
+            : desc(std::move(authored)), water(config) {}
+    };
     std::unordered_map<engine::ecs::Entity, RuntimeTriggerAction> m_triggerActions;
     std::unordered_map<engine::ecs::Entity, RuntimeCameraZone> m_cameraZones;
     std::unordered_set<engine::ecs::Entity> m_cameraZonesInside;
     engine::ecs::Entity m_activeCameraZone = engine::ecs::kNull;
     std::vector<RuntimeTerrain> m_terrains;
+    std::vector<RuntimeWater> m_waters;
+    std::optional<engine::Framebuffer> m_waterSceneCopy;
+    engine::PostProcess::UnderwaterSettings m_underwaterVisuals;
+    float m_underwaterBlend = 0.0f;
+    bool m_underwaterAudio = false;
+    engine::TerrainCameraConstraint m_terrainCameraConstraint;
     std::vector<std::string> m_runtimeWarnings;
 
     std::string m_loadError;

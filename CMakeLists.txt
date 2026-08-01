@@ -65,6 +65,58 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(glm)
 
+# Lua — embedded gameplay scripting. Pin the stable 5.4 ABI and build the
+# official sources directly so editor Play and packaged games use the same VM.
+FetchContent_Declare(
+    lua
+    URL      https://www.lua.org/ftp/lua-5.4.8.tar.gz
+    URL_HASH SHA256=4f18ddae154e793e46eeab727c59ef1c0c0c2b744e7b94219710d76f530629ae
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
+FetchContent_MakeAvailable(lua)
+
+add_library(lua_static STATIC
+    ${lua_SOURCE_DIR}/src/lapi.c
+    ${lua_SOURCE_DIR}/src/lauxlib.c
+    ${lua_SOURCE_DIR}/src/lbaselib.c
+    ${lua_SOURCE_DIR}/src/lcode.c
+    ${lua_SOURCE_DIR}/src/lcorolib.c
+    ${lua_SOURCE_DIR}/src/lctype.c
+    ${lua_SOURCE_DIR}/src/ldblib.c
+    ${lua_SOURCE_DIR}/src/ldebug.c
+    ${lua_SOURCE_DIR}/src/ldo.c
+    ${lua_SOURCE_DIR}/src/ldump.c
+    ${lua_SOURCE_DIR}/src/lfunc.c
+    ${lua_SOURCE_DIR}/src/lgc.c
+    ${lua_SOURCE_DIR}/src/linit.c
+    ${lua_SOURCE_DIR}/src/liolib.c
+    ${lua_SOURCE_DIR}/src/llex.c
+    ${lua_SOURCE_DIR}/src/lmathlib.c
+    ${lua_SOURCE_DIR}/src/lmem.c
+    ${lua_SOURCE_DIR}/src/loadlib.c
+    ${lua_SOURCE_DIR}/src/lobject.c
+    ${lua_SOURCE_DIR}/src/lopcodes.c
+    ${lua_SOURCE_DIR}/src/loslib.c
+    ${lua_SOURCE_DIR}/src/lparser.c
+    ${lua_SOURCE_DIR}/src/lstate.c
+    ${lua_SOURCE_DIR}/src/lstring.c
+    ${lua_SOURCE_DIR}/src/lstrlib.c
+    ${lua_SOURCE_DIR}/src/ltable.c
+    ${lua_SOURCE_DIR}/src/ltablib.c
+    ${lua_SOURCE_DIR}/src/ltm.c
+    ${lua_SOURCE_DIR}/src/lundump.c
+    ${lua_SOURCE_DIR}/src/lutf8lib.c
+    ${lua_SOURCE_DIR}/src/lvm.c
+    ${lua_SOURCE_DIR}/src/lzio.c
+)
+target_include_directories(lua_static PUBLIC ${lua_SOURCE_DIR}/src)
+set_target_properties(lua_static PROPERTIES POSITION_INDEPENDENT_CODE ON)
+if(MSVC)
+    target_compile_options(lua_static PRIVATE /w)
+else()
+    target_compile_options(lua_static PRIVATE -w)
+endif()
+
 # Assimp — model import (FBX / glTF / OBJ / …). Built from source via
 # FetchContent, so no system install is needed (cross-platform, no vcpkg/apt).
 # We trim it hard — static lib, no tools/tests/exporters, only the importers we

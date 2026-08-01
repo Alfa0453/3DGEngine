@@ -320,4 +320,9 @@ void IBL::Bind(unsigned int irradianceUnit, unsigned int prefilterUnit,
     glBindTexture(GL_TEXTURE_2D, m_brdfLUT);
 }
 
+void IBL::BindPrefilter(unsigned int unit) const {
+    glActiveTexture(GL_TEXTURE0 + unit);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, m_prefilter);
+}
+
 } // namespace engine

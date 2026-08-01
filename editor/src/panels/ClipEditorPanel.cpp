@@ -1,6 +1,7 @@
 #include "ClipEditorPanel.h"
 
 #include <engine/animation/Animator.h>
+#include <engine/assets/SkeletalAsset.h>
 #include <engine/graphics/Camera.h>
 #include <engine/graphics/SkinnedModel.h>
 #include <engine/graphics/SkinnedRenderer.h>
@@ -28,6 +29,12 @@ template <std::size_t N> void Copy(std::array<char, N>& dst, const std::string& 
 ClipEditorPanel::~ClipEditorPanel() = default;
 
 void ClipEditorPanel::QueueOpen(const std::string& path) { m_pendingOpen = path; }
+
+void ClipEditorPanel::QueueSource(const std::string& animationPath,
+                                  const std::string& previewMeshPath) {
+    m_pendingSource = animationPath;
+    m_pendingPreviewMesh = previewMeshPath;
+}
 
 void ClipEditorPanel::SyncBuffers() { Copy(m_nameBuffer, m_asset.name); }
 
@@ -200,6 +207,16 @@ unsigned int ClipEditorPanel::RenderPreview(int width, int height, float deltaTi
 void ClipEditorPanel::Draw(const std::string& assetRoot, bool* open, bool* assetSaved,
                            std::string* message, float deltaTime) {
     if (m_scannedRoot != assetRoot) RefreshChoices(assetRoot);
+    if (!m_pendingSource.empty()) {
+        m_asset = {};
+        m_asset.sourceFile = m_pendingSource;
+        m_previewMeshPath = m_pendingPreviewMesh;
+        m_path.clear();
+        SyncBuffers();
+        ResetPreview();
+        m_pendingSource.clear();
+        m_pendingPreviewMesh.clear();
+    }
     if (!m_pendingOpen.empty()) {
         std::string error;
         if (m_asset.Load(m_pendingOpen, &error)) { m_path = m_pendingOpen; SyncBuffers(); ResetPreview(); }
@@ -301,8 +318,40 @@ void ClipEditorPanel::Draw(const std::string& assetRoot, bool* open, bool* asset
     if (ImGui::InputText("Name", m_nameBuffer.data(), m_nameBuffer.size())) m_asset.name = m_nameBuffer.data();
 
     ImGui::SeparatorText("Source");
-    if (drawPicker("Source File", m_sourceSearch, m_asset.sourceFile))
+    if (drawPicker("Source File", m_sourceSearch, m_asset.sourceFile)) {
         m_asset.sourceAssetId = {};
+        if (Lower(std::filesystem::path(m_asset.sourceFile).extension().string())
+                == ".3dganim") {
+            engine::AnimationAssetData animation;
+            std::string ignored;
+            if (engine::LoadAnimationAsset(
+                    m_asset.sourceFile, &animation, &ignored)) {
+                bool currentCompatible = false;
+                if (!m_previewMeshPath.empty()) {
+                    engine::SkeletalMeshAssetData current;
+                    currentCompatible = engine::LoadSkeletalMeshAsset(
+                        m_previewMeshPath, &current, &ignored)
+                        && current.skeletonId == animation.skeletonId;
+                }
+                if (!currentCompatible) {
+                    m_previewMeshPath.clear();
+                    for (const AssetChoice& choice : m_modelChoices) {
+                        if (Lower(std::filesystem::path(choice.path)
+                                .extension().string()) != ".3dgskmesh")
+                            continue;
+                        engine::SkeletalMeshAssetData mesh;
+                        if (engine::LoadSkeletalMeshAsset(
+                                choice.path, &mesh, &ignored)
+                            && mesh.skeletonId == animation.skeletonId) {
+                            m_previewMeshPath = choice.path;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        ResetPreview();
+    }
     if (ImGui::Button("Refresh Files")) RefreshChoices(assetRoot);
 
     // Clip selection from the source's embedded clips.

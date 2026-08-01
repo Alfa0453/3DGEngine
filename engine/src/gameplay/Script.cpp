@@ -1,6 +1,8 @@
 #include "engine/gameplay/Script.h"
+#include "engine/gameplay/LuaScript.h"
 #include "engine/graphics/CameraShake.h"
 #include "engine/gameplay/CameraDirector.h"
+#include "engine/gameplay/GameMode.h"
 
 #include "engine/animation/AnimatedModel.h"
 #include "engine/animation/Animator.h"
@@ -8,6 +10,7 @@
 #include "engine/ecs/Registry.h"
 #include "engine/graphics/SkinnedModel.h"
 #include "engine/graphics/RuntimeParticleSystem.h"
+#include "engine/math/Spline.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -29,6 +32,7 @@
 namespace engine {
 namespace {
 std::string g_scriptSceneLoadRequest;
+std::vector<ScriptLevelStreamRequest> g_scriptLevelStreamRequests;
 constexpr const char* kSaveDataPath = "3dg_savegame.dat";
 
 std::unordered_map<std::string, std::string> ReadSaveValues() {
@@ -421,6 +425,124 @@ void Script::RequestSceneLoad(const std::string& runtimeScenePath) {
     else g_scriptSceneLoadRequest = runtimeScenePath;
 }
 
+int Script::SplinePointCount(ecs::Entity spline) const {
+    const ecs::SplineComponent* component = TryGet<ecs::SplineComponent>(spline);
+    return component ? static_cast<int>(component->points.size()) : 0;
+}
+
+bool Script::IsSplineClosed(ecs::Entity spline) const {
+    const ecs::SplineComponent* component = TryGet<ecs::SplineComponent>(spline);
+    return component && component->closed;
+}
+
+bool Script::SetSplineClosed(ecs::Entity spline, bool closed) {
+    ecs::SplineComponent* component = TryGet<ecs::SplineComponent>(spline);
+    if (!component) return false;
+    component->closed = closed;
+    ++component->revision;
+    return true;
+}
+
+glm::vec3 Script::GetSplinePoint(ecs::Entity spline, int index,
+                                 const glm::vec3& fallback) const {
+    const ecs::SplineComponent* component = TryGet<ecs::SplineComponent>(spline);
+    return component && index >= 0 && index < static_cast<int>(component->points.size())
+        ? component->points[static_cast<std::size_t>(index)] : fallback;
+}
+
+bool Script::SetSplinePoint(ecs::Entity spline, int index, const glm::vec3& point) {
+    ecs::SplineComponent* component = TryGet<ecs::SplineComponent>(spline);
+    if (!component || index < 0 || index >= static_cast<int>(component->points.size())) return false;
+    component->points[static_cast<std::size_t>(index)] = point;
+    ++component->revision;
+    return true;
+}
+
+glm::vec3 Script::GetSplinePointRotation(ecs::Entity spline, int index,
+                                         const glm::vec3& fallback) const {
+    const ecs::SplineComponent* component = TryGet<ecs::SplineComponent>(spline);
+    return component && index >= 0 && index < static_cast<int>(component->rotations.size())
+        ? component->rotations[static_cast<std::size_t>(index)] : fallback;
+}
+
+bool Script::SetSplinePointRotation(ecs::Entity spline, int index,
+                                    const glm::vec3& degrees) {
+    ecs::SplineComponent* component = TryGet<ecs::SplineComponent>(spline);
+    if (!component || index < 0 || index >= static_cast<int>(component->points.size())) return false;
+    component->rotations.resize(component->points.size(), glm::vec3(0.0f));
+    component->rotations[static_cast<std::size_t>(index)] = degrees;
+    ++component->revision;
+    return true;
+}
+
+int Script::AddSplinePoint(ecs::Entity spline, const glm::vec3& point,
+                           const glm::vec3& rotationDegrees) {
+    ecs::SplineComponent* component = TryGet<ecs::SplineComponent>(spline);
+    if (!component) return -1;
+    component->points.push_back(point);
+    component->rotations.resize(component->points.size() - 1, glm::vec3(0.0f));
+    component->rotations.push_back(rotationDegrees);
+    ++component->revision;
+    return static_cast<int>(component->points.size()) - 1;
+}
+
+bool Script::InsertSplinePoint(ecs::Entity spline, int index, const glm::vec3& point,
+                               const glm::vec3& rotationDegrees) {
+    ecs::SplineComponent* component = TryGet<ecs::SplineComponent>(spline);
+    if (!component || index < 0 || index > static_cast<int>(component->points.size())) return false;
+    component->rotations.resize(component->points.size(), glm::vec3(0.0f));
+    component->points.insert(component->points.begin() + index, point);
+    component->rotations.insert(component->rotations.begin() + index, rotationDegrees);
+    ++component->revision;
+    return true;
+}
+
+bool Script::RemoveSplinePoint(ecs::Entity spline, int index) {
+    ecs::SplineComponent* component = TryGet<ecs::SplineComponent>(spline);
+    if (!component || index < 0 || index >= static_cast<int>(component->points.size())) return false;
+    component->points.erase(component->points.begin() + index);
+    if (index < static_cast<int>(component->rotations.size()))
+        component->rotations.erase(component->rotations.begin() + index);
+    component->rotations.resize(component->points.size(), glm::vec3(0.0f));
+    ++component->revision;
+    return true;
+}
+
+bool Script::TranslateSpline(ecs::Entity spline, const glm::vec3& delta) {
+    ecs::SplineComponent* component = TryGet<ecs::SplineComponent>(spline);
+    if (!component) return false;
+    for (glm::vec3& point : component->points) point += delta;
+    if (ecs::Transform* transform = TryGet<ecs::Transform>(spline)) transform->position += delta;
+    ++component->revision;
+    return true;
+}
+
+glm::vec3 Script::SplinePositionAt(ecs::Entity spline, float normalizedDistance,
+                                   const glm::vec3& fallback) const {
+    const ecs::SplineComponent* component = TryGet<ecs::SplineComponent>(spline);
+    if (!component || component->points.size() < 2) return fallback;
+    const Spline curve(component->points, component->closed);
+    return curve.PositionAtDistance(curve.Length() * std::clamp(normalizedDistance, 0.0f, 1.0f));
+}
+
+glm::vec3 Script::SplineTangentAt(ecs::Entity spline, float normalizedDistance,
+                                  const glm::vec3& fallback) const {
+    const ecs::SplineComponent* component = TryGet<ecs::SplineComponent>(spline);
+    if (!component || component->points.size() < 2) return fallback;
+    const Spline curve(component->points, component->closed);
+    return curve.TangentAtDistance(curve.Length() * std::clamp(normalizedDistance, 0.0f, 1.0f));
+}
+
+void Script::RequestLevelLoad(const std::string& level) {
+    if (!level.empty())
+        g_scriptLevelStreamRequests.push_back({level, true});
+}
+
+void Script::RequestLevelUnload(const std::string& level) {
+    if (!level.empty())
+        g_scriptLevelStreamRequests.push_back({level, false});
+}
+
 bool Script::SaveValue(const std::string& key, const std::string& value) {
     if (key.empty()) return false;
     auto values = ReadSaveValues();
@@ -471,9 +593,99 @@ int Script::SetTimer(float seconds, std::function<void()> callback, bool repeat)
     return m_timers.back().id;
 }
 
+bool Script::BindTimerFunction(const std::string& functionName,
+                               std::function<void()> function) {
+    if (functionName.empty() || !function) return false;
+    m_timerFunctions[functionName] = std::move(function);
+    return true;
+}
+
+bool Script::UnbindTimerFunction(const std::string& functionName) {
+    if (functionName.empty()) return false;
+    ClearTimerByFunctionName(functionName);
+    return m_timerFunctions.erase(functionName) != 0;
+}
+
+bool Script::HasTimerFunction(const std::string& functionName) const {
+    const auto it = m_timerFunctions.find(functionName);
+    return it != m_timerFunctions.end() && static_cast<bool>(it->second);
+}
+
+bool Script::InvokeTimerFunction(const std::string& functionName) {
+    const auto it = m_timerFunctions.find(functionName);
+    if (it == m_timerFunctions.end() || !it->second) return false;
+    it->second();
+    return true;
+}
+
+int Script::SetTimerByFunctionName(const std::string& functionName,
+                                   float seconds, bool repeat) {
+    if (!HasTimerFunction(functionName)) return 0;
+    Timer timer;
+    timer.id = m_nextTimerId++;
+    timer.remaining = std::max(seconds, 0.0f);
+    timer.interval = std::max(seconds, 0.0001f);
+    timer.repeat = repeat;
+    timer.functionName = functionName;
+    timer.callback = [this, functionName] {
+        InvokeTimerFunction(functionName);
+    };
+    m_timers.push_back(std::move(timer));
+    return m_timers.back().id;
+}
+
 void Script::ClearTimer(int timerId) {
     for (Timer& timer : m_timers)
         if (timer.id == timerId) timer.cancelled = true;
+}
+
+int Script::ClearTimerByFunctionName(const std::string& functionName) {
+    int cleared = 0;
+    for (Timer& timer : m_timers) {
+        if (!timer.cancelled && timer.functionName == functionName) {
+            timer.cancelled = true;
+            ++cleared;
+        }
+    }
+    return cleared;
+}
+
+bool Script::IsTimerActive(int timerId) const {
+    return std::any_of(m_timers.begin(), m_timers.end(),
+        [timerId](const Timer& timer) {
+            return !timer.cancelled && timer.id == timerId;
+        });
+}
+
+bool Script::IsTimerActive(const std::string& functionName) const {
+    return std::any_of(m_timers.begin(), m_timers.end(),
+        [&functionName](const Timer& timer) {
+            return !timer.cancelled && timer.functionName == functionName;
+        });
+}
+
+void Script::SetGlobalTimeDilation(float dilation) {
+    if (m_context.gameMode)
+        m_context.gameMode->SetGlobalTimeDilation(dilation);
+}
+
+float Script::GlobalTimeDilation() const {
+    return m_context.gameMode
+        ? m_context.gameMode->GlobalTimeDilation() : 1.0f;
+}
+
+float Script::EffectiveTimeDilation() const {
+    return m_context.gameMode
+        ? m_context.gameMode->EffectiveTimeDilation() : 1.0f;
+}
+
+void Script::HitStop(float unscaledSeconds, float dilation) {
+    if (m_context.gameMode)
+        m_context.gameMode->HitStop(unscaledSeconds, dilation);
+}
+
+bool Script::IsHitStopActive() const {
+    return m_context.gameMode && m_context.gameMode->HitStopActive();
 }
 
 void Script::TickTimers(float dt) {
@@ -956,7 +1168,11 @@ Script* PrepareScript(ecs::Registry& registry, ecs::Entity entity, NativeScriptS
         if (script.missingFactory) {
             return nullptr;   // already known-missing: don't retry every frame
         }
-        script.instance = ScriptRegistry::Instance().Create(script.className);
+        if (IsLuaScriptPath(script.sourcePath)) {
+            script.instance = std::make_unique<LuaScript>(script.sourcePath);
+        } else {
+            script.instance = ScriptRegistry::Instance().Create(script.className);
+        }
         if (!script.instance) {
             script.missingFactory = true;
             std::fprintf(stderr,
@@ -1059,10 +1275,37 @@ void ShutdownScripts(ecs::Registry& registry) {
         });
 }
 
+void ShutdownScripts(ecs::Registry& registry, const std::vector<ecs::Entity>& entities) {
+    for (ecs::Entity entity : entities) {
+        if (!registry.Valid(entity)) continue;
+        NativeScriptComponent* script = registry.TryGet<NativeScriptComponent>(entity);
+        if (!script) continue;
+        auto shutdown = [&](NativeScriptSlot& slot) {
+            if (slot.instance && slot.created) {
+                slot.instance->SetContext(
+                    ScriptContext{&registry, entity, nullptr, nullptr, nullptr,
+                                  nullptr, nullptr, &slot.fields});
+                RunGuarded(slot, [&] { slot.instance->OnDestroy(); });
+            }
+            slot.instance.reset();
+            slot.created = false;
+        };
+        shutdown(*script);
+        for (NativeScriptSlot& additional : script->additional) shutdown(additional);
+    }
+}
+
 std::string ConsumeScriptSceneLoadRequest() {
     std::string request = std::move(g_scriptSceneLoadRequest);
     g_scriptSceneLoadRequest.clear();
     return request;
+}
+
+std::vector<ScriptLevelStreamRequest> ConsumeScriptLevelStreamRequests() {
+    std::vector<ScriptLevelStreamRequest> requests =
+        std::move(g_scriptLevelStreamRequests);
+    g_scriptLevelStreamRequests.clear();
+    return requests;
 }
 
 void SetScriptErrorHandler(std::function<void(const std::string&)> handler) {

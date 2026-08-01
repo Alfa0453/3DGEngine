@@ -45,6 +45,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <random>
 #include <unordered_set>
 
 using engine::ecs::Entity;
@@ -525,6 +526,7 @@ void EditorApp::OnInit()
         )glsl"
     );
     m_pbrRenderer.emplace();
+    m_foliageRenderer.emplace();
     m_particleRenderer.emplace();
     m_skinnedRenderer.emplace();
     m_sky.emplace();
@@ -600,6 +602,11 @@ void EditorApp::OnUpdate(float dt)
     RestoreCameraBeforeShake();
     m_elapsed += dt;
     m_dt = dt;
+    float playDt = dt;
+    if (m_mode == EditorMode::Play) {
+        engine::GameMode::Instance().UpdateUnscaledTime(dt);
+        playDt = engine::GameMode::Instance().ScaleDelta(dt);
+    }
     if (dt > 0.0f) {
         m_fps = m_fps * 0.92f + (1.0f / dt) * 0.08f;
     }
@@ -633,20 +640,24 @@ void EditorApp::OnUpdate(float dt)
         const engine::ScriptInputState scriptInput =
             CapturePlayScriptInput(playInputEnabled, true);
         engine::UpdateScripts(
-            *m_playRegistry, dt, &scriptInput, &m_runtimeAudio,
+            *m_playRegistry, playDt, &scriptInput, &m_runtimeAudio,
             &m_cameraShake, &m_cameraDirector, &engine::GameMode::Instance());
         // Camera events are frame events. Every script has now had one opportunity
         // to observe them; fixed updates receive held input and simulation events.
         m_cameraDirector.ClearEvents();
     }
-    StepPlayPhysics(dt, playInputEnabled);
+    // A script may have started a hit stop above. Re-evaluate before advancing
+    // the remaining world systems so the impact freezes this same frame.
+    if (m_mode == EditorMode::Play)
+        playDt = engine::GameMode::Instance().ScaleDelta(dt);
+    StepPlayPhysics(playDt, playInputEnabled);
     ProcessCameraDirectorCommands();
     if (m_mode == EditorMode::Play) {
-        if (m_cameraBlend.Active()) UpdateCameraBlend(dt);
+        if (m_cameraBlend.Active()) UpdateCameraBlend(playDt);
         else ApplyManagedPlayCamera();
     }
     if (m_mode == EditorMode::Play && m_playRegistry)
-        engine::UpdateParticleSystems(*m_playRegistry, dt);
+        engine::UpdateParticleSystems(*m_playRegistry, playDt);
     else if (m_mode == EditorMode::Edit)
         UpdateEditParticlePreviews(dt);
     m_audio.SetListener(m_camera.Position(), m_camera.Front());
@@ -666,7 +677,9 @@ void EditorApp::OnUpdate(float dt)
         m_mode == EditorMode::Edit,
         [&](float x, float y) { return IsViewportDropPosition(x, y); });
     HandleMouseAssetDrag();
-    if (m_terrainSculpt) {
+    if (m_foliagePaint) {
+        HandleFoliagePaint();
+    } else if (m_terrainSculpt) {
         HandleTerrainSculpt();   // left-drag paints the selected terrain instead of selecting
     } else {
         HandleMouseViewportSelection();
@@ -690,9 +703,22 @@ void EditorApp::OnUpdate(float dt)
         UpdateCameraBlend(dt);
     }
     if (m_cameraSequence.Active()) {
-        UpdateCameraSequence(dt);
+        UpdateCameraSequence(
+            m_mode == EditorMode::Play ? playDt : dt);
     }
-    UpdateCameraShake(dt);
+    // Keep free and gameplay cameras above the terrain. Rising terrain pushes the
+    // camera out immediately; moving downhill releases smoothly to avoid a snap.
+    if (!m_cameraBlend.Active() && !m_cameraSequence.Active()) {
+        bool overTerrain = false;
+        const glm::vec3 desired = m_camera.Position();
+        const float surfaceY = TerrainSurfaceY(desired.x, desired.z, overTerrain);
+        m_camera.SetPosition(m_terrainCameraConstraint.Resolve(
+            desired, surfaceY, overTerrain,
+            m_mode == EditorMode::Play ? playDt : dt));
+    } else {
+        m_terrainCameraConstraint.Reset();
+    }
+    UpdateCameraShake(m_mode == EditorMode::Play ? playDt : dt);
     m_audio.SetListener(m_camera.Position(), m_camera.Front());
     
     m_transformController.UpdateKeyboardShortcuts(window,
@@ -707,6 +733,7 @@ void EditorApp::OnRender()
     const engine::Window& window = GetWindow();
     const glm::mat4 viewProj = m_camera.ProjectionMatrix(window.AspectRatio()) * m_camera.ViewMatrix();
     const EditorScene::Environment& environment = m_scene.GetEnvironment();
+    const bool underwaterPost = UpdateUnderwaterState(m_camera, m_dt);
 
     // Render scale: render the 3D scene at a fraction of window resolution into the
     // post buffer and upscale on present. Only in the simple path (no SSR/SSAO) so we
@@ -720,7 +747,7 @@ void EditorApp::OnRender()
         [](const EditorScene::Environment::PostProcessEffect& effect) {
             return effect.enabled && !effect.shaderPath.empty();
         });
-    const bool  useHdrPost = environment.ssr || wantScale || hasGraphPost;
+    const bool  useHdrPost = environment.ssr || wantScale || hasGraphPost || underwaterPost;
     const int   sw = std::max(1, static_cast<int>(std::lround(window.Width()  * scale)));
     const int   sh = std::max(1, static_cast<int>(std::lround(window.Height() * scale)));
     m_renderW = window.Width();
@@ -769,6 +796,8 @@ void EditorApp::OnRender()
             graphEffects.push_back(std::move(effect));
         }
         m_postProcess->SetEffects(std::move(graphEffects));
+        m_underwaterVisuals.blend = m_underwaterBlend;
+        m_postProcess->underwater = m_underwaterVisuals;
         if (m_ssr && environment.ssr) {
             m_ssr->Resize(sw, sh);
         }
@@ -788,7 +817,9 @@ void EditorApp::OnRender()
     } else {
         DrawEditScene(viewProj);
     }
+    DrawFoliage(m_camera, GetWindow().AspectRatio());        // batched trees/bushes/rocks
     DrawGrass(m_camera, GetWindow().AspectRatio());          // opaque grass on terrain (before water)
+    CaptureWaterSceneBuffers();                              // copy opaque colour/depth once for all water
     DrawWaterBodies(m_camera, GetWindow().AspectRatio());   // animated water surfaces (edit + play)
     m_gpuProfiler.End();
     m_cpuSceneMs = std::chrono::duration<double, std::milli>(
@@ -825,16 +856,16 @@ void EditorApp::OnRender()
 
     const auto uiCpuStart = std::chrono::high_resolution_clock::now();
     m_gpuProfiler.Begin("UI");
-    // While the cursor is captured for play-mode mouse look, GLFW still reports a
-    // virtual cursor position that the ImGui backend would feed to ImGui, making
-    // panels light up as if hovered. Disable ImGui mouse input while captured.
+    // A captured GLFW cursor still reports a virtual screen position. Never pass
+    // that position to ImGui: camera-look capture owns the mouse exclusively, so
+    // panel fields cannot hover, focus, drag, or change until capture is released.
     {
         ImGuiIO& io = ImGui::GetIO();
-        if (m_playMouseCaptured) {
-            io.ConfigFlags |= ImGuiConfigFlags_NoMouse;
-        } else {
-            io.ConfigFlags &= ~ImGuiConfigFlags_NoMouse;
-        }
+        const bool captured = m_playMouseCaptured
+            || m_cameraController.MouseLookActive();
+        if (captured) io.ConfigFlags |= ImGuiConfigFlags_NoMouse;
+        else          io.ConfigFlags &= ~ImGuiConfigFlags_NoMouse;
+        io.MouseDrawCursor = false;
     }
     m_imgui.BeginFrame();
     DrawEditorOverlay();
@@ -1173,6 +1204,11 @@ void EditorApp::DrawSelectionOutline(const glm::mat4 & viewProj)
         return;
     }
 
+    if (selected->isWater && !selected->waterFlowSpline.empty()) {
+        m_viewport.DrawSelectedRiverBoundary(m_scene, viewProj);
+        return;
+    }
+
     if (!selected->modelAssetPath.empty()) {
         std::string error;
         const glm::vec3 color = selected->locked
@@ -1283,6 +1319,7 @@ void EditorApp::DrawEditorOverlay()
     dockspaceContext.log = &m_log;
     dockspaceContext.gizmo = &m_gizmo;
     dockspaceContext.camera = &m_camera;
+    dockspaceContext.selectedSplinePoint = &m_selectedSplinePoint;
     dockspaceContext.cameraShakeActive = m_cameraShake.Active();
     dockspaceContext.cameraSequenceActive = m_cameraSequence.Active();
     dockspaceContext.cameraSequenceInputLocked = m_cameraDirector.InputLocked();
@@ -1320,6 +1357,11 @@ void EditorApp::DrawEditorOverlay()
     dockspaceContext.terrainPaintLayer = &m_terrainPaintLayer;
     dockspaceContext.terrainBrushRadius = &m_terrainBrushRadius;
     dockspaceContext.terrainBrushStrength = &m_terrainBrushStrength;
+    dockspaceContext.foliagePaint = &m_foliagePaint;
+    dockspaceContext.foliageErase = &m_foliageErase;
+    dockspaceContext.foliageBrushRadius = &m_foliageBrushRadius;
+    dockspaceContext.foliagePaintDensity = &m_foliagePaintDensity;
+    dockspaceContext.foliageTypeIndex = &m_foliageTypeIndex;
     dockspaceContext.showNavigationPreview = &m_showNavigationPreview;
     dockspaceContext.showGrid = &m_showGrid;
     dockspaceContext.previewAnimations = &m_previewSceneAnimations;
@@ -1350,9 +1392,21 @@ void EditorApp::DrawEditorOverlay()
         dockspaceContext.particleCpuMilliseconds = stats.cpuMilliseconds;
         dockspaceContext.particleGpuMilliseconds = stats.gpuMilliseconds;
     }
-    if (const EditorScene::Object* selected = m_scene.SelectedObject()) {
+    if (!m_animationAssetPreviewPath.empty()) {
+        dockspaceContext.animationPreviewTime = &m_animationAssetPreviewTime;
+    } else if (const EditorScene::Object* selected = m_scene.SelectedObject()) {
         dockspaceContext.animationPreviewTime = &m_animationPreviewTimes[selected->entity];
     }
+    dockspaceContext.animationPreviewAssetPath = &m_animationAssetPreviewPath;
+    dockspaceContext.animationPreviewMeshPath = &m_animationAssetPreviewMeshPath;
+    dockspaceContext.animationAssetPlaying = &m_animationAssetPreviewPlaying;
+    dockspaceContext.animationAssetLoop = &m_animationAssetPreviewLoop;
+    dockspaceContext.animationAssetStripRootMotion =
+        &m_animationAssetPreviewStripRootMotion;
+    dockspaceContext.animationAssetSpeed = &m_animationAssetPreviewSpeed;
+    dockspaceContext.animationAssetYaw = &m_animationAssetPreviewYaw;
+    dockspaceContext.animationAssetPitch = &m_animationAssetPreviewPitch;
+    dockspaceContext.animationAssetZoom = &m_animationAssetPreviewZoom;
     dockspaceContext.animationActionClip = &m_animationActionClip;
     dockspaceContext.animationActionFadeIn = &m_animationActionFadeIn;
     dockspaceContext.animationActionFadeOut = &m_animationActionFadeOut;
@@ -1392,6 +1446,16 @@ void EditorApp::DrawEditorOverlay()
     }
     dockspaceContext.sceneDirty = m_scene.IsDirty();
     m_dockspace.Draw(dockspaceContext);
+    if (dockspaceContext.animationAssetRestartRequested)
+        m_animationAssetPreviewRestartRequested = true;
+    if (dockspaceContext.animationAssetRefreshRequested)
+        m_animationAssetPreviewRefreshRequested = true;
+    if (dockspaceContext.animationAssetOpenInClipEditorRequested
+        && !m_animationAssetPreviewPath.empty()) {
+        m_clipEditor.QueueSource(m_animationAssetPreviewPath,
+                                 m_animationAssetPreviewMeshPath);
+        m_panels.SetOpen(EditorPanels::Panel::ClipEditor, true);
+    }
     if (dockspaceContext.scriptCompileAndRestartRequested) {
         if (m_mode != EditorMode::Edit) {
             m_log.Warning("Exit Play mode before compiling scripts");
@@ -1488,6 +1552,7 @@ void EditorApp::DrawEditorOverlay()
     DrawPrefabEditorPanel();
     DrawScriptDebugPanel();
     DrawViewportPanel();
+    DrawWorldEditorPanel();
     DrawDirtyScenePrompt();
     if (selectedRuntimeAudio != engine::AudioEngine::InvalidSource) {
         if (dockspaceContext.runtimeAudioRestartRequested) m_audio.PlaySource(selectedRuntimeAudio, true);
@@ -1673,19 +1738,38 @@ void EditorApp::DrawEditorOverlay()
             }
             break;
         }
-        case EditorAssets::Type::Model:
         case EditorAssets::Type::SkeletalModel:
             m_panels.SetOpen(EditorPanels::Panel::AnimationPreview, true);
-            m_log.Info("Opened Animation Preview for model asset selection");
+            OpenAnimationAssetPreview(path, dockspaceContext.editorAssetOpenType);
+            m_log.Info("Opened Animation Preview for " + path);
+            break;
+        case EditorAssets::Type::Model:
+            m_log.Info("Static meshes have no skeletal animation preview: " + path);
             break;
         case EditorAssets::Type::Skeleton:
         case EditorAssets::Type::Animation:
-            m_log.Info(std::string("Selected ")
-                + EditorAssets::TypeName(dockspaceContext.editorAssetOpenType)
-                + " asset: " + path);
+            m_panels.SetOpen(EditorPanels::Panel::AnimationPreview, true);
+            OpenAnimationAssetPreview(path, dockspaceContext.editorAssetOpenType);
+            m_log.Info("Opened Animation Preview for " + path);
             break;
         case EditorAssets::Type::Audio:
             m_panels.SetOpen(EditorPanels::Panel::AudioEditor, true);
+            break;
+        case EditorAssets::Type::World: {
+            std::string error;
+            m_worldAuthoringPath = path;
+            if (engine::LoadWorldManifest(path, &m_worldAuthoring, &error)) {
+                m_panels.SetOpen(EditorPanels::Panel::WorldEditor, true);
+                m_worldStatus = "Loaded " + path;
+                m_log.Info("Opened world: " + path);
+            } else {
+                m_log.Error("World load failed: " + error);
+            }
+            break;
+        }
+        case EditorAssets::Type::Foliage:
+            m_log.Info("Foliage asset selected: " + path
+                + " (Foliage Editor arrives in the painting milestone)");
             break;
         case EditorAssets::Type::Texture:
             m_log.Info("Texture selected; drag it to a material texture slot to use it");
@@ -1765,11 +1849,25 @@ void EditorApp::DrawEditorOverlay()
     if (dockspaceContext.addTerrainRequested) {
         AddTerrain();
     }
+    if (dockspaceContext.addFoliageRequested && m_cube) {
+        m_scene.AddFoliage(*m_cube);
+        m_foliagePaint = false;
+        m_log.Info("Added foliage actor");
+    }
     if (dockspaceContext.addWaterRequested) {
         AddWater(dockspaceContext.addWaterPreset);
     }
     if (dockspaceContext.addSplineRequested) {
-        AddSpline();
+        AddSpline(dockspaceContext.addSplineType);
+    }
+    if (dockspaceContext.addRiverForSelectedSplineRequested) {
+        const EditorScene::Object* spline = m_scene.SelectedObject();
+        if (spline && spline->isSpline && spline->splineType == 1) {
+            const std::string splineName = spline->name;
+            AddWater(3, false);
+            m_scene.SetSelectedWaterFlowSpline(splineName);
+            m_log.Info("Created river water using " + splineName);
+        }
     }
     if (dockspaceContext.addTriggerVolumeRequested) {
         AddTriggerVolume();
@@ -1929,7 +2027,7 @@ void EditorApp::DrawEditorOverlay()
 
     std::snprintf(line, sizeof(line), "Status: %s", m_log.LatestMessage().c_str());
     m_text->Text(line, 24.0f, static_cast<float>(height) - 62.0f, 1.2f, accent);
-    m_text->Text("F1-F4 panels   mouse/keyboard drag   G gizmo   F5 save   F7 export   F8 validate",
+    m_text->Text("W move   E rotate   R scale   G uniform scale   Ctrl+R reset   F5 save   F7 export",
         24.0f, static_cast<float>(height) - 34.0f, 1.2f, muted);
 
     m_text->End();
@@ -2111,6 +2209,8 @@ void EditorApp::DrawGraphEditorPanel() {
     bool open = true;
     bool assetSaved = false;
     std::string message;
+    m_graphEditor.SetPreferredPreviewMesh(
+        m_animationAssetPreviewMeshPath);
     m_graphEditor.Draw(m_project.AssetRoot(), &open, &assetSaved, &message, m_dt);
     m_panels.SetOpen(EditorPanels::Panel::GraphEditor, open);
     if (assetSaved) {
@@ -2531,7 +2631,366 @@ EditorDockspace::GameplayDebugState EditorApp::BuildGameplayDebugState() {
     return debug;
 }
 
+void EditorApp::OpenAnimationAssetPreview(
+    const std::string& path, EditorAssets::Type type) {
+    m_animationAssetPreviewPath = path;
+    m_animationAssetPreviewType = type;
+    m_animationAssetPreviewTime = 0.0f;
+    m_animationAssetPreviewPlaying = true;
+    m_animationAssetPreviewRestartRequested = false;
+    m_animationPreviewAssets.Clear();
+    if (type == EditorAssets::Type::SkeletalModel)
+        m_animationAssetPreviewMeshPath = path;
+    RefreshAnimationAssetPreviewChoices();
+}
+
+void EditorApp::RefreshAnimationAssetPreviewChoices() {
+    m_animationAssetPreviewMeshes.clear();
+    engine::AssetHandle targetSkeleton;
+    std::string error;
+    const std::filesystem::path contentRoot(m_project.AssetRoot());
+    if (m_animationAssetPreviewType == EditorAssets::Type::Animation) {
+        engine::AnimationAssetData animation;
+        if (engine::LoadAnimationAsset(
+                m_animationAssetPreviewPath, &animation, &error))
+            targetSkeleton = animation.skeletonId;
+    } else if (m_animationAssetPreviewType == EditorAssets::Type::Skeleton) {
+        engine::SkeletonAssetData skeleton;
+        if (engine::LoadSkeletonAsset(
+                m_animationAssetPreviewPath, &skeleton, &error))
+            targetSkeleton = skeleton.header.id;
+    } else if (m_animationAssetPreviewType == EditorAssets::Type::SkeletalModel) {
+        engine::SkeletalMeshAssetData mesh;
+        if (engine::LoadSkeletalMeshAsset(
+                m_animationAssetPreviewPath, &mesh, &error))
+            targetSkeleton = mesh.skeletonId;
+    }
+
+    if (targetSkeleton.Valid()) {
+        const std::string id = targetSkeleton.ToString();
+        if (m_animationPreferredRigBySkeleton.find(id)
+            == m_animationPreferredRigBySkeleton.end()) {
+            const std::string key = "editor.animation_preview_rig." + id;
+            const engine::Config& config = m_hasProjectFile
+                ? m_projectConfig : m_config;
+            const std::string stored = config.GetString(key, {});
+            if (!stored.empty()) {
+                std::filesystem::path path(stored);
+                if (path.is_relative()) path = contentRoot / path;
+                m_animationPreferredRigBySkeleton[id]
+                    = path.lexically_normal().string();
+            }
+        }
+    }
+    for (const std::string& relative :
+         m_assets.ContentAssetPaths(EditorAssets::Type::SkeletalModel)) {
+        const std::string path = (contentRoot / relative).lexically_normal().string();
+        engine::SkeletalMeshAssetData mesh;
+        std::string meshError;
+        EditorDockspace::AnimationPreviewState::AssetChoice choice;
+        choice.path = path;
+        choice.displayName = std::filesystem::path(path).filename().string();
+        if (!engine::LoadSkeletalMeshAsset(path, &mesh, &meshError)) {
+            choice.reason = meshError;
+        } else if (!targetSkeleton.Valid()) {
+            choice.compatible = true;
+            choice.reason = "No skeleton filter";
+        } else if (mesh.skeletonId == targetSkeleton) {
+            choice.compatible = true;
+            choice.reason = "Exact skeleton match";
+        } else {
+            choice.reason = "Different skeleton";
+        }
+        m_animationAssetPreviewMeshes.push_back(std::move(choice));
+    }
+
+    std::sort(m_animationAssetPreviewMeshes.begin(),
+              m_animationAssetPreviewMeshes.end(),
+        [](const auto& a, const auto& b) {
+            if (a.compatible != b.compatible) return a.compatible > b.compatible;
+            return a.displayName < b.displayName;
+        });
+
+    const auto selected = std::find_if(
+        m_animationAssetPreviewMeshes.begin(),
+        m_animationAssetPreviewMeshes.end(),
+        [&](const auto& choice) {
+            return choice.compatible
+                && std::filesystem::path(choice.path).lexically_normal()
+                    == std::filesystem::path(
+                        m_animationAssetPreviewMeshPath).lexically_normal();
+        });
+    if (selected == m_animationAssetPreviewMeshes.end()) {
+        m_animationAssetPreviewMeshPath.clear();
+        if (targetSkeleton.Valid()) {
+            const auto remembered = m_animationPreferredRigBySkeleton.find(
+                targetSkeleton.ToString());
+            if (remembered != m_animationPreferredRigBySkeleton.end()) {
+                const auto valid = std::find_if(
+                    m_animationAssetPreviewMeshes.begin(),
+                    m_animationAssetPreviewMeshes.end(),
+                    [&](const auto& choice) {
+                        return choice.compatible
+                            && choice.path == remembered->second;
+                    });
+                if (valid != m_animationAssetPreviewMeshes.end())
+                    m_animationAssetPreviewMeshPath = valid->path;
+            }
+        }
+        if (m_animationAssetPreviewMeshPath.empty()) {
+            const auto first = std::find_if(
+                m_animationAssetPreviewMeshes.begin(),
+                m_animationAssetPreviewMeshes.end(),
+                [](const auto& choice) { return choice.compatible; });
+            if (first != m_animationAssetPreviewMeshes.end())
+                m_animationAssetPreviewMeshPath = first->path;
+        }
+    }
+    if (targetSkeleton.Valid() && !m_animationAssetPreviewMeshPath.empty()) {
+        const std::string id = targetSkeleton.ToString();
+        const auto existing = m_animationPreferredRigBySkeleton.find(id);
+        if (existing == m_animationPreferredRigBySkeleton.end()
+            || existing->second != m_animationAssetPreviewMeshPath) {
+            m_animationPreferredRigBySkeleton[id]
+                = m_animationAssetPreviewMeshPath;
+            std::error_code ec;
+            std::filesystem::path stored = std::filesystem::relative(
+                m_animationAssetPreviewMeshPath, contentRoot, ec);
+            if (ec) stored = m_animationAssetPreviewMeshPath;
+            const std::string key = "editor.animation_preview_rig." + id;
+            if (m_hasProjectFile) {
+                m_projectConfig.Set(key, stored.generic_string());
+                m_projectConfig.Save();
+            } else {
+                m_config.Set(key, stored.generic_string());
+                m_config.Save();
+            }
+        }
+    }
+}
+
+unsigned int EditorApp::RenderAnimationAssetPreview(
+    const engine::SkinnedModel& model, int clipIndex,
+    float durationSeconds) {
+    constexpr int size = 420;
+    if (!m_animationAssetPreviewFbo)
+        m_animationAssetPreviewFbo.emplace(size, size, GL_RGBA8, true);
+    if (!m_animationAssetPreviewRenderer)
+        m_animationAssetPreviewRenderer =
+            std::make_unique<engine::SkinnedRenderer>();
+
+    if (m_animationAssetPreviewRestartRequested) {
+        m_animationAssetPreviewTime = 0.0f;
+        m_animationAssetPreviewRestartRequested = false;
+    }
+    if (m_animationAssetPreviewPlaying && durationSeconds > 0.0f) {
+        m_animationAssetPreviewTime +=
+            std::max(m_dt, 0.0f) * std::max(m_animationAssetPreviewSpeed, 0.0f);
+        if (m_animationAssetPreviewLoop)
+            m_animationAssetPreviewTime =
+                std::fmod(m_animationAssetPreviewTime, durationSeconds);
+        else
+            m_animationAssetPreviewTime =
+                std::min(m_animationAssetPreviewTime, durationSeconds);
+    }
+    if (clipIndex >= 0
+        && clipIndex < static_cast<int>(model.Animations().size()))
+        engine::Animator::ComputePose(
+            model.GetSkeleton(),
+            model.Animations()[static_cast<std::size_t>(clipIndex)],
+            m_animationAssetPreviewTime,
+            m_animationAssetPreviewPose);
+    else
+        engine::Animator::ComputeBindPose(
+            model.GetSkeleton(), m_animationAssetPreviewPose);
+
+    GLint oldFbo = 0;
+    GLint oldViewport[4]{};
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &oldFbo);
+    glGetIntegerv(GL_VIEWPORT, oldViewport);
+    const GLboolean depthWas = glIsEnabled(GL_DEPTH_TEST);
+    const GLboolean cullWas = glIsEnabled(GL_CULL_FACE);
+    m_animationAssetPreviewFbo->Bind();
+    glEnable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glClearColor(0.055f, 0.070f, 0.095f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    if (!model.SubMeshes().empty()) {
+        const float radius = std::max(model.BoundingRadius(), 0.001f);
+        glm::mat4 transform(1.0f);
+        transform = glm::rotate(transform,
+            glm::radians(m_animationAssetPreviewYaw), glm::vec3(0, 1, 0));
+        transform = glm::rotate(transform,
+            glm::radians(m_animationAssetPreviewPitch), glm::vec3(1, 0, 0));
+        const glm::vec3 bounds = model.Max() - model.Min();
+        if (bounds.z > bounds.y * 1.25f)
+            transform = glm::rotate(
+                transform, glm::radians(-90.0f), glm::vec3(1, 0, 0));
+        transform = glm::scale(transform,
+            glm::vec3((0.9f * m_animationAssetPreviewZoom) / radius));
+        transform = glm::translate(transform, -model.Center());
+        engine::Camera camera(glm::vec3(0.0f, 0.0f, 2.5f));
+        camera.LookAt(glm::vec3(0.0f));
+        m_animationAssetPreviewRenderer->Draw(
+            model, m_animationAssetPreviewPose, transform, camera, 1.0f,
+            glm::normalize(glm::vec3(0.45f, -1.0f, -0.35f)),
+            glm::vec3(1.0f, 0.96f, 0.90f), glm::vec3(0.16f));
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(oldFbo));
+    glViewport(oldViewport[0], oldViewport[1], oldViewport[2], oldViewport[3]);
+    if (depthWas) glEnable(GL_DEPTH_TEST); else glDisable(GL_DEPTH_TEST);
+    if (cullWas) glEnable(GL_CULL_FACE); else glDisable(GL_CULL_FACE);
+    return m_animationAssetPreviewFbo->ColorTexture();
+}
+
+EditorDockspace::AnimationPreviewState
+EditorApp::BuildAnimationAssetPreviewState() {
+    EditorDockspace::AnimationPreviewState state;
+    state.hasSelection = true;
+    state.assetMode = true;
+    state.assetPath = m_animationAssetPreviewPath;
+    state.previewMeshPath = m_animationAssetPreviewMeshPath;
+    state.selectedName = std::filesystem::path(
+        m_animationAssetPreviewPath).filename().string();
+    state.assetIsAnimation =
+        m_animationAssetPreviewType == EditorAssets::Type::Animation;
+    state.assetIsSkeleton =
+        m_animationAssetPreviewType == EditorAssets::Type::Skeleton;
+    state.skeletalModel = true;
+    state.previewMeshes = m_animationAssetPreviewMeshes;
+    state.assetPlaying = m_animationAssetPreviewPlaying;
+    state.assetStripRootMotion = m_animationAssetPreviewStripRootMotion;
+    state.loop = m_animationAssetPreviewLoop;
+    state.playbackSpeed = m_animationAssetPreviewSpeed;
+    state.previewTime = m_animationAssetPreviewTime;
+
+    if (m_animationAssetPreviewRefreshRequested) {
+        m_animationAssetPreviewRefreshRequested = false;
+        m_animationPreviewAssets.Clear();
+        RefreshAnimationAssetPreviewChoices();
+        state.previewMeshes = m_animationAssetPreviewMeshes;
+        state.previewMeshPath = m_animationAssetPreviewMeshPath;
+    }
+
+    engine::AssetHandle skeletonId;
+    std::string clipName;
+    if (state.assetIsAnimation) {
+        engine::AnimationAssetData animation;
+        if (!engine::LoadAnimationAsset(
+                m_animationAssetPreviewPath, &animation, &state.loadError))
+            return state;
+        skeletonId = animation.skeletonId;
+        if (!animation.clips.empty())
+            clipName = animation.clips.front().animation.name;
+    } else if (state.assetIsSkeleton) {
+        engine::SkeletonAssetData skeleton;
+        if (!engine::LoadSkeletonAsset(
+                m_animationAssetPreviewPath, &skeleton, &state.loadError))
+            return state;
+        skeletonId = skeleton.header.id;
+    } else {
+        engine::SkeletalMeshAssetData mesh;
+        if (!engine::LoadSkeletalMeshAsset(
+                m_animationAssetPreviewPath, &mesh, &state.loadError))
+            return state;
+        skeletonId = mesh.skeletonId;
+    }
+    state.skeletonId = skeletonId.ToString();
+
+    if (m_animationAssetPreviewMeshPath.empty()) {
+        state.loadError = "No compatible preview mesh is available for this skeleton.";
+        return state;
+    }
+
+    engine::SkeletalMeshAssetData meshData;
+    if (!engine::LoadSkeletalMeshAsset(
+            m_animationAssetPreviewMeshPath, &meshData, &state.loadError))
+        return state;
+    if (meshData.skeletonId != skeletonId) {
+        state.loadError = "The selected preview mesh references a different skeleton.";
+        return state;
+    }
+
+    const engine::SkinnedModel* model = nullptr;
+    if (state.assetIsAnimation) {
+        std::vector<engine::RuntimeAssetManager::SkinnedAnimationSource> source{
+            {m_animationAssetPreviewPath,
+             clipName.empty() ? std::string("Preview") : clipName,
+             m_animationAssetPreviewStripRootMotion,
+             clipName}
+        };
+        model = m_animationPreviewAssets.LoadSkinnedModel(
+            m_animationAssetPreviewMeshPath, source, &state.loadError);
+    } else {
+        model = m_animationPreviewAssets.LoadSkinnedModel(
+            m_animationAssetPreviewMeshPath, &state.loadError);
+    }
+    if (!model) return state;
+    state.modelLoaded = true;
+    state.modelPath = m_animationAssetPreviewMeshPath;
+
+    for (const engine::Animation& clip : model->Animations()) {
+        const float ticks = clip.ticksPerSecond > 0.0f
+            ? clip.ticksPerSecond : 25.0f;
+        state.clips.push_back({clip.name,
+            clip.duration > 0.0f ? clip.duration / ticks : 0.0f});
+    }
+    int clipIndex = state.clips.empty() ? -1
+        : static_cast<int>(state.clips.size()) - 1;
+    if (!clipName.empty()) {
+        for (std::size_t i = 0; i < state.clips.size(); ++i)
+            if (state.clips[i].name == clipName) {
+                clipIndex = static_cast<int>(i);
+                break;
+            }
+    }
+    state.defaultClipIndex = std::max(clipIndex, 0);
+    state.defaultClipName = clipIndex >= 0
+        ? state.clips[static_cast<std::size_t>(clipIndex)].name
+        : std::string{};
+    state.previewDuration = clipIndex >= 0
+        ? state.clips[static_cast<std::size_t>(clipIndex)].durationSeconds
+        : 0.0f;
+
+    const engine::Skeleton& skeleton = model->GetSkeleton();
+    for (std::size_t i = 0; i < skeleton.bones.size(); ++i) {
+        const engine::Bone& bone = skeleton.bones[i];
+        int depth = 0;
+        for (int parent = bone.parent;
+             parent >= 0 && parent < static_cast<int>(skeleton.bones.size());
+             parent = skeleton.bones[static_cast<std::size_t>(parent)].parent)
+            ++depth;
+        state.bones.push_back({bone.name, bone.parent, depth});
+    }
+
+    if (state.assetIsAnimation) {
+        engine::AnimationAssetData animation;
+        std::string ignored;
+        if (engine::LoadAnimationAsset(
+                m_animationAssetPreviewPath, &animation, &ignored)
+            && !animation.clips.empty()) {
+            for (const std::string& channel :
+                 animation.clips.front().channelBoneNames) {
+                if (skeleton.Find(channel) >= 0) ++state.matchedChannels;
+                else ++state.missingChannels;
+            }
+        }
+    }
+    state.compatibilitySummary = state.assetIsAnimation
+        ? std::to_string(state.matchedChannels) + " animation channels matched, "
+            + std::to_string(state.missingChannels) + " missing"
+        : "Exact skeleton identity match";
+    state.previewTexture = RenderAnimationAssetPreview(
+        *model, clipIndex, state.previewDuration);
+    state.previewTime = m_animationAssetPreviewTime;
+    return state;
+}
+
 EditorDockspace::AnimationPreviewState EditorApp::BuildAnimationPreviewState() {
+    if (!m_animationAssetPreviewPath.empty())
+        return BuildAnimationAssetPreviewState();
     EditorDockspace::AnimationPreviewState state;
     const EditorScene::Object* selected = m_scene.SelectedObject();
     if (!selected) {
@@ -2976,13 +3435,29 @@ void EditorApp::HandleEditorCommandShortcuts(engine::Window&, bool controlDown)
             DeleteSelected();
         }
     }
-    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_R)) {
+    if (m_mode == EditorMode::Edit && controlDown && Pressed(GLFW_KEY_R)) {
         m_scene.ResetSelectedTransform();
         m_log.Info("Reset selected transform");
     }
-    if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_G)) {
-        m_gizmo.CycleMode();
-        m_log.Info(std::string("Gizmo mode: ") + m_gizmo.ModeName());
+    const bool gizmoShortcutAllowed = m_mode == EditorMode::Edit
+        && !controlDown
+        && !m_cameraController.MouseLookActive();
+    if (gizmoShortcutAllowed && Pressed(GLFW_KEY_W)) {
+        m_gizmo.SetMode(EditorGizmo::Mode::Translate);
+        m_log.Info("Gizmo mode: Move (W)");
+    }
+    if (gizmoShortcutAllowed && Pressed(GLFW_KEY_E)) {
+        m_gizmo.SetMode(EditorGizmo::Mode::Rotate);
+        m_log.Info("Gizmo mode: Rotate (E)");
+    }
+    if (gizmoShortcutAllowed && Pressed(GLFW_KEY_R)) {
+        m_gizmo.SetMode(EditorGizmo::Mode::Scale);
+        m_log.Info("Gizmo mode: Scale (R)");
+    }
+    if (gizmoShortcutAllowed && Pressed(GLFW_KEY_G)) {
+        m_gizmo.SetMode(EditorGizmo::Mode::Scale);
+        m_gizmo.SetAxis(EditorGizmo::Axis::All);
+        m_log.Info("Gizmo mode: Uniform Scale (G)");
     }
     if (m_mode == EditorMode::Edit && Pressed(GLFW_KEY_X)) {
         m_gizmo.SetAxis(EditorGizmo::Axis::X);
@@ -3423,7 +3898,7 @@ void EditorApp::DrawEditScene(const glm::mat4 & viewProj)
         bool environmentSunApplied = false;
 
         for (const EditorScene::Object& object : objects) {
-            if (!object.visible || object.navMeshBoundsVolume
+            if (!object.visible || object.navMeshBoundsVolume || object.isWater
                 || object.primitive == EditorScene::Primitive::Empty
                 || !object.modelAssetPath.empty()) {
                 continue;
@@ -3557,6 +4032,24 @@ void EditorApp::DrawEditScene(const glm::mat4 & viewProj)
         m_viewport.DrawPhysicsColliderGuides(
             m_scene, viewProj, environment.selectedPhysicsGuideOnly);
     }
+    if (m_terrainSculpt && m_terrainBrushHoverValid) {
+        const EditorScene::Object* selected = m_scene.SelectedObject();
+        if (selected && selected->isTerrain) {
+            const auto terrain = m_terrains.find(selected->entity);
+            const Transform* transform = m_scene.TryGetTransform(selected->entity);
+            if (terrain != m_terrains.end() && transform) {
+                m_viewport.DrawTerrainBrushGuide(
+                    terrain->second.terrain, *transform,
+                    m_terrainBrushCenterLocal, m_terrainBrushRadius,
+                    m_terrainSculptMode, m_terrainBrushApplying, viewProj);
+            }
+        }
+    }
+    if (m_foliagePaint && m_foliageBrushHoverValid) {
+        m_viewport.DrawFoliageBrushGuide(
+            m_foliageBrushRing, m_foliageBrushCenterWorld,
+            m_foliageErase, m_foliageBrushApplying, viewProj);
+    }
     if (m_shader && m_cube && environment.showPhysicsGuides) {
         std::vector<EditorViewport::PhysicsJointGuide> jointGuides;
         for (const EditorScene::PhysicsJoint& joint : m_scene.PhysicsJoints()) {
@@ -3598,8 +4091,17 @@ void EditorApp::DrawEditScene(const glm::mat4 & viewProj)
         m_viewport.DrawPhysicsJointGuides(m_renderer, *m_shader, *m_cube, jointGuides, viewProj);
     }
     if (m_shader && m_cube && m_cone) {
+        const glm::vec3* splinePivot = nullptr;
+        if (const EditorScene::Object* selected = m_scene.SelectedObject();
+            selected && selected->isSpline
+            && (m_gizmo.CurrentMode() == EditorGizmo::Mode::Translate
+                || m_gizmo.CurrentMode() == EditorGizmo::Mode::Rotate)
+            && m_selectedSplinePoint >= 0
+            && m_selectedSplinePoint < static_cast<int>(selected->splinePoints.size())) {
+            splinePivot = &selected->splinePoints[static_cast<std::size_t>(m_selectedSplinePoint)];
+        }
         m_viewport.DrawSceneGizmo(m_renderer, *m_shader, *m_cube, *m_cone, m_scene, m_gizmo,
-            viewProj, m_camera, GetWindow().Height());
+            viewProj, m_camera, GetWindow().Height(), splinePivot);
     }
     if (m_shader && m_cube) {
         m_viewport.DrawNavAgentGuides(m_renderer, *m_shader, *m_cube, m_scene, viewProj);
@@ -3777,21 +4279,39 @@ void EditorApp::HandleMouseViewportSelection()
     const glm::mat4 viewProj = m_camera.ProjectionMatrix(window.AspectRatio()) * m_camera.ViewMatrix();
 
     if (left.pressed) {
+        const EditorScene::Object* selected = m_scene.SelectedObject();
+        const glm::vec3* splinePivot = nullptr;
+        if (selected && selected->isSpline
+            && (m_gizmo.CurrentMode() == EditorGizmo::Mode::Translate
+                || m_gizmo.CurrentMode() == EditorGizmo::Mode::Rotate)
+            && m_selectedSplinePoint >= 0
+            && m_selectedSplinePoint < static_cast<int>(selected->splinePoints.size())) {
+            splinePivot = &selected->splinePoints[static_cast<std::size_t>(m_selectedSplinePoint)];
+        }
         if (m_viewport.PickGizmoHandle(m_gizmo, m_scene, px, py, viewProj,
-                window.Width(), window.Height(), m_camera)) {
+                window.Width(), window.Height(), m_camera, splinePivot)) {
             m_mouse.BeginGizmoDrag(GLFW_MOUSE_BUTTON_LEFT, px, py);
             m_transformController.BeginGizmoDrag();
             m_scene.BeginTransformEdit();
             m_log.Info(std::string("Mouse gizmo: ") + m_gizmo.ModeName() + " " + m_gizmo.AxisName());
+        } else if (const int point = m_viewport.PickSplinePoint(
+                       m_scene, px, py, viewProj, window.Width(), window.Height()); point >= 0) {
+            m_selectedSplinePoint = point;
+            m_gizmo.SetMode(EditorGizmo::Mode::Translate);
+            m_log.Info("Selected spline point " + std::to_string(point + 1));
         } else {
             const int picked = m_viewport.PickSceneObject(m_scene, m_editAssets, px, py, viewProj, window.Width(), window.Height());
             if (picked >= 0) {
                 m_scene.SelectIndex(picked);
-                if (const EditorScene::Object* selected = m_scene.SelectedObject()) {
-                    m_log.Info("Selected " + selected->name);
+                // A control point was handled above. Clicking the curve/object itself
+                // returns to whole-spline transform editing, even when it was already selected.
+                m_selectedSplinePoint = -1;
+                if (const EditorScene::Object* pickedObject = m_scene.SelectedObject()) {
+                    m_log.Info("Selected " + pickedObject->name);
                 }
             } else if (m_scene.SelectedObject()) {
                 m_scene.Deselect();
+                m_selectedSplinePoint = -1;
                 m_log.Info("Deselected object");
             }
         }
@@ -3803,7 +4323,17 @@ void EditorApp::HandleMouseViewportSelection()
         const float pixels = ProjectGizmoDrag(dx, dy, viewProj, window.Width(), window.Height());
 
         if (pixels != 0.0f) {
-            m_transformController.ApplyGizmoDrag(m_scene, m_gizmo, pixels);
+            const EditorScene::Object* selected = m_scene.SelectedObject();
+            if (selected && selected->isSpline
+                && (m_gizmo.CurrentMode() == EditorGizmo::Mode::Translate
+                    || m_gizmo.CurrentMode() == EditorGizmo::Mode::Rotate)
+                && m_selectedSplinePoint >= 0
+                && m_selectedSplinePoint < static_cast<int>(selected->splinePoints.size())) {
+                m_transformController.ApplySplinePointGizmoDrag(
+                    m_scene, static_cast<std::size_t>(m_selectedSplinePoint), m_gizmo, pixels);
+            } else {
+                m_transformController.ApplyGizmoDrag(m_scene, m_gizmo, pixels);
+            }
         }
 
         m_mouse.UpdateGizmoLast(px, py);
@@ -3852,23 +4382,30 @@ bool EditorApp::AverageImageColor(const std::string& relativePath, glm::vec3& ou
     return true;
 }
 
-glm::vec3 EditorApp::TerrainLayerMaterialColor(const std::string& materialPath)
+engine::TerrainLayerSurface EditorApp::TerrainLayerMaterialSurface(const std::string& materialPath)
 {
-    const auto cached = m_terrainMaterialColors.find(materialPath);
-    if (cached != m_terrainMaterialColors.end()) return cached->second;
+    const auto cached = m_terrainMaterialSurfaces.find(materialPath);
+    if (cached != m_terrainMaterialSurfaces.end()) return cached->second;
 
-    glm::vec3 color(0.6f, 0.6f, 0.6f);   // neutral fallback if the material won't load
+    engine::TerrainLayerSurface surface;
+    surface.albedo = glm::vec3(0.6f);
     std::string error;
     if (const engine::RuntimeMaterialAsset* mat = m_editAssets.LoadMaterial(materialPath, &error)) {
-        color = mat->material.albedo;
+        surface.albedo = mat->material.albedo;
+        surface.ao = mat->material.ao;
+        surface.roughness = mat->material.roughness;
+        surface.metallic = mat->material.metallic;
         glm::vec3 avg;
         if (!mat->albedoMapPath.empty() && AverageImageColor(mat->albedoMapPath, avg)) {
-            color *= avg;   // modulate base colour by the texture's average
+            surface.albedo *= avg;   // preserve the texture's representative colour
         }
     }
-    color = glm::clamp(color, glm::vec3(0.0f), glm::vec3(1.0f));
-    m_terrainMaterialColors[materialPath] = color;
-    return color;
+    surface.albedo = glm::clamp(surface.albedo, glm::vec3(0.0f), glm::vec3(1.0f));
+    surface.ao = glm::clamp(surface.ao, 0.0f, 1.0f);
+    surface.roughness = glm::clamp(surface.roughness, 0.04f, 1.0f);
+    surface.metallic = glm::clamp(surface.metallic, 0.0f, 1.0f);
+    m_terrainMaterialSurfaces[materialPath] = surface;
+    return surface;
 }
 
 void EditorApp::AddTerrainMeshes(engine::ecs::Registry& pbrRegistry)
@@ -3915,15 +4452,15 @@ void EditorApp::AddTerrainMeshes(engine::ecs::Registry& pbrRegistry)
 
         // Paint-layer palette: default colours, overridden by any assigned material's
         // representative colour. SetLayerColors only rebuilds the albedo when it changes.
-        glm::vec3 layerColors[6];
-        engine::DefaultTerrainLayerColors(layerColors);
+        engine::TerrainLayerSurface layerSurfaces[6];
+        engine::DefaultTerrainLayerSurfaces(layerSurfaces);
         for (int layer = 1; layer <= 5; ++layer) {
             const std::string& matPath = object.terrainLayerMaterials[static_cast<std::size_t>(layer - 1)];
             if (!matPath.empty()) {
-                layerColors[layer] = TerrainLayerMaterialColor(matPath);
+                layerSurfaces[layer] = TerrainLayerMaterialSurface(matPath);
             }
         }
-        tc.terrain.SetLayerColors(layerColors);
+        tc.terrain.SetLayerSurfaces(layerSurfaces);
 
         // Grass: instanced blades on the painted grass layer. Rebuild the scatter only
         // when the terrain/paint/density/position change (cheap signature).
@@ -3934,6 +4471,9 @@ void EditorApp::AddTerrainMeshes(engine::ecs::Registry& pbrRegistry)
             engine::GrassConfig gcfg;
             gcfg.density = object.grassDensity;
             gcfg.bladeHeight = object.grassHeight;
+            gcfg.randomizeHeight = object.grassRandomizeHeight;
+            gcfg.minHeightScale = object.grassMinHeightScale;
+            gcfg.maxHeightScale = object.grassMaxHeightScale;
             gcfg.windStrength = object.grassWindStrength;
             gcfg.windSpeed = object.grassWindSpeed;
             gcfg.baseColor = object.grassBaseColor;
@@ -3948,6 +4488,9 @@ void EditorApp::AddTerrainMeshes(engine::ecs::Registry& pbrRegistry)
             auto mix = [&sig](std::size_t v) { sig = (sig ^ v) * 1099511628211ull; };
             mix(static_cast<std::size_t>(hm.res));
             mix(fbits(hm.size)); mix(fbits(hm.maxHeight));   // NOT the active settings -- those
+            mix(object.grassRandomizeHeight ? 1u : 0u);
+            mix(fbits(object.grassMinHeightScale));
+            mix(fbits(object.grassMaxHeightScale));
             mix(fbits(worldOrigin.x)); mix(fbits(worldOrigin.y)); mix(fbits(worldOrigin.z));  // only bake at paint time
             mix(paint.size());
             const std::size_t pstride = std::max<std::size_t>(1, paint.size() / 512);
@@ -3985,9 +4528,13 @@ void EditorApp::AddTerrainMeshes(engine::ecs::Registry& pbrRegistry)
 
         engine::ecs::PbrMaterial mat;
         mat.albedo = glm::vec3(1.0f);
-        mat.roughness = 0.92f;
-        mat.metallic = 0.0f;
+        // Generated ORM already contains the final per-layer values. Unit scalar
+        // factors keep those channels intact in the generic PBR shader.
+        mat.ao = 1.0f;
+        mat.roughness = 1.0f;
+        mat.metallic = 1.0f;
         mat.albedoMap = &tc.terrain.Albedo();
+        mat.metalRoughMap = &tc.terrain.SurfaceMap();
         const Entity e = pbrRegistry.Create();
         pbrRegistry.Add<Transform>(e, t ? *t : Transform{});
         pbrRegistry.Add<engine::ecs::MeshPBR>(e, engine::ecs::MeshPBR{&tc.terrain.GetMesh(), mat});
@@ -4008,20 +4555,149 @@ float EditorApp::TerrainSurfaceY(float worldX, float worldZ, bool& over)
         }
         const Transform* t = m_scene.TryGetTransform(object.entity);
         const glm::vec3 base = t ? t->position : glm::vec3(0.0f);
-        const float lx = worldX - base.x;
-        const float lz = worldZ - base.z;
+        const glm::vec3 scale = t ? glm::abs(t->scale) : glm::vec3(1.0f);
+        const float sx = std::max(scale.x, 0.0001f);
+        const float sy = std::max(scale.y, 0.0001f);
+        const float sz = std::max(scale.z, 0.0001f);
+        const float lx = (worldX - base.x) / sx;
+        const float lz = (worldZ - base.z) / sz;
         const float size = it->second.terrain.Map().size;
         if (lx < 0.0f || lz < 0.0f || lx > size || lz > size) {
             continue;   // outside this terrain's footprint
         }
-        const float y = base.y + it->second.terrain.HeightAt(lx, lz);
+        const float localY = it->second.terrain.HeightAt(lx, lz);
+        const float y = base.y + localY * sy;
         if (!over || y > best) { best = y; over = true; }   // highest terrain wins on overlap
     }
     return best;
 }
 
+void EditorApp::HandleFoliagePaint()
+{
+    m_foliageBrushHoverValid = false;
+    m_foliageBrushApplying = false;
+    m_foliageBrushRing.clear();
+    m_foliageStrokeCooldown = std::max(0.0f, m_foliageStrokeCooldown - m_dt);
+    if (m_mode != EditorMode::Edit || m_cameraController.MouseLookActive()) return;
+    const EditorScene::Object* selected = m_scene.SelectedObject();
+    if (!selected || !selected->isFoliage || selected->foliageAssetPath.empty()) return;
+
+    engine::Window& window = GetWindow();
+    if (!window.Native()) return;
+    double cx = 0.0, cy = 0.0;
+    glfwGetCursorPos(window.Native(), &cx, &cy);
+    if (!IsViewportDropPosition(static_cast<float>(cx), static_cast<float>(cy))) return;
+    glm::vec3 center = SceneDropPosition();
+    bool overTerrain = false;
+    const float terrainY = TerrainSurfaceY(center.x, center.z, overTerrain);
+    if (overTerrain) center.y = terrainY;
+    center.y += 0.025f;
+    m_foliageBrushCenterWorld = center;
+    m_foliageBrushHoverValid = true;
+    constexpr int ringSegments = 96;
+    m_foliageBrushRing.reserve(ringSegments);
+    for (int i = 0; i < ringSegments; ++i) {
+        const float angleValue = glm::two_pi<float>() * static_cast<float>(i)
+            / static_cast<float>(ringSegments);
+        glm::vec3 point(center.x + std::cos(angleValue) * m_foliageBrushRadius,
+                        center.y,
+                        center.z + std::sin(angleValue) * m_foliageBrushRadius);
+        bool ringOverTerrain = false;
+        const float ringY = TerrainSurfaceY(point.x, point.z, ringOverTerrain);
+        if (ringOverTerrain) point.y = ringY + 0.025f;
+        m_foliageBrushRing.push_back(point);
+    }
+    m_foliageBrushApplying =
+        glfwGetMouseButton(window.Native(), GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+    if (!m_foliageBrushApplying) return;
+
+    if (m_foliageErase) {
+        if (m_foliageStrokeCooldown <= 0.0f) {
+            m_scene.EraseSelectedFoliageInstances(center, m_foliageBrushRadius);
+            m_foliageStrokeCooldown = 0.04f;
+        }
+        return;
+    }
+    if (m_foliageStrokeCooldown > 0.0f) return;
+
+    std::string error;
+    const engine::FoliageAssetData* asset =
+        m_editAssets.LoadFoliage(selected->foliageAssetPath, &error);
+    if (!asset || asset->types.empty()) {
+        if (!error.empty()) m_log.Warning("Foliage paint: " + error);
+        m_foliagePaint = false;
+        return;
+    }
+    const int typeIndex = std::clamp(
+        m_foliageTypeIndex, 0, static_cast<int>(asset->types.size()) - 1);
+    const engine::FoliageTypeAsset& type = asset->types[static_cast<std::size_t>(typeIndex)];
+    const float radius = std::max(m_foliageBrushRadius, 0.1f);
+    const float area = glm::pi<float>() * radius * radius;
+    const int attempts = std::clamp(static_cast<int>(std::ceil(
+        area * type.density * std::max(m_foliagePaintDensity, 0.01f) * 0.025f)), 1, 64);
+
+    static std::mt19937 random{0x3D6F11A6u};
+    std::uniform_real_distribution<float> unit(0.0f, 1.0f);
+    std::uniform_real_distribution<float> angle(0.0f, glm::two_pi<float>());
+    const Transform* owner = m_scene.TryGetTransform(selected->entity);
+    const glm::mat4 ownerModel = owner ? owner->Model() : glm::mat4(1.0f);
+    for (int i = 0; i < attempts; ++i) {
+        const float a = angle(random);
+        const float d = std::sqrt(unit(random)) * radius;
+        glm::vec3 position(center.x + std::cos(a) * d, center.y,
+                           center.z + std::sin(a) * d);
+        bool sampleOverTerrain = false;
+        const float sampleY = TerrainSurfaceY(position.x, position.z, sampleOverTerrain);
+        if (sampleOverTerrain) position.y = sampleY;
+        if (position.y < type.minimumWorldHeight || position.y > type.maximumWorldHeight) continue;
+
+        glm::vec3 surfaceNormal(0.0f, 1.0f, 0.0f);
+        if (sampleOverTerrain) {
+            constexpr float probe = 0.2f;
+            bool leftOver = false, rightOver = false, backOver = false, frontOver = false;
+            const float left = TerrainSurfaceY(position.x - probe, position.z, leftOver);
+            const float right = TerrainSurfaceY(position.x + probe, position.z, rightOver);
+            const float back = TerrainSurfaceY(position.x, position.z - probe, backOver);
+            const float front = TerrainSurfaceY(position.x, position.z + probe, frontOver);
+            if (leftOver && rightOver && backOver && frontOver) {
+                surfaceNormal = glm::normalize(glm::vec3(
+                    left - right, probe * 2.0f, back - front));
+            }
+        }
+        const float slope = glm::degrees(std::acos(
+            std::clamp(surfaceNormal.y, 0.0f, 1.0f)));
+        if (slope < type.minimumSlopeDegrees || slope > type.maximumSlopeDegrees) continue;
+
+        bool tooClose = false;
+        const float spacing2 = type.minimumSpacing * type.minimumSpacing;
+        for (const engine::ecs::FoliageInstance& existing : selected->foliageInstances) {
+            if (!existing.enabled || existing.typeIndex != static_cast<std::uint32_t>(typeIndex)) continue;
+            const glm::vec3 world = glm::vec3(ownerModel * glm::vec4(existing.position, 1.0f));
+            const glm::vec2 delta(world.x - position.x, world.z - position.z);
+            if (glm::dot(delta, delta) < spacing2) { tooClose = true; break; }
+        }
+        if (tooClose) continue;
+
+        const glm::vec3 scale = glm::mix(type.minScale, type.maxScale, unit(random));
+        glm::vec3 rotation = glm::mix(type.minRotation,
+                                      type.maxRotation, unit(random));
+        if (type.randomYaw) rotation.y += unit(random) * 360.0f;
+        if (type.alignToSurface) {
+            rotation.x += glm::degrees(std::atan2(surfaceNormal.z, surfaceNormal.y));
+            rotation.z -= glm::degrees(std::atan2(surfaceNormal.x, surfaceNormal.y));
+        }
+        m_scene.AddSelectedFoliageInstance(position, rotation, scale,
+                                           static_cast<std::uint32_t>(typeIndex));
+    }
+    // Resolve after each stroke so a freshly assigned foliage asset becomes visible.
+    m_editAssets.ResolveRegistryAssets(m_scene.Registry());
+    m_foliageStrokeCooldown = 0.08f;
+}
+
 void EditorApp::HandleTerrainSculpt()
 {
+    m_terrainBrushHoverValid = false;
+    m_terrainBrushApplying = false;
     if (!m_terrainSculpt || m_mode != EditorMode::Edit) {
         return;
     }
@@ -4038,9 +4714,6 @@ void EditorApp::HandleTerrainSculpt()
     if (!IsViewportDropPosition(static_cast<float>(cx), static_cast<float>(cy))) {
         return;
     }
-    if (glfwGetMouseButton(window.Native(), GLFW_MOUSE_BUTTON_LEFT) != GLFW_PRESS) {
-        return;
-    }
     const auto it = m_terrains.find(sel->entity);
     if (it == m_terrains.end() || it->second.terrain.Map().h.empty()) {
         return;
@@ -4050,13 +4723,24 @@ void EditorApp::HandleTerrainSculpt()
     const engine::ecs::Transform* t = m_scene.TryGetTransform(sel->entity);
     const glm::vec3 base = t ? t->position : glm::vec3(0.0f);
 
-    engine::Heightmap hm = it->second.terrain.Map();   // working copy
+    engine::Heightmap& hm = it->second.terrain.MutableMap();
     const int   res  = hm.res;
     if (res < 2) return;
     const float cell = hm.size / static_cast<float>(res - 1);
     const float lx = hit.x - base.x;   // brush centre in terrain-local XZ
     const float lz = hit.z - base.z;
     const float radius = std::max(m_terrainBrushRadius, 0.1f);
+    if (lx + radius < 0.0f || lz + radius < 0.0f
+        || lx - radius > hm.size || lz - radius > hm.size) {
+        return;
+    }
+
+    m_terrainBrushCenterLocal = glm::vec2(lx, lz);
+    m_terrainBrushHoverValid = true;
+    m_terrainBrushApplying =
+        glfwGetMouseButton(window.Native(), GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+    if (!m_terrainBrushApplying) return;
+
     const float delta  = m_terrainBrushStrength * m_dt;
     const int gi = static_cast<int>(std::round(lx / cell));
     const int gj = static_cast<int>(std::round(lz / cell));
@@ -4118,9 +4802,34 @@ void EditorApp::HandleTerrainSculpt()
     }
 
     // --- Sculpt modes: modify the heightmap. ---
-    const std::vector<float> src = hm.h;   // for smooth/flatten reference
+    const int dirtyMinI = std::max(gi - rad, 0);
+    const int dirtyMaxI = std::min(gi + rad, res - 1);
+    const int dirtyMinJ = std::max(gj - rad, 0);
+    const int dirtyMaxJ = std::min(gj + rad, res - 1);
+    if (dirtyMinI > dirtyMaxI || dirtyMinJ > dirtyMaxJ) return;
+
+    // Smoothing needs an immutable one-cell neighborhood. Copy only that local
+    // patch instead of duplicating a million-float 1024 terrain every frame.
+    const int srcMinI = std::max(dirtyMinI - 1, 0);
+    const int srcMaxI = std::min(dirtyMaxI + 1, res - 1);
+    const int srcMinJ = std::max(dirtyMinJ - 1, 0);
+    const int srcMaxJ = std::min(dirtyMaxJ + 1, res - 1);
+    const int srcWidth = srcMaxI - srcMinI + 1;
+    std::vector<float> smoothSource;
+    if (m_terrainSculptMode == 2) {
+        smoothSource.reserve(static_cast<std::size_t>(srcWidth) * (srcMaxJ - srcMinJ + 1));
+        for (int j = srcMinJ; j <= srcMaxJ; ++j) {
+            const auto begin = hm.h.begin() + static_cast<std::ptrdiff_t>(j * res + srcMinI);
+            smoothSource.insert(smoothSource.end(), begin, begin + srcWidth);
+        }
+    }
+    const auto sourceHeight = [&](int i, int j) {
+        if (smoothSource.empty()) return hm.h[static_cast<std::size_t>(j) * res + i];
+        return smoothSource[static_cast<std::size_t>(j - srcMinJ) * srcWidth + (i - srcMinI)];
+    };
     float centerH = 0.0f;
-    if (gi >= 0 && gj >= 0 && gi < res && gj < res) centerH = src[static_cast<std::size_t>(gj) * res + gi];
+    if (gi >= 0 && gj >= 0 && gi < res && gj < res)
+        centerH = hm.h[static_cast<std::size_t>(gj) * res + gi];
 
     for (int j = gj - rad; j <= gj + rad; ++j) {
         for (int i = gi - rad; i <= gi + rad; ++i) {
@@ -4141,7 +4850,7 @@ void EditorApp::HandleTerrainSculpt()
                         for (int di = -1; di <= 1; ++di) {
                             const int ni = i + di, nj = j + dj;
                             if (ni >= 0 && nj >= 0 && ni < res && nj < res) {
-                                sum += src[static_cast<std::size_t>(nj) * res + ni]; ++n;
+                                sum += sourceHeight(ni, nj); ++n;
                             }
                         }
                     const float avg = n ? sum / n : h;
@@ -4154,8 +4863,10 @@ void EditorApp::HandleTerrainSculpt()
         }
     }
 
-    it->second.terrain.SetHeightmap(hm);        // rebuild mesh + albedo
-    m_scene.SetSelectedTerrainHeights(hm.h);    // persist the stroke
+    it->second.terrain.CommitHeightRegion(
+        dirtyMinI, dirtyMinJ, dirtyMaxI, dirtyMaxJ);
+    m_scene.UpdateSelectedTerrainHeightRegion(
+        hm.h, res, dirtyMinI, dirtyMinJ, dirtyMaxI, dirtyMaxJ);
 }
 
 void EditorApp::HandleMouseViewportGizmo()
@@ -4201,7 +4912,17 @@ void EditorApp::HandleMouseViewportGizmo()
         const float pixels = ProjectGizmoDrag(dx, dy, viewProj, window.Width(), window.Height());
 
         if (pixels != 0.0f) {
-            m_transformController.ApplyGizmoDrag(m_scene, m_gizmo, pixels);
+            const EditorScene::Object* selected = m_scene.SelectedObject();
+            if (selected && selected->isSpline
+                && (m_gizmo.CurrentMode() == EditorGizmo::Mode::Translate
+                    || m_gizmo.CurrentMode() == EditorGizmo::Mode::Rotate)
+                && m_selectedSplinePoint >= 0
+                && m_selectedSplinePoint < static_cast<int>(selected->splinePoints.size())) {
+                m_transformController.ApplySplinePointGizmoDrag(
+                    m_scene, static_cast<std::size_t>(m_selectedSplinePoint), m_gizmo, pixels);
+            } else {
+                m_transformController.ApplyGizmoDrag(m_scene, m_gizmo, pixels);
+            }
         }
 
         m_mouse.UpdateGizmoLast(px, py);
@@ -4234,9 +4955,17 @@ float EditorApp::ProjectGizmoDrag(float dx, float dy, const glm::mat4& viewProj,
         || m_gizmo.CurrentMode() == EditorGizmo::Mode::Scale) {
         axis = glm::mat3_cast(transform->rotation) * axis;
     }
-    if (!m_viewport.ProjectWorldToScreen(transform->position, viewProj,
+    glm::vec3 pivot = transform->position;
+    if (selected && selected->isSpline
+        && (m_gizmo.CurrentMode() == EditorGizmo::Mode::Translate
+            || m_gizmo.CurrentMode() == EditorGizmo::Mode::Rotate)
+        && m_selectedSplinePoint >= 0
+        && m_selectedSplinePoint < static_cast<int>(selected->splinePoints.size())) {
+        pivot = selected->splinePoints[static_cast<std::size_t>(m_selectedSplinePoint)];
+    }
+    if (!m_viewport.ProjectWorldToScreen(pivot, viewProj,
             viewportWidth, viewportHeight, &centerScreen)
-        || !m_viewport.ProjectWorldToScreen(transform->position + axis, viewProj,
+        || !m_viewport.ProjectWorldToScreen(pivot + axis, viewProj,
             viewportWidth, viewportHeight, &axisScreen)) {
         return m_gizmo.CurrentAxis() == EditorGizmo::Axis::Y ? -dy : dx;
     }
@@ -4648,7 +5377,7 @@ void EditorApp::AddTerrain() {
     m_log.Info("Added terrain");
 }
 
-void EditorApp::AddWater(int preset) {
+void EditorApp::AddWater(int preset, bool createRiverSpline) {
     if (!m_plane) {
         m_log.Error("Add failed: plane mesh is not ready");
         return;
@@ -4689,26 +5418,73 @@ void EditorApp::AddWater(int preset) {
                  0.55f, 3.2f, 0.8f, 0.10f, 0.55f};
             break;
     }
+    int createdSplineIndex = -1;
+    std::string createdSplineName;
+    if (preset == 3 && createRiverSpline) {
+        AddSpline(1);
+        createdSplineIndex = m_scene.SelectedIndex();
+        if (const EditorScene::Object* spline = m_scene.SelectedObject()) {
+            createdSplineName = spline->name;
+        }
+    }
+
     m_scene.AddPlane(*m_plane);   // a plane object that becomes a water body (rendered by the water pass)
     m_scene.SetSelectedWater(p.size, p.res, 0.0f, p.shallow, p.deep, p.reflection,
                              p.transparency, p.fresnel, p.specular, p.shininess);
     m_scene.SetSelectedWaterWaves(p.seaHeight, p.seaChoppy, p.seaSpeed, p.seaFreq, p.foam, preset);
+    if (!createdSplineName.empty()) {
+        m_scene.SetSelectedWaterFlowSpline(createdSplineName);
+        m_scene.SetSelectedWaterRiverWidth(8.0f);
+        // Leave the new spline ready for point editing; the linked water ribbon is
+        // already visible and updates on every drag.
+        m_scene.SelectIndex(createdSplineIndex);
+        m_selectedSplinePoint = 1;
+        m_gizmo.SetMode(EditorGizmo::Mode::Translate);
+    }
     m_log.Info(std::string("Added ") + p.name);
 }
 
-void EditorApp::AddSpline() {
+void EditorApp::AddSpline(int type) {
     if (!m_plane) {
         m_log.Error("Add failed: plane mesh is not ready");
         return;
     }
+    type = std::clamp(type, 0, 2);
     m_scene.AddPlane(*m_plane);          // gives the spline an entity + transform anchor
-    m_scene.SetSelectedSpline(true, false, 0);   // seeds a short editable path
-    m_log.Info("Added spline");
+    Transform anchor;
+    anchor.position = SceneDropPosition();
+    m_scene.SetSelectedTransform(anchor);
+    m_scene.SetSelectedSpline(true, false, type);
+
+    glm::vec3 forward = m_camera.Front();
+    forward.y = 0.0f;
+    if (glm::dot(forward, forward) < 1.0e-5f) forward = glm::vec3(0.0f, 0.0f, -1.0f);
+    else forward = glm::normalize(forward);
+    const glm::vec3 right = glm::normalize(glm::cross(forward, glm::vec3(0.0f, 1.0f, 0.0f)));
+    const glm::vec3 c = anchor.position;
+    std::vector<glm::vec3> points;
+    if (type == 1) {
+        points = {c - forward * 7.5f, c - forward * 2.5f + right * 1.5f,
+                  c + forward * 2.5f - right * 1.2f, c + forward * 7.5f};
+        m_scene.SetSelectedName("RiverSpline");
+    } else if (type == 2) {
+        points = {c - forward * 6.0f, c - forward * 2.0f,
+                  c + forward * 2.0f, c + forward * 6.0f};
+        m_scene.SetSelectedName("CameraRail");
+    } else {
+        points = {c - forward * 6.0f, c, c + forward * 6.0f};
+        m_scene.SetSelectedName("PathSpline");
+    }
+    m_scene.SetSelectedSplinePoints(points);
+    m_selectedSplinePoint = 1;
+    m_gizmo.SetMode(EditorGizmo::Mode::Translate);
+    m_log.Info(std::string("Added ") + (type == 1 ? "river spline" : type == 2 ? "camera rail" : "path spline"));
 }
 
 void EditorApp::DrawSplines(const glm::mat4& viewProj) {
     if (!m_shader || !m_cube) return;
-    m_viewport.DrawSplineGuides(m_renderer, *m_shader, *m_cube, m_scene, viewProj);
+    m_viewport.DrawSplineGuides(m_renderer, *m_shader, *m_cube, m_scene, viewProj,
+                                m_selectedSplinePoint);
 }
 
 namespace {
@@ -4795,6 +5571,16 @@ void EditorApp::DrawWaterBodies(const engine::Camera& camera, float aspect) {
         cfg.fresnelPower = object.waterFresnel;
         cfg.specularStrength = object.waterSpecular;
         cfg.shininess = object.waterShininess;
+        cfg.depthFadeDistance = object.waterDepthFadeDistance;
+        cfg.shorelineFoamWidth = object.waterShoreFoamWidth;
+        cfg.shorelineFoamStrength = object.waterShoreFoamStrength;
+        cfg.refractionStrength = object.waterRefractionStrength;
+        cfg.reflectionRoughness = object.waterReflectionRoughness;
+        cfg.environmentReflectionStrength = object.waterEnvironmentReflectionStrength;
+        cfg.absorptionStrength = object.waterAbsorptionStrength;
+        cfg.causticsStrength = object.waterCausticsStrength;
+        cfg.causticsScale = object.waterCausticsScale;
+        cfg.maxRenderDistance = object.waterMaxRenderDistance;
         cfg.seaHeight = object.waterSeaHeight;
         cfg.seaChoppy = object.waterSeaChoppy;
         cfg.seaSpeed  = object.waterSeaSpeed;
@@ -4806,7 +5592,38 @@ void EditorApp::DrawWaterBodies(const engine::Camera& camera, float aspect) {
         if (!object.waterFlowSpline.empty()) {
             for (const EditorScene::Object& s : m_scene.Objects()) {
                 if (!s.isSpline || s.name != object.waterFlowSpline || s.splinePoints.size() < 2) continue;
-                engine::Spline spline(s.splinePoints, s.splineClosed);
+                const engine::ecs::SplineComponent* scripted = nullptr;
+                if (m_mode == EditorMode::Play && m_playRegistry) {
+                    // Play runs against a cloned registry. Resolve the spline by its
+                    // runtime name so script edits affect the rendered river immediately
+                    // without modifying the saved editor scene.
+                    for (const auto& entry : m_playEntityNames) {
+                        if (entry.second == s.name) {
+                            scripted = m_playRegistry->TryGet<engine::ecs::SplineComponent>(entry.first);
+                            if (scripted) break;
+                        }
+                    }
+                } else {
+                    scripted = m_scene.Registry().TryGet<engine::ecs::SplineComponent>(s.entity);
+                }
+                const std::vector<glm::vec3>& points = scripted ? scripted->points : s.splinePoints;
+                const std::vector<glm::vec3>& rotations = scripted ? scripted->rotations : s.splinePointRotations;
+                if (points.size() < 2) continue;
+                const bool closed = scripted ? scripted->closed : s.splineClosed;
+                engine::Spline spline(points, closed);
+                cfg.splinePoints = points;
+                cfg.splinePointRotations = rotations;
+                cfg.splineClosed = closed;
+                cfg.riverWidth = object.waterRiverWidth;
+                glm::vec3 boundsMin = points.front();
+                glm::vec3 boundsMax = boundsMin;
+                for (const glm::vec3& point : points) {
+                    boundsMin = glm::min(boundsMin, point);
+                    boundsMax = glm::max(boundsMax, point);
+                }
+                cfg.center = (boundsMin + boundsMax) * 0.5f;
+                cfg.size = std::max(boundsMax.x - boundsMin.x,
+                                    boundsMax.z - boundsMin.z) + cfg.riverWidth;
                 glm::vec3 tangent(0.0f, 0.0f, 1.0f);
                 spline.ClosestPoint(cfg.center, nullptr, &tangent);
                 const glm::vec2 dir(tangent.x, tangent.z);
@@ -4827,12 +5644,11 @@ void EditorApp::DrawWaterBodies(const engine::Camera& camera, float aspect) {
         // ring where they meet the water. Each contact = (worldX, worldZ, radius, strength).
         std::vector<glm::vec4> contacts;
         contacts.reserve(engine::Water::kMaxContacts);
-        const float surfaceY = cfg.center.y;
-        const float halfFoot = object.waterSize * 0.5f;
+        engine::Water& liveWater = res.first->second;
         auto consider = [&](const glm::vec3& pos, float horizRadius, float halfY) {
             if (static_cast<int>(contacts.size()) >= engine::Water::kMaxContacts) return;
-            if (std::abs(pos.x - cfg.center.x) > halfFoot + horizRadius) return;   // outside footprint
-            if (std::abs(pos.z - cfg.center.z) > halfFoot + horizRadius) return;
+            if (!liveWater.ContainsXZ(pos.x, pos.z, horizRadius)) return;
+            const float surfaceY = liveWater.HeightAt(pos.x, pos.z);
             const float band = halfY + 0.6f;
             const float dy = std::abs(pos.y - surfaceY);
             if (dy > band) return;                                                 // not touching the surface
@@ -4863,8 +5679,53 @@ void EditorApp::DrawWaterBodies(const engine::Camera& camera, float aspect) {
 
         res.first->second.Draw(camera, aspect, sunDir, sunColor, ambient,
                                contacts.empty() ? nullptr : contacts.data(),
-                               static_cast<int>(contacts.size()));
+                               static_cast<int>(contacts.size()),
+                               m_waterSceneCopy ? m_waterSceneCopy->ColorTexture() : 0,
+                               m_waterSceneCopy ? m_waterSceneCopy->DepthTexture() : 0,
+                               m_renderW, m_renderH,
+                               env.ibl && m_ibl ? &*m_ibl : nullptr);
     }
+}
+
+void EditorApp::DrawFoliage(const engine::Camera& camera, float aspect) {
+    if (!m_foliageRenderer) return;
+    const EditorScene::Environment& env = m_scene.GetEnvironment();
+    const engine::DayNightCycle::Sample sky = engine::DayNightCycle::At(env.timeOfDay);
+    engine::ecs::Registry& registry =
+        (m_mode == EditorMode::Play && m_playRegistry) ? *m_playRegistry : m_scene.Registry();
+    m_foliageRenderer->Draw(registry, camera, aspect,
+        sky.keyLightDirection,
+        sky.keyLightColor * env.sunIntensity,
+        sky.ambient * env.skyLightIntensity);
+}
+
+void EditorApp::CaptureWaterSceneBuffers() {
+    const bool hasVisibleWater = std::any_of(
+        m_scene.Objects().begin(), m_scene.Objects().end(),
+        [](const EditorScene::Object& object) {
+            return object.isWater && object.visible;
+        });
+    if (!hasVisibleWater || m_renderW <= 0 || m_renderH <= 0) return;
+
+    if (!m_waterSceneCopy) {
+        // Float colour preserves the HDR scene before the transparent water pass.
+        m_waterSceneCopy.emplace(m_renderW, m_renderH, GL_RGBA16F, true);
+    } else if (m_waterSceneCopy->Width() != m_renderW
+               || m_waterSceneCopy->Height() != m_renderH) {
+        m_waterSceneCopy->Resize(m_renderW, m_renderH);
+    }
+
+    GLint previousRead = 0, previousDraw = 0;
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previousRead);
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &previousDraw);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(previousDraw));
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_waterSceneCopy->FboId());
+    glBlitFramebuffer(0, 0, m_renderW, m_renderH,
+                      0, 0, m_renderW, m_renderH,
+                      GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(previousRead));
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(previousDraw));
+    glViewport(0, 0, m_renderW, m_renderH);
 }
 
 float EditorApp::WaterSurfaceY(float worldX, float worldZ, bool& over) {
@@ -4875,20 +5736,61 @@ float EditorApp::WaterSurfaceY(float worldX, float worldZ, bool& over) {
     float best = 0.0f;
     for (const EditorScene::Object& object : m_scene.Objects()) {
         if (!object.isWater || !object.visible) continue;
-        const engine::ecs::Transform* t = m_scene.TryGetTransform(object.entity);
-        const float cx = t ? t->position.x : 0.0f;
-        const float cz = t ? t->position.z : 0.0f;
-        const float half = object.waterSize * 0.5f;
-        if (worldX < cx - half || worldX > cx + half || worldZ < cz - half || worldZ > cz + half) {
-            continue;
-        }
         const auto it = m_waters.find(object.entity);
+        if (it != m_waters.end() && !it->second.ContainsXZ(worldX, worldZ)) continue;
+        const engine::ecs::Transform* t = m_scene.TryGetTransform(object.entity);
+        if (it == m_waters.end()) {
+            const float cx = t ? t->position.x : 0.0f, cz = t ? t->position.z : 0.0f;
+            const float half = object.waterSize * 0.5f;
+            if (std::abs(worldX - cx) > half || std::abs(worldZ - cz) > half) continue;
+        }
         const float y = (it != m_waters.end())
             ? it->second.HeightAt(worldX, worldZ)
             : (t ? t->position.y : object.waterLevel);
         if (!over || y > best) { best = y; over = true; }
     }
     return best;
+}
+
+bool EditorApp::UpdateUnderwaterState(const engine::Camera& camera, float dt) {
+    const glm::vec3 position = camera.Position();
+    const EditorScene::Object* containing = nullptr;
+    float highestSurface = -std::numeric_limits<float>::max();
+    for (const EditorScene::Object& object : m_scene.Objects()) {
+        if (!object.isWater || !object.visible) continue;
+        const engine::ecs::Transform* transform = m_scene.TryGetTransform(object.entity);
+        const glm::vec3 center = transform
+            ? transform->position : glm::vec3(0.0f, object.waterLevel, 0.0f);
+        const auto water = m_waters.find(object.entity);
+        if (water != m_waters.end() && !water->second.ContainsXZ(position.x, position.z)) continue;
+        if (water == m_waters.end()) {
+            const float half = object.waterSize * 0.5f;
+            if (std::abs(position.x - center.x) > half
+                || std::abs(position.z - center.z) > half) continue;
+        }
+        const float surface = water != m_waters.end()
+            ? water->second.HeightAt(position.x, position.z) : center.y;
+        if (position.y < surface && surface > highestSurface) {
+            highestSurface = surface;
+            containing = &object;
+        }
+    }
+
+    const float target = containing ? 1.0f : 0.0f;
+    const float speed = containing
+        ? containing->waterUnderwaterTransitionSpeed : 3.5f;
+    const float response = 1.0f - std::exp(-std::max(dt, 0.0f) * speed);
+    m_underwaterBlend += (target - m_underwaterBlend) * response;
+    if (target == 0.0f && m_underwaterBlend < 0.001f) m_underwaterBlend = 0.0f;
+
+    if (containing) {
+        m_underwaterVisuals.tint = containing->waterUnderwaterTint;
+        m_underwaterVisuals.fogDensity = containing->waterUnderwaterFogDensity;
+        m_underwaterVisuals.distortion = containing->waterUnderwaterDistortion;
+        m_underwaterVisuals.causticsStrength = containing->waterCausticsStrength * 0.8f;
+        m_underwaterVisuals.causticsScale = containing->waterCausticsScale * 4.5f;
+    }
+    return containing != nullptr || m_underwaterBlend > 0.001f;
 }
 
 namespace {
@@ -6831,7 +7733,10 @@ void EditorApp::UpdateAI(float dt)
         // point of interest. Graph agents read it via the HeardNoise?/Investigate
         // nodes; the built-in brain routes to it through its search state.
         if (!seesTarget) {
-            glm::vec3 pointOfInterest;
+            // LoudestAudible writes this when it returns true, but initialize it
+            // defensively so the contract is explicit to both the compiler and any
+            // future sound-field implementation.
+            glm::vec3 pointOfInterest = agentPos;
             bool alerted = playAgent.hearingRange > 0.0f
                 && m_playSoundField.LoudestAudible(agentPos, playAgent.hearingRange, &pointOfInterest);
             if (!alerted && playAgent.team != 0) {
@@ -7504,7 +8409,8 @@ void EditorApp::UpdatePlayPlayerController(float dt, bool inputEnabled)
         // a fallback when the cursor has been freed (e.g. via ESC).
         const bool rightMouseDown = window.Native()
             && glfwGetMouseButton(window.Native(), GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
-        if (m_playMouseCaptured || rightMouseDown || m_cameraController.MouseLookActive()) {
+        if (m_playMouseCaptured || rightMouseDown
+            || m_cameraController.MouseLookActive()) {
             input.lookYaw = window.MouseDeltaX();
             input.lookPitch = window.MouseDeltaY();
         }

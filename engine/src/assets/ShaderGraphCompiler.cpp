@@ -9,15 +9,6 @@
 namespace engine {
 namespace {
 
-std::string SafeName(std::string name)
-{
-    for (char& c : name)
-        if (!(c == '_' || (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z')
-              || (c >= 'a' && c <= 'z'))) c = '_';
-    if (name.empty() || (name.front() >= '0' && name.front() <= '9')) name = "p_" + name;
-    return name;
-}
-
 std::string DefaultValue(ShaderValueType type)
 {
     switch (type) {
@@ -56,6 +47,47 @@ std::string FoldBinary(const std::string& left, const std::string& right, char o
     std::ostringstream out;
     out << result;
     return out.str();
+}
+
+std::string UniformType(ShaderValueType type)
+{
+    switch (type) {
+    case ShaderValueType::Float: return "float";
+    case ShaderValueType::Int: return "int";
+    case ShaderValueType::Bool: return "bool";
+    case ShaderValueType::Vec2: return "vec2";
+    case ShaderValueType::Vec3: return "vec3";
+    case ShaderValueType::Vec4:
+    case ShaderValueType::Color: return "vec4";
+    case ShaderValueType::Texture2D: return "sampler2D";
+    }
+    return "float";
+}
+
+std::string ConvertExpression(
+    std::string expression, ShaderValueType from, ShaderValueType to)
+{
+    if (from == to
+        || (from == ShaderValueType::Color && to == ShaderValueType::Vec4)
+        || (from == ShaderValueType::Vec4 && to == ShaderValueType::Color))
+        return expression;
+    if (from == ShaderValueType::Float) {
+        if (to == ShaderValueType::Vec2) return "vec2(" + expression + ")";
+        if (to == ShaderValueType::Vec3) return "vec3(" + expression + ")";
+        if (to == ShaderValueType::Vec4 || to == ShaderValueType::Color)
+            return "vec4(vec3(" + expression + "),1.0)";
+    }
+    if ((from == ShaderValueType::Color || from == ShaderValueType::Vec4)
+        && to == ShaderValueType::Vec3)
+        return "(" + expression + ").xyz";
+    if (from == ShaderValueType::Vec3
+        && (to == ShaderValueType::Vec4 || to == ShaderValueType::Color))
+        return "vec4(" + expression + ",1.0)";
+    if ((from == ShaderValueType::Vec2 || from == ShaderValueType::Vec3
+         || from == ShaderValueType::Vec4 || from == ShaderValueType::Color)
+        && to == ShaderValueType::Float)
+        return "(" + expression + ").x";
+    return expression;
 }
 
 } // namespace
@@ -99,6 +131,81 @@ GeneratedShaderSource GenerateShaderSource(const ShaderAsset& asset, bool skinne
     const bool postProcess = asset.domain == ShaderDomain::PostProcess;
     const bool particle = asset.domain == ShaderDomain::Particle;
     const bool unlit = asset.domain == ShaderDomain::Unlit;
+
+    // Surface displacement must be evaluated in the vertex stage. Keep this
+    // evaluator deliberately side-effect free and based on the same serialized
+    // graph as the fragment evaluator. Unsupported fragment-only inputs resolve
+    // to a safe zero displacement instead of producing an invalid program.
+    std::unordered_map<std::uint64_t, std::string> vertexExpressions;
+    const auto vertexExpression = [&](const auto& self,
+                                      std::uint64_t nodeId) -> std::string {
+        const auto cached = vertexExpressions.find(nodeId);
+        if (cached != vertexExpressions.end()) return cached->second;
+        const ShaderGraphNode& node = *nodes[nodeId];
+        std::vector<std::string> inputs;
+        for (const auto& pin : asset.pins) {
+            if (pin.nodeId != nodeId || !pin.input) continue;
+            const auto linked = inputLinks.find(pin.id);
+            inputs.push_back(linked == inputLinks.end()
+                ? DefaultValue(pin.type)
+                : self(self, pins[linked->second->fromPin]->nodeId));
+        }
+        std::string value = node.value.empty() ? "0.0" : node.value;
+        if (node.type == "UV") value = "aUV";
+        else if (node.type == "LocalPosition") value = "local.xyz";
+        else if (node.type == "WorldPosition")
+            value = "(uModel*local).xyz";
+        else if (node.type == "Normal") value = "normalize(localNormal)";
+        else if (node.type == "Time") value = "uTime";
+        else if (node.type == "DeltaTime") value = "uDeltaTime";
+        else if (node.type.rfind("Parameter", 0) == 0)
+            value = node.type == "ParameterTexture2D"
+                ? "0.0" : ShaderParameterUniformName(node.name);
+        else if ((node.type == "Add" || node.type == "Subtract"
+                  || node.type == "Multiply" || node.type == "Divide")
+                 && inputs.size() >= 2) {
+            const char* op = node.type == "Add" ? "+"
+                : node.type == "Subtract" ? "-"
+                : node.type == "Multiply" ? "*" : "/";
+            value = "(" + inputs[0] + op + inputs[1] + ")";
+        } else if (node.type == "OneMinus" && !inputs.empty())
+            value = "(1.0-" + inputs[0] + ")";
+        else if (node.type == "Saturate" && !inputs.empty())
+            value = "clamp(" + inputs[0] + ",0.0,1.0)";
+        else if (node.type == "Min" && inputs.size() >= 2)
+            value = "min(" + inputs[0] + "," + inputs[1] + ")";
+        else if (node.type == "Max" && inputs.size() >= 2)
+            value = "max(" + inputs[0] + "," + inputs[1] + ")";
+        else if (node.type == "Clamp" && inputs.size() >= 3)
+            value = "clamp(" + inputs[0] + "," + inputs[1] + ","
+                + inputs[2] + ")";
+        else if (node.type == "Power" && inputs.size() >= 2)
+            value = "pow(" + inputs[0] + "," + inputs[1] + ")";
+        else if (node.type == "Absolute" && !inputs.empty())
+            value = "abs(" + inputs[0] + ")";
+        else if (node.type == "Noise" && !inputs.empty())
+            value = "fract(sin(dot(" + inputs[0]
+                + ",vec2(12.9898,78.233)))*43758.5453)";
+        else if (node.type == "SampleTexture2D") value = "0.0";
+        vertexExpressions[nodeId] = value;
+        return value;
+    };
+
+    std::string displacement = "0.0";
+    if (!postProcess && !particle && !unlit) {
+        for (const auto& pin : asset.pins) {
+            if (pin.nodeId != output->id || !pin.input
+                || pin.name != "Displacement") continue;
+            const auto linked = inputLinks.find(pin.id);
+            if (linked == inputLinks.end()) break;
+            const ShaderGraphPin* source = pins[linked->second->fromPin];
+            displacement = ConvertExpression(
+                vertexExpression(vertexExpression, source->nodeId),
+                source->type, ShaderValueType::Float);
+            break;
+        }
+    }
+
     std::ostringstream vertex;
     if (postProcess) {
         vertex << "#version 330 core\n"
@@ -141,7 +248,13 @@ GeneratedShaderSource GenerateShaderSource(const ShaderAsset& asset, bool skinne
             vertex << "layout(location=3) in ivec4 aBoneIds;\nlayout(location=4) in vec4 aBoneWeights;\n"
                 "uniform mat4 uBones[128];\n";
         vertex << "uniform mat4 uModel;\nuniform mat4 uViewProjection;\n"
-            "out vec3 vNormal;\nout vec3 vWorldPosition;\nout vec2 vUV;\n"
+            "uniform float uTime;\nuniform float uDeltaTime;\n";
+        for (const auto& parameter : asset.parameters)
+            if (parameter.type != ShaderValueType::Texture2D)
+                vertex << "uniform " << UniformType(parameter.type) << ' '
+                    << ShaderParameterUniformName(parameter.name) << ";\n";
+        vertex << "out vec3 vNormal;\nout vec3 vWorldPosition;"
+            "\nout vec3 vLocalPosition;\nout vec2 vUV;\n"
             "void main(){";
         if (skinned)
             vertex << "mat4 skin=aBoneWeights.x*uBones[aBoneIds.x]+aBoneWeights.y*uBones[aBoneIds.y]+"
@@ -149,7 +262,8 @@ GeneratedShaderSource GenerateShaderSource(const ShaderAsset& asset, bool skinne
                 "vec4 local=skin*vec4(aPosition,1.0);vec3 localNormal=mat3(skin)*aNormal;";
         else
             vertex << "vec4 local=vec4(aPosition,1.0);vec3 localNormal=aNormal;";
-        vertex << "vec4 w=uModel*local;vWorldPosition=w.xyz;"
+        vertex << "local.xyz+=normalize(localNormal)*(" << displacement << ");"
+            "vec4 w=uModel*local;vWorldPosition=w.xyz;vLocalPosition=local.xyz;"
             "vNormal=mat3(transpose(inverse(uModel)))*localNormal;vUV=aUV;"
             "gl_Position=uViewProjection*w;}\n";
     }
@@ -167,7 +281,7 @@ GeneratedShaderSource GenerateShaderSource(const ShaderAsset& asset, bool skinne
             ? "in vec2 vUV; in vec4 vParticleColor; in vec3 vParticleVelocity;"
               " in float vParticleSize; in float vParticleRotation;"
               " in float vParticleFrame; in float vParticleAge;"
-            : "in vec3 vNormal; in vec3 vWorldPosition; in vec2 vUV;");
+            : "in vec3 vNormal; in vec3 vWorldPosition; in vec3 vLocalPosition; in vec2 vUV;");
     emit("out vec4 FragColor;");
     if (postProcess) {
         emit("uniform sampler2D uSceneColor; uniform sampler2D uSceneDepth;");
@@ -179,16 +293,31 @@ GeneratedShaderSource GenerateShaderSource(const ShaderAsset& asset, bool skinne
         emit("uniform int uUseWidgetTexture; uniform vec4 uClipRect;");
     } else if (!particle) {
         emit("uniform vec3 uLightDirection; uniform float uLightIntensity;");
-        emit("uniform vec4 uObjectColor;");
+        emit("uniform vec3 uCameraPosition; uniform vec4 uObjectColor;");
+        emit("uniform float uTime; uniform float uDeltaTime;");
+        emit("const float PI=3.14159265359;");
+        emit("float DistributionGGX(vec3 N,vec3 H,float roughness){"
+             "float a=roughness*roughness;float a2=a*a;"
+             "float nDotH=max(dot(N,H),0.0);float d=nDotH*nDotH*(a2-1.0)+1.0;"
+             "return a2/max(PI*d*d,0.000001);}");
+        emit("float GeometrySchlickGGX(float nDotV,float roughness){"
+             "float r=roughness+1.0;float k=(r*r)/8.0;"
+             "return nDotV/max(nDotV*(1.0-k)+k,0.000001);}");
+        emit("float GeometrySmith(vec3 N,vec3 V,vec3 L,float roughness){"
+             "return GeometrySchlickGGX(max(dot(N,V),0.0),roughness)*"
+             "GeometrySchlickGGX(max(dot(N,L),0.0),roughness);}");
+        emit("vec3 FresnelSchlick(float cosTheta,vec3 f0){"
+             "return f0+(1.0-f0)*pow(clamp(1.0-cosTheta,0.0,1.0),5.0);}");
+        emit("vec3 ApplyTangentNormal(vec3 tangentNormal){"
+             "vec3 baseN=normalize(vNormal);vec3 dp1=dFdx(vWorldPosition);"
+             "vec3 dp2=dFdy(vWorldPosition);vec2 duv1=dFdx(vUV);vec2 duv2=dFdy(vUV);"
+             "vec3 T=normalize(dp1*duv2.y-dp2*duv1.y);"
+             "if(dot(T,T)<0.0001)T=normalize(abs(baseN.y)<0.999?cross(vec3(0,1,0),baseN):cross(vec3(1,0,0),baseN));"
+             "vec3 B=normalize(cross(baseN,T));return normalize(mat3(T,B,baseN)*tangentNormal);}");
     }
     for (const auto& parameter : asset.parameters) {
-        const char* type = parameter.type == ShaderValueType::Float ? "float"
-            : parameter.type == ShaderValueType::Int ? "int"
-            : parameter.type == ShaderValueType::Bool ? "bool"
-            : parameter.type == ShaderValueType::Vec2 ? "vec2"
-            : parameter.type == ShaderValueType::Vec3 ? "vec3"
-            : parameter.type == ShaderValueType::Texture2D ? "sampler2D" : "vec4";
-        emit(std::string("uniform ") + type + " u_" + SafeName(parameter.name) + ";");
+        emit("uniform " + UniformType(parameter.type) + " "
+             + ShaderParameterUniformName(parameter.name) + ";");
     }
     emit("void main(){");
 
@@ -245,18 +374,25 @@ GeneratedShaderSource GenerateShaderSource(const ShaderAsset& asset, bool skinne
         else if (node.type == "Exposure") value = "uExposure";
         else if (node.type == "Normal") value = "normalize(vNormal)";
         else if (node.type == "WorldPosition") value = "vWorldPosition";
-        else if (node.type == "LocalPosition") value = "vWorldPosition";
+        else if (node.type == "LocalPosition") value = "vLocalPosition";
         else if (node.type == "Tangent") value = "vec3(1.0,0.0,0.0)";
-        else if (node.type == "ViewDirection") value = "normalize(-vWorldPosition)";
-        else if (node.type == "CameraPosition") value = "vec3(0.0)";
+        else if (node.type == "ViewDirection") value =
+            (!postProcess && !particle && !unlit)
+                ? "normalize(uCameraPosition-vWorldPosition)"
+                : "vec3(0.0,0.0,1.0)";
+        else if (node.type == "CameraPosition") value =
+            (!postProcess && !particle && !unlit)
+                ? "uCameraPosition" : "vec3(0.0)";
         else if (node.type == "ObjectColor")
             value = (!postProcess && !particle && !unlit)
                 ? "uObjectColor" : "vec4(1.0)";
         else if (node.type == "VertexColor") value = "vec4(1.0)";
-        else if (node.type == "Time") value = postProcess ? "uTime" : "0.0";
+        else if (node.type == "Time") value =
+            (postProcess || (!particle && !unlit)) ? "uTime" : "0.0";
         else if (node.type == "DeltaTime") value =
-            postProcess ? "uDeltaTime" : "0.0166667";
-        else if (node.type.rfind("Parameter", 0) == 0) value = "u_" + SafeName(node.name);
+            (postProcess || (!particle && !unlit)) ? "uDeltaTime" : "0.0166667";
+        else if (node.type.rfind("Parameter", 0) == 0)
+            value = ShaderParameterUniformName(node.name);
         else if ((node.type == "Add" || node.type == "Subtract" || node.type == "Multiply"
                   || node.type == "Divide") && inputs.size() >= 2) {
             const char* op = node.type == "Add" ? "+" : node.type == "Subtract" ? "-"
@@ -287,7 +423,9 @@ GeneratedShaderSource GenerateShaderSource(const ShaderAsset& asset, bool skinne
         else if (node.type == "SampleTexture2D" && inputs.size() >= 2)
             value = inputs[0] == "0" ? "vec4(1.0)" : "texture(" + inputs[0] + "," + inputs[1] + ")";
         else if (node.type == "NormalMapDecode" && !inputs.empty())
-            value = "normalize((" + inputs[0] + ").xyz*2.0-1.0)";
+            value = (!postProcess && !particle && !unlit)
+                ? "ApplyTangentNormal(normalize((" + inputs[0] + ").xyz*2.0-1.0))"
+                : "normalize((" + inputs[0] + ").xyz*2.0-1.0)";
         else if (node.type == "UVTransform" && inputs.size() >= 3)
             value = inputs[0] + "*" + inputs[1] + "+" + inputs[2];
         else if (node.type == "Remap" && inputs.size() >= 5)
@@ -308,18 +446,27 @@ GeneratedShaderSource GenerateShaderSource(const ShaderAsset& asset, bool skinne
         return value;
     };
 
-    std::string color = "vec4(0.68,0.32,0.12,1.0)";
-    for (const auto& pin : asset.pins) {
-        if (pin.nodeId != output->id || !pin.input
-            || (pin.name != "Base Color" && pin.name != "Color")) continue;
-        const auto linked = inputLinks.find(pin.id);
-        if (linked != inputLinks.end()) {
-            const ShaderGraphPin* source = pins[linked->second->fromPin];
-            color = expression(expression, source->nodeId);
-            if (source->type == ShaderValueType::Vec3) color = "vec4(" + color + ",1.0)";
-            else if (source->type == ShaderValueType::Float) color = "vec4(vec3(" + color + "),1.0)";
+    const auto outputValue = [&](const char* name, std::string defaultExpression,
+                                 ShaderValueType targetType) {
+        for (const auto& pin : asset.pins) {
+            if (pin.nodeId != output->id || !pin.input || pin.name != name)
+                continue;
+            const auto linked = inputLinks.find(pin.id);
+            if (linked == inputLinks.end()) return defaultExpression;
+            const auto sourcePin = pins.find(linked->second->fromPin);
+            if (sourcePin == pins.end()) return defaultExpression;
+            return ConvertExpression(
+                expression(expression, sourcePin->second->nodeId),
+                sourcePin->second->type, targetType);
         }
-    }
+        return defaultExpression;
+    };
+
+    const std::string color = outputValue(
+        asset.domain == ShaderDomain::Surface ? "Base Color" : "Color",
+        asset.domain == ShaderDomain::Surface ? "uObjectColor"
+                                              : "vec4(0.68,0.32,0.12,1.0)",
+        ShaderValueType::Color);
     for (const std::uint64_t id : result.reachableNodes)
         emit(" // node:" + std::to_string(id), id);
     emit(" vec4 graphColor=" + color + ";", output->id);
@@ -327,9 +474,93 @@ GeneratedShaderSource GenerateShaderSource(const ShaderAsset& asset, bool skinne
         || asset.domain == ShaderDomain::PostProcess
         || asset.domain == ShaderDomain::Particle)
         emit(" FragColor=graphColor;", output->id);
-    else
-        emit(" float n=max(dot(normalize(vNormal),normalize(-uLightDirection)),0.0);"
-             " FragColor=vec4(graphColor.rgb*(0.16+n*uLightIntensity),graphColor.a);", output->id);
+    else {
+        const std::string emissive = outputValue(
+            "Emissive", "vec3(0.0)", ShaderValueType::Vec3);
+        const std::string roughness = outputValue(
+            "Roughness", "0.5", ShaderValueType::Float);
+        const std::string metallic = outputValue(
+            "Metallic", "0.0", ShaderValueType::Float);
+        const std::string normal = outputValue(
+            "Normal", "normalize(vNormal)", ShaderValueType::Vec3);
+        const std::string opacity = outputValue(
+            "Opacity", "1.0", ShaderValueType::Float);
+        const std::string alphaCutoff = outputValue(
+            "Alpha Cutoff", "0.5", ShaderValueType::Float);
+        const std::string clearcoat = outputValue(
+            "Clearcoat", "0.0", ShaderValueType::Float);
+        const std::string transmission = outputValue(
+            "Transmission", "0.0", ShaderValueType::Float);
+        const std::string subsurface = outputValue(
+            "Subsurface", "0.0", ShaderValueType::Float);
+        const std::string sheen = outputValue(
+            "Sheen", "0.0", ShaderValueType::Float);
+        const std::string anisotropy = outputValue(
+            "Anisotropy", "0.0", ShaderValueType::Float);
+
+        emit(" vec3 materialBaseColor=max(graphColor.rgb,vec3(0.0));",
+             output->id);
+        emit(" vec3 materialEmissive=max(" + emissive + ",vec3(0.0));",
+             output->id);
+        emit(" float materialRoughness=clamp(" + roughness
+             + ",0.045,1.0);", output->id);
+        emit(" float materialMetallic=clamp(" + metallic
+             + ",0.0,1.0);", output->id);
+        emit(" float materialOpacity=clamp(graphColor.a*(" + opacity
+             + "),0.0,1.0);", output->id);
+        emit(" float materialClearcoat=clamp(" + clearcoat
+             + ",0.0,1.0);", output->id);
+        emit(" float materialTransmission=clamp(" + transmission
+             + ",0.0,1.0);", output->id);
+        emit(" float materialSubsurface=clamp(" + subsurface
+             + ",0.0,1.0);", output->id);
+        emit(" float materialSheen=clamp(" + sheen
+             + ",0.0,1.0);", output->id);
+        emit(" float materialAnisotropy=clamp(" + anisotropy
+             + ",-1.0,1.0);", output->id);
+        if (asset.blendMode == 1)
+            emit(" if(materialOpacity<clamp(" + alphaCutoff
+                 + ",0.0,1.0))discard;", output->id);
+
+        emit(" vec3 N=normalize(" + normal + ");", output->id);
+        emit(" vec3 V=normalize(uCameraPosition-vWorldPosition);"
+             "vec3 L=normalize(-uLightDirection);vec3 H=normalize(V+L);",
+             output->id);
+        emit(" float nDotL=max(dot(N,L),0.0);float nDotV=max(dot(N,V),0.0001);"
+             "float hDotV=max(dot(H,V),0.0);", output->id);
+        emit(" vec3 tangent=normalize(dFdx(vWorldPosition));"
+             "float anisotropicAlignment=abs(dot(normalize(H-N*dot(H,N)),tangent));"
+             "float anisotropicRoughness=clamp(materialRoughness*mix(1.0,"
+             "mix(1.35,0.65,anisotropicAlignment),abs(materialAnisotropy)),0.045,1.0);",
+             output->id);
+        emit(" vec3 f0=mix(vec3(0.04),materialBaseColor,materialMetallic);"
+             "float ndf=DistributionGGX(N,H,anisotropicRoughness);"
+             "float geometry=GeometrySmith(N,V,L,anisotropicRoughness);"
+             "vec3 fresnel=FresnelSchlick(hDotV,f0);", output->id);
+        emit(" vec3 specular=(ndf*geometry*fresnel)/max(4.0*nDotV*nDotL,0.0001);"
+             "vec3 diffuse=(vec3(1.0)-fresnel)*(1.0-materialMetallic)*"
+             "materialBaseColor/PI;", output->id);
+        emit(" float wrappedDiffuse=max((dot(N,L)+0.45)/1.45,0.0);"
+             "float diffuseTerm=mix(nDotL,wrappedDiffuse,materialSubsurface);"
+             "vec3 direct=(diffuse*diffuseTerm+specular*nDotL)*max(uLightIntensity,0.0);",
+             output->id);
+        emit(" float coatRoughness=mix(0.18,0.045,materialClearcoat);"
+             "float coatD=DistributionGGX(N,H,coatRoughness);"
+             "float coatG=GeometrySmith(N,V,L,coatRoughness);"
+             "vec3 coatF=FresnelSchlick(hDotV,vec3(0.04));"
+             "vec3 coat=materialClearcoat*(coatD*coatG*coatF)/"
+             "max(4.0*nDotV*nDotL,0.0001)*nDotL*uLightIntensity;",
+             output->id);
+        emit(" float rim=pow(1.0-nDotV,5.0);"
+             "vec3 sheenLight=materialBaseColor*materialSheen*rim*"
+             "(0.25+0.75*nDotL)*uLightIntensity;", output->id);
+        emit(" vec3 ambient=materialBaseColor*mix(0.03,0.08,materialSubsurface);"
+             "vec3 transmitted=materialBaseColor*(0.08+0.92*pow(1.0-nDotV,2.0));"
+             "vec3 lit=mix(ambient+direct+coat+sheenLight,transmitted,"
+             "materialTransmission)+materialEmissive;", output->id);
+        emit(" FragColor=vec4(max(lit,vec3(0.0)),materialOpacity);",
+             output->id);
+    }
     emit("}");
     result.vertex = vertex.str();
     result.fragment = fragment.str();

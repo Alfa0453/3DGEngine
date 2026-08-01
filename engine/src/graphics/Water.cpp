@@ -2,7 +2,9 @@
 
 #include "engine/graphics/Shader.h"
 #include "engine/graphics/Camera.h"
+#include "engine/graphics/IBL.h"
 #include "engine/graphics/VertexLayout.h"
+#include "engine/math/Spline.h"
 
 #include <glad/glad.h>
 #include <glm/glm.hpp>
@@ -63,8 +65,9 @@ float sea_height(vec2 xz, float time, float seaHeight, float seaChoppy,
 
 const char* kWaterVertBody = R"glsl(
 layout(location = 0) in vec3 aPos;
-layout(location = 1) in vec3 aNormal;   // unused (flat grid); waves recompute the normal
+layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec2 aUV;
+layout(location = 3) in vec3 aTangent;
 
 uniform mat4  uViewProj;
 uniform vec3  uCenter;       // world centre (xz offset + y = calm level)
@@ -75,16 +78,42 @@ uniform float uSeaSpeed;
 uniform float uSeaFreq;
 uniform vec2  uFlowDir;
 uniform float uFlowStrength;
+uniform int   uSplineRibbon;
+uniform float uRiverWidth;
+uniform float uRiverLength;
 
 out vec3 vWorldPos;
+out vec2 vFlowDir;
+out vec3 vBaseNormal;
+out vec2 vSurfaceCoord;
+out vec3 vSurfaceTangent;
+out vec3 vSurfaceSide;
 
 void main() {
     vec2 xz = vec2(aPos.x + uCenter.x, aPos.z + uCenter.z);
-    // Directional flow scrolls the wave pattern along uFlowDir (rivers).
-    vec2 sampleXZ = xz - uFlowDir * uTime * uFlowStrength;
+    // Ribbon vertices carry their local spline tangent separately. Square water
+    // keeps the old uniform flow direction.
+    vec3 tangent3 = length(aTangent) > 0.001 ? normalize(aTangent) : vec3(0.0, 0.0, 1.0);
+    vec3 normal3 = length(aNormal) > 0.001 ? normalize(aNormal) : vec3(0.0, 1.0, 0.0);
+    vec3 side3 = normalize(cross(normal3, tangent3));
+    vec2 meshFlow = length(tangent3.xz) > 0.001 ? normalize(tangent3.xz) : uFlowDir;
+    vFlowDir = meshFlow;
+    vBaseNormal = normal3;
+    vSurfaceTangent = tangent3;
+    vSurfaceSide = side3;
+    // A spline-local coordinate system keeps the phase continuous around corners.
+    // Using world XZ with a different tangent on each row tears the flow at bends.
+    vSurfaceCoord = uSplineRibbon != 0
+        ? vec2((aUV.x - 0.5) * uRiverWidth, aUV.y * uRiverLength)
+        : xz;
+    vec2 sampleXZ = vSurfaceCoord
+        - (uSplineRibbon != 0 ? vec2(0.0, 1.0) : meshFlow)
+            * uTime * uFlowStrength;
     // 3 octaves for geometry (cheaper); the fragment adds detail via more octaves.
     float h = sea_height(sampleXZ, uTime, uSeaHeight, uSeaChoppy, uSeaSpeed, uSeaFreq, 3);
-    vec3 P = vec3(xz.x, uCenter.y + h, xz.y);
+    // aPos.y carries the authored river elevation relative to uCenter. Square water
+    // has aPos.y == 0, while spline ribbons use it to climb and descend with the path.
+    vec3 P = vec3(xz.x, uCenter.y + aPos.y + h, xz.y);
     vWorldPos = P;
     gl_Position = uViewProj * vec4(P, 1.0);
 }
@@ -92,6 +121,11 @@ void main() {
 
 const char* kWaterFragBody = R"glsl(
 in vec3 vWorldPos;
+in vec2 vFlowDir;
+in vec3 vBaseNormal;
+in vec2 vSurfaceCoord;
+in vec3 vSurfaceTangent;
+in vec3 vSurfaceSide;
 
 uniform vec3  uCamPos;
 uniform vec3  uSunDir;       // travel direction of the sun light
@@ -104,6 +138,25 @@ uniform float uFresnelPower;
 uniform float uSpecStrength;
 uniform float uShininess;
 uniform float uTransparency;
+uniform sampler2D uSceneColor;
+uniform int   uHasSceneColor;
+uniform sampler2D uSceneDepth;
+uniform int   uHasSceneDepth;
+uniform samplerCube uEnvironment;
+uniform int   uHasEnvironment;
+uniform float uMaxReflectionLod;
+uniform float uRefractionStrength;
+uniform float uReflectionRoughness;
+uniform float uEnvironmentReflectionStrength;
+uniform float uAbsorptionStrength;
+uniform float uCausticsStrength;
+uniform float uCausticsScale;
+uniform vec2  uViewportSize;
+uniform float uNearPlane;
+uniform float uFarPlane;
+uniform float uDepthFadeDistance;
+uniform float uShoreFoamWidth;
+uniform float uShoreFoamStrength;
 uniform float uTime;
 uniform float uSeaHeight;
 uniform float uSeaChoppy;
@@ -111,6 +164,7 @@ uniform float uSeaSpeed;
 uniform float uSeaFreq;
 uniform vec2  uFlowDir;
 uniform float uFlowStrength;
+uniform int   uSplineRibbon;
 uniform vec3  uFoamColor;
 uniform float uFoamAmount;
 
@@ -128,22 +182,86 @@ vec3 waterNormal(vec2 xz, float eps) {
     return normalize(vec3(h - hx, eps, h - hz));
 }
 
+float linearEyeDepth(float depth) {
+    float z = depth * 2.0 - 1.0;
+    return (2.0 * uNearPlane * uFarPlane)
+        / max(uFarPlane + uNearPlane - z * (uFarPlane - uNearPlane), 0.0001);
+}
+
 void main() {
     vec2 xz = vWorldPos.xz;
     float dist = length(uCamPos - vWorldPos);
     // Distance-based LOD: widen the sampling step far away to kill shimmer/aliasing.
     float eps = max(0.02, dist * 0.004);
     // Match the vertex flow scroll so the shaded normals travel with the current.
-    vec3 N = waterNormal(xz - uFlowDir * uTime * uFlowStrength, eps);
+    vec2 flow = length(vFlowDir) > 0.001 ? normalize(vFlowDir) : uFlowDir;
+    vec2 sampleCoord = vSurfaceCoord
+        - (uSplineRibbon != 0 ? vec2(0.0, 1.0) : flow)
+            * uTime * uFlowStrength;
+    vec3 waveN = waterNormal(sampleCoord, eps);
+    // Preserve the smoothly interpolated ribbon normal, then layer the animated
+    // wave slope over it. This removes faceted lighting on vertical/rolled bends.
+    vec3 baseN = length(vBaseNormal) > 0.001 ? normalize(vBaseNormal) : vec3(0.0, 1.0, 0.0);
+    vec3 N = uSplineRibbon != 0
+        ? normalize(normalize(vSurfaceSide) * waveN.x
+                    + baseN * max(waveN.y, 0.15)
+                    + normalize(vSurfaceTangent) * waveN.z)
+        : normalize(baseN * max(waveN.y, 0.15) + vec3(waveN.x, 0.0, waveN.z));
 
     vec3 V = normalize(uCamPos - vWorldPos);
+    if (dot(N, V) < 0.0) N = -N; // render the underside correctly when submerged
     float ndv = max(dot(N, V), 0.0);
 
     float fresnel = pow(1.0 - ndv, uFresnelPower);
-    // Deep/shallow tint; compress the view-angle range so it reads as a body of water.
-    float depthMix = mix(0.4, 1.0, ndv);
-    vec3  body  = mix(uShallow, uDeep, depthMix);
-    vec3  color = mix(body, uReflection, fresnel * 0.6);
+    vec2 screenUv = gl_FragCoord.xy / max(uViewportSize, vec2(1.0));
+    // Opaque scene depth below the water. Unlike view-angle tinting, this makes banks,
+    // submerged terrain, and props genuinely shallow while open water becomes deep.
+    float waterDepth = uDepthFadeDistance * 4.0;
+    float hasBottom = 0.0;
+    if (uHasSceneDepth != 0) {
+        float opaqueDepth = texture(uSceneDepth, screenUv).r;
+        if (opaqueDepth < 0.999999) {
+            waterDepth = max(linearEyeDepth(opaqueDepth)
+                           - linearEyeDepth(gl_FragCoord.z), 0.0);
+            hasBottom = 1.0;
+        }
+    }
+    float depthMix = 1.0 - exp(-waterDepth / max(uDepthFadeDistance, 0.01));
+    vec3  body  = mix(uShallow, uDeep, clamp(depthMix, 0.0, 1.0));
+
+    // Distort the already-rendered opaque scene through the animated wave normal.
+    // Near banks the displacement is reduced so the shoreline remains stable. If
+    // the displaced sample crosses in front of the water, fall back to the original
+    // pixel to avoid pulling foreground silhouettes into the surface.
+    vec3 transmitted = body;
+    if (uHasSceneColor != 0) {
+        float refractionDepthScale = mix(0.25, 1.0, clamp(depthMix, 0.0, 1.0));
+        vec2 refractUv = clamp(screenUv + N.xz * uRefractionStrength * refractionDepthScale,
+                               vec2(0.001), vec2(0.999));
+        if (uHasSceneDepth != 0) {
+            float displacedDepth = texture(uSceneDepth, refractUv).r;
+            if (displacedDepth + 0.00005 < gl_FragCoord.z) refractUv = screenUv;
+        }
+        vec3 sceneBehind = texture(uSceneColor, refractUv).rgb;
+        float causticA = sin((xz.x + xz.y) * uCausticsScale + uTime * 1.9);
+        float causticB = sin((xz.x - xz.y) * uCausticsScale * 1.27 - uTime * 1.4);
+        float caustics = pow(max(0.0, 1.0 - abs(causticA + causticB) * 0.55), 7.0);
+        sceneBehind += uFoamColor * caustics * uCausticsStrength
+                       * hasBottom * (1.0 - depthMix);
+        float absorption = clamp(depthMix * uAbsorptionStrength, 0.0, 1.0);
+        transmitted = mix(sceneBehind, body, absorption);
+    }
+
+    vec3 reflected = uReflection;
+    if (uHasEnvironment != 0) {
+        vec3 reflectionDir = reflect(-V, N);
+        vec3 environment = textureLod(
+            uEnvironment, reflectionDir,
+            clamp(uReflectionRoughness, 0.0, 1.0) * uMaxReflectionLod).rgb;
+        reflected = mix(uReflection, environment,
+                        clamp(uEnvironmentReflectionStrength, 0.0, 1.0));
+    }
+    vec3 color = mix(transmitted, reflected, fresnel * 0.72);
 
     // Sun glint (Blinn-Phong), tone-limited so it sparkles instead of blowing out.
     vec3 L = normalize(-uSunDir);
@@ -157,6 +275,14 @@ void main() {
     float crest = smoothstep(0.78, 0.55, N.y);            // 0 flat .. 1 steep crest
     float foamNoise = noise(xz * 1.1 + uTime * 0.12) * 0.5 + 0.5;
     float foam = clamp(crest * uFoamAmount * smoothstep(0.30, 0.72, foamNoise) * 1.8, 0.0, 1.0);
+
+    // Automatic shoreline foam follows the real depth intersection instead of a
+    // manually placed mask. Noise breaks up the otherwise uniform bank line.
+    float shore = hasBottom
+        * (1.0 - smoothstep(0.0, max(uShoreFoamWidth, 0.01), waterDepth));
+    shore *= uShoreFoamStrength
+        * smoothstep(0.18, 0.78, noise(xz * 1.7 - uTime * 0.22) * 0.5 + 0.5);
+    foam = clamp(max(foam, shore), 0.0, 1.0);
     color = mix(color, uFoamColor, foam);
 
     // Contact foam: a bright, animated ring where objects pierce the surface -- the
@@ -175,7 +301,10 @@ void main() {
     contact = clamp(contact, 0.0, 1.0);
     color = mix(color, uFoamColor, contact);
 
-    float alpha = clamp(uTransparency + fresnel * (1.0 - uTransparency) + foam + contact, 0.0, 1.0);
+    // Shallower water exposes more of the scene below it; deep water retains the
+    // authored opacity. Fresnel, foam, and contact rings remain opaque highlights.
+    float depthAlpha = mix(uTransparency * 0.42, uTransparency, depthMix);
+    float alpha = clamp(depthAlpha + fresnel * (1.0 - depthAlpha) + foam + contact, 0.0, 1.0);
     FragColor = vec4(color, alpha);
 }
 )glsl";
@@ -200,18 +329,167 @@ Water::Water(const WaterConfig& config) : m_config(config) {
 Water::~Water() = default;
 
 void Water::SetConfig(const WaterConfig& config) {
-    const bool rebuild = config.size != m_config.size || config.resolution != m_config.resolution;
+    bool splineChanged = config.splineClosed != m_config.splineClosed
+        || config.riverWidth != m_config.riverWidth
+        || config.splinePoints.size() != m_config.splinePoints.size()
+        || config.splinePointRotations.size() != m_config.splinePointRotations.size();
+    if (!splineChanged) {
+        for (std::size_t i = 0; i < config.splinePoints.size(); ++i) {
+            const glm::vec3 delta = config.splinePoints[i] - m_config.splinePoints[i];
+            if (glm::dot(delta, delta) > 1.0e-8f) { splineChanged = true; break; }
+        }
+    }
+    if (!splineChanged) {
+        for (std::size_t i = 0; i < config.splinePointRotations.size(); ++i) {
+            const glm::vec3 delta = config.splinePointRotations[i]
+                - m_config.splinePointRotations[i];
+            if (glm::dot(delta, delta) > 1.0e-8f) { splineChanged = true; break; }
+        }
+    }
+    const bool rebuild = config.size != m_config.size
+        || config.resolution != m_config.resolution || splineChanged;
     m_config = config;
     if (rebuild || !m_mesh) BuildMesh();
 }
 
 void Water::BuildMesh() {
     const int res = (m_config.resolution < 1) ? 1 : m_config.resolution;
+    if (m_config.splinePoints.size() >= 2) {
+        const Spline spline(m_config.splinePoints, m_config.splineClosed);
+        const float length = std::max(spline.Length(), 0.01f);
+        const float width = std::max(m_config.riverWidth, 0.1f);
+        // A river needs substantially more longitudinal vertices than a square patch:
+        // every row rotates to the spline tangent, so this density is what makes the
+        // plane visibly flexible through tight bends. Resolution remains the quality
+        // control, but rivers may use up to 4x that value along their length.
+        const int maximumAlong = std::max(res * 4, 64);
+        const int along = std::clamp(
+            std::max(static_cast<int>(m_config.splinePoints.size()) * 24,
+                     static_cast<int>(std::ceil(length * 3.0f))), 16, maximumAlong);
+        const int across = std::clamp(
+            static_cast<int>(std::ceil(width * 1.5f)), 3, 24);
+        std::vector<glm::vec3> centers(static_cast<std::size_t>(along + 1));
+        for (int z = 0; z <= along; ++z) {
+            const float d = length * static_cast<float>(z) / static_cast<float>(along);
+            centers[static_cast<std::size_t>(z)] = spline.PositionAtDistance(d);
+        }
+        // Prevent the two banks crossing at turns tighter than half the authored
+        // width. A short smoothing pass makes the narrowing gradual rather than a
+        // visible pinch at a single row.
+        std::vector<float> rowHalfWidths(static_cast<std::size_t>(along + 1), width * 0.5f);
+        for (int z = 1; z < along; ++z) {
+            glm::vec3 before = centers[static_cast<std::size_t>(z)]
+                - centers[static_cast<std::size_t>(z - 1)];
+            glm::vec3 after = centers[static_cast<std::size_t>(z + 1)]
+                - centers[static_cast<std::size_t>(z)];
+            const float beforeLength = glm::length(before);
+            const float afterLength = glm::length(after);
+            if (beforeLength <= 1.0e-5f || afterLength <= 1.0e-5f) continue;
+            before /= beforeLength;
+            after /= afterLength;
+            const float angle = std::acos(std::clamp(glm::dot(before, after), -1.0f, 1.0f));
+            if (angle > 1.0e-4f) {
+                const float radius = ((beforeLength + afterLength) * 0.5f) / angle;
+                rowHalfWidths[static_cast<std::size_t>(z)] = std::min(
+                    rowHalfWidths[static_cast<std::size_t>(z)], std::max(radius * 0.82f, width * 0.12f));
+            }
+        }
+        for (int pass = 0; pass < 4; ++pass) {
+            std::vector<float> smoothed = rowHalfWidths;
+            for (int z = 1; z < along; ++z) {
+                smoothed[static_cast<std::size_t>(z)] =
+                    rowHalfWidths[static_cast<std::size_t>(z - 1)] * 0.25f
+                    + rowHalfWidths[static_cast<std::size_t>(z)] * 0.5f
+                    + rowHalfWidths[static_cast<std::size_t>(z + 1)] * 0.25f;
+            }
+            rowHalfWidths.swap(smoothed);
+        }
+        std::vector<float> verts;
+        verts.reserve(static_cast<std::size_t>(along + 1) * (across + 1) * 11);
+        glm::vec3 transportedSide(1.0f, 0.0f, 0.0f);
+        glm::vec3 previousTangent(0.0f, 0.0f, 1.0f);
+        for (int z = 0; z <= along; ++z) {
+            const glm::vec3 center = centers[static_cast<std::size_t>(z)];
+            const int tangentLo = std::max(z - 2, 0);
+            const int tangentHi = std::min(z + 2, along);
+            glm::vec3 tangent = centers[static_cast<std::size_t>(tangentHi)]
+                - centers[static_cast<std::size_t>(tangentLo)];
+            if (glm::dot(tangent, tangent) < 1.0e-8f) tangent = glm::vec3(0.0f, 0.0f, 1.0f);
+            else tangent = glm::normalize(tangent);
+
+            if (z == 0) {
+                transportedSide = glm::cross(tangent, glm::vec3(0.0f, 1.0f, 0.0f));
+                if (glm::dot(transportedSide, transportedSide) < 1.0e-8f)
+                    transportedSide = glm::cross(tangent, glm::vec3(0.0f, 0.0f, 1.0f));
+                transportedSide = glm::normalize(transportedSide);
+            } else {
+                // Rotation-minimising parallel transport avoids the visible twisting
+                // introduced by repeatedly projecting the frame at steep bends.
+                glm::vec3 axis = glm::cross(previousTangent, tangent);
+                const float sine = glm::length(axis);
+                const float cosine = std::clamp(glm::dot(previousTangent, tangent), -1.0f, 1.0f);
+                if (sine > 1.0e-6f) {
+                    axis /= sine;
+                    transportedSide = transportedSide * cosine
+                        + glm::cross(axis, transportedSide) * sine
+                        + axis * glm::dot(axis, transportedSide) * (1.0f - cosine);
+                }
+                transportedSide -= tangent * glm::dot(transportedSide, tangent);
+                if (glm::dot(transportedSide, transportedSide) < 1.0e-8f)
+                    transportedSide = glm::cross(tangent, glm::vec3(0.0f, 1.0f, 0.0f));
+                transportedSide = glm::normalize(transportedSide);
+            }
+            previousTangent = tangent;
+
+            float rollDegrees = 0.0f;
+            if (!m_config.splinePointRotations.empty()) {
+                const std::size_t count = m_config.splinePointRotations.size();
+                const float progress = static_cast<float>(z) / static_cast<float>(along);
+                const float keyed = progress * static_cast<float>(m_config.splineClosed ? count : count - 1);
+                const std::size_t lo = std::min(static_cast<std::size_t>(std::floor(keyed)), count - 1);
+                const std::size_t hi = m_config.splineClosed ? (lo + 1) % count : std::min(lo + 1, count - 1);
+                float f = keyed - std::floor(keyed);
+                f = f * f * (3.0f - 2.0f * f);
+                const float a = m_config.splinePointRotations[lo].z;
+                const float delta = std::remainder(m_config.splinePointRotations[hi].z - a, 360.0f);
+                rollDegrees = a + delta * f;
+            }
+            const float roll = glm::radians(rollDegrees);
+            glm::vec3 side = transportedSide * std::cos(roll)
+                + glm::cross(tangent, transportedSide) * std::sin(roll);
+            glm::vec3 surfaceNormal = glm::normalize(glm::cross(tangent, side));
+            if (surfaceNormal.y < 0.0f) surfaceNormal = -surfaceNormal;
+            for (int x = 0; x <= across; ++x) {
+                const float u = static_cast<float>(x) / static_cast<float>(across);
+                const glm::vec3 world = center + side * ((u * 2.0f - 1.0f)
+                    * rowHalfWidths[static_cast<std::size_t>(z)]);
+                const glm::vec3 local = world - m_config.center;
+                verts.insert(verts.end(), {local.x, local.y, local.z,
+                    surfaceNormal.x, surfaceNormal.y, surfaceNormal.z,
+                    u, static_cast<float>(z) / static_cast<float>(along),
+                    tangent.x, tangent.y, tangent.z});
+            }
+        }
+        std::vector<std::uint32_t> indices;
+        indices.reserve(static_cast<std::size_t>(along) * across * 6);
+        const int stride = across + 1;
+        for (int z = 0; z < along; ++z) {
+            for (int x = 0; x < across; ++x) {
+                const std::uint32_t i0 = static_cast<std::uint32_t>(z * stride + x);
+                const std::uint32_t i1 = i0 + 1;
+                const std::uint32_t i2 = static_cast<std::uint32_t>((z + 1) * stride + x);
+                const std::uint32_t i3 = i2 + 1;
+                indices.insert(indices.end(), {i0, i2, i1, i1, i2, i3});
+            }
+        }
+        m_mesh.emplace(verts, indices, VertexLayout{{3}, {3}, {2}, {3}});
+        return;
+    }
     const float half = m_config.size * 0.5f;
     const float step = m_config.size / static_cast<float>(res);
 
     std::vector<float> verts;
-    verts.reserve(static_cast<std::size_t>(res + 1) * (res + 1) * 8);
+    verts.reserve(static_cast<std::size_t>(res + 1) * (res + 1) * 11);
     for (int z = 0; z <= res; ++z) {
         for (int x = 0; x <= res; ++x) {
             const float px = -half + static_cast<float>(x) * step;
@@ -220,6 +498,7 @@ void Water::BuildMesh() {
             verts.push_back(0.0f); verts.push_back(1.0f); verts.push_back(0.0f); // normal (waves recompute it)
             verts.push_back(static_cast<float>(x) / res);
             verts.push_back(static_cast<float>(z) / res);
+            verts.push_back(0.0f); verts.push_back(0.0f); verts.push_back(0.0f); // no spline tangent
         }
     }
 
@@ -237,13 +516,25 @@ void Water::BuildMesh() {
         }
     }
 
-    m_mesh.emplace(verts, indices, VertexLayout{{3}, {3}, {2}});
+    m_mesh.emplace(verts, indices, VertexLayout{{3}, {3}, {2}, {3}});
 }
 
 void Water::Draw(const Camera& camera, float aspect,
                  const glm::vec3& sunDir, const glm::vec3& sunColor, const glm::vec3& ambient,
-                 const glm::vec4* contacts, int contactCount) {
+                 const glm::vec4* contacts, int contactCount,
+                 unsigned int sceneColorTexture,
+                 unsigned int sceneDepthTexture,
+                 int viewportWidth, int viewportHeight,
+                 const IBL* ibl) {
     if (!m_mesh || !m_shader) return;
+    if (m_config.maxRenderDistance > 0.0f) {
+        const glm::vec2 delta = glm::max(
+            glm::abs(glm::vec2(camera.Position().x - m_config.center.x,
+                               camera.Position().z - m_config.center.z))
+                - glm::vec2(m_config.size * 0.5f),
+            glm::vec2(0.0f));
+        if (glm::length(delta) > m_config.maxRenderDistance) return;
+    }
 
     // Transparent surface: blend over the opaque scene, keep depth testing but don't
     // write depth (so particles / other transparents still composite correctly).
@@ -269,6 +560,38 @@ void Water::Draw(const Camera& camera, float aspect,
     m_shader->SetFloat("uSpecStrength", m_config.specularStrength);
     m_shader->SetFloat("uShininess", m_config.shininess);
     m_shader->SetFloat("uTransparency", m_config.transparency);
+    m_shader->SetInt("uHasSceneColor", sceneColorTexture != 0 ? 1 : 0);
+    m_shader->SetInt("uHasSceneDepth", sceneDepthTexture != 0 ? 1 : 0);
+    m_shader->SetFloat("uRefractionStrength", m_config.refractionStrength);
+    m_shader->SetFloat("uReflectionRoughness", m_config.reflectionRoughness);
+    m_shader->SetFloat("uEnvironmentReflectionStrength", m_config.environmentReflectionStrength);
+    m_shader->SetFloat("uAbsorptionStrength", m_config.absorptionStrength);
+    m_shader->SetFloat("uCausticsStrength", m_config.causticsStrength);
+    m_shader->SetFloat("uCausticsScale", m_config.causticsScale);
+    m_shader->SetVec2("uViewportSize", glm::vec2(
+        static_cast<float>(std::max(viewportWidth, 1)),
+        static_cast<float>(std::max(viewportHeight, 1))));
+    m_shader->SetFloat("uNearPlane", camera.nearPlane);
+    m_shader->SetFloat("uFarPlane", camera.farPlane);
+    m_shader->SetFloat("uDepthFadeDistance", m_config.depthFadeDistance);
+    m_shader->SetFloat("uShoreFoamWidth", m_config.shorelineFoamWidth);
+    m_shader->SetFloat("uShoreFoamStrength", m_config.shorelineFoamStrength);
+    if (sceneColorTexture != 0) {
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, sceneColorTexture);
+        m_shader->SetInt("uSceneColor", 1);
+    }
+    if (sceneDepthTexture != 0) {
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, sceneDepthTexture);
+        m_shader->SetInt("uSceneDepth", 0);
+    }
+    m_shader->SetInt("uHasEnvironment", ibl ? 1 : 0);
+    m_shader->SetFloat("uMaxReflectionLod", ibl ? ibl->MaxReflectionLod() : 0.0f);
+    if (ibl) {
+        ibl->BindPrefilter(2);
+        m_shader->SetInt("uEnvironment", 2);
+    }
     m_shader->SetFloat("uSeaHeight", m_config.seaHeight);
     m_shader->SetFloat("uSeaChoppy", m_config.seaChoppy);
     m_shader->SetFloat("uSeaSpeed", m_config.seaSpeed);
@@ -277,6 +600,12 @@ void Water::Draw(const Camera& camera, float aspect,
     m_shader->SetFloat("uFoamAmount", m_config.foamAmount);
     m_shader->SetVec2("uFlowDir", m_config.flowDir);
     m_shader->SetFloat("uFlowStrength", m_config.flowStrength);
+    const bool splineRibbon = m_config.splinePoints.size() >= 2;
+    m_shader->SetInt("uSplineRibbon", splineRibbon ? 1 : 0);
+    m_shader->SetFloat("uRiverWidth", std::max(m_config.riverWidth, 0.1f));
+    m_shader->SetFloat("uRiverLength", splineRibbon
+        ? std::max(Spline(m_config.splinePoints, m_config.splineClosed).Length(), 0.01f)
+        : std::max(m_config.size, 0.01f));
 
     const int n = (contacts && contactCount > 0)
         ? std::min(contactCount, kMaxContacts) : 0;
@@ -320,13 +649,49 @@ float CpuSeaOctave(glm::vec2 uv, float choppy) {
 }
 } // namespace
 
+bool Water::ContainsXZ(float worldX, float worldZ, float padding) const {
+    if (m_config.splinePoints.size() >= 2) {
+        std::vector<glm::vec3> flat = m_config.splinePoints;
+        for (glm::vec3& point : flat) point.y = 0.0f;
+        const Spline spline(std::move(flat), m_config.splineClosed);
+        const glm::vec3 closest = spline.ClosestPoint(glm::vec3(worldX, 0.0f, worldZ));
+        const glm::vec2 delta(worldX - closest.x, worldZ - closest.z);
+        return glm::dot(delta, delta)
+            <= std::pow(m_config.riverWidth * 0.5f + std::max(padding, 0.0f), 2.0f);
+    }
+    const float half = m_config.size * 0.5f + std::max(padding, 0.0f);
+    return std::abs(worldX - m_config.center.x) <= half
+        && std::abs(worldZ - m_config.center.z) <= half;
+}
+
 float Water::HeightAt(float worldX, float worldZ) const {
     // Matches the vertex shader's sea_height() (3 geometry octaves) so floating objects
     // track the rendered crests.
     float freq   = m_config.seaFreq;
     float amp    = m_config.seaHeight;
     float choppy = m_config.seaChoppy;
+    glm::vec2 flow = m_config.flowDir;
     glm::vec2 uv(worldX, worldZ);
+    float baseY = m_config.center.y;
+    if (m_config.splinePoints.size() >= 2) {
+        std::vector<glm::vec3> flat = m_config.splinePoints;
+        for (glm::vec3& point : flat) point.y = 0.0f;
+        const Spline flatSpline(std::move(flat), m_config.splineClosed);
+        float distance = 0.0f;
+        glm::vec3 tangent(0.0f, 0.0f, 1.0f);
+        const glm::vec3 closest = flatSpline.ClosestPoint(
+            glm::vec3(worldX, 0.0f, worldZ), &distance, &tangent);
+        const Spline heightSpline(m_config.splinePoints, m_config.splineClosed);
+        baseY = heightSpline.PositionAtDistance(distance).y;
+        flow = glm::vec2(tangent.x, tangent.z);
+        if (glm::dot(flow, flow) > 1.0e-8f) flow = glm::normalize(flow);
+        const glm::vec2 side(flow.y, -flow.x);
+        uv = glm::vec2(glm::dot(glm::vec2(worldX - closest.x, worldZ - closest.z), side),
+                       distance);
+        uv.y -= m_time * m_config.flowStrength;
+    } else {
+        uv -= flow * m_time * m_config.flowStrength;
+    }
     uv.x *= 0.75f;
     const glm::mat2 octave(1.6f, 1.2f, -1.2f, 1.6f);
     float h = 0.0f;
@@ -339,7 +704,7 @@ float Water::HeightAt(float worldX, float worldZ) const {
         amp  *= 0.22f;
         choppy = glm::mix(choppy, 1.0f, 0.2f);
     }
-    return m_config.center.y + h;
+    return baseY + h;
 }
 
 } // namespace engine

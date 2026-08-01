@@ -3,6 +3,7 @@
 
 #include <engine/graphics/Primitives.h>
 #include <engine/gameplay/Script.h>
+#include <engine/gameplay/LuaScript.h>
 #include <engine/gameplay/GameplaySystems.h>
 #include <engine/gameplay/RagdollSystem.h>
 #include <engine/gameplay/GameplayComponents.h>
@@ -17,11 +18,13 @@
 #include <engine/ecs/Systems.h>          // RenderLoadedModels
 #include <engine/animation/AnimatedModel.h>
 
+#include <glad/glad.h>
 #include <GLFW/glfw3.h>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -59,6 +62,96 @@ engine::ProceduralSky::CloudSettings SkyClouds(
     clouds.color = environment.cloudColor;
     return clouds;
 }
+
+engine::WaterConfig RuntimeWaterConfig(
+    const RuntimeSceneLoader::Scene::WaterDesc& water) {
+    engine::WaterConfig config;
+    config.center = water.center;
+    config.size = water.size;
+    config.resolution = water.resolution;
+    config.shallowColor = water.shallow;
+    config.deepColor = water.deep;
+    config.reflectionColor = water.reflection;
+    config.transparency = water.transparency;
+    config.fresnelPower = water.fresnel;
+    config.specularStrength = water.specular;
+    config.shininess = water.shininess;
+    config.seaHeight = water.seaHeight;
+    config.seaChoppy = water.seaChoppy;
+    config.seaSpeed = water.seaSpeed;
+    config.seaFreq = water.seaFreq;
+    config.foamAmount = water.foam;
+    config.flowDir = water.flowDir;
+    config.flowStrength = water.flowStrength;
+    config.riverWidth = water.riverWidth;
+    config.splineClosed = water.splineClosed;
+    config.splinePoints = water.splinePoints;
+    config.splinePointRotations = water.splinePointRotations;
+    config.depthFadeDistance = water.depthFadeDistance;
+    config.shorelineFoamWidth = water.shoreFoamWidth;
+    config.shorelineFoamStrength = water.shoreFoamStrength;
+    config.refractionStrength = water.refractionStrength;
+    config.reflectionRoughness = water.reflectionRoughness;
+    config.environmentReflectionStrength = water.environmentReflectionStrength;
+    config.absorptionStrength = water.absorptionStrength;
+    config.causticsStrength = water.causticsStrength;
+    config.causticsScale = water.causticsScale;
+    config.maxRenderDistance = water.maxRenderDistance;
+    return config;
+}
+
+void RuntimeColliderMetrics(const engine::ecs::Collider& collider,
+                            const glm::vec3& scale, float& radius,
+                            float& halfY, float& volume) {
+    constexpr float pi = 3.14159265f;
+    const glm::vec3 s = glm::abs(scale);
+    const float horizontal = std::max(s.x, s.z);
+    const float scaleVolume = std::max(s.x * s.y * s.z, 0.0001f);
+    radius = 0.5f * horizontal;
+    halfY = 0.5f * s.y;
+    volume = scaleVolume;
+    switch (collider.shape) {
+    case engine::ecs::ColliderShape::Sphere:
+        radius = collider.radius * horizontal;
+        halfY = collider.radius * s.y;
+        volume = (4.0f / 3.0f) * pi * std::pow(collider.radius, 3.0f) * scaleVolume;
+        break;
+    case engine::ecs::ColliderShape::Box:
+    case engine::ecs::ColliderShape::Pyramid:
+    case engine::ecs::ColliderShape::Staircase:
+        radius = std::max(collider.halfExtents.x * s.x, collider.halfExtents.z * s.z);
+        halfY = collider.halfExtents.y * s.y;
+        volume = 8.0f * collider.halfExtents.x * collider.halfExtents.y
+                 * collider.halfExtents.z * scaleVolume;
+        if (collider.shape == engine::ecs::ColliderShape::Pyramid) volume /= 3.0f;
+        if (collider.shape == engine::ecs::ColliderShape::Staircase) volume *= 0.5f;
+        break;
+    case engine::ecs::ColliderShape::Capsule:
+        radius = collider.radius * horizontal;
+        halfY = (collider.halfHeight + collider.radius) * s.y;
+        volume = (pi * collider.radius * collider.radius * (2.0f * collider.halfHeight)
+                 + (4.0f / 3.0f) * pi * std::pow(collider.radius, 3.0f)) * scaleVolume;
+        break;
+    case engine::ecs::ColliderShape::Cylinder:
+    case engine::ecs::ColliderShape::Cone:
+        radius = collider.radius * horizontal;
+        halfY = collider.halfHeight * s.y;
+        volume = pi * collider.radius * collider.radius
+                 * (2.0f * collider.halfHeight) * scaleVolume;
+        if (collider.shape == engine::ecs::ColliderShape::Cone) volume /= 3.0f;
+        break;
+    case engine::ecs::ColliderShape::Torus:
+        radius = (collider.majorRadius + collider.minorRadius) * horizontal;
+        halfY = collider.minorRadius * s.y;
+        volume = 2.0f * pi * pi * collider.majorRadius
+                 * collider.minorRadius * collider.minorRadius * scaleVolume;
+        break;
+    default: break;
+    }
+    radius = std::max(radius, 0.1f);
+    halfY = std::max(halfY, 0.05f);
+    volume = std::max(volume, 0.0001f);
+}
 } // namespace
 
 RuntimePlayerApp::RuntimePlayerApp(engine::Config& config, std::string scenePath)
@@ -87,6 +180,7 @@ void RuntimePlayerApp::OnInit() {
     m_staircase.emplace(engine::primitives::Staircase());
 
     m_pbr.emplace(2048);
+    m_foliageRenderer.emplace();
     // Default shader for imported static models (Blinn-Phong; DrawModel binds the
     // material maps). Matches the editor's play-mode model pass.
     m_modelShader.emplace(
@@ -175,18 +269,155 @@ void RuntimePlayerApp::OnInit() {
     if (HasPlayer() && !m_paused) SetPlayCursor(true);   // FPS-style mouse-look
 }
 
+void RuntimePlayerApp::PostProcessLoadedEntities(const std::vector<Entity>& entities) {
+    for (Entity entity : entities) {
+        if (!m_registry.Valid(entity)) continue;
+
+        // Animation-event routing (audio + particles + event log).
+        if (engine::AnimatedModel* animated = m_registry.TryGet<engine::AnimatedModel>(entity)) {
+            animated->onEvent = [this, entity](const std::string& name) {
+                if (name.empty()) return;
+                m_runtimeAudio.ProcessAnimationEvent(m_registry, entity, name);
+                engine::ProcessParticleAnimationEvent(m_registry, entity, name);
+                m_animationEvents.push_back({entity, name});
+            };
+        }
+
+        // The loader adds MeshRenderer (mesh + authored colour); the PBR renderer draws
+        // MeshPBR. Give each plain drawable its resolved PBR material, or a default from
+        // the authored colour. Static models + skinned characters draw via their own
+        // passes, so skip those; skip anything already converted (idempotent).
+        if (m_registry.Has<MeshRenderer>(entity)
+            && !m_registry.Has<engine::ecs::LoadedModelAsset>(entity)
+            && !m_registry.Has<engine::AnimatedModel>(entity)
+            && !m_registry.Has<MeshPBR>(entity)) {
+            const MeshRenderer& mr = m_registry.Get<MeshRenderer>(entity);
+            MeshPBR mesh;
+            mesh.mesh = mr.mesh;
+            if (const engine::ecs::LoadedMaterialAsset* lm =
+                    m_registry.TryGet<engine::ecs::LoadedMaterialAsset>(entity)) {
+                mesh.material = lm->material;
+                mesh.customShader = lm->shader;
+                mesh.shaderParameters = lm->shaderParameters;
+                mesh.shaderParameterTypes = lm->shaderParameterTypes;
+                mesh.shaderTextures = lm->shaderTextures;
+            } else {
+                mesh.material.albedo = mr.color;
+                mesh.material.metallic = 0.0f;
+                mesh.material.roughness = 0.6f;
+            }
+            m_registry.Add<MeshPBR>(entity, std::move(mesh));
+        }
+    }
+}
+
+void RuntimePlayerApp::RebuildResidentScene() {
+    m_scene = m_persistentScene;
+    const auto append = [](auto& destination, const auto& source) {
+        destination.insert(destination.end(), source.begin(), source.end());
+    };
+    for (const auto& [index, scene] : m_streamedScenes) {
+        (void)index;
+        append(m_scene.navBounds, scene.navBounds);
+        append(m_scene.navAgents, scene.navAgents);
+        append(m_scene.triggerActions, scene.triggerActions);
+        append(m_scene.cameraZones, scene.cameraZones);
+        append(m_scene.physicsJoints, scene.physicsJoints);
+        append(m_scene.terrains, scene.terrains);
+        append(m_scene.waters, scene.waters);
+        append(m_scene.splines, scene.splines);
+        append(m_scene.foliage, scene.foliage);
+        append(m_scene.cameraPresets, scene.cameraPresets);
+        append(m_scene.cameraSequences, scene.cameraSequences);
+        append(m_scene.entities, scene.entities);
+        append(m_scene.lights, scene.lights);
+    }
+}
+
+void RuntimePlayerApp::RebuildResidentSystems() {
+    RebuildResidentScene();
+    BuildTerrains();
+    BuildWaters();
+    BuildRuntimeLevelFeatures();
+    BuildAI();
+}
+
+void RuntimePlayerApp::ActivateStreamedLevel(
+    std::size_t levelIndex,
+    const RuntimeSceneLoader::Scene& scene,
+    const std::vector<Entity>& entities) {
+    PostProcessLoadedEntities(entities);
+    m_entityCount += entities.size();
+    m_streamedScenes[levelIndex] = scene;
+    RebuildResidentSystems();
+}
+
+void RuntimePlayerApp::PrepareStreamedLevelUnload(
+    std::size_t levelIndex,
+    const RuntimeSceneLoader::Scene&,
+    const std::vector<Entity>& entities) {
+    (void)levelIndex;
+    engine::ShutdownScripts(m_registry, entities);
+    m_entityCount = entities.size() > m_entityCount
+        ? 0 : m_entityCount - entities.size();
+    for (Entity entity : entities) {
+        m_runtimeAudio.Stop(entity);
+        m_prevHp.erase(entity);
+        m_cameraZonesInside.erase(entity);
+        m_triggerActions.erase(entity);
+        m_cameraZones.erase(entity);
+        if (entity == m_lockTarget) m_lockTarget = engine::ecs::kNull;
+        if (entity == m_hudHealthEntity && entity != m_playerEntity)
+            m_hudHealthEntity = m_playerEntity;
+        if (entity == m_playerEntity) {
+            m_playerController.reset();
+            m_playerEntity = engine::ecs::kNull;
+        }
+    }
+}
+
+void RuntimePlayerApp::FinishStreamedLevelUnload(std::size_t levelIndex) {
+    m_streamedScenes.erase(levelIndex);
+    RebuildResidentSystems();
+}
+
 void RuntimePlayerApp::LoadScene() {
     m_runtimeWarnings.clear();
     if (m_scenePath.empty()) {
-        m_loadError = "No scene specified. Pass a .3dgscene path on the command line.";
+        m_loadError = "No scene specified. Pass a .3dgscene or .3dgworld path on the command line.";
         return;
     }
 
     std::string err;
-    if (!RuntimeSceneLoader::Load(m_scenePath, &m_scene, &err)) {
+    std::string bootScenePath = m_scenePath;
+    m_streamingEnabled = false;
+    m_lastStreamingError.clear();
+
+    // A .3dgworld boots its always-resident persistent level as the main scene; the
+    // streamed levels are driven by the LevelStreamingManager after setup.
+    {
+        std::string ext = std::filesystem::path(m_scenePath).extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (ext == ".3dgworld") {
+            if (!engine::LoadWorldManifest(m_scenePath, &m_worldManifest, &err)) {
+                m_loadError = "World load failed: " + err;
+                return;
+            }
+            m_worldDir = std::filesystem::path(m_scenePath).parent_path().string();
+            bootScenePath = m_worldDir.empty()
+                ? m_worldManifest.persistentScenePath
+                : (std::filesystem::path(m_worldDir) / m_worldManifest.persistentScenePath).string();
+            m_streamingEnabled = true;
+        }
+    }
+
+    if (!RuntimeSceneLoader::Load(bootScenePath, &m_scene, &err)) {
         m_loadError = "Load failed: " + err;
         return;
     }
+    m_persistentScene = m_scene;
+    m_streamedScenes.clear();
 
     RuntimeSceneLoader::PrimitiveMeshes meshes;
     meshes.cube      = &*m_cube;
@@ -198,6 +429,7 @@ void RuntimePlayerApp::LoadScene() {
     meshes.pyramid   = &*m_pyramid;
     meshes.torus     = &*m_torus;
     meshes.staircase = &*m_staircase;
+    m_primitiveMeshes = meshes;   // stashed so streamed levels can instantiate each frame
 
     std::vector<Entity> created;
     if (!RuntimeSceneLoader::Instantiate(m_scene, m_registry, meshes, &created, &err)) {
@@ -215,45 +447,9 @@ void RuntimePlayerApp::LoadScene() {
     for (const std::string& assetError : report.errors)
         m_runtimeWarnings.push_back("Asset: " + assetError);
 
-    m_registry.view<engine::AnimatedModel>().each(
-        [this](Entity entity, engine::AnimatedModel& animated) {
-            animated.onEvent = [this, entity](const std::string& name) {
-                if (name.empty()) return;
-                m_runtimeAudio.ProcessAnimationEvent(m_registry, entity, name);
-                engine::ProcessParticleAnimationEvent(m_registry, entity, name);
-                m_animationEvents.push_back({entity, name});
-            };
-        });
-
-    // The loader adds MeshRenderer (mesh + authored colour); the PBR renderer draws
-    // MeshPBR. Give each drawable its resolved PBR material, or a default material
-    // from the authored colour when it has none. (Static models + skinned meshes get
-    // dedicated render passes in a later milestone; they draw as placeholders here.)
-    std::vector<Entity> drawables;
-    m_registry.view<Transform, MeshRenderer>().each([&](Entity e, Transform&, MeshRenderer&) {
-        drawables.push_back(e);
-    });
-    for (Entity e : drawables) {
-        // Imported static models + animated characters are drawn by their own
-        // passes (RenderLoadedModels / SkinnedRenderer), not as a placeholder mesh.
-        if (m_registry.Has<engine::ecs::LoadedModelAsset>(e)) continue;
-        if (m_registry.Has<engine::AnimatedModel>(e)) continue;
-        const MeshRenderer& mr = m_registry.Get<MeshRenderer>(e);
-        MeshPBR mesh;
-        mesh.mesh = mr.mesh;
-        if (const engine::ecs::LoadedMaterialAsset* lm = m_registry.TryGet<engine::ecs::LoadedMaterialAsset>(e)) {
-            mesh.material = lm->material;
-            mesh.customShader = lm->shader;
-            mesh.shaderParameters = lm->shaderParameters;
-            mesh.shaderParameterTypes = lm->shaderParameterTypes;
-            mesh.shaderTextures = lm->shaderTextures;
-        } else {
-            mesh.material.albedo = mr.color;
-            mesh.material.metallic = 0.0f;
-            mesh.material.roughness = 0.6f;
-        }
-        m_registry.Add<MeshPBR>(e, std::move(mesh));
-    }
+    // Per-entity setup (animation-event hookup + MeshPBR conversion). Factored so a
+    // streamed level can run the same setup on just its new entities.
+    PostProcessLoadedEntities(created);
 
     SetupPlayer();
 
@@ -270,6 +466,7 @@ void RuntimePlayerApp::LoadScene() {
 
     m_sceneDir = std::filesystem::path(m_scenePath).parent_path().string();
     BuildTerrains();
+    BuildWaters();
     BuildRuntimeLevelFeatures();
     BuildAI();
     ValidateRuntimeScene();
@@ -283,6 +480,28 @@ void RuntimePlayerApp::LoadScene() {
     if (m_paused) {
         engine::GameMode::Instance().Pause();
     }
+
+    // Wire streaming for a world: the manager loads/unloads the streamed levels around
+    // the viewer, running the same per-entity setup on each newly-activated level.
+    if (m_streamingEnabled) {
+        m_streaming.Configure(m_worldManifest, m_worldDir);
+        m_streaming.SetActivateHook([this](
+            std::size_t index,
+            const RuntimeSceneLoader::Scene& scene,
+            const std::vector<Entity>& newEntities) {
+            ActivateStreamedLevel(index, scene, newEntities);
+        });
+        m_streaming.SetBeforeDeactivateHook([this](
+            std::size_t index,
+            const RuntimeSceneLoader::Scene& scene,
+            const std::vector<Entity>& entities) {
+            PrepareStreamedLevelUnload(index, scene, entities);
+        });
+        m_streaming.SetDeactivateHook([this](std::size_t index) {
+            FinishStreamedLevelUnload(index);
+        });
+    }
+
     m_simReady = true;
 }
 
@@ -322,7 +541,15 @@ void RuntimePlayerApp::ConfigurePhysics() {
 }
 
 void RuntimePlayerApp::RestartScene() {
+    m_underwaterBlend = 0.0f;
+    m_underwaterAudio = false;
+    m_underwaterVisuals.blend = 0.0f;
+    m_runtimeAudio.ApplySnapshot(engine::AudioSnapshotPreset::Default, 0.1f);
     engine::ShutdownScripts(m_registry);
+    // OnDestroy handlers may queue requests; they belong to the scene being
+    // discarded and must not leak into the freshly loaded scene/world.
+    (void)engine::ConsumeScriptSceneLoadRequest();
+    (void)engine::ConsumeScriptLevelStreamRequests();
     m_runtimeAudio.Stop();
     m_cameraShake.Clear();
     m_cameraSequence.Stop();
@@ -541,10 +768,32 @@ void RuntimePlayerApp::BuildTerrains() {
             static_cast<std::size_t>(desc.resolution * desc.resolution))
             runtime.terrain.SetPaint(desc.paint);
 
+        engine::TerrainLayerSurface layerSurfaces[6];
+        engine::DefaultTerrainLayerSurfaces(layerSurfaces);
+        for (int layer = 1; layer <= 5; ++layer) {
+            const std::string& path = desc.layerMaterials[static_cast<std::size_t>(layer - 1)];
+            if (path.empty()) continue;
+            std::string materialError;
+            if (const engine::RuntimeMaterialAsset* loaded =
+                    m_assets.LoadMaterial(path, &materialError)) {
+                layerSurfaces[layer].albedo = loaded->material.albedo;
+                layerSurfaces[layer].ao = loaded->material.ao;
+                layerSurfaces[layer].roughness = loaded->material.roughness;
+                layerSurfaces[layer].metallic = loaded->material.metallic;
+            } else if (!materialError.empty()) {
+                m_runtimeWarnings.push_back(
+                    "Terrain material '" + path + "': " + materialError);
+            }
+        }
+        runtime.terrain.SetLayerSurfaces(layerSurfaces);
+
         engine::ecs::PbrMaterial material;
         material.albedo = glm::vec3(1.0f);
-        material.roughness = 0.92f;
+        material.ao = 1.0f;
+        material.roughness = 1.0f;
+        material.metallic = 1.0f;
         material.albedoMap = &runtime.terrain.Albedo();
+        material.metalRoughMap = &runtime.terrain.SurfaceMap();
         m_registry.Add<MeshPBR>(
             entity, MeshPBR{&runtime.terrain.GetMesh(), material});
     }
@@ -557,16 +806,189 @@ float RuntimePlayerApp::TerrainSurfaceY(float x, float z, bool& over) const {
         const Transform* transform = m_registry.TryGet<Transform>(runtime.entity);
         if (!transform) continue;
         const engine::Heightmap& map = runtime.terrain.Map();
-        const float localX = x - transform->position.x;
-        const float localZ = z - transform->position.z;
+        const glm::vec3 scale = glm::abs(transform->scale);
+        const float sx = std::max(scale.x, 0.0001f);
+        const float sy = std::max(scale.y, 0.0001f);
+        const float sz = std::max(scale.z, 0.0001f);
+        const float localX = (x - transform->position.x) / sx;
+        const float localZ = (z - transform->position.z) / sz;
         if (localX < map.origin.x || localZ < map.origin.z ||
             localX > map.origin.x + map.size || localZ > map.origin.z + map.size)
             continue;
         best = std::max(
-            best, transform->position.y + runtime.terrain.HeightAt(localX, localZ));
+            best, transform->position.y + runtime.terrain.HeightAt(localX, localZ) * sy);
         over = true;
     }
     return over ? best : 0.0f;
+}
+
+void RuntimePlayerApp::BuildWaters() {
+    m_waters.clear();
+    m_waters.reserve(m_scene.waters.size());
+    for (const RuntimeSceneLoader::Scene::WaterDesc& desc : m_scene.waters)
+        m_waters.emplace_back(desc, RuntimeWaterConfig(desc));
+}
+
+float RuntimePlayerApp::WaterSurfaceY(float x, float z, bool& over) const {
+    over = false;
+    float highest = -std::numeric_limits<float>::max();
+    for (const RuntimeWater& runtime : m_waters) {
+        if (!runtime.water.ContainsXZ(x, z)) continue;
+        highest = std::max(highest, runtime.water.HeightAt(x, z));
+        over = true;
+    }
+    return over ? highest : 0.0f;
+}
+
+void RuntimePlayerApp::ApplyWaterBuoyancy(float dt) {
+    if (m_waters.empty()) return;
+    constexpr float density = 3.0f;
+    constexpr float linearDrag = 2.5f;
+    constexpr float angularDrag = 2.5f;
+    const float gravity = std::max(std::abs(m_physics.gravity.y), 0.01f);
+    m_registry.view<Transform, engine::ecs::RigidBody>().each(
+        [&](Entity entity, Transform& transform, engine::ecs::RigidBody& body) {
+            if (body.invMass <= 0.0f || body.kinematic) return;
+            bool over = false;
+            const float surface = WaterSurfaceY(
+                transform.position.x, transform.position.z, over);
+            if (!over) return;
+            float radius = 0.5f, halfY = 0.5f, volume = 1.0f;
+            if (const engine::ecs::Collider* collider =
+                    m_registry.TryGet<engine::ecs::Collider>(entity)) {
+                RuntimeColliderMetrics(*collider, transform.scale, radius, halfY, volume);
+            } else {
+                const glm::vec3 scale = glm::abs(transform.scale);
+                halfY = std::max(scale.y * 0.5f, 0.05f);
+                volume = std::max(scale.x * scale.y * scale.z, 0.0001f);
+            }
+            const float bottom = transform.position.y - halfY;
+            if (bottom >= surface) return;
+            const float submerged = glm::clamp(
+                (surface - bottom) / (2.0f * halfY), 0.0f, 1.0f);
+            body.AddForce(glm::vec3(0.0f, density * gravity * volume * submerged, 0.0f));
+            body.velocity *= 1.0f / (1.0f + dt * linearDrag * submerged);
+            body.angularVelocity *= 1.0f / (1.0f + dt * angularDrag * submerged);
+            body.sleeping = false;
+            body.sleepTimer = 0.0f;
+        });
+}
+
+void RuntimePlayerApp::CaptureWaterSceneBuffers() {
+    if (m_waters.empty()) return;
+    const int width = std::max(GetWindow().Width(), 1);
+    const int height = std::max(GetWindow().Height(), 1);
+    if (!m_waterSceneCopy) {
+        m_waterSceneCopy.emplace(width, height, GL_RGBA16F, true);
+    } else if (m_waterSceneCopy->Width() != width
+               || m_waterSceneCopy->Height() != height) {
+        m_waterSceneCopy->Resize(width, height);
+    }
+    GLint previousRead = 0, previousDraw = 0;
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &previousRead);
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &previousDraw);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(previousDraw));
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_waterSceneCopy->FboId());
+    glBlitFramebuffer(0, 0, width, height, 0, 0, width, height,
+                      GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(previousRead));
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(previousDraw));
+    glViewport(0, 0, width, height);
+}
+
+void RuntimePlayerApp::DrawWaters(const engine::Camera& camera, float aspect) {
+    if (m_waters.empty()) return;
+    const auto& environment = m_scene.environment;
+    const glm::vec3 sunColor = m_sample.keyLightColor * environment.sunIntensity;
+    const glm::vec3 ambient = m_sample.ambient * environment.skyLightIntensity;
+    std::vector<glm::vec4> contacts;
+    contacts.reserve(engine::Water::kMaxContacts);
+    for (RuntimeWater& runtime : m_waters) {
+        contacts.clear();
+        if (!runtime.desc.splineName.empty()) {
+            const Entity splineEntity = FindNamedEntity(runtime.desc.splineName);
+            if (const engine::ecs::SplineComponent* spline =
+                    m_registry.TryGet<engine::ecs::SplineComponent>(splineEntity);
+                spline && spline->points.size() >= 2) {
+                engine::WaterConfig updated = runtime.water.Config();
+                updated.splinePoints = spline->points;
+                updated.splinePointRotations = spline->rotations;
+                updated.splineClosed = spline->closed;
+                glm::vec3 boundsMin = spline->points.front();
+                glm::vec3 boundsMax = boundsMin;
+                for (const glm::vec3& point : spline->points) {
+                    boundsMin = glm::min(boundsMin, point);
+                    boundsMax = glm::max(boundsMax, point);
+                }
+                updated.center = (boundsMin + boundsMax) * 0.5f;
+                updated.size = std::max(boundsMax.x - boundsMin.x,
+                    boundsMax.z - boundsMin.z) + updated.riverWidth;
+                runtime.water.SetConfig(updated);
+            }
+        }
+        const engine::WaterConfig& config = runtime.water.Config();
+        m_registry.view<Transform, engine::ecs::Collider>().each(
+            [&](Entity, Transform& transform, engine::ecs::Collider& collider) {
+                if (collider.isTrigger
+                    || contacts.size() >= engine::Water::kMaxContacts) return;
+                float radius = 0.5f, halfY = 0.5f, volume = 1.0f;
+                RuntimeColliderMetrics(collider, transform.scale, radius, halfY, volume);
+                if (!runtime.water.ContainsXZ(
+                        transform.position.x, transform.position.z, radius)) return;
+                const float band = halfY + 0.6f;
+                const float dy = std::abs(transform.position.y - config.center.y);
+                if (dy > band) return;
+                contacts.emplace_back(
+                    transform.position.x, transform.position.z, radius,
+                    glm::clamp(1.0f - dy / band, 0.0f, 1.0f));
+            });
+        runtime.water.Draw(
+            camera, aspect, m_sample.keyLightDirection, sunColor, ambient,
+            contacts.empty() ? nullptr : contacts.data(),
+            static_cast<int>(contacts.size()),
+            m_waterSceneCopy ? m_waterSceneCopy->ColorTexture() : 0,
+            m_waterSceneCopy ? m_waterSceneCopy->DepthTexture() : 0,
+            GetWindow().Width(), GetWindow().Height(), m_ibl ? &*m_ibl : nullptr);
+    }
+}
+
+void RuntimePlayerApp::UpdateUnderwaterState(const engine::Camera& camera, float dt) {
+    const glm::vec3 position = camera.Position();
+    const RuntimeWater* containing = nullptr;
+    float highest = -std::numeric_limits<float>::max();
+    for (const RuntimeWater& runtime : m_waters) {
+        const engine::WaterConfig& config = runtime.water.Config();
+        if (!runtime.water.ContainsXZ(position.x, position.z)) continue;
+        const float surface = runtime.water.HeightAt(position.x, position.z);
+        if (position.y < surface && surface > highest) {
+            highest = surface;
+            containing = &runtime;
+        }
+    }
+    const float target = containing ? 1.0f : 0.0f;
+    const float speed = containing
+        ? containing->desc.underwaterTransitionSpeed : 3.5f;
+    m_underwaterBlend += (target - m_underwaterBlend)
+        * (1.0f - std::exp(-std::max(dt, 0.0f) * speed));
+    if (!containing && m_underwaterBlend < 0.001f) m_underwaterBlend = 0.0f;
+    if (containing) {
+        m_underwaterVisuals.tint = containing->desc.underwaterTint;
+        m_underwaterVisuals.fogDensity = containing->desc.underwaterFogDensity;
+        m_underwaterVisuals.distortion = containing->desc.underwaterDistortion;
+        m_underwaterVisuals.causticsStrength = containing->desc.causticsStrength * 0.8f;
+        m_underwaterVisuals.causticsScale = containing->desc.causticsScale * 4.5f;
+    }
+    m_underwaterVisuals.blend = m_underwaterBlend;
+    if (m_post) m_post->underwater = m_underwaterVisuals;
+
+    const bool submerged = containing != nullptr;
+    if (submerged != m_underwaterAudio) {
+        m_runtimeAudio.ApplySnapshot(
+            submerged ? engine::AudioSnapshotPreset::Underwater
+                      : engine::AudioSnapshotPreset::Default,
+            0.35f);
+        m_underwaterAudio = submerged;
+    }
 }
 
 void RuntimePlayerApp::BuildRuntimeLevelFeatures() {
@@ -663,12 +1085,14 @@ void RuntimePlayerApp::ValidateRuntimeScene() {
             warn("Trigger target not found: " + action.targetName);
     }
     for (const auto& entity : m_scene.entities) {
-        if (entity.scriptEnabled && !entity.scriptClassName.empty() &&
+        if (entity.scriptEnabled && !entity.scriptClassName.empty()
+            && !engine::IsLuaScriptPath(entity.scriptPath) &&
             !engine::ScriptRegistry::Instance().Has(entity.scriptClassName))
             warn("Script class is not registered: " + entity.scriptClassName +
                  " (entity " + entity.name + ")");
         for (const auto& script : entity.additionalScripts) {
             if (script.enabled && !script.className.empty()
+                && !engine::IsLuaScriptPath(script.path)
                 && !engine::ScriptRegistry::Instance().Has(script.className)) {
                 warn("Script class is not registered: " + script.className
                      + " (entity " + entity.name + ")");
@@ -1454,6 +1878,12 @@ void RuntimePlayerApp::UpdateCameraSequence(float dt) {
 void RuntimePlayerApp::OnUpdate(float dt) {
     engine::Window& w = GetWindow();
     m_dt = dt;
+    engine::GameMode& gameMode = engine::GameMode::Instance();
+    // Hit-stop duration uses real time so a zero-dilation freeze can recover.
+    gameMode.UpdateUnscaledTime(dt);
+    float gameDt = gameMode.ScaleDelta(dt);
+    if (m_simReady && !m_paused)
+        for (RuntimeWater& water : m_waters) water.water.Update(gameDt);
     if (dt > 0.0f) m_fps = m_fps * 0.92f + (1.0f / dt) * 0.08f;
     if (w.IsKeyPressed(GLFW_KEY_ESCAPE)) w.SetShouldClose(true);
 
@@ -1472,7 +1902,7 @@ void RuntimePlayerApp::OnUpdate(float dt) {
     m_pausePrev = pauseDown;
 
     // Game over / victory: free the cursor for the end screen and allow a restart.
-    if (engine::GameMode::Instance().IsOver()) {
+    if (gameMode.IsOver()) {
         if (HasPlayer()) SetPlayCursor(false);
         if (m_scene.gameMode.allowRestart && w.IsKeyPressed(GLFW_KEY_R)) {
             RestartScene();
@@ -1487,9 +1917,9 @@ void RuntimePlayerApp::OnUpdate(float dt) {
     // Advance an already-playing cinematic before scripts so its shot/timeline
     // events are frame events: scripts observe them once below, then they are
     // cleared before any fixed updates run.
-    if (m_simReady && !m_paused) UpdateCameraSequence(dt);
+    if (m_simReady && !m_paused) UpdateCameraSequence(gameDt);
     if (m_simReady && !m_paused && m_zoneCameraBlend.Active())
-        m_zoneCameraBlend.Update(dt);
+        m_zoneCameraBlend.Update(gameDt);
 
     const bool inputEnabled =
         m_scene.gameMode.playerInputEnabled
@@ -1498,10 +1928,11 @@ void RuntimePlayerApp::OnUpdate(float dt) {
         const engine::ScriptInputState input =
             CaptureScriptInput(inputEnabled, true);
         engine::UpdateScripts(
-            m_registry, dt, &input, &m_runtimeAudio,
-            &m_cameraShake, &m_cameraDirector, &engine::GameMode::Instance());
+            m_registry, gameDt, &input, &m_runtimeAudio,
+            &m_cameraShake, &m_cameraDirector, &gameMode);
         if (std::string requestedScene = engine::ConsumeScriptSceneLoadRequest();
             !requestedScene.empty()) {
+            (void)engine::ConsumeScriptLevelStreamRequests();
             std::filesystem::path requested(requestedScene);
             if (!requested.is_absolute())
                 requested = std::filesystem::path(m_sceneDir) / requested;
@@ -1509,14 +1940,49 @@ void RuntimePlayerApp::OnUpdate(float dt) {
             RestartScene();
             return;
         }
+        for (const engine::ScriptLevelStreamRequest& request
+             : engine::ConsumeScriptLevelStreamRequests()) {
+            if (!m_streamingEnabled) {
+                m_runtimeWarnings.push_back(
+                    "Level streaming request ignored: current startup asset is not a world.");
+                continue;
+            }
+            std::size_t match = m_streaming.Levels().size();
+            for (std::size_t i = 0; i < m_streaming.Levels().size(); ++i) {
+                const std::filesystem::path candidate(
+                    m_streaming.Levels()[i].ref.scenePath);
+                if (request.level == m_streaming.Levels()[i].ref.scenePath
+                    || request.level == candidate.filename().string()
+                    || request.level == candidate.stem().string()) {
+                    match = i;
+                    break;
+                }
+            }
+            if (match == m_streaming.Levels().size()) {
+                m_runtimeWarnings.push_back(
+                    "Unknown streamed level: " + request.level);
+                continue;
+            }
+            const bool ok = request.load
+                ? m_streaming.LoadLevel(
+                    match, m_registry, m_assets, m_primitiveMeshes)
+                : m_streaming.UnloadLevel(match, m_registry);
+            if (!ok) {
+                m_runtimeWarnings.push_back(
+                    "Level streaming request failed: " + request.level
+                    + " (" + m_streaming.LastError() + ")");
+            }
+        }
+        // Script callbacks may have changed dilation or started a hit stop.
+        gameDt = gameMode.ScaleDelta(dt);
         m_cameraDirector.ClearEvents();
         m_animationEvents.clear();
         ProcessCameraCommands();
-        engine::UpdateParticleSystems(m_registry, dt);
+        engine::UpdateParticleSystems(m_registry, gameDt);
 
         m_cameraShakeSample = {};
         if (m_cameraShake.Active())
-            m_cameraShakeSample = m_cameraShake.Update(dt);
+            m_cameraShakeSample = m_cameraShake.Update(gameDt);
 
         const engine::Camera camera = BuildCamera();
         m_audio.SetListener(camera.Position(), camera.Front());
@@ -1535,15 +2001,33 @@ void RuntimePlayerApp::OnUpdate(float dt) {
     } else {
         if (inputEnabled) UpdateFreeCamera(dt);
     }
+
+    // Stream levels in/out around the viewer once per frame (at most one (de)activation
+    // per call). Runs after input, before render, so the registry is consistent.
+    if (m_simReady && m_streamingEnabled) {
+        const glm::vec3 viewer = HasPlayer()
+            ? m_playerController->Position() : BuildCamera().Position();
+        m_streaming.Update(viewer, m_registry, m_assets, m_primitiveMeshes);
+        if (!m_streaming.LastError().empty()
+            && m_streaming.LastError() != m_lastStreamingError) {
+            m_lastStreamingError = m_streaming.LastError();
+            m_runtimeWarnings.push_back("Streaming: " + m_lastStreamingError);
+        } else if (m_streaming.LastError().empty()) {
+            m_lastStreamingError.clear();
+        }
+    }
 }
 
 void RuntimePlayerApp::OnFixedUpdate(float h) {
     if (!m_simReady || m_paused) return;
+    const float gameStep =
+        engine::GameMode::Instance().ScaleDelta(h);
+    if (gameStep <= 0.000001f) return;
     // Keep physics alive after a win/loss so a newly activated death ragdoll can
     // fall and settle instead of freezing on its first frame.
     if (!engine::GameMode::Instance().IsPlaying()) {
         engine::UpdateRagdollsBeforePhysics(m_registry, m_physics);
-        m_physics.Step(m_registry, h);
+        m_physics.Step(m_registry, gameStep);
         engine::UpdateRagdollsAfterPhysics(m_registry);
         return;
     }
@@ -1567,7 +2051,8 @@ void RuntimePlayerApp::OnFixedUpdate(float h) {
             const float movementSpeed = movementLocked ? 0.0f : moveMagnitude *
                 (in.sprint ? m_playerController->runSpeed : m_playerController->walkSpeed);
             const float previousSpeed = animated->controller.Parameter("Speed", 0.0f);
-            const float invStep = h > 0.0001f ? 1.0f / h : 0.0f;
+            const float invStep =
+                gameStep > 0.0001f ? 1.0f / gameStep : 0.0f;
             animated->controller.SetParameter("Speed", movementSpeed);
             animated->controller.SetParameter("Direction", moveMagnitude > 0.001f
                 ? glm::degrees(std::atan2(in.moveRight, in.moveForward)) : 0.0f);
@@ -1583,7 +2068,8 @@ void RuntimePlayerApp::OnFixedUpdate(float h) {
             animated->controller.SetBoolParameter("IsFalling", !m_playerController->body.grounded
                 && m_playerController->body.velocity.y < 0.0f);
         }
-        m_playerController->Update(m_registry, in, h, !movementLocked);
+        m_playerController->Update(
+            m_registry, in, gameStep, !movementLocked);
         if (Transform* t = m_registry.TryGet<Transform>(m_playerEntity)) {
             bool overTerrain = false;
             const float surfaceY = TerrainSurfaceY(
@@ -1598,6 +2084,19 @@ void RuntimePlayerApp::OnFixedUpdate(float h) {
                     body.grounded = true;
                 }
             }
+            bool overWater = false;
+            const float waterSurface = WaterSurfaceY(
+                m_playerController->body.position.x,
+                m_playerController->body.position.z, overWater);
+            if (overWater) {
+                engine::CharacterController& body = m_playerController->body;
+                const float feet = body.position.y - body.height * 0.5f;
+                if (feet <= waterSurface) {
+                    body.position.y = waterSurface + body.height * 0.5f;
+                    if (body.velocity.y < 0.0f) body.velocity.y = 0.0f;
+                    body.grounded = true;
+                }
+            }
             t->position = m_playerController->CapsulePosition();
             t->rotation = m_playerController->CapsuleRotation();
         }
@@ -1606,16 +2105,19 @@ void RuntimePlayerApp::OnFixedUpdate(float h) {
     const engine::ScriptInputState input =
         CaptureScriptInput(inputEnabled, false);
     engine::FixedUpdateScripts(
-        m_registry, h, &input, &m_runtimeAudio,
+        m_registry, gameStep, &input, &m_runtimeAudio,
         &m_cameraShake, &m_cameraDirector, &engine::GameMode::Instance());
-    UpdateAI(h);
-    engine::UpdateProjectiles(m_registry, h);
-    engine::ecs::UpdateGameplay(m_registry, h);        // rotators + movers
+    UpdateAI(gameStep);
+    engine::UpdateProjectiles(m_registry, gameStep);
+    engine::ecs::UpdateGameplay(
+        m_registry, gameStep);                         // rotators + movers
     engine::UpdateHealth(m_registry);
     engine::UpdateRagdollsBeforePhysics(m_registry, m_physics);
-    engine::ecs::UpdateRuntimeMotion(m_registry, h);   // linear/angular velocity
-    engine::UpdateAnimations(m_registry, h);
-    m_physics.Step(m_registry, h);
+    engine::ecs::UpdateRuntimeMotion(
+        m_registry, gameStep);                         // linear/angular velocity
+    engine::UpdateAnimations(m_registry, gameStep);
+    ApplyWaterBuoyancy(gameStep);
+    m_physics.Step(m_registry, gameStep);
     engine::UpdateRagdollsAfterPhysics(m_registry);
     ProcessLevelPhysicsEvents();
     m_runtimeAudio.ProcessCollisionEvents(m_registry, m_physics.Events());
@@ -1623,7 +2125,8 @@ void RuntimePlayerApp::OnFixedUpdate(float h) {
 
     // Evaluate game rules (built-in: lose when the player dies). Scripts can also
     // drive it directly via engine::GameMode::Instance().
-    engine::GameMode::Instance().Update(m_registry, m_playerEntity, h);
+    engine::GameMode::Instance().Update(
+        m_registry, m_playerEntity, gameStep);
 }
 
 void RuntimePlayerApp::OnRender() {
@@ -1632,6 +2135,17 @@ void RuntimePlayerApp::OnRender() {
     m_post->Resize(w.Width(), w.Height());
 
     engine::Camera cam = BuildCamera();
+    if (HasPlayer() && !m_zoneCameraPose && !m_zoneCameraBlend.Active()
+        && !m_cameraSequence.Active() && !m_cameraDirector.Playing()) {
+        bool overTerrain = false;
+        const glm::vec3 desired = cam.Position();
+        const float surfaceY = TerrainSurfaceY(desired.x, desired.z, overTerrain);
+        cam.SetPosition(m_terrainCameraConstraint.Resolve(
+            desired, surfaceY, overTerrain, m_dt));
+    } else {
+        m_terrainCameraConstraint.Reset();
+    }
+    UpdateUnderwaterState(cam, m_dt);
 
     m_post->BeginScene();
     m_renderer.Clear();
@@ -1664,6 +2178,12 @@ void RuntimePlayerApp::OnRender() {
         };
     }
     m_pbr->Render(m_registry, cam, aspect, w.Width(), w.Height(), opt);
+    if (m_foliageRenderer) {
+        m_foliageRenderer->Draw(m_registry, cam, aspect,
+            m_sample.keyLightDirection,
+            m_sample.keyLightColor * env.sunIntensity,
+            m_sample.ambient * env.skyLightIntensity);
+    }
 
     // Static-model pass: imported models (LoadedModelAsset) via their own shader.
     if (m_modelShader) {
@@ -1726,6 +2246,8 @@ void RuntimePlayerApp::OnRender() {
 
     m_sky->Draw(cam.ViewMatrix(), cam.ProjectionMatrix(aspect), m_sample, false,
                 SkyClouds(env));
+    CaptureWaterSceneBuffers();
+    DrawWaters(cam, aspect);
     if (m_particleRenderer) {
         m_particleRenderer->ResetStats();
         m_registry.view<engine::ParticleSystemComponent>().each(

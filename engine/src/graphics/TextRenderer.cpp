@@ -1,4 +1,5 @@
 #include "engine/graphics/TextRenderer.h"
+#include "engine/graphics/ShaderParameterBinding.h"
 
 #include "engine/graphics/Shader.h"
 #include "engine/graphics/Texture.h"
@@ -7,23 +8,12 @@
 #include <glad/glad.h>
 #include <glm/gtc/matrix_transform.hpp>
 
-#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 namespace engine {
 namespace {
-
-std::vector<float> ParseValues(const std::string& text) {
-    std::string normalized = text;
-    for (char& c : normalized) if (c == ',' || c == '(' || c == ')') c = ' ';
-    std::istringstream input(normalized);
-    std::vector<float> values;
-    float value = 0.0f;
-    while (input >> value) values.push_back(value);
-    return values;
-}
 
 // Auto-generated 8x8 bitmap font, ASCII 32..126 (LiberationMono-Bold).
 // Row-major; bit 7 (0x80) = leftmost pixel.
@@ -484,21 +474,18 @@ void TextRenderer::CustomRect(
 
     int unit = 1;
     for (const auto& [name, value] : parameters) {
-        const auto values = ParseValues(value);
         const auto typeIt = parameterTypes.find(name);
         const int type = typeIt == parameterTypes.end() ? 0 : typeIt->second;
-        if (values.empty()) continue;
-        if (type == 1 || type == 2) shader.SetInt(name, static_cast<int>(values[0]));
-        else if (type == 3 && values.size() >= 2) shader.SetVec2(name, glm::vec2(values[0], values[1]));
-        else if (type == 4 && values.size() >= 3) shader.SetVec3(name, glm::vec3(values[0], values[1], values[2]));
-        else if ((type == 5 || type == 6) && values.size() >= 4)
-            shader.SetVec4(name, glm::vec4(values[0], values[1], values[2], values[3]));
-        else shader.SetFloat(name, values[0]);
+        const auto texture = textures.find(name);
+        unit = UploadShaderParameter(
+            shader, name, type, value,
+            texture == textures.end() ? nullptr : texture->second, unit);
     }
     for (const auto& [name, texture] : textures) {
-        if (!texture) continue;
-        texture->Bind(unit);
-        shader.SetInt(name, unit++);
+        if (parameters.count(name) || !texture) continue;
+        unit = UploadShaderParameter(
+            shader, name, static_cast<int>(ShaderValueType::Texture2D),
+            {}, texture, unit);
     }
 
     glBindVertexArray(m_vao);

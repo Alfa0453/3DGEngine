@@ -2,6 +2,7 @@
 
 #include "engine/ecs/Registry.h"
 #include "engine/assets/MaterialAssetLoader.h"
+#include "engine/assets/FoliageAsset.h"
 #include "engine/assets/RuntimeShaderManager.h"
 #include "engine/graphics/Model.h"
 #include "engine/graphics/SkinnedModel.h"
@@ -23,6 +24,8 @@ public:
         int modelsAssigned = 0;
         int texturesAssigned = 0;
         int materialsAssigned = 0;
+        int foliageAssetsLoaded = 0;
+        int foliageActorsAssigned = 0;
         std::vector<std::string> errors;
     };
 
@@ -51,6 +54,8 @@ public:
                                          std::string* error = nullptr);
     const Texture* LoadTexture(const std::string& path, std::string* error = nullptr);
     const RuntimeMaterialAsset* LoadMaterial(const std::string& path, std::string* error = nullptr);
+    const FoliageAssetData* LoadFoliage(const std::string& path, std::string* error = nullptr);
+    const FoliageAssetData* ReloadFoliage(const std::string& path, std::string* error = nullptr);
     const Shader* LoadShader(const std::string& path, bool skinned = false,
                              std::string* error = nullptr);
 
@@ -58,6 +63,7 @@ public:
     const SkinnedModel* FindSkinnedModel(const std::string& path) const;
     const Texture* FindTexture(const std::string& path) const;
     const RuntimeMaterialAsset* FindMaterial(const std::string& path) const;
+    const FoliageAssetData* FindFoliage(const std::string& path) const;
 
     ResolveReport ResolveRegistryAssets(ecs::Registry& registry);
     void Clear();
@@ -67,6 +73,7 @@ private:
     std::unordered_map<std::string, std::unique_ptr<SkinnedModel>> m_skinnedModels;
     std::unordered_map<std::string, std::unique_ptr<Texture>> m_textures;
     std::unordered_map<std::string, std::unique_ptr<RuntimeMaterialAsset>> m_materials;
+    std::unordered_map<std::string, std::unique_ptr<FoliageAssetData>> m_foliage;
     std::unordered_map<std::string, ShaderAsset> m_shaderAssets;
     RuntimeShaderManager m_shaderPrograms;
 };

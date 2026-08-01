@@ -131,6 +131,45 @@ void EditorTransformController::ApplyGizmoDrag(EditorScene& scene, const EditorG
     }
 }
 
+void EditorTransformController::ApplySplinePointGizmoDrag(
+    EditorScene& scene, std::size_t pointIndex, const EditorGizmo& gizmo, float pixels) {
+    const EditorScene::Object* object = scene.SelectedObject();
+    const engine::ecs::Transform* transform = scene.SelectedTransform();
+    if (!object || !transform || pointIndex >= object->splinePoints.size()) return;
+
+    if (gizmo.CurrentMode() == EditorGizmo::Mode::Rotate) {
+        float degrees = pixels * 0.35f;
+        if (gizmo.SnappingEnabled()) {
+            m_dragRemainder += degrees;
+            const float steps = std::trunc(m_dragRemainder / gizmo.RotationSnap());
+            degrees = steps * gizmo.RotationSnap();
+            m_dragRemainder -= degrees;
+        }
+        if (degrees == 0.0f) return;
+        glm::vec3 rotation(0.0f);
+        if (pointIndex < object->splinePointRotations.size())
+            rotation = object->splinePointRotations[pointIndex];
+        rotation += gizmo.AxisVector() * degrees;
+        scene.SetSelectedSplinePointRotation(pointIndex, rotation);
+        return;
+    }
+    if (gizmo.CurrentMode() != EditorGizmo::Mode::Translate) return;
+
+    float amount = pixels * 0.01f;
+    if (gizmo.SnappingEnabled()) {
+        m_dragRemainder += amount;
+        const float steps = std::trunc(m_dragRemainder / gizmo.TranslationSnap());
+        amount = steps * gizmo.TranslationSnap();
+        m_dragRemainder -= amount;
+    }
+    if (amount == 0.0f) return;
+    glm::vec3 axis = gizmo.AxisVector();
+    if (gizmo.CurrentSpace() == EditorGizmo::Space::Local) {
+        axis = glm::mat3_cast(transform->rotation) * axis;
+    }
+    scene.SetSelectedSplinePoint(pointIndex, object->splinePoints[pointIndex] + axis * amount);
+}
+
 bool EditorTransformController::IsTransformEditActive(const engine::Window& window) const {
     return window.IsKeyPressed(GLFW_KEY_LEFT)
         || window.IsKeyPressed(GLFW_KEY_RIGHT)

@@ -186,9 +186,17 @@ or style input changes.
 ## Water
 
 `Water` owns a configurable grid patch with procedural waves, deep/shallow
-colors, Fresnel reflection, sun specular, transparency, crest foam, and flow.
-It updates animation time, draws as a transparent forward pass, and exposes
-`HeightAt` for floating or contact effects.
+absorption, screen-space refraction, rough IBL reflections, sun specular,
+shore/contact foam, shallow-water caustics, spline-directed flow, and distance
+culling. It updates animation time, draws as a transparent forward pass, and
+exposes `HeightAt` for buoyancy and surface-contact effects.
+
+The editor and standalone runtime capture opaque scene colour and depth once
+before all water bodies render. When a camera crosses below a water surface,
+the HDR compositor smoothly blends underwater tint, depth fog, distortion,
+caustics, vignette, and the underwater audio snapshot. Authored water bodies
+are included in runtime scene exports and streamed levels; dynamic rigid bodies
+receive buoyancy and drag in both editor Play and standalone builds.
 
 Transparent water should render after opaque geometry and before UI. Depth
 write and blend state must be restored after the pass.
@@ -202,4 +210,3 @@ Editor visualization uses `EditorLineRenderer` for collider outlines, sockets,
 empty-object icons, navigation overlays, camera rails, AI vision, gizmos, and
 selection outlines. These guides are editor/debug presentation and do not
 become runtime mesh geometry.
-

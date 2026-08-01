@@ -16,6 +16,7 @@ add_executable(3DGEditor
     src/app/EditorApp_Camera.cpp
     src/app/EditorApp_Prefab.cpp
     src/app/EditorApp_ScriptDebug.cpp
+    src/app/EditorApp_World.cpp
     src/app/EditorLog.cpp
     src/app/EditorProject.cpp
     src/app/EditorPanels.cpp

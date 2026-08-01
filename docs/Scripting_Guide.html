@@ -197,6 +197,9 @@ void RegisterGameModule() {
     <table>
       <tr><td><code>WasTriggerEntered(e)</code>, <code>WasTriggerExited(e)</code>, <code>IsTriggerTouching(e)</code></td><td>respond to trigger volumes</td></tr>
       <tr><td><code>SetTimer(seconds, cb, repeat)</code>, <code>Delay(seconds, cb)</code>, <code>ClearTimer(id)</code></td><td>schedule callbacks</td></tr>
+      <tr><td><code>BindTimerFunction(name, cb)</code>, <code>SetTimerByFunctionName(name, seconds, repeat)</code></td><td>schedule a registered event/function by name</td></tr>
+      <tr><td><code>ClearTimerByFunctionName(name)</code>, <code>IsTimerActive(id/name)</code></td><td>manage named timers</td></tr>
+      <tr><td><code>SetGlobalTimeDilation(scale)</code>, <code>HitStop(seconds, scale)</code></td><td>slow motion and real-time impact freezes</td></tr>
     </table>
 
     <h3>Animation</h3>

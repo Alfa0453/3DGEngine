@@ -15,7 +15,8 @@ public:
     enum class ModelImportMode {
         Automatic,
         StaticMesh,
-        SkeletalMesh
+        SkeletalMesh,
+        Animation
     };
 
     enum class Type {
@@ -37,6 +38,8 @@ public:
         BehaviorGraph,
         Prefab,
         Script,
+        World,
+        Foliage,
         Other
     };
 
@@ -100,6 +103,8 @@ public:
     const std::vector<Asset>& Assets() const { return m_assets; }
     const std::vector<Folder>& Folders() const { return m_folders; }
     std::vector<std::string> ContentFolderPaths() const;
+    // Project-relative native asset paths across all Content folders.
+    std::vector<std::string> ContentAssetPaths(Type type) const;
     std::size_t TotalFileCount() const { return m_totalFileCount; }
     SelectionType SelectedType() const { return m_selectedType; }
     int SelectedFolderIndex() const { return m_selectedFolderIndex; }

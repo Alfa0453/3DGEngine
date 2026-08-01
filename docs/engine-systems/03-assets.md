@@ -81,7 +81,7 @@ Prefab—not baked into the mesh during ordinary material assignment.
 
 ## Skeletal import
 
-`ImportSkeletalAssetsToContent` writes a coordinated set:
+`ImportSkeletalAssetsToContent` can write a coordinated set:
 
 - `.3dgskmesh` for skinned vertices, skeleton copy, materials, and optionally
   embedded animations;
@@ -92,9 +92,23 @@ The mesh and animation assets depend on the skeleton ID. Animation channels
 also retain bone names so compatible skeletons can merge clips even when bone
 indices differ.
 
+The import dialog exposes separate **Skeletal Mesh** and **Animation** modes.
+Animation mode defaults to clips only: **Import Mesh Asset** and **Import
+Skeleton Asset** are off, and the **Skeleton** dropdown searches every native
+`.3dgskel` under project Content. The resulting `.3dganim` files depend on the
+selected skeleton ID, so each animation FBX does not duplicate the character
+mesh and rig.
+
+Mesh and skeleton outputs can still be enabled independently. **Skeletal Mesh**
+mode always imports the mesh but lets **Import Skeleton Asset** be disabled when
+an existing skeleton is chosen from the same dropdown. Skin weights are then
+remapped by bone name to that skeleton's bone order. Extra animation helper
+channels are ignored at runtime, while a completely unrelated skeleton with no
+matching channels is rejected during import.
+
 `InspectModelSource` performs a lightweight pre-import check and reports mesh,
-bone, and animation counts. The editor uses this to choose static or skeletal
-import settings.
+bone, and animation counts. The editor uses this to choose static, skeletal, or
+animation import settings.
 
 ## Texture import and decoding
 
@@ -189,4 +203,3 @@ Before packaging:
   decode errors, and whether the material references the native `.3dgtex`.
 - **Imported mesh loses animation:** it was imported as static; reimport it
   through skeletal settings.
-

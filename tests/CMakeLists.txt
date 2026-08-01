@@ -27,6 +27,24 @@ endif()
 
 add_test(NAME animation_movement_regression COMMAND animation_movement_tests)
 
+add_executable(terrain_tests terrain_tests.cpp)
+target_link_libraries(terrain_tests PRIVATE engine)
+if(MSVC)
+    target_compile_options(terrain_tests PRIVATE /W4)
+else()
+    target_compile_options(terrain_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME terrain_regression COMMAND terrain_tests)
+
+add_executable(spline_tests spline_tests.cpp)
+target_link_libraries(spline_tests PRIVATE engine)
+if(MSVC)
+    target_compile_options(spline_tests PRIVATE /W4)
+else()
+    target_compile_options(spline_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME spline_regression COMMAND spline_tests)
+
 add_executable(camera_manager_tests
     camera_manager_tests.cpp
     ${CMAKE_SOURCE_DIR}/editor/src/scene/EditorScene.cpp
@@ -139,6 +157,16 @@ else()
 endif()
 add_test(NAME asset_cooker_regression COMMAND asset_cooker_tests)
 
+add_executable(world_streaming_tests
+    world_streaming_tests.cpp)
+target_link_libraries(world_streaming_tests PRIVATE engine)
+if(MSVC)
+    target_compile_options(world_streaming_tests PRIVATE /W4)
+else()
+    target_compile_options(world_streaming_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME world_streaming_regression COMMAND world_streaming_tests)
+
 add_executable(static_mesh_asset_tests
     static_mesh_asset_tests.cpp)
 target_link_libraries(static_mesh_asset_tests PRIVATE engine)
@@ -148,6 +176,15 @@ else()
     target_compile_options(static_mesh_asset_tests PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 add_test(NAME static_mesh_asset_regression COMMAND static_mesh_asset_tests)
+
+add_executable(foliage_asset_tests foliage_asset_tests.cpp)
+target_link_libraries(foliage_asset_tests PRIVATE engine)
+if(MSVC)
+    target_compile_options(foliage_asset_tests PRIVATE /W4)
+else()
+    target_compile_options(foliage_asset_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME foliage_asset_regression COMMAND foliage_asset_tests)
 
 add_executable(skeletal_asset_tests
     skeletal_asset_tests.cpp)

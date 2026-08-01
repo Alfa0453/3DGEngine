@@ -55,6 +55,19 @@ public:
     const std::vector<Animation>& Animations()  const { return m_animations; }
     std::size_t AnimationCount() const { return m_animations.size(); }
     std::size_t BoneCount()      const { return m_skeleton.bones.size(); }
+    std::size_t SubMeshCount()   const { return m_subMeshes.size(); }
+    std::size_t VertexCount() const {
+        std::size_t count = 0;
+        for (const SubMesh& subMesh : m_subMeshes)
+            count += subMesh.mesh.VertexCount();
+        return count;
+    }
+    std::size_t TriangleCount() const {
+        std::size_t count = 0;
+        for (const SubMesh& subMesh : m_subMeshes)
+            count += subMesh.mesh.TriangleCount();
+        return count;
+    }
 
     const glm::vec3& Min() const { return m_min; }
     const glm::vec3& Max() const { return m_max; }

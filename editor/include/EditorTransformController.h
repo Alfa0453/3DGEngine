@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstddef>
+
 namespace engine {
 class Window;
 }
@@ -14,6 +16,8 @@ public:
     void BeginGizmoDrag() { m_dragRemainder = 0.0f; }
     void EndGizmoDrag() { m_dragRemainder = 0.0f; }
     void ApplyGizmoDrag(EditorScene& scene, const EditorGizmo& gizmo, float pixels);
+    void ApplySplinePointGizmoDrag(EditorScene& scene, std::size_t pointIndex,
+                                   const EditorGizmo& gizmo, float pixels);
 
 private:
     bool IsTransformEditActive(const engine::Window& window) const;

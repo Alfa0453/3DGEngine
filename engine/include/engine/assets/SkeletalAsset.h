@@ -62,6 +62,14 @@ struct SkeletalImportOptions {
     bool joinIdenticalVertices = true;
     bool flipUVs = false;
     bool importEmbeddedAnimations = true;
+    // Output controls. Animation-only imports normally disable both of these
+    // and reuse an existing project skeleton through reuseSkeletonPath.
+    bool importSkeletalMesh = true;
+    bool importSkeleton = true;
+    // Content-relative or absolute path to an existing .3dgskel. When set, the
+    // imported animations depend on this skeleton instead of creating another
+    // skeleton asset. A requested mesh is remapped to its bone order by name.
+    std::string reuseSkeletonPath;
 };
 
 struct SkeletalImportResult {
@@ -111,8 +119,9 @@ bool ImportSkeletalSource(const std::string& sourcePath,
                           SkeletalImportResult* result = nullptr,
                           std::string* error = nullptr);
 
-// destinationBase is a path without an extension. The importer writes
-// destinationBase.3dgskmesh, destinationBase.3dgskel, and one .3dganim per clip.
+// destinationBase is a path without an extension. Output is controlled by
+// SkeletalImportOptions: a .3dgskmesh and .3dgskel are optional, while enabled
+// animations are written as one .3dganim per source clip.
 bool ImportSkeletalAssetsToContent(
     const std::string& sourcePath, const std::string& destinationBase,
     const std::string& contentRoot, const SkeletalImportOptions& options,

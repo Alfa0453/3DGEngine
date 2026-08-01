@@ -11,6 +11,7 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 
+#include <array>
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -292,6 +293,59 @@ public:
             float frequency = 2.0f;
             std::vector<float> heights;
             std::vector<unsigned char> paint;
+            std::array<std::string, 5> layerMaterials{};
+        };
+        struct WaterDesc {
+            std::string name;
+            std::string splineName;
+            glm::vec3 center{0.0f};
+            float size = 80.0f;
+            int resolution = 160;
+            glm::vec3 shallow{0.14f, 0.55f, 0.60f};
+            glm::vec3 deep{0.02f, 0.13f, 0.20f};
+            glm::vec3 reflection{0.55f, 0.72f, 0.92f};
+            float transparency = 0.74f;
+            float fresnel = 5.0f;
+            float specular = 0.8f;
+            float shininess = 400.0f;
+            float seaHeight = 0.55f;
+            float seaChoppy = 3.2f;
+            float seaSpeed = 0.8f;
+            float seaFreq = 0.10f;
+            float foam = 0.55f;
+            glm::vec2 flowDir{0.0f};
+            float flowStrength = 0.0f;
+            float riverWidth = 8.0f;
+            bool splineClosed = false;
+            std::vector<glm::vec3> splinePoints;
+            std::vector<glm::vec3> splinePointRotations;
+            float depthFadeDistance = 6.0f;
+            float shoreFoamWidth = 0.8f;
+            float shoreFoamStrength = 0.75f;
+            float refractionStrength = 0.018f;
+            float reflectionRoughness = 0.12f;
+            float environmentReflectionStrength = 0.85f;
+            float absorptionStrength = 0.75f;
+            float causticsStrength = 0.25f;
+            float causticsScale = 1.5f;
+            float maxRenderDistance = 2500.0f;
+            glm::vec3 underwaterTint{0.04f, 0.30f, 0.38f};
+            float underwaterFogDensity = 0.16f;
+            float underwaterDistortion = 0.006f;
+            float underwaterTransitionSpeed = 3.5f;
+        };
+        struct SplineDesc {
+            std::string name;
+            bool closed = false;
+            std::vector<glm::vec3> points;
+            std::vector<glm::vec3> rotations;
+        };
+        struct FoliageDesc {
+            std::string name;
+            std::string assetPath;
+            AssetHandle assetId;
+            ecs::Transform transform;
+            std::vector<ecs::FoliageInstance> instances;
         };
         struct CameraPreset {
             std::string name;
@@ -398,6 +452,9 @@ public:
         std::vector<CameraZoneDesc> cameraZones;
         std::vector<PhysicsJointDesc> physicsJoints;
         std::vector<TerrainDesc> terrains;
+        std::vector<WaterDesc> waters;
+        std::vector<SplineDesc> splines;
+        std::vector<FoliageDesc> foliage;
         std::vector<CameraPreset> cameraPresets;
         std::vector<CameraSequence> cameraSequences;
         std::vector<EntityDesc> entities;
@@ -422,9 +479,14 @@ public:
     };
 
     static bool Load(const std::string& path, Scene* scene, std::string* error);
+    // Instantiate every entity/light in 'scene' into 'registry', reporting the created
+    // entities in 'created' (the per-level group used for streaming unload). worldOffset
+    // is retained for callers that only need translated placement; the world streaming
+    // manager applies the manifest's complete transform after instantiation.
     static bool Instantiate(const Scene& scene, ecs::Registry& registry,
                             const PrimitiveMeshes& meshes, std::vector<ecs::Entity>* created,
-                            std::string* error);
+                            std::string* error,
+                            const glm::vec3& worldOffset = glm::vec3(0.0f));
 };
 
 } // namespace engine

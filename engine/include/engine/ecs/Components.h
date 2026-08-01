@@ -10,6 +10,7 @@
 #include <glm/gtc/quaternion.hpp>
 
 #include <string>
+#include <cstdint>
 #include <unordered_map>
 #include <vector>
 
@@ -25,6 +26,16 @@ namespace ecs{
 // trigger wiring, diagnostics, and small-game object lookup.
 struct RuntimeName {
     std::string value;
+};
+
+// Runtime-editable spline data. Editor-authored spline objects receive this same
+// component in Play mode, so native C++ and Lua scripts use one API in editor and
+// packaged games. Rotations are Euler degrees; local Z is ribbon roll/banking.
+struct SplineComponent {
+    std::vector<glm::vec3> points;
+    std::vector<glm::vec3> rotations;
+    bool closed = false;
+    std::uint64_t revision = 1;
 };
 
 // Position / rotation / scale, with the model matrix derived on demand. The
@@ -96,6 +107,41 @@ struct PbrMaterial {
     const Texture* normalMap     = nullptr;   // tangent-space normals
     const Texture* metalRoughMap = nullptr;   // glTF ORM: G = roughness, B = metallic
     const Texture* heightMap     = nullptr;   // grayscale displacement for parallax
+};
+
+// Batched foliage placement. A single entity owns many lightweight instance
+// transforms instead of creating one ECS entity per tree, bush, or rock.
+struct FoliageTypeRuntime {
+    std::string name;
+    std::string meshPath;
+    AssetHandle meshId;
+    std::string materialPath;
+    AssetHandle materialId;
+    const Model* model = nullptr;
+    PbrMaterial material;
+    float cullStartDistance = 80.0f;
+    float cullEndDistance = 120.0f;
+    float windStrength = 0.0f;
+    bool castShadows = true;
+    bool collisionEnabled = false;
+};
+
+struct FoliageInstance {
+    std::uint32_t id = 0;
+    std::uint32_t typeIndex = 0;
+    glm::vec3 position{0.0f};       // local to the owning foliage actor
+    glm::vec3 rotationDegrees{0.0f};
+    glm::vec3 scale{1.0f};
+    bool enabled = true;
+};
+
+struct FoliageComponent {
+    std::string assetPath;
+    AssetHandle assetId;
+    std::vector<FoliageTypeRuntime> types;
+    std::vector<FoliageInstance> instances;
+    bool visible = true;
+    std::uint64_t revision = 1;
 };
 
 // Drawable entity rendered through the PBR pipeline: geometry (referenced, not

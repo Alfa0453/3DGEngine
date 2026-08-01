@@ -346,6 +346,9 @@ public:
         bool  grassEnabled = false;
         float grassDensity = 2.0f;         // blades per square unit (before the paint mask)
         float grassHeight = 0.6f;
+        bool  grassRandomizeHeight = false;
+        float grassMinHeightScale = 0.75f;
+        float grassMaxHeightScale = 1.25f;
         float grassWindStrength = 0.18f;   // wind is global (shared by all grass)
         float grassWindSpeed = 1.4f;
         glm::vec3 grassBaseColor{0.16f, 0.34f, 0.12f};   // root
@@ -375,6 +378,20 @@ public:
         float waterFresnel = 4.0f;
         float waterSpecular = 1.2f;
         float waterShininess = 220.0f;
+        float waterDepthFadeDistance = 6.0f;
+        float waterShoreFoamWidth = 0.8f;
+        float waterShoreFoamStrength = 0.75f;
+        float waterRefractionStrength = 0.018f;
+        float waterReflectionRoughness = 0.12f;
+        float waterEnvironmentReflectionStrength = 0.85f;
+        float waterAbsorptionStrength = 0.75f;
+        float waterCausticsStrength = 0.25f;
+        float waterCausticsScale = 1.5f;
+        float waterMaxRenderDistance = 2500.0f;
+        glm::vec3 waterUnderwaterTint{0.04f, 0.30f, 0.38f};
+        float waterUnderwaterFogDensity = 0.16f;
+        float waterUnderwaterDistortion = 0.006f;
+        float waterUnderwaterTransitionSpeed = 3.5f;
         // Surface motion (fed to engine::WaterConfig). Presets (lake/ocean/river) tune
         // these so each water type moves differently: calm lakes, choppy oceans, flowing
         // rivers. waterType is a label only (0 custom, 1 lake, 2 ocean, 3 river).
@@ -386,6 +403,7 @@ public:
         float waterFoam      = 0.55f;
         // A water body may follow a spline (by name) for directional flow -- see below.
         std::string waterFlowSpline;
+        float waterRiverWidth = 8.0f;
 
         // Spline (Catmull-Rom path). General purpose: river flow, motion paths, camera
         // rails, spawn lanes, etc. Control points are world-space. splineType is a label
@@ -394,6 +412,17 @@ public:
         bool  splineClosed = false;
         int   splineType = 0;
         std::vector<glm::vec3> splinePoints;
+        // Per-control-point Euler rotation in degrees. Z is the spline-local roll
+        // used by river ribbons; X/Y remain available to other spline consumers.
+        std::vector<glm::vec3> splinePointRotations;
+
+        // Foliage actor. Instances are lightweight transforms local to this object and
+        // are rendered in batches by FoliageRenderer rather than as hierarchy objects.
+        bool isFoliage = false;
+        std::string foliageAssetPath;
+        engine::AssetHandle foliageAssetId;
+        std::vector<engine::ecs::FoliageInstance> foliageInstances;
+        std::uint32_t nextFoliageInstanceId = 1;
     };
 
     struct ObjectSnapshot {
@@ -604,6 +633,7 @@ public:
     Snapshot CreateSnapshot();
     void RestoreFromSnapshot(const Snapshot& snapshot, const engine::Mesh& cube, const engine::Mesh& plane, const engine::Mesh& sphere, const engine::Mesh& capsule, const engine::Mesh& cylinder, const engine::Mesh& cone, const engine::Mesh& pyramid, const engine::Mesh& torus, const engine::Mesh& staircase);
     void AddEmpty(const engine::Mesh& placeholderMesh);
+    void AddFoliage(const engine::Mesh& placeholderMesh);
     void AddCube(const engine::Mesh& cube);
     void AddPlane(const engine::Mesh& plane);
     void AddSphere(const engine::Mesh& sphere);
@@ -738,13 +768,28 @@ public:
     bool SetSelectedTerrain(bool enabled, int res, float size, float maxHeight,
                             int seed, int octaves, float frequency);
     bool SetSelectedTerrainHeights(std::vector<float> heights);   // sculpt result (no undo)
+    bool UpdateSelectedTerrainHeightRegion(const std::vector<float>& heights,
+                                           int resolution,
+                                           int minI, int minJ, int maxI, int maxJ);
     bool SetSelectedTerrainPaint(std::vector<unsigned char> paint);   // paint result (no undo)
+    bool SetSelectedFoliageAsset(const std::string& path,
+                                 engine::AssetHandle id = {});
+    bool AddSelectedFoliageInstance(const glm::vec3& worldPosition,
+                                    const glm::vec3& rotationDegrees,
+                                    const glm::vec3& scale,
+                                    std::uint32_t typeIndex = 0);
+    std::size_t EraseSelectedFoliageInstances(const glm::vec3& worldPosition,
+                                               float radius);
+    bool ClearSelectedFoliageInstances();
     // Assign (or clear, with an empty path) the material painted for layer 1..5.
     bool SetSelectedTerrainLayerMaterial(int layer, const std::string& materialPath);
     // Grass (instanced blades on the painted grass layer).
     bool SetSelectedTerrainGrass(bool enabled, float density, float height,
                                  float windStrength, float windSpeed,
-                                 const glm::vec3& baseColor, const glm::vec3& tipColor);
+                                 const glm::vec3& baseColor, const glm::vec3& tipColor,
+                                 bool randomizeHeight = false,
+                                 float minHeightScale = 0.75f,
+                                 float maxHeightScale = 1.25f);
     // Per-region grass style: freeze the active settings into a palette slot (deduped) and
     // read/write the per-vertex slot map so painting new grass never changes old grass.
     int  EnsureActiveGrassStyleSlot();                     // returns 1-based slot
@@ -757,13 +802,27 @@ public:
     // Surface motion + foam (lake/ocean/river presets differ here). waterType is a label.
     bool SetSelectedWaterWaves(float seaHeight, float seaChoppy, float seaSpeed,
                                float seaFreq, float foam, int waterType);
+    bool SetSelectedWaterDepth(float fadeDistance, float shoreFoamWidth,
+                               float shoreFoamStrength);
+    bool SetSelectedWaterOptics(float refractionStrength, float reflectionRoughness,
+                                float environmentReflectionStrength,
+                                float absorptionStrength);
+    bool SetSelectedWaterEffects(float causticsStrength, float causticsScale,
+                                 float maxRenderDistance, const glm::vec3& underwaterTint,
+                                 float underwaterFogDensity, float underwaterDistortion,
+                                 float underwaterTransitionSpeed);
     bool SetSelectedWaterFlowSpline(const std::string& splineName);   // river follows a spline
+    bool SetSelectedWaterRiverWidth(float width);
 
     // Spline authoring (Catmull-Rom path).
     bool SetSelectedSpline(bool enabled, bool closed, int type);
     bool AddSelectedSplinePoint(const glm::vec3& point);
+    bool InsertSelectedSplinePoint(std::size_t index, const glm::vec3& point);
     bool SetSelectedSplinePoint(std::size_t index, const glm::vec3& point);
+    bool SetSelectedSplinePointRotation(std::size_t index, const glm::vec3& degrees);
     bool RemoveSelectedSplinePoint(std::size_t index);
+    bool SetSelectedSplinePoints(const std::vector<glm::vec3>& points);
+    bool SetSelectedSplinePointRotations(const std::vector<glm::vec3>& rotations);
     bool AddSelectedPatrolPoint(const glm::vec3& point);
     bool ClearSelectedPatrolPoints();
     bool SetSelectedScriptFields(const std::vector<ScriptField>& fields);
@@ -793,6 +852,8 @@ private:
     Snapshot CaptureSnapshot();
     void RestoreSnapshot(const Snapshot& snapshot, const engine::Mesh& cube, const engine::Mesh& plane, const engine::Mesh& sphere, const engine::Mesh& capsule, const engine::Mesh& cylinder, const engine::Mesh& cone, const engine::Mesh& pyramid, const engine::Mesh& torus, const engine::Mesh& staircase);
     void PushUndoSnapshot();
+    void SyncSplineComponent(Object& object);
+    void SyncFoliageComponent(Object& object);
     void ClearHistory();
     void Clear();
 

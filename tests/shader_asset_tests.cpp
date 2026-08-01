@@ -4,8 +4,14 @@
 #include "engine/assets/ShaderAsset.h"
 #include "engine/assets/ShaderGraphCompiler.h"
 #include "engine/assets/TextureAsset.h"
+#include "engine/graphics/Shader.h"
+#include "engine/graphics/ShaderParameterBinding.h"
 #include "engine/scene/RuntimeSceneLoader.h"
 
+#include <glad/glad.h>
+#include <GLFW/glfw3.h>
+
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -61,8 +67,35 @@ int main()
     asset.nodes[0].comment = "Feeds the output";
     asset.nodes[0].groupId = 77;
     asset.nodes[0].value = "0.45";
+    asset.parameters[0].group = "Surface";
+    asset.parameters[0].tooltip = "Controls highlight width.";
+    asset.parameters[0].useRange = true;
+    asset.parameters[0].minValue = 0.05f;
+    asset.parameters[0].maxValue = 0.95f;
+    asset.parameters[0].step = 0.05f;
     Expect(!engine::ShaderAssetHasErrors(engine::ValidateShaderAsset(asset)),
            "valid graph must pass validation");
+    Expect(engine::ShaderParameterUniformName("Coat Roughness")
+               == "u_Coat_Roughness"
+           && engine::ShaderParameterUniformName("2D Tint") == "u_p_2D_Tint",
+           "shader parameter display names must map to stable valid GLSL uniforms");
+
+    const auto scalarParameter =
+        engine::ParseShaderParameterValue("0.75");
+    const auto vectorParameter =
+        engine::ParseShaderParameterValue("vec4(1, 0.5, 0.25, 1)");
+    const auto enabledParameter =
+        engine::ParseShaderParameterValue("TRUE");
+    const auto disabledParameter =
+        engine::ParseShaderParameterValue("false");
+    Expect(scalarParameter.count == 1
+           && scalarParameter.numbers[0] == 0.75f
+           && vectorParameter.count == 4
+           && vectorParameter.numbers[1] == 0.5f
+           && vectorParameter.numbers[2] == 0.25f,
+           "shared shader binding must parse scalar and vector defaults consistently");
+    Expect(enabledParameter.boolean && !disabledParameter.boolean,
+           "shared shader binding must parse case-insensitive boolean defaults");
 
     const std::uint64_t originalHash = engine::HashShaderAsset(asset);
     const std::filesystem::path project =
@@ -86,6 +119,13 @@ int main()
            && loaded.nodes[0].groupId == 77
            && loaded.nodes[0].value == "0.45",
            "graph comments, groups, and values must survive serialization");
+    Expect(loaded.parameters[0].group == "Surface"
+           && loaded.parameters[0].tooltip == "Controls highlight width."
+           && loaded.parameters[0].useRange
+           && loaded.parameters[0].minValue == 0.05f
+           && loaded.parameters[0].maxValue == 0.95f
+           && loaded.parameters[0].step == 0.05f,
+           "material parameter metadata must survive shader serialization");
     const engine::AssetHandle shaderId = asset.assetId;
     asset.name = "Test Surface Updated";
     Expect(engine::SaveShaderAsset(path.string(), asset, &error)
@@ -194,6 +234,21 @@ int main()
     Expect(ContainsIssue(engine::ValidateShaderAsset(duplicateParameter), "unique"),
            "duplicate parameter names must be reported");
 
+    engine::ShaderAsset uniformCollision = ValidAsset();
+    uniformCollision.parameters[0].name = "Coat Roughness";
+    uniformCollision.parameters.push_back(
+        {41, "Coat-Roughness", engine::ShaderValueType::Float, "0.8"});
+    Expect(ContainsIssue(engine::ValidateShaderAsset(uniformCollision),
+                         "shader uniforms"),
+           "different display names must not collide after GLSL sanitization");
+
+    engine::ShaderAsset invalidRange = ValidAsset();
+    invalidRange.parameters[0].useRange = true;
+    invalidRange.parameters[0].minValue = 2.0f;
+    invalidRange.parameters[0].maxValue = 1.0f;
+    Expect(ContainsIssue(engine::ValidateShaderAsset(invalidRange), "minimum"),
+           "invalid material parameter ranges must be reported before saving");
+
     engine::ShaderAsset wrongDomainOutput = ValidAsset();
     wrongDomainOutput.domain = engine::ShaderDomain::Particle;
     Expect(ContainsIssue(engine::ValidateShaderAsset(wrongDomainOutput),
@@ -247,6 +302,182 @@ int main()
            && objectColorSource.fragment.find("uObjectColor")
                != std::string::npos,
            "surface Object Color must use the per-object renderer uniform");
+
+    engine::ShaderAsset completeSurface;
+    completeSurface.id = 450;
+    completeSurface.name = "Complete Surface";
+    completeSurface.domain = engine::ShaderDomain::Surface;
+    completeSurface.blendMode = 1;
+    completeSurface.nodes = {
+        {1, "ConstantColor", "Base", 0, 0, {}, 0, false,
+         "vec4(0.8,0.3,0.1,1.0)"},
+        {2, "ConstantColor", "Emissive", 0, 0, {}, 0, false,
+         "vec4(0.1,0.2,0.3,1.0)"},
+        {3, "ConstantFloat", "Roughness", 0, 0, {}, 0, false, "0.35"},
+        {4, "ConstantFloat", "Metallic", 0, 0, {}, 0, false, "0.7"},
+        {5, "Normal", "Normal", 0, 0},
+        {6, "ConstantFloat", "Opacity", 0, 0, {}, 0, false, "0.8"},
+        {7, "ConstantFloat", "Cutoff", 0, 0, {}, 0, false, "0.4"},
+        {8, "ConstantFloat", "Clearcoat", 0, 0, {}, 0, false, "0.6"},
+        {9, "ConstantFloat", "Transmission", 0, 0, {}, 0, false, "0.2"},
+        {10, "ConstantFloat", "Subsurface", 0, 0, {}, 0, false, "0.3"},
+        {11, "ConstantFloat", "Sheen", 0, 0, {}, 0, false, "0.25"},
+        {12, "ConstantFloat", "Anisotropy", 0, 0, {}, 0, false, "0.45"},
+        {13, "ConstantFloat", "Displacement", 0, 0, {}, 0, false, "0.125"},
+        {20, "SurfaceOutput", "Surface", 400, 0}
+    };
+    completeSurface.pins = {
+        {101,1,"Result",engine::ShaderValueType::Color,false,false},
+        {102,2,"Result",engine::ShaderValueType::Color,false,false},
+        {103,3,"Result",engine::ShaderValueType::Float,false,false},
+        {104,4,"Result",engine::ShaderValueType::Float,false,false},
+        {105,5,"Result",engine::ShaderValueType::Vec3,false,false},
+        {106,6,"Result",engine::ShaderValueType::Float,false,false},
+        {107,7,"Result",engine::ShaderValueType::Float,false,false},
+        {108,8,"Result",engine::ShaderValueType::Float,false,false},
+        {109,9,"Result",engine::ShaderValueType::Float,false,false},
+        {110,10,"Result",engine::ShaderValueType::Float,false,false},
+        {111,11,"Result",engine::ShaderValueType::Float,false,false},
+        {112,12,"Result",engine::ShaderValueType::Float,false,false},
+        {113,13,"Result",engine::ShaderValueType::Float,false,false},
+        {201,20,"Base Color",engine::ShaderValueType::Color,true,false},
+        {202,20,"Emissive",engine::ShaderValueType::Color,true,false},
+        {203,20,"Roughness",engine::ShaderValueType::Float,true,false},
+        {204,20,"Metallic",engine::ShaderValueType::Float,true,false},
+        {205,20,"Normal",engine::ShaderValueType::Vec3,true,false},
+        {206,20,"Opacity",engine::ShaderValueType::Float,true,false},
+        {207,20,"Alpha Cutoff",engine::ShaderValueType::Float,true,false},
+        {208,20,"Clearcoat",engine::ShaderValueType::Float,true,false},
+        {209,20,"Transmission",engine::ShaderValueType::Float,true,false},
+        {210,20,"Subsurface",engine::ShaderValueType::Float,true,false},
+        {211,20,"Sheen",engine::ShaderValueType::Float,true,false},
+        {212,20,"Anisotropy",engine::ShaderValueType::Float,true,false},
+        {213,20,"Displacement",engine::ShaderValueType::Float,true,false}
+    };
+    for (std::uint64_t i = 0; i < 13; ++i)
+        completeSurface.links.push_back({300 + i, 101 + i, 201 + i});
+    const auto completeStatic = engine::GenerateShaderSource(completeSurface);
+    const auto completeSkinned = engine::GenerateShaderSource(completeSurface, true);
+    Expect(completeStatic.success && completeSkinned.success
+           && completeStatic.fragment.find("materialRoughness") != std::string::npos
+           && completeStatic.fragment.find("materialMetallic") != std::string::npos
+           && completeStatic.fragment.find("materialEmissive") != std::string::npos
+           && completeStatic.fragment.find("materialClearcoat") != std::string::npos
+           && completeStatic.fragment.find("materialTransmission") != std::string::npos
+           && completeStatic.fragment.find("materialSubsurface") != std::string::npos
+           && completeStatic.fragment.find("materialSheen") != std::string::npos
+           && completeStatic.fragment.find("materialAnisotropy") != std::string::npos
+           && completeStatic.fragment.find("discard") != std::string::npos
+           && completeStatic.vertex.find("0.125") != std::string::npos
+           && completeSkinned.vertex.find("uBones[128]") != std::string::npos
+           && completeSkinned.vertex.find("0.125") != std::string::npos,
+           "every Surface output must participate in static and skinned shader generation");
+
+    // When a graphics context is available, compile both generated variants on
+    // the real driver. Headless test machines may skip this without weakening
+    // the deterministic source/contract assertions above.
+    if (glfwInit() == GLFW_TRUE) {
+        glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+        glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+        GLFWwindow* smokeWindow = glfwCreateWindow(32, 32, "shader-smoke", nullptr, nullptr);
+        if (smokeWindow) {
+            glfwMakeContextCurrent(smokeWindow);
+            if (gladLoadGLLoader(reinterpret_cast<GLADloadproc>(glfwGetProcAddress))) {
+                engine::ShaderCompileReport staticReport;
+                engine::ShaderCompileReport skinnedReport;
+                auto staticProgram = engine::Shader::TryCompile(
+                    completeStatic.vertex, completeStatic.fragment, staticReport);
+                auto skinnedProgram = engine::Shader::TryCompile(
+                    completeSkinned.vertex, completeSkinned.fragment, skinnedReport);
+                Expect(staticProgram && staticReport.success,
+                       "complete static Surface GLSL must compile on the active driver");
+                Expect(skinnedProgram && skinnedReport.success,
+                       "complete skinned Surface GLSL must compile on the active driver");
+            }
+            glfwDestroyWindow(smokeWindow);
+        }
+        glfwTerminate();
+    }
+
+    engine::ShaderAsset convertible = completeSurface;
+    convertible.nodes.push_back(
+        {900, "ParticleAge", "Particle-only input", 0.0f, 0.0f});
+    convertible.pins.push_back(
+        {901, 900, "Age", engine::ShaderValueType::Float, false, false});
+    const engine::AssetHandle conversionAssetId = convertible.assetId;
+    engine::ShaderDomainConversionReport toPost;
+    Expect(engine::ConvertShaderAssetDomain(
+               convertible, engine::ShaderDomain::PostProcess, &toPost)
+           && toPost.success && toPost.preservedOutputLinks == 1
+           && toPost.removedNodes == 1 && toPost.removedLinks == 12
+           && convertible.domain == engine::ShaderDomain::PostProcess
+           && convertible.assetId == conversionAssetId
+           && std::count_if(
+                  convertible.nodes.begin(), convertible.nodes.end(),
+                  [](const engine::ShaderGraphNode& node) {
+                      return node.type == "PostProcessOutput";
+                  }) == 1
+           && std::count_if(
+                  convertible.pins.begin(), convertible.pins.end(),
+                  [&](const engine::ShaderGraphPin& pin) {
+                      const auto outputNode = std::find_if(
+                          convertible.nodes.begin(), convertible.nodes.end(),
+                          [](const engine::ShaderGraphNode& node) {
+                              return node.type == "PostProcessOutput";
+                          });
+                      return outputNode != convertible.nodes.end()
+                          && pin.nodeId == outputNode->id && pin.name == "Color";
+                  }) == 1
+           && !engine::ShaderAssetHasErrors(
+                  engine::ValidateShaderAsset(convertible)),
+           "Surface-to-Post conversion must preserve Base Color, remove incompatible nodes, and create the canonical output");
+
+    convertible.nodes.push_back(
+        {902, "SceneDepth", "Post-only input", 0.0f, 0.0f});
+    convertible.pins.push_back(
+        {903, 902, "Depth", engine::ShaderValueType::Float, false, false});
+    engine::ShaderDomainConversionReport backToSurface;
+    Expect(engine::ConvertShaderAssetDomain(
+               convertible, engine::ShaderDomain::Surface, &backToSurface)
+           && backToSurface.success
+           && backToSurface.preservedOutputLinks == 1
+           && backToSurface.removedNodes == 1
+           && std::count_if(
+                  convertible.pins.begin(), convertible.pins.end(),
+                  [&](const engine::ShaderGraphPin& pin) {
+                      const auto outputNode = std::find_if(
+                          convertible.nodes.begin(), convertible.nodes.end(),
+                          [](const engine::ShaderGraphNode& node) {
+                              return node.type == "SurfaceOutput";
+                          });
+                      return outputNode != convertible.nodes.end()
+                          && pin.nodeId == outputNode->id;
+                  }) == 13
+           && engine::GenerateShaderSource(convertible).success,
+           "Post-to-Surface conversion must restore all Surface sockets and preserve Color as Base Color");
+
+    engine::ShaderAsset everyDomain = completeSurface;
+    const engine::ShaderDomain domainSequence[] = {
+        engine::ShaderDomain::PostProcess,
+        engine::ShaderDomain::Particle,
+        engine::ShaderDomain::Unlit,
+        engine::ShaderDomain::Surface
+    };
+    bool everyDomainValid = true;
+    for (const engine::ShaderDomain targetDomain : domainSequence) {
+        engine::ShaderDomainConversionReport conversion;
+        everyDomainValid = everyDomainValid
+            && engine::ConvertShaderAssetDomain(
+                everyDomain, targetDomain, &conversion)
+            && conversion.success
+            && !engine::ShaderAssetHasErrors(
+                engine::ValidateShaderAsset(everyDomain))
+            && engine::GenerateShaderSource(everyDomain).success;
+    }
+    Expect(everyDomainValid,
+           "all four shader domains must remain valid and compilable through repeated conversion");
 
     engine::ShaderAsset folded;
     folded.id = 500;

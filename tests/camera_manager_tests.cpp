@@ -256,6 +256,20 @@ int main() {
     gameMode.cameraMode = 2;
     scene.SetGameModeSettings(gameMode);
 
+    scene.AddPlane(emptyPlaceholder);
+    Check(scene.SetSelectedWater(
+              48.0f, 96, 1.5f,
+              {0.15f, 0.50f, 0.48f}, {0.02f, 0.10f, 0.18f},
+              {0.55f, 0.72f, 0.92f}, 0.72f, 5.0f, 0.8f, 320.0f),
+          "create depth-aware water test body");
+    Check(scene.SetSelectedWaterDepth(7.5f, 1.25f, 0.9f),
+          "set depth-aware water settings");
+    Check(scene.SetSelectedWaterOptics(0.035f, 0.28f, 0.65f, 1.1f),
+          "set water reflection and refraction settings");
+    Check(scene.SetSelectedWaterEffects(
+              0.42f, 2.25f, 1800.0f, {0.02f, 0.24f, 0.31f}, 0.21f, 0.009f, 4.5f),
+          "set water caustics and underwater settings");
+
     const std::filesystem::path path =
         std::filesystem::temp_directory_path() / "3dg_camera_manager_test.scene";
     std::string error;
@@ -289,6 +303,32 @@ int main() {
               != std::string::npos,
           "game mode startup and camera override settings are serialized");
     input.close();
+
+    EditorScene loadedScene;
+    Check(loadedScene.Load(path.string(),
+              emptyPlaceholder, emptyPlaceholder, emptyPlaceholder,
+              emptyPlaceholder, emptyPlaceholder, emptyPlaceholder,
+              emptyPlaceholder, emptyPlaceholder, emptyPlaceholder, &error),
+          "load scene with depth-aware water settings");
+    const auto loadedWater = std::find_if(
+        loadedScene.Objects().begin(), loadedScene.Objects().end(),
+        [](const EditorScene::Object& object) { return object.isWater; });
+    Check(loadedWater != loadedScene.Objects().end()
+              && Near(loadedWater->waterDepthFadeDistance, 7.5f)
+              && Near(loadedWater->waterShoreFoamWidth, 1.25f)
+              && Near(loadedWater->waterShoreFoamStrength, 0.9f)
+              && Near(loadedWater->waterRefractionStrength, 0.035f)
+              && Near(loadedWater->waterReflectionRoughness, 0.28f)
+              && Near(loadedWater->waterEnvironmentReflectionStrength, 0.65f)
+              && Near(loadedWater->waterAbsorptionStrength, 1.1f)
+              && Near(loadedWater->waterCausticsStrength, 0.42f)
+              && Near(loadedWater->waterCausticsScale, 2.25f)
+              && Near(loadedWater->waterMaxRenderDistance, 1800.0f)
+              && Near(loadedWater->waterUnderwaterTint.g, 0.24f)
+              && Near(loadedWater->waterUnderwaterFogDensity, 0.21f)
+              && Near(loadedWater->waterUnderwaterDistortion, 0.009f)
+              && Near(loadedWater->waterUnderwaterTransitionSpeed, 4.5f),
+          "water depth and optics settings survive scene round trip");
     std::filesystem::remove(path);
 
     const std::filesystem::path runtimePath =
@@ -303,6 +343,12 @@ int main() {
           "runtime export preserves saved cameras");
     Check(runtimeScene.cameraSequences.size() == 1,
           "runtime export preserves camera sequences");
+    Check(runtimeScene.waters.size() == 1
+              && Near(runtimeScene.waters[0].size, 48.0f)
+              && Near(runtimeScene.waters[0].refractionStrength, 0.035f)
+              && Near(runtimeScene.waters[0].causticsStrength, 0.42f)
+              && Near(runtimeScene.waters[0].underwaterFogDensity, 0.21f),
+          "runtime export preserves complete water settings");
     Check(runtimeScene.cameraSequences[0].shots.size() == 2
           && runtimeScene.cameraSequences[0].shots[0].cameraName == "Gameplay Camera",
           "runtime export preserves sequence shot references");

@@ -11,12 +11,12 @@
 #include "engine/graphics/CascadedShadow.h"
 #include "engine/graphics/Texture.h"
 #include "engine/graphics/Frustum.h"
+#include "engine/graphics/ShaderParameterBinding.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
-#include <sstream>
 
 #include <glad/glad.h>
 #include <glm/gtc/matrix_transform.hpp>
@@ -34,43 +34,39 @@ using engine::ecs::PbrMaterial;
 namespace engine {
 namespace {
 
-std::vector<float> ParameterNumbers(std::string value) {
-    std::replace(value.begin(), value.end(), ',', ' ');
-    std::replace(value.begin(), value.end(), '(', ' ');
-    std::replace(value.begin(), value.end(), ')', ' ');
-    std::istringstream input(value);
-    std::vector<float> values;
-    float number = 0.0f;
-    while (input >> number) values.push_back(number);
-    return values;
-}
-
 void UploadCustomParameters(Shader& shader, const MeshPBR& mesh) {
     int textureUnit = 18;
     for (const auto& entry : mesh.shaderParameters) {
-        const std::string uniform = "u_" + entry.first;
         const auto type = mesh.shaderParameterTypes.find(entry.first);
         const int valueType = type == mesh.shaderParameterTypes.end() ? 0 : type->second;
-        if (valueType == 7) {
-            const auto texture = mesh.shaderTextures.find(entry.first);
-            if (texture != mesh.shaderTextures.end() && texture->second) {
-                texture->second->Bind(static_cast<unsigned int>(textureUnit));
-                shader.SetInt(uniform, textureUnit++);
-            }
-            continue;
-        }
-        const std::vector<float> values = ParameterNumbers(entry.second);
-        if (valueType == 1 || valueType == 2)
-            shader.SetInt(uniform, entry.second == "true" ? 1
-                : values.empty() ? 0 : static_cast<int>(values[0]));
-        else if (valueType == 3 && values.size() >= 2)
-            shader.SetVec2(uniform, glm::vec2(values[0], values[1]));
-        else if (valueType == 4 && values.size() >= 3)
-            shader.SetVec3(uniform, glm::vec3(values[0], values[1], values[2]));
-        else if ((valueType == 5 || valueType == 6) && values.size() >= 4)
-            shader.SetVec4(uniform, glm::vec4(values[0], values[1], values[2], values[3]));
-        else shader.SetFloat(uniform, values.empty() ? 0.0f : values[0]);
+        const auto texture = mesh.shaderTextures.find(entry.first);
+        textureUnit = UploadShaderParameter(
+            shader, entry.first, valueType, entry.second,
+            texture == mesh.shaderTextures.end() ? nullptr : texture->second,
+            textureUnit);
     }
+}
+
+int SelectMeshLod(const Mesh& mesh, const Transform& transform,
+                  const Camera& camera) {
+    if (mesh.MaxLod() <= 0) return 0;
+    // Cap exceptionally dense terrain even when the camera is standing on it.
+    // Distance then adds normal geometric LOD without any per-frame uploads.
+    int level = mesh.LodForTriangleBudget(200000u);
+    const glm::mat4 model = transform.Model();
+    const glm::vec3 center = glm::vec3(
+        model * glm::vec4(mesh.BoundsCenter(), 1.0f));
+    const glm::vec3 scale = glm::abs(transform.scale);
+    const float radius = std::max(mesh.BoundsRadius()
+        * std::max({scale.x, scale.y, scale.z}), 0.01f);
+    const float surfaceDistance = std::max(
+        glm::length(camera.Position() - center) - radius, 0.0f);
+    const float ratio = surfaceDistance / radius;
+    if (ratio > 1.0f) level = std::max(level, 1);
+    if (ratio > 3.0f) level = std::max(level, 2);
+    if (ratio > 6.0f) level = std::max(level, 3);
+    if (ratio > 12.0f) level = std::max(level, 4);
+    return std::min(level, mesh.MaxLod());
 }
 
 const char* kPbrVert = R"GLSL(
@@ -705,9 +701,16 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
     std::vector<std::pair<Transform*, MeshPBR*>> custom;
     reg.view<Transform, MeshPBR>().each([&](Entity, Transform& t, MeshPBR& m) {
         if (!m.mesh) return;
-        if (opt.frustumCull &&
-            !SphereInFrustum(frustum, t.position, 0.5f * glm::length(t.scale)))
-            return;                                   // off-screen: skip it
+        if (opt.frustumCull) {
+            const glm::mat4 model = t.Model();
+            const glm::vec3 center = glm::vec3(
+                model * glm::vec4(m.mesh->BoundsCenter(), 1.0f));
+            const glm::vec3 scale = glm::abs(t.scale);
+            const float radius = m.mesh->BoundsRadius()
+                * std::max({scale.x, scale.y, scale.z});
+            if (!SphereInFrustum(frustum, center, radius))
+                return;                               // actual mesh is off-screen
+        }
         if (m.customShader) {
             custom.emplace_back(&t, &m);
             return;
@@ -782,7 +785,7 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
         } else {
             glDisable(GL_BLEND); glDepthMask(GL_TRUE);
         }
-        m.mesh->Draw();
+        m.mesh->DrawLod(SelectMeshLod(*m.mesh, t, camera));
     }
     glDisable(GL_BLEND); glDepthMask(GL_TRUE);
 
@@ -852,6 +855,9 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
         shader.Bind();
         shader.SetMat4("uViewProjection", camera.ProjectionMatrix(aspect) * camera.ViewMatrix());
         shader.SetMat4("uModel", transform.Model());
+        shader.SetVec3("uCameraPosition", camera.Position());
+        shader.SetFloat("uTime", cloudSeconds);
+        shader.SetFloat("uDeltaTime", 1.0f / 60.0f);
         shader.SetVec3("uLightDirection", sunDir);
         shader.SetFloat("uLightIntensity", std::max({sunColor.x, sunColor.y, sunColor.z}));
         shader.SetVec4("uObjectColor",
@@ -863,7 +869,7 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
         } else {
             glDisable(GL_BLEND); glDepthMask(GL_TRUE);
         }
-        mesh.mesh->Draw();
+        mesh.mesh->DrawLod(SelectMeshLod(*mesh.mesh, transform, camera));
     }
     glDisable(GL_BLEND);
     glDepthMask(GL_TRUE);

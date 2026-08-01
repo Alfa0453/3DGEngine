@@ -6,6 +6,7 @@
 #include <engine/graphics/Primitives.h>
 #include <engine/graphics/Camera.h>
 #include <engine/assets/TextureAsset.h>
+#include <engine/assets/RuntimeAssetManager.h>
 
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -19,6 +20,8 @@
 #include <utility>
 
 namespace material_maker {
+
+MaterialPreview::~MaterialPreview() = default;
 
 using engine::ecs::Entity;
 using engine::ecs::Transform;
@@ -203,6 +206,7 @@ void MaterialPreview::EnsureInitialized() {
 
     m_fbo.emplace(256, 256, GL_RGBA8, /*depth=*/true);
     m_pbr.emplace(1024);
+    m_customAssets = std::make_unique<engine::RuntimeAssetManager>();
     m_ibl.emplace(128);
     m_sky.emplace();
     m_debug.emplace(kDebugVert, kDebugFrag);
@@ -431,6 +435,27 @@ unsigned int MaterialPreview::RenderUnchecked(const PbrMaterial& material, const
     mp.material.metalRoughMap = ResolveMap(settings.metalRoughMapPath);
     mp.material.heightMap     = ResolveMap(settings.heightMapPath);
 
+    // The Material Maker uses the same graph compiler and custom-material path
+    // as scene rendering, so the preview is representative of the saved asset.
+    mp.customShader = nullptr;
+    mp.shaderParameters = settings.shaderParameters;
+    mp.shaderParameterTypes = settings.shaderParameterTypes;
+    mp.shaderTextures.clear();
+    if (!settings.shaderPath.empty() && settings.channel == Channel::Full) {
+        std::string shaderError;
+        mp.customShader = m_customAssets->LoadShader(
+            settings.shaderPath, false, &shaderError);
+        for (const auto& parameter : settings.shaderParameters) {
+            const auto type = settings.shaderParameterTypes.find(parameter.first);
+            if (type == settings.shaderParameterTypes.end()
+                || type->second != static_cast<int>(engine::ShaderValueType::Texture2D)
+                || parameter.second.empty()) continue;
+            if (const engine::Texture* texture = m_customAssets->LoadTexture(
+                    parameter.second, &shaderError))
+                mp.shaderTextures[parameter.first] = texture;
+        }
+    }
+
     // Drive the key light from the (rotated) environment sample.
     Light& sun = m_reg.Get<Light>(m_sun);
     sun.direction = m_sample.keyLightDirection;
@@ -493,6 +518,7 @@ unsigned int MaterialPreview::RenderUnchecked(const PbrMaterial& material, const
 
 void MaterialPreview::Retry() {
     m_textures.clear();
+    m_customAssets.reset();
     m_debug.reset(); m_equirectSky.reset(); m_sky.reset(); m_ibl.reset(); m_pbr.reset(); m_fbo.reset();
     m_groundMesh.reset(); m_plane.reset(); m_cube.reset(); m_sphere.reset();
     m_reg = engine::ecs::Registry{};

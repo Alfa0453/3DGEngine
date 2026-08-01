@@ -27,6 +27,9 @@ class AnimationGraphEditorPanel {
 public:
     ~AnimationGraphEditorPanel();
     void QueueOpen(const std::string& path);
+    void SetPreferredPreviewMesh(const std::string& path) {
+        m_preferredPreviewMesh = path;
+    }
     void Draw(const std::string& assetRoot, bool* open, bool* assetSaved,
               std::string* message, float deltaTime);
 
@@ -47,6 +50,7 @@ private:
     std::string m_scannedRoot;
     std::vector<AssetChoice> m_modelChoices;
     std::vector<AssetChoice> m_clipChoices;
+    std::string m_preferredPreviewMesh;
 
     // Live preview.
     engine::RuntimeAssetManager m_assets;

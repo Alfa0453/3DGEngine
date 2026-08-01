@@ -1,6 +1,7 @@
 #include "engine/assets/AssetCooker.h"
 
 #include "engine/assets/AssetRegistry.h"
+#include "engine/scene/WorldManifest.h"
 
 #include <algorithm>
 #include <filesystem>
@@ -229,6 +230,41 @@ bool AssetCooker::CookRuntimeScene(const std::string& contentRoot,
         return false;
     }
 
+    // Lua source is executable game content rather than a C++ build input. Keep
+    // its Content/Scripts-relative path intact so the serialized Script
+    // component resolves identically in Editor Play and in the packaged player.
+    // Script files are tiny, and copying the folder also supports scripts loaded
+    // dynamically by another Lua script rather than referenced by one scene.
+    const std::filesystem::path authoredScripts = content / "Scripts";
+    if (std::filesystem::is_directory(authoredScripts, ec)) {
+        ec.clear();
+        for (std::filesystem::recursive_directory_iterator it(authoredScripts, ec), end;
+             !ec && it != end; it.increment(ec)) {
+            if (!it->is_regular_file(ec) || it->path().extension() != ".lua") continue;
+            const std::filesystem::path relative =
+                std::filesystem::relative(it->path(), content, ec);
+            if (ec) break;
+            const std::filesystem::path destination = cookedContent / relative;
+            std::filesystem::create_directories(destination.parent_path(), ec);
+            if (!ec) {
+                std::filesystem::copy_file(
+                    it->path(), destination,
+                    std::filesystem::copy_options::overwrite_existing, ec);
+            }
+            if (ec) break;
+        }
+        if (ec) {
+            const std::string copyError = ec.message();
+            std::error_code cleanupError;
+            std::filesystem::remove_all(staging, cleanupError);
+            SetError(error, "Could not copy Lua scripts into cook output: "
+                + copyError);
+            return false;
+        }
+    } else {
+        ec.clear();
+    }
+
     AssetRegistry cookedRegistry;
     std::vector<CookedAssetEntry> cookedAssets;
     for (const AssetRegistryEntry* entry : ordered) {
@@ -340,6 +376,248 @@ bool AssetCooker::CookRuntimeScene(const std::string& contentRoot,
         result->outputRoot = output.string();
         result->runtimeScenePath =
             (output / "Content" / "Scenes" / scene.filename()).string();
+        result->assets = std::move(cookedAssets);
+    }
+    SetError(error, {});
+    return true;
+}
+
+bool AssetCooker::CookRuntimeWorld(const std::string& contentRoot,
+                                   const std::string& runtimeWorldPath,
+                                   const std::string& outputRoot,
+                                   const AssetRegistry& registry,
+                                   AssetCookResult* result,
+                                   std::string* error) {
+    namespace fs = std::filesystem;
+    const fs::path content = fs::absolute(contentRoot).lexically_normal();
+    const fs::path worldPath = fs::absolute(runtimeWorldPath).lexically_normal();
+    const fs::path output = fs::absolute(outputRoot).lexically_normal();
+    const fs::path worldDir = worldPath.parent_path();
+    const fs::path staging =
+        output.parent_path() / (output.filename().string() + ".worldstaging");
+
+    WorldManifest world;
+    if (!LoadWorldManifest(worldPath.string(), &world, error)) return false;
+    if (world.persistentScenePath.empty()) {
+        SetError(error, "World has no persistent runtime scene.");
+        return false;
+    }
+    if (IsWithin(output, content) || IsWithin(content, output)
+        || output == output.root_path() || staging == staging.root_path()) {
+        SetError(error, "Cook output must be outside the source Content folder.");
+        return false;
+    }
+
+    const auto resolveScene = [&](const std::string& value) {
+        const fs::path path(value);
+        return fs::absolute(path.is_absolute() ? path : worldDir / path)
+            .lexically_normal();
+    };
+
+    std::vector<fs::path> scenes;
+    scenes.push_back(resolveScene(world.persistentScenePath));
+    for (const LevelRef& level : world.levels)
+        scenes.push_back(resolveScene(level.scenePath));
+
+    std::unordered_set<std::string> cookedNames;
+    std::vector<AssetHandle> sceneIds;
+    std::vector<std::vector<AssetHandle>> sceneRoots;
+    sceneIds.reserve(scenes.size());
+    sceneRoots.reserve(scenes.size());
+    for (const fs::path& scene : scenes) {
+        if (!fs::is_regular_file(scene)) {
+            SetError(error, "World runtime scene is missing: " + scene.string());
+            return false;
+        }
+        const std::string name = scene.filename().string();
+        if (!cookedNames.insert(name).second) {
+            SetError(error, "World contains runtime scenes with the same file name: "
+                + name);
+            return false;
+        }
+        AssetHandle sceneId;
+        std::vector<AssetHandle> roots;
+        if (!ReadSceneMetadata(scene, &sceneId, &roots, error)) return false;
+        sceneIds.push_back(sceneId);
+        sceneRoots.push_back(std::move(roots));
+    }
+
+    // Reuse the single-scene cook to create an atomic, relocatable baseline
+    // (scripts, directory layout, and validation), then replace its registry
+    // with the union required by the complete world.
+    std::error_code ec;
+    fs::remove_all(staging, ec);
+    AssetCookResult baseResult;
+    if (!CookRuntimeScene(content.string(), scenes.front().string(),
+            staging.string(), registry, &baseResult, error)) {
+        return false;
+    }
+
+    std::unordered_set<AssetHandle, AssetHandleHash> visiting;
+    std::unordered_set<AssetHandle, AssetHandleHash> visited;
+    std::vector<const AssetRegistryEntry*> ordered;
+    for (const auto& roots : sceneRoots) {
+        for (AssetHandle root : roots) {
+            if (!CollectDependency(
+                    root, registry, &visiting, &visited, &ordered, error)) {
+                fs::remove_all(staging, ec);
+                return false;
+            }
+        }
+    }
+    std::sort(ordered.begin(), ordered.end(),
+        [](const AssetRegistryEntry* a, const AssetRegistryEntry* b) {
+            return a->virtualPath < b->virtualPath;
+        });
+
+    const fs::path cookedContent = staging / "Content";
+    const fs::path cookedScenes = cookedContent / "Scenes";
+    fs::create_directories(cookedScenes, ec);
+    AssetRegistry cookedRegistry;
+    std::vector<CookedAssetEntry> cookedAssets;
+    for (const AssetRegistryEntry* entry : ordered) {
+        fs::path relative;
+        if (!VirtualPathToRelative(entry->virtualPath, &relative)) {
+            fs::remove_all(staging, ec);
+            SetError(error, "Asset has an unsafe virtual path: "
+                + entry->virtualPath);
+            return false;
+        }
+        const fs::path source = content / relative;
+        const fs::path destination = cookedContent / relative;
+        if (!IsWithin(source, content) || !fs::is_regular_file(source)) {
+            fs::remove_all(staging, ec);
+            SetError(error, "Required asset file is missing: " + source.string());
+            return false;
+        }
+        fs::create_directories(destination.parent_path(), ec);
+        if (!ec) {
+            fs::copy_file(source, destination,
+                fs::copy_options::overwrite_existing, ec);
+        }
+        if (ec) {
+            const std::string copyError = ec.message();
+            fs::remove_all(staging, ec);
+            SetError(error, "Could not copy cooked asset: " + copyError);
+            return false;
+        }
+        std::uint64_t size = 0;
+        const std::uint64_t hash = HashFile(source, &size, error);
+        if (hash == 0 && size != 0) {
+            fs::remove_all(staging, ec);
+            return false;
+        }
+        cookedAssets.push_back(
+            {entry->id, entry->type, entry->virtualPath, size, hash});
+        std::string registryError;
+        if (!cookedRegistry.Register(*entry, &registryError)) {
+            fs::remove_all(staging, ec);
+            SetError(error, "Could not create cooked registry: " + registryError);
+            return false;
+        }
+    }
+
+    WorldManifest cookedWorld = world;
+    if (!cookedWorld.id.Valid()) cookedWorld.id = AssetHandle::Generate();
+    cookedWorld.persistentScenePath = scenes.front().filename().string();
+    for (std::size_t i = 0; i < cookedWorld.levels.size(); ++i)
+        cookedWorld.levels[i].scenePath = scenes[i + 1].filename().string();
+
+    for (std::size_t i = 0; i < scenes.size(); ++i) {
+        const fs::path destination = cookedScenes / scenes[i].filename();
+        fs::copy_file(scenes[i], destination,
+            fs::copy_options::overwrite_existing, ec);
+        if (ec) {
+            const std::string copyError = ec.message();
+            fs::remove_all(staging, ec);
+            SetError(error, "Could not copy world runtime scene: " + copyError);
+            return false;
+        }
+        AssetRegistryEntry sceneEntry;
+        sceneEntry.id = sceneIds[i];
+        sceneEntry.type = AssetType::Scene;
+        sceneEntry.virtualPath = AssetRegistry::NormalizeVirtualPath(
+            (fs::path("Scenes") / scenes[i].filename()).generic_string());
+        sceneEntry.importerVersion = 1;
+        sceneEntry.dependencies = sceneRoots[i];
+        std::string registryError;
+        if (!cookedRegistry.Register(sceneEntry, &registryError)) {
+            fs::remove_all(staging, ec);
+            SetError(error, "Could not register world scene: " + registryError);
+            return false;
+        }
+    }
+
+    const fs::path cookedWorldPath = cookedScenes / "world.3dgworld";
+    if (!SaveWorldManifest(cookedWorldPath.string(), cookedWorld, error)) {
+        fs::remove_all(staging, ec);
+        return false;
+    }
+    AssetRegistryEntry worldEntry;
+    worldEntry.id = cookedWorld.id;
+    worldEntry.type = AssetType::World;
+    worldEntry.virtualPath = "/Game/Scenes/world.3dgworld";
+    worldEntry.importerVersion = 1;
+    worldEntry.dependencies = sceneIds;
+    std::string registryError;
+    if (!cookedRegistry.Register(worldEntry, &registryError)
+        || !cookedRegistry.Save(
+            AssetRegistry::DefaultRegistryPath(cookedContent.string()),
+            &registryError)) {
+        fs::remove_all(staging, ec);
+        SetError(error, "Could not save cooked world registry: " + registryError);
+        return false;
+    }
+
+    std::ofstream manifest(staging / "CookManifest.3dgmanifest", std::ios::trunc);
+    manifest << "3DGCookManifest 1\n"
+             << "world " << worldEntry.id.ToString() << ' '
+             << std::quoted(
+                    (fs::path("Content") / "Scenes" / "world.3dgworld")
+                        .generic_string())
+             << '\n'
+             << "scenes " << scenes.size() << '\n';
+    for (std::size_t i = 0; i < scenes.size(); ++i) {
+        manifest << "scene " << sceneIds[i].ToString() << ' '
+                 << std::quoted(
+                        (fs::path("Content") / "Scenes" / scenes[i].filename())
+                            .generic_string())
+                 << '\n';
+    }
+    manifest << "assets " << cookedAssets.size() << '\n';
+    for (const CookedAssetEntry& asset : cookedAssets) {
+        manifest << "asset " << asset.id.ToString() << ' '
+                 << static_cast<std::uint32_t>(asset.type) << ' '
+                 << std::quoted(asset.virtualPath) << ' '
+                 << asset.fileSize << ' ' << asset.contentHash << '\n';
+    }
+    manifest.close();
+    if (!manifest) {
+        fs::remove_all(staging, ec);
+        SetError(error, "Could not finish writing world cook manifest.");
+        return false;
+    }
+
+    std::ofstream config(staging / "player.cfg", std::ios::trunc);
+    config << "window.width = 1280\n"
+           << "window.height = 720\n"
+           << "window.vsync = true\n"
+           << "player.scene = Content/Scenes/world.3dgworld\n";
+    config.close();
+    if (!config) {
+        fs::remove_all(staging, ec);
+        SetError(error, "Could not create cooked world player configuration.");
+        return false;
+    }
+
+    if (!ReplaceOutput(staging, output, error)) {
+        fs::remove_all(staging, ec);
+        return false;
+    }
+    if (result) {
+        result->outputRoot = output.string();
+        result->runtimeScenePath =
+            (output / "Content" / "Scenes" / "world.3dgworld").string();
         result->assets = std::move(cookedAssets);
     }
     SetError(error, {});

@@ -6,6 +6,8 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
@@ -84,6 +86,7 @@ public:
 
 int throwingDestroyed = 0;
 int timerCallbacks = 0;
+int namedTimerCallbacks = 0;
 engine::ecs::Entity spawnedEntity = engine::ecs::kNull;
 
 class GameplayServicesScript final : public engine::Script {
@@ -93,7 +96,11 @@ public:
         Delay(0.1f, [] { ++timerCallbacks; });
     }
     void OnUpdate(float) override {
-        if (timerCallbacks > 0) RequestSceneLoad("Levels/Next.3dgscene");
+        if (timerCallbacks > 0) {
+            RequestSceneLoad("Levels/Next.3dgscene");
+            RequestLevelLoad("Dungeon");
+            RequestLevelUnload("Courtyard.runtime.scene");
+        }
     }
 };
 
@@ -106,6 +113,31 @@ public:
     void OnDestroy() override {
         ++throwingDestroyed;
     }
+};
+
+class NamedTimerScript final : public engine::Script {
+public:
+    void OnCreate() override {
+        BindTimerFunction("Pulse", [this] {
+            ++namedTimerCallbacks;
+            if (namedTimerCallbacks == 2)
+                ClearTimerByFunctionName("Pulse");
+        });
+        timerHandle = SetTimerByFunctionName("Pulse", 0.1f, true);
+    }
+
+    void OnUpdate(float) override {
+        if (namedTimerCallbacks == 1)
+            activeAfterFirstPulse = IsTimerActive(timerHandle)
+                && IsTimerActive("Pulse");
+    }
+
+    bool TimerStillActive() const {
+        return IsTimerActive(timerHandle);
+    }
+
+    int timerHandle = 0;
+    bool activeAfterFirstPulse = false;
 };
 
 engine::NativeScriptComponent Component(const std::string& className) {
@@ -129,6 +161,9 @@ int main() {
     });
     scripts.Register("GameplayServicesRegressionScript", [] {
         return std::make_unique<GameplayServicesScript>();
+    });
+    scripts.Register("NamedTimerRegressionScript", [] {
+        return std::make_unique<NamedTimerScript>();
     });
 
     {
@@ -180,6 +215,14 @@ int main() {
         Check(timerCallbacks == 1, "delayed script callback fires once");
         Check(engine::ConsumeScriptSceneLoadRequest() == "Levels/Next.3dgscene",
               "scene changes are safely queued for the runtime host");
+        const auto levelRequests =
+            engine::ConsumeScriptLevelStreamRequests();
+        Check(levelRequests.size() == 2
+                && levelRequests[0].load
+                && levelRequests[0].level == "Dungeon"
+                && !levelRequests[1].load
+                && levelRequests[1].level == "Courtyard.runtime.scene",
+              "manual level streaming requests are safely queued for the runtime host");
     }
 
     {
@@ -261,9 +304,107 @@ int main() {
     }
 
     {
+        engine::ecs::Registry registry;
+        const engine::ecs::Entity entity = registry.Create();
+        registry.Add<engine::NativeScriptComponent>(
+            entity, Component("NamedTimerRegressionScript"));
+        engine::UpdateScripts(registry, 0.1f);
+        auto* component =
+            registry.TryGet<engine::NativeScriptComponent>(entity);
+        auto* named = component
+            ? dynamic_cast<NamedTimerScript*>(component->instance.get()) : nullptr;
+        Check(named && named->timerHandle != 0
+                && named->activeAfterFirstPulse,
+              "named repeating timer can be queried by handle and function name");
+        engine::UpdateScripts(registry, 0.1f);
+        engine::UpdateScripts(registry, 0.2f);
+        Check(namedTimerCallbacks == 2
+                && named && !named->TimerStillActive(),
+              "named timer invokes the bound C++ event and can clear itself by name");
+        engine::ShutdownScripts(registry);
+    }
+
+    {
+        const std::filesystem::path luaPath =
+            std::filesystem::current_path() / "lua_script_regression.lua";
+        {
+            std::ofstream lua(luaPath, std::ios::trunc);
+            lua << "function OnCreate()\n"
+                   "  local x = Engine.GetFieldFloat(\"startX\", 1)\n"
+                   "  Engine.SetPosition(x, 2, 3)\n"
+                   "  Engine.SetTimerByFunctionName(\"Pulse\", 0.1, false)\n"
+                   "  Engine.SetGlobalTimeDilation(0.5)\n"
+                   "  Engine.HitStop(0.1, 0.0)\n"
+                   "end\n"
+                   "function Pulse()\n"
+                   "  Engine.Translate(1, 0, 0)\n"
+                   "end\n"
+                   "function OnUpdate(dt)\n"
+                   "  Engine.Translate(dt, 0, 0)\n"
+                   "end\n"
+                   "function OnFixedUpdate(dt)\n"
+                   "  Engine.Translate(0, dt, 0)\n"
+                   "end\n"
+                   "function OnDestroy()\n"
+                   "  Engine.SetScale(2, 2, 2)\n"
+                   "end\n";
+        }
+
+        engine::ecs::Registry registry;
+        const engine::ecs::Entity entity = registry.Create();
+        registry.Add<engine::ecs::Transform>(entity);
+        engine::NativeScriptComponent component;
+        component.className = "LuaRegression";
+        component.sourcePath = luaPath.string();
+        component.fields.push_back(
+            {"startX", engine::ScriptField::Type::Float, "5"});
+        registry.Add<engine::NativeScriptComponent>(entity, std::move(component));
+
+        engine::GameMode& gameMode = engine::GameMode::Instance();
+        gameMode.Reset();
+        engine::UpdateScripts(
+            registry, 0.25f, nullptr, nullptr, nullptr, nullptr, &gameMode);
+        const engine::ecs::Transform& afterUpdate =
+            registry.Get<engine::ecs::Transform>(entity);
+        Check(afterUpdate.position.x == 6.25f
+                && afterUpdate.position.y == 2.0f
+                && afterUpdate.position.z == 3.0f,
+              "Lua scripts run named function timers and normal lifecycle callbacks");
+        Check(gameMode.GlobalTimeDilation() == 0.5f
+                && gameMode.HitStopActive()
+                && gameMode.EffectiveTimeDilation() == 0.0f,
+              "Lua scripts control global dilation and hit stop");
+
+        engine::FixedUpdateScripts(registry, 0.5f);
+        Check(registry.Get<engine::ecs::Transform>(entity).position.y == 2.5f,
+              "Lua scripts receive fixed updates through the native lifecycle");
+
+        engine::ShutdownScripts(registry);
+        Check(registry.Get<engine::ecs::Transform>(entity).scale.x == 2.0f,
+              "Lua scripts receive OnDestroy before their VM is released");
+        std::error_code cleanupError;
+        std::filesystem::remove(luaPath, cleanupError);
+        gameMode.Reset();
+    }
+
+    {
         engine::GameMode& gameMode = engine::GameMode::Instance();
         engine::ecs::Registry registry;
         gameMode.Reset();
+        gameMode.SetGlobalTimeDilation(0.25f);
+        Check(gameMode.ScaleDelta(2.0f) == 0.5f,
+              "global time dilation scales gameplay delta time");
+        gameMode.HitStop(0.1f);
+        Check(gameMode.HitStopActive()
+                && gameMode.ScaleDelta(2.0f) == 0.0f,
+              "zero-dilation hit stop freezes gameplay");
+        gameMode.UpdateUnscaledTime(0.05f);
+        Check(gameMode.HitStopActive(),
+              "hit stop duration advances using unscaled time");
+        gameMode.UpdateUnscaledTime(0.06f);
+        Check(!gameMode.HitStopActive()
+                && gameMode.ScaleDelta(2.0f) == 0.5f,
+              "hit stop restores the configured global dilation");
         gameMode.AddScore(30);
         gameMode.Update(registry, engine::ecs::kNull, 1.5f);
 

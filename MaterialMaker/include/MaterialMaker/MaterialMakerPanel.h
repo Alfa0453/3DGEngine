@@ -4,6 +4,7 @@
 
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace material_maker {
@@ -26,18 +27,32 @@ public:
     void SetMetalRoughMap(const std::string& path);
     void SetHeightMap(const std::string& path);
     bool SetShaderAsset(const std::string& path);
+    void RefreshShaderLibrary();
 
     const MaterialDocument& CurrentMaterial() const { return m_material; }
     const std::string& LastSavedPath() const { return m_lastSavedPath; }
     const std::string& StatusMessage() const { return m_status; }
 
 private:
+    struct ShaderParameterMetadata {
+        std::string defaultValue;
+        std::string group = "General";
+        std::string tooltip;
+        bool useRange = false;
+        float minValue = 0.0f;
+        float maxValue = 1.0f;
+        float step = 0.01f;
+        bool visible = true;
+    };
+
     void DrawPreview();          // live GL preview (falls back to the drawn one)
     void DrawApproxPreview();    // hand-drawn 2D approximation (fallback)
     void DrawSurfaceControls();
     void DrawAdvancedControls();
     void DrawTextureControls();
     void DrawShaderControls();
+    void ScanShaderLibrary();
+    bool LoadShaderDefinition(const std::string& path, bool preserveOverrides);
     void DrawOrmPacker();          // pack separate metal/rough/AO into one ORM texture
     void DrawExportControls();
     void DrawPresetControls();     // starter presets (incl. measured metals)
@@ -82,6 +97,7 @@ private:
     char m_metalRoughMapBuffer[1024]{};
     char m_heightMapBuffer[1024]{};
     char m_shaderPathBuffer[1024]{};
+    char m_shaderSearchBuffer[128]{};
     char m_hdriPathBuffer[1024]{};
 
     // ORM channel-packer source paths.
@@ -92,6 +108,13 @@ private:
     // Material library (saved .3dgmat files in the output directory).
     std::vector<std::string> m_libraryFiles;
     bool m_libraryScanned = false;
+
+    // Engine-owned Surface shaders found below the active project Content root.
+    // This is cached so the panel does not recursively scan Content every frame.
+    std::vector<std::string> m_shaderLibraryFiles;
+    bool m_shaderLibraryScanned = false;
+    std::unordered_map<std::string, ShaderParameterMetadata>
+        m_shaderParameterMetadata;
 
     // Import-from-model state.
     std::string m_importModelPath;

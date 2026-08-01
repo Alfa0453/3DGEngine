@@ -56,6 +56,12 @@ public:
     };
 
     struct AnimationPreviewState {
+        struct AssetChoice {
+            std::string path;
+            std::string displayName;
+            bool compatible = false;
+            std::string reason;
+        };
         struct ClipInfo {
             std::string name;
             float durationSeconds = 0.0f;
@@ -90,12 +96,21 @@ public:
         };
 
         bool hasSelection = false;
+        bool assetMode = false;
+        bool assetIsAnimation = false;
+        bool assetIsSkeleton = false;
         bool skeletalModel = false;
         bool modelLoaded = false;
         bool playMode = false;
         bool runtimeAnimated = false;
         bool locomotionEnabled = false;
         std::string selectedName;
+        std::string assetPath;
+        std::string previewMeshPath;
+        std::string skeletonId;
+        std::string compatibilitySummary;
+        std::vector<AssetChoice> previewMeshes;
+        unsigned int previewTexture = 0;
         std::string modelPath;
         std::string loadError;
         std::vector<ClipInfo> clips;
@@ -129,10 +144,14 @@ public:
         float previewTime = 0.0f;
         float previewDuration = 0.0f;
         bool actionPlaying = false;
+        bool assetPlaying = true;
+        bool assetStripRootMotion = false;
         float blend = 1.0f;
         float parameter = 0.0f;
         std::size_t stateCount = 0;
         std::size_t poseBones = 0;
+        std::size_t matchedChannels = 0;
+        std::size_t missingChannels = 0;
     };
     
     struct Context {
@@ -146,6 +165,7 @@ public:
         EditorLog* log = nullptr;
         EditorGizmo* gizmo = nullptr;
         engine::Camera* camera = nullptr;
+        int* selectedSplinePoint = nullptr;
         bool cameraBlendRequested = false;
         EditorScene::CameraPreset cameraBlendPreset;
         bool cameraShakeRequested = false;
@@ -191,6 +211,11 @@ public:
         int*   terrainPaintLayer = nullptr;
         float* terrainBrushRadius = nullptr;
         float* terrainBrushStrength = nullptr;
+        bool*  foliagePaint = nullptr;
+        bool*  foliageErase = nullptr;
+        float* foliageBrushRadius = nullptr;
+        float* foliagePaintDensity = nullptr;
+        int*   foliageTypeIndex = nullptr;
         bool* showNavigationPreview = nullptr;
         bool* showGrid = nullptr;            // reference ground grid + world axes
         bool* previewAnimations = nullptr;   // advance character animations in the edit viewport
@@ -228,6 +253,18 @@ public:
         double particleCpuMilliseconds = 0.0;
         double particleGpuMilliseconds = 0.0;
         float* animationPreviewTime = nullptr;
+        std::string* animationPreviewAssetPath = nullptr;
+        std::string* animationPreviewMeshPath = nullptr;
+        bool* animationAssetPlaying = nullptr;
+        bool* animationAssetLoop = nullptr;
+        bool* animationAssetStripRootMotion = nullptr;
+        float* animationAssetSpeed = nullptr;
+        float* animationAssetYaw = nullptr;
+        float* animationAssetPitch = nullptr;
+        float* animationAssetZoom = nullptr;
+        bool animationAssetRestartRequested = false;
+        bool animationAssetRefreshRequested = false;
+        bool animationAssetOpenInClipEditorRequested = false;
         int* animationActionClip = nullptr;
         float* animationActionFadeIn = nullptr;
         float* animationActionFadeOut = nullptr;
@@ -302,9 +339,12 @@ public:
         bool addDynamicCubeRequested = false;
         bool addStaticFloorRequested = false;
         bool addTerrainRequested = false;
+        bool addFoliageRequested = false;
         bool addWaterRequested = false;
         int  addWaterPreset = 0;            // 0 generic, 1 lake, 2 ocean, 3 river
         bool addSplineRequested = false;
+        int  addSplineType = 0;             // 0 path, 1 river, 2 camera rail
+        bool addRiverForSelectedSplineRequested = false;
         bool addTriggerVolumeRequested = false;
         bool addNavMeshBoundsVolumeRequested = false;
         bool addPlayerStartRequested = false;

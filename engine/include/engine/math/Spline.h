@@ -91,8 +91,16 @@ public:
     }
     glm::vec3 TangentAtDistance(float distance) const {
         EnsureLut();
-        if (m_length <= 1.0e-6f) return glm::vec3(0.0f, 0.0f, 1.0f);
-        return Tangent(std::clamp(distance / m_length, 0.0f, 1.0f));
+        if (m_length <= 1.0e-6f || m_lutT.empty()) return glm::vec3(0.0f, 0.0f, 1.0f);
+        distance = std::clamp(distance, 0.0f, m_length);
+        const auto it = std::lower_bound(m_lutDistance.begin(), m_lutDistance.end(), distance);
+        const std::size_t hi = static_cast<std::size_t>(it - m_lutDistance.begin());
+        if (hi == 0) return Tangent(m_lutT.front());
+        if (hi >= m_lutT.size()) return Tangent(m_lutT.back());
+        const std::size_t lo = hi - 1;
+        const float span = m_lutDistance[hi] - m_lutDistance[lo];
+        const float f = span > 1.0e-6f ? (distance - m_lutDistance[lo]) / span : 0.0f;
+        return Tangent(glm::mix(m_lutT[lo], m_lutT[hi], f));
     }
 
     // Closest point on the curve to a world position (LUT-approximate). Optionally
@@ -105,16 +113,34 @@ public:
             if (outTangent)  *outTangent = glm::vec3(0.0f, 0.0f, 1.0f);
             return glm::vec3(0.0f);
         }
-        std::size_t best = 0;
+        float bestDistance = 0.0f;
+        glm::vec3 bestPoint = m_lutPosition.front();
         float bestSq = std::numeric_limits<float>::max();
-        for (std::size_t i = 0; i < m_lutPosition.size(); ++i) {
-            const glm::vec3 d = m_lutPosition[i] - world;
-            const float sq = glm::dot(d, d);
-            if (sq < bestSq) { bestSq = sq; best = i; }
+        if (m_lutPosition.size() == 1) {
+            if (outDistance) *outDistance = 0.0f;
+            if (outTangent) *outTangent = Tangent(0.0f);
+            return bestPoint;
         }
-        if (outDistance) *outDistance = m_lutDistance[best];
-        if (outTangent)  *outTangent = TangentAtDistance(m_lutDistance[best]);
-        return m_lutPosition[best];
+        // Project onto each LUT chord instead of choosing the nearest sample. This
+        // remains inexpensive while avoiding visible jumps for followers and tools.
+        for (std::size_t i = 1; i < m_lutPosition.size(); ++i) {
+            const glm::vec3 a = m_lutPosition[i - 1];
+            const glm::vec3 ab = m_lutPosition[i] - a;
+            const float abSq = glm::dot(ab, ab);
+            const float f = abSq > 1.0e-12f
+                ? std::clamp(glm::dot(world - a, ab) / abSq, 0.0f, 1.0f) : 0.0f;
+            const glm::vec3 candidate = a + ab * f;
+            const glm::vec3 d = candidate - world;
+            const float sq = glm::dot(d, d);
+            if (sq < bestSq) {
+                bestSq = sq;
+                bestPoint = candidate;
+                bestDistance = glm::mix(m_lutDistance[i - 1], m_lutDistance[i], f);
+            }
+        }
+        if (outDistance) *outDistance = bestDistance;
+        if (outTangent)  *outTangent = TangentAtDistance(bestDistance);
+        return bestPoint;
     }
 
     // Evenly-spaced points along the curve (for drawing a smooth polyline). Fills `out`.
@@ -163,16 +189,22 @@ private:
         m_lutDirty = false;
         m_lutDistance.clear();
         m_lutPosition.clear();
+        m_lutT.clear();
         m_length = 0.0f;
         const int segs = SegmentCount();
         if (segs <= 0) {
-            if (!m_points.empty()) { m_lutPosition.push_back(m_points.front()); m_lutDistance.push_back(0.0f); }
+            if (!m_points.empty()) {
+                m_lutPosition.push_back(m_points.front());
+                m_lutDistance.push_back(0.0f);
+                m_lutT.push_back(0.0f);
+            }
             return;
         }
         const int total = segs * kSamplesPerSegment;
         glm::vec3 prev = EvalSegment(0, 0.0f);
         m_lutPosition.push_back(prev);
         m_lutDistance.push_back(0.0f);
+        m_lutT.push_back(0.0f);
         for (int i = 1; i <= total; ++i) {
             const float t = static_cast<float>(i) / static_cast<float>(total);
             const float scaled = t * static_cast<float>(segs);
@@ -182,6 +214,7 @@ private:
             m_length += glm::length(pos - prev);
             m_lutPosition.push_back(pos);
             m_lutDistance.push_back(m_length);
+            m_lutT.push_back(t);
             prev = pos;
         }
     }
@@ -191,6 +224,7 @@ private:
 
     mutable bool                   m_lutDirty = true;
     mutable std::vector<float>     m_lutDistance;
+    mutable std::vector<float>     m_lutT;
     mutable std::vector<glm::vec3> m_lutPosition;
     mutable float                  m_length = 0.0f;
 

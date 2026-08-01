@@ -4,6 +4,7 @@
 #include "AnimationGraphBuilder.h"
 
 #include <engine/animation/Animator.h>
+#include <engine/assets/SkeletalAsset.h>
 #include <engine/graphics/Camera.h>
 #include <engine/graphics/SkinnedModel.h>
 #include <engine/graphics/SkinnedRenderer.h>
@@ -418,6 +419,39 @@ void AnimationGraphEditorPanel::Draw(const std::string& assetRoot, bool* open, b
                     c.clipName = UniqueClipAlias(m_asset.clips, std::move(alias));
                     c.stripRootMotion = clip.stripRootMotion;
                     m_asset.clips.push_back(std::move(c));
+                    if (m_asset.previewModel.empty()
+                        && Lower(std::filesystem::path(clip.sourceFile)
+                            .extension().string()) == ".3dganim") {
+                        engine::AnimationAssetData animation;
+                        std::string ignored;
+                        if (engine::LoadAnimationAsset(
+                                clip.sourceFile, &animation, &ignored)) {
+                            if (!m_preferredPreviewMesh.empty()) {
+                                engine::SkeletalMeshAssetData preferred;
+                                if (engine::LoadSkeletalMeshAsset(
+                                        m_preferredPreviewMesh,
+                                        &preferred, &ignored)
+                                    && preferred.skeletonId
+                                        == animation.skeletonId) {
+                                    m_asset.previewModel =
+                                        m_preferredPreviewMesh;
+                                    m_asset.previewModelAssetId =
+                                        preferred.header.id;
+                                }
+                            }
+                            for (const AssetChoice& modelChoice : m_modelChoices) {
+                                if (!m_asset.previewModel.empty()) break;
+                                engine::SkeletalMeshAssetData mesh;
+                                if (engine::LoadSkeletalMeshAsset(
+                                        modelChoice.path, &mesh, &ignored)
+                                    && mesh.skeletonId == animation.skeletonId) {
+                                    m_asset.previewModel = modelChoice.path;
+                                    m_asset.previewModelAssetId = mesh.header.id;
+                                    break;
+                                }
+                            }
+                        }
+                    }
                     ResetPreview();
                 } else if (message) {
                     *message = err;

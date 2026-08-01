@@ -24,6 +24,9 @@ struct GrassConfig {
     float     density      = 2.0f;
     float     bladeHeight  = 0.6f;
     float     bladeWidth   = 1.0f;                 // multiplier on the base blade width
+    bool      randomizeHeight = false;
+    float     minHeightScale = 0.75f;
+    float     maxHeightScale = 1.25f;
     glm::vec3 baseColor{0.16f, 0.34f, 0.12f};      // root (darker)
     glm::vec3 tipColor{0.42f, 0.68f, 0.28f};       // tip (lighter)
     float     windStrength = 0.18f;
@@ -52,7 +55,7 @@ public:
     GrassField(GrassField&& o) noexcept { MoveFrom(o); }
     GrassField& operator=(GrassField&& o) noexcept { if (this != &o) { Release(); MoveFrom(o); } return *this; }
 
-    static constexpr int kFloatsPerInstance = 13;   // pos3,yaw,scale,phase,height,base3,tip3
+    static constexpr int kFloatsPerInstance = 14;   // pos3,yaw,widthScale,phase,height,heightScale,base3,tip3
 
     // (Re)scatter blades over the terrain, only where paint == cfg.grassLayer. Each blade
     // bakes the appearance of its texel's frozen style (styleIndex -> palette; slot 0 or
@@ -100,9 +103,14 @@ public:
                     instances.push_back(worldOrigin.y + y);
                     instances.push_back(worldOrigin.z + jz);
                     instances.push_back(u01(rng) * 6.2831853f);         // yaw
-                    instances.push_back(0.75f + u01(rng) * 0.5f);       // scale variation
+                    instances.push_back(0.85f + u01(rng) * 0.3f);       // subtle width variation
                     instances.push_back(u01(rng) * 6.2831853f);         // wind phase
                     instances.push_back(st.bladeHeight);                // baked height
+                    const float minHeight = std::max(0.05f, std::min(cfg.minHeightScale, cfg.maxHeightScale));
+                    const float maxHeight = std::max(minHeight, std::max(cfg.minHeightScale, cfg.maxHeightScale));
+                    instances.push_back(cfg.randomizeHeight
+                        ? minHeight + u01(rng) * (maxHeight - minHeight)
+                        : 1.0f);                                        // optional height-only variation
                     instances.push_back(st.base.r); instances.push_back(st.base.g); instances.push_back(st.base.b);
                     instances.push_back(st.tip.r);  instances.push_back(st.tip.g);  instances.push_back(st.tip.b);
                     ++placed;
@@ -210,11 +218,14 @@ private:
         glVertexAttribPointer(6, 1, GL_FLOAT, GL_FALSE, stride, offset(6));
         glVertexAttribDivisor(6, 1);
         glEnableVertexAttribArray(7);   // baked base colour
-        glVertexAttribPointer(7, 3, GL_FLOAT, GL_FALSE, stride, offset(7));
+        glVertexAttribPointer(7, 3, GL_FLOAT, GL_FALSE, stride, offset(8));
         glVertexAttribDivisor(7, 1);
         glEnableVertexAttribArray(8);   // baked tip colour
-        glVertexAttribPointer(8, 3, GL_FLOAT, GL_FALSE, stride, offset(10));
+        glVertexAttribPointer(8, 3, GL_FLOAT, GL_FALSE, stride, offset(11));
         glVertexAttribDivisor(8, 1);
+        glEnableVertexAttribArray(9);   // randomized height multiplier
+        glVertexAttribPointer(9, 1, GL_FLOAT, GL_FALSE, stride, offset(7));
+        glVertexAttribDivisor(9, 1);
 
         glBindVertexArray(0);
         glBindBuffer(GL_ARRAY_BUFFER, 0);
@@ -230,6 +241,7 @@ layout(location=5) in float iPhase;
 layout(location=6) in float iBladeHeight;   // baked per blade (frozen style)
 layout(location=7) in vec3  iBase;
 layout(location=8) in vec3  iTip;
+layout(location=9) in float iHeightScale;
 uniform mat4  uViewProj;
 uniform float uTime;
 uniform float uBladeWidth;
@@ -245,9 +257,8 @@ void main() {
     vBase = iBase;
     vTip  = iTip;
     vec3 p = aPos;
-    p.x *= uBladeWidth;
-    p.y *= iBladeHeight;
-    p  *= iScale;
+    p.x *= uBladeWidth * iScale;
+    p.y *= iBladeHeight * iHeightScale;
     float c = cos(iYaw), s = sin(iYaw);
     vec3 rot = vec3(p.x * c - p.z * s, p.y, p.x * s + p.z * c);
     // Wind bends the blade more toward the tip (heightFrac^2), coherent across the field.

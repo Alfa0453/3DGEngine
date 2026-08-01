@@ -133,11 +133,11 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             return false;
         }
     }
-    if (magic != "3DGRuntimeScene" || version < 1 || version > 80) {
+    if (magic != "3DGRuntimeScene" || version < 1 || version > 86) {
         if (error) {
             *error = "Runtime scene file has an unknown format: "
                 + magic + " " + std::to_string(version)
-                + " (expected 3DGRuntimeScene 1..80).";
+                + " (expected 3DGRuntimeScene 1..86).";
         }
         return false;
     }
@@ -304,6 +304,12 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                 record >> value;
                 paint = static_cast<unsigned char>(std::min(value, 255u));
             }
+            if (version >= 81) {
+                for (std::string& material : terrain.layerMaterials) {
+                    record >> std::quoted(material);
+                    if (material == "-") material.clear();
+                }
+            }
             if (!record || terrain.entityName.empty()) {
                 if (error) *error = "Runtime scene contains invalid terrain data.";
                 return false;
@@ -313,6 +319,122 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             terrain.maxHeight = std::max(terrain.maxHeight, 0.0f);
             terrain.octaves = std::max(terrain.octaves, 1);
             loaded.terrains.push_back(std::move(terrain));
+            continue;
+        }
+        if (recordType == "water" && version >= 82) {
+            Scene::WaterDesc water;
+            record >> std::quoted(water.name)
+                   >> water.center.x >> water.center.y >> water.center.z
+                   >> water.size >> water.resolution
+                   >> water.shallow.r >> water.shallow.g >> water.shallow.b
+                   >> water.deep.r >> water.deep.g >> water.deep.b
+                   >> water.reflection.r >> water.reflection.g >> water.reflection.b
+                   >> water.transparency >> water.fresnel
+                   >> water.specular >> water.shininess
+                   >> water.seaHeight >> water.seaChoppy >> water.seaSpeed
+                   >> water.seaFreq >> water.foam
+                   >> water.flowDir.x >> water.flowDir.y >> water.flowStrength
+                   >> water.depthFadeDistance >> water.shoreFoamWidth
+                   >> water.shoreFoamStrength >> water.refractionStrength
+                   >> water.reflectionRoughness
+                   >> water.environmentReflectionStrength >> water.absorptionStrength
+                   >> water.causticsStrength >> water.causticsScale
+                   >> water.maxRenderDistance
+                   >> water.underwaterTint.r >> water.underwaterTint.g
+                   >> water.underwaterTint.b >> water.underwaterFogDensity
+                   >> water.underwaterDistortion >> water.underwaterTransitionSpeed;
+            if (version >= 83) {
+                int closed = 0;
+                std::size_t pointCount = 0;
+                record >> water.riverWidth >> closed >> pointCount;
+                water.splineClosed = closed != 0;
+                water.splinePoints.resize(pointCount);
+                water.splinePointRotations.resize(pointCount, glm::vec3(0.0f));
+                for (std::size_t i = 0; i < pointCount; ++i) {
+                    glm::vec3& point = water.splinePoints[i];
+                    record >> point.x >> point.y >> point.z;
+                    if (version >= 84) {
+                        glm::vec3& rotation = water.splinePointRotations[i];
+                        record >> rotation.x >> rotation.y >> rotation.z;
+                    }
+                }
+                if (version >= 85) {
+                    record >> std::quoted(water.splineName);
+                    if (water.splineName == "-") water.splineName.clear();
+                }
+            }
+            if (!record || water.name.empty()) {
+                if (error) *error = "Runtime scene contains invalid water data.";
+                return false;
+            }
+            water.size = std::max(water.size, 1.0f);
+            water.resolution = std::clamp(water.resolution, 8, 512);
+            water.transparency = std::clamp(water.transparency, 0.0f, 1.0f);
+            water.reflectionRoughness = std::clamp(water.reflectionRoughness, 0.0f, 1.0f);
+            water.maxRenderDistance = std::max(water.maxRenderDistance, 0.0f);
+            loaded.waters.push_back(std::move(water));
+            continue;
+        }
+        if (recordType == "spline" && version >= 85) {
+            Scene::SplineDesc spline;
+            int closed = 0;
+            std::size_t pointCount = 0;
+            record >> std::quoted(spline.name) >> closed >> pointCount;
+            spline.closed = closed != 0;
+            spline.points.resize(pointCount);
+            spline.rotations.resize(pointCount, glm::vec3(0.0f));
+            for (std::size_t i = 0; i < pointCount; ++i) {
+                record >> spline.points[i].x >> spline.points[i].y >> spline.points[i].z
+                       >> spline.rotations[i].x >> spline.rotations[i].y >> spline.rotations[i].z;
+            }
+            if (!record || spline.name.empty() || spline.name == "-") {
+                if (error) *error = "Runtime scene contains invalid spline data.";
+                return false;
+            }
+            loaded.splines.push_back(std::move(spline));
+            continue;
+        }
+        if (recordType == "foliage" && version >= 86) {
+            Scene::FoliageDesc foliage;
+            std::string assetIdText;
+            std::size_t instanceCount = 0;
+            record >> std::quoted(foliage.name) >> std::quoted(foliage.assetPath)
+                   >> assetIdText
+                   >> foliage.transform.position.x >> foliage.transform.position.y
+                   >> foliage.transform.position.z
+                   >> foliage.transform.scale.x >> foliage.transform.scale.y
+                   >> foliage.transform.scale.z
+                   >> foliage.transform.rotation.w >> foliage.transform.rotation.x
+                   >> foliage.transform.rotation.y >> foliage.transform.rotation.z
+                   >> instanceCount;
+            if (assetIdText != "-"
+                && !AssetHandle::Parse(assetIdText, &foliage.assetId)) {
+                if (error) *error = "Runtime scene contains an invalid foliage asset ID.";
+                return false;
+            }
+            if (instanceCount > 10'000'000u) {
+                if (error) *error = "Runtime scene foliage instance count is too large.";
+                return false;
+            }
+            foliage.instances.resize(instanceCount);
+            for (ecs::FoliageInstance& instance : foliage.instances) {
+                int enabled = 1;
+                record >> instance.id >> instance.typeIndex
+                       >> instance.position.x >> instance.position.y >> instance.position.z
+                       >> instance.rotationDegrees.x >> instance.rotationDegrees.y
+                       >> instance.rotationDegrees.z
+                       >> instance.scale.x >> instance.scale.y >> instance.scale.z
+                       >> enabled;
+                instance.enabled = enabled != 0;
+            }
+            if (!record || foliage.name.empty() || foliage.assetPath.empty()
+                || foliage.assetPath == "-") {
+                if (error) *error = "Runtime scene contains invalid foliage data.";
+                return false;
+            }
+            foliage.transform.scale = glm::max(
+                glm::abs(foliage.transform.scale), glm::vec3(0.001f));
+            loaded.foliage.push_back(std::move(foliage));
             continue;
         }
         if (recordType == "nav_bounds" && version >= 50) {
@@ -1566,7 +1688,7 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
     return true;
 }
 
-bool RuntimeSceneLoader::Instantiate(const Scene &scene, ecs::Registry &registry, const PrimitiveMeshes &meshes, std::vector<ecs::Entity> *created, std::string *error)
+bool RuntimeSceneLoader::Instantiate(const Scene &scene, ecs::Registry &registry, const PrimitiveMeshes &meshes, std::vector<ecs::Entity> *created, std::string *error, const glm::vec3 &worldOffset)
 {
     if (created) {
         created->clear();
@@ -1585,7 +1707,7 @@ bool RuntimeSceneLoader::Instantiate(const Scene &scene, ecs::Registry &registry
         const ecs::Entity entity = registry.Create();
         registry.Add<ecs::RuntimeName>(entity, ecs::RuntimeName{desc.name});
         registry.Add<ecs::Transform>(entity, ecs::Transform{
-            desc.position,
+            desc.position + worldOffset,
             desc.scale,
             desc.rotation
         });
@@ -1773,7 +1895,7 @@ bool RuntimeSceneLoader::Instantiate(const Scene &scene, ecs::Registry &registry
         }
         if (desc.moverEnabled) {
             ecs::Mover mover = desc.mover;
-            mover.origin = desc.position;
+            mover.origin = desc.position + worldOffset;
             mover.initialized = true;
             registry.Add<ecs::Mover>(entity, mover);
         }
@@ -1845,6 +1967,37 @@ bool RuntimeSceneLoader::Instantiate(const Scene &scene, ecs::Registry &registry
         }
     }
 
+    for (const Scene::FoliageDesc& desc : scene.foliage) {
+        const ecs::Entity entity = registry.Create();
+        ecs::Transform transform = desc.transform;
+        transform.position += worldOffset;
+        registry.Add<ecs::RuntimeName>(entity, ecs::RuntimeName{desc.name});
+        registry.Add<ecs::Transform>(entity, transform);
+        ecs::FoliageComponent component;
+        component.assetPath = desc.assetPath;
+        component.assetId = desc.assetId;
+        component.instances = desc.instances;
+        registry.Add<ecs::FoliageComponent>(entity, std::move(component));
+        if (created) created->push_back(entity);
+    }
+
+    for (const Scene::SplineDesc& desc : scene.splines) {
+        ecs::Entity splineEntity = ecs::kNull;
+        registry.view<ecs::RuntimeName>().each(
+            [&](ecs::Entity entity, ecs::RuntimeName& name) {
+                if (splineEntity == ecs::kNull && name.value == desc.name)
+                    splineEntity = entity;
+            });
+        if (splineEntity == ecs::kNull) continue;
+        ecs::SplineComponent component;
+        component.points = desc.points;
+        for (glm::vec3& point : component.points) point += worldOffset;
+        component.rotations = desc.rotations;
+        component.rotations.resize(component.points.size(), glm::vec3(0.0f));
+        component.closed = desc.closed;
+        registry.Add<ecs::SplineComponent>(splineEntity, std::move(component));
+    }
+
     bool environmentSunApplied = false;
     for (const Scene::LightDesc& desc : scene.lights) {
         ecs::Light light = desc.light;
@@ -1858,7 +2011,7 @@ bool RuntimeSceneLoader::Instantiate(const Scene &scene, ecs::Registry &registry
         const ecs::Entity entity = registry.Create();
         registry.Add<ecs::RuntimeName>(entity, ecs::RuntimeName{desc.name});
         registry.Add<ecs::Transform>(entity, ecs::Transform{
-            desc.position,
+            desc.position + worldOffset,
             glm::vec3(1.0f),
             glm::quat(1.0f, 0.0f, 0.0f, 0.0f)
         });

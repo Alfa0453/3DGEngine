@@ -4,6 +4,7 @@
 #include "engine/assets/AssetRegistry.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -36,12 +37,28 @@ std::string CanonicalShaderAsset(const ShaderAsset& asset) {
         out << "|l:" << link.id << ':' << link.fromPin << ':' << link.toPin;
     for (const ShaderParameter& parameter : asset.parameters)
         out << "|u:" << parameter.id << ':' << parameter.name << ':'
-            << static_cast<int>(parameter.type) << ':' << parameter.defaultValue;
+            << static_cast<int>(parameter.type) << ':' << parameter.defaultValue
+            << ':' << parameter.group << ':' << parameter.tooltip << ':'
+            << parameter.useRange << ':' << parameter.minValue << ':'
+            << parameter.maxValue << ':' << parameter.step << ':'
+            << parameter.materialVisible;
     return out.str();
 }
 
 bool IsFinite(float value) {
     return std::isfinite(value);
+}
+
+std::size_t NumericComponentCount(std::string value) {
+    if (const std::size_t open = value.find('('); open != std::string::npos)
+        value.erase(0, open + 1);
+    for (char& c : value)
+        if (c == ',' || c == '(' || c == ')') c = ' ';
+    std::istringstream input(value);
+    std::size_t count = 0;
+    float number = 0.0f;
+    while (input >> number) ++count;
+    return count;
 }
 
 } // namespace
@@ -78,6 +95,181 @@ bool ShaderValueTypesCompatible(ShaderValueType from, ShaderValueType to) {
     return from == ShaderValueType::Float
         && (to == ShaderValueType::Vec2 || to == ShaderValueType::Vec3
             || to == ShaderValueType::Vec4 || to == ShaderValueType::Color);
+}
+
+std::string ShaderParameterUniformName(const std::string& parameterName) {
+    std::string safe = parameterName;
+    for (char& c : safe)
+        if (!(c == '_' || (c >= '0' && c <= '9')
+              || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')))
+            c = '_';
+    if (safe.empty() || (safe.front() >= '0' && safe.front() <= '9'))
+        safe = "p_" + safe;
+    return "u_" + safe;
+}
+
+const char* ShaderDomainOutputNodeType(ShaderDomain domain) {
+    switch (domain) {
+    case ShaderDomain::Surface: return "SurfaceOutput";
+    case ShaderDomain::PostProcess: return "PostProcessOutput";
+    case ShaderDomain::Particle: return "ParticleOutput";
+    case ShaderDomain::Unlit: return "UnlitOutput";
+    }
+    return "SurfaceOutput";
+}
+
+bool ConvertShaderAssetDomain(ShaderAsset& asset, ShaderDomain domain,
+                              ShaderDomainConversionReport* outputReport) {
+    ShaderDomainConversionReport report;
+    report.from = asset.domain;
+    report.to = domain;
+    if (domain == asset.domain) {
+        report.success = true;
+        if (outputReport) *outputReport = report;
+        return true;
+    }
+
+    auto output = std::find_if(
+        asset.nodes.begin(), asset.nodes.end(),
+        [&](const ShaderGraphNode& node) {
+            return node.type == ShaderDomainOutputNodeType(asset.domain);
+        });
+    if (output == asset.nodes.end()) {
+        output = std::find_if(
+            asset.nodes.begin(), asset.nodes.end(),
+            [](const ShaderGraphNode& node) {
+                return node.type.find("Output") != std::string::npos;
+            });
+    }
+    if (output == asset.nodes.end()) {
+        report.error = "The shader graph has no output node.";
+        if (outputReport) *outputReport = report;
+        return false;
+    }
+
+    const std::uint64_t outputId = output->id;
+    std::unordered_map<std::string, std::uint64_t> oldConnections;
+    std::unordered_set<std::uint64_t> removedPins;
+    for (const ShaderGraphPin& pin : asset.pins) {
+        if (pin.nodeId != outputId) continue;
+        removedPins.insert(pin.id);
+        const auto link = std::find_if(
+            asset.links.begin(), asset.links.end(),
+            [&](const ShaderGraphLink& item) { return item.toPin == pin.id; });
+        if (link != asset.links.end()) oldConnections[pin.name] = link->fromPin;
+    }
+
+    static const std::unordered_set<std::string> particleNodes = {
+        "ParticleColor", "ParticleAge", "NormalizedLifetime",
+        "ParticleVelocity", "ParticleSize", "ParticleRotation",
+        "ParticleFrame", "TrailCoordinates", "SoftDepth", "ParticleOutput"
+    };
+    static const std::unordered_set<std::string> postNodes = {
+        "ScreenUV", "SceneColor", "SceneDepth", "SceneNormal",
+        "SceneVelocity", "TexelSize", "Exposure", "SceneColorSample",
+        "SceneDepthSample", "SceneNormalSample", "SceneVelocitySample",
+        "PixelOffset", "PostProcessOutput"
+    };
+    static const std::unordered_set<std::string> unlitNodes = {
+        "WidgetUV", "WidgetColor", "WidgetTexture", "ClipMask",
+        "SignedDistance", "UnlitOutput"
+    };
+    const auto exclusiveDomain = [&](const std::string& type) {
+        if (particleNodes.count(type)) return static_cast<int>(ShaderDomain::Particle);
+        if (postNodes.count(type)) return static_cast<int>(ShaderDomain::PostProcess);
+        if (unlitNodes.count(type)) return static_cast<int>(ShaderDomain::Unlit);
+        if (type == "SurfaceOutput") return static_cast<int>(ShaderDomain::Surface);
+        return -1;
+    };
+
+    std::unordered_set<std::uint64_t> removedNodes;
+    for (const ShaderGraphNode& node : asset.nodes) {
+        if (node.id == outputId) continue;
+        const int exclusive = exclusiveDomain(node.type);
+        if ((exclusive >= 0 && exclusive != static_cast<int>(domain))
+            || node.type.find("Output") != std::string::npos)
+            removedNodes.insert(node.id);
+    }
+    for (const ShaderGraphPin& pin : asset.pins)
+        if (removedNodes.count(pin.nodeId)) removedPins.insert(pin.id);
+
+    const std::size_t linksBefore = asset.links.size();
+    asset.links.erase(std::remove_if(
+        asset.links.begin(), asset.links.end(),
+        [&](const ShaderGraphLink& link) {
+            return removedPins.count(link.fromPin) || removedPins.count(link.toPin);
+        }), asset.links.end());
+    asset.pins.erase(std::remove_if(
+        asset.pins.begin(), asset.pins.end(),
+        [&](const ShaderGraphPin& pin) { return removedPins.count(pin.id); }),
+        asset.pins.end());
+    asset.nodes.erase(std::remove_if(
+        asset.nodes.begin(), asset.nodes.end(),
+        [&](const ShaderGraphNode& node) { return removedNodes.count(node.id); }),
+        asset.nodes.end());
+
+    output = std::find_if(
+        asset.nodes.begin(), asset.nodes.end(),
+        [&](const ShaderGraphNode& node) { return node.id == outputId; });
+    output->type = ShaderDomainOutputNodeType(domain);
+    output->name = std::string(ShaderDomainName(domain)) + " Output";
+    asset.domain = domain;
+
+    std::uint64_t next = asset.id + 1;
+    for (const auto& node : asset.nodes) next = std::max(next, node.id + 1);
+    for (const auto& pin : asset.pins) next = std::max(next, pin.id + 1);
+    for (const auto& link : asset.links) next = std::max(next, link.id + 1);
+    for (const auto& parameter : asset.parameters)
+        next = std::max(next, parameter.id + 1);
+
+    struct PinDefinition { const char* name; ShaderValueType type; };
+    static const std::vector<PinDefinition> surfacePins = {
+        {"Base Color", ShaderValueType::Color}, {"Emissive", ShaderValueType::Color},
+        {"Roughness", ShaderValueType::Float}, {"Metallic", ShaderValueType::Float},
+        {"Normal", ShaderValueType::Vec3}, {"Opacity", ShaderValueType::Float},
+        {"Alpha Cutoff", ShaderValueType::Float}, {"Clearcoat", ShaderValueType::Float},
+        {"Transmission", ShaderValueType::Float}, {"Subsurface", ShaderValueType::Float},
+        {"Sheen", ShaderValueType::Float}, {"Anisotropy", ShaderValueType::Float},
+        {"Displacement", ShaderValueType::Float}
+    };
+    static const std::vector<PinDefinition> colorPins = {
+        {"Color", ShaderValueType::Color}
+    };
+    const auto& definitions = domain == ShaderDomain::Surface
+        ? surfacePins : colorPins;
+    for (const PinDefinition& definition : definitions) {
+        const std::uint64_t pinId = next++;
+        asset.pins.push_back({pinId, outputId, definition.name,
+                              definition.type, true, false});
+        std::string oldName = definition.name;
+        if (definition.name == std::string("Base Color")
+            && report.from != ShaderDomain::Surface)
+            oldName = "Color";
+        else if (definition.name == std::string("Color")
+                 && report.from == ShaderDomain::Surface)
+            oldName = "Base Color";
+        const auto oldConnection = oldConnections.find(oldName);
+        if (oldConnection == oldConnections.end()) continue;
+        const auto source = std::find_if(
+            asset.pins.begin(), asset.pins.end(),
+            [&](const ShaderGraphPin& pin) {
+                return pin.id == oldConnection->second;
+            });
+        if (source == asset.pins.end()
+            || !ShaderValueTypesCompatible(source->type, definition.type))
+            continue;
+        asset.links.push_back({next++, source->id, pinId});
+        ++report.preservedOutputLinks;
+    }
+    report.removedNodes = removedNodes.size();
+    // A semantically preserved output is rebuilt with a new pin/link ID, so it
+    // must not be reported as lost merely because the old serialized link was
+    // replaced.
+    report.removedLinks = linksBefore >= asset.links.size()
+        ? linksBefore - asset.links.size() : 0;
+    report.success = true;
+    if (outputReport) *outputReport = report;
+    return true;
 }
 
 std::vector<ShaderAssetIssue> ValidateShaderAsset(const ShaderAsset& asset) {
@@ -198,16 +390,57 @@ std::vector<ShaderAssetIssue> ValidateShaderAsset(const ShaderAsset& asset) {
 
     std::unordered_set<std::uint64_t> parameterIds;
     std::unordered_set<std::string> parameterNames;
+    std::unordered_set<std::string> parameterUniforms;
+    static const std::unordered_set<std::string> reservedUniforms = {
+        "u_ViewProjection", "u_Model", "u_Bones", "u_CameraPosition",
+        "u_Time", "u_DeltaTime", "u_LightDirection", "u_LightIntensity",
+        "u_ObjectColor"
+    };
     std::size_t textureCount = 0;
     for (const ShaderParameter& parameter : asset.parameters) {
         if (parameter.id == 0 || !parameterIds.insert(parameter.id).second)
             error("Parameter IDs must be non-zero and unique.");
         if (parameter.name.empty() || !parameterNames.insert(parameter.name).second)
             error("Parameter names must be non-empty and unique.");
+        if (!parameter.name.empty()) {
+            const std::string uniform =
+                ShaderParameterUniformName(parameter.name);
+            if (!parameterUniforms.insert(uniform).second)
+                error("Parameter names must map to unique shader uniforms.");
+            if (reservedUniforms.count(uniform))
+                error("Parameter name conflicts with an engine shader uniform.");
+        }
         if (static_cast<int>(parameter.type) < static_cast<int>(ShaderValueType::Float)
             || static_cast<int>(parameter.type) > static_cast<int>(ShaderValueType::Texture2D))
             error("Parameter value type is invalid.");
         if (parameter.type == ShaderValueType::Texture2D) ++textureCount;
+        if (parameter.type == ShaderValueType::Bool) {
+            std::string value = parameter.defaultValue;
+            std::transform(value.begin(), value.end(), value.begin(),
+                [](unsigned char c) {
+                    return static_cast<char>(std::tolower(c));
+                });
+            if (value != "true" && value != "false" && value != "0"
+                && value != "1")
+                warning("Boolean parameter default should be true or false.");
+        } else if (parameter.type != ShaderValueType::Texture2D) {
+            const std::size_t required =
+                parameter.type == ShaderValueType::Vec2 ? 2
+                : parameter.type == ShaderValueType::Vec3 ? 3
+                : parameter.type == ShaderValueType::Vec4
+                    || parameter.type == ShaderValueType::Color ? 4 : 1;
+            if (NumericComponentCount(parameter.defaultValue) < required)
+                warning("Parameter default has fewer numeric components than its type.");
+        }
+        if (parameter.useRange) {
+            if (!IsFinite(parameter.minValue) || !IsFinite(parameter.maxValue)
+                || !IsFinite(parameter.step))
+                error("Parameter range values must be finite.");
+            else if (parameter.minValue > parameter.maxValue)
+                error("Parameter range minimum cannot exceed its maximum.");
+            else if (parameter.step <= 0.0f)
+                error("Parameter range step must be greater than zero.");
+        }
     }
     if (textureCount > kMaximumTextures) error("Shader exposes more than 16 textures.");
     return issues;
@@ -311,13 +544,21 @@ bool SaveShaderAsset(const std::string& path, ShaderAsset& asset, std::string* e
             << ' ' << (pin.required ? 1 : 0) << '\n';
     for (const ShaderGraphLink& link : asset.links)
         out << "link " << link.id << ' ' << link.fromPin << ' ' << link.toPin << '\n';
-    for (const ShaderParameter& parameter : asset.parameters)
+    for (const ShaderParameter& parameter : asset.parameters) {
         out << "parameter " << parameter.id << ' ' << std::quoted(parameter.name)
             << ' ' << static_cast<int>(parameter.type) << ' '
             << std::quoted(parameter.defaultValue) << ' '
             << (parameter.assetId.Valid()
                     ? parameter.assetId.ToString() : std::string("-"))
             << '\n';
+        out << "parameter_meta " << parameter.id << ' '
+            << std::quoted(parameter.group) << ' '
+            << std::quoted(parameter.tooltip) << ' '
+            << (parameter.useRange ? 1 : 0) << ' '
+            << parameter.minValue << ' ' << parameter.maxValue << ' '
+            << parameter.step << ' '
+            << (parameter.materialVisible ? 1 : 0) << '\n';
+    }
     out << "ASSET_DEPS " << dependencies.size();
     for (AssetHandle dependency : dependencies)
         out << ' ' << dependency.ToString();
@@ -448,6 +689,27 @@ bool LoadShaderAsset(const std::string& path, ShaderAsset* output, std::string* 
                 }
             }
             asset.parameters.push_back(std::move(parameter));
+        } else if (record == "parameter_meta") {
+            std::uint64_t id = 0;
+            int useRange = 0, materialVisible = 1;
+            std::string group, tooltip;
+            float minValue = 0.0f, maxValue = 1.0f, step = 0.01f;
+            in >> id >> std::quoted(group) >> std::quoted(tooltip)
+               >> useRange >> minValue >> maxValue >> step >> materialVisible;
+            const auto parameter = std::find_if(
+                asset.parameters.begin(), asset.parameters.end(),
+                [id](const ShaderParameter& candidate) {
+                    return candidate.id == id;
+                });
+            if (parameter != asset.parameters.end()) {
+                parameter->group = group.empty() ? "General" : std::move(group);
+                parameter->tooltip = std::move(tooltip);
+                parameter->useRange = useRange != 0;
+                parameter->minValue = minValue;
+                parameter->maxValue = maxValue;
+                parameter->step = step;
+                parameter->materialVisible = materialVisible != 0;
+            }
         } else {
             std::string ignored;
             std::getline(in, ignored);

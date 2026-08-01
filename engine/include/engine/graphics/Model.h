@@ -81,6 +81,18 @@ public:
 
     // Quick stats (handy for tests / debug overlays).
     std::size_t SubMeshCount() const { return m_subMeshes.size(); }
+    std::size_t VertexCount() const {
+        std::size_t count = 0;
+        for (const SubMesh& subMesh : m_subMeshes)
+            count += subMesh.mesh.VertexCount();
+        return count;
+    }
+    std::size_t TriangleCount() const {
+        std::size_t count = 0;
+        for (const SubMesh& subMesh : m_subMeshes)
+            count += subMesh.mesh.TriangleCount();
+        return count;
+    }
 
 private:
     std::vector<SubMesh>                  m_subMeshes;

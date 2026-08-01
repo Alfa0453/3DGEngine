@@ -14,7 +14,7 @@ The engine is C++17, uses OpenGL, and follows one central boundary:
 ## Read by subject
 
 1. [Core application and project architecture](01-core-architecture.md)
-2. [ECS, components, systems, prefabs, and scenes](02-ecs-scenes.md)
+2. [ECS, components, systems, prefabs, scenes, worlds, and level streaming](02-ecs-scenes.md)
 3. [Native assets, registry, importing, loading, and cooking](03-assets.md)
 4. [Rendering, lighting, cameras, environment, terrain, and water](04-rendering.md)
 5. [Materials, textures, and shader graphs](05-materials-shaders.md)
@@ -34,7 +34,7 @@ The engine is C++17, uses OpenGL, and follows one central boundary:
 ```text
 Window events
   -> variable Update
-       input, scripts, audio, animation, camera, UI
+       unscaled clock, time dilation, input, scripts, audio, animation, camera, UI
   -> zero or more fixed updates
        game mode, scripts, gameplay, AI, controllers, ragdoll activation,
        physics, projectile/contact processing
@@ -47,6 +47,11 @@ Window events
 Physics and gameplay that affect collision should run at the fixed step.
 Presentation systems such as animation blending, audio listener updates, camera
 effects, and UI normally run once per rendered frame.
+
+Gameplay timers, scripts, animation, AI, particles, cameras, and physics consume
+the globally scaled gameplay delta. Editor UI and audio mixing remain on
+unscaled time. Hit-stop duration is also counted with unscaled time, allowing a
+complete gameplay freeze to release reliably.
 
 ## Asset and scene flow
 
@@ -78,4 +83,3 @@ Source file (FBX/OBJ/glTF/PNG/JPEG)
 - [Fireball spell tutorial](../TUTORIAL_FireballSpell.md)
 - [Audio system guide](../AUDIO_SYSTEM.md)
 - [Existing engine manual](../ENGINE_MANUAL.md)
-

@@ -172,22 +172,67 @@ protected:
     ecs::Transform* FindTransform(const std::string& name);
     bool SocketTransform(const std::string& name, glm::mat4* world) const;
     bool SocketPosition(const std::string& name, glm::vec3* position) const;
+    int SplinePointCount(ecs::Entity spline) const;
+    bool IsSplineClosed(ecs::Entity spline) const;
+    bool SetSplineClosed(ecs::Entity spline, bool closed);
+    glm::vec3 GetSplinePoint(ecs::Entity spline, int index,
+                             const glm::vec3& fallback = glm::vec3(0.0f)) const;
+    bool SetSplinePoint(ecs::Entity spline, int index, const glm::vec3& point);
+    glm::vec3 GetSplinePointRotation(ecs::Entity spline, int index,
+                                     const glm::vec3& fallback = glm::vec3(0.0f)) const;
+    bool SetSplinePointRotation(ecs::Entity spline, int index,
+                                const glm::vec3& degrees);
+    int AddSplinePoint(ecs::Entity spline, const glm::vec3& point,
+                       const glm::vec3& rotationDegrees = glm::vec3(0.0f));
+    bool InsertSplinePoint(ecs::Entity spline, int index, const glm::vec3& point,
+                           const glm::vec3& rotationDegrees = glm::vec3(0.0f));
+    bool RemoveSplinePoint(ecs::Entity spline, int index);
+    bool TranslateSpline(ecs::Entity spline, const glm::vec3& delta);
+    glm::vec3 SplinePositionAt(ecs::Entity spline, float normalizedDistance,
+                               const glm::vec3& fallback = glm::vec3(0.0f)) const;
+    glm::vec3 SplineTangentAt(ecs::Entity spline, float normalizedDistance,
+                              const glm::vec3& fallback = glm::vec3(0.0f, 0.0f, 1.0f)) const;
     void DestroySelf();
     void Destroy(ecs::Entity entity);
     ecs::Entity SpawnEmpty(const std::string& name, const glm::vec3& position = glm::vec3(0.0f));
     ecs::Entity SpawnFromObject(const std::string& prototypeName,
                                 const glm::vec3& position);
     void RequestSceneLoad(const std::string& runtimeScenePath);
+    // Manual level-streaming requests. The identifier may be the level's
+    // manifest path, file name, or file stem.
+    void RequestLevelLoad(const std::string& level);
+    void RequestLevelUnload(const std::string& level);
     bool SaveValue(const std::string& key, const std::string& value);
     std::string LoadValue(const std::string& key,
                           const std::string& fallback = {}) const;
     bool SaveCheckpoint(const std::string& name, const glm::vec3& position);
     bool LoadCheckpoint(const std::string& name, glm::vec3* position) const;
     int SetTimer(float seconds, std::function<void()> callback, bool repeat = false);
+    int SetTimerByEvent(float seconds, std::function<void()> event,
+                        bool repeat = false) {
+        return SetTimer(seconds, std::move(event), repeat);
+    }
+    // Native C++ has no reflection metadata, so expose a small per-script
+    // function table. Register once (normally in OnCreate), then timers can use
+    // the same string-based workflow as visual scripting and Lua.
+    bool BindTimerFunction(const std::string& functionName,
+                           std::function<void()> function);
+    bool UnbindTimerFunction(const std::string& functionName);
+    int SetTimerByFunctionName(const std::string& functionName, float seconds,
+                               bool repeat = false);
     int Delay(float seconds, std::function<void()> callback) {
         return SetTimer(seconds, std::move(callback), false);
     }
     void ClearTimer(int timerId);
+    int ClearTimerByFunctionName(const std::string& functionName);
+    bool IsTimerActive(int timerId) const;
+    bool IsTimerActive(const std::string& functionName) const;
+
+    void SetGlobalTimeDilation(float dilation);
+    float GlobalTimeDilation() const;
+    float EffectiveTimeDilation() const;
+    void HitStop(float unscaledSeconds, float dilation = 0.0f);
+    bool IsHitStopActive() const;
     // Start a multi-step sequence (Do / Wait / WaitUntil), ticked automatically each update.
     ScriptSequence& Sequence();
     bool IsKeyDown(int key) const;
@@ -359,16 +404,21 @@ protected:
     }
 
 private:
+    virtual bool HasTimerFunction(const std::string& functionName) const;
+    virtual bool InvokeTimerFunction(const std::string& functionName);
+
     struct Timer {
         int id = 0;
         float remaining = 0.0f;
         float interval = 0.0f;
         bool repeat = false;
         bool cancelled = false;
+        std::string functionName;
         std::function<void()> callback;
     };
     ScriptContext m_context;
     std::vector<Timer> m_timers;
+    std::unordered_map<std::string, std::function<void()>> m_timerFunctions;
     int m_nextTimerId = 1;
     std::vector<std::unique_ptr<ScriptSequence>> m_sequences;
 };
@@ -593,6 +643,9 @@ void FixedUpdateScripts(ecs::Registry& registry, float dt, const ScriptInputStat
 // Calls OnDestroy() on every live script and releases the instances. Call when
 // leaving Play mode or unloading the scene so scripts can clean up.
 void ShutdownScripts(ecs::Registry& registry);
+// Level streaming variant: invokes OnDestroy and releases scripts only for the
+// entities being unloaded, leaving scripts in other resident levels untouched.
+void ShutdownScripts(ecs::Registry& registry, const std::vector<ecs::Entity>& entities);
 
 // Optional sink for script errors (a script that threw and was disabled). The editor
 // wires this to its console so failures are visible instead of only hitting stderr.
@@ -602,5 +655,11 @@ void SetScriptErrorHandler(std::function<void(const std::string&)> handler);
 // Scene requests are queued by scripts and consumed by the runtime host after the
 // current script update, avoiding registry destruction from inside a callback.
 std::string ConsumeScriptSceneLoadRequest();
+
+struct ScriptLevelStreamRequest {
+    std::string level;
+    bool load = true;
+};
+std::vector<ScriptLevelStreamRequest> ConsumeScriptLevelStreamRequests();
 
 } // namespace engine

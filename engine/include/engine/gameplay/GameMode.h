@@ -39,6 +39,20 @@ public:
     void SetScore(int value);
     void SetMessage(const std::string& message) { m_message = message; }
 
+    // --- Global gameplay time --------------------------------------------
+    // Dilation affects gameplay/script/animation/physics delta time, not the
+    // editor UI or audio mixer. HitStop temporarily layers another dilation on
+    // top and counts down in unscaled real time, so a zero-scale freeze recovers.
+    void SetGlobalTimeDilation(float dilation);
+    float GlobalTimeDilation() const { return m_timeDilation; }
+    float EffectiveTimeDilation() const;
+    float ScaleDelta(float unscaledDelta) const;
+    void HitStop(float unscaledSeconds, float dilation = 0.0f);
+    void ClearHitStop();
+    bool HitStopActive() const { return m_hitStopRemaining > 0.0f; }
+    float HitStopRemaining() const { return m_hitStopRemaining; }
+    void UpdateUnscaledTime(float unscaledDelta);
+
     // --- Rules ------------------------------------------------------------
     // Built-in: end the run (GameOver) when the player entity's Health dies. Turn
     // off for games that handle death themselves (respawn, lives, etc.).
@@ -62,6 +76,9 @@ private:
     int         m_score = 0;
     float       m_elapsed = 0.0f;
     std::string m_message;
+    float       m_timeDilation = 1.0f;
+    float       m_hitStopDilation = 1.0f;
+    float       m_hitStopRemaining = 0.0f;
 };
 
 } // namespace engine

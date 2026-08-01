@@ -123,6 +123,69 @@ int main() {
                      == first.animationIds.size() + 1,
           "registry records skeleton and animation dependencies");
 
+    const fs::path animationOnlyBase =
+        content / "Animations" / "WizardMotion";
+    const fs::path animationSource =
+        fs::path(THREEDG_TEST_SOURCE_DIR)
+        / "wizardscene" / "assets" / "anims" / "WalkForwardAnim.FBX";
+    Check(fs::is_regular_file(animationSource),
+          "animation FBX regression fixture exists");
+    fs::create_directories(animationOnlyBase.parent_path(), ec);
+    engine::SkeletalImportOptions animationOnlyOptions;
+    animationOnlyOptions.importSkeletalMesh = false;
+    animationOnlyOptions.importSkeleton = false;
+    animationOnlyOptions.importEmbeddedAnimations = true;
+    animationOnlyOptions.reuseSkeletonPath =
+        fs::relative(first.skeletonPath, content).string();
+    engine::SkeletalImportResult animationOnly;
+    const bool importedAnimationOnly = engine::ImportSkeletalAssetsToContent(
+        animationSource.string(), animationOnlyBase.string(), content.string(),
+        animationOnlyOptions, &registry, &animationOnly, &error);
+    if (!importedAnimationOnly)
+        std::cerr << "Animation-only import error: " << error << '\n';
+    Check(importedAnimationOnly,
+          "animation-only import reuses a selected engine skeleton");
+    Check(!animationOnly.skeletalMeshId.Valid()
+              && animationOnly.skeletalMeshPath.empty()
+              && animationOnly.skeletonId == first.skeletonId
+              && animationOnly.skeletonPath == first.skeletonPath
+              && !fs::exists(animationOnlyBase.string() + ".3dgskmesh")
+              && !fs::exists(animationOnlyBase.string() + ".3dgskel")
+              && !animationOnly.animationPaths.empty(),
+          "animation-only import emits no duplicate mesh or skeleton assets");
+    for (std::size_t i = 0; i < animationOnly.animationPaths.size(); ++i) {
+        engine::AnimationAssetData loadedAnimation;
+        Check(fs::is_regular_file(animationOnly.animationPaths[i])
+                  && engine::LoadAnimationAsset(
+                      animationOnly.animationPaths[i], &loadedAnimation, &error)
+                  && loadedAnimation.skeletonId == first.skeletonId
+                  && registry.Find(animationOnly.animationIds[i])
+                  && registry.Find(animationOnly.animationIds[i])->dependencies
+                      == std::vector<engine::AssetHandle>{first.skeletonId},
+              "animation-only assets depend on the reused skeleton identity");
+    }
+
+    const fs::path reusedMeshBase = content / "Characters" / "WizardReused";
+    engine::SkeletalImportOptions reusedMeshOptions;
+    reusedMeshOptions.importSkeletalMesh = true;
+    reusedMeshOptions.importSkeleton = false;
+    reusedMeshOptions.importEmbeddedAnimations = false;
+    reusedMeshOptions.reuseSkeletonPath =
+        fs::relative(first.skeletonPath, content).string();
+    engine::SkeletalImportResult reusedMesh;
+    Check(engine::ImportSkeletalAssetsToContent(
+              source.string(), reusedMeshBase.string(), content.string(),
+              reusedMeshOptions, &registry, &reusedMesh, &error)
+              && reusedMesh.skeletalMeshId.Valid()
+              && fs::is_regular_file(reusedMesh.skeletalMeshPath)
+              && !fs::exists(reusedMeshBase.string() + ".3dgskel")
+              && reusedMesh.skeletonId == first.skeletonId
+              && reusedMesh.animationPaths.empty()
+              && registry.Find(reusedMesh.skeletalMeshId)
+              && registry.Find(reusedMesh.skeletalMeshId)->dependencies
+                  == std::vector<engine::AssetHandle>{first.skeletonId},
+          "mesh output can reuse a skeleton without duplicating skeleton or animations");
+
     const engine::AssetHandle meshId = first.skeletalMeshId;
     const engine::AssetHandle skeletonId = first.skeletonId;
     const std::vector<engine::AssetHandle> animationIds = first.animationIds;

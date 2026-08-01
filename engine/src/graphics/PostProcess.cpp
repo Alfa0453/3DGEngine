@@ -2,6 +2,7 @@
 
 #include "engine/graphics/VertexLayout.h"
 #include "engine/graphics/Texture.h"
+#include "engine/graphics/ShaderParameterBinding.h"
 
 #include <glad/glad.h>
 #include <glm/glm.hpp>
@@ -11,7 +12,6 @@
 #include <utility>
 #include <vector>
 #include <algorithm>
-#include <sstream>
 
 namespace engine {
 namespace {
@@ -63,15 +63,47 @@ const char* kCompositeFrag = R"GLSL(
 in vec2 vUV; out vec4 FragColor;
 uniform sampler2D uScene;
 uniform sampler2D uBloom;
+uniform sampler2D uSceneDepth;
 uniform float uExposure;
 uniform float uBloomStrength;
+uniform float uTime;
+uniform float uUnderwaterBlend;
+uniform vec3  uUnderwaterTint;
+uniform float uUnderwaterFogDensity;
+uniform float uUnderwaterDistortion;
+uniform float uUnderwaterCausticsStrength;
+uniform float uUnderwaterCausticsScale;
 vec3 ACES(vec3 x) {
     const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
     return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
 }
 void main() {
-    vec3 hdr = texture(uScene, vUV).rgb;
-    hdr += texture(uBloom, vUV).rgb * uBloomStrength;
+    float underwater = clamp(uUnderwaterBlend, 0.0, 1.0);
+    vec2 wave = vec2(
+        sin(vUV.y * 31.0 + uTime * 1.7) + sin(vUV.y * 13.0 - uTime * 0.9),
+        cos(vUV.x * 27.0 - uTime * 1.4) + cos(vUV.x * 11.0 + uTime * 0.8));
+    vec2 sampleUv = clamp(vUV + wave * (0.5 * uUnderwaterDistortion * underwater),
+                          vec2(0.001), vec2(0.999));
+    vec3 hdr = texture(uScene, sampleUv).rgb;
+    hdr += texture(uBloom, sampleUv).rgb * uBloomStrength;
+    if (underwater > 0.0001) {
+        float rawDepth = texture(uSceneDepth, sampleUv).r;
+        float distanceHint = smoothstep(0.15, 1.0, rawDepth);
+        float fog = underwater * (1.0 - exp(-uUnderwaterFogDensity
+                    * mix(1.0, 12.0, distanceHint)));
+        vec3 filtered = hdr * mix(vec3(1.0), uUnderwaterTint * 2.0, fog * 0.72);
+        filtered = mix(filtered, uUnderwaterTint * max(dot(hdr, vec3(0.333)), 0.16),
+                       fog * 0.38);
+        float causticA = sin((sampleUv.x + sampleUv.y) * uUnderwaterCausticsScale * 18.0
+                             + uTime * 1.8);
+        float causticB = sin((sampleUv.x - sampleUv.y) * uUnderwaterCausticsScale * 15.0
+                             - uTime * 1.3);
+        float caustics = pow(max(0.0, 1.0 - abs(causticA + causticB) * 0.55), 7.0);
+        filtered += uUnderwaterTint * caustics * uUnderwaterCausticsStrength
+                    * underwater * (1.0 - fog * 0.6);
+        float vignette = 1.0 - smoothstep(0.20, 0.85, length(vUV - vec2(0.5)));
+        hdr = filtered * mix(1.0, mix(0.82, 1.0, vignette), underwater);
+    }
     vec3 col = ACES(hdr * uExposure);
     col = pow(col, vec3(1.0 / 2.2));
     FragColor = vec4(col, 1.0);
@@ -136,45 +168,17 @@ Mesh MakeFullscreenQuad() {
     return Mesh(verts, idx, VertexLayout{ {2}, {2} });
 }
 
-std::vector<float> ParameterNumbers(std::string value) {
-    std::replace(value.begin(), value.end(), ',', ' ');
-    std::replace(value.begin(), value.end(), '(', ' ');
-    std::replace(value.begin(), value.end(), ')', ' ');
-    std::istringstream input(value);
-    std::vector<float> result;
-    float number = 0.0f;
-    while (input >> number) result.push_back(number);
-    return result;
-}
-
 void UploadEffectParameters(Shader& shader, const PostProcess::Effect& effect) {
     int textureUnit = 4;
     for (const auto& entry : effect.parameters) {
-        const std::string uniform = "u_" + entry.first;
         const auto type = effect.parameterTypes.find(entry.first);
         const int valueType =
             type == effect.parameterTypes.end() ? 0 : type->second;
-        if (valueType == 7) {
-            const auto texture = effect.textures.find(entry.first);
-            if (texture != effect.textures.end() && texture->second) {
-                texture->second->Bind(static_cast<unsigned int>(textureUnit));
-                shader.SetInt(uniform, textureUnit++);
-            }
-            continue;
-        }
-        const std::vector<float> values = ParameterNumbers(entry.second);
-        if (valueType == 1 || valueType == 2)
-            shader.SetInt(uniform, entry.second == "true" ? 1
-                : values.empty() ? 0 : static_cast<int>(values[0]));
-        else if (valueType == 3 && values.size() >= 2)
-            shader.SetVec2(uniform, glm::vec2(values[0], values[1]));
-        else if (valueType == 4 && values.size() >= 3)
-            shader.SetVec3(uniform, glm::vec3(values[0], values[1], values[2]));
-        else if ((valueType == 5 || valueType == 6) && values.size() >= 4)
-            shader.SetVec4(
-                uniform, glm::vec4(values[0], values[1], values[2], values[3]));
-        else
-            shader.SetFloat(uniform, values.empty() ? 0.0f : values[0]);
+        const auto texture = effect.textures.find(entry.first);
+        textureUnit = UploadShaderParameter(
+            shader, entry.first, valueType, entry.second,
+            texture == effect.textures.end() ? nullptr : texture->second,
+            textureUnit);
     }
 }
 
@@ -349,8 +353,16 @@ void PostProcess::RenderComposite(int screenWidth, int screenHeight, float dt,
     m_composite.Bind();
     scene->BindColorTexture(0); m_composite.SetInt("uScene", 0);
     src->BindColorTexture(1);  m_composite.SetInt("uBloom", 1);
+    m_hdr.BindDepthTexture(2); m_composite.SetInt("uSceneDepth", 2);
     m_composite.SetFloat("uExposure", exposure);
     m_composite.SetFloat("uBloomStrength", settings.bloom ? settings.bloomStrength : 0.0f);
+    m_composite.SetFloat("uTime", m_time);
+    m_composite.SetFloat("uUnderwaterBlend", underwater.blend);
+    m_composite.SetVec3("uUnderwaterTint", underwater.tint);
+    m_composite.SetFloat("uUnderwaterFogDensity", underwater.fogDensity);
+    m_composite.SetFloat("uUnderwaterDistortion", underwater.distortion);
+    m_composite.SetFloat("uUnderwaterCausticsStrength", underwater.causticsStrength);
+    m_composite.SetFloat("uUnderwaterCausticsScale", underwater.causticsScale);
     m_quad.Draw();
 
     // FXAA the LDR result to the final target (edge AA for the offscreen path).

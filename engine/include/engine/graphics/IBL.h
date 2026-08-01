@@ -29,6 +29,9 @@ public:
 
     // Bind irradiance / prefilter / BRDF-LUT to the given texture units.
     void Bind(unsigned int irradianceUnit, unsigned int prefilterUnit, unsigned int brdfUnit) const;
+    // Bind only the roughness-prefiltered environment cubemap. Lightweight forward
+    // effects such as water do not need the diffuse irradiance map or BRDF LUT.
+    void BindPrefilter(unsigned int unit) const;
 
     float MaxReflectionLod() const { return static_cast<float>(m_prefilterMips - 1); }
 

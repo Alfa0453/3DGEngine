@@ -275,7 +275,8 @@ bool EditorAssets::ImportAsset(const std::string& sourcePath,
             fs::path(CurrentPath()) / (source.stem().string() + ".3dgmesh"));
         engine::StaticMeshImportResult result;
         std::string staticError;
-        const bool tryStatic = modelMode != ModelImportMode::SkeletalMesh;
+        const bool tryStatic = modelMode == ModelImportMode::Automatic
+            || modelMode == ModelImportMode::StaticMesh;
         if (tryStatic && engine::ImportStaticMeshToAsset(
                 source.string(), destination.string(), m_rootPath,
                 m_staticMeshImportOptions, m_assetRegistry, &result,
@@ -302,9 +303,24 @@ bool EditorAssets::ImportAsset(const std::string& sourcePath,
         }
 
         fs::path base = fs::path(CurrentPath()) / source.stem();
+        const auto generatedAnimationExists = [&](const fs::path& candidate) {
+            const fs::path folder = candidate.parent_path();
+            const std::string prefix = candidate.filename().string() + "_";
+            std::error_code scanError;
+            for (fs::directory_iterator it(folder, scanError), end;
+                 !scanError && it != end; it.increment(scanError)) {
+                if (!it->is_regular_file(scanError)) continue;
+                const fs::path path = it->path();
+                if (Lower(path.extension().string()) == ".3dganim"
+                    && path.stem().string().rfind(prefix, 0) == 0)
+                    return true;
+            }
+            return false;
+        };
         int suffix = 1;
         while (fs::exists(base.string() + ".3dgskmesh", ec)
-               || fs::exists(base.string() + ".3dgskel", ec)) {
+               || fs::exists(base.string() + ".3dgskel", ec)
+               || generatedAnimationExists(base)) {
             base = fs::path(CurrentPath())
                 / (source.stem().string() + "_" + std::to_string(suffix++));
         }
@@ -322,11 +338,15 @@ bool EditorAssets::ImportAsset(const std::string& sourcePath,
             }
             return false;
         }
-        m_lastImportMessage = "Imported skeletal assets: "
-            + std::to_string(skeletalResult.boneCount) + " bones, "
-            + std::to_string(skeletalResult.vertexCount) + " vertices, "
+        m_lastImportMessage = "Imported skeletal source: "
             + std::to_string(skeletalResult.animationPaths.size())
             + " animation clip(s)";
+        if (!skeletalResult.skeletalMeshPath.empty())
+            m_lastImportMessage += ", mesh "
+                + fs::path(skeletalResult.skeletalMeshPath).filename().string();
+        if (!skeletalResult.skeletonPath.empty())
+            m_lastImportMessage += ", skeleton "
+                + fs::path(skeletalResult.skeletonPath).filename().string();
         if (!Refresh(m_rootPath, error)) return false;
         std::string selectedPath = !skeletalResult.skeletalMeshPath.empty()
             ? skeletalResult.skeletalMeshPath
@@ -411,6 +431,27 @@ std::vector<std::string> EditorAssets::ContentFolderPaths() const {
     return folders;
 }
 
+std::vector<std::string> EditorAssets::ContentAssetPaths(Type type) const {
+    std::vector<std::string> paths;
+    std::error_code ec;
+    if (m_rootPath.empty() || !fs::is_directory(m_rootPath, ec)) return paths;
+    for (fs::recursive_directory_iterator it(
+             m_rootPath, fs::directory_options::skip_permission_denied, ec), end;
+         it != end; it.increment(ec)) {
+        if (ec) {
+            ec.clear();
+            continue;
+        }
+        if (!it->is_regular_file(ec)
+            || ClassifyExtension(Lower(it->path().extension().string())) != type)
+            continue;
+        const fs::path relative = fs::relative(it->path(), m_rootPath, ec);
+        if (!ec) paths.push_back(NormalizeSlashes(relative.string()));
+    }
+    std::sort(paths.begin(), paths.end());
+    return paths;
+}
+
 bool EditorAssets::ReimportSelectedStaticMesh(std::string* error) {
     m_lastImportMessage.clear();
     const Asset* selected = SelectedAsset();
@@ -489,8 +530,12 @@ bool EditorAssets::ReimportSelectedSkeletalAssets(std::string* error) {
     fs::path base = destination;
     base.replace_extension();
     engine::SkeletalImportResult result;
+    engine::SkeletalImportOptions reimportOptions = m_skeletalImportOptions;
+    reimportOptions.importSkeletalMesh = true;
+    reimportOptions.importSkeleton = true;
+    reimportOptions.reuseSkeletonPath.clear();
     if (!engine::ImportSkeletalAssetsToContent(
-            sourcePath, base.string(), m_rootPath, m_skeletalImportOptions,
+            sourcePath, base.string(), m_rootPath, reimportOptions,
             m_assetRegistry, &result, error))
         return false;
     m_lastImportMessage = "Reimported skeletal assets: "
@@ -923,6 +968,8 @@ const char *EditorAssets::TypeName(Type type)
         case Type::BehaviorGraph: return "Behavior Tree";
         case Type::Prefab: return "Prefab";
         case Type::Script: return "Script";
+        case Type::World: return "World";
+        case Type::Foliage: return "Foliage";
         case Type::Other: return "Other";
     }
     return "Other";
@@ -991,7 +1038,13 @@ EditorAssets::Type EditorAssets::ClassifyExtension(const std::string &extension)
     if (extension == ".btgraph") {
         return Type::BehaviorGraph;
     }
-    if (extension == ".h" || extension == ".hpp"
+    if (extension == ".3dgworld") {
+        return Type::World;
+    }
+    if (extension == ".3dgfoliage") {
+        return Type::Foliage;
+    }
+    if (extension == ".h" || extension == ".hpp" || extension == ".lua"
         || extension == ".cpp" || extension == ".cc") {
         return Type::Script;
     }

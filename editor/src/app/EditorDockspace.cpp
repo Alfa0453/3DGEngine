@@ -10,6 +10,8 @@
 #include <engine/graphics/SkinnedModel.h>
 #include <engine/graphics/ImageDecode.h>
 #include <engine/assets/ShaderAsset.h>
+#include <engine/assets/FoliageAsset.h>
+#include <engine/math/Spline.h>
 #include <engine/physics/PhysicsComponents.h>
 
 #include <glm/gtc/quaternion.hpp>
@@ -36,6 +38,7 @@ std::array<char, 128> g_scriptClassBuffer{};
 engine::ecs::Entity g_objectNameEntity = engine::ecs::kNull;
 engine::ecs::Entity g_scriptEntity = engine::ecs::kNull;
 int g_scriptTemplateIndex = 0;
+int g_scriptLanguageIndex = 0; // 0 = native C++, 1 = Lua
 constexpr std::size_t kScriptSourceCapacity = 128u * 1024u;
 std::vector<char> g_scriptSourceBuffer(kScriptSourceCapacity, '\0');
 std::string g_scriptSourcePath;
@@ -58,6 +61,9 @@ int g_cameraSequenceShotSelection = -1;
 int g_cameraSequenceCueSelection = -1;
 int g_cameraSequenceNameSelection = -1;
 std::array<char, 128> g_cameraSequenceName{};
+engine::FoliageAssetData g_foliageDraft;
+std::string g_foliageDraftPath;
+bool g_foliageDraftDirty = false;
 
 struct CollisionChannelDesc {
     const char* name;
@@ -1025,19 +1031,22 @@ std::string StoredScriptPath(const std::filesystem::path& absolutePath) {
               : relative.lexically_normal().generic_string();
 }
 
-std::string ScriptHeaderPathFor(const EditorDockspace::Context& context,
-                                const std::string& className) {
+std::string ScriptPathFor(const EditorDockspace::Context& context,
+                          const std::string& className,
+                          bool lua = false) {
     std::error_code ec;
     const std::filesystem::path contentRoot =
         context.assets && !context.assets->RootPath().empty()
             ? std::filesystem::absolute(context.assets->RootPath(), ec)
             : GameModuleRootFor(context).parent_path() / "Content";
-    return StoredScriptPath(contentRoot / "Scripts" / (className + ".h"));
+    return StoredScriptPath(contentRoot / "Scripts"
+        / (className + (lua ? ".lua" : ".h")));
 }
 
 struct SavedScriptEntry {
     std::string className;
     std::string storedPath;
+    bool lua = false;
 };
 
 std::vector<SavedScriptEntry> SavedScriptsFor(const EditorDockspace::Context& context) {
@@ -1053,8 +1062,10 @@ std::vector<SavedScriptEntry> SavedScriptsFor(const EditorDockspace::Context& co
     for (const std::filesystem::path& root : roots) {
         for (std::filesystem::directory_iterator it(root, ec), end;
              !ec && it != end; it.increment(ec)) {
-            if (!it->is_regular_file(ec) || it->path().extension() != ".h") continue;
-            {
+            if (!it->is_regular_file(ec)) continue;
+            const bool lua = it->path().extension() == ".lua";
+            if (!lua && it->path().extension() != ".h") continue;
+            if (!lua) {
                 std::ifstream source(it->path(), std::ios::binary);
                 const std::string contents((std::istreambuf_iterator<char>(source)),
                                            std::istreambuf_iterator<char>());
@@ -1066,18 +1077,19 @@ std::vector<SavedScriptEntry> SavedScriptsFor(const EditorDockspace::Context& co
             const std::string className = SanitizeScriptClassName(stem);
             if (className.empty() || className != stem) continue;
             const bool alreadyListed = std::any_of(scripts.begin(), scripts.end(),
-                [&className](const SavedScriptEntry& entry) {
-                    return entry.className == className;
+                [&className, lua](const SavedScriptEntry& entry) {
+                    return entry.className == className && entry.lua == lua;
                 });
             if (!alreadyListed) {
-                scripts.push_back({className, StoredScriptPath(it->path())});
+                scripts.push_back({className, StoredScriptPath(it->path()), lua});
             }
         }
         ec.clear();
     }
     std::sort(scripts.begin(), scripts.end(),
         [](const SavedScriptEntry& a, const SavedScriptEntry& b) {
-            return a.className < b.className;
+            return a.className == b.className ? a.lua < b.lua
+                                              : a.className < b.className;
         });
     return scripts;
 }
@@ -1266,10 +1278,11 @@ bool OpenScriptInPreferredEditor(EditorDockspace::Context& context,
 bool CreateScriptFiles(const EditorDockspace::Context& context,
                        const std::string& className,
                        ScriptTemplate scriptTemplate,
+                       bool lua,
                        std::string* scriptPath,
                        std::string* error) {
     const std::filesystem::path gameRoot = GameModuleRootFor(context);
-    if (!IsGameModuleRoot(gameRoot)) {
+    if (!lua && !IsGameModuleRoot(gameRoot)) {
         if (error) {
             *error = "Could not find the shared game module (game/CMakeLists.txt and game/include/game/GameModule.h).";
         }
@@ -1289,7 +1302,8 @@ bool CreateScriptFiles(const EditorDockspace::Context& context,
         return false;
     }
 
-    const std::filesystem::path headerPath = scriptRoot / (className + ".h");
+    const std::filesystem::path headerPath =
+        scriptRoot / (className + (lua ? ".lua" : ".h"));
     const std::filesystem::path docsRoot = scriptRoot / "Docs";
     std::filesystem::create_directories(docsRoot, ec);
     if (ec) {
@@ -1304,7 +1318,7 @@ bool CreateScriptFiles(const EditorDockspace::Context& context,
     // old file untouched so projects can migrate without losing user changes.
     const std::filesystem::path legacyHeader =
         gameRoot / "include" / "game" / "scripts" / (className + ".h");
-    if (!std::filesystem::exists(headerPath, ec)
+    if (!lua && !std::filesystem::exists(headerPath, ec)
         && std::filesystem::exists(legacyHeader, ec)) {
         std::filesystem::copy_file(legacyHeader, headerPath,
             std::filesystem::copy_options::skip_existing, ec);
@@ -1315,7 +1329,25 @@ bool CreateScriptFiles(const EditorDockspace::Context& context,
     }
 
     if (!std::filesystem::exists(headerPath)) {
-        if (IsBehaviorTreeTemplate(scriptTemplate)) {
+        if (lua) {
+            std::ostringstream source;
+            source
+                << "-- " << className << "\n"
+                << "-- Runs in Editor Play and packaged games without rebuilding.\n\n"
+                << "function OnCreate()\n"
+                << "    -- Called once when this object enters Play mode.\n"
+                << "end\n\n"
+                << "function OnUpdate(dt)\n"
+                << "    -- Example: Engine.Translate(0, 0, dt)\n"
+                << "end\n\n"
+                << "function OnFixedUpdate(dt)\n"
+                << "    -- Put fixed-step physics-related logic here.\n"
+                << "end\n\n"
+                << "function OnDestroy()\n"
+                << "    -- Called before this object or script is removed.\n"
+                << "end\n";
+            if (!WriteTextFile(headerPath, source.str(), error)) return false;
+        } else if (IsBehaviorTreeTemplate(scriptTemplate)) {
             std::string source;
             if (!LoadBehaviorTreeTemplate(gameRoot, scriptTemplate, className, &source, error)
                 || !WriteTextFile(headerPath, source, error)) {
@@ -1347,8 +1379,8 @@ bool CreateScriptFiles(const EditorDockspace::Context& context,
         }
     }
 
-    if (!UpdateEditorScriptRegistry(gameRoot, scriptRoot, className,
-                                    IsBehaviorTreeTemplate(scriptTemplate), error)) {
+    if (!lua && !UpdateEditorScriptRegistry(gameRoot, scriptRoot, className,
+                                             IsBehaviorTreeTemplate(scriptTemplate), error)) {
         return false;
     }
 
@@ -1356,11 +1388,18 @@ bool CreateScriptFiles(const EditorDockspace::Context& context,
         std::ostringstream doc;
         doc << "# " << className << "\n\n"
             << "## What It Does\n\n"
-            << (IsBehaviorTreeTemplate(scriptTemplate)
+            << (lua ? "Lua gameplay script generated by the editor. "
+                : IsBehaviorTreeTemplate(scriptTemplate)
                 ? "Behavior-tree script template generated by the editor. "
                 : "Gameplay script template generated by the editor. ")
             << ScriptTemplateDescription(scriptTemplate);
-        if (IsBehaviorTreeTemplate(scriptTemplate)) {
+        if (lua) {
+            doc << " It runs directly in Play mode and packaged games; no C++ rebuild is required.\n\n"
+                << "## How To Use It\n\n"
+                << "Define `OnCreate`, `OnUpdate(dt)`, `OnFixedUpdate(dt)`, and `OnDestroy` as needed. "
+                << "Use the global `Engine` table for transforms, input, fields, animation, audio, particles, camera shake, health, and game score/state. "
+                << "Save the file and start Play again to load the new version.\n";
+        } else if (IsBehaviorTreeTemplate(scriptTemplate)) {
             doc << " It derives from `engine::ai::BtScript` and is selected from the Script Class dropdown on a Behavior Graph script task, decorator, or service.\n\n"
                 << "## How To Use It\n\n"
                 << "Edit the generated methods, compile scripts, then open the Behavior Graph. Add the matching Script Task, Script Decorator, or Script Service and choose `" << className
@@ -3006,7 +3045,145 @@ void DrawAnimationPreview(EditorDockspace::Context& context, bool* open) {
 
     ImGui::Text("%s", state.selectedName.c_str());
     ImGui::SameLine();
-    ImGui::TextDisabled("(%s mode)", state.playMode ? "Play" : "Edit");
+    ImGui::TextDisabled("(%s)", state.assetMode ? "Asset Preview"
+        : state.playMode ? "Play mode" : "Edit mode");
+
+    if (state.assetMode) {
+        if (context.animationPreviewAssetPath
+            && ImGui::Button("Use Scene Selection")) {
+            context.animationPreviewAssetPath->clear();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Refresh Compatible Rigs"))
+            context.animationAssetRefreshRequested = true;
+        if (state.assetIsAnimation) {
+            ImGui::SameLine();
+            if (ImGui::Button("Open in Clip Editor"))
+                context.animationAssetOpenInClipEditorRequested = true;
+        }
+
+        ImGui::TextWrapped("Asset: %s", state.assetPath.c_str());
+        ImGui::TextDisabled("Skeleton: %s",
+            state.skeletonId.empty() ? "-" : state.skeletonId.c_str());
+
+        const std::string rigLabel = state.previewMeshPath.empty()
+            ? std::string("No compatible preview mesh")
+            : std::filesystem::path(state.previewMeshPath).filename().string();
+        ImGui::SetNextItemWidth(-1.0f);
+        if (ImGui::BeginCombo("Preview Mesh", rigLabel.c_str())) {
+            for (const auto& choice : state.previewMeshes) {
+                ImGui::PushID(choice.path.c_str());
+                if (!choice.compatible) ImGui::BeginDisabled();
+                const bool selected = choice.path == state.previewMeshPath;
+                if (ImGui::Selectable(choice.displayName.c_str(), selected)
+                    && choice.compatible
+                    && context.animationPreviewMeshPath) {
+                    *context.animationPreviewMeshPath = choice.path;
+                    context.animationAssetRefreshRequested = true;
+                }
+                if (!choice.compatible) ImGui::EndDisabled();
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                    ImGui::SetTooltip("%s\n%s", choice.path.c_str(),
+                        choice.reason.c_str());
+                ImGui::PopID();
+            }
+            if (state.previewMeshes.empty())
+                ImGui::TextDisabled("No .3dgskmesh assets found in Content.");
+            ImGui::EndCombo();
+        }
+
+        if (!state.loadError.empty()) {
+            ImGui::TextColored(ImVec4(1.0f, 0.40f, 0.30f, 1.0f),
+                "%s", state.loadError.c_str());
+            ImGui::End();
+            return;
+        }
+        if (!state.compatibilitySummary.empty()) {
+            const ImVec4 color = state.missingChannels == 0
+                ? ImVec4(0.45f, 0.85f, 0.55f, 1.0f)
+                : ImVec4(1.0f, 0.72f, 0.25f, 1.0f);
+            ImGui::TextColored(color, "%s", state.compatibilitySummary.c_str());
+        }
+
+        if (state.previewTexture != 0) {
+            const float side = std::max(180.0f,
+                std::min(ImGui::GetContentRegionAvail().x, 420.0f));
+            ImGui::Image((ImTextureID)(std::intptr_t)state.previewTexture,
+                ImVec2(side, side), ImVec2(0, 1), ImVec2(1, 0));
+            if (ImGui::IsItemHovered()) {
+                if (ImGui::IsMouseDragging(ImGuiMouseButton_Left)
+                    && context.animationAssetYaw
+                    && context.animationAssetPitch) {
+                    const ImVec2 delta = ImGui::GetIO().MouseDelta;
+                    *context.animationAssetYaw += delta.x * 0.45f;
+                    *context.animationAssetPitch = std::clamp(
+                        *context.animationAssetPitch - delta.y * 0.35f,
+                        -85.0f, 85.0f);
+                }
+                if (context.animationAssetZoom
+                    && ImGui::GetIO().MouseWheel != 0.0f) {
+                    *context.animationAssetZoom = std::clamp(
+                        *context.animationAssetZoom
+                            + ImGui::GetIO().MouseWheel * 0.1f,
+                        0.4f, 3.0f);
+                }
+            }
+        }
+
+        if (context.animationAssetPlaying) {
+            if (ImGui::Button(*context.animationAssetPlaying ? "Pause" : "Play"))
+                *context.animationAssetPlaying = !*context.animationAssetPlaying;
+            ImGui::SameLine();
+            if (ImGui::Button("Restart"))
+                context.animationAssetRestartRequested = true;
+        }
+        if (context.animationAssetLoop)
+            ImGui::Checkbox("Loop", context.animationAssetLoop);
+        ImGui::SameLine();
+        if (context.animationAssetStripRootMotion && state.assetIsAnimation)
+            ImGui::Checkbox("Strip Root Motion",
+                context.animationAssetStripRootMotion);
+        if (context.animationAssetSpeed)
+            ImGui::DragFloat("Playback Speed", context.animationAssetSpeed,
+                0.02f, 0.0f, 8.0f, "%.2fx");
+        if (context.animationPreviewTime && state.previewDuration > 0.0f) {
+            float time = *context.animationPreviewTime;
+            if (ImGui::SliderFloat("Timeline", &time, 0.0f,
+                    state.previewDuration, "%.3f s"))
+                *context.animationPreviewTime = time;
+            ImGui::TextDisabled("%.3f / %.3f seconds",
+                state.previewTime, state.previewDuration);
+        }
+
+        if (ImGui::CollapsingHeader("Clips", ImGuiTreeNodeFlags_DefaultOpen)) {
+            for (std::size_t i = 0; i < state.clips.size(); ++i)
+                ImGui::BulletText("%s  (%.3f s)",
+                    state.clips[i].name.empty()
+                        ? ("Clip " + std::to_string(i)).c_str()
+                        : state.clips[i].name.c_str(),
+                    state.clips[i].durationSeconds);
+            if (state.clips.empty()) ImGui::TextDisabled("No clips in this asset.");
+        }
+        if (ImGui::CollapsingHeader("Events / Notifies")) {
+            ImGui::TextDisabled(
+                "Reusable events are authored on a .3dgclip in the Clip Editor.");
+            for (const auto& event : state.events)
+                ImGui::BulletText("%.3f s  %s", event.time, event.name.c_str());
+        }
+        if (ImGui::CollapsingHeader("Skeleton")) {
+            ImGui::Text("%zu bones", state.bones.size());
+            ImGui::BeginChild("AssetPreviewSkeleton", ImVec2(0, 220), true);
+            for (const auto& bone : state.bones) {
+                std::string label(static_cast<std::size_t>(
+                    std::max(bone.depth, 0)) * 2, ' ');
+                label += bone.name.empty() ? "(unnamed)" : bone.name;
+                ImGui::TextUnformatted(label.c_str());
+            }
+            ImGui::EndChild();
+        }
+        ImGui::End();
+        return;
+    }
     if (!state.skeletalModel) {
         ImGui::TextUnformatted("Selected object is not marked as a skeletal model.");
         ImGui::End();
@@ -4038,6 +4215,44 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
         ImGui::Text("Material: %s", selected->materialAssetPath.empty() ? "-" : selected->materialAssetPath.c_str());
 
         const engine::ecs::MeshRenderer* renderer = context.scene->TryGetMeshRenderer(selected->entity);
+        std::size_t vertexCount = 0;
+        std::size_t triangleCount = 0;
+        std::size_t subMeshCount = 0;
+        bool geometryStatsAvailable = false;
+        if (!selected->modelAssetPath.empty() && context.runtimeAssets) {
+            std::string geometryError;
+            if (selected->skeletalModel) {
+                if (const engine::SkinnedModel* model =
+                        context.runtimeAssets->LoadSkinnedModel(
+                            selected->modelAssetPath, &geometryError)) {
+                    vertexCount = model->VertexCount();
+                    triangleCount = model->TriangleCount();
+                    subMeshCount = model->SubMeshCount();
+                    geometryStatsAvailable = true;
+                }
+            } else if (const engine::Model* model =
+                           context.runtimeAssets->LoadModel(
+                               selected->modelAssetPath, &geometryError)) {
+                vertexCount = model->VertexCount();
+                triangleCount = model->TriangleCount();
+                subMeshCount = model->SubMeshCount();
+                geometryStatsAvailable = true;
+            }
+        } else if (renderer && renderer->mesh) {
+            vertexCount = renderer->mesh->VertexCount();
+            triangleCount = renderer->mesh->TriangleCount();
+            subMeshCount = 1;
+            geometryStatsAvailable = true;
+        }
+        if (geometryStatsAvailable) {
+            ImGui::Text("Geometry: %zu vertices | %zu triangles",
+                        vertexCount, triangleCount);
+            if (subMeshCount > 1u)
+                ImGui::TextDisabled("Submeshes: %zu", subMeshCount);
+        } else {
+            ImGui::TextDisabled("Geometry statistics unavailable.");
+        }
+
         if (renderer) {
             glm::vec3 color = renderer->color;
             if (ImGui::ColorEdit3("Color", &color.x)) {
@@ -5386,6 +5601,8 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                 "%s",
                 selected->scriptClassName.empty() ? "NewObjectScript" : selected->scriptClassName.c_str());
             g_scriptEntity = selected->entity;
+            g_scriptLanguageIndex =
+                std::filesystem::path(selected->scriptPath).extension() == ".lua" ? 1 : 0;
         }
 
         bool scriptEnabled = selected->scriptEnabled;
@@ -5398,7 +5615,8 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                 const std::string className = SanitizeScriptClassName(g_scriptClassBuffer.data());
                 if (!className.empty() && className != selected->scriptClassName) {
                     toggled = context.scene->SetSelectedScript(
-                        className, ScriptHeaderPathFor(context, className), true);
+                        className, ScriptPathFor(
+                            context, className, g_scriptLanguageIndex == 1), true);
                     if (toggled) {
                         std::snprintf(g_scriptClassBuffer.data(), g_scriptClassBuffer.size(), "%s", className.c_str());
                     }
@@ -5417,17 +5635,26 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
         const std::vector<SavedScriptEntry> savedScripts = SavedScriptsFor(context);
         const std::string bufferedClass = SanitizeScriptClassName(g_scriptClassBuffer.data());
         const auto selectedSavedScript = std::find_if(savedScripts.begin(), savedScripts.end(),
-            [&bufferedClass](const SavedScriptEntry& entry) {
-                return entry.className == bufferedClass;
+            [&bufferedClass, selected](const SavedScriptEntry& entry) {
+                return entry.className == bufferedClass
+                    && (selected->scriptPath.empty()
+                        || std::filesystem::path(entry.storedPath).lexically_normal()
+                            == std::filesystem::path(selected->scriptPath).lexically_normal());
             });
-        const char* savedScriptPreview = selectedSavedScript != savedScripts.end()
-            ? selectedSavedScript->className.c_str() : "Choose saved script...";
-        if (ImGui::BeginCombo("Saved Script", savedScriptPreview)) {
+        const std::string savedScriptPreview = selectedSavedScript != savedScripts.end()
+            ? selectedSavedScript->className
+                + (selectedSavedScript->lua ? " (Lua)" : " (C++)")
+            : "Choose saved script...";
+        if (ImGui::BeginCombo("Saved Script", savedScriptPreview.c_str())) {
             for (const SavedScriptEntry& entry : savedScripts) {
-                const bool isSelected = entry.className == bufferedClass;
-                if (ImGui::Selectable(entry.className.c_str(), isSelected)) {
+                const bool isSelected = entry.className == bufferedClass
+                    && entry.lua == (g_scriptLanguageIndex == 1);
+                const std::string label =
+                    entry.className + (entry.lua ? " (Lua)" : " (C++)");
+                if (ImGui::Selectable(label.c_str(), isSelected)) {
                     std::snprintf(g_scriptClassBuffer.data(), g_scriptClassBuffer.size(),
                         "%s", entry.className.c_str());
+                    g_scriptLanguageIndex = entry.lua ? 1 : 0;
                 }
                 if (isSelected) ImGui::SetItemDefaultFocus();
             }
@@ -5437,15 +5664,19 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             ImGui::EndCombo();
         }
         ImGui::InputText("Script Class", g_scriptClassBuffer.data(), g_scriptClassBuffer.size());
+        const char* scriptLanguages[] = {"Native C++", "Lua"};
+        ImGui::Combo("Language", &g_scriptLanguageIndex, scriptLanguages,
+                     IM_ARRAYSIZE(scriptLanguages));
         ImGui::Text("Script Path: %s", selected->scriptPath.empty() ? "-" : selected->scriptPath.c_str());
         const std::string currentClass = SanitizeScriptClassName(g_scriptClassBuffer.data());
+        const bool creatingLua = g_scriptLanguageIndex == 1;
         const bool classExists = std::any_of(savedScripts.begin(), savedScripts.end(),
-            [&currentClass](const SavedScriptEntry& entry) {
-                return entry.className == currentClass;
+            [&currentClass, creatingLua](const SavedScriptEntry& entry) {
+                return entry.className == currentClass && entry.lua == creatingLua;
             });
 
         // The template picker only matters when creating a brand-new script.
-        if (!classExists) {
+        if (!classExists && !creatingLua) {
             const char* scriptTemplates[] = {
                 "Empty",
                 "Player Movement",
@@ -5458,6 +5689,9 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             };
             ImGui::Combo("New Script Template", &g_scriptTemplateIndex, scriptTemplates,
                          IM_ARRAYSIZE(scriptTemplates));
+        } else if (!classExists) {
+            ImGui::TextDisabled(
+                "Lua creates a lifecycle starter; add inspector fields below.");
         }
 
         // One context-aware action replaces the old Create/Attach split: attach the class
@@ -5468,11 +5702,12 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                 if (context.log) context.log->Warning("Enter a script class name first");
             } else if (classExists) {
                 const auto saved = std::find_if(savedScripts.begin(), savedScripts.end(),
-                    [&className](const SavedScriptEntry& entry) {
-                        return entry.className == className;
+                    [&className, creatingLua](const SavedScriptEntry& entry) {
+                        return entry.className == className && entry.lua == creatingLua;
                     });
                 const std::string scriptPath = saved != savedScripts.end()
-                    ? saved->storedPath : ScriptHeaderPathFor(context, className);
+                    ? saved->storedPath
+                    : ScriptPathFor(context, className, creatingLua);
                 if (context.scene->SetSelectedScript(className, scriptPath, true)) {
                     if (context.log) context.log->Info("Attached script: " + className);
                 } else if (context.log) {
@@ -5485,10 +5720,13 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                     }
                 }
             } else {
-                const ScriptTemplate scriptTemplate = ScriptTemplateFromIndex(g_scriptTemplateIndex);
+                const ScriptTemplate scriptTemplate = creatingLua
+                    ? ScriptTemplate::Empty
+                    : ScriptTemplateFromIndex(g_scriptTemplateIndex);
                 std::string scriptPath;
                 std::string error;
-                if (CreateScriptFiles(context, className, scriptTemplate, &scriptPath, &error)) {
+                if (CreateScriptFiles(context, className, scriptTemplate, creatingLua,
+                                      &scriptPath, &error)) {
                     if (!IsBehaviorTreeTemplate(scriptTemplate)) {
                         context.scene->SetSelectedScript(className, scriptPath, true);
                         context.scene->SetSelectedScriptFields(DefaultFieldsForTemplate(scriptTemplate));
@@ -5510,7 +5748,8 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                             context.log->Info("Created AI script: " + scriptPath
                                 + " (compile it, then select the class in the Behavior Graph)");
                         } else {
-                            context.log->Info("Created script: " + scriptPath);
+                            context.log->Info(std::string("Created ")
+                                + (creatingLua ? "Lua script: " : "script: ") + scriptPath);
                         }
                     }
                 } else if (context.log) {
@@ -5544,7 +5783,11 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             && std::filesystem::path(g_scriptSourcePath).lexically_normal()
                 == std::filesystem::path(selected->scriptPath).lexically_normal()
             && ImGui::TreeNode("Script Source")) {
-            ImGui::TextWrapped("This header is compiled into both Editor Play and the standalone game. Save it, then rebuild and restart the editor to load native code changes.");
+            const bool editingLua =
+                std::filesystem::path(selected->scriptPath).extension() == ".lua";
+            ImGui::TextWrapped(editingLua
+                ? "Lua runs in Editor Play and packaged games. Save it, then restart Play to load the new source."
+                : "This header is compiled into both Editor Play and the standalone game. Save it, then rebuild and restart the editor to load native code changes.");
             if (ImGui::InputTextMultiline("##ScriptSource",
                     g_scriptSourceBuffer.data(), g_scriptSourceBuffer.size(),
                     ImVec2(-1.0f, 340.0f), ImGuiInputTextFlags_AllowTabInput)) {
@@ -5567,7 +5810,9 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                 }
             }
             ImGui::SameLine();
-            ImGui::TextDisabled(g_scriptSourceDirty ? "Unsaved changes" : "Saved - rebuild required");
+            ImGui::TextDisabled(g_scriptSourceDirty ? "Unsaved changes"
+                : (editingLua ? "Saved - restart Play to reload"
+                              : "Saved - rebuild required"));
             ImGui::TreePop();
         }
 
@@ -6240,26 +6485,247 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
         if (ImGui::Checkbox("Grass (grows on painted Grass layer)", &grassEnabled)) {
             context.scene->SetSelectedTerrainGrass(grassEnabled, selected->grassDensity,
                 selected->grassHeight, selected->grassWindStrength, selected->grassWindSpeed,
-                selected->grassBaseColor, selected->grassTipColor);
+                selected->grassBaseColor, selected->grassTipColor,
+                selected->grassRandomizeHeight, selected->grassMinHeightScale,
+                selected->grassMaxHeightScale);
         }
         if (selected->grassEnabled) {
             float density = selected->grassDensity, height = selected->grassHeight;
             float windStr = selected->grassWindStrength, windSpd = selected->grassWindSpeed;
+            bool randomizeHeight = selected->grassRandomizeHeight;
+            float minHeightScale = selected->grassMinHeightScale;
+            float maxHeightScale = selected->grassMaxHeightScale;
             glm::vec3 base = selected->grassBaseColor, tip = selected->grassTipColor;
             bool gc = false;
             gc |= ImGui::DragFloat("Grass Density", &density, 0.05f, 0.05f, 40.0f, "%.2f");
             gc |= ImGui::DragFloat("Grass Height", &height, 0.01f, 0.05f, 5.0f, "%.2f");
+            gc |= ImGui::Checkbox("Randomize Grass Height", &randomizeHeight);
+            ImGui::BeginDisabled(!randomizeHeight);
+            gc |= ImGui::DragFloatRange2("Height Range", &minHeightScale, &maxHeightScale,
+                0.01f, 0.05f, 4.0f, "Min %.2fx", "Max %.2fx");
+            ImGui::EndDisabled();
             gc |= ImGui::DragFloat("Wind Strength", &windStr, 0.01f, 0.0f, 2.0f, "%.2f");
             gc |= ImGui::DragFloat("Wind Speed", &windSpd, 0.02f, 0.0f, 8.0f, "%.2f");
             gc |= ImGui::ColorEdit3("Grass Root", &base.x);
             gc |= ImGui::ColorEdit3("Grass Tip", &tip.x);
             if (gc) {
-                context.scene->SetSelectedTerrainGrass(true, density, height, windStr, windSpd, base, tip);
+                context.scene->SetSelectedTerrainGrass(true, density, height, windStr, windSpd,
+                    base, tip, randomizeHeight, minHeightScale, maxHeightScale);
             }
             ImGui::TextDisabled("These settings apply to grass you paint NEXT. Grass already on the "
                                 "field keeps the settings it was painted with. Paint the Grass layer "
                                 "(Sculpt > Paint > Grass) to grow grass; wind is shared by all grass.");
+            ImGui::TextDisabled("Height randomization is a multiplier of Grass Height and applies "
+                                "to the whole field when enabled.");
         }
+    }
+
+    if (selected->isFoliage && ImGui::CollapsingHeader("Foliage", ImGuiTreeNodeFlags_DefaultOpen)) {
+        const EditorAssets::Asset* contentSelection = context.assets
+            ? context.assets->SelectedAsset() : nullptr;
+        const bool selectedStaticMesh = contentSelection
+            && contentSelection->type == EditorAssets::Type::Model;
+        if (!selectedStaticMesh) ImGui::BeginDisabled();
+        if (ImGui::Button("Create Type From Selected Mesh") && context.assets) {
+            const std::string meshPath = context.assets->SelectedAssetFullPath();
+            const std::filesystem::path folder =
+                std::filesystem::path(context.assets->RootPath()) / "Assets" / "Foliage";
+            std::error_code directoryError;
+            std::filesystem::create_directories(folder, directoryError);
+            engine::FoliageAssetData foliage;
+            foliage.name = std::filesystem::path(meshPath).stem().string() + " Foliage";
+            engine::FoliageTypeAsset type;
+            type.name = std::filesystem::path(meshPath).stem().string();
+            type.meshPath = meshPath;
+            foliage.types.push_back(std::move(type));
+            const std::filesystem::path savePath = folder /
+                (std::filesystem::path(meshPath).stem().string() + ".3dgfoliage");
+            std::string saveError;
+            if (!directoryError && engine::SaveFoliageAsset(savePath.string(), foliage, &saveError)) {
+                context.scene->SetSelectedFoliageAsset(savePath.string());
+                std::string refreshError;
+                context.assets->Refresh(context.assets->RootPath(), &refreshError);
+                if (context.runtimeAssets)
+                    context.runtimeAssets->ResolveRegistryAssets(context.scene->Registry());
+                if (context.log) context.log->Info("Created foliage asset: " + savePath.string());
+            } else if (context.log) {
+                context.log->Error("Could not create foliage asset: "
+                    + (saveError.empty() ? directoryError.message() : saveError));
+            }
+        }
+        if (!selectedStaticMesh) ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::TextDisabled("Select a static mesh in Content first");
+
+        const std::vector<std::string> assets = context.assets
+            ? context.assets->ContentAssetPaths(EditorAssets::Type::Foliage)
+            : std::vector<std::string>{};
+        std::string currentLabel = selected->foliageAssetPath.empty()
+            ? std::string("Choose foliage asset...")
+            : std::filesystem::path(selected->foliageAssetPath).filename().string();
+        if (ImGui::BeginCombo("Foliage Asset", currentLabel.c_str())) {
+            for (const std::string& relative : assets) {
+                const std::string full = context.assets
+                    ? (std::filesystem::path(context.assets->RootPath()) / relative).string()
+                    : relative;
+                const bool chosen = selected->foliageAssetPath == full
+                    || selected->foliageAssetPath == relative;
+                if (ImGui::Selectable(relative.c_str(), chosen)) {
+                    context.scene->SetSelectedFoliageAsset(full);
+                    if (context.runtimeAssets) {
+                        const auto report = context.runtimeAssets->ResolveRegistryAssets(
+                            context.scene->Registry());
+                        if (context.log) {
+                            for (const std::string& error : report.errors)
+                                context.log->Warning("Foliage: " + error);
+                        }
+                    }
+                }
+            }
+            ImGui::EndCombo();
+        }
+
+        const engine::ecs::FoliageComponent* component =
+            context.scene->Registry().TryGet<engine::ecs::FoliageComponent>(selected->entity);
+        ImGui::Text("Instances: %zu", selected->foliageInstances.size());
+        ImGui::Text("Types: %zu", component ? component->types.size() : 0u);
+        if (context.foliageTypeIndex && component && !component->types.empty()) {
+            *context.foliageTypeIndex = std::clamp(
+                *context.foliageTypeIndex, 0, static_cast<int>(component->types.size()) - 1);
+            const std::string typeLabel = component->types[
+                static_cast<std::size_t>(*context.foliageTypeIndex)].name;
+            if (ImGui::BeginCombo("Paint Type", typeLabel.c_str())) {
+                for (std::size_t i = 0; i < component->types.size(); ++i) {
+                    const bool active = static_cast<int>(i) == *context.foliageTypeIndex;
+                    if (ImGui::Selectable(component->types[i].name.c_str(), active))
+                        *context.foliageTypeIndex = static_cast<int>(i);
+                }
+                ImGui::EndCombo();
+            }
+        }
+
+        if (!selected->foliageAssetPath.empty()) {
+            if (g_foliageDraftPath != selected->foliageAssetPath) {
+                std::string loadError;
+                engine::FoliageAssetData loaded;
+                if (engine::LoadFoliageAsset(selected->foliageAssetPath, &loaded, &loadError)) {
+                    g_foliageDraft = std::move(loaded);
+                    g_foliageDraftPath = selected->foliageAssetPath;
+                    g_foliageDraftDirty = false;
+                } else if (context.log) {
+                    context.log->Warning("Could not edit foliage asset: " + loadError);
+                }
+            }
+            if (!g_foliageDraft.types.empty() && context.foliageTypeIndex
+                && ImGui::TreeNodeEx("Type Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
+                const std::size_t draftIndex = static_cast<std::size_t>(std::clamp(
+                    *context.foliageTypeIndex, 0,
+                    static_cast<int>(g_foliageDraft.types.size()) - 1));
+                engine::FoliageTypeAsset& type = g_foliageDraft.types[draftIndex];
+                ImGui::PushID(static_cast<int>(draftIndex));
+                std::array<char, 96> typeName{};
+                std::snprintf(typeName.data(), typeName.size(), "%s", type.name.c_str());
+                if (ImGui::InputText("Name", typeName.data(), typeName.size())) {
+                    type.name = typeName.data();
+                    g_foliageDraftDirty = true;
+                }
+                bool changed = false;
+                changed |= ImGui::DragFloat("Density", &type.density, 0.05f, 0.01f, 100.0f, "%.2f /m2");
+                changed |= ImGui::DragFloat3("Minimum Scale", &type.minScale.x, 0.01f, 0.01f, 20.0f, "%.2f");
+                changed |= ImGui::DragFloat3("Maximum Scale", &type.maxScale.x, 0.01f, 0.01f, 20.0f, "%.2f");
+                changed |= ImGui::DragFloat3("Minimum Rotation", &type.minRotation.x, 1.0f, -360.0f, 360.0f, "%.0f deg");
+                changed |= ImGui::DragFloat3("Maximum Rotation", &type.maxRotation.x, 1.0f, -360.0f, 360.0f, "%.0f deg");
+                changed |= ImGui::DragFloat("Minimum Spacing", &type.minimumSpacing, 0.05f, 0.0f, 100.0f, "%.2f m");
+                changed |= ImGui::DragFloatRange2("Allowed Slope", &type.minimumSlopeDegrees,
+                    &type.maximumSlopeDegrees, 0.5f, 0.0f, 89.0f, "Min %.1f deg", "Max %.1f deg");
+                changed |= ImGui::DragFloatRange2("World Height", &type.minimumWorldHeight,
+                    &type.maximumWorldHeight, 0.5f, -100000.0f, 100000.0f, "Min %.1f", "Max %.1f");
+                changed |= ImGui::DragFloatRange2("Cull Distance", &type.cullStartDistance,
+                    &type.cullEndDistance, 1.0f, 0.0f, 100000.0f, "Start %.0f m", "End %.0f m");
+                changed |= ImGui::DragFloat("Wind Strength", &type.windStrength, 0.01f, 0.0f, 10.0f, "%.2f");
+                changed |= ImGui::Checkbox("Align to Surface", &type.alignToSurface);
+                changed |= ImGui::Checkbox("Random Yaw", &type.randomYaw);
+                changed |= ImGui::Checkbox("Cast Shadows", &type.castShadows);
+                changed |= ImGui::Checkbox("Generate Collision", &type.collisionEnabled);
+                if (changed) g_foliageDraftDirty = true;
+
+                const EditorAssets::Asset* selectedContent = context.assets
+                    ? context.assets->SelectedAsset() : nullptr;
+                const bool canAssignMesh = selectedContent
+                    && selectedContent->type == EditorAssets::Type::Model;
+                const bool canAssignMaterial = selectedContent
+                    && selectedContent->type == EditorAssets::Type::Material;
+                if (!canAssignMesh) ImGui::BeginDisabled();
+                if (ImGui::Button("Use Selected Mesh") && context.assets) {
+                    type.meshPath = context.assets->SelectedAssetFullPath();
+                    type.meshId = {};
+                    g_foliageDraftDirty = true;
+                }
+                if (!canAssignMesh) ImGui::EndDisabled();
+                ImGui::SameLine();
+                if (!canAssignMaterial) ImGui::BeginDisabled();
+                if (ImGui::Button("Use Selected Material") && context.assets) {
+                    type.materialPath = context.assets->SelectedAssetFullPath();
+                    type.materialId = {};
+                    g_foliageDraftDirty = true;
+                }
+                if (!canAssignMaterial) ImGui::EndDisabled();
+
+                if (ImGui::Button("Duplicate Type")) {
+                    engine::FoliageTypeAsset duplicate = type;
+                    duplicate.name += " Copy";
+                    g_foliageDraft.types.push_back(std::move(duplicate));
+                    *context.foliageTypeIndex = static_cast<int>(g_foliageDraft.types.size()) - 1;
+                    g_foliageDraftDirty = true;
+                }
+                ImGui::SameLine();
+                if (g_foliageDraft.types.size() <= 1) ImGui::BeginDisabled();
+                if (ImGui::Button("Remove Type")) {
+                    g_foliageDraft.types.erase(g_foliageDraft.types.begin()
+                        + static_cast<std::ptrdiff_t>(draftIndex));
+                    *context.foliageTypeIndex = std::clamp(*context.foliageTypeIndex,
+                        0, static_cast<int>(g_foliageDraft.types.size()) - 1);
+                    g_foliageDraftDirty = true;
+                }
+                if (g_foliageDraft.types.size() <= 1) ImGui::EndDisabled();
+                ImGui::SameLine();
+                if (!g_foliageDraftDirty) ImGui::BeginDisabled();
+                if (ImGui::Button("Save Type Settings")) {
+                    std::string saveError;
+                    if (engine::SaveFoliageAsset(g_foliageDraftPath,
+                                                 g_foliageDraft, &saveError)) {
+                        g_foliageDraftDirty = false;
+                        if (context.runtimeAssets) {
+                            context.runtimeAssets->ReloadFoliage(g_foliageDraftPath, &saveError);
+                            context.runtimeAssets->ResolveRegistryAssets(context.scene->Registry());
+                        }
+                        if (context.log) context.log->Info("Saved foliage settings");
+                    } else if (context.log) {
+                        context.log->Error("Foliage save failed: " + saveError);
+                    }
+                }
+                if (!g_foliageDraftDirty) ImGui::EndDisabled();
+                if (g_foliageDraftDirty) {
+                    ImGui::SameLine();
+                    ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.18f, 1.0f), "Unsaved");
+                }
+                ImGui::PopID();
+                ImGui::TreePop();
+            }
+        }
+        if (context.foliagePaint) {
+            ImGui::Checkbox("Paint in Viewport", context.foliagePaint);
+            if (*context.foliagePaint && context.terrainSculpt) *context.terrainSculpt = false;
+        }
+        if (context.foliageErase) ImGui::Checkbox("Erase", context.foliageErase);
+        if (context.foliageBrushRadius)
+            ImGui::DragFloat("Brush Radius", context.foliageBrushRadius, 0.1f, 0.1f, 100.0f, "%.1f m");
+        if (context.foliagePaintDensity)
+            ImGui::DragFloat("Density Multiplier", context.foliagePaintDensity, 0.02f, 0.01f, 10.0f, "%.2fx");
+        if (ImGui::Button("Clear All Instances"))
+            context.scene->ClearSelectedFoliageInstances();
+        ImGui::TextDisabled("Left-drag in the viewport to paint. Enable Erase to remove instances.");
+        ImGui::TextDisabled("Placement follows terrain height and the foliage asset's spacing/scale rules.");
     }
 
     if (selected->isWater && ImGui::CollapsingHeader("Water", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -6311,6 +6777,77 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             context.scene->SetSelectedWaterWaves(seaHeight, seaChoppy, seaSpeed, seaFreq, foam, 0);
         }
 
+        ImGui::Separator();
+        ImGui::TextUnformatted("Depth + Shoreline");
+        float depthFade = selected->waterDepthFadeDistance;
+        float shoreWidth = selected->waterShoreFoamWidth;
+        float shoreStrength = selected->waterShoreFoamStrength;
+        bool depthChanged = false;
+        depthChanged |= ImGui::DragFloat("Deep Color Distance", &depthFade,
+            0.05f, 0.05f, 100.0f, "%.2f m");
+        depthChanged |= ImGui::DragFloat("Shore Foam Width", &shoreWidth,
+            0.02f, 0.01f, 20.0f, "%.2f m");
+        depthChanged |= ImGui::DragFloat("Shore Foam Strength", &shoreStrength,
+            0.02f, 0.0f, 4.0f, "%.2f");
+        if (depthChanged) {
+            context.scene->SetSelectedWaterDepth(
+                depthFade, shoreWidth, shoreStrength);
+        }
+        ImGui::TextDisabled("Uses opaque scene depth for shallow water and bank foam.");
+
+        ImGui::Separator();
+        ImGui::TextUnformatted("Reflection + Refraction");
+        float refractionStrength = selected->waterRefractionStrength;
+        float reflectionRoughness = selected->waterReflectionRoughness;
+        float environmentReflection = selected->waterEnvironmentReflectionStrength;
+        float absorption = selected->waterAbsorptionStrength;
+        bool opticsChanged = false;
+        opticsChanged |= ImGui::DragFloat("Refraction Distortion", &refractionStrength,
+            0.001f, 0.0f, 0.25f, "%.3f");
+        opticsChanged |= ImGui::DragFloat("Reflection Roughness", &reflectionRoughness,
+            0.01f, 0.0f, 1.0f, "%.2f");
+        opticsChanged |= ImGui::DragFloat("Environment Reflection", &environmentReflection,
+            0.01f, 0.0f, 1.0f, "%.2f");
+        opticsChanged |= ImGui::DragFloat("Depth Absorption", &absorption,
+            0.01f, 0.0f, 2.0f, "%.2f");
+        if (opticsChanged) {
+            context.scene->SetSelectedWaterOptics(
+                refractionStrength, reflectionRoughness,
+                environmentReflection, absorption);
+        }
+        ImGui::TextDisabled("Refraction samples the opaque scene; reflections use World IBL.");
+
+        ImGui::Separator();
+        ImGui::TextUnformatted("Caustics + Underwater");
+        float causticsStrength = selected->waterCausticsStrength;
+        float causticsScale = selected->waterCausticsScale;
+        float maxRenderDistance = selected->waterMaxRenderDistance;
+        glm::vec3 underwaterTint = selected->waterUnderwaterTint;
+        float underwaterFog = selected->waterUnderwaterFogDensity;
+        float underwaterDistortion = selected->waterUnderwaterDistortion;
+        float transitionSpeed = selected->waterUnderwaterTransitionSpeed;
+        bool effectsChanged = false;
+        effectsChanged |= ImGui::DragFloat("Caustics Strength", &causticsStrength,
+            0.01f, 0.0f, 4.0f, "%.2f");
+        effectsChanged |= ImGui::DragFloat("Caustics Scale", &causticsScale,
+            0.02f, 0.05f, 20.0f, "%.2f");
+        effectsChanged |= ImGui::DragFloat("Render Distance", &maxRenderDistance,
+            10.0f, 0.0f, 100000.0f, "%.0f m");
+        effectsChanged |= ImGui::ColorEdit3("Underwater Tint", &underwaterTint.x);
+        effectsChanged |= ImGui::DragFloat("Underwater Fog", &underwaterFog,
+            0.005f, 0.0f, 2.0f, "%.3f");
+        effectsChanged |= ImGui::DragFloat("Underwater Distortion", &underwaterDistortion,
+            0.0005f, 0.0f, 0.1f, "%.4f");
+        effectsChanged |= ImGui::DragFloat("Surface Transition", &transitionSpeed,
+            0.1f, 0.1f, 20.0f, "%.1f /s");
+        if (effectsChanged) {
+            context.scene->SetSelectedWaterEffects(
+                causticsStrength, causticsScale, maxRenderDistance,
+                underwaterTint, underwaterFog, underwaterDistortion,
+                transitionSpeed);
+        }
+        ImGui::TextDisabled("Render Distance 0 disables distance culling.");
+
         // River flow: make the surface scroll along a spline's direction.
         ImGui::Separator();
         const std::string& currentFlow = selected->waterFlowSpline;
@@ -6326,7 +6863,15 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             }
             ImGui::EndCombo();
         }
-        ImGui::TextDisabled("Assign a spline to make the water flow along it (rivers).");
+        if (!currentFlow.empty()) {
+            float width = selected->waterRiverWidth;
+            if (ImGui::DragFloat("River Width", &width, 0.1f, 0.1f, 500.0f, "%.2f m")) {
+                context.scene->SetSelectedWaterRiverWidth(width);
+            }
+            ImGui::TextDisabled("The surface, position, length and curved flow update live from the spline.");
+        } else {
+            ImGui::TextDisabled("Assign a spline to turn this water patch into a flowing river ribbon.");
+        }
     }
 
     if (selected->isSpline && ImGui::CollapsingHeader("Spline", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -6340,16 +6885,31 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             context.scene->SetSelectedSpline(true, closed, type);
         }
 
-        ImGui::Text("Control points: %d", static_cast<int>(selected->splinePoints.size()));
-        ImGui::TextDisabled("Drag XYZ to shape the path (world space).");
+        engine::Spline authoredSpline(selected->splinePoints, selected->splineClosed);
+        ImGui::Text("%d points  |  Length %.2f m",
+            static_cast<int>(selected->splinePoints.size()), authoredSpline.Length());
+        ImGui::TextDisabled("Select a point, then use W to move or E to rotate it. River roll uses local Z.");
+
+        int localSelection = context.selectedSplinePoint ? *context.selectedSplinePoint : -1;
+        if (localSelection >= static_cast<int>(selected->splinePoints.size())) localSelection = -1;
 
         int removeIndex = -1;
         for (std::size_t i = 0; i < selected->splinePoints.size(); ++i) {
             ImGui::PushID(static_cast<int>(i));
+            const bool pointSelected = localSelection == static_cast<int>(i);
+            char pointLabel[16];
+            std::snprintf(pointLabel, sizeof(pointLabel), "%02d", static_cast<int>(i + 1));
+            if (ImGui::Selectable(pointLabel, pointSelected, 0, ImVec2(30.0f, 0.0f))) {
+                localSelection = static_cast<int>(i);
+                if (context.selectedSplinePoint) *context.selectedSplinePoint = localSelection;
+            }
+            ImGui::SameLine();
             glm::vec3 p = selected->splinePoints[i];
-            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 32.0f);
+            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 28.0f);
             if (ImGui::DragFloat3("##pt", &p.x, 0.1f, -100000.0f, 100000.0f, "%.2f")) {
                 context.scene->SetSelectedSplinePoint(i, p);
+                localSelection = static_cast<int>(i);
+                if (context.selectedSplinePoint) *context.selectedSplinePoint = localSelection;
             }
             ImGui::SameLine();
             if (ImGui::SmallButton("X")) removeIndex = static_cast<int>(i);
@@ -6357,6 +6917,10 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
         }
         if (removeIndex >= 0) {
             context.scene->RemoveSelectedSplinePoint(static_cast<std::size_t>(removeIndex));
+            if (context.selectedSplinePoint) {
+                if (*context.selectedSplinePoint == removeIndex) *context.selectedSplinePoint = -1;
+                else if (*context.selectedSplinePoint > removeIndex) --*context.selectedSplinePoint;
+            }
         }
 
         if (ImGui::Button("Add Point")) {
@@ -6368,16 +6932,94 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                 else np += glm::vec3(3.0f, 0.0f, 0.0f);
             }
             context.scene->AddSelectedSplinePoint(np);
+            if (context.selectedSplinePoint) {
+                *context.selectedSplinePoint = static_cast<int>(selected->splinePoints.size()) - 1;
+            }
         }
         ImGui::SameLine();
         if (ImGui::Button("Add at View") && context.camera) {
-            // Drop a point in front of the camera on the y=0 plane (or last point's height).
+            // Intersect the camera ray with the current spline height. If the view is
+            // nearly horizontal, use a stable forward distance instead.
             const glm::vec3 eye = context.camera->Position();
             const glm::vec3 fwd = context.camera->Front();
             const float h = selected->splinePoints.empty() ? 0.0f : selected->splinePoints.back().y;
-            const float denom = (std::abs(fwd.y) > 1.0e-4f) ? fwd.y : -1.0f;
-            const float dist = std::clamp((h - eye.y) / denom, 2.0f, 60.0f);
-            context.scene->AddSelectedSplinePoint(eye + fwd * dist);
+            float dist = 10.0f;
+            if (std::abs(fwd.y) > 1.0e-4f) {
+                const float planeHit = (h - eye.y) / fwd.y;
+                if (planeHit > 0.0f) dist = std::clamp(planeHit, 2.0f, 60.0f);
+            }
+            glm::vec3 point = eye + fwd * dist;
+            point.y = h;
+            context.scene->AddSelectedSplinePoint(point);
+            if (context.selectedSplinePoint) {
+                *context.selectedSplinePoint = static_cast<int>(selected->splinePoints.size()) - 1;
+            }
+        }
+
+        const int selectedPoint = context.selectedSplinePoint ? *context.selectedSplinePoint : -1;
+        if (selectedPoint >= 0 && selectedPoint < static_cast<int>(selected->splinePoints.size())) {
+            glm::vec3 pointRotation(0.0f);
+            if (static_cast<std::size_t>(selectedPoint) < selected->splinePointRotations.size()) {
+                pointRotation = selected->splinePointRotations[static_cast<std::size_t>(selectedPoint)];
+            }
+            if (ImGui::DragFloat3("Point Rotation", &pointRotation.x, 0.5f,
+                                  -3600.0f, 3600.0f, "%.1f deg")) {
+                context.scene->SetSelectedSplinePointRotation(
+                    static_cast<std::size_t>(selectedPoint), pointRotation);
+            }
+            ImGui::TextDisabled("Z banks river water; all axes are saved for other spline users.");
+            if (ImGui::Button("Insert After")) {
+                const std::size_t i = static_cast<std::size_t>(selectedPoint);
+                const auto& pts = selected->splinePoints;
+                const std::size_t next = i + 1 < pts.size() ? i + 1 : (closed ? 0 : i);
+                const glm::vec3 point = next != i ? glm::mix(pts[i], pts[next], 0.5f)
+                                                  : pts[i] + glm::vec3(2.0f, 0.0f, 0.0f);
+                context.scene->InsertSelectedSplinePoint(i + 1, point);
+                if (i < selected->splinePointRotations.size()) {
+                    context.scene->SetSelectedSplinePointRotation(i + 1,
+                        selected->splinePointRotations[i]);
+                }
+                if (context.selectedSplinePoint) *context.selectedSplinePoint = selectedPoint + 1;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Duplicate")) {
+                const std::size_t i = static_cast<std::size_t>(selectedPoint);
+                context.scene->InsertSelectedSplinePoint(i + 1,
+                    selected->splinePoints[i] + glm::vec3(0.5f, 0.0f, 0.5f));
+                if (i < selected->splinePointRotations.size()) {
+                    context.scene->SetSelectedSplinePointRotation(i + 1,
+                        selected->splinePointRotations[i]);
+                }
+                if (context.selectedSplinePoint) *context.selectedSplinePoint = selectedPoint + 1;
+            }
+        }
+
+        if (selected->splinePoints.size() >= 2) {
+            if (ImGui::Button("Reverse Direction")) {
+                std::vector<glm::vec3> reversed = selected->splinePoints;
+                std::vector<glm::vec3> reversedRotations = selected->splinePointRotations;
+                std::reverse(reversed.begin(), reversed.end());
+                std::reverse(reversedRotations.begin(), reversedRotations.end());
+                context.scene->SetSelectedSplinePoints(reversed);
+                context.scene->SetSelectedSplinePointRotations(reversedRotations);
+                if (context.selectedSplinePoint && *context.selectedSplinePoint >= 0) {
+                    *context.selectedSplinePoint = static_cast<int>(reversed.size()) - 1
+                        - *context.selectedSplinePoint;
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Even Spacing")) {
+                std::vector<glm::vec3> even;
+                authoredSpline.SampleUniform(static_cast<int>(selected->splinePoints.size()), even);
+                context.scene->SetSelectedSplinePoints(even);
+            }
+        }
+        if (selected->splineType == 1) {
+            ImGui::Separator();
+            if (ImGui::Button("Create River Water From Spline")) {
+                context.addRiverForSelectedSplineRequested = true;
+            }
+            ImGui::TextDisabled("Creates river water and assigns this spline as its flow direction.");
         }
     }
 
@@ -6591,10 +7233,19 @@ void DrawAssets(EditorDockspace::Context& context, bool* open) {
             importModelInspected = engine::InspectModelSource(
                 selected, &importModelInfo, &importInspectionError);
             if (importModelInspected) {
-                importModelMode = static_cast<int>(
-                    importModelInfo.IsSkeletal()
+                const bool animationOnly = importModelInfo.animationCount > 0
+                    && importModelInfo.meshCount == 0;
+                importModelMode = static_cast<int>(animationOnly
+                    ? EditorAssets::ModelImportMode::Animation
+                    : (importModelInfo.IsSkeletal()
                         ? EditorAssets::ModelImportMode::SkeletalMesh
-                        : EditorAssets::ModelImportMode::StaticMesh);
+                        : EditorAssets::ModelImportMode::StaticMesh));
+                engine::SkeletalImportOptions& settings =
+                    context.assets->SkeletalImportSettings();
+                settings.importSkeletalMesh = !animationOnly;
+                settings.importSkeleton = !animationOnly;
+                settings.importEmbeddedAnimations = true;
+                if (!animationOnly) settings.reuseSkeletonPath.clear();
             }
         }
     };
@@ -6639,9 +7290,13 @@ void DrawAssets(EditorDockspace::Context& context, bool* open) {
 
         ImGui::SeparatorText("Asset Settings");
         if (importingModel) {
-            const char* importAs = importModelMode
-                    == static_cast<int>(EditorAssets::ModelImportMode::SkeletalMesh)
-                ? "Skeletal Mesh" : "Static Mesh";
+            const auto selectedImportMode =
+                static_cast<EditorAssets::ModelImportMode>(importModelMode);
+            const char* importAs = selectedImportMode
+                    == EditorAssets::ModelImportMode::SkeletalMesh
+                ? "Skeletal Mesh"
+                : (selectedImportMode == EditorAssets::ModelImportMode::Animation
+                    ? "Animation" : "Static Mesh");
             ImGui::SetNextItemWidth(260.0f);
             if (ImGui::BeginCombo("Import As", importAs)) {
                 const bool staticSelected = importModelMode
@@ -6651,9 +7306,26 @@ void DrawAssets(EditorDockspace::Context& context, bool* open) {
                         EditorAssets::ModelImportMode::StaticMesh);
                 const bool skeletalSelected = importModelMode
                     == static_cast<int>(EditorAssets::ModelImportMode::SkeletalMesh);
-                if (ImGui::Selectable("Skeletal Mesh", skeletalSelected))
+                if (ImGui::Selectable("Skeletal Mesh", skeletalSelected)) {
                     importModelMode = static_cast<int>(
                         EditorAssets::ModelImportMode::SkeletalMesh);
+                    engine::SkeletalImportOptions& settings =
+                        context.assets->SkeletalImportSettings();
+                    settings.importSkeletalMesh = true;
+                    settings.importSkeleton = true;
+                    settings.reuseSkeletonPath.clear();
+                }
+                const bool animationSelected = importModelMode
+                    == static_cast<int>(EditorAssets::ModelImportMode::Animation);
+                if (ImGui::Selectable("Animation", animationSelected)) {
+                    importModelMode = static_cast<int>(
+                        EditorAssets::ModelImportMode::Animation);
+                    engine::SkeletalImportOptions& settings =
+                        context.assets->SkeletalImportSettings();
+                    settings.importSkeletalMesh = false;
+                    settings.importSkeleton = false;
+                    settings.importEmbeddedAnimations = true;
+                }
                 ImGui::EndCombo();
             }
             if (importModelInspected) {
@@ -6668,7 +7340,9 @@ void DrawAssets(EditorDockspace::Context& context, bool* open) {
             }
 
             if (importModelMode
-                == static_cast<int>(EditorAssets::ModelImportMode::SkeletalMesh)) {
+                == static_cast<int>(EditorAssets::ModelImportMode::SkeletalMesh)
+                || importModelMode
+                    == static_cast<int>(EditorAssets::ModelImportMode::Animation)) {
                 engine::SkeletalImportOptions& settings =
                     context.assets->SkeletalImportSettings();
                 ImGui::DragFloat("Uniform Scale", &settings.uniformScale,
@@ -6678,10 +7352,77 @@ void DrawAssets(EditorDockspace::Context& context, bool* open) {
                 ImGui::Checkbox("Join Identical Vertices",
                                 &settings.joinIdenticalVertices);
                 ImGui::Checkbox("Flip UVs", &settings.flipUVs);
-                ImGui::Checkbox("Import Embedded Animations",
+                ImGui::Checkbox("Import Animations",
                                 &settings.importEmbeddedAnimations);
-                ImGui::TextDisabled(
-                    "Creates skeletal mesh, skeleton, and animation assets.");
+                const bool animationMode = importModelMode
+                    == static_cast<int>(EditorAssets::ModelImportMode::Animation);
+                ImGui::SeparatorText(animationMode
+                    ? "Animation Import Outputs"
+                    : "Skeletal Mesh Import Outputs");
+                if (animationMode) {
+                    ImGui::Checkbox("Import Mesh Asset",
+                                    &settings.importSkeletalMesh);
+                } else {
+                    // Skeletal Mesh mode always emits the mesh. Its skeleton can
+                    // either be created from the source or reused from Content.
+                    settings.importSkeletalMesh = true;
+                }
+
+                const std::vector<std::string> skeletons =
+                    context.assets->ContentAssetPaths(
+                        EditorAssets::Type::Skeleton);
+                const std::string skeletonLabel =
+                    settings.reuseSkeletonPath.empty()
+                    ? std::string("Create from source")
+                    : settings.reuseSkeletonPath;
+                ImGui::SetNextItemWidth(420.0f);
+                if (ImGui::BeginCombo("Skeleton", skeletonLabel.c_str())) {
+                    const bool createSelected =
+                        settings.reuseSkeletonPath.empty();
+                    if (ImGui::Selectable(
+                            "Create from source", createSelected)) {
+                        settings.reuseSkeletonPath.clear();
+                        settings.importSkeleton = true;
+                    }
+                    if (createSelected) ImGui::SetItemDefaultFocus();
+                    for (const std::string& path : skeletons) {
+                        const bool selected =
+                            settings.reuseSkeletonPath == path;
+                        if (ImGui::Selectable(path.c_str(), selected)) {
+                            settings.reuseSkeletonPath = path;
+                            settings.importSkeleton = false;
+                        }
+                        if (selected) ImGui::SetItemDefaultFocus();
+                    }
+                    ImGui::EndCombo();
+                }
+
+                if (!settings.reuseSkeletonPath.empty()) {
+                    settings.importSkeleton = false;
+                    ImGui::BeginDisabled();
+                }
+                ImGui::Checkbox("Import Skeleton Asset",
+                                &settings.importSkeleton);
+                if (!settings.reuseSkeletonPath.empty())
+                    ImGui::EndDisabled();
+
+                if (settings.reuseSkeletonPath.empty()
+                    && !settings.importSkeleton) {
+                    ImGui::TextColored(
+                        ImVec4(1.0f, 0.55f, 0.25f, 1.0f),
+                        "Select an existing skeleton or import one from the source.");
+                } else if (!settings.reuseSkeletonPath.empty()) {
+                    ImGui::TextDisabled(animationMode
+                        ? "Animation clips will reference the selected engine skeleton."
+                        : "Mesh skin weights will be remapped to the selected engine skeleton.");
+                }
+                if (animationMode) {
+                    ImGui::TextDisabled(
+                        "Animation mode defaults to clips only to avoid duplicate meshes and skeletons.");
+                } else {
+                    ImGui::TextDisabled(
+                        "Disable skeleton import by selecting an existing compatible skeleton above.");
+                }
             } else {
                 engine::StaticMeshImportOptions& settings =
                     context.assets->StaticMeshImportSettings();
@@ -6757,7 +7498,24 @@ void DrawAssets(EditorDockspace::Context& context, bool* open) {
         }
 
         ImGui::Spacing();
-        const bool canImport = !importSource.empty();
+        bool skeletalSettingsValid = true;
+        if (importModelMode
+                == static_cast<int>(EditorAssets::ModelImportMode::Animation)
+            || importModelMode
+                == static_cast<int>(EditorAssets::ModelImportMode::SkeletalMesh)) {
+            const engine::SkeletalImportOptions& settings =
+                context.assets->SkeletalImportSettings();
+            skeletalSettingsValid = settings.importSkeleton
+                || !settings.reuseSkeletonPath.empty();
+            if (importModelMode
+                == static_cast<int>(EditorAssets::ModelImportMode::Animation)) {
+                skeletalSettingsValid = skeletalSettingsValid
+                    && settings.importEmbeddedAnimations
+                    && (!importModelInspected
+                        || importModelInfo.animationCount > 0);
+            }
+        }
+        const bool canImport = !importSource.empty() && skeletalSettingsValid;
         if (!canImport) ImGui::BeginDisabled();
         if (ImGui::Button("Import", ImVec2(120.0f, 0.0f))) {
             std::string error;
@@ -6915,7 +7673,11 @@ void DrawStandaloneScriptEditor(EditorDockspace::Context& context) {
             }
         }
     }
-    ImGui::TextDisabled("Compile Scripts saves native code, closes the editor, rebuilds editor + player, and reopens the project.");
+    const bool editingLua =
+        std::filesystem::path(g_scriptSourcePath).extension() == ".lua";
+    ImGui::TextDisabled(editingLua
+        ? "Lua runs directly. Save it, then restart Play to load changes."
+        : "Compile Scripts saves native code, closes the editor, rebuilds editor + player, and reopens the project.");
     ImGui::Separator();
     if (ImGui::InputTextMultiline("##StandaloneScriptSource",
             g_scriptSourceBuffer.data(), g_scriptSourceBuffer.size(),
@@ -6943,7 +7705,7 @@ void DrawStandaloneScriptEditor(EditorDockspace::Context& context) {
     ImGui::SameLine();
     ImGui::TextDisabled(g_scriptSourceDirty ? "Unsaved changes" : "Saved");
     ImGui::Separator();
-    ImGui::BeginDisabled(context.playMode);
+    ImGui::BeginDisabled(context.playMode || editingLua);
     if (ImGui::Button("Compile Scripts & Restart")) {
         std::string error;
         bool saved = true;
@@ -6955,11 +7717,14 @@ void DrawStandaloneScriptEditor(EditorDockspace::Context& context) {
         else if (context.log) context.log->Error("Script source save failed: " + error);
     }
     ImGui::EndDisabled();
-    if (context.playMode && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-        ImGui::SetTooltip("Exit Play mode before compiling scripts.");
+    if ((context.playMode || editingLua)
+        && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip(editingLua
+            ? "Lua scripts do not need compilation."
+            : "Exit Play mode before compiling scripts.");
     }
     ImGui::SameLine();
-    ImGui::BeginDisabled(context.playMode);
+    ImGui::BeginDisabled(context.playMode || editingLua);
     if (ImGui::Button("Hot Reload (dev)")) {
         std::string error;
         bool saved = true;
@@ -6972,7 +7737,9 @@ void DrawStandaloneScriptEditor(EditorDockspace::Context& context) {
     }
     ImGui::EndDisabled();
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-        ImGui::SetTooltip("Rebuild game_scripts.dll and reload it without restarting the editor.");
+        ImGui::SetTooltip(editingLua
+            ? "Lua scripts reload when Play starts."
+            : "Rebuild game_scripts.dll and reload it without restarting the editor.");
     }
     ImGui::SameLine();
     if (ImGui::Button("Last Build Log")) {
@@ -7107,15 +7874,39 @@ void DrawScriptApiBrowser(EditorDockspace::Context& /*context*/, bool* open) {
         {"Core", "Entity SpawnFromObject(\"Proto\", pos)", "Spawn a copy of a named object at a position."},
         {"Core", "int Delay(seconds, fn)", "Run fn once after a delay."},
         {"Core", "int SetTimer(seconds, fn, repeat=false)", "Run fn after a delay, optionally repeating."},
+        {"Core", "int SetTimerByEvent(seconds, fn, repeat=false)", "Event-style alias for callback timers."},
+        {"Core", "bool BindTimerFunction(\"Name\", fn)", "Register a C++ callback for named timers."},
+        {"Core", "int SetTimerByFunctionName(\"Name\", sec, repeat=false)", "Run a registered C++ or Lua function by name."},
         {"Core", "void ClearTimer(id)", "Cancel a running timer."},
+        {"Core", "int ClearTimerByFunctionName(\"Name\")", "Cancel every timer using a function name."},
+        {"Core", "bool IsTimerActive(id or name)", "Query a timer by handle or function name."},
         {"Core", "Sequence().Do(fn).Wait(sec).Do(fn)", "Run steps across frames (coroutine-style)."},
         {"Core", "Sequence().WaitUntil(pred).Do(fn)", "Wait for a condition, then run steps."},
         {"Core", "void RequestSceneLoad(\"path\")", "Load a runtime scene next frame."},
+
+        {"Time", "void SetGlobalTimeDilation(scale)", "Set gameplay speed; 1 normal, 0 frozen."},
+        {"Time", "float GlobalTimeDilation()", "Read the configured base gameplay speed."},
+        {"Time", "float EffectiveTimeDilation()", "Read base speed with an active hit stop applied."},
+        {"Time", "void HitStop(realSeconds, scale=0)", "Temporarily freeze or nearly freeze gameplay."},
+        {"Time", "bool IsHitStopActive()", "Is a temporary impact freeze active."},
 
         {"Components", "T* TryGet<T>()", "Component T on this entity, or nullptr."},
         {"Components", "bool Has<T>()", "Does this entity have component T."},
         {"Components", "T& Add<T>(value)", "Add component T to this entity."},
         {"Components", "void Remove<T>()", "Remove component T from this entity."},
+
+        {"Spline", "int SplinePointCount(entity)", "Number of control points on a spline object."},
+        {"Spline", "vec3 GetSplinePoint(entity, index)", "Read a control point (C++ index starts at 0; Lua at 1)."},
+        {"Spline", "bool SetSplinePoint(entity, index, pos)", "Move a control point at runtime."},
+        {"Spline", "vec3 GetSplinePointRotation(entity, index)", "Read point rotation in degrees."},
+        {"Spline", "bool SetSplinePointRotation(entity, index, degrees)", "Rotate a point; Z banks a river."},
+        {"Spline", "int AddSplinePoint(entity, pos, rotation={})", "Append a point and return its index."},
+        {"Spline", "bool InsertSplinePoint(entity, index, pos, rotation={})", "Insert a control point."},
+        {"Spline", "bool RemoveSplinePoint(entity, index)", "Remove a control point."},
+        {"Spline", "bool TranslateSpline(entity, delta)", "Move every point together."},
+        {"Spline", "bool SetSplineClosed(entity, closed)", "Toggle open or closed-loop mode."},
+        {"Spline", "vec3 SplinePositionAt(entity, 0..1)", "Sample an arc-length position."},
+        {"Spline", "vec3 SplineTangentAt(entity, 0..1)", "Sample the normalized path direction."},
 
         {"Input", "bool Input().KeyDown(key)", "Key currently held."},
         {"Input", "bool Input().KeyPressed(key)", "Key pressed this frame."},
@@ -8433,15 +9224,15 @@ void DrawGizmoToolbar(EditorDockspace::Context& context, bool* open) {
     }
 
     const EditorGizmo::Mode mode = context.gizmo->CurrentMode();
-    if (ImGui::Selectable("Move", mode == EditorGizmo::Mode::Translate, 0, ImVec2(72.0f, 0.0f))) {
+    if (ImGui::Selectable("W Move", mode == EditorGizmo::Mode::Translate, 0, ImVec2(82.0f, 0.0f))) {
         context.gizmo->SetMode(EditorGizmo::Mode::Translate);
     }
     ImGui::SameLine();
-    if (ImGui::Selectable("Rotate", mode == EditorGizmo::Mode::Rotate, 0, ImVec2(72.0f, 0.0f))) {
+    if (ImGui::Selectable("E Rotate", mode == EditorGizmo::Mode::Rotate, 0, ImVec2(82.0f, 0.0f))) {
         context.gizmo->SetMode(EditorGizmo::Mode::Rotate);
     }
     ImGui::SameLine();
-    if (ImGui::Selectable("Scale", mode == EditorGizmo::Mode::Scale, 0, ImVec2(72.0f, 0.0f))) {
+    if (ImGui::Selectable("R Scale", mode == EditorGizmo::Mode::Scale, 0, ImVec2(82.0f, 0.0f))) {
         context.gizmo->SetMode(EditorGizmo::Mode::Scale);
     }
 
@@ -8481,7 +9272,7 @@ void DrawGizmoToolbar(EditorDockspace::Context& context, bool* open) {
 
     if (mode == EditorGizmo::Mode::Scale) {
         ImGui::SameLine();
-        if (ImGui::Button(axis == EditorGizmo::Axis::All ? "All *" : "All", ImVec2(68.0f, 0.0f))) {
+        if (ImGui::Button(axis == EditorGizmo::Axis::All ? "G All *" : "G All", ImVec2(68.0f, 0.0f))) {
             context.gizmo->SetAxis(EditorGizmo::Axis::All);
         }
     }
@@ -8742,6 +9533,10 @@ bool EditorDockspace::Draw(Context& context) {
                 context.addTerrainRequested = true;
                 context.frameSelectedRequested = true;
             }
+            if (ImGui::MenuItem("Foliage Actor")) {
+                context.addFoliageRequested = true;
+                context.frameSelectedRequested = true;
+            }
             if (ImGui::BeginMenu("Water")) {
                 if (ImGui::MenuItem("Lake")) {
                     context.addWaterRequested = true; context.addWaterPreset = 1;
@@ -8762,9 +9557,20 @@ bool EditorDockspace::Draw(Context& context) {
                 }
                 ImGui::EndMenu();
             }
-            if (ImGui::MenuItem("Spline")) {
-                context.addSplineRequested = true;
-                context.frameSelectedRequested = true;
+            if (ImGui::BeginMenu("Spline")) {
+                if (ImGui::MenuItem("Path Spline")) {
+                    context.addSplineRequested = true; context.addSplineType = 0;
+                    context.frameSelectedRequested = true;
+                }
+                if (ImGui::MenuItem("River Spline")) {
+                    context.addSplineRequested = true; context.addSplineType = 1;
+                    context.frameSelectedRequested = true;
+                }
+                if (ImGui::MenuItem("Camera Rail")) {
+                    context.addSplineRequested = true; context.addSplineType = 2;
+                    context.frameSelectedRequested = true;
+                }
+                ImGui::EndMenu();
             }
             if (ImGui::BeginMenu("Physics")) {
                 if (ImGui::MenuItem("Dynamic Cube")) {
@@ -8827,14 +9633,20 @@ bool EditorDockspace::Draw(Context& context) {
         if (context.gizmo && ImGui::BeginMenu("Gizmo")) {
             if (ImGui::BeginMenu("Mode")) {
                 const EditorGizmo::Mode mode = context.gizmo->CurrentMode();
-                if (ImGui::MenuItem("Move", "G", mode == EditorGizmo::Mode::Translate)) {
+                if (ImGui::MenuItem("Move", "W", mode == EditorGizmo::Mode::Translate)) {
                     context.gizmo->SetMode(EditorGizmo::Mode::Translate);
                 }
-                if (ImGui::MenuItem("Rotate", nullptr, mode == EditorGizmo::Mode::Rotate)) {
+                if (ImGui::MenuItem("Rotate", "E", mode == EditorGizmo::Mode::Rotate)) {
                     context.gizmo->SetMode(EditorGizmo::Mode::Rotate);
                 }
-                if (ImGui::MenuItem("Scale", nullptr, mode == EditorGizmo::Mode::Scale)) {
+                if (ImGui::MenuItem("Scale", "R", mode == EditorGizmo::Mode::Scale)) {
                     context.gizmo->SetMode(EditorGizmo::Mode::Scale);
+                }
+                if (ImGui::MenuItem("Uniform Scale", "G",
+                        mode == EditorGizmo::Mode::Scale
+                            && context.gizmo->CurrentAxis() == EditorGizmo::Axis::All)) {
+                    context.gizmo->SetMode(EditorGizmo::Mode::Scale);
+                    context.gizmo->SetAxis(EditorGizmo::Axis::All);
                 }
                 ImGui::EndMenu();
             }
@@ -9036,6 +9848,8 @@ bool EditorDockspace::Draw(Context& context) {
             break; // drawn by EditorApp::DrawPrefabEditorPanel (owns the prefab asset)
         case EditorPanels::Panel::ScriptDebug:
             break; // drawn by EditorApp::DrawScriptDebugPanel (needs the play registry)
+        case EditorPanels::Panel::WorldEditor:
+            break; // drawn by EditorApp::DrawWorldEditorPanel (owns the world authoring state)
         case EditorPanels::Panel::PhysicsStatus:
             DrawPhysicsStatus(context, &open);
             break;

@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <sstream>
 #include <utility>
 
 namespace material_maker {
@@ -66,6 +67,29 @@ bool IsSupportedTexturePath(const std::filesystem::path& path) {
     return extension == ".png" || extension == ".jpg"
         || extension == ".jpeg" || extension == ".tga"
         || extension == ".3dgtex";
+}
+
+std::vector<float> ParameterNumbers(std::string value) {
+    if (const std::size_t open = value.find('('); open != std::string::npos)
+        value.erase(0, open + 1);
+    for (char& c : value)
+        if (c == ',' || c == '(' || c == ')') c = ' ';
+    std::istringstream input(value);
+    std::vector<float> numbers;
+    float number = 0.0f;
+    while (input >> number) numbers.push_back(number);
+    return numbers;
+}
+
+std::string FormatParameter(const float* values, int count) {
+    std::string result;
+    char number[32]{};
+    for (int i = 0; i < count; ++i) {
+        if (i > 0) result += ',';
+        std::snprintf(number, sizeof(number), "%.6g", values[i]);
+        result += number;
+    }
+    return result;
 }
 
 // Starter presets. Metal entries use measured base reflectances (F0), which is the
@@ -151,6 +175,8 @@ bool MaterialMakerPanel::LoadFromFile(const std::string& path) {
     }
 
     m_material = loaded;
+    if (!m_material.shaderPath.empty())
+        LoadShaderDefinition(m_material.shaderPath, true);
     m_savedSnapshot = m_material;
     m_hasSavedSnapshot = true;
     m_lastSavedPath = path;
@@ -165,6 +191,7 @@ void MaterialMakerPanel::SetOutputDirectory(const std::string& outputDirectory) 
     if (m_outputDirectory == outputDirectory) return;
     m_outputDirectory = outputDirectory;
     m_libraryScanned = false;
+    m_shaderLibraryScanned = false;
     CopyToBuffer(m_outputDirectoryBuffer, sizeof(m_outputDirectoryBuffer), m_outputDirectory);
 }
 
@@ -189,43 +216,231 @@ void MaterialMakerPanel::SetHeightMap(const std::string& path) {
 }
 
 bool MaterialMakerPanel::SetShaderAsset(const std::string& path) {
+    return LoadShaderDefinition(path, false);
+}
+
+bool MaterialMakerPanel::LoadShaderDefinition(
+    const std::string& path, bool preserveOverrides) {
     engine::ShaderAsset shader;
     std::string error;
     if (!engine::LoadShaderAsset(path, &shader, &error)) {
         m_status = "Shader load failed: " + error;
         return false;
     }
+    if (shader.domain != engine::ShaderDomain::Surface) {
+        m_status = std::string("Material Maker requires a Surface shader; selected asset is ")
+            + engine::ShaderDomainName(shader.domain) + ".";
+        return false;
+    }
     m_material.shaderPath = path;
-    m_material.shaderParameters.clear();
+    m_material.shaderAssetId = shader.assetId;
+    std::unordered_map<std::string, ShaderParameterDocument> existing;
+    if (preserveOverrides) {
+        for (const ShaderParameterDocument& parameter :
+             m_material.shaderParameters)
+            existing[parameter.name] = parameter;
+    }
+    std::vector<ShaderParameterDocument> synchronized;
+    m_shaderParameterMetadata.clear();
     for (const auto& source : shader.parameters) {
         ShaderParameterDocument parameter;
         parameter.name = source.name;
         parameter.type = static_cast<int>(source.type);
         parameter.value = source.defaultValue;
         parameter.assetId = source.assetId;
-        m_material.shaderParameters.push_back(std::move(parameter));
+        const auto previous = existing.find(source.name);
+        if (previous != existing.end()
+            && previous->second.type == parameter.type) {
+            parameter.value = previous->second.value;
+            parameter.assetId = previous->second.assetId;
+        }
+        synchronized.push_back(std::move(parameter));
+        m_shaderParameterMetadata[source.name] = {
+            source.defaultValue,
+            source.group.empty() ? "General" : source.group,
+            source.tooltip,
+            source.useRange,
+            source.minValue,
+            source.maxValue,
+            source.step,
+            source.materialVisible
+        };
     }
+    m_material.shaderParameters = std::move(synchronized);
     CopyToBuffer(m_shaderPathBuffer, sizeof(m_shaderPathBuffer), path);
-    m_status = "Loaded shader parameters from " + path;
+    m_status = preserveOverrides
+        ? "Refreshed shader definition and preserved compatible overrides."
+        : "Loaded shader parameters from " + path;
     return true;
+}
+
+void MaterialMakerPanel::RefreshShaderLibrary() {
+    m_shaderLibraryScanned = false;
+    ScanShaderLibrary();
+}
+
+void MaterialMakerPanel::ScanShaderLibrary() {
+    m_shaderLibraryFiles.clear();
+    m_shaderLibraryScanned = true;
+
+    std::filesystem::path root = m_outputDirectory;
+    for (std::filesystem::path cursor = root; !cursor.empty(); cursor = cursor.parent_path()) {
+        std::string folder = cursor.filename().string();
+        std::transform(folder.begin(), folder.end(), folder.begin(),
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (folder == "content") {
+            root = cursor;
+            break;
+        }
+        if (cursor == cursor.root_path()) break;
+    }
+
+    std::error_code ec;
+    if (!std::filesystem::is_directory(root, ec)) return;
+    for (std::filesystem::recursive_directory_iterator it(
+             root, std::filesystem::directory_options::skip_permission_denied, ec), end;
+         it != end; it.increment(ec)) {
+        if (ec) {
+            ec.clear();
+            continue;
+        }
+        if (!it->is_regular_file(ec) || LowerExtension(it->path()) != ".3dgshader")
+            continue;
+        engine::ShaderAsset shader;
+        std::string ignored;
+        if (engine::LoadShaderAsset(it->path().string(), &shader, &ignored)
+            && shader.domain == engine::ShaderDomain::Surface)
+            m_shaderLibraryFiles.push_back(it->path().lexically_normal().string());
+    }
+    std::sort(m_shaderLibraryFiles.begin(), m_shaderLibraryFiles.end());
 }
 
 void MaterialMakerPanel::DrawShaderControls() {
     if (!ImGui::CollapsingHeader("Custom Shader", ImGuiTreeNodeFlags_DefaultOpen)) return;
-    if (ImGui::InputText("Shader Asset", m_shaderPathBuffer, sizeof(m_shaderPathBuffer)))
-        m_material.shaderPath = m_shaderPathBuffer;
+    if (!m_shaderLibraryScanned) ScanShaderLibrary();
+
+    const std::string selectedName = m_material.shaderPath.empty()
+        ? std::string("Standard PBR (no custom shader)")
+        : std::filesystem::path(m_material.shaderPath).filename().string();
+    ImGui::SetNextItemWidth(-70.0f);
+    if (ImGui::BeginCombo("Shader", selectedName.c_str())) {
+        ImGui::InputTextWithHint("##shader_search", "Search Surface shaders...",
+                                 m_shaderSearchBuffer, sizeof(m_shaderSearchBuffer));
+        if (ImGui::Selectable("Standard PBR (none)", m_material.shaderPath.empty())) {
+            m_material.shaderPath.clear();
+            m_material.shaderAssetId = {};
+            m_material.shaderParameters.clear();
+            m_shaderParameterMetadata.clear();
+            m_shaderPathBuffer[0] = '\0';
+        }
+        std::string search = m_shaderSearchBuffer;
+        std::transform(search.begin(), search.end(), search.begin(),
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        for (const std::string& path : m_shaderLibraryFiles) {
+            std::string label = std::filesystem::path(path).filename().string();
+            std::string searchable = label;
+            std::transform(searchable.begin(), searchable.end(), searchable.begin(),
+                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (!search.empty() && searchable.find(search) == std::string::npos) continue;
+            const bool selected = std::filesystem::path(path).lexically_normal()
+                == std::filesystem::path(m_material.shaderPath).lexically_normal();
+            ImGui::PushID(path.c_str());
+            if (ImGui::Selectable(label.c_str(), selected)) SetShaderAsset(path);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", path.c_str());
+            ImGui::PopID();
+        }
+        if (m_shaderLibraryFiles.empty())
+            ImGui::TextDisabled("No Surface .3dgshader assets found in Content.");
+        ImGui::EndCombo();
+    }
     ImGui::SameLine();
-    if (ImGui::SmallButton("Load"))
-        SetShaderAsset(m_shaderPathBuffer);
-    ImGui::TextDisabled("Exposed graph parameters become material-instance values.");
+    if (ImGui::SmallButton("Refresh")) RefreshShaderLibrary();
+    if (!m_material.shaderPath.empty()) {
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Reload Definition"))
+            LoadShaderDefinition(m_material.shaderPath, true);
+    }
+
+    if (!m_material.shaderPath.empty()) {
+        ImGui::TextDisabled("%s", m_material.shaderPath.c_str());
+        ImGui::TextDisabled("Exposed graph parameters become material-instance values.");
+    } else {
+        ImGui::TextDisabled("Choose an engine-owned Surface shader to override Standard PBR.");
+    }
+    std::string currentGroup;
     for (auto& parameter : m_material.shaderParameters) {
+        const auto metadataIt = m_shaderParameterMetadata.find(parameter.name);
+        const ShaderParameterMetadata* metadata =
+            metadataIt == m_shaderParameterMetadata.end()
+                ? nullptr : &metadataIt->second;
+        if (metadata && !metadata->visible) continue;
+        const std::string group = metadata && !metadata->group.empty()
+            ? metadata->group : "General";
+        if (group != currentGroup) {
+            ImGui::SeparatorText(group.c_str());
+            currentGroup = group;
+        }
         ImGui::PushID(parameter.name.c_str());
         std::array<char, 256> value{};
         std::snprintf(value.data(), value.size(), "%s", parameter.value.c_str());
-        if (parameter.type == static_cast<int>(engine::ShaderValueType::Bool)) {
+        const auto type = static_cast<engine::ShaderValueType>(parameter.type);
+        if (type == engine::ShaderValueType::Bool) {
             bool enabled = parameter.value == "1" || parameter.value == "true";
             if (ImGui::Checkbox(parameter.name.c_str(), &enabled))
                 parameter.value = enabled ? "true" : "false";
+        } else if (type == engine::ShaderValueType::Float) {
+            const std::vector<float> parsed = ParameterNumbers(parameter.value);
+            float number = parsed.empty() ? 0.0f : parsed[0];
+            const bool changed = metadata && metadata->useRange
+                ? ImGui::SliderFloat(parameter.name.c_str(), &number,
+                                     metadata->minValue, metadata->maxValue)
+                : ImGui::DragFloat(parameter.name.c_str(), &number,
+                                   metadata ? metadata->step : 0.01f);
+            if (changed)
+                parameter.value = FormatParameter(&number, 1);
+        } else if (type == engine::ShaderValueType::Int) {
+            const std::vector<float> parsed = ParameterNumbers(parameter.value);
+            int number = parsed.empty() ? 0 : static_cast<int>(parsed[0]);
+            const bool changed = metadata && metadata->useRange
+                ? ImGui::SliderInt(parameter.name.c_str(), &number,
+                    static_cast<int>(metadata->minValue),
+                    static_cast<int>(metadata->maxValue))
+                : ImGui::InputInt(parameter.name.c_str(), &number,
+                    std::max(1, static_cast<int>(metadata ? metadata->step : 1.0f)));
+            if (changed)
+                parameter.value = std::to_string(number);
+        } else if (type == engine::ShaderValueType::Vec2
+                   || type == engine::ShaderValueType::Vec3
+                   || type == engine::ShaderValueType::Vec4
+                   || type == engine::ShaderValueType::Color) {
+            const int count = type == engine::ShaderValueType::Vec2 ? 2
+                : type == engine::ShaderValueType::Vec3 ? 3 : 4;
+            float numbers[4]{0.0f, 0.0f, 0.0f, 1.0f};
+            const std::vector<float> parsed = ParameterNumbers(parameter.value);
+            for (int i = 0; i < count && i < static_cast<int>(parsed.size()); ++i)
+                numbers[i] = parsed[static_cast<std::size_t>(i)];
+            bool changed = false;
+            if (type == engine::ShaderValueType::Color)
+                changed = ImGui::ColorEdit4(parameter.name.c_str(), numbers);
+            else if (metadata && metadata->useRange && count == 2)
+                changed = ImGui::SliderFloat2(parameter.name.c_str(), numbers,
+                    metadata->minValue, metadata->maxValue);
+            else if (metadata && metadata->useRange && count == 3)
+                changed = ImGui::SliderFloat3(parameter.name.c_str(), numbers,
+                    metadata->minValue, metadata->maxValue);
+            else if (metadata && metadata->useRange)
+                changed = ImGui::SliderFloat4(parameter.name.c_str(), numbers,
+                    metadata->minValue, metadata->maxValue);
+            else if (count == 2)
+                changed = ImGui::DragFloat2(parameter.name.c_str(), numbers,
+                    metadata ? metadata->step : 0.01f);
+            else if (count == 3)
+                changed = ImGui::DragFloat3(parameter.name.c_str(), numbers,
+                    metadata ? metadata->step : 0.01f);
+            else
+                changed = ImGui::DragFloat4(parameter.name.c_str(), numbers,
+                    metadata ? metadata->step : 0.01f);
+            if (changed) parameter.value = FormatParameter(numbers, count);
         } else if (ImGui::InputText(parameter.name.c_str(), value.data(), value.size())) {
             parameter.value = value.data();
         }
@@ -246,12 +461,32 @@ void MaterialMakerPanel::DrawShaderControls() {
             }
             ImGui::EndDragDropTarget();
         }
+        if (metadata && !metadata->tooltip.empty()
+            && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("%s", metadata->tooltip.c_str());
+        if (metadata) {
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Reset")) {
+                parameter.value = metadata->defaultValue;
+                parameter.assetId = {};
+            }
+        }
         ImGui::PopID();
     }
     if (!m_material.shaderPath.empty() && ImGui::Button("Clear Custom Shader")) {
         m_material.shaderPath.clear();
+        m_material.shaderAssetId = {};
         m_material.shaderParameters.clear();
+        m_shaderParameterMetadata.clear();
         m_shaderPathBuffer[0] = '\0';
+    }
+
+    if (ImGui::TreeNode("Manual Shader Path")) {
+        if (ImGui::InputText("Asset", m_shaderPathBuffer, sizeof(m_shaderPathBuffer)))
+            m_material.shaderPath = m_shaderPathBuffer;
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Load")) SetShaderAsset(m_shaderPathBuffer);
+        ImGui::TreePop();
     }
 }
 
@@ -824,6 +1059,11 @@ void MaterialMakerPanel::DrawPreview() {
         s.normalMapPath     = m_material.normalMap;
         s.metalRoughMapPath = m_material.metalRoughMap;
         s.heightMapPath     = m_material.heightMap;
+        s.shaderPath = m_material.shaderPath;
+        for (const ShaderParameterDocument& parameter : m_material.shaderParameters) {
+            s.shaderParameters[parameter.name] = parameter.value;
+            s.shaderParameterTypes[parameter.name] = parameter.type;
+        }
 
         texture = m_preview->Render(pbr, s);
     }

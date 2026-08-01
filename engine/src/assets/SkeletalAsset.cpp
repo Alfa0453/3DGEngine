@@ -1212,10 +1212,106 @@ bool ImportSkeletalAssetsToContent(
             sourcePath, options, &mesh, &skeleton, &animations, &output, error))
         return false;
 
+    if (!options.importEmbeddedAnimations && !options.importSkeletalMesh
+        && !options.importSkeleton) {
+        SetError(error, "Skeletal import has no enabled outputs.");
+        return false;
+    }
+    if (options.importEmbeddedAnimations && animations.empty()
+        && !options.importSkeletalMesh && !options.importSkeleton) {
+        SetError(error, "Animation-only import found no animation clips.");
+        return false;
+    }
+
     const std::string skeletonPath = destinationBase + ".3dgskel";
     const std::string meshPath = destinationBase + ".3dgskmesh";
-    if (const AssetHandle id = ExistingId(skeletonPath, AssetType::Skeleton))
+    bool reuseSkeleton = !options.reuseSkeletonPath.empty();
+    std::string selectedSkeletonPath;
+    if (reuseSkeleton) {
+        std::filesystem::path selected(options.reuseSkeletonPath);
+        if (selected.is_relative()) selected = std::filesystem::path(contentRoot) / selected;
+        selected = selected.lexically_normal();
+        selectedSkeletonPath = selected.string();
+
+        SkeletonAssetData target;
+        if (!LoadSkeletonAsset(selectedSkeletonPath, &target, error)) {
+            if (error && !error->empty())
+                *error = "Could not reuse selected skeleton: " + *error;
+            return false;
+        }
+        if (registry) {
+            const AssetRegistryEntry* entry = registry->Find(target.header.id);
+            if (!entry || entry->type != AssetType::Skeleton) {
+                SetError(error,
+                    "The selected skeleton is not registered as an engine skeleton asset.");
+                return false;
+            }
+        }
+
+        std::unordered_map<std::string, int> targetBones;
+        for (std::size_t i = 0; i < target.skeleton.bones.size(); ++i)
+            targetBones[target.skeleton.bones[i].name] = static_cast<int>(i);
+
+        // Standalone animation assets carry channel names, so they can be
+        // rebound safely even when the selected skeleton orders bones differently.
+        std::size_t matchedAnimationChannels = 0;
+        std::size_t animationChannels = 0;
+        for (const AnimationAssetData& animation : animations) {
+            for (const NamedAnimationClipData& clip : animation.clips) {
+                for (const std::string& name : clip.channelBoneNames) {
+                    ++animationChannels;
+                    if (targetBones.find(name) != targetBones.end())
+                        ++matchedAnimationChannels;
+                }
+            }
+        }
+        // Animation sources commonly contain helper/weapon channels that are
+        // intentionally absent from the deform skeleton. Runtime name binding
+        // safely ignores those, but a completely unrelated rig is rejected.
+        if (animationChannels > 0 && matchedAnimationChannels == 0) {
+            SetError(error,
+                "Selected skeleton is incompatible; no animation channels match its bones.");
+            return false;
+        }
+
+        if (options.importSkeletalMesh && !mesh.subMeshes.empty()) {
+            std::vector<int> remap(mesh.skeleton.bones.size(), -1);
+            for (std::size_t i = 0; i < mesh.skeleton.bones.size(); ++i) {
+                const auto found = targetBones.find(mesh.skeleton.bones[i].name);
+                if (found == targetBones.end()) {
+                    SetError(error, "Selected skeleton is incompatible; mesh bone '"
+                        + mesh.skeleton.bones[i].name + "' was not found.");
+                    return false;
+                }
+                remap[i] = found->second;
+            }
+            for (SkeletalMeshSubMeshData& subMesh : mesh.subMeshes) {
+                for (std::size_t vertex = 0;
+                     vertex + kSkeletalMeshVertexStride <= subMesh.vertices.size();
+                     vertex += kSkeletalMeshVertexStride) {
+                    for (std::size_t component = 0; component < 4; ++component) {
+                        float& stored = subMesh.vertices[vertex + 8 + component];
+                        const int sourceIndex = static_cast<int>(std::lround(stored));
+                        if (sourceIndex < 0
+                            || static_cast<std::size_t>(sourceIndex) >= remap.size()) {
+                            SetError(error, "Imported mesh contains an invalid bone index.");
+                            return false;
+                        }
+                        stored = static_cast<float>(remap[static_cast<std::size_t>(sourceIndex)]);
+                    }
+                }
+            }
+        }
+        skeleton = std::move(target);
+    } else if (!options.importSkeleton) {
+        SetError(error,
+            "Select an existing skeleton or enable Import Skeleton Asset.");
+        return false;
+    } else if (const AssetHandle id = ExistingId(skeletonPath, AssetType::Skeleton)) {
         skeleton.header.id = id;
+    }
+
+    const bool writeSkeleton = options.importSkeleton && !reuseSkeleton;
     mesh.skeletonId = skeleton.header.id;
     mesh.skeleton = skeleton.skeleton;
     if (const AssetHandle id = ExistingId(meshPath, AssetType::SkeletalMesh))
@@ -1261,13 +1357,14 @@ bool ImportSkeletalAssetsToContent(
         entry.dependencies = std::move(dependencies);
         return updated.Register(std::move(entry), error);
     };
-    if (!registerAsset(skeletonPath, skeleton.header.id, AssetType::Skeleton, {}))
+    if (writeSkeleton
+        && !registerAsset(skeletonPath, skeleton.header.id, AssetType::Skeleton, {}))
         return false;
     for (std::size_t i = 0; i < animations.size(); ++i)
         if (!registerAsset(animationPaths[i], animations[i].header.id,
                            AssetType::Animation, {skeleton.header.id}))
             return false;
-    if (!mesh.subMeshes.empty()
+    if (options.importSkeletalMesh && !mesh.subMeshes.empty()
         && !registerAsset(meshPath, mesh.header.id, AssetType::SkeletalMesh,
                           mesh.header.dependencies))
         return false;
@@ -1315,11 +1412,12 @@ bool ImportSkeletalAssetsToContent(
         for (AssetHandle id : staleIds) updated.Remove(id);
     }
 
-    if (!SaveSkeletonAsset(skeletonPath, skeleton, error)) return false;
+    if (writeSkeleton && !SaveSkeletonAsset(skeletonPath, skeleton, error)) return false;
     for (std::size_t i = 0; i < animations.size(); ++i)
         if (!SaveAnimationAsset(animationPaths[i], animations[i], error))
             return false;
-    if (!mesh.subMeshes.empty() && !SaveSkeletalMeshAsset(meshPath, mesh, error))
+    if (options.importSkeletalMesh && !mesh.subMeshes.empty()
+        && !SaveSkeletalMeshAsset(meshPath, mesh, error))
         return false;
     if (registry) {
         if (!updated.Save(AssetRegistry::DefaultRegistryPath(contentRoot), error))
@@ -1332,9 +1430,12 @@ bool ImportSkeletalAssetsToContent(
     }
 
     output.skeletonId = skeleton.header.id;
-    output.skeletonPath = skeletonPath;
-    output.skeletalMeshId = mesh.header.id;
-    output.skeletalMeshPath = mesh.subMeshes.empty() ? std::string() : meshPath;
+    output.skeletonPath = writeSkeleton ? skeletonPath : selectedSkeletonPath;
+    output.skeletalMeshId = options.importSkeletalMesh && !mesh.subMeshes.empty()
+        ? mesh.header.id : AssetHandle{};
+    output.skeletalMeshPath = options.importSkeletalMesh && !mesh.subMeshes.empty()
+        ? meshPath : std::string();
+    output.boneCount = skeleton.skeleton.bones.size();
     output.animationPaths = animationPaths;
     for (const auto& animation : animations)
         output.animationIds.push_back(animation.header.id);

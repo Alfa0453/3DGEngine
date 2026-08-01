@@ -55,7 +55,9 @@ enum class AssetType : std::uint32_t {
     Scene,
     Script,
     Terrain,
-    Font
+    Font,
+    World,  // a streamed world manifest referencing Scene levels (.3dgworld)
+    Foliage // instanced static-mesh foliage palette (.3dgfoliage)
 };
 
 const char* AssetTypeName(AssetType type);
@@ -87,4 +89,3 @@ bool ReadNativeAssetHeaderFile(const std::string& path, NativeAssetHeader* heade
                                std::string* error = nullptr);
 
 } // namespace engine
-

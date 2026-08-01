@@ -4,6 +4,8 @@
 #include "engine/graphics/Shader.h"
 #include "engine/graphics/Mesh.h"
 
+#include <glm/glm.hpp>
+
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -46,7 +48,16 @@ public:
         float minExposure     = 0.08f;
         float maxExposure     = 6.0f;
     };
+    struct UnderwaterSettings {
+        float blend = 0.0f;                 // smoothly driven by the camera/water test
+        glm::vec3 tint{0.04f, 0.30f, 0.38f};
+        float fogDensity = 0.16f;
+        float distortion = 0.006f;
+        float causticsStrength = 0.20f;
+        float causticsScale = 7.0f;
+    };
     Settings settings;
+    UnderwaterSettings underwater;
 
     PostProcess(int width, int height);
     ~PostProcess();

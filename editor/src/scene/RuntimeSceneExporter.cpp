@@ -4,6 +4,7 @@
 #include <engine/assets/AssetRegistry.h>
 #include <engine/ecs/Components.h>
 #include <engine/physics/PhysicsComponents.h>
+#include <engine/math/Spline.h>
 
 #include <algorithm>
 #include <fstream>
@@ -99,7 +100,7 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         return engine::MakeAssetReference(
             &assetRegistry, contentRoot, assetPath, type).id;
     };
-    out << "3DGRuntimeScene 80 " << sceneId.ToString() << '\n';
+    out << "3DGRuntimeScene 86 " << sceneId.ToString() << '\n';
     out << "# Runtime export from 3DGEditor. Editor-only flags are omitted.\n";
     const EditorScene::Environment& environment = scene.GetEnvironment();
     out << "environment "
@@ -214,6 +215,122 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
     }
 
     for (const EditorScene::Object& object : scene.Objects()) {
+        if (!object.visible || !object.isWater) continue;
+        const Transform* transform = scene.TryGetTransform(object.entity);
+        if (!transform) continue;
+        glm::vec2 flowDir(0.0f);
+        float flowStrength = 0.0f;
+        const EditorScene::Object* flowSpline = nullptr;
+        glm::vec3 waterCenter = transform->position;
+        float waterSize = object.waterSize;
+        if (!object.waterFlowSpline.empty()) {
+            for (const EditorScene::Object& splineObject : scene.Objects()) {
+                if (!splineObject.isSpline
+                    || splineObject.name != object.waterFlowSpline
+                    || splineObject.splinePoints.size() < 2) continue;
+                engine::Spline spline(
+                    splineObject.splinePoints, splineObject.splineClosed);
+                flowSpline = &splineObject;
+                glm::vec3 boundsMin = splineObject.splinePoints.front();
+                glm::vec3 boundsMax = boundsMin;
+                for (const glm::vec3& point : splineObject.splinePoints) {
+                    boundsMin = glm::min(boundsMin, point);
+                    boundsMax = glm::max(boundsMax, point);
+                }
+                waterCenter = (boundsMin + boundsMax) * 0.5f;
+                waterSize = std::max(boundsMax.x - boundsMin.x,
+                                     boundsMax.z - boundsMin.z) + object.waterRiverWidth;
+                glm::vec3 tangent(0.0f, 0.0f, 1.0f);
+                spline.ClosestPoint(transform->position, nullptr, &tangent);
+                flowDir = glm::vec2(tangent.x, tangent.z);
+                const float length = glm::length(flowDir);
+                if (length > 0.0001f) {
+                    flowDir /= length;
+                    flowStrength = std::max(object.waterSeaSpeed, 0.5f);
+                }
+                break;
+            }
+        }
+        out << "water " << std::quoted(object.name) << ' '
+            << waterCenter.x << ' ' << waterCenter.y << ' ' << waterCenter.z << ' '
+            << waterSize << ' ' << object.waterResolution << ' '
+            << object.waterShallow.r << ' ' << object.waterShallow.g << ' ' << object.waterShallow.b << ' '
+            << object.waterDeep.r << ' ' << object.waterDeep.g << ' ' << object.waterDeep.b << ' '
+            << object.waterReflection.r << ' ' << object.waterReflection.g << ' ' << object.waterReflection.b << ' '
+            << object.waterTransparency << ' ' << object.waterFresnel << ' '
+            << object.waterSpecular << ' ' << object.waterShininess << ' '
+            << object.waterSeaHeight << ' ' << object.waterSeaChoppy << ' '
+            << object.waterSeaSpeed << ' ' << object.waterSeaFreq << ' ' << object.waterFoam << ' '
+            << flowDir.x << ' ' << flowDir.y << ' ' << flowStrength << ' '
+            << object.waterDepthFadeDistance << ' ' << object.waterShoreFoamWidth << ' '
+            << object.waterShoreFoamStrength << ' ' << object.waterRefractionStrength << ' '
+            << object.waterReflectionRoughness << ' '
+            << object.waterEnvironmentReflectionStrength << ' ' << object.waterAbsorptionStrength << ' '
+            << object.waterCausticsStrength << ' ' << object.waterCausticsScale << ' '
+            << object.waterMaxRenderDistance << ' '
+            << object.waterUnderwaterTint.r << ' ' << object.waterUnderwaterTint.g << ' '
+            << object.waterUnderwaterTint.b << ' ' << object.waterUnderwaterFogDensity << ' '
+            << object.waterUnderwaterDistortion << ' '
+            << object.waterUnderwaterTransitionSpeed << ' '
+            << object.waterRiverWidth << ' '
+            << (flowSpline && flowSpline->splineClosed ? 1 : 0) << ' '
+            << (flowSpline ? flowSpline->splinePoints.size() : 0);
+        if (flowSpline) {
+            for (std::size_t i = 0; i < flowSpline->splinePoints.size(); ++i) {
+                const glm::vec3& point = flowSpline->splinePoints[i];
+                const glm::vec3 rotation = i < flowSpline->splinePointRotations.size()
+                    ? flowSpline->splinePointRotations[i] : glm::vec3(0.0f);
+                out << ' ' << point.x << ' ' << point.y << ' ' << point.z
+                    << ' ' << rotation.x << ' ' << rotation.y << ' ' << rotation.z;
+            }
+        }
+        out << ' ' << StoredPath(flowSpline ? flowSpline->name : std::string{});
+        out << '\n';
+    }
+
+    // General spline objects remain addressable by name at runtime and can be
+    // manipulated by native or Lua gameplay scripts.
+    for (const EditorScene::Object& spline : scene.Objects()) {
+        if (!spline.isSpline) continue;
+        out << "spline " << StoredPath(spline.name) << ' '
+            << (spline.splineClosed ? 1 : 0) << ' ' << spline.splinePoints.size();
+        for (std::size_t i = 0; i < spline.splinePoints.size(); ++i) {
+            const glm::vec3& point = spline.splinePoints[i];
+            const glm::vec3 rotation = i < spline.splinePointRotations.size()
+                ? spline.splinePointRotations[i] : glm::vec3(0.0f);
+            out << ' ' << point.x << ' ' << point.y << ' ' << point.z
+                << ' ' << rotation.x << ' ' << rotation.y << ' ' << rotation.z;
+        }
+        out << '\n';
+    }
+
+    for (const EditorScene::Object& object : scene.Objects()) {
+        if (!object.isFoliage || !object.visible || object.foliageAssetPath.empty()) continue;
+        const Transform* transform = scene.TryGetTransform(object.entity);
+        if (!transform) continue;
+        const engine::AssetHandle foliageId = assetIdFor(
+            object.foliageAssetPath, object.foliageAssetId,
+            engine::AssetType::Foliage);
+        out << "foliage " << StoredPath(object.name) << ' '
+            << StoredPath(object.foliageAssetPath) << ' '
+            << (foliageId.Valid() ? foliageId.ToString() : std::string("-")) << ' '
+            << transform->position.x << ' ' << transform->position.y << ' ' << transform->position.z << ' '
+            << transform->scale.x << ' ' << transform->scale.y << ' ' << transform->scale.z << ' '
+            << transform->rotation.w << ' ' << transform->rotation.x << ' '
+            << transform->rotation.y << ' ' << transform->rotation.z << ' '
+            << object.foliageInstances.size();
+        for (const engine::ecs::FoliageInstance& instance : object.foliageInstances) {
+            out << ' ' << instance.id << ' ' << instance.typeIndex
+                << ' ' << instance.position.x << ' ' << instance.position.y << ' ' << instance.position.z
+                << ' ' << instance.rotationDegrees.x << ' ' << instance.rotationDegrees.y
+                << ' ' << instance.rotationDegrees.z
+                << ' ' << instance.scale.x << ' ' << instance.scale.y << ' ' << instance.scale.z
+                << ' ' << (instance.enabled ? 1 : 0);
+        }
+        out << '\n';
+    }
+
+    for (const EditorScene::Object& object : scene.Objects()) {
         if (!object.visible || !object.navMeshBoundsVolume) continue;
         const Transform* transform = scene.TryGetTransform(object.entity);
         if (!transform) continue;
@@ -228,8 +345,8 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         if (!object.visible || object.navMeshBoundsVolume) {
             continue;
         }
-        if (object.isSpline) {
-            continue;   // splines are authoring paths, not runtime meshes
+        if (object.isSpline || object.isWater || object.isFoliage) {
+            continue;   // authoring helpers are rendered by their dedicated systems
         }
 
         const Transform* transform = scene.TryGetTransform(object.entity);
@@ -687,6 +804,8 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
             out << ' ' << object.terrainPaint.size();
             for (unsigned char paint : object.terrainPaint)
                 out << ' ' << static_cast<unsigned>(paint);
+            for (const std::string& material : object.terrainLayerMaterials)
+                out << ' ' << StoredPath(material);
             out << '\n';
         }
     }

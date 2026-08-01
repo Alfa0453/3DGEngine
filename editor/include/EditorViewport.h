@@ -19,6 +19,7 @@ class Renderer;
 class RuntimeAssetManager;
 class Shader;
 class SkinnedModel;
+class Terrain;
 class Texture;
 namespace ai { struct NavGrid; class NavMesh; }
 }
@@ -67,7 +68,8 @@ public:
                                     const EditorGizmo& gizmo,
                                     const glm::mat4& viewProj,
                                     const engine::Camera& camera,
-                                    int viewportHeight) const;
+                                    int viewportHeight,
+                                    const glm::vec3* pivotOverride = nullptr) const;
 
     void DrawSelectedLightGuide(engine::Renderer& renderer,
                                 engine::Shader& shader,
@@ -86,6 +88,22 @@ public:
     void DrawPhysicsColliderGuides(const EditorScene& scene,
                                    const glm::mat4& viewProj,
                                    bool selectedOnly) const;
+
+    // Terrain-authoring cursor. The ring follows the generated heightfield so the
+    // visible footprint matches the vertices affected by the current brush.
+    void DrawTerrainBrushGuide(const engine::Terrain& terrain,
+                               const engine::ecs::Transform& transform,
+                               const glm::vec2& localCenter,
+                               float radius,
+                               int brushMode,
+                               bool applying,
+                               const glm::mat4& viewProj) const;
+
+    void DrawFoliageBrushGuide(const std::vector<glm::vec3>& ring,
+                               const glm::vec3& center,
+                               bool erase,
+                               bool applying,
+                               const glm::mat4& viewProj) const;
 
     // Unreal-style forward arrow for skeletal characters: points along the object's
     // local -Z (the gameplay "front" the player controller faces). Align the character
@@ -128,7 +146,13 @@ public:
                           engine::Shader& shader,
                           const engine::Mesh& cube,
                           const EditorScene& scene,
-                          const glm::mat4& viewProj) const;
+                          const glm::mat4& viewProj,
+                          int selectedPoint = -1) const;
+
+    // Draw the actual calm-surface outline of a spline-driven river. This replaces
+    // the legacy square plane selection boundary.
+    void DrawSelectedRiverBoundary(const EditorScene& scene,
+                                    const glm::mat4& viewProj) const;
 
     void DrawNavMeshBoundsGuides(engine::Renderer& renderer,
                                  engine::Shader& shader,
@@ -228,6 +252,11 @@ public:
                         int width,
                         int height) const;
 
+    int PickSplinePoint(const EditorScene& scene,
+                        float x, float y,
+                        const glm::mat4& viewProj,
+                        int width, int height) const;
+
     bool PickGizmoHandle(EditorGizmo& gizmo,
                          const EditorScene& scene,
                          float x,
@@ -235,7 +264,8 @@ public:
                          const glm::mat4& viewProj,
                          int width,
                          int height,
-                         const engine::Camera& camera) const;
+                         const engine::Camera& camera,
+                         const glm::vec3* pivotOverride = nullptr) const;
 
     glm::vec3 SceneDropPosition(float x,
                                 float y,
@@ -245,4 +275,6 @@ public:
 
 private:
     mutable std::unique_ptr<EditorLineRenderer> m_colliderLines;
+    mutable std::unique_ptr<EditorLineRenderer> m_splineLines;
+    mutable std::unique_ptr<EditorLineRenderer> m_waterLines;
 };

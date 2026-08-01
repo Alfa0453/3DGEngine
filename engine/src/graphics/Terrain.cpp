@@ -4,35 +4,9 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdarg>
-#include <cstdio>
+#include <limits>
 
 namespace engine {
-
-// --- Terrain debug trace -----------------------------------------------------
-// Writes to D:/C++_Projects/3DGEngine/terrain_trace.log, TRUNCATING it on the first
-// call each run (mode "w") so the file only ever contains the current run -- no stale
-// lines to confuse diagnosis. Every line is flushed immediately, so after a crash the
-// LAST line is the last step that ran; the crash is between it and the next step.
-// Remove once the terrain issue is resolved.
-static void TTrace(const char* fmt, ...) {
-    static std::FILE* file = [] {
-        std::FILE* f = nullptr;
-#ifdef _MSC_VER
-        fopen_s(&f, "D:/C++_Projects/3DGEngine/terrain_trace.log", "w");
-#else
-        f = std::fopen("D:/C++_Projects/3DGEngine/terrain_trace.log", "w");
-#endif
-        return f;
-    }();
-    if (!file) return;
-    std::va_list args;
-    va_start(args, fmt);
-    std::vfprintf(file, fmt, args);
-    va_end(args);
-    std::fputc('\n', file);
-    std::fflush(file);
-}
 
 namespace {
 
@@ -59,6 +33,25 @@ float ValueNoise(float x, float y, unsigned seed) {
 const engine::VertexLayout& TerrainLayout() {
     static const engine::VertexLayout layout{{3}, {3}, {2}};   // pos, normal, uv
     return layout;
+}
+
+void BuildTerrainVertices(const Heightmap& hm, std::vector<float>& vertices) {
+    vertices.clear();
+    const int R = hm.res;
+    if (R < 2 || hm.h.empty()) return;
+    const float cell = hm.size / static_cast<float>(R - 1);
+    vertices.reserve(static_cast<std::size_t>(R) * R * 8u);
+    for (int j = 0; j < R; ++j) {
+        for (int i = 0; i < R; ++i) {
+            const float x = hm.origin.x + static_cast<float>(i) * cell;
+            const float z = hm.origin.z + static_cast<float>(j) * cell;
+            const float y = hm.origin.y + hm.At(i, j);
+            const glm::vec3 n = hm.NormalAt(i, j);
+            vertices.insert(vertices.end(), {x, y, z, n.x, n.y, n.z,
+                static_cast<float>(i) / static_cast<float>(R - 1),
+                static_cast<float>(j) / static_cast<float>(R - 1)});
+        }
+    }
 }
 
 } // namespace
@@ -136,19 +129,7 @@ void BuildTerrainMeshData(const Heightmap& hm,
     ii.clear();
     const int R = hm.res;
     if (R < 2 || hm.h.empty()) return;
-    const float cell = hm.size / static_cast<float>(R - 1);
-    vv.reserve(static_cast<std::size_t>(R) * R * 8);
-    for (int j = 0; j < R; ++j) {
-        for (int i = 0; i < R; ++i) {
-            const float x = hm.origin.x + static_cast<float>(i) * cell;
-            const float z = hm.origin.z + static_cast<float>(j) * cell;
-            const float y = hm.origin.y + hm.At(i, j);
-            const glm::vec3 n = hm.NormalAt(i, j);
-            vv.insert(vv.end(), {x, y, z, n.x, n.y, n.z,
-                                 static_cast<float>(i) / static_cast<float>(R - 1),
-                                 static_cast<float>(j) / static_cast<float>(R - 1)});
-        }
-    }
+    BuildTerrainVertices(hm, vv);
     ii.reserve(static_cast<std::size_t>(R - 1) * (R - 1) * 6);
     for (int j = 0; j < R - 1; ++j) {
         for (int i = 0; i < R - 1; ++i) {
@@ -157,6 +138,33 @@ void BuildTerrainMeshData(const Heightmap& hm,
             ii.insert(ii.end(), {a, c, b, b, c, d});
         }
     }
+}
+
+std::vector<std::vector<std::uint32_t>> BuildTerrainLodIndices(
+    int resolution, int maxLevels) {
+    std::vector<std::vector<std::uint32_t>> levels;
+    const int R = std::max(resolution, 0);
+    if (R < 3 || maxLevels <= 0) return levels;
+    for (int level = 1; level <= maxLevels; ++level) {
+        const int step = 1 << level;
+        if (step >= R - 1) break;
+        const int cells = (R - 2 + step) / step;
+        std::vector<std::uint32_t> indices;
+        indices.reserve(static_cast<std::size_t>(cells) * cells * 6u);
+        for (int j = 0; j < R - 1; j += step) {
+            const int j1 = std::min(j + step, R - 1);
+            for (int i = 0; i < R - 1; i += step) {
+                const int i1 = std::min(i + step, R - 1);
+                const std::uint32_t a = static_cast<std::uint32_t>(j * R + i);
+                const std::uint32_t b = static_cast<std::uint32_t>(j * R + i1);
+                const std::uint32_t c = static_cast<std::uint32_t>(j1 * R + i);
+                const std::uint32_t d = static_cast<std::uint32_t>(j1 * R + i1);
+                indices.insert(indices.end(), {a, c, b, b, c, d});
+            }
+        }
+        levels.push_back(std::move(indices));
+    }
+    return levels;
 }
 
 void DefaultTerrainLayerColors(glm::vec3 outColors[6]) {
@@ -168,37 +176,148 @@ void DefaultTerrainLayerColors(glm::vec3 outColors[6]) {
     outColors[5] = glm::vec3(0.80f, 0.72f, 0.50f);   // sand
 }
 
-std::vector<unsigned char> BuildTerrainAlbedo(const Heightmap& hm,
-                                              const std::vector<std::uint8_t>& paint,
-                                              const glm::vec3 layerColors[6], int texRes) {
-    std::vector<unsigned char> px(static_cast<std::size_t>(texRes) * texRes * 4, 255);
-    const glm::vec3 grass(0.28f, 0.42f, 0.20f), rock(0.42f, 0.40f, 0.38f), snow(0.92f, 0.94f, 0.98f);
-    const glm::vec3 sand(0.55f, 0.52f, 0.36f);
+void DefaultTerrainLayerSurfaces(TerrainLayerSurface outSurfaces[6]) {
+    glm::vec3 colors[6];
+    DefaultTerrainLayerColors(colors);
+    const float roughness[6] = {0.90f, 0.92f, 0.78f, 0.96f, 0.72f, 0.94f};
+    for (int i = 0; i < 6; ++i) {
+        outSurfaces[i].albedo = colors[i];
+        outSurfaces[i].ao = 1.0f;
+        outSurfaces[i].roughness = roughness[i];
+        outSurfaces[i].metallic = 0.0f;
+    }
+}
+
+glm::vec3 TerrainCameraConstraint::Resolve(const glm::vec3& desired,
+                                           float surfaceY, bool overTerrain,
+                                           float dt, float clearance,
+                                           float releaseSpeed) {
+    const float minimum = overTerrain
+        ? surfaceY + std::max(clearance, 0.0f)
+        : -std::numeric_limits<float>::infinity();
+    const bool blocked = overTerrain && desired.y < minimum;
+    const float target = blocked ? minimum : desired.y;
+
+    if (!m_active && !blocked) return desired;
+    if (!m_active) {
+        m_height = target;
+        m_active = true;
+    } else if (target >= m_height) {
+        // Never interpolate upward through the terrain.
+        m_height = target;
+    } else {
+        const float alpha = releaseSpeed > 0.0f
+            ? 1.0f - std::exp(-releaseSpeed * std::max(dt, 0.0f))
+            : 1.0f;
+        m_height += (target - m_height) * alpha;
+    }
+
+    glm::vec3 resolved = desired;
+    resolved.y = overTerrain ? std::max(m_height, minimum) : m_height;
+    if (!blocked && std::abs(resolved.y - desired.y) < 0.002f) {
+        resolved.y = desired.y;
+        m_active = false;
+    }
+    return resolved;
+}
+
+namespace {
+TerrainLayerSurface MixSurface(const TerrainLayerSurface& a,
+                               const TerrainLayerSurface& b, float t) {
+    TerrainLayerSurface result;
+    result.albedo = glm::mix(a.albedo, b.albedo, t);
+    result.ao = glm::mix(a.ao, b.ao, t);
+    result.roughness = glm::mix(a.roughness, b.roughness, t);
+    result.metallic = glm::mix(a.metallic, b.metallic, t);
+    return result;
+}
+
+void AccumulateSurface(TerrainLayerSurface& dst, float& total,
+                       const TerrainLayerSurface& source, float weight) {
+    if (weight <= 0.0f) return;
+    dst.albedo += source.albedo * weight;
+    dst.ao += source.ao * weight;
+    dst.roughness += source.roughness * weight;
+    dst.metallic += source.metallic * weight;
+    total += weight;
+}
+} // namespace
+
+void BuildTerrainSurfaceMaps(const Heightmap& hm,
+                             const std::vector<std::uint8_t>& paint,
+                             const TerrainLayerSurface layers[6],
+                             std::vector<unsigned char>& albedo,
+                             std::vector<unsigned char>& orm, int texRes) {
+    texRes = std::max(texRes, 1);
+    albedo.assign(static_cast<std::size_t>(texRes) * texRes * 4, 255);
+    orm.assign(static_cast<std::size_t>(texRes) * texRes * 4, 255);
     const int res = hm.res;
-    const bool havePaint = (static_cast<int>(paint.size()) == res * res) && res > 1;
-    const int denom = std::max(1, texRes - 1);
+    const bool havePaint = res > 1 && paint.size() == static_cast<std::size_t>(res) * res;
+    const float texDenom = static_cast<float>(std::max(1, texRes - 1));
 
     for (int ty = 0; ty < texRes; ++ty) {
         for (int tx = 0; tx < texRes; ++tx) {
-            const int i = tx * (res - 1) / denom;
-            const int j = ty * (res - 1) / denom;
-            const float hf = (hm.maxHeight > 0.0f) ? hm.At(i, j) / hm.maxHeight : 0.0f;
-            const float slope = 1.0f - hm.NormalAt(i, j).y;
-            glm::vec3 c = glm::mix(grass, snow, glm::smoothstep(0.55f, 0.85f, hf));
-            c = glm::mix(c, sand, glm::smoothstep(0.10f, 0.02f, hf));
-            c = glm::mix(c, rock, glm::smoothstep(0.35f, 0.6f, slope));
+            const float gx = static_cast<float>(tx) / texDenom * std::max(res - 1, 0);
+            const float gz = static_cast<float>(ty) / texDenom * std::max(res - 1, 0);
+            const int i0 = static_cast<int>(std::floor(gx));
+            const int j0 = static_cast<int>(std::floor(gz));
+            const float fx = gx - i0, fz = gz - j0;
+            const int ic = std::clamp(static_cast<int>(std::round(gx)), 0, std::max(res - 1, 0));
+            const int jc = std::clamp(static_cast<int>(std::round(gz)), 0, std::max(res - 1, 0));
+            const float hf = hm.maxHeight > 0.0f ? hm.At(ic, jc) / hm.maxHeight : 0.0f;
+            const float slope = 1.0f - hm.NormalAt(ic, jc).y;
+
+            TerrainLayerSurface surface = MixSurface(
+                layers[1], layers[4], glm::smoothstep(0.55f, 0.85f, hf));
+            surface = MixSurface(surface, layers[5], glm::smoothstep(0.10f, 0.02f, hf));
+            surface = MixSurface(surface, layers[2], glm::smoothstep(0.35f, 0.60f, slope));
+
             if (havePaint) {
-                const std::uint8_t layer = paint[static_cast<std::size_t>(j) * res + i];
-                if (layer >= 1 && layer <= 5) c = layerColors[layer];
+                TerrainLayerSurface painted{};
+                painted.albedo = glm::vec3(0.0f);
+                painted.ao = painted.roughness = painted.metallic = 0.0f;
+                float paintedWeight = 0.0f;
+                const int is[4] = {i0, i0 + 1, i0, i0 + 1};
+                const int js[4] = {j0, j0, j0 + 1, j0 + 1};
+                const float ws[4] = {(1.0f-fx)*(1.0f-fz), fx*(1.0f-fz),
+                                     (1.0f-fx)*fz, fx*fz};
+                for (int corner = 0; corner < 4; ++corner) {
+                    const int i = std::clamp(is[corner], 0, res - 1);
+                    const int j = std::clamp(js[corner], 0, res - 1);
+                    const std::uint8_t layer = paint[static_cast<std::size_t>(j) * res + i];
+                    if (layer >= 1 && layer <= 5)
+                        AccumulateSurface(painted, paintedWeight, layers[layer], ws[corner]);
+                }
+                if (paintedWeight > 0.0001f) {
+                    painted.albedo /= paintedWeight;
+                    painted.ao /= paintedWeight;
+                    painted.roughness /= paintedWeight;
+                    painted.metallic /= paintedWeight;
+                    surface = MixSurface(surface, painted, glm::clamp(paintedWeight, 0.0f, 1.0f));
+                }
             }
+
             const std::size_t o = (static_cast<std::size_t>(ty) * texRes + tx) * 4;
-            px[o + 0] = static_cast<unsigned char>(glm::clamp(c.r, 0.0f, 1.0f) * 255.0f);
-            px[o + 1] = static_cast<unsigned char>(glm::clamp(c.g, 0.0f, 1.0f) * 255.0f);
-            px[o + 2] = static_cast<unsigned char>(glm::clamp(c.b, 0.0f, 1.0f) * 255.0f);
-            px[o + 3] = 255;
+            auto byte = [](float value) {
+                return static_cast<unsigned char>(glm::clamp(value, 0.0f, 1.0f) * 255.0f + 0.5f);
+            };
+            albedo[o] = byte(surface.albedo.r); albedo[o + 1] = byte(surface.albedo.g);
+            albedo[o + 2] = byte(surface.albedo.b); albedo[o + 3] = 255;
+            orm[o] = byte(surface.ao); orm[o + 1] = byte(surface.roughness);
+            orm[o + 2] = byte(surface.metallic); orm[o + 3] = 255;
         }
     }
-    return px;
+}
+
+std::vector<unsigned char> BuildTerrainAlbedo(const Heightmap& hm,
+                                              const std::vector<std::uint8_t>& paint,
+                                              const glm::vec3 layerColors[6], int texRes) {
+    TerrainLayerSurface layers[6];
+    DefaultTerrainLayerSurfaces(layers);
+    for (int i = 0; i < 6; ++i) layers[i].albedo = layerColors[i];
+    std::vector<unsigned char> albedo, orm;
+    BuildTerrainSurfaceMaps(hm, paint, layers, albedo, orm, texRes);
+    return albedo;
 }
 
 // ---------------------------------------------------------------------------
@@ -207,50 +326,99 @@ std::vector<unsigned char> BuildTerrainAlbedo(const Heightmap& hm,
 
 void Terrain::Generate(int res, float size, const glm::vec3& origin,
                        float maxHeight, unsigned seed, int octaves, float baseFrequency) {
-    TTrace("Generate: begin res=%d size=%.2f maxH=%.2f seed=%u oct=%d freq=%.3f",
-           res, size, maxHeight, seed, octaves, baseFrequency);
     m_hm = GenerateFbmHeightmap(res, size, origin, maxHeight, seed, octaves, baseFrequency);
-    TTrace("Generate: fbm done res=%d h=%zu", m_hm.res, m_hm.h.size());
     Rebuild();
-    TTrace("Generate: end (ready=%d)", Ready() ? 1 : 0);
 }
 
 void Terrain::SetHeightmap(const Heightmap& hm) {
-    TTrace("SetHeightmap: begin res=%d h=%zu", hm.res, hm.h.size());
+    const bool sameTopology = m_mesh.Valid()
+        && m_hm.res == hm.res && m_hm.size == hm.size
+        && m_hm.origin == hm.origin;
     m_hm = hm;
-    if (m_hm.res < 2) { TTrace("SetHeightmap: skip res<2"); return; }
+    if (m_hm.res < 2) return;
     // Paint sized for a different resolution no longer applies -- drop it.
     if (static_cast<int>(m_paint.size()) != m_hm.res * m_hm.res) m_paint.clear();
-    Rebuild();
-    TTrace("SetHeightmap: end (ready=%d)", Ready() ? 1 : 0);
+    if (sameTopology && !m_hm.h.empty()) {
+        std::vector<float> vertices;
+        BuildTerrainVertices(m_hm, vertices);
+        m_mesh.UpdateVertices(vertices, TerrainLayout());
+        RebuildAlbedo();
+    } else {
+        Rebuild();
+    }
+}
+
+void Terrain::CommitHeightRegion(int minI, int minJ, int maxI, int maxJ) {
+    const int R = m_hm.res;
+    if (!m_mesh.Valid() || R < 2 || m_hm.h.empty()) return;
+    minI = std::clamp(minI - 1, 0, R - 1);
+    maxI = std::clamp(maxI + 1, 0, R - 1);
+    minJ = std::clamp(minJ - 1, 0, R - 1);
+    maxJ = std::clamp(maxJ + 1, 0, R - 1);
+    if (minI > maxI || minJ > maxJ) return;
+
+    const float cell = m_hm.size / static_cast<float>(R - 1);
+    const int width = maxI - minI + 1;
+    std::vector<float> row;
+    row.reserve(static_cast<std::size_t>(width) * 8u);
+    for (int j = minJ; j <= maxJ; ++j) {
+        row.clear();
+        for (int i = minI; i <= maxI; ++i) {
+            const float x = m_hm.origin.x + static_cast<float>(i) * cell;
+            const float z = m_hm.origin.z + static_cast<float>(j) * cell;
+            const float y = m_hm.origin.y + m_hm.At(i, j);
+            const glm::vec3 n = m_hm.NormalAt(i, j);
+            row.insert(row.end(), {x, y, z, n.x, n.y, n.z,
+                static_cast<float>(i) / static_cast<float>(R - 1),
+                static_cast<float>(j) / static_cast<float>(R - 1)});
+        }
+        m_mesh.UpdateVertexRange(
+            static_cast<std::size_t>(j) * R + minI, row);
+    }
+    const glm::vec3 half(m_hm.size * 0.5f, m_hm.maxHeight * 0.5f,
+                         m_hm.size * 0.5f);
+    m_mesh.SetBounds(m_hm.origin + half, glm::length(half));
+    RebuildAlbedo();
 }
 
 void Terrain::SetPaint(const std::vector<std::uint8_t>& paint) {
-    TTrace("SetPaint: begin size=%zu", paint.size());
     m_paint = paint;
     RebuildAlbedo();
-    TTrace("SetPaint: end");
 }
 
 void Terrain::Rebuild() {
-    TTrace("Rebuild: begin res=%d h=%zu", m_hm.res, m_hm.h.size());
-    if (m_hm.res < 2 || m_hm.h.empty()) { TTrace("Rebuild: skip empty"); return; }
+    if (m_hm.res < 2 || m_hm.h.empty()) return;
     std::vector<float> vv;
     std::vector<std::uint32_t> ii;
     BuildTerrainMeshData(m_hm, vv, ii);
-    TTrace("Rebuild: meshData vv=%zu ii=%zu", vv.size(), ii.size());
-    if (vv.empty() || ii.empty()) { TTrace("Rebuild: skip no geometry"); return; }
-    TTrace("Rebuild: Upload... (vao=%u before)", m_mesh.Vao());
+    if (vv.empty() || ii.empty()) return;
     m_mesh.Upload(vv, ii, TerrainLayout());   // in place: never destroys the VAO
-    TTrace("Rebuild: Upload done (vao=%u indexCount=%u)", m_mesh.Vao(), m_mesh.IndexCount());
+    m_mesh.UploadLodIndices(BuildTerrainLodIndices(m_hm.res));
+    const glm::vec3 half(m_hm.size * 0.5f, m_hm.maxHeight * 0.5f,
+                         m_hm.size * 0.5f);
+    m_mesh.SetBounds(m_hm.origin + half, glm::length(half));
     RebuildAlbedo();
-    TTrace("Rebuild: end");
 }
 
 void Terrain::SetLayerColors(const glm::vec3 colors[6]) {
+    TerrainLayerSurface surfaces[6];
+    for (int i = 0; i < 6; ++i) {
+        surfaces[i] = m_layerSurfaces[i];
+        surfaces[i].albedo = colors[i];
+    }
+    SetLayerSurfaces(surfaces);
+}
+
+void Terrain::SetLayerSurfaces(const TerrainLayerSurface surfaces[6]) {
     bool changed = false;
     for (int i = 0; i < 6; ++i) {
-        if (m_layerColors[i] != colors[i]) { m_layerColors[i] = colors[i]; changed = true; }
+        const TerrainLayerSurface& a = m_layerSurfaces[i];
+        const TerrainLayerSurface& b = surfaces[i];
+        if (a.albedo != b.albedo || a.ao != b.ao || a.roughness != b.roughness
+            || a.metallic != b.metallic) {
+            m_layerSurfaces[i] = b;
+            changed = true;
+        }
     }
     if (changed && m_albedo.has_value()) {
         RebuildAlbedo();   // recolour with the new layer palette
@@ -259,18 +427,18 @@ void Terrain::SetLayerColors(const glm::vec3 colors[6]) {
 
 void Terrain::RebuildAlbedo() {
     const int texRes = 256;
-    TTrace("RebuildAlbedo: begin (paint=%zu)", m_paint.size());
-    std::vector<unsigned char> px = BuildTerrainAlbedo(m_hm, m_paint, m_layerColors, texRes);
-    TTrace("RebuildAlbedo: albedo built px=%zu hasAlbedo=%d", px.size(), m_albedo.has_value() ? 1 : 0);
+    std::vector<unsigned char> px, orm;
+    BuildTerrainSurfaceMaps(m_hm, m_paint, m_layerSurfaces, px, orm, texRes);
     if (m_albedo.has_value() && m_albedo->Width() == texRes && m_albedo->Height() == texRes) {
-        TTrace("RebuildAlbedo: Update...");
         m_albedo->Update(px.data(), texRes, texRes);   // in place, no new GL texture
-        TTrace("RebuildAlbedo: Update done");
     } else {
-        TTrace("RebuildAlbedo: emplace...");
         m_albedo.emplace(px.data(), texRes, texRes);
-        TTrace("RebuildAlbedo: emplace done");
     }
+    if (m_surfaceMap.has_value() && m_surfaceMap->Width() == texRes
+        && m_surfaceMap->Height() == texRes)
+        m_surfaceMap->Update(orm.data(), texRes, texRes);
+    else
+        m_surfaceMap.emplace(orm.data(), texRes, texRes);
 }
 
 } // namespace engine

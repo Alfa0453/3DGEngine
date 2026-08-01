@@ -313,6 +313,10 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
                 object.navAgentBrainAsset,
                 engine::AssetType::BehaviorTree,
                 object.navAgentBrainAssetId);
+            captureParticleReference(
+                object.foliageAssetPath,
+                engine::AssetType::Foliage,
+                object.foliageAssetId);
             const engine::AssetType modelType = object.skeletalModel
                 ? engine::AssetType::SkeletalMesh
                 : engine::AssetType::StaticMesh;
@@ -395,7 +399,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         return false;
     }
 
-    out << "3DGEditorScene 112 " << m_assetId.ToString() << '\n';
+    out << "3DGEditorScene 119 " << m_assetId.ToString() << '\n';
     out << "environment "
         << m_environment.timeOfDay << ' '
         << m_environment.skyLightIntensity << ' '
@@ -1005,6 +1009,35 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
             << object.grassTipColor.r << ' ' << object.grassTipColor.g << ' ' << object.grassTipColor.b << '\n';
     }
 
+    // Optional grass height-only randomization (scene version 118+).
+    for (const Object& object : m_objects) {
+        if (!object.isTerrain || !object.grassRandomizeHeight) continue;
+        out << "terrain_grass_height_random " << object.name << ' '
+            << 1 << ' ' << object.grassMinHeightScale << ' '
+            << object.grassMaxHeightScale << '\n';
+    }
+
+    // Foliage actors and their lightweight instance transforms (scene version 119+).
+    for (const Object& object : m_objects) {
+        if (!object.isFoliage) continue;
+        out << "foliage " << std::quoted(object.name) << ' '
+            << std::quoted(object.foliageAssetPath.empty()
+                ? std::string("-") : object.foliageAssetPath) << ' '
+            << (object.foliageAssetId.Valid()
+                ? object.foliageAssetId.ToString() : std::string("-")) << ' '
+            << object.nextFoliageInstanceId << ' '
+            << object.foliageInstances.size();
+        for (const engine::ecs::FoliageInstance& instance : object.foliageInstances) {
+            out << ' ' << instance.id << ' ' << instance.typeIndex
+                << ' ' << instance.position.x << ' ' << instance.position.y << ' ' << instance.position.z
+                << ' ' << instance.rotationDegrees.x << ' ' << instance.rotationDegrees.y
+                << ' ' << instance.rotationDegrees.z
+                << ' ' << instance.scale.x << ' ' << instance.scale.y << ' ' << instance.scale.z
+                << ' ' << (instance.enabled ? 1 : 0);
+        }
+        out << '\n';
+    }
+
     // Per-region grass style palette + per-vertex slot map (scene version 80+).
     for (const Object& object : m_objects) {
         if (!object.isTerrain) continue;
@@ -1032,7 +1065,24 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
             << object.waterSpecular << ' ' << object.waterShininess << ' '
             << object.waterType << ' ' << object.waterSeaHeight << ' ' << object.waterSeaChoppy << ' '
             << object.waterSeaSpeed << ' ' << object.waterSeaFreq << ' ' << object.waterFoam << ' '
-            << (object.waterFlowSpline.empty() ? "-" : object.waterFlowSpline) << '\n';
+            << (object.waterFlowSpline.empty() ? "-" : object.waterFlowSpline) << ' '
+            << object.waterDepthFadeDistance << ' '
+            << object.waterShoreFoamWidth << ' '
+            << object.waterShoreFoamStrength << ' '
+            << object.waterRefractionStrength << ' '
+            << object.waterReflectionRoughness << ' '
+            << object.waterEnvironmentReflectionStrength << ' '
+            << object.waterAbsorptionStrength << ' '
+            << object.waterCausticsStrength << ' '
+            << object.waterCausticsScale << ' '
+            << object.waterMaxRenderDistance << ' '
+            << object.waterUnderwaterTint.r << ' '
+            << object.waterUnderwaterTint.g << ' '
+            << object.waterUnderwaterTint.b << ' '
+            << object.waterUnderwaterFogDensity << ' '
+            << object.waterUnderwaterDistortion << ' '
+            << object.waterUnderwaterTransitionSpeed << ' '
+            << object.waterRiverWidth << '\n';
     }
 
     // Spline paths (Catmull-Rom control points).
@@ -1041,8 +1091,12 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         out << "spline " << object.name << ' '
             << (object.splineClosed ? 1 : 0) << ' ' << object.splineType << ' '
             << object.splinePoints.size();
-        for (const glm::vec3& p : object.splinePoints) {
-            out << ' ' << p.x << ' ' << p.y << ' ' << p.z;
+        for (std::size_t i = 0; i < object.splinePoints.size(); ++i) {
+            const glm::vec3& p = object.splinePoints[i];
+            const glm::vec3 r = i < object.splinePointRotations.size()
+                ? object.splinePointRotations[i] : glm::vec3(0.0f);
+            out << ' ' << p.x << ' ' << p.y << ' ' << p.z
+                << ' ' << r.x << ' ' << r.y << ' ' << r.z;
         }
         out << '\n';
     }
@@ -1158,7 +1212,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             return false;
         }
     }
-    if (magic != "3DGEditorScene" ||(version < 1 || version > 112)) {
+    if (magic != "3DGEditorScene" ||(version < 1 || version > 119)) {
         if (error) *error = "Scene file has an unknown format.";
         return false;
     }
@@ -1651,6 +1705,23 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             continue;
         }
 
+        if (recordType == "terrain_grass_height_random" && version >= 118) {
+            std::string name;
+            int enabled = 0;
+            float minScale = 0.75f, maxScale = 1.25f;
+            in >> name >> enabled >> minScale >> maxScale;
+            for (Object& obj : m_objects) {
+                if (obj.name != name) continue;
+                obj.grassRandomizeHeight = enabled != 0;
+                obj.grassMinHeightScale = std::clamp(
+                    std::min(minScale, maxScale), 0.05f, 4.0f);
+                obj.grassMaxHeightScale = std::clamp(
+                    std::max(minScale, maxScale), obj.grassMinHeightScale, 4.0f);
+                break;
+            }
+            continue;
+        }
+
         if (recordType == "terrain_grass_paint" && version >= 80) {
             std::string name;
             std::size_t pcount = 0;
@@ -1693,6 +1764,29 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             if (version >= 78) {
                 in >> flowSpline;
             }
+            float depthFade = 6.0f, shoreWidth = 0.8f, shoreStrength = 0.75f;
+            if (version >= 113) {
+                in >> depthFade >> shoreWidth >> shoreStrength;
+            }
+            float refractionStrength = 0.018f, reflectionRoughness = 0.12f;
+            float environmentReflectionStrength = 0.85f, absorptionStrength = 0.75f;
+            if (version >= 114) {
+                in >> refractionStrength >> reflectionRoughness
+                   >> environmentReflectionStrength >> absorptionStrength;
+            }
+            float causticsStrength = 0.25f, causticsScale = 1.5f;
+            float maxRenderDistance = 2500.0f;
+            glm::vec3 underwaterTint(0.04f, 0.30f, 0.38f);
+            float underwaterFogDensity = 0.16f, underwaterDistortion = 0.006f;
+            float underwaterTransitionSpeed = 3.5f;
+            if (version >= 115) {
+                in >> causticsStrength >> causticsScale >> maxRenderDistance
+                   >> underwaterTint.r >> underwaterTint.g >> underwaterTint.b
+                   >> underwaterFogDensity >> underwaterDistortion
+                   >> underwaterTransitionSpeed;
+            }
+            float riverWidth = 8.0f;
+            if (version >= 116) in >> riverWidth;
             for (Object& obj : m_objects) {
                 if (obj.name == name) {
                     obj.isWater = true;
@@ -1713,6 +1807,21 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                     obj.waterSeaFreq = seaFreq;
                     obj.waterFoam = foam;
                     obj.waterFlowSpline = (flowSpline == "-") ? std::string() : flowSpline;
+                    obj.waterDepthFadeDistance = depthFade;
+                    obj.waterShoreFoamWidth = shoreWidth;
+                    obj.waterShoreFoamStrength = shoreStrength;
+                    obj.waterRefractionStrength = refractionStrength;
+                    obj.waterReflectionRoughness = reflectionRoughness;
+                    obj.waterEnvironmentReflectionStrength = environmentReflectionStrength;
+                    obj.waterAbsorptionStrength = absorptionStrength;
+                    obj.waterCausticsStrength = causticsStrength;
+                    obj.waterCausticsScale = causticsScale;
+                    obj.waterMaxRenderDistance = maxRenderDistance;
+                    obj.waterUnderwaterTint = underwaterTint;
+                    obj.waterUnderwaterFogDensity = underwaterFogDensity;
+                    obj.waterUnderwaterDistortion = underwaterDistortion;
+                    obj.waterUnderwaterTransitionSpeed = underwaterTransitionSpeed;
+                    obj.waterRiverWidth = std::max(riverWidth, 0.1f);
                     break;
                 }
             }
@@ -1725,11 +1834,16 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             std::size_t count = 0;
             in >> name >> closed >> type >> count;
             std::vector<glm::vec3> pts;
+            std::vector<glm::vec3> rotations;
             pts.reserve(count);
+            rotations.reserve(count);
             for (std::size_t i = 0; i < count; ++i) {
                 glm::vec3 p(0.0f);
                 in >> p.x >> p.y >> p.z;
                 pts.push_back(p);
+                glm::vec3 rotation(0.0f);
+                if (version >= 117) in >> rotation.x >> rotation.y >> rotation.z;
+                rotations.push_back(rotation);
             }
             for (Object& obj : m_objects) {
                 if (obj.name == name) {
@@ -1737,6 +1851,8 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                     obj.splineClosed = (closed != 0);
                     obj.splineType = type;
                     obj.splinePoints = std::move(pts);
+                    obj.splinePointRotations = std::move(rotations);
+                    SyncSplineComponent(obj);
                     break;
                 }
             }
@@ -1760,6 +1876,53 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                 obj.navMovementGroundProbe = std::max(groundProbe, 0.02f);
                 obj.navMovementStepHeight = std::max(stepHeight, 0.0f);
                 obj.navMovementMaxSlope = std::clamp(maxSlope, 0.0f, 89.0f);
+                break;
+            }
+            continue;
+        }
+        if (recordType == "foliage" && version >= 119) {
+            std::string objectName;
+            std::string assetPath;
+            std::string assetIdText;
+            std::uint32_t nextId = 1;
+            std::size_t instanceCount = 0;
+            in >> std::quoted(objectName) >> std::quoted(assetPath)
+               >> assetIdText >> nextId >> instanceCount;
+            if (!in || instanceCount > 10'000'000u) {
+                if (error) *error = "Scene contains an invalid foliage record.";
+                Clear();
+                return false;
+            }
+            engine::AssetHandle assetId;
+            if (assetIdText != "-" && !engine::AssetHandle::Parse(assetIdText, &assetId)) {
+                if (error) *error = "Scene contains an invalid foliage asset ID.";
+                Clear();
+                return false;
+            }
+            std::vector<engine::ecs::FoliageInstance> instances(instanceCount);
+            for (engine::ecs::FoliageInstance& instance : instances) {
+                int enabled = 1;
+                in >> instance.id >> instance.typeIndex
+                   >> instance.position.x >> instance.position.y >> instance.position.z
+                   >> instance.rotationDegrees.x >> instance.rotationDegrees.y
+                   >> instance.rotationDegrees.z
+                   >> instance.scale.x >> instance.scale.y >> instance.scale.z
+                   >> enabled;
+                instance.enabled = enabled != 0;
+            }
+            if (!in) {
+                if (error) *error = "Scene contains invalid foliage instances.";
+                Clear();
+                return false;
+            }
+            for (Object& object : m_objects) {
+                if (object.name != objectName) continue;
+                object.isFoliage = true;
+                object.foliageAssetPath = assetPath == "-" ? std::string{} : assetPath;
+                object.foliageAssetId = assetId;
+                object.foliageInstances = std::move(instances);
+                object.nextFoliageInstanceId = std::max(nextId, 1u);
+                SyncFoliageComponent(object);
                 break;
             }
             continue;
@@ -3043,6 +3206,24 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         }
     }
 
+    // Migrate existing rivers whose legacy transform still points at the original
+    // square water patch rather than the generated spline ribbon.
+    for (Object& water : m_objects) {
+        if (!water.isWater || water.waterFlowSpline.empty()) continue;
+        for (const Object& spline : m_objects) {
+            if (!spline.isSpline || spline.name != water.waterFlowSpline
+                || spline.splinePoints.empty()) continue;
+            glm::vec3 boundsMin = spline.splinePoints.front();
+            glm::vec3 boundsMax = boundsMin;
+            for (const glm::vec3& point : spline.splinePoints) {
+                boundsMin = glm::min(boundsMin, point);
+                boundsMax = glm::max(boundsMax, point);
+            }
+            if (Transform* transform = m_registry.TryGet<Transform>(water.entity))
+                transform->position = (boundsMin + boundsMax) * 0.5f;
+            break;
+        }
+    }
     m_selectedIndex = m_objects.empty() ? -1 : 0;
     m_dirty = false;
     ClearHistory();
@@ -3120,6 +3301,24 @@ void EditorScene::SelectIndex(int index)
         return;
     }
     m_selectedIndex = index;
+    // River geometry is authored by its linked world-space spline. Keep the water
+    // object's transform at the ribbon centre so its gizmo sits on the visible plane.
+    Object& selected = m_objects[static_cast<std::size_t>(index)];
+    if (selected.isWater && !selected.waterFlowSpline.empty()) {
+        for (const Object& spline : m_objects) {
+            if (!spline.isSpline || spline.name != selected.waterFlowSpline
+                || spline.splinePoints.empty()) continue;
+            glm::vec3 boundsMin = spline.splinePoints.front();
+            glm::vec3 boundsMax = boundsMin;
+            for (const glm::vec3& point : spline.splinePoints) {
+                boundsMin = glm::min(boundsMin, point);
+                boundsMax = glm::max(boundsMax, point);
+            }
+            if (Transform* transform = m_registry.TryGet<Transform>(selected.entity))
+                transform->position = (boundsMin + boundsMax) * 0.5f;
+            break;
+        }
+    }
 }
 
 void EditorScene::Deselect()
@@ -3133,6 +3332,15 @@ void EditorScene::MoveSelected(const glm::vec3 & delta)
         return;
     }
 
+    Object* selected = m_selectedIndex >= 0
+        ? &m_objects[static_cast<std::size_t>(m_selectedIndex)] : nullptr;
+    if (selected && selected->isWater && !selected->waterFlowSpline.empty()) {
+        for (Object& spline : m_objects) {
+            if (!spline.isSpline || spline.name != selected->waterFlowSpline) continue;
+            for (glm::vec3& point : spline.splinePoints) point += delta;
+            break;
+        }
+    }
     if (Transform* transform = SelectedTransform()) {
         transform->position += delta;
         m_dirty = true;
@@ -3208,6 +3416,17 @@ bool EditorScene::SetSelectedTransform(const Transform& value) {
 
     if (!m_transformEditOpen) {
         PushUndoSnapshot();
+    }
+    const glm::vec3 positionDelta = value.position - transform->position;
+    Object* selected = m_selectedIndex >= 0
+        ? &m_objects[static_cast<std::size_t>(m_selectedIndex)] : nullptr;
+    if (selected && selected->isWater && !selected->waterFlowSpline.empty()
+        && glm::dot(positionDelta, positionDelta) > 0.0f) {
+        for (Object& spline : m_objects) {
+            if (!spline.isSpline || spline.name != selected->waterFlowSpline) continue;
+            for (glm::vec3& point : spline.splinePoints) point += positionDelta;
+            break;
+        }
     }
     *transform = value;
     m_dirty = true;
@@ -4821,8 +5040,140 @@ bool EditorScene::SetSelectedWaterFlowSpline(const std::string& splineName) {
     if (selected.locked) return false;
     PushUndoSnapshot();
     selected.waterFlowSpline = splineName;
+    for (const Object& spline : m_objects) {
+        if (!spline.isSpline || spline.name != splineName || spline.splinePoints.empty()) continue;
+        glm::vec3 boundsMin = spline.splinePoints.front();
+        glm::vec3 boundsMax = boundsMin;
+        for (const glm::vec3& point : spline.splinePoints) {
+            boundsMin = glm::min(boundsMin, point);
+            boundsMax = glm::max(boundsMax, point);
+        }
+        if (Transform* transform = m_registry.TryGet<Transform>(selected.entity))
+            transform->position = (boundsMin + boundsMax) * 0.5f;
+        break;
+    }
     m_dirty = true;
     return true;
+}
+
+void EditorScene::SyncSplineComponent(Object& object) {
+    if (!object.isSpline) {
+        m_registry.Remove<engine::ecs::SplineComponent>(object.entity);
+        return;
+    }
+    engine::ecs::SplineComponent* component =
+        m_registry.TryGet<engine::ecs::SplineComponent>(object.entity);
+    if (!component) {
+        component = &m_registry.Add<engine::ecs::SplineComponent>(
+            object.entity, engine::ecs::SplineComponent{});
+    }
+    component->points = object.splinePoints;
+    component->rotations = object.splinePointRotations;
+    component->rotations.resize(component->points.size(), glm::vec3(0.0f));
+    component->closed = object.splineClosed;
+    ++component->revision;
+}
+
+void EditorScene::SyncFoliageComponent(Object& object) {
+    if (!object.isFoliage) {
+        m_registry.Remove<engine::ecs::FoliageComponent>(object.entity);
+        return;
+    }
+    engine::ecs::FoliageComponent* component =
+        m_registry.TryGet<engine::ecs::FoliageComponent>(object.entity);
+    if (!component) {
+        component = &m_registry.Add<engine::ecs::FoliageComponent>(
+            object.entity, engine::ecs::FoliageComponent{});
+    }
+    component->assetPath = object.foliageAssetPath;
+    component->assetId = object.foliageAssetId;
+    component->instances = object.foliageInstances;
+    component->visible = object.visible;
+    ++component->revision;
+}
+
+bool EditorScene::SetSelectedFoliageAsset(const std::string& path,
+                                          engine::AssetHandle id) {
+    if (m_selectedIndex < 0) return false;
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (!selected.isFoliage) return false;
+    PushUndoSnapshot();
+    selected.foliageAssetPath = path;
+    selected.foliageAssetId = id;
+    // Types are resolved afresh by RuntimeAssetManager, but painted transforms remain.
+    if (auto* component = m_registry.TryGet<engine::ecs::FoliageComponent>(selected.entity))
+        component->types.clear();
+    SyncFoliageComponent(selected);
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::AddSelectedFoliageInstance(
+    const glm::vec3& worldPosition, const glm::vec3& rotationDegrees,
+    const glm::vec3& scale, std::uint32_t typeIndex) {
+    if (m_selectedIndex < 0) return false;
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (!selected.isFoliage || selected.foliageAssetPath.empty()) return false;
+    const Transform* owner = m_registry.TryGet<Transform>(selected.entity);
+    const glm::mat4 inverseOwner = owner ? glm::inverse(owner->Model()) : glm::mat4(1.0f);
+    engine::ecs::FoliageInstance instance;
+    instance.id = selected.nextFoliageInstanceId++;
+    instance.typeIndex = typeIndex;
+    instance.position = glm::vec3(inverseOwner * glm::vec4(worldPosition, 1.0f));
+    instance.rotationDegrees = rotationDegrees;
+    instance.scale = glm::max(scale, glm::vec3(0.001f));
+    selected.foliageInstances.push_back(instance);
+    SyncFoliageComponent(selected);
+    m_dirty = true;
+    return true;
+}
+
+std::size_t EditorScene::EraseSelectedFoliageInstances(
+    const glm::vec3& worldPosition, float radius) {
+    if (m_selectedIndex < 0) return 0;
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (!selected.isFoliage) return 0;
+    const Transform* owner = m_registry.TryGet<Transform>(selected.entity);
+    const glm::mat4 model = owner ? owner->Model() : glm::mat4(1.0f);
+    const float radiusSquared = std::max(radius, 0.01f) * std::max(radius, 0.01f);
+    const std::size_t before = selected.foliageInstances.size();
+    selected.foliageInstances.erase(
+        std::remove_if(selected.foliageInstances.begin(), selected.foliageInstances.end(),
+        [&](const engine::ecs::FoliageInstance& instance) {
+            const glm::vec3 world = glm::vec3(model * glm::vec4(instance.position, 1.0f));
+            const glm::vec2 delta(world.x - worldPosition.x, world.z - worldPosition.z);
+            return glm::dot(delta, delta) <= radiusSquared;
+        }), selected.foliageInstances.end());
+    const std::size_t removed = before - selected.foliageInstances.size();
+    if (removed != 0) {
+        SyncFoliageComponent(selected);
+        m_dirty = true;
+    }
+    return removed;
+}
+
+bool EditorScene::ClearSelectedFoliageInstances() {
+    if (m_selectedIndex < 0) return false;
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (!selected.isFoliage || selected.foliageInstances.empty()) return false;
+    PushUndoSnapshot();
+    selected.foliageInstances.clear();
+    SyncFoliageComponent(selected);
+    m_dirty = true;
+    return true;
+}
+
+void EditorScene::AddFoliage(const engine::Mesh& placeholderMesh)
+{
+    PushUndoSnapshot();
+    Transform transform;
+    const std::string name = "Foliage_" + std::to_string(m_nextCubeNumber++);
+    CreateObject(name, Primitive::Empty, placeholderMesh, transform, glm::vec3(0.18f, 0.65f, 0.24f));
+    Object& object = m_objects.back();
+    object.isFoliage = true;
+    SyncFoliageComponent(object);
+    m_selectedIndex = static_cast<int>(m_objects.size()) - 1;
+    m_dirty = true;
 }
 
 bool EditorScene::SetSelectedSpline(bool enabled, bool closed, int type) {
@@ -4841,6 +5192,8 @@ bool EditorScene::SetSelectedSpline(bool enabled, bool closed, int type) {
                                  c + glm::vec3(0.0f, 0.0f, 4.0f),
                                  c + glm::vec3(6.0f, 0.0f, 0.0f)};
     }
+    selected.splinePointRotations.resize(selected.splinePoints.size(), glm::vec3(0.0f));
+    SyncSplineComponent(selected);
     m_dirty = true;
     return true;
 }
@@ -4851,6 +5204,34 @@ bool EditorScene::AddSelectedSplinePoint(const glm::vec3& point) {
     if (selected.locked || !selected.isSpline) return false;
     PushUndoSnapshot();
     selected.splinePoints.push_back(point);
+    selected.splinePointRotations.resize(selected.splinePoints.size(), glm::vec3(0.0f));
+    SyncSplineComponent(selected);
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedWaterRiverWidth(float width) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) return false;
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked || !selected.isWater) return false;
+    PushUndoSnapshot();
+    selected.waterRiverWidth = std::clamp(width, 0.1f, 500.0f);
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::InsertSelectedSplinePoint(std::size_t index, const glm::vec3& point) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) return false;
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked || !selected.isSpline) return false;
+    index = std::min(index, selected.splinePoints.size());
+    PushUndoSnapshot();
+    selected.splinePointRotations.resize(selected.splinePoints.size(), glm::vec3(0.0f));
+    selected.splinePoints.insert(
+        selected.splinePoints.begin() + static_cast<std::ptrdiff_t>(index), point);
+    selected.splinePointRotations.insert(
+        selected.splinePointRotations.begin() + static_cast<std::ptrdiff_t>(index), glm::vec3(0.0f));
+    SyncSplineComponent(selected);
     m_dirty = true;
     return true;
 }
@@ -4860,6 +5241,7 @@ bool EditorScene::SetSelectedSplinePoint(std::size_t index, const glm::vec3& poi
     Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
     if (selected.locked || index >= selected.splinePoints.size()) return false;
     selected.splinePoints[index] = point;   // no snapshot: called during drags
+    SyncSplineComponent(selected);
     m_dirty = true;
     return true;
 }
@@ -4870,6 +5252,45 @@ bool EditorScene::RemoveSelectedSplinePoint(std::size_t index) {
     if (selected.locked || index >= selected.splinePoints.size()) return false;
     PushUndoSnapshot();
     selected.splinePoints.erase(selected.splinePoints.begin() + static_cast<std::ptrdiff_t>(index));
+    if (index < selected.splinePointRotations.size()) {
+        selected.splinePointRotations.erase(
+            selected.splinePointRotations.begin() + static_cast<std::ptrdiff_t>(index));
+    }
+    SyncSplineComponent(selected);
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedSplinePointRotation(std::size_t index, const glm::vec3& degrees) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) return false;
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked || index >= selected.splinePoints.size()) return false;
+    selected.splinePointRotations.resize(selected.splinePoints.size(), glm::vec3(0.0f));
+    selected.splinePointRotations[index] = degrees;
+    SyncSplineComponent(selected);
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedSplinePoints(const std::vector<glm::vec3>& points) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) return false;
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked || !selected.isSpline) return false;
+    PushUndoSnapshot();
+    selected.splinePoints = points;
+    selected.splinePointRotations.resize(points.size(), glm::vec3(0.0f));
+    SyncSplineComponent(selected);
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedSplinePointRotations(const std::vector<glm::vec3>& rotations) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) return false;
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked || !selected.isSpline) return false;
+    selected.splinePointRotations = rotations;
+    selected.splinePointRotations.resize(selected.splinePoints.size(), glm::vec3(0.0f));
+    SyncSplineComponent(selected);
     m_dirty = true;
     return true;
 }
@@ -4900,7 +5321,9 @@ bool EditorScene::SetSelectedTerrainLayerMaterial(int layer, const std::string& 
 
 bool EditorScene::SetSelectedTerrainGrass(bool enabled, float density, float height,
                                           float windStrength, float windSpeed,
-                                          const glm::vec3& baseColor, const glm::vec3& tipColor) {
+                                          const glm::vec3& baseColor, const glm::vec3& tipColor,
+                                          bool randomizeHeight, float minHeightScale,
+                                          float maxHeightScale) {
     if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) return false;
     Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
     if (selected.locked) return false;
@@ -4908,6 +5331,12 @@ bool EditorScene::SetSelectedTerrainGrass(bool enabled, float density, float hei
     selected.grassEnabled = enabled;
     selected.grassDensity = std::clamp(density, 0.05f, 40.0f);
     selected.grassHeight = std::max(height, 0.05f);
+    selected.grassRandomizeHeight = randomizeHeight;
+    selected.grassMinHeightScale = std::clamp(
+        std::min(minHeightScale, maxHeightScale), 0.05f, 4.0f);
+    selected.grassMaxHeightScale = std::clamp(
+        std::max(minHeightScale, maxHeightScale),
+        selected.grassMinHeightScale, 4.0f);
     selected.grassWindStrength = std::max(windStrength, 0.0f);
     selected.grassWindSpeed = std::max(windSpeed, 0.0f);
     selected.grassBaseColor = baseColor;
@@ -4962,6 +5391,91 @@ bool EditorScene::SetSelectedTerrainHeights(std::vector<float> heights) {
         return false;
     }
     selected.terrainHeights = std::move(heights);   // per-stroke; no undo snapshot (avoids spam)
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedWaterDepth(float fadeDistance, float shoreFoamWidth,
+                                        float shoreFoamStrength) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size()))
+        return false;
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) return false;
+    PushUndoSnapshot();
+    selected.waterDepthFadeDistance = std::max(fadeDistance, 0.05f);
+    selected.waterShoreFoamWidth = std::max(shoreFoamWidth, 0.01f);
+    selected.waterShoreFoamStrength = std::clamp(shoreFoamStrength, 0.0f, 4.0f);
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedWaterOptics(float refractionStrength,
+                                         float reflectionRoughness,
+                                         float environmentReflectionStrength,
+                                         float absorptionStrength) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size()))
+        return false;
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) return false;
+    PushUndoSnapshot();
+    selected.waterRefractionStrength = std::clamp(refractionStrength, 0.0f, 0.25f);
+    selected.waterReflectionRoughness = std::clamp(reflectionRoughness, 0.0f, 1.0f);
+    selected.waterEnvironmentReflectionStrength =
+        std::clamp(environmentReflectionStrength, 0.0f, 1.0f);
+    selected.waterAbsorptionStrength = std::clamp(absorptionStrength, 0.0f, 2.0f);
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedWaterEffects(float causticsStrength,
+                                          float causticsScale,
+                                          float maxRenderDistance,
+                                          const glm::vec3& underwaterTint,
+                                          float underwaterFogDensity,
+                                          float underwaterDistortion,
+                                          float underwaterTransitionSpeed) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size()))
+        return false;
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) return false;
+    PushUndoSnapshot();
+    selected.waterCausticsStrength = std::clamp(causticsStrength, 0.0f, 4.0f);
+    selected.waterCausticsScale = std::clamp(causticsScale, 0.05f, 20.0f);
+    selected.waterMaxRenderDistance = std::max(maxRenderDistance, 0.0f);
+    selected.waterUnderwaterTint = glm::clamp(underwaterTint, glm::vec3(0.0f), glm::vec3(4.0f));
+    selected.waterUnderwaterFogDensity = std::clamp(underwaterFogDensity, 0.0f, 2.0f);
+    selected.waterUnderwaterDistortion = std::clamp(underwaterDistortion, 0.0f, 0.1f);
+    selected.waterUnderwaterTransitionSpeed =
+        std::clamp(underwaterTransitionSpeed, 0.1f, 20.0f);
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::UpdateSelectedTerrainHeightRegion(
+    const std::vector<float>& heights, int resolution,
+    int minI, int minJ, int maxI, int maxJ) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())
+        || resolution < 2
+        || heights.size() != static_cast<std::size_t>(resolution) * resolution)
+        return false;
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) return false;
+    if (selected.terrainHeights.size() != heights.size()) {
+        selected.terrainHeights = heights; // one full copy on the first sculpt stroke
+    } else {
+        minI = std::clamp(minI, 0, resolution - 1);
+        maxI = std::clamp(maxI, 0, resolution - 1);
+        minJ = std::clamp(minJ, 0, resolution - 1);
+        maxJ = std::clamp(maxJ, 0, resolution - 1);
+        if (minI > maxI || minJ > maxJ) return false;
+        const std::size_t count = static_cast<std::size_t>(maxI - minI + 1);
+        for (int j = minJ; j <= maxJ; ++j) {
+            const std::size_t offset = static_cast<std::size_t>(j) * resolution + minI;
+            std::copy_n(heights.begin() + static_cast<std::ptrdiff_t>(offset),
+                        count,
+                        selected.terrainHeights.begin() + static_cast<std::ptrdiff_t>(offset));
+        }
+    }
     m_dirty = true;
     return true;
 }
@@ -5538,6 +6052,8 @@ void EditorScene::RestoreSnapshot(const Snapshot & snapshot, const engine::Mesh 
             m_registry.Add<Light>(entity, object.lightData);
         }
         m_objects.push_back(object);
+        if (m_objects.back().isSpline) SyncSplineComponent(m_objects.back());
+        if (m_objects.back().isFoliage) SyncFoliageComponent(m_objects.back());
     }
 
     m_selectedIndex = snapshot.selectedIndex;

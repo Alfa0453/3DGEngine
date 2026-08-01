@@ -579,7 +579,7 @@ void CharacterEditorPanel::RefreshAssetChoices(const std::string& assetRoot) {
                 m_graphChoices.push_back(std::move(choice));
             } else if (extension == ".btgraph") {
                 m_behaviorChoices.push_back(std::move(choice));
-            } else if (extension == ".h"
+            } else if ((extension == ".h" || extension == ".lua")
                        && Lower(file.generic_string()).find("/scripts/")
                               != std::string::npos) {
                 choice.displayName = file.stem().string();
@@ -884,8 +884,13 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
         ImGui::TextColored(ImVec4(1.0f, .35f, .3f, 1.0f), "Preview load failed: %s",
                            m_previewError.c_str());
     } else if (m_previewModel) {
-        ImGui::Text("%s  |  %zu bones", std::filesystem::path(m_asset.modelAssetPath).filename().string().c_str(),
+        ImGui::Text("%s  |  %zu bones",
+                    std::filesystem::path(m_asset.modelAssetPath).filename().string().c_str(),
                     m_previewModel->BoneCount());
+        ImGui::Text("%zu vertices  |  %zu triangles  |  %zu submeshes",
+                    m_previewModel->VertexCount(),
+                    m_previewModel->TriangleCount(),
+                    m_previewModel->SubMeshCount());
         if (!m_asset.animationStates.empty()) {
             ImGui::Text("Graph state: %s", m_previewController.CurrentStateName().c_str());
         } else {
@@ -1972,7 +1977,7 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
             if (message) *message = "Refreshed saved gameplay scripts.";
         }
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Rescan Content/Scripts for saved .h scripts.");
+            ImGui::SetTooltip("Rescan Content/Scripts for saved C++ and Lua scripts.");
         }
 
         if (ImGui::Button("Apply Scripts to Selected")) {

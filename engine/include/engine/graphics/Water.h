@@ -6,6 +6,7 @@
 
 #include <memory>
 #include <optional>
+#include <vector>
 
 namespace engine {
 
@@ -36,6 +37,22 @@ struct WaterConfig {
     float     specularStrength = 0.8f;    // sun glint intensity
     float     shininess      = 400.0f;    // sun glint tightness
 
+    // Scene-depth shading. The opaque depth buffer reveals how much geometry lies
+    // below the surface, driving shallow/deep absorption and automatic bank foam.
+    float     depthFadeDistance = 6.0f;   // metres until the deep colour is reached
+    float     shorelineFoamWidth = 0.8f;  // shallow depth band that receives foam
+    float     shorelineFoamStrength = 0.75f;
+
+    // Screen-space refraction plus rough environment reflections. Refraction uses
+    // the opaque scene colour captured immediately before the transparent pass.
+    float     refractionStrength = 0.018f; // screen UV displacement by wave normal
+    float     reflectionRoughness = 0.12f; // cubemap mip selection (0 mirror .. 1 rough)
+    float     environmentReflectionStrength = 0.85f;
+    float     absorptionStrength = 0.75f;  // how strongly depth tints refracted colour
+    float     causticsStrength = 0.25f;
+    float     causticsScale = 1.5f;
+    float     maxRenderDistance = 2500.0f; // footprint distance culling (0 = unlimited)
+
     // Stylised whitecap foam on wave crests.
     glm::vec3 foamColor{1.0f, 1.0f, 1.0f};
     float     foamAmount = 0.55f;         // 0 = none; higher = more crest foam
@@ -44,6 +61,13 @@ struct WaterConfig {
     // direction; flowStrength scrolls the wave pattern along it (0 = still water).
     glm::vec2 flowDir{0.0f, 0.0f};
     float     flowStrength = 0.0f;
+
+    // When points are supplied the square patch becomes a ribbon whose centreline
+    // follows the spline. Editing the points and reapplying the config rebuilds it.
+    std::vector<glm::vec3> splinePoints;
+    std::vector<glm::vec3> splinePointRotations;
+    bool      splineClosed = false;
+    float     riverWidth = 8.0f;
 };
 
 class Water {
@@ -68,11 +92,16 @@ public:
     static constexpr int kMaxContacts = 16;
     void Draw(const Camera& camera, float aspect,
               const glm::vec3& sunDir, const glm::vec3& sunColor, const glm::vec3& ambient,
-              const glm::vec4* contacts = nullptr, int contactCount = 0);
+              const glm::vec4* contacts = nullptr, int contactCount = 0,
+              unsigned int sceneColorTexture = 0,
+              unsigned int sceneDepthTexture = 0,
+              int viewportWidth = 1, int viewportHeight = 1,
+              const IBL* ibl = nullptr);
 
     // Surface height at a world XZ position and the current time -- for buoyancy,
     // splashes, or floating the player. Matches the shader's Gerstner sum.
     float HeightAt(float worldX, float worldZ) const;
+    bool ContainsXZ(float worldX, float worldZ, float padding = 0.0f) const;
     float Level() const { return m_config.center.y; }
 
 private:

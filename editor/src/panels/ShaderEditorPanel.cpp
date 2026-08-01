@@ -3,6 +3,7 @@
 #include "EditorAssets.h"
 
 #include <engine/graphics/Primitives.h>
+#include <engine/graphics/ShaderParameterBinding.h>
 #include <engine/graphics/VertexLayout.h>
 #include <engine/assets/ShaderGraphCompiler.h>
 
@@ -195,14 +196,32 @@ std::filesystem::path UniquePath(std::filesystem::path path)
 
 const char* DomainOutput(engine::ShaderDomain domain)
 {
-    switch (domain)
-    {
-    case engine::ShaderDomain::Surface: return "SurfaceOutput";
-    case engine::ShaderDomain::PostProcess: return "PostProcessOutput";
-    case engine::ShaderDomain::Particle: return "ParticleOutput";
-    case engine::ShaderDomain::Unlit: return "UnlitOutput";
-    }
-    return "SurfaceOutput";
+    return engine::ShaderDomainOutputNodeType(domain);
+}
+
+std::optional<engine::ShaderDomain> ExclusiveNodeDomain(
+    const std::string& type)
+{
+    static const std::unordered_set<std::string> particle = {
+        "ParticleColor", "ParticleAge", "NormalizedLifetime",
+        "ParticleVelocity", "ParticleSize", "ParticleRotation",
+        "ParticleFrame", "TrailCoordinates", "SoftDepth", "ParticleOutput"
+    };
+    static const std::unordered_set<std::string> post = {
+        "ScreenUV", "SceneColor", "SceneDepth", "SceneNormal",
+        "SceneVelocity", "TexelSize", "Exposure", "SceneColorSample",
+        "SceneDepthSample", "SceneNormalSample", "SceneVelocitySample",
+        "PixelOffset", "PostProcessOutput"
+    };
+    static const std::unordered_set<std::string> unlit = {
+        "WidgetUV", "WidgetColor", "WidgetTexture", "ClipMask",
+        "SignedDistance", "UnlitOutput"
+    };
+    if (particle.count(type)) return engine::ShaderDomain::Particle;
+    if (post.count(type)) return engine::ShaderDomain::PostProcess;
+    if (unlit.count(type)) return engine::ShaderDomain::Unlit;
+    if (type == "SurfaceOutput") return engine::ShaderDomain::Surface;
+    return std::nullopt;
 }
 
 bool TemplateAllowedForDomain(
@@ -258,6 +277,7 @@ void ShaderEditorPanel::NewDocument()
     std::snprintf(m_name.data(), m_name.size(), "%s", m_asset.name.c_str());
     m_dirty = true;
     m_applied = false;
+    m_pendingDomain = -1;
     m_error.clear();
     GenerateSources();
     m_compilePending = true;
@@ -278,6 +298,7 @@ bool ShaderEditorPanel::OpenDocument(const std::string& path)
     std::snprintf(m_name.data(), m_name.size(), "%s", m_asset.name.c_str());
     m_dirty = false;
     m_applied = false;
+    m_pendingDomain = -1;
     m_error.clear();
     GenerateSources();
     m_compilePending = true;
@@ -350,6 +371,31 @@ void ShaderEditorPanel::RequestNew()
         ImGui::OpenPopup("Unsaved Shader Asset");
     }
     else NewDocument();
+}
+
+void ShaderEditorPanel::ApplyDomainChange(engine::ShaderDomain domain)
+{
+    if (domain == m_asset.domain) return;
+    PushUndo();
+    engine::ShaderDomainConversionReport report;
+    if (!engine::ConvertShaderAssetDomain(m_asset, domain, &report)) {
+        UndoGraph();
+        m_error = "Domain conversion failed: " + report.error;
+        return;
+    }
+    m_selectedNodes.clear();
+    m_linkPin = 0;
+    m_hoveredPin = 0;
+    m_nodePromptPin = 0;
+    m_dirty = true;
+    m_compilePending = true;
+    m_applied = false;
+    m_status = "Converted " + std::string(engine::ShaderDomainName(report.from))
+        + " to " + engine::ShaderDomainName(domain) + ": preserved "
+        + std::to_string(report.preservedOutputLinks)
+        + " output connection(s), removed "
+        + std::to_string(report.removedNodes) + " incompatible node(s) and "
+        + std::to_string(report.removedLinks) + " connection(s)";
 }
 
 void ShaderEditorPanel::GenerateSources()
@@ -450,10 +496,18 @@ void ShaderEditorPanel::AddGraphNode(const std::string& type, float x, float y)
         parameter.id = id++;
         parameter.name = node.name;
         parameter.type = descriptor->output;
-        parameter.defaultValue = engine::ShaderValueTypeName(descriptor->output);
-        if (descriptor->output == engine::ShaderValueType::Float) parameter.defaultValue = "0.5";
-        else if (descriptor->output == engine::ShaderValueType::Color)
-            parameter.defaultValue = "1,1,1,1";
+        switch (descriptor->output) {
+        case engine::ShaderValueType::Float: parameter.defaultValue = "0.5"; break;
+        case engine::ShaderValueType::Int: parameter.defaultValue = "0"; break;
+        case engine::ShaderValueType::Bool: parameter.defaultValue = "false"; break;
+        case engine::ShaderValueType::Vec2: parameter.defaultValue = "0,0"; break;
+        case engine::ShaderValueType::Vec3: parameter.defaultValue = "0,0,0"; break;
+        case engine::ShaderValueType::Vec4:
+        case engine::ShaderValueType::Color:
+            parameter.defaultValue = "1,1,1,1"; break;
+        case engine::ShaderValueType::Texture2D:
+            parameter.defaultValue.clear(); break;
+        }
         m_asset.parameters.push_back(std::move(parameter));
     }
     m_asset.nodes.push_back(node);
@@ -1139,6 +1193,66 @@ void ShaderEditorPanel::DrawGraphInspector(EditorAssets& assets)
             }
         }
     }
+    if (node->type.rfind("Parameter", 0) == 0
+        && node->type != "ParameterColor"
+        && node->type != "ParameterTexture2D") {
+        const auto parameter = std::find_if(
+            m_asset.parameters.begin(), m_asset.parameters.end(),
+            [&](const engine::ShaderParameter& item) {
+                return item.name == node->name;
+            });
+        if (parameter != m_asset.parameters.end()) {
+            std::string normalized = parameter->defaultValue;
+            for (char& c : normalized)
+                if (c == ',' || c == '(' || c == ')') c = ' ';
+            std::istringstream input(normalized);
+            float values[4]{0.0f, 0.0f, 0.0f, 0.0f};
+            input >> values[0] >> values[1] >> values[2] >> values[3];
+            bool changed = false;
+            if (parameter->type == engine::ShaderValueType::Float) {
+                changed = ImGui::DragFloat("Default", &values[0], 0.01f);
+            } else if (parameter->type == engine::ShaderValueType::Int) {
+                int integer = static_cast<int>(values[0]);
+                if (ImGui::InputInt("Default", &integer)) {
+                    values[0] = static_cast<float>(integer);
+                    changed = true;
+                }
+            } else if (parameter->type == engine::ShaderValueType::Bool) {
+                bool enabled = parameter->defaultValue == "true"
+                    || values[0] != 0.0f;
+                if (ImGui::Checkbox("Default", &enabled)) {
+                    parameter->defaultValue = enabled ? "true" : "false";
+                    changed = true;
+                }
+            } else if (parameter->type == engine::ShaderValueType::Vec2) {
+                changed = ImGui::DragFloat2("Default", values, 0.01f);
+            } else if (parameter->type == engine::ShaderValueType::Vec3) {
+                changed = ImGui::DragFloat3("Default", values, 0.01f);
+            } else if (parameter->type == engine::ShaderValueType::Vec4) {
+                changed = ImGui::DragFloat4("Default", values, 0.01f);
+            }
+            if (changed) {
+                if (parameter->type != engine::ShaderValueType::Bool) {
+                    char formatted[128];
+                    if (parameter->type == engine::ShaderValueType::Vec2)
+                        std::snprintf(formatted, sizeof(formatted), "%.6g,%.6g",
+                                      values[0], values[1]);
+                    else if (parameter->type == engine::ShaderValueType::Vec3)
+                        std::snprintf(formatted, sizeof(formatted), "%.6g,%.6g,%.6g",
+                                      values[0], values[1], values[2]);
+                    else if (parameter->type == engine::ShaderValueType::Vec4)
+                        std::snprintf(formatted, sizeof(formatted),
+                                      "%.6g,%.6g,%.6g,%.6g", values[0], values[1],
+                                      values[2], values[3]);
+                    else
+                        std::snprintf(formatted, sizeof(formatted), "%.6g", values[0]);
+                    parameter->defaultValue = formatted;
+                }
+                m_dirty = true;
+                m_compilePending = true;
+            }
+        }
+    }
     if (node->type == "ParameterTexture2D") {
         const auto parameter = std::find_if(
             m_asset.parameters.begin(), m_asset.parameters.end(),
@@ -1185,6 +1299,58 @@ void ShaderEditorPanel::DrawGraphInspector(EditorAssets& assets)
                 "Accepts engine-owned .3dgtex assets from Content.");
         }
     }
+    if (node->type.rfind("Parameter", 0) == 0) {
+        const auto parameter = std::find_if(
+            m_asset.parameters.begin(), m_asset.parameters.end(),
+            [&](const engine::ShaderParameter& item) {
+                return item.name == node->name;
+            });
+        if (parameter != m_asset.parameters.end()) {
+            ImGui::SeparatorText("Material Parameter");
+            std::array<char, 96> group{};
+            std::array<char, 256> tooltip{};
+            std::snprintf(group.data(), group.size(), "%s", parameter->group.c_str());
+            std::snprintf(tooltip.data(), tooltip.size(), "%s",
+                          parameter->tooltip.c_str());
+            if (ImGui::InputText("Group", group.data(), group.size())) {
+                parameter->group = group.data();
+                if (parameter->group.empty()) parameter->group = "General";
+                m_dirty = true;
+            }
+            if (ImGui::InputText("Tooltip", tooltip.data(), tooltip.size())) {
+                parameter->tooltip = tooltip.data();
+                m_dirty = true;
+            }
+            if (ImGui::Checkbox("Visible in Materials",
+                                &parameter->materialVisible))
+                m_dirty = true;
+            const bool supportsRange =
+                parameter->type == engine::ShaderValueType::Float
+                || parameter->type == engine::ShaderValueType::Int
+                || parameter->type == engine::ShaderValueType::Vec2
+                || parameter->type == engine::ShaderValueType::Vec3
+                || parameter->type == engine::ShaderValueType::Vec4;
+            if (!supportsRange) ImGui::BeginDisabled();
+            if (ImGui::Checkbox("Use Editor Range", &parameter->useRange))
+                m_dirty = true;
+            if (parameter->useRange) {
+                bool changed = false;
+                changed |= ImGui::DragFloat("Minimum", &parameter->minValue,
+                                            0.01f);
+                changed |= ImGui::DragFloat("Maximum", &parameter->maxValue,
+                                            0.01f);
+                changed |= ImGui::DragFloat("Step", &parameter->step, 0.001f,
+                                            0.0001f, 1000.0f, "%.4f");
+                if (changed) m_dirty = true;
+                if (parameter->minValue > parameter->maxValue)
+                    ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.25f, 1.0f),
+                                       "Minimum must not exceed maximum.");
+            }
+            if (!supportsRange) ImGui::EndDisabled();
+            ImGui::TextDisabled("Uniform: %s",
+                engine::ShaderParameterUniformName(parameter->name).c_str());
+        }
+    }
     if (node->type == "ObjectColor") {
         ImGui::ColorEdit4("Preview Object Color", m_previewObjectColor);
         ImGui::TextWrapped(
@@ -1192,7 +1358,7 @@ void ShaderEditorPanel::DrawGraphInspector(EditorAssets& assets)
             "Use Constant Color for a fixed shader color, or Parameter Color "
             "for a material-editable color.");
     }
-    ImGui::Checkbox("Collapsed", &node->collapsed);
+    if (ImGui::Checkbox("Collapsed", &node->collapsed)) m_dirty = true;
 }
 
 void ShaderEditorPanel::EnsurePreviewResources()
@@ -1315,6 +1481,9 @@ unsigned int ShaderEditorPanel::RenderPreview(int width, int height)
         : const_cast<engine::Shader&>(*shader);
     mutableShader.Bind();
     mutableShader.SetMat4("uViewProjection", projection * view);
+    mutableShader.SetVec3("uCameraPosition", eye);
+    mutableShader.SetFloat("uTime", m_timeOfDay * 60.0f);
+    mutableShader.SetFloat("uDeltaTime", 1.0f / 60.0f);
     mutableShader.SetVec3("uLightDirection",
         glm::normalize(glm::vec3(std::sin(lightYaw), -0.6f - std::abs(sunHeight),
                                 std::cos(lightYaw))));
@@ -1324,32 +1493,22 @@ unsigned int ShaderEditorPanel::RenderPreview(int width, int height)
     mutableShader.SetVec4("uObjectColor", glm::vec4(
         m_previewObjectColor[0], m_previewObjectColor[1],
         m_previewObjectColor[2], m_previewObjectColor[3]));
-    for (const auto& parameter : m_asset.parameters) {
-        if (parameter.type != engine::ShaderValueType::Color
-            && parameter.type != engine::ShaderValueType::Vec4) continue;
-        std::string normalized = parameter.defaultValue;
-        for (char& c : normalized)
-            if (c == ',' || c == '(' || c == ')') c = ' ';
-        std::istringstream input(normalized);
-        glm::vec4 color(0.0f);
-        input >> color.x >> color.y >> color.z >> color.w;
-        mutableShader.SetVec4("u_" + parameter.name, color);
-    }
     int textureUnit = 8;
     for (const auto& parameter : m_asset.parameters) {
-        if (parameter.type != engine::ShaderValueType::Texture2D
-            || parameter.defaultValue.empty()
-            || parameter.defaultValue == "0")
-            continue;
+        const engine::Texture* texture = nullptr;
         std::string textureError;
-        if (const engine::Texture* texture = m_previewAssets.LoadTexture(
-                parameter.defaultValue, &textureError)) {
-            texture->Bind(textureUnit);
-            mutableShader.SetInt("u_" + parameter.name, textureUnit);
-            ++textureUnit;
-        } else if (!textureError.empty()) {
+        if (parameter.type == engine::ShaderValueType::Texture2D
+            && !parameter.defaultValue.empty()
+            && parameter.defaultValue != "0") {
+            texture = m_previewAssets.LoadTexture(
+                parameter.defaultValue, &textureError);
+        }
+        if (!textureError.empty()) {
             m_error = textureError;
         }
+        textureUnit = engine::UploadShaderParameter(
+            mutableShader, parameter.name, static_cast<int>(parameter.type),
+            parameter.defaultValue, texture, textureUnit);
     }
     glm::mat4 model(1.0f);
     if (m_shape == PreviewShape::Plane)
@@ -1507,32 +1666,45 @@ void ShaderEditorPanel::Draw(EditorAssets& assets, bool* open)
     const char* domains[] = {"Surface", "Post Process", "Particle", "Unlit"};
     if (ImGui::Combo("Domain", &domain, domains, 4))
     {
-        PushUndo();
-        m_asset.domain = static_cast<engine::ShaderDomain>(domain);
-        const auto output = std::find_if(
-            m_asset.nodes.begin(), m_asset.nodes.end(),
-            [](const engine::ShaderGraphNode& node) {
-                return node.type.find("Output") != std::string::npos;
-            });
-        if (output != m_asset.nodes.end()) {
-            output->type = DomainOutput(m_asset.domain);
-            output->name = std::string(engine::ShaderDomainName(m_asset.domain))
-                + " Output";
-            m_asset.pins.erase(std::remove_if(
-                m_asset.pins.begin(), m_asset.pins.end(),
-                [&](const engine::ShaderGraphPin& pin) {
-                    return pin.nodeId == output->id;
-                }), m_asset.pins.end());
-            const std::uint64_t pin = NextId(m_asset);
-            m_asset.pins.push_back({
-                pin, output->id,
-                m_asset.domain == engine::ShaderDomain::Surface
-                    ? "Base Color" : "Color",
-                engine::ShaderValueType::Color, true, false
-            });
+        m_pendingDomain = domain;
+        ImGui::OpenPopup("Change Shader Domain");
+    }
+    if (ImGui::BeginPopupModal("Change Shader Domain", nullptr,
+                               ImGuiWindowFlags_AlwaysAutoResize)) {
+        const engine::ShaderDomain target = static_cast<engine::ShaderDomain>(
+            std::clamp(m_pendingDomain, 0, 3));
+        std::size_t incompatibleNodes = 0;
+        for (const auto& node : m_asset.nodes) {
+            if (node.type == DomainOutput(m_asset.domain)) continue;
+            const auto exclusive = ExclusiveNodeDomain(node.type);
+            if ((exclusive && *exclusive != target)
+                || node.type.find("Output") != std::string::npos)
+                ++incompatibleNodes;
         }
-        m_dirty = true;
-        m_compilePending = true;
+        ImGui::Text("Convert %s to %s?",
+                    engine::ShaderDomainName(m_asset.domain),
+                    engine::ShaderDomainName(target));
+        ImGui::Separator();
+        ImGui::BulletText("The complete %s output socket layout will be created.",
+                          engine::ShaderDomainName(target));
+        ImGui::BulletText(
+            "Compatible Color/Base Color connections will be preserved.");
+        if (incompatibleNodes != 0)
+            ImGui::BulletText("%zu domain-specific node(s) will be removed.",
+                              incompatibleNodes);
+        ImGui::TextDisabled("The entire conversion can be reverted with Undo.");
+        if (ImGui::Button("Convert Domain")) {
+            ApplyDomainChange(target);
+            m_pendingDomain = -1;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SetItemDefaultFocus();
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) {
+            m_pendingDomain = -1;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
     }
     if (ImGui::BeginDragDropTarget())
     {
@@ -1641,6 +1813,44 @@ void ShaderEditorPanel::Draw(EditorAssets& assets, bool* open)
                     }
                 }
             }
+        }
+    }
+    const std::vector<engine::ShaderAssetIssue> graphIssues =
+        engine::ValidateShaderAsset(m_asset);
+    if (!graphIssues.empty()) {
+        const std::size_t errors = static_cast<std::size_t>(std::count_if(
+            graphIssues.begin(), graphIssues.end(),
+            [](const engine::ShaderAssetIssue& issue) {
+                return issue.severity
+                    == engine::ShaderAssetIssue::Severity::Error;
+            }));
+        ImGui::SeparatorText("Graph Validation");
+        ImGui::Text("%zu error(s), %zu warning(s)", errors,
+                    graphIssues.size() - errors);
+        for (std::size_t i = 0; i < graphIssues.size(); ++i) {
+            const auto& issue = graphIssues[i];
+            ImGui::PushID(static_cast<int>(i));
+            const ImVec4 color = issue.severity
+                    == engine::ShaderAssetIssue::Severity::Error
+                ? ImVec4(1.0f, 0.35f, 0.3f, 1.0f)
+                : ImVec4(1.0f, 0.75f, 0.25f, 1.0f);
+            ImGui::PushStyleColor(ImGuiCol_Text, color);
+            if (ImGui::Selectable(issue.message.c_str())) {
+                if (issue.nodeId != 0) {
+                    m_selectedNodes = {issue.nodeId};
+                    const auto node = std::find_if(
+                        m_asset.nodes.begin(), m_asset.nodes.end(),
+                        [&](const engine::ShaderGraphNode& item) {
+                            return item.id == issue.nodeId;
+                        });
+                    if (node != m_asset.nodes.end()) {
+                        m_graphPanX = 220.0f - node->x * m_graphZoom;
+                        m_graphPanY = 120.0f - node->y * m_graphZoom;
+                    }
+                }
+            }
+            ImGui::PopStyleColor();
+            ImGui::PopID();
         }
     }
     if (!m_error.empty()) ImGui::TextColored(ImVec4(1, 0.3f, 0.25f, 1), "%s", m_error.c_str());

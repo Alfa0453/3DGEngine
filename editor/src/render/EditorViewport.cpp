@@ -14,10 +14,12 @@
 #include <engine/graphics/Renderer.h>
 #include <engine/graphics/Shader.h>
 #include <engine/graphics/SkinnedModel.h>
+#include <engine/graphics/Terrain.h>
 #include <engine/graphics/Texture.h>
 #include <engine/math/Spline.h>
 
 #include <glad/glad.h>
+#include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
 
@@ -703,7 +705,9 @@ void DrawGizmoRing(engine::Renderer& renderer,
 } // namespace
 
 EditorViewport::EditorViewport()
-    : m_colliderLines(std::make_unique<EditorLineRenderer>())
+    : m_colliderLines(std::make_unique<EditorLineRenderer>()),
+      m_splineLines(std::make_unique<EditorLineRenderer>()),
+      m_waterLines(std::make_unique<EditorLineRenderer>())
 {
 }
 
@@ -724,7 +728,8 @@ void EditorViewport::DrawSceneGizmo(engine::Renderer& renderer,
                                     const EditorGizmo& gizmo,
                                     const glm::mat4& viewProj,
                                     const engine::Camera& camera,
-                                    int viewportHeight) const {
+                                    int viewportHeight,
+                                    const glm::vec3* pivotOverride) const {
     const EditorScene::Object* selected = scene.SelectedObject();
     const engine::ecs::Transform* selectedTransform = selected
         ? scene.TryGetTransform(selected->entity)
@@ -740,14 +745,16 @@ void EditorViewport::DrawSceneGizmo(engine::Renderer& renderer,
 
     // Terrain renders as a mesh spanning local [0,size] (corner at the transform position),
     // so centre the gizmo on the terrain footprint instead of its corner.
-    const glm::vec3 center = selectedTransform->position
+    const glm::vec3 center = pivotOverride ? *pivotOverride : selectedTransform->position
         + (selected->isTerrain ? glm::vec3(selected->terrainSize * 0.5f, 0.0f, selected->terrainSize * 0.5f)
                                : glm::vec3(0.0f));
     const glm::vec3 xColor = AxisColor(EditorGizmo::Axis::X, gizmo.CurrentAxis());
     const glm::vec3 yColor = AxisColor(EditorGizmo::Axis::Y, gizmo.CurrentAxis());
     const glm::vec3 zColor = AxisColor(EditorGizmo::Axis::Z, gizmo.CurrentAxis());
 
-    const float gizmoScale = GizmoWorldScale(*selectedTransform, camera, viewportHeight) * gizmo.VisualScale();
+    engine::ecs::Transform gizmoTransform = *selectedTransform;
+    gizmoTransform.position = center;
+    const float gizmoScale = GizmoWorldScale(gizmoTransform, camera, viewportHeight) * gizmo.VisualScale();
     const float length = gizmoScale * 0.78f;
     const float thickness = gizmoScale * 0.022f;
     const float head = gizmoScale * 0.16f;
@@ -999,6 +1006,107 @@ void EditorViewport::DrawPhysicsColliderGuides(const EditorScene& scene,
     m_colliderLines->Draw(viewProj, 1.5f, true);
 }
 
+void EditorViewport::DrawTerrainBrushGuide(
+    const engine::Terrain& terrain,
+    const engine::ecs::Transform& transform,
+    const glm::vec2& localCenter,
+    float radius,
+    int brushMode,
+    bool applying,
+    const glm::mat4& viewProj) const {
+    if (!m_colliderLines || !terrain.Ready() || terrain.Map().h.empty()) return;
+
+    radius = std::max(radius, 0.1f);
+    const float terrainSize = terrain.Map().size;
+    if (localCenter.x + radius < 0.0f || localCenter.y + radius < 0.0f
+        || localCenter.x - radius > terrainSize
+        || localCenter.y - radius > terrainSize) {
+        return;
+    }
+
+    static const glm::vec3 modeColors[] = {
+        {0.20f, 0.95f, 0.42f}, // raise
+        {1.00f, 0.30f, 0.24f}, // lower
+        {0.20f, 0.78f, 1.00f}, // smooth
+        {0.82f, 0.42f, 1.00f}, // flatten
+        {0.30f, 0.95f, 0.32f}, // paint
+        {1.00f, 0.52f, 0.16f}  // erase
+    };
+    const int colorIndex = std::clamp(brushMode, 0, 5);
+    const glm::vec3 color = applying
+        ? glm::mix(modeColors[colorIndex], glm::vec3(1.0f), 0.30f)
+        : modeColors[colorIndex];
+    const glm::vec3 innerColor = color * 0.62f;
+    const glm::mat4 model = transform.Model();
+    // Lift just above the surface to avoid z-fighting while retaining depth tests.
+    const float lift = std::max(terrain.Map().maxHeight * 0.00035f, 0.015f);
+
+    auto inside = [terrainSize](const glm::vec2& p) {
+        return p.x >= 0.0f && p.y >= 0.0f
+            && p.x <= terrainSize && p.y <= terrainSize;
+    };
+    auto worldPoint = [&](const glm::vec2& p) {
+        const float y = terrain.HeightAt(p.x, p.y) + lift;
+        return glm::vec3(model * glm::vec4(p.x, y, p.y, 1.0f));
+    };
+    auto addRing = [&](float ringRadius, const glm::vec3& ringColor) {
+        constexpr int segments = 96;
+        for (int i = 0; i < segments; ++i) {
+            const float a0 = glm::two_pi<float>() * static_cast<float>(i) / segments;
+            const float a1 = glm::two_pi<float>() * static_cast<float>(i + 1) / segments;
+            const glm::vec2 p0 = localCenter
+                + glm::vec2(std::cos(a0), std::sin(a0)) * ringRadius;
+            const glm::vec2 p1 = localCenter
+                + glm::vec2(std::cos(a1), std::sin(a1)) * ringRadius;
+            // Do not draw beyond the heightfield: the clipped ring now shows the
+            // exact portion of the brush that can affect edge vertices.
+            if (inside(p0) && inside(p1))
+                m_colliderLines->AddLine(worldPoint(p0), worldPoint(p1), ringColor);
+        }
+    };
+
+    m_colliderLines->Clear();
+    addRing(radius, color);
+    // A subtle half-radius ring makes the smooth falloff easier to judge.
+    addRing(radius * 0.5f, innerColor);
+
+    if (inside(localCenter)) {
+        const float crossRadius = std::clamp(radius * 0.08f, 0.08f, 0.45f);
+        const glm::vec2 x0(localCenter.x - crossRadius, localCenter.y);
+        const glm::vec2 x1(localCenter.x + crossRadius, localCenter.y);
+        const glm::vec2 z0(localCenter.x, localCenter.y - crossRadius);
+        const glm::vec2 z1(localCenter.x, localCenter.y + crossRadius);
+        if (inside(x0) && inside(x1))
+            m_colliderLines->AddLine(worldPoint(x0), worldPoint(x1), color);
+        if (inside(z0) && inside(z1))
+            m_colliderLines->AddLine(worldPoint(z0), worldPoint(z1), color);
+    }
+
+    m_colliderLines->Draw(viewProj, applying ? 3.0f : 2.0f, false);
+}
+
+void EditorViewport::DrawFoliageBrushGuide(
+    const std::vector<glm::vec3>& ring, const glm::vec3& center,
+    bool erase, bool applying, const glm::mat4& viewProj) const {
+    if (!m_colliderLines || ring.size() < 3) return;
+    const glm::vec3 base = erase
+        ? glm::vec3(1.0f, 0.28f, 0.18f)
+        : glm::vec3(0.22f, 1.0f, 0.42f);
+    const glm::vec3 color = applying
+        ? glm::mix(base, glm::vec3(1.0f), 0.35f) : base;
+    m_colliderLines->Clear();
+    for (std::size_t i = 0; i < ring.size(); ++i)
+        m_colliderLines->AddLine(ring[i], ring[(i + 1) % ring.size()], color);
+    // Centre cross remains readable even when the terrain is steep.
+    const float arm = std::clamp(glm::distance(ring.front(), center) * 0.08f,
+                                 0.08f, 0.55f);
+    m_colliderLines->AddLine(center - glm::vec3(arm, 0.0f, 0.0f),
+                             center + glm::vec3(arm, 0.0f, 0.0f), color);
+    m_colliderLines->AddLine(center - glm::vec3(0.0f, 0.0f, arm),
+                             center + glm::vec3(0.0f, 0.0f, arm), color);
+    m_colliderLines->Draw(viewProj, applying ? 3.5f : 2.5f, false);
+}
+
 void EditorViewport::DrawCharacterFacingArrows(engine::Renderer& renderer,
                                                engine::Shader& shader,
                                                const engine::Mesh& cube,
@@ -1169,13 +1277,13 @@ void EditorViewport::DrawCameraSequenceGuides(
 
 void EditorViewport::DrawSplineGuides(
     engine::Renderer& renderer, engine::Shader& shader, const engine::Mesh& cube,
-    const EditorScene& scene, const glm::mat4& viewProj) const {
+    const EditorScene& scene, const glm::mat4& viewProj, int selectedPoint) const {
+    (void)renderer;
+    (void)shader;
+    (void)cube;
     const EditorScene::Object* selected = scene.SelectedObject();
-
-    shader.Bind();
-    shader.SetMat4("uViewProj", viewProj);
-    shader.SetVec3("uLightDir", glm::normalize(glm::vec3(-0.4f, -1.0f, -0.3f)));
-    shader.SetInt("uHasDiffuse", 0);
+    if (!m_splineLines) return;
+    m_splineLines->Clear();
 
     for (const EditorScene::Object& object : scene.Objects()) {
         if (!object.isSpline || !object.visible) continue;
@@ -1188,25 +1296,180 @@ void EditorViewport::DrawSplineGuides(
         if (isSel) curveColor = glm::mix(curveColor, glm::vec3(1.0f), 0.35f);
 
         if (object.splinePoints.size() >= 2) {
-            shader.SetVec3("uEmissive", curveColor * 0.4f);
             engine::Spline spline(object.splinePoints, object.splineClosed);
             std::vector<glm::vec3> pts;
             const int samples = std::max(24, static_cast<int>(object.splinePoints.size()) * 12);
             spline.SampleUniform(samples, pts);
             for (std::size_t i = 1; i < pts.size(); ++i) {
-                DrawGuideSegment(renderer, shader, cube, pts[i - 1], pts[i],
-                                 isSel ? 0.06f : 0.04f, curveColor);
+                m_splineLines->AddLine(pts[i - 1], pts[i], curveColor);
+            }
+
+            // Direction chevrons make flow and rail orientation readable without
+            // selecting the spline or opening its inspector.
+            const int arrows = std::clamp(static_cast<int>(spline.Length() / 5.0f), 1, 12);
+            for (int i = 1; i <= arrows; ++i) {
+                const float distance = spline.Length() * static_cast<float>(i)
+                    / static_cast<float>(arrows + 1);
+                const glm::vec3 p = spline.PositionAtDistance(distance);
+                const glm::vec3 tangent = spline.TangentAtDistance(distance);
+                glm::vec3 side = glm::cross(glm::vec3(0.0f, 1.0f, 0.0f), tangent);
+                if (glm::dot(side, side) < 1.0e-6f) side = glm::vec3(1.0f, 0.0f, 0.0f);
+                else side = glm::normalize(side);
+                const float size = isSel ? 0.42f : 0.3f;
+                m_splineLines->AddLine(p, p - tangent * size + side * size * 0.55f, curveColor);
+                m_splineLines->AddLine(p, p - tangent * size - side * size * 0.55f, curveColor);
             }
         }
 
-        // Control-point handles (bigger + brighter on the selected spline).
-        shader.SetVec3("uEmissive", glm::vec3(0.5f, 0.42f, 0.1f));
-        const float handle = isSel ? 0.32f : 0.22f;
-        for (const glm::vec3& p : object.splinePoints) {
-            DrawGizmoBox(renderer, shader, cube, p, glm::vec3(handle), glm::vec3(1.0f, 0.85f, 0.2f));
+        // A subdued control polygon plus shader lines for point handles. This removes
+        // the old cube-mesh markers and keeps authoring fast on long splines.
+        if (isSel) {
+            const glm::vec3 polygonColor(0.34f, 0.38f, 0.43f);
+            for (std::size_t i = 1; i < object.splinePoints.size(); ++i) {
+                m_splineLines->AddLine(object.splinePoints[i - 1], object.splinePoints[i], polygonColor);
+            }
+            if (object.splineClosed && object.splinePoints.size() > 2) {
+                m_splineLines->AddLine(object.splinePoints.back(), object.splinePoints.front(), polygonColor);
+            }
+        }
+        for (std::size_t i = 0; i < object.splinePoints.size(); ++i) {
+            const glm::vec3& p = object.splinePoints[i];
+            const bool active = isSel && selectedPoint == static_cast<int>(i);
+            const glm::vec3 handleColor = active ? glm::vec3(1.0f) : glm::vec3(1.0f, 0.82f, 0.16f);
+            const float handle = active ? 0.32f : (isSel ? 0.22f : 0.14f);
+            m_splineLines->AddLine(p - glm::vec3(handle, 0, 0), p + glm::vec3(handle, 0, 0), handleColor);
+            m_splineLines->AddLine(p - glm::vec3(0, handle, 0), p + glm::vec3(0, handle, 0), handleColor);
+            m_splineLines->AddLine(p - glm::vec3(0, 0, handle), p + glm::vec3(0, 0, handle), handleColor);
         }
     }
-    shader.SetVec3("uEmissive", glm::vec3(0.0f));
+    m_splineLines->Draw(viewProj, 2.5f, true);
+}
+
+void EditorViewport::DrawSelectedRiverBoundary(
+    const EditorScene& scene, const glm::mat4& viewProj) const {
+    const EditorScene::Object* water = scene.SelectedObject();
+    if (!water || !water->isWater || water->waterFlowSpline.empty() || !m_waterLines) return;
+    const EditorScene::Object* splineObject = nullptr;
+    for (const EditorScene::Object& object : scene.Objects()) {
+        if (object.isSpline && object.name == water->waterFlowSpline
+            && object.splinePoints.size() >= 2) {
+            splineObject = &object;
+            break;
+        }
+    }
+    if (!splineObject) return;
+
+    const engine::Spline spline(splineObject->splinePoints, splineObject->splineClosed);
+    const float length = spline.Length();
+    if (length <= 0.001f) return;
+    const int samples = std::clamp(
+        std::max(static_cast<int>(splineObject->splinePoints.size()) * 24,
+                 static_cast<int>(std::ceil(length * 3.0f))), 16, 640);
+    const float halfWidth = std::max(water->waterRiverWidth, 0.1f) * 0.5f;
+    const glm::vec3 color = water->locked
+        ? glm::vec3(1.0f, 0.28f, 0.08f) : glm::vec3(1.0f, 0.55f, 0.05f);
+    m_waterLines->Clear();
+    std::vector<glm::vec3> centers(static_cast<std::size_t>(samples + 1));
+    for (int i = 0; i <= samples; ++i) {
+        const float distance = length * static_cast<float>(i) / static_cast<float>(samples);
+        centers[static_cast<std::size_t>(i)] = spline.PositionAtDistance(distance);
+    }
+    std::vector<float> rowHalfWidths(static_cast<std::size_t>(samples + 1), halfWidth);
+    for (int i = 1; i < samples; ++i) {
+        glm::vec3 before = centers[static_cast<std::size_t>(i)]
+            - centers[static_cast<std::size_t>(i - 1)];
+        glm::vec3 after = centers[static_cast<std::size_t>(i + 1)]
+            - centers[static_cast<std::size_t>(i)];
+        const float beforeLength = glm::length(before);
+        const float afterLength = glm::length(after);
+        if (beforeLength <= 1.0e-5f || afterLength <= 1.0e-5f) continue;
+        before /= beforeLength;
+        after /= afterLength;
+        const float angle = std::acos(std::clamp(glm::dot(before, after), -1.0f, 1.0f));
+        if (angle > 1.0e-4f) {
+            const float radius = ((beforeLength + afterLength) * 0.5f) / angle;
+            rowHalfWidths[static_cast<std::size_t>(i)] = std::min(
+                halfWidth, std::max(radius * 0.82f, halfWidth * 0.24f));
+        }
+    }
+    for (int pass = 0; pass < 4; ++pass) {
+        std::vector<float> smoothed = rowHalfWidths;
+        for (int i = 1; i < samples; ++i) {
+            smoothed[static_cast<std::size_t>(i)] =
+                rowHalfWidths[static_cast<std::size_t>(i - 1)] * 0.25f
+                + rowHalfWidths[static_cast<std::size_t>(i)] * 0.5f
+                + rowHalfWidths[static_cast<std::size_t>(i + 1)] * 0.25f;
+        }
+        rowHalfWidths.swap(smoothed);
+    }
+    glm::vec3 previousLeft(0.0f), previousRight(0.0f), firstLeft(0.0f), firstRight(0.0f);
+    glm::vec3 transportedSide(1.0f, 0.0f, 0.0f);
+    glm::vec3 previousTangent(0.0f, 0.0f, 1.0f);
+    for (int i = 0; i <= samples; ++i) {
+        const glm::vec3 center = centers[static_cast<std::size_t>(i)];
+        const int tangentLo = std::max(i - 2, 0);
+        const int tangentHi = std::min(i + 2, samples);
+        glm::vec3 tangent = centers[static_cast<std::size_t>(tangentHi)]
+            - centers[static_cast<std::size_t>(tangentLo)];
+        if (glm::dot(tangent, tangent) < 1.0e-8f) tangent = glm::vec3(0.0f, 0.0f, 1.0f);
+        else tangent = glm::normalize(tangent);
+
+        if (i == 0) {
+            transportedSide = glm::cross(tangent, glm::vec3(0.0f, 1.0f, 0.0f));
+            if (glm::dot(transportedSide, transportedSide) < 1.0e-8f)
+                transportedSide = glm::cross(tangent, glm::vec3(0.0f, 0.0f, 1.0f));
+            transportedSide = glm::normalize(transportedSide);
+        } else {
+            glm::vec3 axis = glm::cross(previousTangent, tangent);
+            const float sine = glm::length(axis);
+            const float cosine = std::clamp(glm::dot(previousTangent, tangent), -1.0f, 1.0f);
+            if (sine > 1.0e-6f) {
+                axis /= sine;
+                transportedSide = transportedSide * cosine
+                    + glm::cross(axis, transportedSide) * sine
+                    + axis * glm::dot(axis, transportedSide) * (1.0f - cosine);
+            }
+            transportedSide -= tangent * glm::dot(transportedSide, tangent);
+            if (glm::dot(transportedSide, transportedSide) < 1.0e-8f)
+                transportedSide = glm::cross(tangent, glm::vec3(0.0f, 1.0f, 0.0f));
+            transportedSide = glm::normalize(transportedSide);
+        }
+        previousTangent = tangent;
+        float rollDegrees = 0.0f;
+        if (!splineObject->splinePointRotations.empty()) {
+            const std::size_t count = splineObject->splinePointRotations.size();
+            const float progress = static_cast<float>(i) / static_cast<float>(samples);
+            const float keyed = progress * static_cast<float>(splineObject->splineClosed ? count : count - 1);
+            const std::size_t lo = std::min(static_cast<std::size_t>(std::floor(keyed)), count - 1);
+            const std::size_t hi = splineObject->splineClosed ? (lo + 1) % count : std::min(lo + 1, count - 1);
+            float f = keyed - std::floor(keyed);
+            f = f * f * (3.0f - 2.0f * f);
+            const float a = splineObject->splinePointRotations[lo].z;
+            rollDegrees = a + std::remainder(splineObject->splinePointRotations[hi].z - a, 360.0f) * f;
+        }
+        const float roll = glm::radians(rollDegrees);
+        const glm::vec3 side = transportedSide * std::cos(roll)
+            + glm::cross(tangent, transportedSide) * std::sin(roll);
+        const glm::vec3 left = center + side * rowHalfWidths[static_cast<std::size_t>(i)];
+        const glm::vec3 right = center - side * rowHalfWidths[static_cast<std::size_t>(i)];
+        if (i == 0) {
+            firstLeft = left;
+            firstRight = right;
+        } else {
+            m_waterLines->AddLine(previousLeft, left, color);
+            m_waterLines->AddLine(previousRight, right, color);
+        }
+        previousLeft = left;
+        previousRight = right;
+    }
+    if (splineObject->splineClosed) {
+        m_waterLines->AddLine(previousLeft, firstLeft, color);
+        m_waterLines->AddLine(previousRight, firstRight, color);
+    } else {
+        m_waterLines->AddLine(firstLeft, firstRight, color);
+        m_waterLines->AddLine(previousLeft, previousRight, color);
+    }
+    m_waterLines->Draw(viewProj, 3.0f, true);
 }
 
 void EditorViewport::DrawNavAgentGuides(engine::Renderer& renderer,
@@ -1714,6 +1977,91 @@ int EditorViewport::PickSceneObject(const EditorScene& scene,
             continue;
         }
 
+        if (object.isSpline) {
+            engine::Spline spline(object.splinePoints, object.splineClosed);
+            std::vector<glm::vec3> points;
+            spline.SampleUniform(std::max(24, static_cast<int>(object.splinePoints.size()) * 12), points);
+            float bestScreenSq = 8.0f * 8.0f;
+            float curveDistance = std::numeric_limits<float>::max();
+            glm::vec2 previous;
+            bool hasPrevious = false;
+            for (const glm::vec3& point : points) {
+                glm::vec2 screen;
+                if (!ProjectWorldToScreen(point, viewProj, width, height, &screen)) {
+                    hasPrevious = false;
+                    continue;
+                }
+                if (hasPrevious) {
+                    const float screenSq = DistanceToSegmentSquared(glm::vec2(x, y), previous, screen);
+                    if (screenSq <= bestScreenSq) {
+                        bestScreenSq = screenSq;
+                        curveDistance = std::min(curveDistance, glm::length(point - ray.origin));
+                    }
+                }
+                previous = screen;
+                hasPrevious = true;
+            }
+            if (curveDistance < bestDistance) {
+                bestDistance = curveDistance;
+                picked = i;
+            }
+            continue;
+        }
+
+        if (object.isWater && !object.waterFlowSpline.empty()) {
+            const EditorScene::Object* flow = nullptr;
+            for (const EditorScene::Object& candidate : objects) {
+                if (candidate.isSpline && candidate.name == object.waterFlowSpline
+                    && candidate.splinePoints.size() >= 2) {
+                    flow = &candidate;
+                    break;
+                }
+            }
+            if (flow) {
+                const engine::Spline spline(flow->splinePoints, flow->splineClosed);
+                const int samples = std::clamp(
+                    std::max(24, static_cast<int>(flow->splinePoints.size()) * 16), 24, 320);
+                const float length = spline.Length();
+                glm::vec2 previousScreen;
+                float previousHalfWidth = 8.0f;
+                bool hasPrevious = false;
+                float riverDistance = std::numeric_limits<float>::max();
+                for (int sample = 0; sample <= samples; ++sample) {
+                    const float distance = length * static_cast<float>(sample)
+                        / static_cast<float>(samples);
+                    const glm::vec3 center = spline.PositionAtDistance(distance);
+                    glm::vec3 tangent = spline.TangentAtDistance(distance);
+                    tangent.y = 0.0f;
+                    if (glm::dot(tangent, tangent) < 1.0e-8f) tangent = glm::vec3(0, 0, 1);
+                    else tangent = glm::normalize(tangent);
+                    const glm::vec3 side(tangent.z, 0.0f, -tangent.x);
+                    glm::vec2 centerScreen, edgeScreen;
+                    if (!ProjectWorldToScreen(center, viewProj, width, height, &centerScreen)
+                        || !ProjectWorldToScreen(center + side * object.waterRiverWidth * 0.5f,
+                                                 viewProj, width, height, &edgeScreen)) {
+                        hasPrevious = false;
+                        continue;
+                    }
+                    const float halfWidthPixels = std::max(glm::length(edgeScreen - centerScreen), 8.0f);
+                    if (hasPrevious) {
+                        const float threshold = std::max(previousHalfWidth, halfWidthPixels);
+                        if (DistanceToSegmentSquared(glm::vec2(x, y), previousScreen, centerScreen)
+                            <= threshold * threshold) {
+                            riverDistance = std::min(riverDistance, glm::length(center - ray.origin));
+                        }
+                    }
+                    previousScreen = centerScreen;
+                    previousHalfWidth = halfWidthPixels;
+                    hasPrevious = true;
+                }
+                if (riverDistance < bestDistance) {
+                    bestDistance = riverDistance;
+                    picked = i;
+                }
+                continue;
+            }
+        }
+
         const engine::ecs::Transform* transform = scene.TryGetTransform(object.entity);
         if (!transform) {
             continue;
@@ -1792,6 +2140,28 @@ int EditorViewport::PickSceneObject(const EditorScene& scene,
     return picked;
 }
 
+int EditorViewport::PickSplinePoint(const EditorScene& scene,
+                                    float x, float y,
+                                    const glm::mat4& viewProj,
+                                    int width, int height) const {
+    const EditorScene::Object* selected = scene.SelectedObject();
+    if (!selected || !selected->isSpline || selected->locked) return -1;
+    const glm::vec2 mouse(x, y);
+    int best = -1;
+    float bestSq = 13.0f * 13.0f;
+    for (std::size_t i = 0; i < selected->splinePoints.size(); ++i) {
+        glm::vec2 screen;
+        if (!ProjectWorldToScreen(selected->splinePoints[i], viewProj, width, height, &screen)) continue;
+        const glm::vec2 delta = screen - mouse;
+        const float distanceSq = glm::dot(delta, delta);
+        if (distanceSq <= bestSq) {
+            bestSq = distanceSq;
+            best = static_cast<int>(i);
+        }
+    }
+    return best;
+}
+
 bool EditorViewport::PickGizmoHandle(EditorGizmo& gizmo,
                                      const EditorScene& scene,
                                      float x,
@@ -1799,7 +2169,8 @@ bool EditorViewport::PickGizmoHandle(EditorGizmo& gizmo,
                                      const glm::mat4& viewProj,
                                      int width,
                                      int height,
-                                     const engine::Camera& camera) const {
+                                     const engine::Camera& camera,
+                                     const glm::vec3* pivotOverride) const {
     const EditorScene::Object* selectedObject = scene.SelectedObject();
     const engine::ecs::Transform* selectedTransform = selectedObject
         ? scene.TryGetTransform(selectedObject->entity)
@@ -1808,17 +2179,19 @@ bool EditorViewport::PickGizmoHandle(EditorGizmo& gizmo,
         return false;
     }
 
-    const float gizmoScale = GizmoWorldScale(*selectedTransform, camera, height) * gizmo.VisualScale();
-    const float length = gizmoScale * 0.78f;
-    const float head = gizmoScale * 0.16f;
-    const float rotateRadius = gizmoScale * 0.72f;
+    engine::ecs::Transform gizmoTransform = *selectedTransform;
     constexpr float pi = 3.14159265359f;
     const glm::vec2 mouse{x, y};
     // Match the drawn gizmo: terrain's gizmo sits at its footprint centre, not the corner.
-    const glm::vec3 center = selectedTransform->position
+    const glm::vec3 center = pivotOverride ? *pivotOverride : selectedTransform->position
         + (selectedObject && selectedObject->isTerrain
                ? glm::vec3(selectedObject->terrainSize * 0.5f, 0.0f, selectedObject->terrainSize * 0.5f)
                : glm::vec3(0.0f));
+    gizmoTransform.position = center;
+    const float gizmoScale = GizmoWorldScale(gizmoTransform, camera, height) * gizmo.VisualScale();
+    const float length = gizmoScale * 0.78f;
+    const float head = gizmoScale * 0.16f;
+    const float rotateRadius = gizmoScale * 0.72f;
     glm::vec2 centerScreen;
     if (!ProjectWorldToScreen(center, viewProj, width, height, &centerScreen)) {
         return false;

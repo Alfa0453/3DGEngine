@@ -1,4 +1,4 @@
-# ECS, components, systems, prefabs, and scenes
+# ECS, components, systems, prefabs, scenes, worlds, and level streaming
 
 ## Registry model
 
@@ -95,6 +95,39 @@ camera presets and sequences, lights, and entity records.
 Stable asset IDs are stored with readable fallback paths. On load, the ID is
 resolved first so renamed or moved assets continue to work.
 
+## Worlds and level-as-asset streaming
+
+A `.3dgworld` manifest treats a level as an engine-owned scene asset. A world
+contains one always-resident persistent scene and any number of placed streamed
+levels. Each `LevelRef` stores:
+
+- a stable scene asset ID and readable fallback path;
+- a placement transform applied to the entire level;
+- local bounds used for streaming distance tests;
+- load and unload radii;
+- a `Distance`, `AlwaysLoaded`, or `Manual` streaming rule.
+
+`LevelStreamingManager` instantiates active levels into the shared ECS registry
+and records exactly which entities each level owns. Unloading destroys that
+entity group while leaving shared GPU assets cached. Distance streaming uses
+separate load and unload radii to prevent rapid boundary thrashing, and the
+manager performs at most one activation or deactivation per update to reduce
+frame spikes.
+
+Placed level transforms affect entity transforms, mover origins and axes,
+rotator and light directions, navigation bounds and patrol points, joint
+anchors, and camera presets. The persistent level owns world environment and
+game-mode state; streamed levels cannot replace it when they activate.
+
+Activation hooks let the editor or player create host-owned state for newly
+loaded entities, such as physics bodies, audio voices, animation runtime data,
+navigation data, particle emitters, and scripts. The before-deactivate hook must
+release that transient state before the entities are destroyed.
+
+Manual streaming can be connected to doors, transitions, or script logic with
+`LoadLevel` and `UnloadLevel`. `UnloadAll` is used before replacing a world or
+shutting down the runtime.
+
 ## Prefabs
 
 There are two prefab concepts:
@@ -129,9 +162,12 @@ toggle is treated as “Active in Play,” and it does not create visible geomet
 ## Common ordering constraints
 
 - Instantiate components before resolving assets.
+- Apply a streamed level's placement before building host-owned physics,
+  navigation, animation, or audio state.
 - Resolve skeletal assets before constructing animation poses or sockets.
 - Run health bookkeeping before checking `justDied`.
 - Activate ragdolls before physics and synchronize ragdoll poses after physics.
 - Process collision events only after `PhysicsWorld::Step`.
 - Shut down scripts and audio voices before replacing the runtime registry.
-
+- Release per-level transient systems before destroying a streamed level's
+  entities.

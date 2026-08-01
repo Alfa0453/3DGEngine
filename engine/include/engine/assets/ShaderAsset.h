@@ -60,10 +60,17 @@ struct ShaderParameter {
     ShaderValueType type = ShaderValueType::Float;
     std::string defaultValue = "0";
     AssetHandle assetId;
+    std::string group = "General";
+    std::string tooltip;
+    bool useRange = false;
+    float minValue = 0.0f;
+    float maxValue = 1.0f;
+    float step = 0.01f;
+    bool materialVisible = true;
 };
 
 struct ShaderAsset {
-    static constexpr int CurrentVersion = 3;
+    static constexpr int CurrentVersion = 4;
     int version = CurrentVersion;
     AssetHandle assetId;
     // Graph-local ID seed. This is intentionally separate from the stable
@@ -85,9 +92,28 @@ struct ShaderAssetIssue {
     std::uint64_t nodeId = 0;
 };
 
+struct ShaderDomainConversionReport {
+    bool success = false;
+    ShaderDomain from = ShaderDomain::Surface;
+    ShaderDomain to = ShaderDomain::Surface;
+    std::size_t removedNodes = 0;
+    std::size_t removedLinks = 0;
+    std::size_t preservedOutputLinks = 0;
+    std::string error;
+};
+
 const char* ShaderDomainName(ShaderDomain domain);
 const char* ShaderValueTypeName(ShaderValueType type);
 bool ShaderValueTypesCompatible(ShaderValueType from, ShaderValueType to);
+// Converts a display parameter name into the stable GLSL uniform used by every
+// editor and runtime binding path (for example "Coat Roughness" ->
+// "u_Coat_Roughness").
+std::string ShaderParameterUniformName(const std::string& parameterName);
+const char* ShaderDomainOutputNodeType(ShaderDomain domain);
+// Rebuilds the canonical output sockets, removes nodes owned by incompatible
+// domains, and preserves semantically compatible Color/Base Color links.
+bool ConvertShaderAssetDomain(ShaderAsset& asset, ShaderDomain domain,
+                              ShaderDomainConversionReport* report = nullptr);
 
 std::vector<ShaderAssetIssue> ValidateShaderAsset(const ShaderAsset& asset);
 bool ShaderAssetHasErrors(const std::vector<ShaderAssetIssue>& issues);

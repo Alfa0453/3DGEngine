@@ -1,5 +1,6 @@
 #include <engine/assets/AssetCooker.h>
 #include <engine/assets/AssetRegistry.h>
+#include <engine/scene/WorldManifest.h>
 
 #include <cstdlib>
 #include <filesystem>
@@ -104,6 +105,8 @@ int main() {
     WriteText(content / "AI" / "Wizard.btgraph", "behavior");
     WriteText(content / "Audio" / "Fire.3dgaudio", "audio");
     WriteText(content / "Audio" / "Unused.3dgaudio", "unused");
+    WriteText(content / "Scripts" / "WizardCombat.lua",
+        "function OnUpdate(dt) end\n");
     WriteText(scene,
         "3DGRuntimeScene 73 " + sceneId.ToString() + "\n"
         "ASSET_DEPS 5 " + meshId.ToString() + " "
@@ -135,8 +138,10 @@ int main() {
               output / "Content" / "AI" / "Wizard.btgraph")
           && fs::is_regular_file(
               output / "Content" / "Audio" / "Fire.3dgaudio")
+          && fs::is_regular_file(
+              output / "Content" / "Scripts" / "WizardCombat.lua")
           && !fs::exists(output / "Content" / "Audio" / "Unused.3dgaudio"),
-          "cook includes mesh and particle dependency chains and excludes unrelated assets");
+          "cook includes dependency chains and executable Lua content while excluding unrelated assets");
     Check(fs::is_regular_file(
               output / "Content" / "Scenes" / "Level.runtime.scene")
           && fs::is_regular_file(output / "Content" / "AssetRegistry.3dgdb")
@@ -159,6 +164,62 @@ int main() {
           && cookedRegistry.Find(audioId)
           && !cookedRegistry.Find(unusedId),
           "cooked registry contains only the scene dependency closure");
+
+    const fs::path streamedScene =
+        content / "Scenes" / "Dungeon.runtime.scene";
+    const engine::AssetHandle streamedSceneId =
+        engine::AssetHandle::Generate();
+    WriteText(streamedScene,
+        "3DGRuntimeScene 73 " + streamedSceneId.ToString() + "\n"
+        "ASSET_DEPS 1 " + unusedId.ToString() + "\n");
+    engine::WorldManifest world;
+    world.id = engine::AssetHandle::Generate();
+    world.persistentScenePath = scene.filename().string();
+    engine::LevelRef dungeon;
+    dungeon.scenePath = streamedScene.filename().string();
+    dungeon.sceneId = streamedSceneId;
+    dungeon.rule = engine::LevelStreamRule::Distance;
+    dungeon.loadRadius = 20.0f;
+    dungeon.unloadRadius = 30.0f;
+    dungeon.worldTransform[3] = glm::vec4(100.0f, 0.0f, 0.0f, 1.0f);
+    world.levels.push_back(dungeon);
+    const fs::path worldPath = content / "Scenes" / "Test.3dgworld";
+    Check(engine::SaveWorldManifest(worldPath.string(), world, &error),
+          "save world cooker input");
+
+    const fs::path worldOutput = root / "Cooked" / "WorldGame";
+    engine::AssetCookResult worldResult;
+    Check(engine::AssetCooker::CookRuntimeWorld(
+              content.string(), worldPath.string(), worldOutput.string(),
+              registry, &worldResult, &error),
+          "cook runtime world dependency union");
+    Check(worldResult.assets.size() == 10
+          && fs::is_regular_file(
+              worldOutput / "Content" / "Scenes" / "world.3dgworld")
+          && fs::is_regular_file(
+              worldOutput / "Content" / "Scenes" / scene.filename())
+          && fs::is_regular_file(
+              worldOutput / "Content" / "Scenes" / streamedScene.filename())
+          && fs::is_regular_file(
+              worldOutput / "Content" / "Audio" / "Unused.3dgaudio"),
+          "world cook includes all scenes and streamed-only dependencies");
+    engine::AssetRegistry worldRegistry;
+    Check(worldRegistry.Load(
+              (worldOutput / "Content" / "AssetRegistry.3dgdb").string(), &error)
+          && worldRegistry.Find(world.id)
+          && worldRegistry.Find(sceneId)
+          && worldRegistry.Find(streamedSceneId)
+          && worldRegistry.Find(unusedId),
+          "world cook registry contains world, levels, and dependency union");
+    engine::WorldManifest cookedWorld;
+    Check(engine::LoadWorldManifest(
+              (worldOutput / "Content" / "Scenes" / "world.3dgworld").string(),
+              &cookedWorld, &error)
+          && cookedWorld.persistentScenePath == scene.filename().string()
+          && cookedWorld.levels.size() == 1
+          && cookedWorld.levels.front().scenePath
+              == streamedScene.filename().string(),
+          "cooked world uses relocatable scene paths");
 
     engine::AssetRegistry missingRegistry = registry;
     engine::AssetRegistryEntry broken = *missingRegistry.Find(materialId);
