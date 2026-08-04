@@ -33,6 +33,12 @@ int main() {
     tree.minimumSpacing = 2.5f;
     tree.cullStartDistance = 90.0f;
     tree.cullEndDistance = 140.0f;
+    tree.lod1MeshPath = "Content/Assets/Meshes/Pine_LOD1.3dgmesh";
+    tree.lod1MeshId = engine::AssetHandle::Generate();
+    tree.lod2MeshPath = "Content/Assets/Meshes/Pine_LOD2.3dgmesh";
+    tree.lod2MeshId = engine::AssetHandle::Generate();
+    tree.lod1Distance = 42.0f;
+    tree.lod2Distance = 86.0f;
     tree.collisionEnabled = true;
     asset.types.push_back(tree);
 
@@ -44,7 +50,7 @@ int main() {
     Check(engine::LoadFoliageAsset(path.string(), &loaded, &error), "load foliage asset");
     Check(loaded.header.type == engine::AssetType::Foliage, "native foliage type");
     Check(loaded.header.id.Valid(), "stable foliage ID");
-    Check(loaded.header.dependencies.size() == 2, "mesh and material dependencies");
+    Check(loaded.header.dependencies.size() == 4, "mesh, material, and LOD dependencies");
     Check(loaded.name == "Forest Palette" && loaded.types.size() == 1, "palette data");
     if (!loaded.types.empty()) {
         const auto& value = loaded.types.front();
@@ -53,6 +59,9 @@ int main() {
               "placement settings");
         Check(Near(value.maxScale.y, 1.5f) && value.collisionEnabled,
               "scale and collision settings");
+        Check(value.lod1MeshPath == tree.lod1MeshPath && value.lod2MeshPath == tree.lod2MeshPath
+                  && Near(value.lod1Distance, 42.0f) && Near(value.lod2Distance, 86.0f),
+              "LOD settings");
     }
 
     fs::remove_all(root, ec);

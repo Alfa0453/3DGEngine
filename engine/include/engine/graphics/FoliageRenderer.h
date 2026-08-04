@@ -23,7 +23,7 @@ public:
 
     void Draw(ecs::Registry& registry, const Camera& camera, float aspect,
               const glm::vec3& sunDirection, const glm::vec3& sunColor,
-              const glm::vec3& ambient);
+              const glm::vec3& ambient, float time = 0.0f);
 
     int VisibleInstances() const { return m_visibleInstances; }
     int DrawCalls() const { return m_drawCalls; }

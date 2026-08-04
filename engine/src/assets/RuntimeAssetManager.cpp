@@ -3,10 +3,12 @@
 #include "engine/animation/AnimatedModel.h"
 #include "engine/animation/AnimationGraphDesc.h"
 #include "engine/ecs/Components.h"
+#include "engine/physics/PhysicsComponents.h"
 #include "engine/assets/ShaderGraphCompiler.h"
 #include "engine/assets/TextureAsset.h"
 
 #include <glm/gtc/quaternion.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 
 #include <algorithm>
 #include <exception>
@@ -679,15 +681,30 @@ RuntimeAssetManager::ResolveReport RuntimeAssetManager::ResolveRegistryAssets(ec
                 type.meshId = source.meshId;
                 type.materialPath = source.materialPath;
                 type.materialId = source.materialId;
+                type.lod1MeshPath = source.lod1MeshPath;
+                type.lod1MeshId = source.lod1MeshId;
+                type.lod2MeshPath = source.lod2MeshPath;
+                type.lod2MeshId = source.lod2MeshId;
                 type.cullStartDistance = source.cullStartDistance;
                 type.cullEndDistance = source.cullEndDistance;
+                type.lod1Distance = source.lod1Distance;
+                type.lod2Distance = source.lod2Distance;
                 type.windStrength = source.windStrength;
                 type.castShadows = source.castShadows;
                 type.collisionEnabled = source.collisionEnabled;
                 type.model = LoadModel(source.meshPath, &error);
                 if (!type.model) {
                     report.errors.push_back(error);
-                } else if (!source.materialPath.empty()) {
+                }
+                if (!source.lod1MeshPath.empty()) {
+                    type.lod1Model = LoadModel(source.lod1MeshPath, &error);
+                    if (!type.lod1Model) report.errors.push_back(error);
+                }
+                if (!source.lod2MeshPath.empty()) {
+                    type.lod2Model = LoadModel(source.lod2MeshPath, &error);
+                    if (!type.lod2Model) report.errors.push_back(error);
+                }
+                if (!source.materialPath.empty()) {
                     const RuntimeMaterialAsset* material =
                         LoadMaterial(source.materialPath, &error);
                     if (!material) {
@@ -709,6 +726,47 @@ RuntimeAssetManager::ResolveReport RuntimeAssetManager::ResolveRegistryAssets(ec
         });
 
     return report;
+}
+
+int RuntimeAssetManager::RebuildFoliageCollisionProxies(ecs::Registry& registry) const {
+    std::vector<ecs::Entity> oldProxies;
+    registry.view<ecs::FoliageCollisionProxy>().each(
+        [&](ecs::Entity entity, ecs::FoliageCollisionProxy&) { oldProxies.push_back(entity); });
+    for (ecs::Entity entity : oldProxies) registry.Destroy(entity);
+
+    int created = 0;
+    registry.view<ecs::Transform, ecs::FoliageComponent>().each(
+        [&](ecs::Entity ownerEntity, ecs::Transform& owner, ecs::FoliageComponent& foliage) {
+            for (const ecs::FoliageInstance& instance : foliage.instances) {
+                if (!instance.enabled || instance.typeIndex >= foliage.types.size()) continue;
+                const ecs::FoliageTypeRuntime& type = foliage.types[instance.typeIndex];
+                if (!type.collisionEnabled || !type.model) continue;
+
+                const glm::vec3 localCenter = type.model->Center();
+                const glm::vec3 localHalf = glm::max(
+                    (type.model->Max() - type.model->Min()) * 0.5f, glm::vec3(0.02f));
+                const glm::quat localRotation = glm::quat(glm::radians(instance.rotationDegrees));
+                const glm::mat4 localModel = glm::translate(glm::mat4(1.0f), instance.position)
+                    * glm::mat4_cast(localRotation) * glm::scale(glm::mat4(1.0f), instance.scale);
+                const glm::mat4 worldModel = owner.Model() * localModel;
+
+                ecs::Transform proxyTransform;
+                proxyTransform.position = glm::vec3(worldModel * glm::vec4(localCenter, 1.0f));
+                proxyTransform.rotation = owner.rotation * localRotation;
+                proxyTransform.scale = glm::abs(owner.scale * instance.scale);
+                const ecs::Entity proxy = registry.Create();
+                registry.Add<ecs::Transform>(proxy, proxyTransform);
+                ecs::Collider collider = ecs::Collider::MakeBox(localHalf);
+                collider.layer = ecs::CollisionLayer::WorldStatic;
+                collider.mask = ecs::CollisionLayer::All;
+                collider.friction = 0.8f;
+                registry.Add<ecs::Collider>(proxy, collider);
+                registry.Add<ecs::FoliageCollisionProxy>(proxy,
+                    {ownerEntity, instance.id});
+                ++created;
+            }
+        });
+    return created;
 }
 void RuntimeAssetManager::Clear()
 {

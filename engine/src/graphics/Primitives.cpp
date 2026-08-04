@@ -82,7 +82,9 @@ Mesh Plane(float size, float uvTiling) {
         -h, 0.0f,  h,   0.0f,1.0f,0.0f,   0.0f, t,
     };
     const std::vector<std::uint32_t> idx = { 0, 1, 2, 2, 3, 0 };
-    return Mesh(v, idx, PNT());
+    Mesh mesh(v, idx, PNT());
+    mesh.SetTwoSided(true);   // a flat plane is visible from both sides (no backface cull)
+    return mesh;
 }
 
 Mesh Cone(int segments)

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "engine/assets/AssetIdentity.h"
+#include "engine/ecs/Entity.h"
 #include "engine/audio/AudioTypes.h"
 #include "engine/graphics/Mesh.h"
 #include "engine/graphics/ParticleSystem.h"
@@ -118,9 +119,17 @@ struct FoliageTypeRuntime {
     std::string materialPath;
     AssetHandle materialId;
     const Model* model = nullptr;
+    std::string lod1MeshPath;
+    AssetHandle lod1MeshId;
+    const Model* lod1Model = nullptr;
+    std::string lod2MeshPath;
+    AssetHandle lod2MeshId;
+    const Model* lod2Model = nullptr;
     PbrMaterial material;
     float cullStartDistance = 80.0f;
     float cullEndDistance = 120.0f;
+    float lod1Distance = 35.0f;
+    float lod2Distance = 75.0f;
     float windStrength = 0.0f;
     bool castShadows = true;
     bool collisionEnabled = false;
@@ -142,6 +151,13 @@ struct FoliageComponent {
     std::vector<FoliageInstance> instances;
     bool visible = true;
     std::uint64_t revision = 1;
+};
+
+// Runtime-only marker for a simplified static collider generated from an
+// opted-in foliage instance. It is never authored or serialized with a scene.
+struct FoliageCollisionProxy {
+    Entity foliageOwner = kNull;
+    std::uint32_t instanceId = 0;
 };
 
 // Drawable entity rendered through the PBR pipeline: geometry (referenced, not

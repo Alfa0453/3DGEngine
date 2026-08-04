@@ -1196,88 +1196,92 @@ void EditorApp::DrawSelectionOutline(const glm::mat4 & viewProj)
     if (m_mode != EditorMode::Edit || !m_cube || !m_outlineShader) {
         return;
     }
-
-    const EditorScene::Object* selected = m_scene.SelectedObject();
-    const Transform* transform = m_scene.SelectedTransform();
-    if (!selected || !transform || !selected->visible || selected->navMeshBoundsVolume
-        || selected->primitive == EditorScene::Primitive::Empty) {
+    if (m_scene.SelectedIndices().empty()) {
         return;
     }
 
-    if (selected->isWater && !selected->waterFlowSpline.empty()) {
-        m_viewport.DrawSelectedRiverBoundary(m_scene, viewProj);
-        return;
-    }
+    const engine::Window& window = GetWindow();
+    const glm::vec2 viewportSize(static_cast<float>(window.Width()), static_cast<float>(window.Height()));
+    const int primaryIndex = m_scene.SelectedIndex();
 
-    if (!selected->modelAssetPath.empty()) {
-        std::string error;
-        const glm::vec3 color = selected->locked
-            ? glm::vec3(1.0f, 0.28f, 0.08f)
-            : glm::vec3(1.0f, 0.55f, 0.05f);
-        const engine::Window& window = GetWindow();
-        const glm::vec2 viewportSize(static_cast<float>(window.Width()), static_cast<float>(window.Height()));
-        if (selected->skeletalModel && m_skinnedOutlineShader) {
-            if (const engine::SkinnedModel* model = m_editAssets.LoadSkinnedModel(selected->modelAssetPath, &error)) {
-                std::vector<glm::mat4> bindPose;
-                const auto found = m_editAnimationPoses.find(selected->entity);
-                const std::vector<glm::mat4>* pose = found != m_editAnimationPoses.end() ? &found->second : nullptr;
-                if (!pose) {
-                    engine::Animator::ComputeBindPose(model->GetSkeleton(), bindPose);
-                    pose = &bindPose;
+    // Outline one object (model / terrain / mesh) in the given highlight colour.
+    auto drawOutline = [&](const EditorScene::Object& object, const Transform& transform,
+                           const glm::vec3& color) {
+        if (!object.modelAssetPath.empty()) {
+            std::string error;
+            if (object.skeletalModel && m_skinnedOutlineShader) {
+                if (const engine::SkinnedModel* model =
+                        m_editAssets.LoadSkinnedModel(object.modelAssetPath, &error)) {
+                    std::vector<glm::mat4> bindPose;
+                    const auto found = m_editAnimationPoses.find(object.entity);
+                    const std::vector<glm::mat4>* pose =
+                        found != m_editAnimationPoses.end() ? &found->second : nullptr;
+                    if (!pose) {
+                        engine::Animator::ComputeBindPose(model->GetSkeleton(), bindPose);
+                        pose = &bindPose;
+                    }
+                    m_skinnedOutlineShader->Bind();
+                    m_skinnedOutlineShader->SetMat4("uViewProj", viewProj);
+                    m_skinnedOutlineShader->SetVec2("uViewportSize", viewportSize);
+                    const glm::mat4 renderOffset = engine::MakeModelRenderOffset(
+                        object.modelOffsetPosition, object.modelOrientationEuler,
+                        object.modelOffsetScale, model->Center());
+                    m_viewport.DrawSelectedSkinnedModelOutline(m_renderer, *m_skinnedOutlineShader,
+                        transform, *model, *pose, color, 2.0f, renderOffset);
                 }
-                m_skinnedOutlineShader->Bind();
-                m_skinnedOutlineShader->SetMat4("uViewProj", viewProj);
-                m_skinnedOutlineShader->SetVec2("uViewportSize", viewportSize);
-                const glm::mat4 renderOffset = engine::MakeModelRenderOffset(
-                    selected->modelOffsetPosition, selected->modelOrientationEuler,
-                    selected->modelOffsetScale, model->Center());
-                m_viewport.DrawSelectedSkinnedModelOutline(m_renderer, *m_skinnedOutlineShader,
-                    *transform, *model, *pose, color, 2.0f, renderOffset);
+                return;
+            }
+            if (const engine::Model* model = m_editAssets.LoadModel(object.modelAssetPath, &error)) {
+                m_outlineShader->Bind();
+                m_outlineShader->SetMat4("uViewProj", viewProj);
+                m_outlineShader->SetVec2("uViewportSize", viewportSize);
+                m_viewport.DrawSelectedModelOutline(m_renderer, *m_outlineShader, transform, *model, color, 2.0f);
             }
             return;
         }
-        const engine::Model* model = m_editAssets.LoadModel(selected->modelAssetPath, &error);
-        if (model) {
+        if (object.isTerrain) {
+            const auto terrainIt = m_terrains.find(object.entity);
+            if (terrainIt != m_terrains.end() && terrainIt->second.terrain.Ready()) {
+                m_outlineShader->Bind();
+                m_outlineShader->SetMat4("uViewProj", viewProj);
+                m_outlineShader->SetVec2("uViewportSize", viewportSize);
+                m_viewport.DrawSelectedMeshOutline(m_renderer, *m_outlineShader, transform,
+                                                   terrainIt->second.terrain.GetMesh(), color, 2.0f);
+            }
+            return;
+        }
+        if (const MeshRenderer* renderer = m_scene.TryGetMeshRenderer(object.entity);
+            renderer && renderer->mesh) {
             m_outlineShader->Bind();
             m_outlineShader->SetMat4("uViewProj", viewProj);
             m_outlineShader->SetVec2("uViewportSize", viewportSize);
-            m_viewport.DrawSelectedModelOutline(m_renderer, *m_outlineShader, *transform, *model, color, 2.0f);
+            m_viewport.DrawSelectedMeshOutline(m_renderer, *m_outlineShader, transform, *renderer->mesh, color, 2.0f);
         }
-        return;
-    }
+    };
 
-    // Terrain: outline the generated terrain mesh (from the terrain cache), not the flat
-    // placeholder plane the object carries. The terrain mesh spans the sculpted surface, so
-    // the highlight now hugs the mountains and stays visible when the camera faces them.
-    if (selected->isTerrain) {
-        const auto terrainIt = m_terrains.find(selected->entity);
-        if (terrainIt != m_terrains.end() && terrainIt->second.terrain.Ready()) {
-            const glm::vec3 color = selected->locked
-                ? glm::vec3(1.0f, 0.28f, 0.08f)
-                : glm::vec3(1.0f, 0.55f, 0.05f);
-            m_outlineShader->Bind();
-            m_outlineShader->SetMat4("uViewProj", viewProj);
-            const engine::Window& window = GetWindow();
-            m_outlineShader->SetVec2("uViewportSize", glm::vec2(window.Width(), window.Height()));
-            m_viewport.DrawSelectedMeshOutline(m_renderer, *m_outlineShader, *transform,
-                                               terrainIt->second.terrain.GetMesh(), color, 2.0f);
+    for (int index : m_scene.SelectedIndices()) {
+        if (index < 0 || index >= static_cast<int>(m_scene.Objects().size())) continue;
+        const EditorScene::Object& object = m_scene.Objects()[static_cast<std::size_t>(index)];
+        const Transform* transform = m_scene.TryGetTransform(object.entity);
+        if (!transform || !object.visible || object.navMeshBoundsVolume
+            || object.primitive == EditorScene::Primitive::Empty) {
+            continue;
         }
-        return;
-    }
 
-    const MeshRenderer* renderer = m_scene.TryGetMeshRenderer(selected->entity);
-    if (!renderer || !renderer->mesh) {
-        return;
-    }
+        const bool isPrimary = (index == primaryIndex);
+        const glm::vec3 color = object.locked
+            ? glm::vec3(1.0f, 0.28f, 0.08f)                     // locked: red
+            : (isPrimary ? glm::vec3(1.0f, 0.55f, 0.05f)       // active: orange
+                         : glm::vec3(1.0f, 0.82f, 0.30f));      // also-selected: amber
 
-    const glm::vec3 color = selected->locked
-        ? glm::vec3(1.0f, 0.28f, 0.08f)
-        : glm::vec3(1.0f, 0.55f, 0.05f);
-    m_outlineShader->Bind();
-    m_outlineShader->SetMat4("uViewProj", viewProj);
-    const engine::Window& window = GetWindow();
-    m_outlineShader->SetVec2("uViewportSize", glm::vec2(window.Width(), window.Height()));
-    m_viewport.DrawSelectedMeshOutline(m_renderer, *m_outlineShader, *transform, *renderer->mesh, color, 2.0f);
+        // River geometry has a dedicated boundary highlight (scene-selection based, so
+        // only the primary draws it); other objects use the generic outline.
+        if (object.isWater && !object.waterFlowSpline.empty()) {
+            if (isPrimary) m_viewport.DrawSelectedRiverBoundary(m_scene, viewProj);
+            continue;
+        }
+        drawOutline(object, *transform, color);
+    }
 }
 
 void EditorApp::DrawEditorOverlay()
@@ -1287,8 +1291,33 @@ void EditorApp::DrawEditorOverlay()
         if (ImGui::Begin("Profiler", &m_showProfiler,
                          ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing)) {
             const ImGuiIO& io = ImGui::GetIO();
-            ImGui::Text("FPS: %.0f  (%.2f ms/frame)", io.Framerate,
-                        io.Framerate > 0.0f ? 1000.0f / io.Framerate : 0.0f);
+
+            // Record this frame's real time into the rolling history.
+            const float frameMs = io.DeltaTime * 1000.0f;
+            m_frameMsHistory[static_cast<std::size_t>(m_frameMsHead)] = frameMs;
+            m_frameMsHead = (m_frameMsHead + 1) % kFrameHistory;
+
+            // Window stats (min / avg / max) over the recorded history.
+            float mn = 1.0e9f, mx = 0.0f, sum = 0.0f;
+            int samples = 0;
+            for (float ms : m_frameMsHistory) {
+                if (ms <= 0.0f) continue;
+                mn = std::min(mn, ms);
+                mx = std::max(mx, ms);
+                sum += ms;
+                ++samples;
+            }
+            const float avg = samples > 0 ? sum / static_cast<float>(samples) : 0.0f;
+            if (samples == 0) mn = 0.0f;
+
+            ImGui::Text("FPS: %.0f  (%.2f ms/frame)", io.Framerate, frameMs);
+            // Frame-time graph: spikes reveal hitches (streaming, GC, big uploads).
+            const float plotMax = std::max(mx * 1.1f, 16.7f);
+            ImGui::PlotLines("##frametime", m_frameMsHistory.data(), kFrameHistory,
+                             m_frameMsHead, nullptr, 0.0f, plotMax, ImVec2(220.0f, 45.0f));
+            ImGui::Text("min %.2f  avg %.2f  max %.2f ms", mn, avg, mx);
+            ImGui::Separator();
+
             ImGui::Text("CPU render: %.2f ms", m_cpuFrameMs);
             ImGui::Text("  scene submit: %.2f ms", m_cpuSceneMs);
             ImGui::Text("  ui build:     %.2f ms", m_cpuUiMs);
@@ -1303,6 +1332,21 @@ void EditorApp::DrawEditorOverlay()
                 ImGui::Text("GPU total  %6.2f ms", gpuTotal);
             } else {
                 ImGui::TextDisabled("GPU timings warming up...");
+            }
+
+            // Scene counts: what the frame is actually pushing through.
+            ImGui::Separator();
+            int objectCount = 0, visibleCount = 0, lightCount = 0;
+            for (const EditorScene::Object& object : m_scene.Objects()) {
+                ++objectCount;
+                if (object.visible) ++visibleCount;
+                if (object.light) ++lightCount;
+            }
+            ImGui::Text("Objects: %d  (visible %d)", objectCount, visibleCount);
+            ImGui::Text("Lights:  %d", lightCount);
+            if (m_mode == EditorMode::Play) {
+                ImGui::Text("Play entities: %d",
+                            m_playRegistry ? static_cast<int>(m_playEntityNames.size()) : 0);
             }
         }
         ImGui::End();
@@ -1359,6 +1403,11 @@ void EditorApp::DrawEditorOverlay()
     dockspaceContext.terrainBrushStrength = &m_terrainBrushStrength;
     dockspaceContext.foliagePaint = &m_foliagePaint;
     dockspaceContext.foliageErase = &m_foliageErase;
+    // Auto-lock the Hierarchy's selection while the user is working in the viewport: a
+    // gizmo drag in progress, or terrain/foliage paint modes active.
+    dockspaceContext.viewportInteractionActive =
+        m_mouse.GizmoActiveFor(GLFW_MOUSE_BUTTON_LEFT)
+        || m_terrainSculpt || m_foliagePaint;
     dockspaceContext.foliageBrushRadius = &m_foliageBrushRadius;
     dockspaceContext.foliagePaintDensity = &m_foliagePaintDensity;
     dockspaceContext.foliageTypeIndex = &m_foliageTypeIndex;
@@ -1767,10 +1816,19 @@ void EditorApp::DrawEditorOverlay()
             }
             break;
         }
-        case EditorAssets::Type::Foliage:
-            m_log.Info("Foliage asset selected: " + path
-                + " (Foliage Editor arrives in the painting milestone)");
+        case EditorAssets::Type::Foliage: {
+            const EditorScene::Object* sel = m_scene.SelectedObject();
+            if (sel && sel->isFoliage) {
+                m_scene.SetSelectedFoliageAsset(path);
+                m_editAssets.ResolveRegistryAssets(m_scene.Registry());
+                m_log.Info("Assigned foliage asset to '" + sel->name
+                    + "'. Edit types and paint in the Inspector's Foliage section.");
+            } else {
+                m_log.Info("Select a Foliage actor first (Add > Foliage), then this asset "
+                    "assigns to it. Edit types and paint from the Inspector.");
+            }
             break;
+        }
         case EditorAssets::Type::Texture:
             m_log.Info("Texture selected; drag it to a material texture slot to use it");
             break;
@@ -4301,15 +4359,23 @@ void EditorApp::HandleMouseViewportSelection()
             m_log.Info("Selected spline point " + std::to_string(point + 1));
         } else {
             const int picked = m_viewport.PickSceneObject(m_scene, m_editAssets, px, py, viewProj, window.Width(), window.Height());
+            const bool shiftHeld = window.IsKeyPressed(GLFW_KEY_LEFT_SHIFT)
+                || window.IsKeyPressed(GLFW_KEY_RIGHT_SHIFT);
             if (picked >= 0) {
-                m_scene.SelectIndex(picked);
+                // Shift+click adds/removes the object from the multi-selection; a plain
+                // click replaces the whole selection with just this object.
+                if (shiftHeld) m_scene.ToggleSelection(picked);
+                else m_scene.SelectIndex(picked);
                 // A control point was handled above. Clicking the curve/object itself
                 // returns to whole-spline transform editing, even when it was already selected.
                 m_selectedSplinePoint = -1;
                 if (const EditorScene::Object* pickedObject = m_scene.SelectedObject()) {
-                    m_log.Info("Selected " + pickedObject->name);
+                    m_log.Info((shiftHeld ? "Toggled selection: " : "Selected ")
+                        + pickedObject->name + " ("
+                        + std::to_string(m_scene.SelectedIndices().size()) + " selected)");
                 }
-            } else if (m_scene.SelectedObject()) {
+            } else if (!shiftHeld && m_scene.SelectedObject()) {
+                // Plain click on empty space clears; Shift+click on empty keeps the group.
                 m_scene.Deselect();
                 m_selectedSplinePoint = -1;
                 m_log.Info("Deselected object");
@@ -5696,7 +5762,8 @@ void EditorApp::DrawFoliage(const engine::Camera& camera, float aspect) {
     m_foliageRenderer->Draw(registry, camera, aspect,
         sky.keyLightDirection,
         sky.keyLightColor * env.sunIntensity,
-        sky.ambient * env.skyLightIntensity);
+        sky.ambient * env.skyLightIntensity,
+        static_cast<float>(glfwGetTime()));   // drives wind sway
 }
 
 void EditorApp::CaptureWaterSceneBuffers() {

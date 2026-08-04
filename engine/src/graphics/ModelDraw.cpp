@@ -1,12 +1,21 @@
 #include "engine/graphics/Model.h"
 #include "engine/graphics/Shader.h"
 
+#include <glad/glad.h>
+
 namespace engine {
 
 void DrawModel(const Model& model, Shader& shader,
                const glm::vec3& tint, const Texture* albedoOverride,
                const ModelMaterialOverride* materialOverride) {
     const auto& mats = model.Materials();
+
+    // Backface culling: imported models are closed solids, so never rasterize their
+    // inside faces (front faces are CCW). Restored to the default (off) at the end so
+    // callers/other passes keep their expected state.
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+    glFrontFace(GL_CCW);
 
     // Sampler units are fixed for the lifetime of the shader's use here.
     shader.SetInt("uDiffuseTex",  0);
@@ -69,6 +78,8 @@ void DrawModel(const Model& model, Shader& shader,
 
         sm.mesh.Draw();
     }
+
+    glDisable(GL_CULL_FACE);   // restore the default (off) for subsequent draws
 }
 
 }// namespace engine

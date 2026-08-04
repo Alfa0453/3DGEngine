@@ -1,6 +1,7 @@
 #include "engine/graphics/ShadowCasters.h"
 
 #include "engine/graphics/Mesh.h"
+#include "engine/graphics/Model.h"
 #include "engine/graphics/Shader.h"
 #include "engine/ecs/Registry.h"
 #include "engine/ecs/Components.h"
@@ -8,6 +9,7 @@
 
 #include <glad/glad.h>
 #include <glm/gtc/type_ptr.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 
 #include <cstddef>
 
@@ -16,6 +18,19 @@ using engine::ecs::Transform;
 using engine::ecs::MeshPBR;
 
 namespace engine {
+namespace {
+
+glm::mat4 FoliageInstanceMatrix(const Transform& owner,
+                                const ecs::FoliageInstance& instance) {
+    glm::mat4 local(1.0f);
+    local = glm::translate(local, instance.position);
+    local = glm::rotate(local, glm::radians(instance.rotationDegrees.y), glm::vec3(0, 1, 0));
+    local = glm::rotate(local, glm::radians(instance.rotationDegrees.x), glm::vec3(1, 0, 0));
+    local = glm::rotate(local, glm::radians(instance.rotationDegrees.z), glm::vec3(0, 0, 1));
+    return owner.Model() * glm::scale(local, instance.scale);
+}
+
+} // namespace
 
 ShadowCasterBatch::ShadowCasterBatch()  { glGenBuffers(1, &m_vbo); }
 ShadowCasterBatch::~ShadowCasterBatch() { if (m_vbo) glDeleteBuffers(1, &m_vbo); }
@@ -43,6 +58,32 @@ void ShadowCasterBatch::Build(ecs::Registry &reg)
         const float* mp = glm::value_ptr(model);
         v.insert(v.end(), mp, mp + 16);
     });
+
+    // Foliage is stored as many light-weight instances under one actor. Feed its
+    // enabled, shadow-casting types into the same batch as ordinary static meshes.
+    reg.view<Transform, ecs::FoliageComponent>().each(
+        [&](Entity, Transform& owner, ecs::FoliageComponent& foliage) {
+            if (!foliage.visible) return;
+            for (std::size_t typeIndex = 0; typeIndex < foliage.types.size(); ++typeIndex) {
+                const ecs::FoliageTypeRuntime& type = foliage.types[typeIndex];
+                if (!type.castShadows || !type.model) continue;
+                const bool textured = type.material.albedoMap || type.material.normalMap
+                    || type.material.metalRoughMap || type.material.heightMap;
+                for (const ecs::FoliageInstance& instance : foliage.instances) {
+                    if (!instance.enabled || instance.typeIndex != typeIndex) continue;
+                    const glm::mat4 model = FoliageInstanceMatrix(owner, instance);
+                    for (const SubMesh& subMesh : type.model->SubMeshes()) {
+                        if (textured) {
+                            m_textured.push_back({&subMesh.mesh, model, &type.material});
+                        } else {
+                            std::vector<float>& values = groups[&subMesh.mesh];
+                            const float* matrix = glm::value_ptr(model);
+                            values.insert(values.end(), matrix, matrix + 16);
+                        }
+                    }
+                }
+            }
+        });
 
     for (auto& kv : groups) {
         Record r;

@@ -36,7 +36,8 @@ bool ValidateFoliageAsset(const FoliageAssetData& asset, std::string* error) {
         }
         if (type.density < 0.0f || type.minimumSpacing < 0.0f
             || type.cullEndDistance <= 0.0f
-            || type.cullStartDistance > type.cullEndDistance) {
+            || type.cullStartDistance > type.cullEndDistance
+            || type.lod1Distance < 0.0f || type.lod2Distance < type.lod1Distance) {
             SetError(error, "Foliage placement or culling values are invalid.");
             return false;
         }
@@ -63,6 +64,10 @@ bool SaveFoliageAsset(const std::string& path, FoliageAssetData asset,
             asset.header.dependencies.push_back(type.meshId);
         if (type.materialId.Valid() && dependencies.insert(type.materialId).second)
             asset.header.dependencies.push_back(type.materialId);
+        if (type.lod1MeshId.Valid() && dependencies.insert(type.lod1MeshId).second)
+            asset.header.dependencies.push_back(type.lod1MeshId);
+        if (type.lod2MeshId.Valid() && dependencies.insert(type.lod2MeshId).second)
+            asset.header.dependencies.push_back(type.lod2MeshId);
     }
     if (!ValidateFoliageAsset(asset, error)) return false;
 
@@ -88,7 +93,12 @@ bool SaveFoliageAsset(const std::string& path, FoliageAssetData asset,
                 << (type.alignToSurface ? 1 : 0) << ' '
                 << (type.randomYaw ? 1 : 0) << ' '
                 << (type.castShadows ? 1 : 0) << ' '
-                << (type.collisionEnabled ? 1 : 0) << '\n';
+                << (type.collisionEnabled ? 1 : 0) << ' '
+                << std::quoted(type.lod1MeshPath) << ' '
+                << (type.lod1MeshId.Valid() ? type.lod1MeshId.ToString() : std::string("-")) << ' '
+                << std::quoted(type.lod2MeshPath) << ' '
+                << (type.lod2MeshId.Valid() ? type.lod2MeshId.ToString() : std::string("-")) << ' '
+                << type.lod1Distance << ' ' << type.lod2Distance << '\n';
     }
     const std::string bytes = payload.str();
     asset.header.payloadSize = static_cast<std::uint64_t>(bytes.size());
@@ -122,7 +132,7 @@ bool LoadFoliageAsset(const std::string& path, FoliageAssetData* output,
     NativeAssetHeader header;
     if (!in || !ReadNativeAssetHeader(in, &header, error)) return false;
     if (header.type != AssetType::Foliage
-        || header.assetVersion != kFoliageAssetVersion
+        || header.assetVersion == 0 || header.assetVersion > kFoliageAssetVersion
         || header.payloadSize > 16ull * 1024ull * 1024ull) {
         SetError(error, "Foliage asset type or version is unsupported.");
         return false;
@@ -140,7 +150,7 @@ bool LoadFoliageAsset(const std::string& path, FoliageAssetData* output,
     FoliageAssetData loaded;
     loaded.header = header;
     if (!(data >> magic >> version) || magic != "3DGFoliage"
-        || version != kFoliageAssetVersion
+        || version == 0 || version > kFoliageAssetVersion
         || !(data >> tag >> std::quoted(loaded.name)) || tag != "name"
         || !(data >> tag >> typeCount) || tag != "types" || typeCount > 1024) {
         SetError(error, "Foliage asset payload header is malformed.");
@@ -148,7 +158,7 @@ bool LoadFoliageAsset(const std::string& path, FoliageAssetData* output,
     }
     loaded.types.resize(typeCount);
     for (FoliageTypeAsset& type : loaded.types) {
-        std::string meshId, materialId;
+        std::string meshId, materialId, lod1Id, lod2Id;
         int align = 1, yaw = 1, shadows = 1, collision = 0;
         if (!(data >> tag) || tag != "type"
             || !(data >> std::quoted(type.name) >> std::quoted(type.meshPath) >> meshId
@@ -169,6 +179,20 @@ bool LoadFoliageAsset(const std::string& path, FoliageAssetData* output,
         }
         if (materialId != "-" && !AssetHandle::Parse(materialId, &type.materialId)) {
             SetError(error, "Foliage material dependency ID is invalid.");
+            return false;
+        }
+        if (version >= 2 && !(data >> std::quoted(type.lod1MeshPath) >> lod1Id
+                                 >> std::quoted(type.lod2MeshPath) >> lod2Id
+                                 >> type.lod1Distance >> type.lod2Distance)) {
+            SetError(error, "Foliage LOD record is malformed.");
+            return false;
+        }
+        if (lod1Id != "-" && !AssetHandle::Parse(lod1Id, &type.lod1MeshId)) {
+            SetError(error, "Foliage LOD1 dependency ID is invalid.");
+            return false;
+        }
+        if (lod2Id != "-" && !AssetHandle::Parse(lod2Id, &type.lod2MeshId)) {
+            SetError(error, "Foliage LOD2 dependency ID is invalid.");
             return false;
         }
         type.alignToSurface = align != 0;

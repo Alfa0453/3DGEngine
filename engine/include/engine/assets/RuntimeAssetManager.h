@@ -66,6 +66,9 @@ public:
     const FoliageAssetData* FindFoliage(const std::string& path) const;
 
     ResolveReport ResolveRegistryAssets(ecs::Registry& registry);
+    // Rebuild simplified static collider proxies for foliage types that opt in
+    // to collision. Call after resolving a loaded runtime scene.
+    int RebuildFoliageCollisionProxies(ecs::Registry& registry) const;
     void Clear();
 
 private:

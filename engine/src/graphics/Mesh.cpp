@@ -59,7 +59,8 @@ Mesh::Mesh(Mesh &&other) noexcept
       m_lodIndexCounts(std::move(other.m_lodIndexCounts)),
       m_vertexCount(other.m_vertexCount), m_indexCount(other.m_indexCount),
       m_vertexStrideBytes(other.m_vertexStrideBytes),
-      m_boundsCenter(other.m_boundsCenter), m_boundsRadius(other.m_boundsRadius)
+      m_boundsCenter(other.m_boundsCenter), m_boundsRadius(other.m_boundsRadius),
+      m_twoSided(other.m_twoSided)
 {
     other.m_vao = other.m_vbo = other.m_ebo = 0;
     other.m_vertexCount = 0;
@@ -85,6 +86,7 @@ Mesh &Mesh::operator=(Mesh &&other) noexcept
         m_vertexStrideBytes = other.m_vertexStrideBytes;
         m_boundsCenter = other.m_boundsCenter;
         m_boundsRadius = other.m_boundsRadius;
+        m_twoSided = other.m_twoSided;
         other.m_vao = other.m_vbo = other.m_ebo = 0;
         other.m_vertexCount = 0;
         other.m_indexCount = 0;

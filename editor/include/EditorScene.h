@@ -616,7 +616,14 @@ public:
     void SelectNext();
     void SelectPrevious();
     void SelectIndex(int index);
+    // Shift+click: add the object to the multi-selection, or remove it if already in.
+    // The primary selection (SelectedIndex, used by the inspector/gizmo) follows the
+    // most-recently toggled object.
+    void ToggleSelection(int index);
     void Deselect();
+    // Every selected object (includes the primary). Single selection = one entry.
+    // Self-heals against the many sites that set the primary directly (add/duplicate/undo).
+    const std::vector<int>& SelectedIndices() const;
     void MoveSelected(const glm::vec3& delta);
     void RotateSelected(const glm::vec3& axis, float degrees);
     void RotateSelectedYaw(float degrees);
@@ -780,6 +787,11 @@ public:
                                     std::uint32_t typeIndex = 0);
     std::size_t EraseSelectedFoliageInstances(const glm::vec3& worldPosition,
                                                float radius);
+    bool SetSelectedFoliageInstance(std::uint32_t id,
+                                    const engine::ecs::FoliageInstance& instance);
+    bool RemoveSelectedFoliageInstance(std::uint32_t id);
+    bool DuplicateSelectedFoliageInstance(std::uint32_t id,
+                                          std::uint32_t* newId = nullptr);
     bool ClearSelectedFoliageInstances();
     // Assign (or clear, with an empty path) the material painted for layer 1..5.
     bool SetSelectedTerrainLayerMaterial(int layer, const std::string& materialPath);
@@ -868,6 +880,10 @@ private:
     Environment m_environment;
     GameModeSettings m_gameMode;
     int m_selectedIndex = -1;
+    // Multi-selection; includes m_selectedIndex. Mutable so the const accessor can prune
+    // out-of-range entries and collapse to single when a direct primary write desynced it.
+    mutable std::vector<int> m_selectedIndices;
+    void EnsureSelectionValid() const;
     int m_nextCubeNumber = 1;
     bool m_dirty = false;
     bool m_undoSuppressed = false;

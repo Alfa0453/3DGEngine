@@ -171,6 +171,10 @@ public:
         bool cameraShakeRequested = false;
         bool cameraShakeStopRequested = false;
         bool cameraShakeActive = false;
+        // True while the user is actively working in the viewport (gizmo drag, terrain
+        // sculpt, or foliage paint). The Hierarchy locks selection during this so a stray
+        // click can't re-target (and then delete) the scene selection.
+        bool viewportInteractionActive = false;
         engine::CameraShakeSettings cameraShakeSettings;
         bool cameraSequencePlayRequested = false;
         bool cameraSequenceStopRequested = false;

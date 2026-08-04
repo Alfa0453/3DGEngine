@@ -78,6 +78,11 @@ public:
         m_boundsRadius = std::max(radius, 0.0f);
     }
 
+    // Flat, single-face geometry (a plane/quad) is visible from both sides, so the
+    // renderer skips backface culling for it. Closed solids leave this false.
+    bool TwoSided() const { return m_twoSided; }
+    void SetTwoSided(bool twoSided) { m_twoSided = twoSided; }
+
     // The vertex array object, so callers can attach per-instance attributes for
     // instanced drawing (see PbrRenderer's instanced lit pass).
     unsigned int Vao() const { return m_vao; }
@@ -97,6 +102,7 @@ private:
     std::size_t m_vertexStrideBytes = 0;
     glm::vec3 m_boundsCenter{0.0f};
     float m_boundsRadius = 0.0f;
+    bool m_twoSided = false;
 };
 
 } // namespace engine

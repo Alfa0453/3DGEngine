@@ -348,6 +348,7 @@ bool EditorRuntimeController::BuildPlayRuntimePreview(const EditorScene& scene,
         }
         return false;
     }
+    playAssets.RebuildFoliageCollisionProxies(playRegistry);
 
     if (error) {
         *error = {};

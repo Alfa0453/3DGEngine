@@ -42,11 +42,31 @@ layout(location=5) in vec4 iModel1;
 layout(location=6) in vec4 iModel2;
 layout(location=7) in vec4 iModel3;
 uniform mat4 uViewProjection;
+uniform float uTime;
+uniform float uWindStrength;
+uniform vec3 uCameraPos;
+uniform float uCullStart;
+uniform float uCullEnd;
 out vec3 vNormal;
 out vec2 vUv;
+out float vFade;
 void main() {
     mat4 model = mat4(iModel0, iModel1, iModel2, iModel3);
     vec4 world = model * vec4(aPosition, 1.0);
+    // Wind sway: bend by a sine wave scaled by the vertex's local height so the base
+    // stays planted while the canopy moves. Phase offset by world position so nearby
+    // instances don't sway in lockstep.
+    if (uWindStrength > 0.0) {
+        float height = max(aPosition.y, 0.0);
+        float phase = uTime * 1.7 + world.x * 0.35 + world.z * 0.35;
+        vec2 sway = vec2(sin(phase), cos(phase * 0.8)) * uWindStrength * 0.15 * height;
+        world.xz += sway;
+    }
+    // Distance fade band: 1 at/inside cullStart, 0 at cullEnd (dithered in the frag).
+    float dist = length(world.xyz - uCameraPos);
+    vFade = (uCullEnd > uCullStart)
+        ? clamp((uCullEnd - dist) / max(uCullEnd - uCullStart, 0.001), 0.0, 1.0)
+        : 1.0;
     vNormal = normalize(mat3(transpose(inverse(model))) * aNormal);
     vUv = aUv;
     gl_Position = uViewProjection * world;
@@ -56,6 +76,7 @@ void main() {
 #version 330 core
 in vec3 vNormal;
 in vec2 vUv;
+in float vFade;
 uniform vec3 uColor;
 uniform vec3 uSunDirection;
 uniform vec3 uSunColor;
@@ -64,7 +85,22 @@ uniform sampler2D uAlbedo;
 uniform int uHasAlbedo;
 uniform float uAlphaCutoff;
 out vec4 FragColor;
+// Ordered 4x4 Bayer dither so the distance fade dissolves cleanly without needing
+// alpha blending or back-to-front sorting (the pass stays opaque + alpha-cutout).
+float DitherThreshold(vec2 fragCoord) {
+    int x = int(mod(fragCoord.x, 4.0));
+    int y = int(mod(fragCoord.y, 4.0));
+    int index = x + y * 4;
+    float bayer[16] = float[16](
+         0.0/16.0,  8.0/16.0,  2.0/16.0, 10.0/16.0,
+        12.0/16.0,  4.0/16.0, 14.0/16.0,  6.0/16.0,
+         3.0/16.0, 11.0/16.0,  1.0/16.0,  9.0/16.0,
+        15.0/16.0,  7.0/16.0, 13.0/16.0,  5.0/16.0);
+    return bayer[index];
+}
 void main() {
+    // Fade out with distance: fewer fragments survive as vFade drops toward 0.
+    if (vFade < DitherThreshold(gl_FragCoord.xy)) discard;
     vec4 sampleColor = (uHasAlbedo == 1) ? texture(uAlbedo, vUv) : vec4(1.0);
     if (sampleColor.a < uAlphaCutoff) discard;
     float ndl = max(dot(normalize(vNormal), normalize(-uSunDirection)), 0.0);
@@ -82,7 +118,7 @@ FoliageRenderer::~FoliageRenderer() {
 
 void FoliageRenderer::Draw(ecs::Registry& registry, const Camera& camera, float aspect,
                            const glm::vec3& sunDirection, const glm::vec3& sunColor,
-                           const glm::vec3& ambient) {
+                           const glm::vec3& ambient, float time) {
     m_visibleInstances = 0;
     m_drawCalls = 0;
     if (!m_shader) return;
@@ -94,6 +130,8 @@ void FoliageRenderer::Draw(ecs::Registry& registry, const Camera& camera, float 
     m_shader->SetVec3("uAmbient", ambient);
     m_shader->SetFloat("uAlphaCutoff", 0.35f);
     m_shader->SetInt("uAlbedo", 0);
+    m_shader->SetFloat("uTime", time);
+    m_shader->SetVec3("uCameraPos", camera.Position());
 
     const GLboolean cull = glIsEnabled(GL_CULL_FACE);
     glDisable(GL_CULL_FACE); // leaves and cards are commonly two-sided
@@ -104,29 +142,40 @@ void FoliageRenderer::Draw(ecs::Registry& registry, const Camera& camera, float 
             for (std::size_t typeIndex = 0; typeIndex < foliage.types.size(); ++typeIndex) {
                 const ecs::FoliageTypeRuntime& type = foliage.types[typeIndex];
                 if (!type.model) continue;
-
-                std::vector<glm::mat4> matrices;
-                matrices.reserve(foliage.instances.size());
+                // Per-type wind + distance-fade band (authored on the foliage asset).
+                m_shader->SetFloat("uWindStrength", type.windStrength);
+                m_shader->SetFloat("uCullStart", type.cullStartDistance);
+                m_shader->SetFloat("uCullEnd", std::max(type.cullEndDistance, type.cullStartDistance + 0.001f));
+                // Keep the placement batch, but select one optional authored mesh
+                // per distance tier. A missing tier always falls back to LOD0.
+                const Model* lodModels[3] = {type.model, type.lod1Model, type.lod2Model};
+                std::vector<glm::mat4> matrices[3];
+                for (auto& tier : matrices) tier.reserve(foliage.instances.size());
                 for (const ecs::FoliageInstance& instance : foliage.instances) {
                     if (!instance.enabled || instance.typeIndex != typeIndex) continue;
                     const glm::mat4 model = InstanceMatrix(owner, instance);
                     const glm::vec3 worldPosition = glm::vec3(model[3]);
                     const float distance = glm::length(worldPosition - camera.Position());
                     if (distance > std::max(type.cullEndDistance, 0.0f)) continue;
-                    matrices.push_back(model);
+                    int lod = 0;
+                    if (type.lod2Model && distance >= type.lod2Distance) lod = 2;
+                    else if (type.lod1Model && distance >= type.lod1Distance) lod = 1;
+                    matrices[lod].push_back(model);
                 }
-                if (matrices.empty()) continue;
-                m_visibleInstances += static_cast<int>(matrices.size());
+                for (int lod = 0; lod < 3; ++lod) {
+                    if (matrices[lod].empty() || !lodModels[lod]) continue;
+                    m_visibleInstances += static_cast<int>(matrices[lod].size());
 
-                glBindBuffer(GL_ARRAY_BUFFER, m_instanceVbo);
-                glBufferData(GL_ARRAY_BUFFER,
-                    static_cast<GLsizeiptr>(matrices.size() * sizeof(glm::mat4)),
-                    matrices.data(), GL_DYNAMIC_DRAW);
+                    glBindBuffer(GL_ARRAY_BUFFER, m_instanceVbo);
+                    glBufferData(GL_ARRAY_BUFFER,
+                        static_cast<GLsizeiptr>(matrices[lod].size() * sizeof(glm::mat4)),
+                        matrices[lod].data(), GL_DYNAMIC_DRAW);
 
-                const auto& subMeshes = type.model->SubMeshes();
-                const auto& materials = type.model->Materials();
-                const auto& textures = type.model->Textures();
-                for (const SubMesh& subMesh : subMeshes) {
+                    const Model* lodModel = lodModels[lod];
+                    const auto& subMeshes = lodModel->SubMeshes();
+                    const auto& materials = lodModel->Materials();
+                    const auto& textures = lodModel->Textures();
+                    for (const SubMesh& subMesh : subMeshes) {
                     const Material* sourceMaterial =
                         subMesh.material >= 0
                         && subMesh.material < static_cast<int>(materials.size())
@@ -155,14 +204,15 @@ void FoliageRenderer::Draw(ecs::Registry& registry, const Camera& camera, float 
                                                     * sizeof(glm::vec4)));
                         glVertexAttribDivisor(location, 1);
                     }
-                    glDrawElementsInstanced(GL_TRIANGLES,
-                        static_cast<GLsizei>(subMesh.mesh.IndexCount()), GL_UNSIGNED_INT,
-                        nullptr, static_cast<GLsizei>(matrices.size()));
+                        glDrawElementsInstanced(GL_TRIANGLES,
+                            static_cast<GLsizei>(subMesh.mesh.IndexCount()), GL_UNSIGNED_INT,
+                            nullptr, static_cast<GLsizei>(matrices[lod].size()));
                     for (GLuint location = 4; location <= 7; ++location) {
                         glVertexAttribDivisor(location, 0);
                         glDisableVertexAttribArray(location);
                     }
-                    ++m_drawCalls;
+                        ++m_drawCalls;
+                    }
                 }
             }
         });

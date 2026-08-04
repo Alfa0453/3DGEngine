@@ -455,6 +455,9 @@ private:
     double                               m_cpuFrameMs = 0.0;   // CPU cost of OnRender
     double                               m_cpuSceneMs = 0.0;   // CPU cost of scene submission
     double                               m_cpuUiMs = 0.0;      // CPU cost of building the UI
+    static constexpr int                 kFrameHistory = 120;  // ~2s of frame times at 60fps
+    std::array<float, kFrameHistory>     m_frameMsHistory{};   // rolling frame-time graph (ms)
+    int                                  m_frameMsHead = 0;    // ring-buffer write cursor
     int                                  m_renderW = 0;        // 3D render target width (render scale)
     int                                  m_renderH = 0;        // 3D render target height
     material_maker::MaterialMakerPanel   m_materialMaker;

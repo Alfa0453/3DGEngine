@@ -51,6 +51,10 @@ std::array<char, 512> g_customCodeEditorPath{};
 std::string g_scriptBuildLog;
 bool g_scriptBuildLogOpen = false;
 ImGuiTextFilter g_hierarchyFilter;
+// When on, clicking rows in the Hierarchy does not change the scene selection. This
+// keeps a viewport selection safe from a stray hierarchy click (and the delete that
+// might follow) while you work in the scene.
+bool g_hierarchyLockSelection = false;
 std::array<char, 96> g_componentSearch{};
 bool g_componentPopupOpenRequested = false;
 int g_cameraPresetSelection = -1;
@@ -64,6 +68,7 @@ std::array<char, 128> g_cameraSequenceName{};
 engine::FoliageAssetData g_foliageDraft;
 std::string g_foliageDraftPath;
 bool g_foliageDraftDirty = false;
+int g_foliageInstanceSelection = -1;
 
 struct CollisionChannelDesc {
     const char* name;
@@ -4013,6 +4018,18 @@ void DrawHierarchy(EditorDockspace::Context& context, bool* open) {
     }
 
     const std::vector<EditorScene::Object>& objects = context.scene->Objects();
+    ImGui::Checkbox("Lock Selection", &g_hierarchyLockSelection);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Prevent the Hierarchy from changing the scene selection, so a "
+                          "stray click here can't re-target your viewport selection. Also "
+                          "auto-locks while you drag a gizmo or paint in the viewport.");
+    }
+    // Effective lock: the manual toggle, or automatically while working in the viewport.
+    const bool selectionLocked = g_hierarchyLockSelection || context.viewportInteractionActive;
+    if (context.viewportInteractionActive && !g_hierarchyLockSelection) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.18f, 1.0f), "(locked: working in viewport)");
+    }
     g_hierarchyFilter.Draw("Filter");
 
     int visibleObjects = 0;
@@ -4036,6 +4053,14 @@ void DrawHierarchy(EditorDockspace::Context& context, bool* open) {
     }
     ImGui::Separator();
 
+    // Snapshot the multi-selection once so every selected row is highlighted (clicks
+    // mutate the real set; the snapshot refreshes next frame).
+    const std::vector<int> selectionSnapshot = context.scene->SelectedIndices();
+    const auto isRowSelected = [&](int index) {
+        return std::find(selectionSnapshot.begin(), selectionSnapshot.end(), index)
+            != selectionSnapshot.end();
+    };
+
     for (int i = 0; i < static_cast<int>(objects.size()); ++i) {
         const EditorScene::Object& object = objects[static_cast<std::size_t>(i)];
         char label[192];
@@ -4049,11 +4074,18 @@ void DrawHierarchy(EditorDockspace::Context& context, bool* open) {
             continue;
         }
 
-        if (ImGui::Selectable(label, i == context.scene->SelectedIndex())) {
-            context.scene->SelectIndex(i);
+        if (ImGui::Selectable(label, isRowSelected(i)) && !selectionLocked) {
+            // Shift+click toggles the row in/out of the multi-selection; a plain click
+            // replaces the selection with just this object. Disabled while locked so the
+            // viewport selection can't be changed (and accidentally deleted) from here.
+            if (ImGui::GetIO().KeyShift) context.scene->ToggleSelection(i);
+            else context.scene->SelectIndex(i);
         }
         if (ImGui::BeginPopupContextItem()) {
-            context.scene->SelectIndex(i);
+            // Right-clicking an unselected row selects just it; right-clicking a row that
+            // is already selected keeps the (possibly multi-) selection so Duplicate/Delete
+            // act on the whole group. While locked, the selection is left untouched.
+            if (!selectionLocked && !isRowSelected(i)) context.scene->SelectIndex(i);
             if (ImGui::MenuItem("Duplicate", nullptr, false, !object.locked)) {
                 context.duplicateSelectedRequested = true;
             }
@@ -6642,6 +6674,8 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                     &type.maximumWorldHeight, 0.5f, -100000.0f, 100000.0f, "Min %.1f", "Max %.1f");
                 changed |= ImGui::DragFloatRange2("Cull Distance", &type.cullStartDistance,
                     &type.cullEndDistance, 1.0f, 0.0f, 100000.0f, "Start %.0f m", "End %.0f m");
+                changed |= ImGui::DragFloatRange2("LOD Distances", &type.lod1Distance,
+                    &type.lod2Distance, 1.0f, 0.0f, 100000.0f, "LOD 1 %.0f m", "LOD 2 %.0f m");
                 changed |= ImGui::DragFloat("Wind Strength", &type.windStrength, 0.01f, 0.0f, 10.0f, "%.2f");
                 changed |= ImGui::Checkbox("Align to Surface", &type.alignToSurface);
                 changed |= ImGui::Checkbox("Random Yaw", &type.randomYaw);
@@ -6662,6 +6696,24 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                     g_foliageDraftDirty = true;
                 }
                 if (!canAssignMesh) ImGui::EndDisabled();
+                ImGui::SameLine();
+                if (!canAssignMesh) ImGui::BeginDisabled();
+                if (ImGui::Button("Use as LOD 1") && context.assets) {
+                    type.lod1MeshPath = context.assets->SelectedAssetFullPath();
+                    type.lod1MeshId = {};
+                    g_foliageDraftDirty = true;
+                }
+                if (!canAssignMesh) ImGui::EndDisabled();
+                ImGui::SameLine();
+                if (!canAssignMesh) ImGui::BeginDisabled();
+                if (ImGui::Button("Use as LOD 2") && context.assets) {
+                    type.lod2MeshPath = context.assets->SelectedAssetFullPath();
+                    type.lod2MeshId = {};
+                    g_foliageDraftDirty = true;
+                }
+                if (!canAssignMesh) ImGui::EndDisabled();
+                ImGui::TextDisabled("LOD1: %s", type.lod1MeshPath.empty() ? "Primary mesh" : type.lod1MeshPath.c_str());
+                ImGui::TextDisabled("LOD2: %s", type.lod2MeshPath.empty() ? "LOD1 / primary mesh" : type.lod2MeshPath.c_str());
                 ImGui::SameLine();
                 if (!canAssignMaterial) ImGui::BeginDisabled();
                 if (ImGui::Button("Use Selected Material") && context.assets) {
@@ -6724,6 +6776,64 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             ImGui::DragFloat("Density Multiplier", context.foliagePaintDensity, 0.02f, 0.01f, 10.0f, "%.2fx");
         if (ImGui::Button("Clear All Instances"))
             context.scene->ClearSelectedFoliageInstances();
+        if (ImGui::TreeNodeEx("Placed Instances", ImGuiTreeNodeFlags_DefaultOpen)) {
+            const int instanceCount = static_cast<int>(selected->foliageInstances.size());
+            g_foliageInstanceSelection = std::clamp(
+                g_foliageInstanceSelection, -1, instanceCount - 1);
+            ImGui::BeginChild("FoliageInstanceList", ImVec2(0.0f, 145.0f), true);
+            ImGuiListClipper clipper;
+            clipper.Begin(instanceCount);
+            while (clipper.Step()) {
+                for (int index = clipper.DisplayStart; index < clipper.DisplayEnd; ++index) {
+                    const engine::ecs::FoliageInstance& instance =
+                        selected->foliageInstances[static_cast<std::size_t>(index)];
+                    std::string label = "#" + std::to_string(instance.id)
+                        + "  Type " + std::to_string(instance.typeIndex)
+                        + (instance.enabled ? "" : "  (Disabled)");
+                    if (ImGui::Selectable(label.c_str(), index == g_foliageInstanceSelection))
+                        g_foliageInstanceSelection = index;
+                }
+            }
+            ImGui::EndChild();
+            if (g_foliageInstanceSelection >= 0
+                && g_foliageInstanceSelection < instanceCount) {
+                const engine::ecs::FoliageInstance current = selected->foliageInstances[
+                    static_cast<std::size_t>(g_foliageInstanceSelection)];
+                engine::ecs::FoliageInstance edited = current;
+                bool instanceChanged = false;
+                ImGui::PushID(static_cast<int>(current.id));
+                instanceChanged |= ImGui::Checkbox("Enabled", &edited.enabled);
+                instanceChanged |= ImGui::DragFloat3("Local Position", &edited.position.x,
+                    0.05f, -100000.0f, 100000.0f, "%.2f");
+                instanceChanged |= ImGui::DragFloat3("Rotation", &edited.rotationDegrees.x,
+                    1.0f, -360.0f, 360.0f, "%.1f deg");
+                instanceChanged |= ImGui::DragFloat3("Scale", &edited.scale.x,
+                    0.01f, 0.001f, 100.0f, "%.2f");
+                if (instanceChanged)
+                    context.scene->SetSelectedFoliageInstance(current.id, edited);
+                if (ImGui::Button("Duplicate Instance")) {
+                    std::uint32_t newId = 0;
+                    if (context.scene->DuplicateSelectedFoliageInstance(current.id, &newId)) {
+                        const EditorScene::Object* refreshed = context.scene->SelectedObject();
+                        if (refreshed) {
+                            for (std::size_t i = 0; i < refreshed->foliageInstances.size(); ++i) {
+                                if (refreshed->foliageInstances[i].id == newId) {
+                                    g_foliageInstanceSelection = static_cast<int>(i);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Delete Instance")) {
+                    if (context.scene->RemoveSelectedFoliageInstance(current.id))
+                        g_foliageInstanceSelection = -1;
+                }
+                ImGui::PopID();
+            }
+            ImGui::TreePop();
+        }
         ImGui::TextDisabled("Left-drag in the viewport to paint. Enable Erase to remove instances.");
         ImGui::TextDisabled("Placement follows terrain height and the foliage asset's spacing/scale rules.");
     }

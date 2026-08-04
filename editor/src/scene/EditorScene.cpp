@@ -3279,20 +3279,24 @@ void EditorScene::SelectNext()
 {
     if (m_objects.empty()) {
         m_selectedIndex = -1;
+        m_selectedIndices.clear();
         return;
     }
     m_selectedIndex = (m_selectedIndex + 1) % static_cast<int>(m_objects.size());
+    m_selectedIndices.assign(1, m_selectedIndex);
 }
 
 void EditorScene::SelectPrevious()
 {
     if (m_objects.empty()) {
         m_selectedIndex = -1;
+        m_selectedIndices.clear();
         return;
     }
     m_selectedIndex = (m_selectedIndex <= 0)
         ? static_cast<int>(m_objects.size()) - 1
         : m_selectedIndex - 1;
+    m_selectedIndices.assign(1, m_selectedIndex);
 }
 
 void EditorScene::SelectIndex(int index)
@@ -3301,6 +3305,7 @@ void EditorScene::SelectIndex(int index)
         return;
     }
     m_selectedIndex = index;
+    m_selectedIndices.assign(1, index);   // single selection replaces the whole set
     // River geometry is authored by its linked world-space spline. Keep the water
     // object's transform at the ribbon centre so its gizmo sits on the visible plane.
     Object& selected = m_objects[static_cast<std::size_t>(index)];
@@ -3321,30 +3326,78 @@ void EditorScene::SelectIndex(int index)
     }
 }
 
+void EditorScene::ToggleSelection(int index)
+{
+    if (index < 0 || index >= static_cast<int>(m_objects.size())) {
+        return;
+    }
+    EnsureSelectionValid();
+    const auto it = std::find(m_selectedIndices.begin(), m_selectedIndices.end(), index);
+    if (it != m_selectedIndices.end()) {
+        // Already selected -> remove it. Move the primary to another member (or none).
+        m_selectedIndices.erase(it);
+        if (m_selectedIndex == index)
+            m_selectedIndex = m_selectedIndices.empty() ? -1 : m_selectedIndices.back();
+    } else {
+        m_selectedIndices.push_back(index);
+        m_selectedIndex = index;            // primary follows the most-recently added
+    }
+}
+
 void EditorScene::Deselect()
 {
     m_selectedIndex = -1;
+    m_selectedIndices.clear();
+}
+
+const std::vector<int>& EditorScene::SelectedIndices() const
+{
+    EnsureSelectionValid();
+    return m_selectedIndices;
+}
+
+void EditorScene::EnsureSelectionValid() const
+{
+    const int count = static_cast<int>(m_objects.size());
+    m_selectedIndices.erase(
+        std::remove_if(m_selectedIndices.begin(), m_selectedIndices.end(),
+                       [count](int i) { return i < 0 || i >= count; }),
+        m_selectedIndices.end());
+    if (m_selectedIndex >= 0 && m_selectedIndex < count) {
+        // A valid primary that isn't in the set means it was set directly (add/duplicate/
+        // undo) and the set is stale -> collapse to just the primary.
+        if (std::find(m_selectedIndices.begin(), m_selectedIndices.end(), m_selectedIndex)
+            == m_selectedIndices.end()) {
+            m_selectedIndices.assign(1, m_selectedIndex);
+        }
+    } else if (m_selectedIndex < 0) {
+        m_selectedIndices.clear();
+    }
 }
 
 void EditorScene::MoveSelected(const glm::vec3 & delta)
 {
-    if (SelectedLocked()) {
-        return;
-    }
-
-    Object* selected = m_selectedIndex >= 0
-        ? &m_objects[static_cast<std::size_t>(m_selectedIndex)] : nullptr;
-    if (selected && selected->isWater && !selected->waterFlowSpline.empty()) {
-        for (Object& spline : m_objects) {
-            if (!spline.isSpline || spline.name != selected->waterFlowSpline) continue;
-            for (glm::vec3& point : spline.splinePoints) point += delta;
-            break;
+    // Translate every selected (unlocked) object by the same delta so a gizmo drag
+    // moves the whole multi-selection as a rigid group.
+    EnsureSelectionValid();
+    bool moved = false;
+    for (int index : m_selectedIndices) {
+        if (index < 0 || index >= static_cast<int>(m_objects.size())) continue;
+        Object& object = m_objects[static_cast<std::size_t>(index)];
+        if (object.locked) continue;
+        if (object.isWater && !object.waterFlowSpline.empty()) {
+            for (Object& spline : m_objects) {
+                if (!spline.isSpline || spline.name != object.waterFlowSpline) continue;
+                for (glm::vec3& point : spline.splinePoints) point += delta;
+                break;
+            }
+        }
+        if (Transform* transform = m_registry.TryGet<Transform>(object.entity)) {
+            transform->position += delta;
+            moved = true;
         }
     }
-    if (Transform* transform = SelectedTransform()) {
-        transform->position += delta;
-        m_dirty = true;
-    }
+    if (moved) m_dirty = true;
 }
 
 void EditorScene::RotateSelected(const glm::vec3 &axis, float degrees)
@@ -5152,6 +5205,62 @@ std::size_t EditorScene::EraseSelectedFoliageInstances(
     return removed;
 }
 
+bool EditorScene::SetSelectedFoliageInstance(
+    std::uint32_t id, const engine::ecs::FoliageInstance& instance) {
+    if (m_selectedIndex < 0) return false;
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (!selected.isFoliage) return false;
+    const auto found = std::find_if(selected.foliageInstances.begin(),
+        selected.foliageInstances.end(), [id](const engine::ecs::FoliageInstance& current) {
+            return current.id == id;
+        });
+    if (found == selected.foliageInstances.end()) return false;
+    engine::ecs::FoliageInstance sanitized = instance;
+    sanitized.id = id;
+    sanitized.scale = glm::max(sanitized.scale, glm::vec3(0.001f));
+    *found = sanitized;
+    SyncFoliageComponent(selected);
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::RemoveSelectedFoliageInstance(std::uint32_t id) {
+    if (m_selectedIndex < 0) return false;
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (!selected.isFoliage) return false;
+    const auto found = std::find_if(selected.foliageInstances.begin(),
+        selected.foliageInstances.end(), [id](const engine::ecs::FoliageInstance& instance) {
+            return instance.id == id;
+        });
+    if (found == selected.foliageInstances.end()) return false;
+    PushUndoSnapshot();
+    selected.foliageInstances.erase(found);
+    SyncFoliageComponent(selected);
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::DuplicateSelectedFoliageInstance(std::uint32_t id,
+                                                    std::uint32_t* newId) {
+    if (m_selectedIndex < 0) return false;
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (!selected.isFoliage) return false;
+    const auto found = std::find_if(selected.foliageInstances.begin(),
+        selected.foliageInstances.end(), [id](const engine::ecs::FoliageInstance& instance) {
+            return instance.id == id;
+        });
+    if (found == selected.foliageInstances.end()) return false;
+    PushUndoSnapshot();
+    engine::ecs::FoliageInstance duplicate = *found;
+    duplicate.id = selected.nextFoliageInstanceId++;
+    duplicate.position += glm::vec3(0.35f, 0.0f, 0.35f);
+    selected.foliageInstances.push_back(duplicate);
+    SyncFoliageComponent(selected);
+    m_dirty = true;
+    if (newId) *newId = duplicate.id;
+    return true;
+}
+
 bool EditorScene::ClearSelectedFoliageInstances() {
     if (m_selectedIndex < 0) return false;
     Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
@@ -5966,25 +6075,30 @@ bool EditorScene::DuplicateSelected(const engine::Mesh & cube, const engine::Mes
 
 bool EditorScene::DeleteSelected()
 {
-    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+    // Delete every selected (unlocked) object. Erase highest index first so the earlier
+    // indices stay valid as the vector shrinks.
+    EnsureSelectionValid();
+    std::vector<int> indices;
+    for (int index : m_selectedIndices) {
+        if (index >= 0 && index < static_cast<int>(m_objects.size())
+            && !m_objects[static_cast<std::size_t>(index)].locked) {
+            indices.push_back(index);
+        }
+    }
+    if (indices.empty()) {
         return false;
     }
-    if (m_objects[static_cast<std::size_t>(m_selectedIndex)].locked) {
-        return false;
-    }
+    std::sort(indices.begin(), indices.end(), [](int a, int b) { return a > b; });
+    indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
 
     PushUndoSnapshot();
-
-    const std::size_t index = static_cast<std::size_t>(m_selectedIndex);
-    m_registry.Destroy(m_objects[index].entity);
-    m_objects.erase(m_objects.begin() + static_cast<std::ptrdiff_t>(index));
-
-    if (m_objects.empty()) {
-        m_selectedIndex = -1;
-    } else if (m_selectedIndex >= static_cast<int>(m_objects.size())) {
-        m_selectedIndex = static_cast<int>(m_objects.size()) - 1;
+    for (int index : indices) {
+        m_registry.Destroy(m_objects[static_cast<std::size_t>(index)].entity);
+        m_objects.erase(m_objects.begin() + static_cast<std::ptrdiff_t>(index));
     }
 
+    m_selectedIndices.clear();
+    m_selectedIndex = -1;
     m_dirty = true;
     return true;
 }

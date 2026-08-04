@@ -11,6 +11,7 @@
 #include "engine/ecs/Components.h"
 #include "engine/graphics/ShaderParameterBinding.h"
 
+#include <glad/glad.h>
 #include <glm/gtc/matrix_transform.hpp>
 
 #include <string>
@@ -422,6 +423,12 @@ void SkinnedRenderer::DrawScene(ecs::Registry& reg, const Camera& camera, float 
         glm::vec2(std::cos(cloudAngle), std::sin(cloudAngle))
         * (cloudSeconds * lit.cloudWindSpeed));
 
+    // Backface culling: characters are closed meshes, so skip their inside faces.
+    // Restored to the default (off) after the pass so other passes are unaffected.
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+    glFrontFace(GL_CCW);
+
     reg.view<ecs::Transform, AnimatedModel>().each([&](ecs::Entity entity, ecs::Transform& t, AnimatedModel& am) {
         if (!am.model || am.pose.empty()) return;
         if (const ecs::LoadedMaterialAsset* custom =
@@ -478,6 +485,8 @@ void SkinnedRenderer::DrawScene(ecs::Registry& reg, const Camera& camera, float 
             sm.mesh.Draw();
         }
     });
+
+    glDisable(GL_CULL_FACE);   // restore the default (off) for subsequent passes
 }
 
 void SkinnedRenderer::DrawDepth(const SkinnedModel& model,

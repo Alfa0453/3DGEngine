@@ -446,6 +446,7 @@ void RuntimePlayerApp::LoadScene() {
     m_assetErrors = static_cast<int>(report.errors.size());
     for (const std::string& assetError : report.errors)
         m_runtimeWarnings.push_back("Asset: " + assetError);
+    m_assets.RebuildFoliageCollisionProxies(m_registry);
 
     // Per-entity setup (animation-event hookup + MeshPBR conversion). Factored so a
     // streamed level can run the same setup on just its new entities.
@@ -2182,7 +2183,8 @@ void RuntimePlayerApp::OnRender() {
         m_foliageRenderer->Draw(m_registry, cam, aspect,
             m_sample.keyLightDirection,
             m_sample.keyLightColor * env.sunIntensity,
-            m_sample.ambient * env.skyLightIntensity);
+            m_sample.ambient * env.skyLightIntensity,
+            static_cast<float>(glfwGetTime()));   // drives wind sway
     }
 
     // Static-model pass: imported models (LoadedModelAsset) via their own shader.
