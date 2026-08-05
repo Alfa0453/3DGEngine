@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>3DGEngine — Build a Game Tutorial (Coin Rush)</title>
+<style>
+  :root{ --ink:#1a1f2b; --muted:#5a6474; --line:#d7dde6; --accent:#e0672a;
+    --accent2:#2f6fdb; --code-bg:#f5f7fb; --ok:#1f8a55; }
+  *{ box-sizing:border-box; }
+  html{ -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+  body{ font-family:"Segoe UI",Arial,sans-serif; color:var(--ink); line-height:1.5;
+        font-size:10.5pt; margin:0; }
+  @page{ size:A4; margin:16mm 15mm 18mm 15mm; }
+  .page{ page-break-after:always; }
+  h1,h2,h3,h4{ line-height:1.2; }
+  h1{ font-size:23pt; margin:0 0 6pt; }
+  h2{ font-size:16pt; margin:18pt 0 8pt; padding-bottom:4pt;
+      border-bottom:2px solid var(--accent); page-break-after:avoid; }
+  h3{ font-size:12.5pt; margin:14pt 0 5pt; color:#22314c; page-break-after:avoid; }
+  p{ margin:5pt 0; } ul,ol{ margin:5pt 0 5pt 18pt; } li{ margin:3pt 0; }
+  code{ font-family:"Consolas","Courier New",monospace; font-size:9pt;
+        background:var(--code-bg); padding:1px 4px; border-radius:3px; }
+  pre{ background:var(--code-bg); border:1px solid var(--line); border-left:3px solid var(--accent2);
+       border-radius:5px; padding:8pt 10pt; overflow:auto; font-size:8.6pt; line-height:1.4;
+       page-break-inside:avoid; white-space:pre; }
+  pre code{ background:none; padding:0; }
+  .muted{ color:var(--muted); } .lead{ font-size:12pt; color:#33405a; }
+  .lesson{ display:flex; align-items:baseline; gap:10pt; margin-top:6pt; }
+  .lesson .n{ font-size:20pt; font-weight:800; color:var(--accent);
+      border:2px solid var(--accent); border-radius:8px; padding:1pt 9pt; }
+  .goal{ background:#fff5ee; border:1px solid #f4d6bf; border-radius:6px; padding:7pt 10pt;
+      margin:8pt 0; font-size:9.5pt; }
+  .goal b{ color:var(--accent); text-transform:uppercase; font-size:8pt; letter-spacing:.5px; }
+  .steps{ counter-reset:step; list-style:none; margin-left:0; }
+  .steps > li{ counter-increment:step; position:relative; padding-left:26pt; margin:7pt 0; }
+  .steps > li::before{ content:counter(step); position:absolute; left:0; top:-1pt;
+      width:18pt; height:18pt; background:var(--accent2); color:#fff; border-radius:50%;
+      font-size:9pt; font-weight:700; display:flex; align-items:center; justify-content:center; }
+  .check{ background:#eafaf1; border:1px solid #c3ead4; border-left:4px solid var(--ok);
+      border-radius:6px; padding:7pt 10pt; margin:9pt 0; font-size:9.5pt; page-break-inside:avoid; }
+  .check b{ color:var(--ok); text-transform:uppercase; font-size:8pt; letter-spacing:.5px; }
+  .tip{ background:#eef3fb; border:1px solid #cfe0fb; border-radius:6px; padding:7pt 10pt;
+      margin:9pt 0; font-size:9.5pt; page-break-inside:avoid; }
+  .tip b{ text-transform:uppercase; font-size:8pt; letter-spacing:.5px; color:var(--accent2); }
+  .kbd{ font-family:Consolas,monospace; font-size:8.5pt; border:1px solid #c3ccd8;
+        border-bottom-width:2px; border-radius:4px; padding:0 4px; background:#fff; }
+  .cover{ height:250mm; display:flex; flex-direction:column; justify-content:center; }
+  .cover .badge{ font-size:9.5pt; letter-spacing:3px; text-transform:uppercase; color:var(--accent); }
+  .cover h1{ font-size:40pt; margin:6pt 0; }
+  .cover .sub{ font-size:15pt; color:var(--muted); }
+  .rule{ height:4px; width:130px; background:linear-gradient(90deg,var(--accent),var(--accent2)); margin:12pt 0; }
+  .toc ol{ margin-left:16pt; } .toc a{ color:var(--ink); text-decoration:none; }
+  table{ border-collapse:collapse; width:100%; margin:7pt 0; font-size:9pt; page-break-inside:avoid; }
+  th,td{ border:1px solid var(--line); padding:4pt 7pt; text-align:left; vertical-align:top; }
+  th{ background:#eef2f8; }
+  a{ color:var(--accent2); } .small{ font-size:8.5pt; }
+</style>
+</head>
+<body>
+
+<section class="page cover">
+  <div class="badge">A hands-on 3DGEngine tutorial</div>
+  <div class="rule"></div>
+  <h1>Coin Rush</h1>
+  <div class="sub">Build a complete little game — and learn the engine while you do it.</div>
+  <div class="rule"></div>
+  <p class="muted">Over eleven short lessons you will make a third-person arena game: collect the
+  coins before a hunting enemy catches you, with animation, physics, a HUD, audio, checkpoints, and
+  a shippable build. Every lesson names the engine system it teaches. Print to PDF with
+  <span class="kbd">Ctrl</span>+<span class="kbd">P</span> → <em>Save as PDF</em> (A4).</p>
+</section>
+
+<section class="page toc">
+  <h2>What you'll build</h2>
+  <p class="lead">A playable loop: a controllable character with real locomotion, coins that score,
+  a HUD, an AI enemy that sees and hears you, combat with ragdoll death, sound and particle polish,
+  checkpoints you can save/load, and win/lose with a packaged executable.</p>
+  <h3>Lessons</h3>
+  <div class="toc"><ol>
+    <li>Set up the project &amp; import your assets <span class="muted">— projects, importing</span></li>
+    <li>Build the arena <span class="muted">— scenes, rendering, lighting, physics colliders</span></li>
+    <li>Make the player character <span class="muted">— clips, graphs, characters, controller</span></li>
+    <li>Your first script <span class="muted">— the scripting lifecycle</span></li>
+    <li>Coins &amp; scoring <span class="muted">— triggers, prefabs, GameMode</span></li>
+    <li>The HUD <span class="muted">— UI binding</span></li>
+    <li>The enemy <span class="muted">— nav agents, perception, navmesh</span></li>
+    <li>Combat &amp; ragdoll <span class="muted">— actions, animation events, health, ragdolls</span></li>
+    <li>Polish: audio &amp; particles <span class="muted">— audio buses, particle control</span></li>
+    <li>Checkpoints &amp; saving <span class="muted">— save/load, checkpoints</span></li>
+    <li>Win, lose &amp; ship it <span class="muted">— GameMode, packaging</span></li>
+  </ol></div>
+  <div class="tip"><b>Before you start</b> You need the editor built and a few source assets: a
+  rigged character FBX with idle/walk/run takes (a Mixamo export works well), a coin mesh, a couple
+  of prop meshes, some textures, and a few short WAV sounds. No assets? Use the editor's primitive
+  meshes for everything and a capsule as the "character" — the lessons still work; you just skip the
+  animation import in Lesson 3.</div>
+</section>
+
+<section class="page">
+  <div class="lesson"><span class="n">1</span><h1>Set up the project &amp; import assets</h1></div>
+  <div class="goal"><b>You'll learn</b> How projects work, how each project's scripts are isolated,
+  and how to import art with the drag-and-drop Import dialog.</div>
+
+  <ol class="steps">
+    <li>Open the editor. <b>File → New Project</b>. Pick a folder, name it <code>CoinRush</code>,
+      and confirm. The editor creates a <code>Content</code> folder and an empty, isolated script
+      set — nothing from other projects leaks in.</li>
+    <li>Drag your source files (character FBX, coin/prop meshes, textures, WAVs) from Windows
+      Explorer <b>onto the editor window</b>. The <b>Import Settings</b> dialog appears and scans
+      each file's type.</li>
+    <li>In the dialog: confirm the character imports as <b>Skeletal Mesh</b> (it shows e.g.
+      <span class="small">"[Model] hero.fbx (skeleton, 1 mesh, 6 anim)"</span>), the coin/props as
+      <b>Static Mesh</b>, colour textures with <b>sRGB</b> on and any normal/roughness maps with
+      sRGB <b>off</b>. Set the Target Folder, then <b>Import</b>.</li>
+    <li>Check the Console — you'll see one line per imported asset. The Content Browser now shows
+      them.</li>
+  </ol>
+  <div class="check"><b>Checkpoint</b> Your Content Browser lists the character, meshes, textures,
+  and sounds. If a model came in as the wrong type, re-drop it and override the mode in the dialog.</div>
+  <div class="tip"><b>No assets?</b> Skip the drop step and use the built-in primitive meshes (cube,
+  plane, sphere, capsule) throughout. Use a capsule as your "character" and revisit Lesson 3 later.</div>
+</section>
+
+<section class="page">
+  <div class="lesson"><span class="n">2</span><h1>Build the arena</h1></div>
+  <div class="goal"><b>You'll learn</b> Placing objects, materials, lighting, and giving geometry
+  physics colliders so the player and AI can stand on and bump into it.</div>
+
+  <ol class="steps">
+    <li><b>Floor</b> — add a Plane (or drag your floor mesh in). Scale it to ~30×30. In the
+      Inspector assign a material (make one in the Material Maker first if you like), then
+      <b>+ Add Component → Physics Setup → Static Collider</b> so it's solid ground.</li>
+    <li><b>Walls</b> — add four Cubes around the edge, scale them into walls, and give each a
+      <b>Static Collider</b> too, so nothing walks off the arena.</li>
+    <li><b>Props</b> — scatter a few meshes for cover. Props the enemy shouldn't see through need
+      colliders; decorative ones don't.</li>
+    <li><b>Sun</b> — add a <b>Light</b>, set it to Directional, and aim it down at an angle. Set the
+      scene's environment/sky for ambient fill so shadows aren't pitch black.</li>
+    <li>Frame the camera and press <b>Play</b> briefly to confirm the arena renders and is lit,
+      then stop.</li>
+  </ol>
+  <div class="check"><b>Checkpoint</b> A lit floor with walls and props. Selecting the floor and
+  toggling <b>Show Collider</b> should outline its collision shape.</div>
+  <div class="tip"><b>Match Collider to Scale</b> If you resize an object after adding a collider,
+  click <b>Match Collider to Scale</b> in the Inspector so the collision shape refits.</div>
+</section>
+
+<section class="page">
+  <div class="lesson"><span class="n">3</span><h1>Make the player character</h1></div>
+  <div class="goal"><b>You'll learn</b> The animation pipeline — clips → graph → character — and the
+  Player Controller that gives you a moving, animated hero.</div>
+
+  <h3>3a. Wrap your takes as clips</h3>
+  <ol class="steps">
+    <li>Open the <b>Clip Editor</b>. Pick your character FBX as the source, choose the <b>Idle</b>
+      take in the Clip dropdown, set <b>Loop</b> on, name it <code>Idle</code>, and Save
+      <code>Idle.3dgclip</code>.</li>
+    <li>Repeat for <code>Walk</code> and <code>Run</code> (loop on). Use the live preview to confirm
+      each take plays.</li>
+  </ol>
+
+  <h3>3b. Build the locomotion graph</h3>
+  <ol class="steps">
+    <li>Open the <b>Graph Editor</b>. <b>Add Clip…</b> and add Idle, Walk, Run.</li>
+    <li>Add a Float parameter named <code>Speed</code>.</li>
+    <li>Click <b>Create 1D Locomotion</b> — it makes a blend-space state (Idle at 0, Walk at ~1.5,
+      Run at ~4) driven by <code>Speed</code>.</li>
+    <li>Look at the <b>Validation strip</b> at the top. Clear any red items (unresolved clips) and
+      yellow items (always-true transitions, undeclared parameters, dead ends). Save
+      <code>Locomotion.3dggraph</code>.</li>
+  </ol>
+  <div class="tip"><b>Why validation matters</b> A transition like <code>Speed &gt;= 0</code> is
+  always true and would skip your idle on frame 1. The strip flags it; fix it to
+  <code>Speed &gt; 0.1</code> or delete stray transitions.</div>
+
+  <h3>3c. Assemble the character</h3>
+  <ol class="steps">
+    <li>Open the <b>Character Editor</b>. Set the skeletal model + material.</li>
+    <li>Under <b>Animation Graph</b>, reference <code>Locomotion.3dggraph</code>. The preview now
+      plays Idle — drag the <code>Speed</code> slider to watch idle → walk → run.</li>
+    <li>Set the capsule <b>Collider</b> to fit the body, and enable the <b>Player Controller</b>
+      (Third Person). Optionally enable <b>Foot IK</b> so feet plant on the ground.</li>
+    <li>Save <code>Hero.3dgcharacter</code>. Drag it into the scene, name it <code>Player</code>,
+      and add a <b>PlayerStart</b> object so the runtime binds the camera and controls to it.</li>
+  </ol>
+  <div class="check"><b>Checkpoint</b> Press <b>Play</b>. WASD moves the hero; the mesh blends
+  idle → walk → run as you speed up, and the camera follows in third person. If it T-poses, the
+  graph's clips didn't resolve — re-check the clip names in the Graph Editor.</div>
+</section>
+
+<section class="page">
+  <div class="lesson"><span class="n">4</span><h1>Your first script</h1></div>
+  <div class="goal"><b>You'll learn</b> How native C++ scripts attach to objects and the four
+  lifecycle callbacks — the foundation for all gameplay.</div>
+
+  <ol class="steps">
+    <li>Add an empty object, name it <code>Spinner</code>, and give it a small mesh.</li>
+    <li>Inspector → <b>+ Add Script</b> → name it <code>Spinner</code> → <b>Create + Attach</b>.
+      The editor creates <code>Content/Scripts/Spinner.h</code>, registered for <em>this project
+      only</em>.</li>
+    <li>Open <code>Spinner.h</code> and make it rotate:</li>
+  </ol>
+  <pre><code>#include &lt;engine/gameplay/Script.h&gt;
+
+class Spinner final : public engine::Script {
+public:
+    void OnCreate() override {
+        m_speed = GetFieldFloat("spinSpeed", 90.0f);   // tune this in the Inspector
+    }
+    void OnUpdate(float dt) override {                  // per rendered frame
+        if (auto* t = Transform())
+            t-&gt;rotation = glm::rotate(t-&gt;rotation,
+                              glm::radians(m_speed * dt), glm::vec3(0,1,0));
+    }
+private:
+    float m_speed = 90.0f;
+};</code></pre>
+  <ol class="steps" start="4">
+    <li>Save, then <b>Compile Scripts</b> (the Script Editor button, or accept the prompt).</li>
+    <li>Press <b>Play</b> — the Spinner rotates. Stop, change its <code>spinSpeed</code> field in
+      the Inspector, Play again — no recompile needed for the value.</li>
+  </ol>
+  <div class="check"><b>Checkpoint</b> The object spins in Play. You just used <code>OnCreate</code>
+  (read a field), <code>OnUpdate</code> (per-frame logic), <code>Transform()</code> (my components),
+  and a designer-tunable field.</div>
+  <div class="tip"><b>Update vs FixedUpdate</b> Cosmetic/per-frame work goes in
+  <code>OnUpdate(dt)</code>. Anything touching physics/collision goes in
+  <code>OnFixedUpdate(dt)</code>, which runs at the fixed simulation step.</div>
+</section>
+
+<section class="page">
+  <div class="lesson"><span class="n">5</span><h1>Coins &amp; scoring</h1></div>
+  <div class="goal"><b>You'll learn</b> Trigger volumes, reading the shared GameMode for score, and
+  reusing objects with prefabs.</div>
+
+  <ol class="steps">
+    <li>Make one coin: add your coin mesh, name it <code>Coin</code>. Inspector →
+      <b>+ Add Component → Physics Setup → Trigger</b> (an overlap-only collider that never blocks
+      movement). Size it a bit larger than the mesh so it's easy to grab.</li>
+    <li>Make sure your <b>Player</b> object also has a collider (the character's capsule counts).</li>
+    <li>Add a <b>Coin</b> script to the coin (+ Add Script → Coin → Create + Attach) and write it:</li>
+  </ol>
+  <pre><code>#include &lt;engine/gameplay/Script.h&gt;
+
+class Coin final : public engine::Script {
+public:
+    void OnCreate() override { m_spin = GetFieldFloat("spinSpeed", 140.0f); }
+
+    void OnUpdate(float dt) override {                     // pretty spin
+        if (auto* t = Transform())
+            t-&gt;rotation = glm::rotate(t-&gt;rotation,
+                              glm::radians(m_spin*dt), glm::vec3(0,1,0));
+    }
+    void OnFixedUpdate(float) override {                  // collision happens on the fixed step
+        if (WasTriggerEntered(FindObject("Player"))) {
+            Game()-&gt;AddScore(1);                          // shared score → HUD later
+            Audio().PlayCue("Content/SFX/coin.wav");      // will play once we add audio
+            DestroySelf();                                // safe: queued, not immediate
+        }
+    }
+private:
+    float m_spin = 140.0f;
+};</code></pre>
+  <ol class="steps" start="4">
+    <li>Compile Scripts, Play, walk into the coin — it vanishes. (Watch the Console; the score is
+      rising even though there's no HUD yet.)</li>
+    <li><b>Make it a prefab:</b> right-click the coin → <b>Create Prefab</b> →
+      <code>Coin.3dgprefab</code>. Now drag that prefab into the arena a dozen times to place all
+      your coins. Editing the prefab later updates every instance.</li>
+  </ol>
+  <div class="check"><b>Checkpoint</b> Multiple coins in the arena, each disappears on pickup, and
+  the score climbs. You used a <b>trigger</b>, <code>WasTriggerEntered</code>, <code>Game()</code>,
+  and a <b>prefab</b>.</div>
+</section>
+
+<section class="page">
+  <div class="lesson"><span class="n">6</span><h1>The HUD</h1></div>
+  <div class="goal"><b>You'll learn</b> How UI widgets bind to runtime values by name, so gameplay
+  drives the display with no glue code.</div>
+
+  <ol class="steps">
+    <li>Open the <b>HUD editor</b> and add a text widget with the text <code>Coins: {}</code>. Bind
+      it to the named value <code>score</code> — the <code>{}</code> is filled from GameMode's score
+      automatically.</li>
+    <li>Add a <b>Health bar</b> widget; it binds to the player's <code>Health</code>
+      (<code>healthFraction</code>). (We add Health to the player in Lesson 8; the bar will read it
+      then.)</li>
+    <li>Add a centered <b>message</b> text bound to <code>gamemessage</code> — this shows your
+      win/lose text later.</li>
+    <li>Save <code>Game.hud</code> and reference it from the scene (scene settings → HUD).</li>
+  </ol>
+  <div class="check"><b>Checkpoint</b> Press Play — the coin counter updates live as you collect
+  coins. No extra code: the widget reads <code>score</code> straight from GameMode.</div>
+  <div class="tip"><b>Push your own values</b> Beyond the built-ins (<code>score</code>,
+  <code>time</code>, <code>gamestate</code>, <code>gamemessage</code>), you can drive custom HUD
+  strings/floats from gameplay via the GameMode/HUD context — handy for timers or wave numbers.</div>
+</section>
+
+<section class="page">
+  <div class="lesson"><span class="n">7</span><h1>The enemy</h1></div>
+  <div class="goal"><b>You'll learn</b> Navigation baking and Nav Agents — an enemy that paths
+  around the arena and chases you when it sees or hears you.</div>
+
+  <ol class="steps">
+    <li><b>Bake navigation:</b> open the <b>Navigation</b> preview, set the bounds to cover the
+      floor, and <b>Build</b>. You'll see the walkable navmesh polygons.</li>
+    <li>Place another character (or a capsule) and name it <code>Guard</code>.</li>
+    <li>Inspector → <b>+ Add Component → Nav Agent</b>. Set: Speed ~3, a Reach Radius, a Repath
+      Interval (~0.4s), a <b>Vision Range</b> and half-angle, a <b>Hearing Range</b>, <b>Team</b> =
+      2, and turn on <b>Auto-target</b> (it will pick the nearest enemy of a different non-zero
+      team — set the Player's Nav Agent, or its team tag, to team 1).</li>
+    <li>Give the Guard <b>Health</b> (we'll use it in Lesson 8).</li>
+    <li>Press <b>Play</b>. The Guard patrols; when it sees you (in its vision cone with clear
+      line-of-sight) or hears you running past, it switches to Chase and paths toward you, then
+      Searches your last-known spot when it loses you.</li>
+  </ol>
+  <div class="check"><b>Checkpoint</b> The Guard reacts to you: sprint near it and watch it give
+  chase; break line-of-sight behind a prop and watch it search where it last saw you.</div>
+  <div class="tip"><b>Hearing</b> Moving fast emits footstep noise that scales with speed; taking or
+  dealing damage emits a loud combat noise. Sneak slowly to stay quiet.</div>
+</section>
+
+<section class="page">
+  <div class="lesson"><span class="n">8</span><h1>Combat &amp; ragdoll</h1></div>
+  <div class="goal"><b>You'll learn</b> One-shot action animations, animation notify events, applying
+  damage through Health, and ragdoll death.</div>
+
+  <h3>8a. An attack action</h3>
+  <ol class="steps">
+    <li>In the Clip Editor wrap your attack take as an <b>Action Clip</b> named <code>Attack</code>
+      (Action Clip = one-shot, plays over locomotion). Author a notify event named <code>hit</code>
+      on the frame the swing connects.</li>
+    <li>Add a <b>PlayerCombat</b> script to the Player:</li>
+  </ol>
+  <pre><code>#include &lt;engine/gameplay/Script.h&gt;
+
+class PlayerCombat final : public engine::Script {
+public:
+    void OnUpdate(float) override {
+        if (Input().KeyPressed(GLFW_KEY_SPACE))
+            Anim().PlayAction("Attack");                 // one-shot montage
+
+        if (WasAnimationEvent("hit")) {                  // fires on the authored keyframe
+            if (ecs::Entity guard = FindObject("Guard"); guard != engine::ecs::kNull) {
+                auto* gt = Registry()-&gt;TryGet&lt;ecs::Transform&gt;(guard);
+                auto* pt = Transform();
+                if (gt &amp;&amp; pt &amp;&amp; glm::length(gt-&gt;position - pt-&gt;position) &lt; 2.2f)
+                    if (auto* hp = Registry()-&gt;TryGet&lt;Health&gt;(guard))
+                        hp-&gt;Damage(50.0f);               // in range → hit
+            }
+        }
+    }
+};</code></pre>
+  <div class="tip"><b>Why a notify event?</b> Firing damage on the <code>hit</code> frame (not on the
+  key-press) makes the swing feel connected — the hit lands exactly when the animation says so.</div>
+
+  <h3>8b. Ragdoll on death</h3>
+  <ol class="steps">
+    <li>Select the Guard → Inspector → <b>Health → Ragdoll On Death</b>. Tune Mass, Physics Bodies,
+      Body Thickness, damping, and Death Impulse.</li>
+    <li>Play, land two hits on the Guard — at zero HP its animation stops and it collapses into
+      connected physics bodies.</li>
+  </ol>
+  <div class="check"><b>Checkpoint</b> <span class="kbd">Space</span> swings; a close swing damages
+  the Guard on the <code>hit</code> frame; two hits drop it into a ragdoll. Give the Guard its own
+  attack that damages the Player's Health the same way for a two-way fight.</div>
+</section>
+
+<section class="page">
+  <div class="lesson"><span class="n">9</span><h1>Polish: audio &amp; particles</h1></div>
+  <div class="goal"><b>You'll learn</b> Firing sound cues and driving particle systems from scripts,
+  and using animation events so effects land on the exact frame.</div>
+
+  <h3>9a. Audio</h3>
+  <ol class="steps">
+    <li>You already call <code>Audio().PlayCue("Content/SFX/coin.wav")</code> in the Coin script —
+      drop a coin WAV at that path and it plays on pickup.</li>
+    <li>Add ambient music: put a script on an empty object that loads and plays it, switching mood
+      when the Guard is chasing:</li>
+  </ol>
+  <pre><code>void OnCreate() override { Audio().LoadMusic("Content/Music/level.adaptive"); }
+void OnUpdate(float) override {
+    Audio().SetMusicState(guardChasing ? "combat" : "explore");  // beat-synced switch
+}</code></pre>
+  <ol class="steps" start="3">
+    <li>Add a footstep cue on the character's walk clip: author a <code>footstep</code> notify and
+      play a cue when it fires (in a script on the Player):
+      <code>if (WasAnimationEvent("footstep")) Audio().PlayCue("Content/SFX/step.wav");</code></li>
+  </ol>
+
+  <h3>9b. Particles</h3>
+  <ol class="steps">
+    <li>In the <b>Particle Editor</b> start from a preset (e.g. Sparkle), tune it, and save
+      <code>Pickup.particle</code>. Add it to the Coin prefab.</li>
+    <li>Burst it on pickup — add one line to the Coin's pickup block:
+      <code>Particles().Burst(24);</code> right before <code>DestroySelf()</code>.</li>
+    <li>For the attack, burst an impact effect on the <code>hit</code> event:
+      <code>if (WasAnimationEvent("hit")) Particles().Burst(30);</code></li>
+  </ol>
+  <div class="check"><b>Checkpoint</b> Coins sparkle and click on pickup, footsteps and hits have
+  sound, and music shifts to a combat cue when the Guard chases. The game now <em>feels</em> alive.</div>
+</section>
+
+<section class="page">
+  <div class="lesson"><span class="n">10</span><h1>Checkpoints &amp; saving</h1></div>
+  <div class="goal"><b>You'll learn</b> The save system — quick checkpoints, typed persistent values,
+  and full save slots that restore the whole world.</div>
+
+  <ol class="steps">
+    <li>Place a trigger volume named <code>Checkpoint</code> partway through the arena. Add a script
+      that saves when the Player enters it:</li>
+  </ol>
+  <pre><code>void OnFixedUpdate(float) override {
+    if (WasTriggerEntered(FindObject("Player"))) {
+        SaveGameToSlot(0, "Checkpoint");     // captures Transforms, Health, velocities, etc.
+        Game()-&gt;SetMessage("Checkpoint!");   // brief HUD note
+    }
+}</code></pre>
+  <ol class="steps" start="2">
+    <li>Make death load the last save. In a <b>PlayerHealth</b> watcher script:</li>
+  </ol>
+  <pre><code>void OnUpdate(float) override {
+    if (auto* h = TryGet&lt;Health&gt;(); h &amp;&amp; !h-&gt;alive) {
+        LoadGameFromSlot(0);                 // reloads the scene + restores the snapshot
+    }
+}</code></pre>
+  <ol class="steps" start="3">
+    <li>Persist a running best-coins value with the typed store:
+      <code>SaveInt("bestCoins", std::max(GetSavedInt("bestCoins"), Game()-&gt;Score()));</code></li>
+  </ol>
+  <div class="check"><b>Checkpoint</b> Cross the checkpoint, die on purpose — the world reloads to
+  the saved state. In a packaged build the player can also <span class="kbd">F5</span> quick-save
+  and <span class="kbd">F9</span> open the load menu.</div>
+</section>
+
+<section class="page">
+  <div class="lesson"><span class="n">11</span><h1>Win, lose &amp; ship it</h1></div>
+  <div class="goal"><b>You'll learn</b> Ending the game through GameMode, and packaging a standalone
+  build that ships only the assets it uses.</div>
+
+  <ol class="steps">
+    <li><b>Win condition</b> — on an empty <code>GameRules</code> object, end the game when every
+      coin is collected:</li>
+  </ol>
+  <pre><code>void OnCreate() override { m_toWin = GetFieldInt("coinsToWin", 12); }
+void OnUpdate(float) override {
+    if (Game()-&gt;Score() &gt;= m_toWin) Game()-&gt;Win();          // HUD shows VICTORY
+    // lose if the player died (its Health went to 0 and it wasn't checkpoint-restored)
+}
+int m_toWin = 12;</code></pre>
+  <ol class="steps" start="2">
+    <li><b>Lose condition</b> — if you didn't add checkpoint-reload, call <code>Game()-&gt;Lose()</code>
+      on player death instead; the HUD end screen reads <code>gamestate</code>/<code>gamemessage</code>.</li>
+    <li><b>Playtest the whole loop</b> — collect all coins to win; get caught/killed to lose; verify
+      the HUD, audio, and saves along the way.</li>
+    <li><b>Package</b> — export the runtime scene and build the standalone <code>player</code>. The
+      AssetCooker walks the scene's dependencies and copies <em>only</em> the assets it reaches, so
+      unused imports never ship. Distribute the player executable plus the cooked content folder.</li>
+  </ol>
+  <div class="check"><b>Checkpoint — you shipped a game.</b> A lit arena, an animated third-person
+  hero (with optional foot IK), spinning coins that score to a live HUD, a Guard that sees and hears
+  and chases and ragdolls, combat with frame-accurate hits, audio and particles, checkpoints and an
+  in-game save menu, win/lose, and a standalone build.</div>
+
+  <h2>Where to go next</h2>
+  <table>
+    <tr><th>Add…</th><th>Using</th></tr>
+    <tr><td>A second level with a door that loads it</td><td><code>RequestSceneLoad("Level2")</code> (works in editor Play too)</td></tr>
+    <tr><td>A big open map streamed in chunks</td><td>A <b>World</b> + <code>RequestLevelLoad/Unload</code> (packaged)</td></tr>
+    <tr><td>A dash with a slow-mo flourish</td><td><code>HitStop()</code> / <code>SetGlobalTimeDilation()</code>, <code>Camera().Shake()</code></td></tr>
+    <tr><td>Smarter enemies</td><td>A <b>Behavior Graph</b> (<code>.btgraph</code>) with custom Task/Decorator/Service nodes</td></tr>
+    <tr><td>A cutscene on victory</td><td><code>Camera().PlaySequence("VictoryCam")</code></td></tr>
+    <tr><td>Richer materials</td><td>The Shader Editor (graph materials) with clearcoat/transmission/sheen</td></tr>
+  </table>
+  <div class="tip"><b>Deeper docs</b> For exact APIs and every field, see the
+  <em>Detailed Systems Manual</em> and the per-header reference under
+  <code>docs/engine-systems/</code>. Print this tutorial with A4 margins for correct pagination.</div>
+</section>
+
+</body>
+</html>

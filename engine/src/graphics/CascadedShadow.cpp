@@ -46,9 +46,12 @@ vec2 uv=mat2(cos(a),-sin(a),sin(a),cos(a))*p+0.5+uUvOffset;
 float alpha=uOpacity*((uHasAlbedoMap==1)?texture(uAlbedoMap,uv).a:1.0); if(alpha<uAlphaCutoff) discard; } }
 )GLSL";
 
-// Light-space matrix that tightly bounds one camera sub-frustum.
+// Light-space matrix that bounds one camera sub-frustum. Uses a rotation-invariant
+// bounding sphere for a constant ortho extent and snaps the centre to whole shadow texels,
+// so shadow edges do not shimmer / crawl as the camera moves (stabilised CSM). mapSize is
+// the shadow map resolution (for the texel grid).
 glm::mat4 FitCascade(const glm::mat4& camView, const glm::mat4& subProj,
-                     const glm::vec3& lightDir) {
+                     const glm::vec3& lightDir, int mapSize) {
     const glm::mat4 inv = glm::inverse(subProj * camView);
     std::array<glm::vec3, 8> corners;
     int n = 0;
@@ -63,24 +66,30 @@ glm::mat4 FitCascade(const glm::mat4& camView, const glm::mat4& subProj,
     for (const auto& c : corners) center += c;
     center /= 8.0f;
 
-    glm::vec3 up = (std::abs(glm::dot(lightDir, glm::vec3(0, 1, 0))) > 0.99f)
-                 ? glm::vec3(0, 0, 1) : glm::vec3(0, 1, 0);
-    const glm::mat4 lightView = glm::lookAt(center - glm::normalize(lightDir), center, up);
+    // Bounding sphere: its radius does not change as the camera rotates, so the ortho box
+    // keeps a constant size (no size shimmer). Quantise the radius to stop sub-frame wobble.
+    float radius = 0.0f;
+    for (const auto& c : corners) radius = std::max(radius, glm::length(c - center));
+    radius = std::ceil(radius * 16.0f) / 16.0f;
 
-    float minX = 1e30f, minY = 1e30f, minZ = 1e30f;
-    float maxX = -1e30f, maxY = -1e30f, maxZ = -1e30f;
-    for (const auto& c : corners) {
-        const glm::vec3 lc = glm::vec3(lightView * glm::vec4(c, 1.0f));
-        minX = std::min(minX, lc.x); maxX = std::max(maxX, lc.x);
-        minY = std::min(minY, lc.y); maxY = std::max(maxY, lc.y);
-        minZ = std::min(minZ, lc.z); maxZ = std::max(maxZ, lc.z);
-    }
+    const glm::vec3 dir = glm::normalize(lightDir);
+    const glm::vec3 up = (std::abs(glm::dot(dir, glm::vec3(0, 1, 0))) > 0.99f)
+                       ? glm::vec3(0, 0, 1) : glm::vec3(0, 1, 0);
+
+    // Texel snapping: quantise the centre on the light's X/Y axes to whole shadow texels, so
+    // the shadow grid is fixed in world space and edges don't crawl as the camera translates.
+    const float worldPerTexel = (radius * 2.0f) / static_cast<float>(std::max(mapSize, 1));
+    const glm::mat3 lightBasis = glm::mat3(glm::lookAt(glm::vec3(0.0f), -dir, up));   // world -> light rotation
+    glm::vec3 cLight = lightBasis * center;
+    cLight.x = std::floor(cLight.x / worldPerTexel) * worldPerTexel;
+    cLight.y = std::floor(cLight.y / worldPerTexel) * worldPerTexel;
+    center = glm::transpose(lightBasis) * cLight;   // orthonormal basis -> inverse is transpose
+
+    const glm::mat4 lightView = glm::lookAt(center - dir * radius, center, up);
     // Pull the near/far planes out so occluders behind the slice still cast.
     const float zMult = 10.0f;
-    minZ = (minZ < 0.0f) ? minZ * zMult : minZ / zMult;
-    maxZ = (maxZ < 0.0f) ? maxZ / zMult : maxZ * zMult;
-
-    const glm::mat4 lightProj = glm::ortho(minX, maxX, minY, maxY, minZ, maxZ);
+    const glm::mat4 lightProj = glm::ortho(-radius, radius, -radius, radius,
+                                           -radius * zMult, radius * zMult);
     return lightProj * lightView;
 }
 
@@ -147,7 +156,7 @@ void CascadedShadow::Generate(ecs::Registry& reg, const Camera& camera, float as
     for (int i = 0; i < kCascades; ++i) {
         const float cn = (i == 0) ? near : splitFar[i - 1];
         const glm::mat4 subProj = glm::perspective(glm::radians(camera.fov), aspect, cn, splitFar[i]);
-        m_vp[i] = FitCascade(camView, subProj, lightDir);
+        m_vp[i] = FitCascade(camView, subProj, lightDir, m_size);
 
         glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, m_texArray, 0, i);
         glClear(GL_DEPTH_BUFFER_BIT);

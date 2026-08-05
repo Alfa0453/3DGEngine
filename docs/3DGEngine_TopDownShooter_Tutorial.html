@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>3DGEngine — Top-Down Shooter Tutorial (Arena Assault)</title>
+<style>
+  :root{ --ink:#1a1f2b; --muted:#5a6474; --line:#d7dde6; --accent:#c0392b;
+    --accent2:#137a86; --code-bg:#f5f7fb; --ok:#1f8a55; }
+  *{ box-sizing:border-box; }
+  html{ -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+  body{ font-family:"Segoe UI",Arial,sans-serif; color:var(--ink); line-height:1.5;
+        font-size:10.5pt; margin:0; }
+  @page{ size:A4; margin:16mm 15mm 18mm 15mm; }
+  .page{ page-break-after:always; }
+  h1,h2,h3,h4{ line-height:1.2; }
+  h1{ font-size:23pt; margin:0 0 6pt; }
+  h2{ font-size:16pt; margin:18pt 0 8pt; padding-bottom:4pt;
+      border-bottom:2px solid var(--accent); page-break-after:avoid; }
+  h3{ font-size:12.5pt; margin:14pt 0 5pt; color:#22314c; page-break-after:avoid; }
+  p{ margin:5pt 0; } ul,ol{ margin:5pt 0 5pt 18pt; } li{ margin:3pt 0; }
+  code{ font-family:"Consolas","Courier New",monospace; font-size:9pt;
+        background:var(--code-bg); padding:1px 4px; border-radius:3px; }
+  pre{ background:var(--code-bg); border:1px solid var(--line); border-left:3px solid var(--accent2);
+       border-radius:5px; padding:8pt 10pt; overflow:auto; font-size:8.6pt; line-height:1.4;
+       page-break-inside:avoid; white-space:pre; }
+  pre code{ background:none; padding:0; }
+  .muted{ color:var(--muted); } .lead{ font-size:12pt; color:#33405a; }
+  .lesson{ display:flex; align-items:baseline; gap:10pt; margin-top:6pt; }
+  .lesson .n{ font-size:20pt; font-weight:800; color:var(--accent);
+      border:2px solid var(--accent); border-radius:8px; padding:1pt 9pt; }
+  .goal{ background:#fdf0ee; border:1px solid #f2cfc9; border-radius:6px; padding:7pt 10pt;
+      margin:8pt 0; font-size:9.5pt; }
+  .goal b{ color:var(--accent); text-transform:uppercase; font-size:8pt; letter-spacing:.5px; }
+  .steps{ counter-reset:step; list-style:none; margin-left:0; }
+  .steps > li{ counter-increment:step; position:relative; padding-left:26pt; margin:7pt 0; }
+  .steps > li::before{ content:counter(step); position:absolute; left:0; top:-1pt;
+      width:18pt; height:18pt; background:var(--accent2); color:#fff; border-radius:50%;
+      font-size:9pt; font-weight:700; display:flex; align-items:center; justify-content:center; }
+  .check{ background:#eafaf1; border:1px solid #c3ead4; border-left:4px solid var(--ok);
+      border-radius:6px; padding:7pt 10pt; margin:9pt 0; font-size:9.5pt; page-break-inside:avoid; }
+  .check b{ color:var(--ok); text-transform:uppercase; font-size:8pt; letter-spacing:.5px; }
+  .tip{ background:#e9f6f8; border:1px solid #bfe3e8; border-radius:6px; padding:7pt 10pt;
+      margin:9pt 0; font-size:9.5pt; page-break-inside:avoid; }
+  .tip b{ text-transform:uppercase; font-size:8pt; letter-spacing:.5px; color:var(--accent2); }
+  .kbd{ font-family:Consolas,monospace; font-size:8.5pt; border:1px solid #c3ccd8;
+        border-bottom-width:2px; border-radius:4px; padding:0 4px; background:#fff; }
+  .cover{ height:250mm; display:flex; flex-direction:column; justify-content:center; }
+  .cover .badge{ font-size:9.5pt; letter-spacing:3px; text-transform:uppercase; color:var(--accent); }
+  .cover h1{ font-size:40pt; margin:6pt 0; }
+  .cover .sub{ font-size:15pt; color:var(--muted); }
+  .rule{ height:4px; width:130px; background:linear-gradient(90deg,var(--accent),var(--accent2)); margin:12pt 0; }
+  .toc ol{ margin-left:16pt; } .toc a{ color:var(--ink); text-decoration:none; }
+  table{ border-collapse:collapse; width:100%; margin:7pt 0; font-size:9pt; page-break-inside:avoid; }
+  th,td{ border:1px solid var(--line); padding:4pt 7pt; text-align:left; vertical-align:top; }
+  th{ background:#eef2f8; }
+  a{ color:var(--accent2); } .small{ font-size:8.5pt; }
+</style>
+</head>
+<body>
+
+<section class="page cover">
+  <div class="badge">A hands-on 3DGEngine tutorial</div>
+  <div class="rule"></div>
+  <h1>Arena Assault</h1>
+  <div class="sub">Build a twin-stick top-down shooter — and learn the engine while you do it.</div>
+  <div class="rule"></div>
+  <p class="muted">Nine lessons: an overhead arena, a twin-stick hero that moves and aims
+  independently, bullets you spawn and that deal damage, waves of chasing enemies, health and
+  score, a HUD, sound and particle punch, and game-over/restart with a packaged build. Every
+  lesson names the engine system it teaches. Print to PDF with
+  <span class="kbd">Ctrl</span>+<span class="kbd">P</span> → <em>Save as PDF</em> (A4).</p>
+</section>
+
+<section class="page toc">
+  <h2>What you'll build</h2>
+  <p class="lead">A survival arena: move with WASD, aim/fire with the arrow keys (classic
+  twin-stick), blast waves of enemies that path toward you, watch your health, rack up a score, and
+  restart on death — then ship it as a standalone.</p>
+  <h3>Lessons</h3>
+  <div class="toc"><ol>
+    <li>Set up the project &amp; import <span class="muted">— projects, importing</span></li>
+    <li>The arena &amp; overhead camera <span class="muted">— scenes, lighting, isometric controller</span></li>
+    <li>Twin-stick movement &amp; aim <span class="muted">— scripting, input, facing</span></li>
+    <li>Shooting <span class="muted">— spawning, velocity, trigger hits, lifetimes</span></li>
+    <li>Enemies &amp; waves <span class="muted">— nav agents, timers, spawners</span></li>
+    <li>Health, damage &amp; score <span class="muted">— Health, contact damage, GameMode</span></li>
+    <li>The HUD <span class="muted">— UI binding</span></li>
+    <li>Polish: audio &amp; particles <span class="muted">— cues, muzzle/hit/death FX</span></li>
+    <li>Game over, restart &amp; ship <span class="muted">— GameMode, packaging</span></li>
+  </ol></div>
+  <div class="tip"><b>Assets</b> You can build this entirely from the editor's <b>primitive
+  meshes</b>: a capsule for the player, capsules/cubes for enemies, a small sphere for bullets, a
+  plane for the floor. Real art is optional — swap it in later. A few short WAVs (shoot, hit,
+  explode) add a lot of punch.</div>
+</section>
+
+<section class="page">
+  <div class="lesson"><span class="n">1</span><h1>Set up the project &amp; import</h1></div>
+  <div class="goal"><b>You'll learn</b> Projects (with isolated scripts) and importing — or how to
+  work purely from primitives.</div>
+  <ol class="steps">
+    <li><b>File → New Project</b>, name it <code>ArenaAssault</code>. It gets a Content folder and
+      an empty script set of its own.</li>
+    <li>Optional: drag art onto the window and use the Import dialog (models auto-detect skeletal
+      vs static; textures get sRGB/Smooth). For this tutorial the built-in primitives are enough —
+      capsule = player/enemies, sphere = bullet, plane = floor.</li>
+    <li>Drop a few short WAVs into <code>Content/SFX/</code> (<code>shoot.wav</code>,
+      <code>hit.wav</code>, <code>explode.wav</code>) so the audio lines later just work.</li>
+  </ol>
+  <div class="check"><b>Checkpoint</b> A fresh <code>ArenaAssault</code> project is open.</div>
+</section>
+
+<section class="page">
+  <div class="lesson"><span class="n">2</span><h1>The arena &amp; overhead camera</h1></div>
+  <div class="goal"><b>You'll learn</b> Building a scene, and the Isometric Player Controller that
+  gives you a fixed overhead camera with camera-relative WASD movement — perfect for top-down.</div>
+  <ol class="steps">
+    <li><b>Floor</b> — add a Plane, scale it ~40×40, give it a material and a <b>Static Collider</b>
+      (Physics Setup → Static Collider).</li>
+    <li><b>Walls</b> — ring the arena with four Cubes scaled into walls; add Static Colliders so
+      nothing escapes.</li>
+    <li><b>Player</b> — add a Capsule, name it <code>Player</code>. Give it a <b>Capsule Collider</b>
+      and a <b>Player Controller</b> (Inspector → + Add Component → Player Controller), and set
+      <b>Camera Mode = Isometric</b>. Tune <em>Isometric Distance</em>, <em>Yaw</em>, and
+      <em>Pitch</em> for a comfortable overhead angle (e.g. pitch ≈ −60°).</li>
+    <li>Add a <b>Light</b> (Directional) as the sun and set the sky/environment for ambient.</li>
+    <li>Add a <b>PlayerStart</b> and press <b>Play</b>. The camera sits overhead; WASD moves the
+      player relative to the screen, and the camera follows.</li>
+  </ol>
+  <div class="check"><b>Checkpoint</b> An overhead view of the arena with a capsule you can drive
+  around with WASD.</div>
+  <div class="tip"><b>Why Isometric?</b> Isometric mode gives a fixed camera angle and
+  screen-relative movement, so "up" on the keyboard always moves the player "up" on screen — exactly
+  what a top-down game wants. The player's body faces its movement direction; aiming will be
+  independent (next lesson).</div>
+</section>
+
+<section class="page">
+  <div class="lesson"><span class="n">3</span><h1>Twin-stick movement &amp; aim</h1></div>
+  <div class="goal"><b>You'll learn</b> Reading input in a script to add an independent <em>aim</em>
+  axis on top of the controller's movement — the heart of a twin-stick shooter.</div>
+  <p>Movement is already handled by the Isometric Player Controller (WASD). We add a script that
+  reads the <b>arrow keys</b> as an aim direction and (next lesson) fires along it. Body faces where
+  you move; bullets go where you aim.</p>
+  <ol class="steps">
+    <li>Select <code>Player</code> → Inspector → <b>+ Add Script</b> → <code>PlayerAim</code> →
+      Create + Attach.</li>
+    <li>Write the aim axis (we wire up firing in Lesson 4):</li>
+  </ol>
+  <pre><code>#include &lt;engine/gameplay/Script.h&gt;
+#include &lt;glm/glm.hpp&gt;
+
+class PlayerAim final : public engine::Script {
+public:
+    void OnUpdate(float dt) override {
+        glm::vec3 aim(0.0f);
+        if (Input().KeyDown(GLFW_KEY_UP))    aim.z -= 1.0f;
+        if (Input().KeyDown(GLFW_KEY_DOWN))  aim.z += 1.0f;
+        if (Input().KeyDown(GLFW_KEY_LEFT))  aim.x -= 1.0f;
+        if (Input().KeyDown(GLFW_KEY_RIGHT)) aim.x += 1.0f;
+
+        m_firing = glm::length(aim) &gt; 0.1f;
+        if (m_firing) m_aim = glm::normalize(aim);   // keep the last aim direction
+        // (firing added next lesson)
+    }
+protected:
+    glm::vec3 m_aim{0.0f, 0.0f, -1.0f};   // where the gun points
+    bool      m_firing = false;
+};</code></pre>
+  <div class="check"><b>Checkpoint</b> The code compiles and attaches (Compile Scripts, Play). It
+  doesn't do anything visible yet — the aim direction is just being tracked, ready to shoot.</div>
+  <div class="tip"><b>Movement axis note</b> Here "up" on screen is −Z and right is +X, matching the
+  Isometric camera's default orientation. If your camera yaw is rotated, rotate the aim vector by
+  the same yaw so arrows still map to screen directions.</div>
+</section>
+
+<section class="page">
+  <div class="lesson"><span class="n">4</span><h1>Shooting</h1></div>
+  <div class="goal"><b>You'll learn</b> Spawning objects at runtime, moving them with velocity,
+  detecting hits with triggers, and giving them a lifetime — a complete projectile.</div>
+
+  <h3>4a. The bullet prototype</h3>
+  <ol class="steps">
+    <li>Add a small <b>Sphere</b>, name it <code>Bullet</code>. Give it: a <b>Trigger</b> collider
+      (Physics Setup → Trigger), a <b>Linear Velocity</b> component (+ Add Component → Linear
+      Velocity — this makes the runtime move it), and a bright emissive material.</li>
+    <li>Add a <code>Bullet</code> script to it. It damages the first enemy it overlaps and
+      self-destructs after a short life:</li>
+  </ol>
+  <pre><code>#include &lt;engine/gameplay/Script.h&gt;
+
+class Bullet final : public engine::Script {
+public:
+    void OnCreate() override {
+        Delay(1.5f, [this]{ DestroySelf(); });          // lifetime, so strays vanish
+    }
+    void OnFixedUpdate(float) override {                // overlap tests on the fixed step
+        engine::ecs::Entity target = engine::ecs::kNull;
+        Registry()-&gt;view&lt;Health, engine::ecs::RuntimeName&gt;().each(
+            [&](engine::ecs::Entity e, Health&amp; h, engine::ecs::RuntimeName&amp; n) {
+                if (target == engine::ecs::kNull &amp;&amp; n.value != "Player"
+                    &amp;&amp; h.alive &amp;&amp; IsTriggerTouching(e))
+                    target = e;                          // first live non-player we're touching
+            });
+        if (target != engine::ecs::kNull) {
+            if (auto* h = Registry()-&gt;TryGet&lt;Health&gt;(target)) h-&gt;Damage(m_damage);
+            Particles().Burst(10);                       // impact spark
+            DestroySelf();
+        }
+    }
+private:
+    float m_damage = 34.0f;
+};</code></pre>
+  <ol class="steps" start="3">
+    <li>Turn the Bullet into a <b>prefab</b> (right-click → Create Prefab → <code>Bullet.3dgprefab</code>)
+      or just keep it as a named prototype in the scene — either way <code>SpawnFromObject("Bullet",…)</code>
+      clones it. Move the prototype off-screen (or disable it) so the loose one isn't in play.</li>
+  </ol>
+
+  <h3>4b. Fire from the player</h3>
+  <p>Extend <code>PlayerAim</code> to spawn a bullet along the aim vector on a fixed cadence:</p>
+  <pre><code>    void OnUpdate(float dt) override {
+        glm::vec3 aim(0.0f);
+        if (Input().KeyDown(GLFW_KEY_UP))    aim.z -= 1.0f;
+        if (Input().KeyDown(GLFW_KEY_DOWN))  aim.z += 1.0f;
+        if (Input().KeyDown(GLFW_KEY_LEFT))  aim.x -= 1.0f;
+        if (Input().KeyDown(GLFW_KEY_RIGHT)) aim.x += 1.0f;
+        m_firing = glm::length(aim) &gt; 0.1f;
+        if (m_firing) m_aim = glm::normalize(aim);
+
+        m_cooldown -= dt;
+        if (m_firing &amp;&amp; m_cooldown &lt;= 0.0f) { Fire(); m_cooldown = m_fireRate; }
+    }
+private:
+    void Fire() {
+        auto* t = Transform(); if (!t) return;
+        const glm::vec3 muzzle = t-&gt;position + m_aim * 0.8f + glm::vec3(0, 0.8f, 0);
+        engine::ecs::Entity b = SpawnFromObject("Bullet", muzzle);
+        if (auto* v = Registry()-&gt;TryGet&lt;engine::ecs::LinearVelocity&gt;(b))
+            v-&gt;velocity = m_aim * m_bulletSpeed;
+        Audio().PlayCue("Content/SFX/shoot.wav");
+        Particles().Burst(6);                            // muzzle flash on the player
+    }
+    float m_cooldown = 0.0f, m_fireRate = 0.14f, m_bulletSpeed = 26.0f;</code></pre>
+  <div class="check"><b>Checkpoint</b> Hold an arrow key and a stream of glowing bullets fires that
+  way while WASD moves you independently. (Nothing dies yet — enemies arrive next.) If bullets don't
+  move, confirm the Bullet prototype has an enabled <b>Linear Velocity</b> component.</div>
+  <div class="tip"><b>Fast bullets &amp; tunnelling</b> Trigger overlap can miss very fast, thin
+  targets. Keep bullet speed moderate, make enemies not razor-thin, or (advanced) sweep a short
+  raycast along the bullet's motion each fixed step for hit-scan accuracy.</div>
+</section>
+
+<section class="page">
+  <div class="lesson"><span class="n">5</span><h1>Enemies &amp; waves</h1></div>
+  <div class="goal"><b>You'll learn</b> Nav Agents that chase a named target, and a spawner that uses
+  timers to send escalating waves at the player.</div>
+
+  <h3>5a. The enemy prototype</h3>
+  <ol class="steps">
+    <li>Bake nav: <b>Navigation</b> preview → set bounds over the floor → <b>Build</b>.</li>
+    <li>Add a Capsule, name it <code>Enemy</code>. Give it a Capsule <b>Collider</b>, a
+      <b>Health</b> (e.g. 60), and a <b>Nav Agent</b> with <b>Chase Target = "Player"</b>, a Speed
+      of ~3, and a Repath Interval ~0.4s. It will path straight to the player.</li>
+    <li>Add an <code>Enemy</code> script for contact damage and death rewards:</li>
+  </ol>
+  <pre><code>#include &lt;engine/gameplay/Script.h&gt;
+
+class Enemy final : public engine::Script {
+public:
+    void OnFixedUpdate(float dt) override {
+        if (auto* h = TryGet&lt;Health&gt;(); h &amp;&amp; !h-&gt;alive) { Die(); return; }
+
+        m_hitCooldown -= dt;
+        auto* me = Transform();
+        auto* pt = FindTransform("Player");
+        if (me &amp;&amp; pt &amp;&amp; glm::length(pt-&gt;position - me-&gt;position) &lt; 1.5f
+            &amp;&amp; m_hitCooldown &lt;= 0.0f) {
+            if (auto* ph = TryGet&lt;Health&gt;(FindObject("Player"))) ph-&gt;Damage(12.0f);
+            m_hitCooldown = 0.6f;                          // damage tick
+        }
+    }
+private:
+    void Die() {
+        if (m_dead) return; m_dead = true;
+        Game()-&gt;AddScore(10);
+        Particles().Burst(30);
+        Audio().PlayCue("Content/SFX/explode.wav");
+        DestroySelf();
+    }
+    float m_hitCooldown = 0.0f; bool m_dead = false;
+};</code></pre>
+  <ol class="steps" start="4">
+    <li>Make <code>Enemy</code> a prefab/prototype and move the loose one off-screen.</li>
+  </ol>
+
+  <h3>5b. The wave spawner</h3>
+  <p>Add an empty object <code>Director</code> with a <code>WaveSpawner</code> script. It rings the
+  arena with enemies, ramping each wave:</p>
+  <pre><code>#include &lt;engine/gameplay/Script.h&gt;
+#include &lt;cmath&gt;
+#include &lt;cstdlib&gt;
+
+class WaveSpawner final : public engine::Script {
+public:
+    void OnCreate() override { BeginWave(); }
+
+    void OnUpdate(float dt) override {
+        m_spawnTimer -= dt;
+        if (m_left &gt; 0 &amp;&amp; m_spawnTimer &lt;= 0.0f) {
+            SpawnOne();  --m_left;  m_spawnTimer = m_interval;
+        }
+        m_waveTimer -= dt;
+        if (m_left == 0 &amp;&amp; m_waveTimer &lt;= 0.0f) BeginWave();   // next wave after a breather
+    }
+private:
+    void BeginWave() {
+        ++m_wave;
+        m_left     = 4 + m_wave * 2;                       // more each wave
+        m_interval = std::max(0.25f, 0.8f - m_wave * 0.05f);
+        m_waveTimer = m_left * m_interval + 6.0f;
+        Game()-&gt;SetMessage("Wave " + std::to_string(m_wave));
+    }
+    void SpawnOne() {
+        const float a = (float)std::rand() / RAND_MAX * 6.2831853f;
+        SpawnFromObject("Enemy", glm::vec3(std::cos(a) * 16.0f, 0.0f, std::sin(a) * 16.0f));
+    }
+    int m_wave = 0, m_left = 0;
+    float m_spawnTimer = 0.0f, m_interval = 0.8f, m_waveTimer = 0.0f;
+};</code></pre>
+  <div class="check"><b>Checkpoint</b> Waves of capsules stream in from the arena edge and path
+  toward you; your bullets kill them (Health hits 0 → they explode and score). If they don't move,
+  re-check the navmesh bake and the Nav Agent's Chase Target = "Player".</div>
+</section>
+
+<section class="page">
+  <div class="lesson"><span class="n">6</span><h1>Health, damage &amp; score</h1></div>
+  <div class="goal"><b>You'll learn</b> Giving the player Health, taking contact damage, and ending
+  the run on death via GameMode.</div>
+  <ol class="steps">
+    <li>Select <code>Player</code> → add a <b>Health</b> component (e.g. 100). The enemy script
+      already calls <code>Damage(12)</code> on the object named "Player", so contact now hurts.</li>
+    <li>Add a <code>PlayerState</code> script to the Player that ends the run at zero HP and tracks a
+      best score:</li>
+  </ol>
+  <pre><code>#include &lt;engine/gameplay/Script.h&gt;
+
+class PlayerState final : public engine::Script {
+public:
+    void OnUpdate(float) override {
+        if (m_over) return;
+        if (auto* h = TryGet&lt;Health&gt;(); h &amp;&amp; !h-&gt;alive) {
+            m_over = true;
+            SaveInt("bestScore", std::max(GetSavedInt("bestScore"), Game()-&gt;Score()));
+            Game()-&gt;SetMessage("You were overrun!");
+            Game()-&gt;Lose();                                // GameMode → end screen (Lesson 9)
+        }
+    }
+private:
+    bool m_over = false;
+};</code></pre>
+  <div class="check"><b>Checkpoint</b> Let an enemy touch you a few times — your HP falls and the run
+  ends when it hits 0. Score climbs as you kill enemies (each enemy adds 10 via its
+  <code>Die()</code>).</div>
+  <div class="tip"><b>Score already works</b> Because each enemy calls <code>Game()-&gt;AddScore(10)</code>
+  on death, the shared GameMode score is live — the HUD (next) reads it with no extra code.</div>
+</section>
+
+<section class="page">
+  <div class="lesson"><span class="n">7</span><h1>The HUD</h1></div>
+  <div class="goal"><b>You'll learn</b> Binding UI widgets to runtime values so the display updates
+  itself.</div>
+  <ol class="steps">
+    <li>HUD editor → add a <b>Health bar</b> bound to the player's <code>Health</code>
+      (<code>healthFraction</code>).</li>
+    <li>Add a text widget <code>Score: {}</code> bound to <code>score</code> (from GameMode).</li>
+    <li>Add a centered <b>message</b> text bound to <code>gamemessage</code> — this shows "Wave N"
+      from the spawner and "You were overrun!" on death.</li>
+    <li>Save <code>Game.hud</code> and reference it from the scene.</li>
+  </ol>
+  <div class="check"><b>Checkpoint</b> Health bar drains under fire, score counts kills, and the wave
+  banner flashes each new wave — all driven by gameplay, no wiring code.</div>
+</section>
+
+<section class="page">
+  <div class="lesson"><span class="n">8</span><h1>Polish: audio &amp; particles</h1></div>
+  <div class="goal"><b>You'll learn</b> Layering sound cues and particle bursts you've already
+  hooked, plus adaptive music that reacts to pressure.</div>
+  <ol class="steps">
+    <li>Your scripts already fire cues (<code>shoot.wav</code> on Fire, <code>explode.wav</code> on
+      enemy death) and particle bursts (muzzle on Fire, impact on Bullet hit, explosion on enemy
+      death). Drop the WAVs at those paths and add particle systems to the Player / Bullet / Enemy
+      prototypes so <code>Particles().Burst(...)</code> has something to play.</li>
+    <li>Author quick systems in the <b>Particle Editor</b>: a bright <em>Muzzle</em> (short cone),
+      an <em>Impact</em> (sparks), and an <em>Explosion</em> (burst + smoke). Attach each to the
+      matching prototype.</li>
+    <li>Add ambient music that intensifies with the wave — put this on <code>Director</code>:</li>
+  </ol>
+  <pre><code>void OnCreate() override { Audio().LoadMusic("Content/Music/arena.adaptive"); }
+// inside BeginWave():   Audio().SetMusicState(m_wave &gt;= 4 ? "intense" : "steady");</code></pre>
+  <div class="check"><b>Checkpoint</b> Shooting cracks, hits spark, enemies pop with a boom, and the
+  music lifts as waves escalate. The arena now feels dangerous.</div>
+</section>
+
+<section class="page">
+  <div class="lesson"><span class="n">9</span><h1>Game over, restart &amp; ship</h1></div>
+  <div class="goal"><b>You'll learn</b> The GameMode end screen with restart, and packaging a
+  standalone build.</div>
+  <ol class="steps">
+    <li>You already call <code>Game()-&gt;Lose()</code> on death. In the scene's Game Mode settings,
+      enable <b>Allow Restart</b>. The runtime then shows a centered <b>GAME OVER</b> with your
+      score and <em>"Press R to restart"</em> — <span class="kbd">R</span> reloads the arena.</li>
+    <li>Optionally add a win condition (survive N waves): in <code>WaveSpawner::BeginWave</code>,
+      <code>if (m_wave &gt; GetFieldInt("wavesToWin", 8)) Game()-&gt;Win();</code>.</li>
+    <li>Playtest the full loop: waves ramp, health matters, score climbs, death ends the run, R
+      restarts, the best score persists (<code>bestScore</code>).</li>
+    <li><b>Package</b> — export the runtime scene and build the standalone <code>player</code>. The
+      AssetCooker ships only the assets the scene reaches. Distribute the player executable + the
+      cooked content.</li>
+  </ol>
+  <div class="check"><b>Checkpoint — you shipped a shooter.</b> An overhead arena, twin-stick
+  movement + aim, spawned projectiles with real hit detection, escalating waves of pathing enemies,
+  health/score/HUD, audio and particle feedback, game-over with restart, and a standalone build.</div>
+
+  <h2>Where to go next</h2>
+  <table>
+    <tr><th>Add…</th><th>Using</th></tr>
+    <tr><td>Weapon pickups (spread, rapid, rocket)</td><td>Trigger pickups that set fields on the PlayerAim script (<code>m_fireRate</code>, bullet count)</td></tr>
+    <tr><td>A dash with i-frames &amp; slow-mo</td><td><code>SetGlobalTimeDilation()</code> / <code>HitStop()</code> + a brief invulnerable flag</td></tr>
+    <tr><td>Screen shake on explosions</td><td><code>Camera().Shake(intensity, duration, freq)</code></td></tr>
+    <tr><td>Mouse aiming instead of arrow keys</td><td>A cursor→ground ray to get the aim point, then aim = normalize(point − player)</td></tr>
+    <tr><td>Boss with attack patterns</td><td>A <b>Behavior Graph</b> (<code>.btgraph</code>) driving phases</td></tr>
+    <tr><td>Persistent high-score table</td><td><code>SaveInt/GetSavedInt</code> across runs; a menu scene via <code>RequestSceneLoad</code></td></tr>
+  </table>
+  <div class="tip"><b>Deeper docs</b> For exact APIs and every field, see the <em>Detailed Systems
+  Manual</em> and the per-header reference under <code>docs/engine-systems/</code>. Print this
+  tutorial with A4 margins for correct pagination.</div>
+</section>
+
+</body>
+</html>

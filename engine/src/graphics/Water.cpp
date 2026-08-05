@@ -188,6 +188,38 @@ float linearEyeDepth(float depth) {
         / max(uFarPlane + uNearPlane - z * (uFarPlane - uNearPlane), 0.0001);
 }
 
+// Screen-space reflection of the OPAQUE scene, reusing the colour + depth buffers already
+// bound for refraction -- so it reflects real scene objects with no extra scene pass. Marches
+// the reflection ray in world space, projecting each step to screen space and comparing eye
+// depths; a hit within a thin band returns that pixel's colour. Misses fall back to the sky.
+uniform mat4  uViewProj;       // also declared in the vertex stage; same program uniform
+uniform int   uSsrEnabled;
+uniform float uSsrStrength;
+uniform float uSsrDistance;    // world-space march length
+uniform float uSsrThickness;   // eye-space depth band that counts as a hit
+bool ssrReflect(vec3 P, vec3 R, out vec3 hitColor) {
+    hitColor = vec3(0.0);
+    const int STEPS = 20;
+    float stepLen = max(uSsrDistance, 0.5) / float(STEPS);
+    vec3 pos = P + R * (stepLen * 0.5);
+    for (int i = 0; i < STEPS; ++i) {
+        pos += R * stepLen;
+        vec4 clip = uViewProj * vec4(pos, 1.0);
+        if (clip.w <= 0.0) return false;
+        vec3 ndc = clip.xyz / clip.w;
+        vec2 uv = ndc.xy * 0.5 + 0.5;
+        if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return false;  // off screen
+        float sceneD = texture(uSceneDepth, uv).r;
+        if (sceneD >= 0.999999) continue;                       // sky pixel -> keep marching
+        float diff = linearEyeDepth(ndc.z * 0.5 + 0.5) - linearEyeDepth(sceneD);
+        if (diff > 0.0 && diff < uSsrThickness) {                // ray just behind the surface
+            hitColor = texture(uSceneColor, uv).rgb;
+            return true;
+        }
+    }
+    return false;
+}
+
 void main() {
     vec2 xz = vWorldPos.xz;
     float dist = length(uCamPos - vWorldPos);
@@ -252,14 +284,25 @@ void main() {
         transmitted = mix(sceneBehind, body, absorption);
     }
 
+    vec3 reflectionDir = reflect(-V, N);
     vec3 reflected = uReflection;
     if (uHasEnvironment != 0) {
-        vec3 reflectionDir = reflect(-V, N);
         vec3 environment = textureLod(
             uEnvironment, reflectionDir,
             clamp(uReflectionRoughness, 0.0, 1.0) * uMaxReflectionLod).rgb;
         reflected = mix(uReflection, environment,
                         clamp(uEnvironmentReflectionStrength, 0.0, 1.0));
+    }
+    // Screen-space scene reflection on top of the sky/environment (cheap: reuses the bound
+    // opaque buffers). Faded near the screen edges so reflections don't pop at the borders;
+    // off-screen / missed rays keep the environment reflection, so it always looks sensible.
+    if (uSsrEnabled != 0 && uHasSceneColor != 0 && uHasSceneDepth != 0) {
+        vec3 ssrColor;
+        if (ssrReflect(vWorldPos, reflectionDir, ssrColor)) {
+            vec2 edge = abs(screenUv - 0.5) * 2.0;
+            float fade = clamp(1.0 - pow(max(edge.x, edge.y), 4.0), 0.0, 1.0);
+            reflected = mix(reflected, ssrColor, clamp(uSsrStrength, 0.0, 1.0) * fade);
+        }
     }
     vec3 color = mix(transmitted, reflected, fresnel * 0.72);
 
@@ -565,6 +608,12 @@ void Water::Draw(const Camera& camera, float aspect,
     m_shader->SetFloat("uRefractionStrength", m_config.refractionStrength);
     m_shader->SetFloat("uReflectionRoughness", m_config.reflectionRoughness);
     m_shader->SetFloat("uEnvironmentReflectionStrength", m_config.environmentReflectionStrength);
+    // Screen-space scene reflection only makes sense when the opaque scene textures are bound.
+    m_shader->SetInt("uSsrEnabled",
+        (m_config.reflectScene && sceneColorTexture != 0 && sceneDepthTexture != 0) ? 1 : 0);
+    m_shader->SetFloat("uSsrStrength", m_config.ssrStrength);
+    m_shader->SetFloat("uSsrDistance", m_config.ssrDistance);
+    m_shader->SetFloat("uSsrThickness", m_config.ssrThickness);
     m_shader->SetFloat("uAbsorptionStrength", m_config.absorptionStrength);
     m_shader->SetFloat("uCausticsStrength", m_config.causticsStrength);
     m_shader->SetFloat("uCausticsScale", m_config.causticsScale);

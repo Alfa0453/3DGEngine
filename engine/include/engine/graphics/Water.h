@@ -48,6 +48,13 @@ struct WaterConfig {
     float     refractionStrength = 0.018f; // screen UV displacement by wave normal
     float     reflectionRoughness = 0.12f; // cubemap mip selection (0 mirror .. 1 rough)
     float     environmentReflectionStrength = 0.85f;
+    // Screen-space scene reflection: reflects real scene objects by reusing the opaque
+    // colour+depth buffers already bound for refraction (no extra scene pass). Off-screen /
+    // missed rays fall back to the environment reflection above.
+    bool      reflectScene = true;         // enable SSR of scene objects on the surface
+    float     ssrStrength = 0.85f;         // blend of the scene reflection over the sky (0..1)
+    float     ssrDistance = 30.0f;         // world-space ray-march length
+    float     ssrThickness = 1.2f;         // eye-space depth band counted as a hit
     float     absorptionStrength = 0.75f;  // how strongly depth tints refracted colour
     float     causticsStrength = 0.25f;
     float     causticsScale = 1.5f;

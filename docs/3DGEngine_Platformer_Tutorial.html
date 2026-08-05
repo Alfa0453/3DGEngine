@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>3DGEngine — Platformer Tutorial (Cloud Climber)</title>
+<style>
+  :root{ --ink:#1a1f2b; --muted:#5a6474; --line:#d7dde6; --accent:#2e9e5b;
+    --accent2:#6a4fd0; --code-bg:#f5f7fb; --ok:#1f8a55; }
+  *{ box-sizing:border-box; }
+  html{ -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+  body{ font-family:"Segoe UI",Arial,sans-serif; color:var(--ink); line-height:1.5;
+        font-size:10.5pt; margin:0; }
+  @page{ size:A4; margin:16mm 15mm 18mm 15mm; }
+  .page{ page-break-after:always; }
+  h1,h2,h3,h4{ line-height:1.2; }
+  h1{ font-size:23pt; margin:0 0 6pt; }
+  h2{ font-size:16pt; margin:18pt 0 8pt; padding-bottom:4pt;
+      border-bottom:2px solid var(--accent); page-break-after:avoid; }
+  h3{ font-size:12.5pt; margin:14pt 0 5pt; color:#22314c; page-break-after:avoid; }
+  p{ margin:5pt 0; } ul,ol{ margin:5pt 0 5pt 18pt; } li{ margin:3pt 0; }
+  code{ font-family:"Consolas","Courier New",monospace; font-size:9pt;
+        background:var(--code-bg); padding:1px 4px; border-radius:3px; }
+  pre{ background:var(--code-bg); border:1px solid var(--line); border-left:3px solid var(--accent2);
+       border-radius:5px; padding:8pt 10pt; overflow:auto; font-size:8.6pt; line-height:1.4;
+       page-break-inside:avoid; white-space:pre; }
+  pre code{ background:none; padding:0; }
+  .muted{ color:var(--muted); } .lead{ font-size:12pt; color:#33405a; }
+  .lesson{ display:flex; align-items:baseline; gap:10pt; margin-top:6pt; }
+  .lesson .n{ font-size:20pt; font-weight:800; color:var(--accent);
+      border:2px solid var(--accent); border-radius:8px; padding:1pt 9pt; }
+  .goal{ background:#edf9f1; border:1px solid #c9e9d5; border-radius:6px; padding:7pt 10pt;
+      margin:8pt 0; font-size:9.5pt; }
+  .goal b{ color:var(--accent); text-transform:uppercase; font-size:8pt; letter-spacing:.5px; }
+  .steps{ counter-reset:step; list-style:none; margin-left:0; }
+  .steps > li{ counter-increment:step; position:relative; padding-left:26pt; margin:7pt 0; }
+  .steps > li::before{ content:counter(step); position:absolute; left:0; top:-1pt;
+      width:18pt; height:18pt; background:var(--accent2); color:#fff; border-radius:50%;
+      font-size:9pt; font-weight:700; display:flex; align-items:center; justify-content:center; }
+  .check{ background:#eafaf1; border:1px solid #c3ead4; border-left:4px solid var(--ok);
+      border-radius:6px; padding:7pt 10pt; margin:9pt 0; font-size:9.5pt; page-break-inside:avoid; }
+  .check b{ color:var(--ok); text-transform:uppercase; font-size:8pt; letter-spacing:.5px; }
+  .tip{ background:#f0edfb; border:1px solid #d8cef5; border-radius:6px; padding:7pt 10pt;
+      margin:9pt 0; font-size:9.5pt; page-break-inside:avoid; }
+  .tip b{ text-transform:uppercase; font-size:8pt; letter-spacing:.5px; color:var(--accent2); }
+  .kbd{ font-family:Consolas,monospace; font-size:8.5pt; border:1px solid #c3ccd8;
+        border-bottom-width:2px; border-radius:4px; padding:0 4px; background:#fff; }
+  .cover{ height:250mm; display:flex; flex-direction:column; justify-content:center; }
+  .cover .badge{ font-size:9.5pt; letter-spacing:3px; text-transform:uppercase; color:var(--accent); }
+  .cover h1{ font-size:40pt; margin:6pt 0; }
+  .cover .sub{ font-size:15pt; color:var(--muted); }
+  .rule{ height:4px; width:130px; background:linear-gradient(90deg,var(--accent),var(--accent2)); margin:12pt 0; }
+  .toc ol{ margin-left:16pt; } .toc a{ color:var(--ink); text-decoration:none; }
+  table{ border-collapse:collapse; width:100%; margin:7pt 0; font-size:9pt; page-break-inside:avoid; }
+  th,td{ border:1px solid var(--line); padding:4pt 7pt; text-align:left; vertical-align:top; }
+  th{ background:#eef2f8; }
+  a{ color:var(--accent2); } .small{ font-size:8.5pt; }
+</style>
+</head>
+<body>
+
+<section class="page cover">
+  <div class="badge">A hands-on 3DGEngine tutorial</div>
+  <div class="rule"></div>
+  <h1>Cloud Climber</h1>
+  <div class="sub">Build a 3D platformer — and learn the engine while you do it.</div>
+  <div class="rule"></div>
+  <p class="muted">Nine lessons: a side-on 2.5D level with the Platformer camera, a jumping hero,
+  moving and crumbling platforms, coins, hazards with respawn checkpoints, a HUD, sound and particle
+  juice, and a goal flag with win/lose and a packaged build. Every lesson names the engine system it
+  teaches. Print to PDF with <span class="kbd">Ctrl</span>+<span class="kbd">P</span> →
+  <em>Save as PDF</em> (A4).</p>
+</section>
+
+<section class="page toc">
+  <h2>What you'll build</h2>
+  <p class="lead">A run-and-jump course: side-on camera, run left/right and jump across gaps and
+  moving platforms, grab coins, dodge spikes, respawn at checkpoints when you fall, and reach the
+  goal flag — then ship it as a standalone.</p>
+  <h3>Lessons</h3>
+  <div class="toc"><ol>
+    <li>Set up the project &amp; import <span class="muted">— projects, importing</span></li>
+    <li>The level &amp; the platformer camera <span class="muted">— scenes, Platformer controller, jump</span></li>
+    <li>Moving &amp; crumbling platforms <span class="muted">— Mover component, scripts, timers</span></li>
+    <li>Coins &amp; score <span class="muted">— triggers, prefabs, GameMode</span></li>
+    <li>Hazards, falling &amp; respawn <span class="muted">— damage triggers, checkpoints</span></li>
+    <li>The HUD <span class="muted">— UI binding</span></li>
+    <li>Feel: jump juice <span class="muted">— camera shake, hit-stop, SFX on landing</span></li>
+    <li>Polish: audio &amp; particles <span class="muted">— cues, dust, sparkles</span></li>
+    <li>The goal, win &amp; ship <span class="muted">— GameMode, packaging</span></li>
+  </ol></div>
+  <div class="tip"><b>Assets</b> Build it entirely from primitives if you like: a capsule hero,
+  cubes for platforms, a small sphere for coins, thin cubes for spikes, a cylinder for the goal. A
+  rigged character with idle/run/jump takes makes it sing, but is optional — the Platformer
+  controller works with a plain capsule too.</div>
+</section>
+
+<section class="page">
+  <div class="lesson"><span class="n">1</span><h1>Set up the project &amp; import</h1></div>
+  <div class="goal"><b>You'll learn</b> Projects (with isolated scripts) and importing — or building
+  from primitives.</div>
+  <ol class="steps">
+    <li><b>File → New Project</b>, name it <code>CloudClimber</code>.</li>
+    <li>Optional: drag a rigged hero FBX (idle/run/jump takes) and any props onto the window; the
+      Import dialog handles types. Otherwise use primitives — a capsule hero works with the
+      Platformer controller.</li>
+    <li>Drop a few WAVs into <code>Content/SFX/</code> (<code>jump.wav</code>, <code>coin.wav</code>,
+      <code>land.wav</code>, <code>hurt.wav</code>).</li>
+  </ol>
+  <div class="check"><b>Checkpoint</b> A fresh <code>CloudClimber</code> project is open.</div>
+</section>
+
+<section class="page">
+  <div class="lesson"><span class="n">2</span><h1>The level &amp; the platformer camera</h1></div>
+  <div class="goal"><b>You'll learn</b> The <b>Platformer</b> Player Controller — a side-on 2.5D
+  camera with run-and-jump movement locked to one axis.</div>
+  <ol class="steps">
+    <li><b>Ground &amp; platforms</b> — add a long thin Cube as the starting ground and several more
+      Cubes as platforms at rising heights and across gaps. Give each a <b>Static Collider</b>
+      (Physics Setup → Static Collider) so you can stand on them.</li>
+    <li><b>Player</b> — add a Capsule, name it <code>Player</code>, give it a Capsule <b>Collider</b>
+      and a <b>Player Controller</b>. Set <b>Camera Mode = Platformer</b>.</li>
+    <li>Set the <b>Camera Yaw</b> to pick the run axis: <code>0</code> = run along Z,
+      <code>-90</code> = run along X. Set the <b>Side Distance</b> for how far back the camera sits.
+      Set a <b>Jump Speed</b> that clears your platform gaps.</li>
+    <li>Add a <b>PlayerStart</b> and press <b>Play</b>. The camera is side-on; move left/right along
+      the run axis, and <span class="kbd">Space</span> jumps. The character turns to face its travel
+      direction automatically.</li>
+  </ol>
+  <div class="check"><b>Checkpoint</b> A side-scrolling view where you run and jump between platforms.
+  Tune Jump Speed and platform spacing until the jumps feel fair.</div>
+  <div class="tip"><b>The run axis</b> Platformer mode confines movement to one horizontal line
+  (chosen by Camera Yaw) so it plays like a 2.5D side-scroller while everything stays 3D. Yaw
+  <code>-90</code> runs along X (classic left-to-right); <code>0</code> runs along Z.</div>
+</section>
+
+<section class="page">
+  <div class="lesson"><span class="n">3</span><h1>Moving &amp; crumbling platforms</h1></div>
+  <div class="goal"><b>You'll learn</b> The authored <b>Mover</b> component for platforms that
+  oscillate, and a script for platforms that crumble when you stand on them.</div>
+
+  <h3>3a. A moving platform (no code)</h3>
+  <ol class="steps">
+    <li>Add a Cube platform with a Static Collider.</li>
+    <li>Inspector → <b>+ Add Component → Mover</b>. Set <b>Axis</b> (e.g. <code>(1,0,0)</code> for
+      horizontal, <code>(0,1,0)</code> for an elevator), a <b>Distance</b>, a <b>Speed</b>, and a
+      <b>Phase</b> to offset it. It now glides back and forth on its own.</li>
+    <li>Play and ride it across a gap.</li>
+  </ol>
+  <div class="tip"><b>Riding platforms</b> Stand on a Mover platform and it carries you. If your
+  character slides off a fast one, lower its Speed or widen the platform — moving-platform "stick"
+  depends on the contact each fixed step.</div>
+
+  <h3>3b. A crumbling platform (script)</h3>
+  <ol class="steps">
+    <li>Add a Cube platform (Static Collider), name it <code>Crumble</code>, and attach a
+      <code>Crumble</code> script:</li>
+  </ol>
+  <pre><code>#include &lt;engine/gameplay/Script.h&gt;
+#include &lt;cmath&gt;
+
+class Crumble final : public engine::Script {
+public:
+    void OnFixedUpdate(float) override {
+        if (m_triggered) return;
+        auto* me = Transform();
+        auto* p  = FindTransform("Player");
+        if (me &amp;&amp; p) {
+            const glm::vec3 d = p-&gt;position - me-&gt;position;   // is the player on top?
+            if (std::abs(d.x) &lt; 1.3f &amp;&amp; std::abs(d.z) &lt; 1.3f &amp;&amp; d.y &gt; 0.0f &amp;&amp; d.y &lt; 1.7f) {
+                m_triggered = true;
+                Delay(0.5f, [this]{ Particles().Burst(20); DestroySelf(); });  // drop out
+            }
+        }
+    }
+private:
+    bool m_triggered = false;
+};</code></pre>
+  <div class="check"><b>Checkpoint</b> One platform glides on a Mover; another vanishes half a second
+  after you land on it — forcing you to keep moving. (We add the puff of dust in Lesson 8.)</div>
+</section>
+
+<section class="page">
+  <div class="lesson"><span class="n">4</span><h1>Coins &amp; score</h1></div>
+  <div class="goal"><b>You'll learn</b> Trigger pickups, GameMode score, and reusing objects with
+  prefabs — the platformer's collectibles.</div>
+  <ol class="steps">
+    <li>Add a small Sphere, name it <code>Coin</code>, give it a <b>Trigger</b> collider and a
+      bright emissive material.</li>
+    <li>Attach a <code>Coin</code> script:</li>
+  </ol>
+  <pre><code>#include &lt;engine/gameplay/Script.h&gt;
+
+class Coin final : public engine::Script {
+public:
+    void OnUpdate(float dt) override {                       // bob + spin
+        m_t += dt;
+        if (auto* t = Transform()) {
+            t-&gt;position.y += std::sin(m_t * 3.0f) * dt * 0.3f;
+            t-&gt;rotation = glm::rotate(t-&gt;rotation, glm::radians(120.0f*dt), glm::vec3(0,1,0));
+        }
+    }
+    void OnFixedUpdate(float) override {
+        if (WasTriggerEntered(FindObject("Player"))) {
+            Game()-&gt;AddScore(1);
+            Audio().PlayCue("Content/SFX/coin.wav");
+            Particles().Burst(16);
+            DestroySelf();
+        }
+    }
+private:
+    float m_t = 0.0f;
+};</code></pre>
+  <ol class="steps" start="3">
+    <li>Make it a <b>prefab</b> (<code>Coin.3dgprefab</code>) and line coins along your jump arcs and
+      over gaps to reward risky routes.</li>
+  </ol>
+  <div class="check"><b>Checkpoint</b> Coins bob and spin, vanish on touch, and the score rises.
+  You've reused a prefab and read <code>Game()</code>.</div>
+</section>
+
+<section class="page">
+  <div class="lesson"><span class="n">5</span><h1>Hazards, falling &amp; respawn</h1></div>
+  <div class="goal"><b>You'll learn</b> Damage triggers, a kill-plane for falls, checkpoints via the
+  shared key/value store, and respawning the player.</div>
+
+  <h3>5a. Player lives &amp; respawn</h3>
+  <ol class="steps">
+    <li>Give <code>Player</code> a <b>Health</b> component with hp = 3 (three lives).</li>
+    <li>Attach a <code>PlayerLife</code> script that respawns on a fall and ends the game at zero
+      lives. Checkpoints (next) store the respawn point in the shared store:</li>
+  </ol>
+  <pre><code>#include &lt;engine/gameplay/Script.h&gt;
+
+class PlayerLife final : public engine::Script {
+public:
+    void OnCreate() override {
+        m_start = Transform() ? Transform()-&gt;position : glm::vec3(0);
+        SaveVec3("respawn", m_start);                       // initial checkpoint = start
+    }
+    void OnFixedUpdate(float) override {
+        auto* t = Transform(); if (!t) return;
+        if (t-&gt;position.y &lt; m_killY) LoseLifeAndRespawn();   // fell off the world
+
+        if (auto* h = TryGet&lt;Health&gt;(); h &amp;&amp; !h-&gt;alive) {
+            Game()-&gt;SetMessage("Out of lives!");
+            Game()-&gt;Lose();
+        }
+    }
+    void LoseLifeAndRespawn() {
+        if (auto* h = TryGet&lt;Health&gt;()) h-&gt;Damage(1.0f);      // -1 life
+        Audio().PlayCue("Content/SFX/hurt.wav");
+        if (auto* t = Transform()) t-&gt;position = GetSavedVec3("respawn", m_start);
+        if (auto* rb = TryGet&lt;engine::ecs::RigidBody&gt;()) rb-&gt;velocity = glm::vec3(0);
+    }
+private:
+    glm::vec3 m_start{0};
+    float m_killY = -10.0f;
+};</code></pre>
+
+  <h3>5b. Spikes &amp; checkpoints</h3>
+  <ol class="steps">
+    <li><b>Spike</b> — a thin Cube with a <b>Trigger</b> collider and a <code>Spike</code> script
+      that hurts and respawns the player:</li>
+  </ol>
+  <pre><code>void OnFixedUpdate(float) override {
+    if (WasTriggerEntered(FindObject("Player"))) {
+        if (auto* pt = FindTransform("Player"))
+            pt-&gt;position = GetSavedVec3("respawn", pt-&gt;position);
+        if (auto* h = TryGet&lt;Health&gt;(FindObject("Player"))) h-&gt;Damage(1.0f);
+        Audio().PlayCue("Content/SFX/hurt.wav");
+    }
+}</code></pre>
+  <ol class="steps" start="2">
+    <li><b>Checkpoint</b> — a Trigger volume with a <code>Checkpoint</code> script that records the
+      respawn point everyone reads:</li>
+  </ol>
+  <pre><code>void OnFixedUpdate(float) override {
+    if (WasTriggerEntered(FindObject("Player"))) {
+        if (auto* t = Transform()) SaveVec3("respawn", t-&gt;position + glm::vec3(0,1,0));
+        Game()-&gt;SetMessage("Checkpoint!");
+    }
+}</code></pre>
+  <div class="check"><b>Checkpoint</b> Falling off or touching spikes costs a life and warps you to
+  the last checkpoint; three deaths ends the run. Checkpoints and death share one value —
+  <code>"respawn"</code> in the key/value store — so no script has to call another.</div>
+</section>
+
+<section class="page">
+  <div class="lesson"><span class="n">6</span><h1>The HUD</h1></div>
+  <div class="goal"><b>You'll learn</b> Binding UI to runtime values — coins and lives that update
+  themselves.</div>
+  <ol class="steps">
+    <li>HUD editor → add a text <code>Coins: {}</code> bound to <code>score</code>.</li>
+    <li>Add a <b>lives</b> display bound to the player's <code>Health</code> (the health bar, or a
+      text bound to <code>hp</code>). With hp = 3, this reads as three lives.</li>
+    <li>Add a centered <b>message</b> bound to <code>gamemessage</code> — shows "Checkpoint!",
+      "Out of lives!", and your win text.</li>
+    <li>Save <code>Game.hud</code> and reference it from the scene.</li>
+  </ol>
+  <div class="check"><b>Checkpoint</b> Coins and lives update live as you play, and banners appear at
+  checkpoints and on death — no glue code.</div>
+</section>
+
+<section class="page">
+  <div class="lesson"><span class="n">7</span><h1>Feel: jump juice</h1></div>
+  <div class="goal"><b>You'll learn</b> Small feedback that makes jumping feel great — a landing
+  thud, camera shake, and a jump cue — using the camera and audio APIs.</div>
+  <ol class="steps">
+    <li>Attach a <code>JumpJuice</code> script to the Player. It infers landings from vertical speed
+      (no controller internals needed):</li>
+  </ol>
+  <pre><code>#include &lt;engine/gameplay/Script.h&gt;
+
+class JumpJuice final : public engine::Script {
+public:
+    void OnUpdate(float dt) override {
+        auto* t = Transform();
+        if (t &amp;&amp; dt &gt; 0.0f) {
+            const float vy = (t-&gt;position.y - m_lastY) / dt;
+            m_lastY = t-&gt;position.y;
+            if (m_wasFalling &amp;&amp; vy &gt; -0.5f) {              // was falling, now stopped → landed
+                Camera().Shake(0.22f, 0.14f, 24.0f);
+                Audio().PlayCue("Content/SFX/land.wav");
+                Particles().Burst(10);                    // dust puff (Lesson 8)
+            }
+            m_wasFalling = vy &lt; -3.0f;                     // remember a real fall
+        }
+        if (Input().KeyPressed(GLFW_KEY_SPACE))
+            Audio().PlayCue("Content/SFX/jump.wav");
+    }
+private:
+    float m_lastY = 0.0f; bool m_wasFalling = false;
+};</code></pre>
+  <div class="check"><b>Checkpoint</b> Jumps have a whoosh, landings thud with a little screen shake
+  and dust, and heights feel weighty.</div>
+  <div class="tip"><b>Optional: a snappier feel</b> Add a brief <code>HitStop(0.04f)</code> on a big
+  landing, or a <code>SetGlobalTimeDilation()</code> flourish on the final jump. Little pauses read
+  as impact.</div>
+</section>
+
+<section class="page">
+  <div class="lesson"><span class="n">8</span><h1>Polish: audio &amp; particles</h1></div>
+  <div class="goal"><b>You'll learn</b> Attaching the particle systems and sounds your scripts
+  already call, plus adaptive music.</div>
+  <ol class="steps">
+    <li>Your scripts already fire cues (coin/jump/land/hurt) and bursts (coin sparkle, crumble dust,
+      landing dust, spike). Drop the WAVs at those paths and add particle systems to the matching
+      prototypes so <code>Particles().Burst(...)</code> has something to emit.</li>
+    <li>In the <b>Particle Editor</b> make: a <em>Sparkle</em> (coin), a <em>Dust</em> (crumble +
+      land), and a <em>Puff</em> (spike). Attach each to its object.</li>
+    <li>Add gentle ambient music on an empty <code>Director</code> object:
+      <code>Audio().LoadMusic("Content/Music/clouds.adaptive");</code> and, if you like, switch to a
+      brighter state near the goal with <code>Audio().SetMusicState("finale")</code>.</li>
+  </ol>
+  <div class="check"><b>Checkpoint</b> Coins sparkle, platforms puff dust, landings kick up dirt,
+  and music carries the run. The platformer now has bounce and life.</div>
+</section>
+
+<section class="page">
+  <div class="lesson"><span class="n">9</span><h1>The goal, win &amp; ship</h1></div>
+  <div class="goal"><b>You'll learn</b> Ending the level via GameMode and packaging a standalone
+  build.</div>
+  <ol class="steps">
+    <li><b>Goal flag</b> — add a Cylinder at the level's end, name it <code>Goal</code>, give it a
+      <b>Trigger</b> collider, and attach a <code>Goal</code> script:</li>
+  </ol>
+  <pre><code>#include &lt;engine/gameplay/Script.h&gt;
+
+class Goal final : public engine::Script {
+public:
+    void OnCreate() override { m_needCoins = GetFieldInt("coinsNeeded", 0); }
+    void OnFixedUpdate(float) override {
+        if (WasTriggerEntered(FindObject("Player"))) {
+            if (Game()-&gt;Score() &gt;= m_needCoins) {
+                Game()-&gt;SetMessage("You reached the clouds!");
+                Game()-&gt;Win();                              // HUD end screen
+            } else {
+                Game()-&gt;SetMessage("Collect more coins first!");
+            }
+        }
+    }
+private:
+    int m_needCoins = 0;
+};</code></pre>
+  <ol class="steps" start="2">
+    <li>Enable <b>Allow Restart</b> in the scene's Game Mode settings, so the end screen offers
+      <span class="kbd">R</span> to replay.</li>
+    <li>Playtest the whole run: jumps, moving/crumbling platforms, coins, spikes, falls, checkpoints,
+      lives, and the goal.</li>
+    <li><b>Package</b> — export the runtime scene and build the standalone <code>player</code>. The
+      cooker ships only reached assets. Distribute the player + cooked content.</li>
+  </ol>
+  <div class="check"><b>Checkpoint — you shipped a platformer.</b> A side-on 2.5D course with a
+  jumping hero, moving and crumbling platforms, collectible coins, spikes and fall-death with
+  checkpoints and lives, a HUD, jump juice, audio and particles, a goal flag with win/lose, and a
+  standalone build.</div>
+
+  <h2>Where to go next</h2>
+  <table>
+    <tr><th>Add…</th><th>Using</th></tr>
+    <tr><td>A double jump / wall jump</td><td>Track grounded/airborne + apply upward velocity to the body on a second press</td></tr>
+    <tr><td>Enemies that patrol platforms</td><td>A <b>Mover</b> or Nav Agent + contact damage (see the shooter tutorial)</td></tr>
+    <tr><td>A key that unlocks a door</td><td>A trigger that sets <code>SaveBool("hasKey", true)</code>; the door checks it</td></tr>
+    <tr><td>Multiple levels / a hub</td><td><code>RequestSceneLoad("Level2")</code> at the goal (works in editor Play too)</td></tr>
+    <tr><td>A time-attack timer</td><td>A HUD-bound <code>time</code> from GameMode; a best-time via <code>SaveFloat</code></td></tr>
+    <tr><td>Rich hero animation</td><td>An <b>Animation Graph</b> with idle/run/jump/fall states driven by <code>Speed</code>/<code>IsGrounded</code>/<code>VerticalSpeed</code></td></tr>
+  </table>
+  <div class="tip"><b>Deeper docs</b> For exact APIs and every field, see the <em>Detailed Systems
+  Manual</em> and the per-header reference under <code>docs/engine-systems/</code>. Print this
+  tutorial with A4 margins for correct pagination.</div>
+</section>
+
+</body>
+</html>
