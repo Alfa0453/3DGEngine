@@ -131,6 +131,8 @@ bool AnimationController::TestTransition(const Transition& transition) const {
         case Transition::Compare::Less:           return value < threshold;
         case Transition::Compare::Equal:          return std::abs(value - threshold) <= 0.0001f;
         case Transition::Compare::NotEqual:       return std::abs(value - threshold) > 0.0001f;
+        case Transition::Compare::LessOrEqual:    return value <= threshold;
+        case Transition::Compare::Greater:        return value > threshold;
         }
         return false;
     };

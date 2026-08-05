@@ -624,7 +624,7 @@ void AnimationGraphEditorPanel::Draw(const std::string& assetRoot, bool* open, b
     }
 
     ImGui::SeparatorText("Transitions");
-    const char* compares[] = { ">=", "<", "==", "!=" };
+    const char* compares[] = { ">=", "<", "==", "!=", "<=", ">" };
     int removeTransition = -1;
     for (std::size_t i = 0; i < m_asset.transitions.size(); ++i) {
         auto& t = m_asset.transitions[i];
@@ -675,8 +675,8 @@ void AnimationGraphEditorPanel::Draw(const std::string& assetRoot, bool* open, b
             const float want = sel ? 1.0f : 0.0f;
             if (t.compare != Comp::Equal || t.threshold != want) { t.compare = Comp::Equal; t.threshold = want; m_controllerDirty = true; }
         } else {
-            int compare = std::clamp(static_cast<int>(t.compare), 0, 3);
-            if (ImGui::Combo("Compare", &compare, compares, 4)) { t.compare = static_cast<Comp>(compare); m_controllerDirty = true; }
+            int compare = std::clamp(static_cast<int>(t.compare), 0, 5);
+            if (ImGui::Combo("Compare", &compare, compares, 6)) { t.compare = static_cast<Comp>(compare); m_controllerDirty = true; }
             if (ImGui::DragFloat("Threshold", &t.threshold, .05f)) m_controllerDirty = true;
         }
         int removeCondition = -1;
@@ -720,8 +720,8 @@ void AnimationGraphEditorPanel::Draw(const std::string& assetRoot, bool* open, b
                     m_controllerDirty = true;
                 }
             } else {
-                int compare = std::clamp(static_cast<int>(condition.compare), 0, 3);
-                if (ImGui::Combo("Compare", &compare, compares, 4)) {
+                int compare = std::clamp(static_cast<int>(condition.compare), 0, 5);
+                if (ImGui::Combo("Compare", &compare, compares, 6)) {
                     condition.compare =
                         static_cast<EditorScene::AnimationStateTransition::Compare>(compare);
                     m_controllerDirty = true;
@@ -740,8 +740,16 @@ void AnimationGraphEditorPanel::Draw(const std::string& assetRoot, bool* open, b
         }
         if (ImGui::SmallButton("Add Condition")) {
             EditorScene::AnimationStateTransition::Condition condition;
-            if (!m_asset.parameters.empty())
-                condition.parameter = m_asset.parameters.front().name;
+            if (!m_asset.parameters.empty()) {
+                const auto& param = m_asset.parameters.front();
+                condition.parameter = param.name;
+                using PT = EditorScene::AnimationParameter::Type;
+                if (param.type == PT::Bool || param.type == PT::Trigger) {
+                    condition.compare = Comp::Equal; condition.threshold = 1.0f;
+                } else {
+                    condition.compare = Comp::Greater; condition.threshold = 0.1f;
+                }
+            }
             t.additionalConditions.push_back(std::move(condition));
             m_controllerDirty = true;
         }
@@ -758,7 +766,20 @@ void AnimationGraphEditorPanel::Draw(const std::string& assetRoot, bool* open, b
         EditorScene::AnimationStateTransition t;
         t.fromState = m_asset.states.front().name;
         t.toState = m_asset.states.size() > 1 ? m_asset.states[1].name : m_asset.states.front().name;
-        if (!m_asset.parameters.empty()) t.parameter = m_asset.parameters.front().name;
+        if (!m_asset.parameters.empty()) {
+            const auto& param = m_asset.parameters.front();
+            t.parameter = param.name;
+            // Avoid an always-true default: "Speed >= 0" fires on frame 1 and skips the
+            // state. Bools/triggers compare == true; numeric params fire only above a small
+            // threshold so a resting character stays put.
+            using PT = EditorScene::AnimationParameter::Type;
+            using Comp = EditorScene::AnimationStateTransition::Compare;
+            if (param.type == PT::Bool || param.type == PT::Trigger) {
+                t.compare = Comp::Equal; t.threshold = 1.0f;
+            } else {
+                t.compare = Comp::Greater; t.threshold = 0.1f;
+            }
+        }
         m_asset.transitions.push_back(std::move(t)); m_controllerDirty = true;
     }
 

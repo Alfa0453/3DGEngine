@@ -63,7 +63,8 @@ struct AnimationGraphDesc {
     };
 
     struct TransitionDesc {
-        enum class Compare { GreaterOrEqual = 0, Less = 1, Equal = 2, NotEqual = 3 };
+        enum class Compare { GreaterOrEqual = 0, Less = 1, Equal = 2, NotEqual = 3,
+                             LessOrEqual = 4, Greater = 5 };
         struct Condition {
             std::string parameter = "Speed";
             Compare compare = Compare::GreaterOrEqual;
@@ -143,7 +144,7 @@ inline void BuildAnimationController(
             to->second,
             transition.parameter,
             static_cast<AnimationController::Transition::Compare>(
-                std::clamp(static_cast<int>(transition.compare), 0, 3)),
+                std::clamp(static_cast<int>(transition.compare), 0, 5)),
             transition.threshold,
             std::max(transition.fade, 0.0f),
             std::clamp(transition.exitTime, 0.0f, 1.0f),
@@ -158,7 +159,7 @@ inline void BuildAnimationController(
             runtimeTransition.additionalConditions.push_back({
                 condition.parameter,
                 static_cast<AnimationController::Transition::Compare>(
-                    std::clamp(static_cast<int>(condition.compare), 0, 3)),
+                    std::clamp(static_cast<int>(condition.compare), 0, 5)),
                 condition.threshold
             });
         }

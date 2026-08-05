@@ -148,6 +148,11 @@ glm::vec3 Animator::SampleRootTranslation(const Skeleton& skel, const Animation&
     return SampleBoneTRS(anim, 0, WrapTicks(anim, timeSeconds), skel.bones[0]).pos;
 }
 
+glm::quat Animator::SampleRootRotation(const Skeleton& skel, const Animation& anim, float timeSeconds) {
+    if (skel.bones.empty()) return glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+    return SampleBoneTRS(anim, 0, WrapTicks(anim, timeSeconds), skel.bones[0]).rot;
+}
+
 void Animator::BlendLocal(const std::vector<BoneLocal>& a, const std::vector<BoneLocal>& b,
                           float blend, std::vector<BoneLocal>& out) {
     const std::size_t n = std::min(a.size(), b.size());
@@ -218,6 +223,68 @@ std::vector<float> Animator::BuildMask(const Skeleton& skel, const std::string& 
     }
     for (std::size_t i = 0; i < n; ++i) mask[i] = in[i] ? inside : outside;
     return mask;
+}
+
+namespace {
+// Shortest-arc rotation taking unit vector a onto unit vector b (no experimental GLM).
+glm::quat RotationBetween(glm::vec3 a, glm::vec3 b) {
+    a = glm::normalize(a);
+    b = glm::normalize(b);
+    const float d = glm::dot(a, b);
+    if (d >= 1.0f - 1.0e-6f) return glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+    if (d <= -1.0f + 1.0e-6f) {                       // opposite: rotate 180 about any perp axis
+        glm::vec3 axis = glm::cross(glm::vec3(1.0f, 0.0f, 0.0f), a);
+        if (glm::dot(axis, axis) < 1.0e-6f) axis = glm::cross(glm::vec3(0.0f, 1.0f, 0.0f), a);
+        return glm::angleAxis(3.14159265358979323846f, glm::normalize(axis));
+    }
+    const glm::vec3 c = glm::cross(a, b);
+    glm::quat q(1.0f + d, c.x, c.y, c.z);
+    return glm::normalize(q);
+}
+} // namespace
+
+Animator::TwoBoneIKResult Animator::SolveTwoBoneIK(const glm::vec3& hip, const glm::vec3& knee,
+                                                   const glm::vec3& foot, const glm::vec3& target,
+                                                   const glm::vec3& poleHint) {
+    TwoBoneIKResult result;
+    const float upperLen = glm::length(knee - hip);
+    const float lowerLen = glm::length(foot - knee);
+    const glm::vec3 curEnd = foot - hip;
+    const float curEndLen = glm::length(curEnd);
+    if (upperLen < 1.0e-5f || lowerLen < 1.0e-5f || curEndLen < 1.0e-5f) return result;
+
+    const glm::vec3 toTarget = target - hip;
+    const float rawDist = glm::length(toTarget);
+    if (rawDist < 1.0e-5f) return result;
+    const glm::vec3 targetDir = toTarget / rawDist;
+
+    // Clamp the reach so the limb never stretches or hyperextends.
+    const float minReach = std::abs(upperLen - lowerLen) + 1.0e-3f;
+    const float maxReach = upperLen + lowerLen - 1.0e-3f;
+    const float dist = glm::clamp(rawDist, minReach, maxReach);
+
+    // Knee bend plane: prefer the pole hint; fall back to the current limb plane.
+    glm::vec3 axis = glm::cross(targetDir, glm::normalize(poleHint - hip));
+    if (glm::dot(axis, axis) < 1.0e-6f)
+        axis = glm::cross(glm::normalize(curEnd), glm::normalize(knee - hip));
+    if (glm::dot(axis, axis) < 1.0e-6f) return result;   // fully degenerate
+    axis = glm::normalize(axis);
+
+    // 1) Straighten the limb onto the target direction.
+    const glm::quat align = RotationBetween(curEnd, targetDir);
+    // 2) Bend the upper bone off the target line by the law-of-cosines hip angle.
+    const float hipCos = glm::clamp(
+        (upperLen * upperLen + dist * dist - lowerLen * lowerLen) / (2.0f * upperLen * dist),
+        -1.0f, 1.0f);
+    const float hipAngle = std::acos(hipCos);
+    result.upper = glm::normalize(glm::angleAxis(hipAngle, axis) * align);
+
+    // 3) Point the lower bone from the solved knee at the (clamped) target.
+    const glm::vec3 kneeSolved = hip + result.upper * (knee - hip);
+    const glm::vec3 lowerNow = result.upper * (foot - knee);
+    const glm::vec3 lowerWant = (hip + targetDir * dist) - kneeSolved;
+    result.lower = RotationBetween(lowerNow, lowerWant);
+    return result;
 }
 
 } // namespace engine

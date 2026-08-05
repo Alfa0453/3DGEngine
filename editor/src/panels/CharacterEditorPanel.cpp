@@ -129,7 +129,16 @@ void CharacterEditorPanel::RebuildPreviewGraph() {
     m_previewGraphParameters.clear();
     m_previewTime = 0.0f;
     m_previewGraphDirty = false;
-    if (!m_previewModel || m_asset.animationStates.empty()) return;
+
+    // Prefer the referenced graph's animation data; fall back to the character's own inline
+    // states for legacy (graph-less) characters.
+    const std::vector<EditorScene::AnimationStateNode>& states =
+        m_previewUsingGraph ? m_previewGraphStates : m_asset.animationStates;
+    const std::vector<EditorScene::AnimationParameter>& parameters =
+        m_previewUsingGraph ? m_previewGraphParamDefs : m_asset.animationParameters;
+    const std::vector<EditorScene::AnimationStateTransition>& transitions =
+        m_previewUsingGraph ? m_previewGraphTransitions : m_asset.animationTransitions;
+    if (!m_previewModel || states.empty()) return;
 
     const auto& clips = m_previewModel->Animations();
     const auto resolveClip = [&](int fallback, const std::string& name) {
@@ -146,11 +155,10 @@ void CharacterEditorPanel::RebuildPreviewGraph() {
         return animation.ticksPerSecond > 0.0f ? animation.duration / animation.ticksPerSecond : 0.0f;
     };
     editor::BuildAnimationController(m_previewController,
-        m_asset.animationStates, m_asset.animationParameters, m_asset.animationTransitions,
-        resolveClip, duration);
+        states, parameters, transitions, resolveClip, duration);
 
     // The preview UI keeps its own editable copy of each parameter's value.
-    for (const auto& parameter : m_asset.animationParameters) {
+    for (const auto& parameter : parameters) {
         m_previewGraphParameters[parameter.name] = parameter.defaultValue;
     }
 }
@@ -217,23 +225,55 @@ void main(){
         m_attachmentShader = engine::Shader::TryCompile(vertex, fragment, report);
     }
 
-    // Reload the preview model when the model OR its merged animation sources change.
+    // A graph-driven character keeps its animation in a referenced .3dggraph; load it so the
+    // preview shows the graph's clips + idle. Its own inline animationStates stay empty, so
+    // without this the preview would fall back to a static bind pose.
+    if (m_previewGraphPath != m_asset.animationGraphPath) {
+        m_previewGraphPath = m_asset.animationGraphPath;
+        m_previewUsingGraph = false;
+        m_previewGraphSources.clear();
+        m_previewGraphStates.clear();
+        m_previewGraphParamDefs.clear();
+        m_previewGraphTransitions.clear();
+        if (!m_asset.animationGraphPath.empty()) {
+            AnimationGraphAsset graph;
+            std::string graphError;
+            if (graph.Load(m_asset.animationGraphPath, &graphError)) {
+                m_previewUsingGraph = true;
+                for (const AnimationGraphClip& c : graph.clips)
+                    if (!c.sourceFile.empty())
+                        m_previewGraphSources.push_back(
+                            {c.sourceFile, c.clipName, c.stripRootMotion, c.sourceClipName});
+                m_previewGraphStates = graph.states;
+                m_previewGraphParamDefs = graph.parameters;
+                m_previewGraphTransitions = graph.transitions;
+            } else if (!graphError.empty()) {
+                m_previewError = graphError;
+            }
+        }
+        m_previewAnimSignature.clear();   // force the model reload below to re-merge clips
+    }
+
+    // Reload the preview model when the model OR its merged animation sources change. Use the
+    // graph's clips when a graph is referenced, otherwise the character's inline sources.
+    std::vector<engine::RuntimeAssetManager::SkinnedAnimationSource> sources;
+    if (m_previewUsingGraph) {
+        sources = m_previewGraphSources;
+    } else {
+        for (const auto& source : m_asset.animationSources)
+            if (!source.file.empty())
+                sources.push_back({source.file, source.clipName, source.stripRootMotion});
+    }
     std::string animSignature;
-    for (const auto& source : m_asset.animationSources) {
-        animSignature += source.file + '|' + source.clipName + '|' +
-                         (source.stripRootMotion ? "1" : "0") + '\n';
+    for (const auto& source : sources) {
+        animSignature += source.path + '|' + source.name + '|' +
+                         (source.stripRootMotion ? "1" : "0") + '|' + source.sourceName + '\n';
     }
     if (m_previewModelPath != m_asset.modelAssetPath || m_previewAnimSignature != animSignature) {
         ResetPreviewModel();
         m_previewModelPath = m_asset.modelAssetPath;
         m_previewAnimSignature = animSignature;
         if (!m_previewModelPath.empty()) {
-            std::vector<engine::RuntimeAssetManager::SkinnedAnimationSource> sources;
-            for (const auto& source : m_asset.animationSources) {
-                if (!source.file.empty()) {
-                    sources.push_back({source.file, source.clipName, source.stripRootMotion});
-                }
-            }
             m_previewModel = sources.empty()
                 ? m_previewAssets.LoadSkinnedModel(m_previewModelPath, &m_previewError)
                 : m_previewAssets.LoadSkinnedModel(m_previewModelPath, sources, &m_previewError);
@@ -269,8 +309,12 @@ void main(){
     m_previewSocketParentWorld.clear();
     if (m_previewModel) {
         const auto& clips = m_previewModel->Animations();
-        if (!clips.empty() && !m_asset.animationStates.empty()) {
-            for (const auto& parameter : m_asset.animationParameters) {
+        const std::vector<EditorScene::AnimationParameter>& previewParams =
+            m_previewUsingGraph ? m_previewGraphParamDefs : m_asset.animationParameters;
+        const bool haveGraphStates =
+            m_previewUsingGraph ? !m_previewGraphStates.empty() : !m_asset.animationStates.empty();
+        if (!clips.empty() && haveGraphStates) {
+            for (const auto& parameter : previewParams) {
                 const float value = m_previewGraphParameters[parameter.name];
                 if (parameter.type == EditorScene::AnimationParameter::Type::Bool)
                     m_previewController.SetBoolParameter(parameter.name, value != 0.0f);
@@ -891,11 +935,21 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
                     m_previewModel->VertexCount(),
                     m_previewModel->TriangleCount(),
                     m_previewModel->SubMeshCount());
-        if (!m_asset.animationStates.empty()) {
+        const bool previewHasStates =
+            m_previewUsingGraph ? !m_previewGraphStates.empty() : !m_asset.animationStates.empty();
+        if (previewHasStates) {
             ImGui::Text("Graph state: %s", m_previewController.CurrentStateName().c_str());
+            if (m_previewUsingGraph) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("(%s)",
+                    std::filesystem::path(m_asset.animationGraphPath).filename().string().c_str());
+            }
+        } else if (!m_asset.animationGraphPath.empty()) {
+            ImGui::TextColored(ImVec4(1.0f, .72f, .25f, 1.0f),
+                "Animation Graph set, but it has no states / clips did not load.");
         } else {
             ImGui::TextColored(ImVec4(1.0f, .72f, .25f, 1.0f),
-                "Bind pose - capture or create an Animation Graph.");
+                "Bind pose - reference an Animation Graph below.");
         }
     }
     if (m_selectedSocket >= 0
@@ -918,6 +972,28 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
     ImGui::SameLine();
     if (ImGui::Button("Reset View")) { m_previewYaw = 0.0f; m_previewPitch = 0.0f; m_previewZoom = 1.0f; m_previewTime = 0.0f; }
     ImGui::Checkbox("Show Collider", &m_showColliderGuide);
+    // Live parameter scrubbers so the graph's transitions/blend spaces can be driven in the
+    // editor (e.g. raise Speed to watch idle -> walk -> run) without entering Play.
+    const std::vector<EditorScene::AnimationParameter>& driveParams =
+        m_previewUsingGraph ? m_previewGraphParamDefs : m_asset.animationParameters;
+    if (!driveParams.empty()) {
+        ImGui::SeparatorText("Graph Parameters");
+        for (const auto& parameter : driveParams) {
+            float& value = m_previewGraphParameters[parameter.name];
+            ImGui::PushID(parameter.name.c_str());
+            if (parameter.type == EditorScene::AnimationParameter::Type::Bool) {
+                bool on = value != 0.0f;
+                if (ImGui::Checkbox(parameter.name.c_str(), &on)) value = on ? 1.0f : 0.0f;
+            } else if (parameter.type == EditorScene::AnimationParameter::Type::Trigger) {
+                if (ImGui::Button(("Trigger " + parameter.name).c_str()))
+                    m_previewController.SetTriggerParameter(parameter.name);
+            } else {
+                ImGui::SetNextItemWidth(160);
+                ImGui::DragFloat(parameter.name.c_str(), &value, 0.05f);
+            }
+            ImGui::PopID();
+        }
+    }
     ImGui::EndChild(); ImGui::SameLine();
 
     ImGui::BeginChild("CharacterDetails", ImVec2(0, 0), true);
@@ -1695,7 +1771,7 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
 
         ImGui::SeparatorText("Transitions");
         int removeTransition=-1;
-        const char* compares[]={">=","<","==","!="};
+        const char* compares[]={">=","<","==","!=","<=",">"};
         for(std::size_t i=0;i<m_asset.animationTransitions.size();++i){
             auto& transition=m_asset.animationTransitions[i]; ImGui::PushID(3000+static_cast<int>(i));
             auto stateCombo=[&](const char* label,std::string& value,bool any){
@@ -1731,8 +1807,8 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
                     changed=true;
                 }
             } else {
-                int compare=std::clamp(static_cast<int>(transition.compare),0,3);
-                if(ImGui::Combo("Compare",&compare,compares,4)){transition.compare=static_cast<Comp>(compare);changed=true;}
+                int compare=std::clamp(static_cast<int>(transition.compare),0,5);
+                if(ImGui::Combo("Compare",&compare,compares,6)){transition.compare=static_cast<Comp>(compare);changed=true;}
                 changed|=ImGui::DragFloat("Threshold",&transition.threshold,.05f);
             }
             changed|=ImGui::DragFloat("Fade",&transition.fade,.01f,0.0f,5.0f);
@@ -1746,7 +1822,13 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
         if(ImGui::Button("Add Transition")&&!m_asset.animationStates.empty()){
             EditorScene::AnimationStateTransition t; t.fromState=m_asset.animationStates.front().name;
             t.toState=m_asset.animationStates.size()>1?m_asset.animationStates[1].name:m_asset.animationStates.front().name;
-            if(!m_asset.animationParameters.empty())t.parameter=m_asset.animationParameters.front().name;
+            if(!m_asset.animationParameters.empty()){
+                const auto& param=m_asset.animationParameters.front(); t.parameter=param.name;
+                using PT=EditorScene::AnimationParameter::Type;
+                using TC=EditorScene::AnimationStateTransition::Compare;
+                if(param.type==PT::Bool||param.type==PT::Trigger){t.compare=TC::Equal;t.threshold=1.0f;}
+                else{t.compare=TC::Greater;t.threshold=0.1f;}
+            }
             m_asset.animationTransitions.push_back(std::move(t));changed=true;
         }
 

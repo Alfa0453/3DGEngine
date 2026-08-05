@@ -298,7 +298,7 @@ constexpr ComponentCatalogEntry kComponentCatalog[] = {
     {"Camera Zone", "Gameplay", "Blend to a saved camera inside a trigger volume", AddableComponent::CameraZone},
     {"Health", "Gameplay", "Hit points and alive state", AddableComponent::Health},
     {"Navigation Agent", "AI", "Patrol, perception, and chase behavior", AddableComponent::NavAgent},
-    {"Script", "Scripting", "Custom object behavior and exposed fields", AddableComponent::Script},
+    // Script is added via the dedicated "+ Add Script" button, not this catalog.
     {"Audio Source", "Audio", "2D or spatial sound playback", AddableComponent::AudioSource},
     {"Particle System", "Effects", "Animated billboard particle emitter", AddableComponent::ParticleSystem},
 };
@@ -1121,10 +1121,21 @@ bool UpdateEditorScriptRegistry(const std::filesystem::path& gameRoot,
                                 const std::string& newClassName,
                                 bool newBehaviorTree,
                                 std::string* error) {
-    const std::filesystem::path listPath = gameRoot / "EditorScripts.list";
+    // Per-project list: stored next to the project's .project file (one level above
+    // Content/Scripts) so each project owns its own script set instead of sharing one
+    // global list in the game module. The generated header still lives in the game module.
+    const std::filesystem::path listPath =
+        scriptRoot.parent_path().parent_path() / "EditorScripts.list";
     std::vector<GeneratedScriptRegistration> registrations;
     {
-        std::ifstream input(listPath);
+        // Read the project list, migrating once from the legacy shared game-module list
+        // when the per-project file doesn't exist yet (the filter below drops entries whose
+        // headers aren't in this project's Scripts folder).
+        std::error_code listEc;
+        const std::filesystem::path readFrom =
+            std::filesystem::exists(listPath, listEc) ? listPath
+                                                      : gameRoot / "EditorScripts.list";
+        std::ifstream input(readFrom);
         std::string line;
         while (std::getline(input, line)) {
             if (line.empty() || line.front() == '#') continue;
@@ -3500,7 +3511,7 @@ void DrawAnimationPreview(EditorDockspace::Context& context, bool* open) {
 
             ImGui::Separator();
             ImGui::Text("Transitions: %zu", transitions.size());
-            const char* compareLabels[] = {">=", "<", "==", "!="};
+            const char* compareLabels[] = {">=", "<", "==", "!=", "<=", ">"};
             for (std::size_t i = 0; i < transitions.size(); ++i) {
                 EditorScene::AnimationStateTransition& transition = transitions[i];
                 ImGui::PushID(10000 + static_cast<int>(i));
@@ -3564,10 +3575,13 @@ void DrawAnimationPreview(EditorDockspace::Context& context, bool* open) {
                     changed = true;
                 }
                 int compare = static_cast<int>(transition.compare);
-                compare = std::clamp(compare, 0, 3);
+                compare = std::clamp(compare, 0, 5);
                 if (parameterType != EditorScene::AnimationParameter::Type::Trigger && ImGui::BeginCombo("Compare", compareLabels[compare])) {
+                    // Bool params only expose == / != ; numeric params get the full set
+                    // including the new <= and >.
                     const int firstCompare = parameterType == EditorScene::AnimationParameter::Type::Bool ? 2 : 0;
-                    for (int c = firstCompare; c < 4; ++c) {
+                    const int lastCompare = parameterType == EditorScene::AnimationParameter::Type::Bool ? 4 : 6;
+                    for (int c = firstCompare; c < lastCompare; ++c) {
                         const bool selectedCompare = c == compare;
                         if (ImGui::Selectable(compareLabels[c], selectedCompare)) {
                             transition.compare = static_cast<EditorScene::AnimationStateTransition::Compare>(c);
@@ -3619,8 +3633,10 @@ void DrawAnimationPreview(EditorDockspace::Context& context, bool* open) {
                     from,
                     to,
                     "Speed",
-                    EditorScene::AnimationStateTransition::Compare::GreaterOrEqual,
-                    0.0f,
+                    // "Speed >= 0" is always true and would skip the state on frame 1;
+                    // default to "> 0.1" so a resting character stays in place.
+                    EditorScene::AnimationStateTransition::Compare::Greater,
+                    0.1f,
                     0.2f
                 });
                 changed = true;
@@ -4176,9 +4192,20 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
     }
 
     if (!selected->navMeshBoundsVolume) {
-        if (ImGui::Button("+ Add Component", ImVec2(-1.0f, 30.0f))) {
+        // Add Component (opens the searchable catalog) and a dedicated Add Script shortcut
+        // sit side by side. Sections below appear only for components that have been added.
+        const float spacing = ImGui::GetStyle().ItemSpacing.x;
+        const float half = (ImGui::GetContentRegionAvail().x - spacing) * 0.5f;
+        if (ImGui::Button("+ Add Component", ImVec2(half, 30.0f))) {
             g_componentPopupOpenRequested = true;
         }
+        ImGui::SameLine();
+        const bool hasScript = HasComponent(*selected, AddableComponent::Script);
+        ImGui::BeginDisabled(selected->locked || hasScript);
+        if (ImGui::Button(hasScript ? "Script Added" : "+ Add Script", ImVec2(half, 30.0f))) {
+            AddComponent(context, AddableComponent::Script);
+        }
+        ImGui::EndDisabled();
         DrawAddComponentPopup(context);
     }
 
@@ -4941,46 +4968,44 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
     }
 #endif
 
-    if (!isCharacter && ImGui::CollapsingHeader("Runtime Components", ImGuiTreeNodeFlags_DefaultOpen)) {
-        // Velocity components are shown only when the object actually has them; add them
-        // from "+ Add Component" (Linear/Angular Velocity) when needed.
-        if (selected->linearVelocityEnabled || selected->angularVelocityEnabled) {
-        bool linearVelocityEnabled = selected->linearVelocityEnabled;
-        if (ImGui::Checkbox("LinearVelocity", &linearVelocityEnabled)) {
-            context.scene->SetSelectedLinearVelocityEnabled(linearVelocityEnabled);
+    // Each runtime/physics component added via "+ Add Component" gets its own collapsing
+    // header with a Remove button; the shared quick-setup buttons live in "Physics Setup".
+    if (!isCharacter && selected->linearVelocityEnabled
+        && ImGui::CollapsingHeader("Linear Velocity", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (ImGui::SmallButton("Remove##LinearVelocity")) {
+            context.scene->SetSelectedLinearVelocityEnabled(false);
         }
-        if (linearVelocityEnabled) {
-            glm::vec3 linearVelocity = selected->linearVelocity;
-            if (ImGui::DragFloat3("Velocity", &linearVelocity.x, 0.05f)) {
-                context.scene->SetSelectedLinearVelocity(linearVelocity);
-            }
+        glm::vec3 linearVelocity = selected->linearVelocity;
+        if (ImGui::DragFloat3("Velocity", &linearVelocity.x, 0.05f)) {
+            context.scene->SetSelectedLinearVelocity(linearVelocity);
         }
+    }
 
-        bool angularVelocityEnabled = selected->angularVelocityEnabled;
-        if (ImGui::Checkbox("AngularVelocity", &angularVelocityEnabled)) {
-            context.scene->SetSelectedAngularVelocityEnabled(angularVelocityEnabled);
+    if (!isCharacter && selected->angularVelocityEnabled
+        && ImGui::CollapsingHeader("Angular Velocity", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (ImGui::SmallButton("Remove##AngularVelocity")) {
+            context.scene->SetSelectedAngularVelocityEnabled(false);
         }
-        if (angularVelocityEnabled) {
-            glm::vec3 angularAxis = selected->angularVelocityAxis;
-            float angularSpeed = selected->angularVelocityRadians;
-            if (ImGui::DragFloat3("Axis", &angularAxis.x, 0.05f)) {
-                context.scene->SetSelectedAngularVelocity(angularAxis, angularSpeed);
-            }
-            if (ImGui::DragFloat("Speed", &angularSpeed, 0.05f)) {
-                context.scene->SetSelectedAngularVelocity(angularAxis, angularSpeed);
-            }
-            if (ImGui::Button("Spin Y")) {
-                context.scene->SetSelectedAngularVelocity(glm::vec3(0.0f, 1.0f, 0.0f), 1.57f);
-            }
+        glm::vec3 angularAxis = selected->angularVelocityAxis;
+        float angularSpeed = selected->angularVelocityRadians;
+        if (ImGui::DragFloat3("Axis", &angularAxis.x, 0.05f)) {
+            context.scene->SetSelectedAngularVelocity(angularAxis, angularSpeed);
         }
+        if (ImGui::DragFloat("Speed", &angularSpeed, 0.05f)) {
+            context.scene->SetSelectedAngularVelocity(angularAxis, angularSpeed);
+        }
+        if (ImGui::Button("Spin Y")) {
+            context.scene->SetSelectedAngularVelocity(glm::vec3(0.0f, 1.0f, 0.0f), 1.57f);
+        }
+    }
 
+    // Shared physics quick-setup: always available on non-character objects, collapsed by
+    // default so it stays out of the way. Adds/clears RigidBody + Collider in one click.
+    if (!isCharacter && ImGui::CollapsingHeader("Physics Setup")) {
         if (ImGui::Button("Clear Runtime Motion")) {
             context.scene->SetSelectedLinearVelocityEnabled(false);
             context.scene->SetSelectedAngularVelocityEnabled(false);
         }
-
-        ImGui::Separator();
-        }   // end velocity components (shown only when present)
         const engine::ecs::Transform* selectedTransform = context.scene->TryGetTransform(selected->entity);
         if (ImGui::Button("Dynamic Body")) {
             engine::ecs::RigidBody rigidBody = engine::ecs::RigidBody::Dynamic(1.0f);
@@ -5062,11 +5087,13 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             }
         }
 
-        bool rigidBodyEnabled = selected->rigidBodyEnabled;
-        if (ImGui::Checkbox("RigidBody", &rigidBodyEnabled)) {
-            context.scene->SetSelectedRigidBodyEnabled(rigidBodyEnabled);
+    }   // end Physics Setup
+
+    if (!isCharacter && selected->rigidBodyEnabled
+        && ImGui::CollapsingHeader("Rigid Body", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (ImGui::SmallButton("Remove##RigidBody")) {
+            context.scene->SetSelectedRigidBodyEnabled(false);
         }
-        if (rigidBodyEnabled) {
             engine::ecs::RigidBody rigidBody = selected->rigidBody;
             bool dynamicBody = rigidBody.invMass > 0.0f;
             if (ImGui::Checkbox("Dynamic", &dynamicBody)) {
@@ -5114,11 +5141,11 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             }
         }
 
-        bool colliderEnabled = selected->colliderEnabled;
-        if (ImGui::Checkbox("Collider", &colliderEnabled)) {
-            context.scene->SetSelectedColliderEnabled(colliderEnabled);
+    if (!isCharacter && selected->colliderEnabled
+        && ImGui::CollapsingHeader("Collider", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (ImGui::SmallButton("Remove##Collider")) {
+            context.scene->SetSelectedColliderEnabled(false);
         }
-        if (colliderEnabled) {
             engine::ecs::Collider collider = selected->collider;
             int shapeIndex = ColliderShapeIndex(collider.shape);
             const char* shapes[] = {"Sphere", "Box", "Plane", "Capsule", "Cylinder", "Cone", "Pyramid", "Torus", "Staircase"};
@@ -5378,15 +5405,20 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             if (shown == 0) {
                 ImGui::TextUnformatted("No joints connected to this object.");
             }
-        }
-    }
+        }   // end Physics Joints
 
-    if (!isCharacter && ImGui::CollapsingHeader("Gameplay Components", ImGuiTreeNodeFlags_DefaultOpen)) {
-        bool rotatorEnabled = selected->rotatorEnabled;
-        if (ImGui::Checkbox("Rotator", &rotatorEnabled)) {
-            context.scene->SetSelectedRotatorEnabled(rotatorEnabled);
-        }
-        if (rotatorEnabled) {
+    // A script is present as soon as it has a class or path (even before it is enabled --
+    // "+ Add Script" registers the class name). It gets its own section below, separate
+    // from the gameplay components, so adding a script never opens this section.
+    const bool hasScript = selected->scriptEnabled
+        || !selected->scriptClassName.empty() || !selected->scriptPath.empty();
+    // Each gameplay component added via "+ Add Component" gets its own collapsing header;
+    // its Remove button deletes it, after which the header no longer appears.
+    if (!isCharacter && selected->rotatorEnabled
+        && ImGui::CollapsingHeader("Rotator", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (ImGui::SmallButton("Remove##Rotator")) {
+                context.scene->SetSelectedRotatorEnabled(false);
+            }
             engine::ecs::Rotator rotator = selected->rotator;
             bool changed = false;
             changed |= ImGui::DragFloat3("Rotator Axis", &rotator.axis.x, 0.05f);
@@ -5401,11 +5433,11 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             }
         }
 
-        bool moverEnabled = selected->moverEnabled;
-        if (ImGui::Checkbox("Mover", &moverEnabled)) {
-            context.scene->SetSelectedMoverEnabled(moverEnabled);
-        }
-        if (moverEnabled) {
+    if (!isCharacter && selected->moverEnabled
+        && ImGui::CollapsingHeader("Mover", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (ImGui::SmallButton("Remove##Mover")) {
+                context.scene->SetSelectedMoverEnabled(false);
+            }
             engine::ecs::Mover mover = selected->mover;
             bool changed = false;
             changed |= ImGui::DragFloat3("Mover Axis", &mover.axis.x, 0.05f);
@@ -5426,11 +5458,11 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             }
         }
 
-        bool playerEnabled = selected->playerControllerEnabled;
-        if (ImGui::Checkbox("Player Controller", &playerEnabled)) {
-            context.scene->SetSelectedPlayerControllerEnabled(playerEnabled);
-        }
-        if (playerEnabled) {
+    if (!isCharacter && selected->playerControllerEnabled
+        && ImGui::CollapsingHeader("Player Controller", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (ImGui::SmallButton("Remove##PlayerController")) {
+                context.scene->SetSelectedPlayerControllerEnabled(false);
+            }
             EditorScene::PlayerControllerSettings player = selected->playerController;
             bool changed = false;
             const char* cameraModes[] = { "Third Person", "First Person", "Isometric", "Platformer" };
@@ -5538,16 +5570,15 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             }
         }
 
-        bool cameraZoneEnabled = selected->cameraZoneEnabled;
-        if (ImGui::Checkbox("Camera Zone", &cameraZoneEnabled)) {
-            context.scene->SetSelectedCameraZone(
-                cameraZoneEnabled,
-                selected->cameraZonePresetName,
-                selected->cameraZoneRestoreOnExit,
-                selected->cameraZonePriority,
-                selected->cameraZoneReturnBlend);
-        }
-        if (cameraZoneEnabled) {
+    if (!isCharacter && selected->cameraZoneEnabled
+        && ImGui::CollapsingHeader("Camera Zone", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (ImGui::SmallButton("Remove##CameraZone")) {
+                context.scene->SetSelectedCameraZone(false,
+                    selected->cameraZonePresetName,
+                    selected->cameraZoneRestoreOnExit,
+                    selected->cameraZonePriority,
+                    selected->cameraZoneReturnBlend);
+            }
             std::string presetName = selected->cameraZonePresetName;
             bool restoreOnExit = selected->cameraZoneRestoreOnExit;
             int priority = selected->cameraZonePriority;
@@ -5583,11 +5614,11 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             }
         }
 
-        bool healthEnabled = selected->healthEnabled;
-        if (ImGui::Checkbox("Health", &healthEnabled)) {
-            context.scene->SetSelectedHealthEnabled(healthEnabled);
-        }
-        if (healthEnabled) {
+    if (!isCharacter && selected->healthEnabled
+        && ImGui::CollapsingHeader("Health", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (ImGui::SmallButton("Remove##Health")) {
+                context.scene->SetSelectedHealthEnabled(false);
+            }
             engine::Health health = selected->health;
             bool changed = false;
             changed |= ImGui::DragFloat("HP", &health.hp, 1.0f, 0.0f, 100000.0f);
@@ -5625,8 +5656,11 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                     "Replaces animation with connected physics bodies at zero HP.");
             }
         }
-        
-        ImGui::Separator();
+
+    // Script is its own section, independent of the gameplay components -- adding a script
+    // never opens Gameplay Components. Shown as soon as a script is present.
+    if (!isCharacter && hasScript
+        && ImGui::CollapsingHeader("Script", ImGuiTreeNodeFlags_DefaultOpen)) {
         if (g_scriptEntity != selected->entity) {
             std::snprintf(g_scriptClassBuffer.data(),
                 g_scriptClassBuffer.size(),
@@ -6029,8 +6063,9 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             ImGui::PopID();
             }
         }
+    }   // end Script
 
-        if (selected->colliderEnabled && selected->collider.isTrigger) {
+    if (!isCharacter && selected->colliderEnabled && selected->collider.isTrigger) {
             ImGui::Separator();
             std::string targetName = selected->triggerTargetName;
             EditorScene::TriggerActionMode enterMoverAction = selected->triggerEnterMoverAction;
@@ -6167,9 +6202,10 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                                    "Choose a sequence for the Play action.");
             }
         }
-    }
 
-    if (!isCharacter && ImGui::CollapsingHeader("AI Agent", ImGuiTreeNodeFlags_DefaultOpen)) {
+    // Only shown once a Navigation Agent has been added via "+ Add Component".
+    if (!isCharacter && selected->navAgentEnabled
+        && ImGui::CollapsingHeader("AI Agent", ImGuiTreeNodeFlags_DefaultOpen)) {
         bool  enabled  = selected->navAgentEnabled;
         float speed    = selected->navAgentSpeed;
         float maxForce = selected->navAgentMaxForce;

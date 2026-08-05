@@ -46,6 +46,21 @@ public:
                             float timeSeconds, std::vector<BoneLocal>& out);
     static glm::vec3 SampleRootTranslation(const Skeleton& skel, const Animation& anim,
                                            float timeSeconds);
+    // The root bone's LOCAL rotation at timeSeconds (looping). Used to extract root-motion
+    // yaw so turning/curved clips can steer the entity instead of only its mesh.
+    static glm::quat SampleRootRotation(const Skeleton& skel, const Animation& anim,
+                                        float timeSeconds);
+
+    // Analytic two-bone IK. Given the world-space positions of the chain root (hip),
+    // mid joint (knee) and end effector (foot/ankle), and a desired target for the end
+    // effector plus a pole/hint direction the mid joint should bend toward, returns the
+    // world-space rotations to apply to the upper (root) and lower (mid) bones so the end
+    // reaches the target (or points at it when out of reach). Lengths are taken from the
+    // input positions, so the limb never stretches.
+    struct TwoBoneIKResult { glm::quat upper{1,0,0,0}; glm::quat lower{1,0,0,0}; };
+    static TwoBoneIKResult SolveTwoBoneIK(const glm::vec3& hip, const glm::vec3& knee,
+                                          const glm::vec3& foot, const glm::vec3& target,
+                                          const glm::vec3& poleHint);
 
     // Uniform blend of two local poses (per bone: lerp pos/scale, slerp rot).
     static void BlendLocal(const std::vector<BoneLocal>& a, const std::vector<BoneLocal>& b,

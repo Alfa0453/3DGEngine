@@ -2315,7 +2315,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                            >> conditionCompare >> condition.threshold;
                         if (condition.parameter == "-") condition.parameter.clear();
                         condition.compare = static_cast<AnimationStateTransition::Compare>(
-                            std::clamp(conditionCompare, 0, 3));
+                            std::clamp(conditionCompare, 0, 5));
                         transition.additionalConditions.push_back(std::move(condition));
                     }
                 }
@@ -4162,7 +4162,7 @@ bool EditorScene::SetSelectedAnimationStateGraph(const std::vector<AnimationStat
         transition.exitTime = std::clamp(transition.exitTime, 0.0f, 1.0f);
         for (AnimationStateTransition::Condition& condition
              : transition.additionalConditions) {
-            const int compare = std::clamp(static_cast<int>(condition.compare), 0, 3);
+            const int compare = std::clamp(static_cast<int>(condition.compare), 0, 5);
             condition.compare = static_cast<AnimationStateTransition::Compare>(compare);
         }
     }

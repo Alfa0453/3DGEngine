@@ -1001,7 +1001,7 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                         record >> std::quoted(condition.parameter)
                                >> condition.compare >> condition.threshold;
                         if (condition.parameter == "-") condition.parameter.clear();
-                        condition.compare = std::clamp(condition.compare, 0, 3);
+                        condition.compare = std::clamp(condition.compare, 0, 5);
                         transition.additionalConditions.push_back(std::move(condition));
                     }
                 }
@@ -1014,7 +1014,7 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                 if (transition.parameter == "-") {
                     transition.parameter.clear();
                 }
-                transition.compare = std::clamp(transition.compare, 0, 3);
+                transition.compare = std::clamp(transition.compare, 0, 5);
                 transition.fade = std::max(transition.fade, 0.0f);
                 transition.exitTime = std::clamp(transition.exitTime, 0.0f, 1.0f);
                 entity.animationTransitions.push_back(transition);

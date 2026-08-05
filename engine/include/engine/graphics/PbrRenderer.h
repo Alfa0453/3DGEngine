@@ -37,6 +37,8 @@ public:
         // with that cascade's view-projection. See SkinnedRenderer::DrawDepth.
         std::function<void(const glm::mat4&)> shadowCasters;
         bool frustumCull = true;   // skip MeshPBR entities outside the camera frustum
+        bool backfaceCull = true;  // cull closed-mesh backfaces; false = draw two-sided
+                                   // (e.g. the Material Maker preview shows both sides)
         bool instancing  = true;   // batch untextured meshes; false = per-object (fallback)
         // Shadow frustum. If radius <= 0 it is fitted automatically to the
         // MeshPBR entities each frame.

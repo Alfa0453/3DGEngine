@@ -24,6 +24,7 @@
 
 #include "GameBtScripts.h"
 #include "EditorScriptTools.h"
+#include "EditorGeneratedScriptTools.h"
 #include "AnimationGraphBuilder.h"
 #include "NativeDialog.h"
 #include <game/GameModule.h>
@@ -555,6 +556,15 @@ void EditorApp::OnInit()
     LoadProjectAssetRegistry();
     m_materialMaker.SetOutputDirectory(m_project.AssetRoot());
     m_behaviorGraph.SetOutputDirectory(m_project.AssetRoot());
+    // Rebuild the shared game module's generated script header from ONLY this project's
+    // list, so scripts authored in other projects are not compiled into this one.
+    {
+        std::string regenError;
+        if (!EditorGeneratedScriptTools::RegenerateGeneratedScripts(
+                m_project.AssetRoot(), &regenError)) {
+            m_log.Info("Project scripts: " + regenError);
+        }
+    }
     engine::ai::RegisterExampleBtScripts();   // built-in example scripts (idempotent)
     RegisterGameBtScripts();                  // legacy: editor/src/GameBtScripts.cpp
     RegisterGameModule();                     // shared game module (scripts used by editor + player)
@@ -6522,6 +6532,15 @@ void EditorApp::NewProject(const std::string& location, const std::string& name)
     m_behaviorGraph.SetOutputDirectory(m_project.AssetRoot());
     m_content.Refresh(m_assets, m_project, m_log);
     LoadProjectAssetRegistry();
+    // A brand-new project has no script list, so this resets the shared game module's
+    // generated header to register nothing -- previous projects' scripts are dropped.
+    {
+        std::string regenError;
+        if (!EditorGeneratedScriptTools::RegenerateGeneratedScripts(
+                m_project.AssetRoot(), &regenError)) {
+            m_log.Info("Project scripts: " + regenError);
+        }
+    }
 
     // Start the project from a clean default scene and save it into the project.
     m_scene.BuildDefault(*m_cube, *m_plane, *m_sphere, *m_capsule, *m_cylinder,
@@ -6557,6 +6576,15 @@ void EditorApp::OpenProjectFromPath(const std::string& projectFile) {
     m_content.Refresh(m_assets, m_project, m_log);
     LoadProjectAssetRegistry();
     SetScenePathDraft(m_project.ScenePath());
+    // Regenerate the shared game module's script header from this project's list only, so
+    // opening a project no longer carries over the previously open project's scripts.
+    {
+        std::string regenError;
+        if (!EditorGeneratedScriptTools::RegenerateGeneratedScripts(
+                m_project.AssetRoot(), &regenError)) {
+            m_log.Info("Project scripts: " + regenError);
+        }
+    }
 
     std::error_code ec;
     if (m_project.HasLastSavedScene()

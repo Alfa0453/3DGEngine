@@ -112,6 +112,16 @@ private:
     bool m_previewGraphDirty = true;
     engine::AnimationController m_previewController;
     std::unordered_map<std::string, float> m_previewGraphParameters;
+
+    // A graph-driven character keeps its animation in a referenced .3dggraph rather than
+    // the character's own inline animationStates (which stay empty). The preview loads that
+    // graph so the character shows its idle animation in the editor.
+    std::string m_previewGraphPath;
+    bool m_previewUsingGraph = false;
+    std::vector<EditorScene::AnimationStateNode> m_previewGraphStates;
+    std::vector<EditorScene::AnimationParameter> m_previewGraphParamDefs;
+    std::vector<EditorScene::AnimationStateTransition> m_previewGraphTransitions;
+    std::vector<engine::RuntimeAssetManager::SkinnedAnimationSource> m_previewGraphSources;
     std::unique_ptr<engine::Shader> m_colliderGuideShader;
     std::unique_ptr<engine::Shader> m_attachmentShader;   // lit shader for socketed props
     std::optional<engine::Mesh> m_colliderGuideMesh;

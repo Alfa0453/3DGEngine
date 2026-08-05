@@ -750,8 +750,14 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
     // Backface culling: never rasterize the inside of closed meshes. Front faces are
     // CCW (the mesh convention). Two-sided translucency (glass) turns it off per-object
     // below, and it is restored to the default (off) at the end of Render so later
-    // passes (sky / water / particles / foliage) keep their expected state.
-    glEnable(GL_CULL_FACE);
+    // passes (sky / water / particles / foliage) keep their expected state. When
+    // opt.backfaceCull is false (e.g. the Material Maker preview) everything draws
+    // two-sided so backfaces stay visible.
+    const bool cullEnabled = opt.backfaceCull;
+    const auto setCull = [cullEnabled](bool want) {
+        (want && cullEnabled) ? glEnable(GL_CULL_FACE) : glDisable(GL_CULL_FACE);
+    };
+    setCull(true);
     glCullFace(GL_BACK);
     glFrontFace(GL_CCW);
 
@@ -794,14 +800,12 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
             glDisable(GL_BLEND); glDepthMask(GL_TRUE);
         }
         // Glass and flat planes render two-sided; closed solids cull their backfaces.
-        if (m.material.blendMode == PbrMaterial::BlendMode::Transparent || m.mesh->TwoSided())
-            glDisable(GL_CULL_FACE);
-        else
-            glEnable(GL_CULL_FACE);
+        setCull(!(m.material.blendMode == PbrMaterial::BlendMode::Transparent
+                  || m.mesh->TwoSided()));
         m.mesh->DrawLod(SelectMeshLod(*m.mesh, t, camera));
     }
     glDisable(GL_BLEND); glDepthMask(GL_TRUE);
-    glEnable(GL_CULL_FACE);   // batches below are opaque
+    setCull(true);   // batches below are opaque
 
     // Instanced batches (uInstanced = 1, no textures).
     if (!batches.empty()) {
@@ -822,8 +826,7 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
             const Mesh* mesh = kv.first;
             std::vector<float>& data = kv.second;
             const GLsizei count = static_cast<GLsizei>(data.size() / 25);
-            if (mesh->TwoSided()) glDisable(GL_CULL_FACE);   // flat planes: both sides
-            else glEnable(GL_CULL_FACE);
+            setCull(!mesh->TwoSided());   // flat planes: both sides
             glBindVertexArray(mesh->Vao());
             glBindBuffer(GL_ARRAY_BUFFER, m_instanceVBO);
             glBufferData(GL_ARRAY_BUFFER,
@@ -885,10 +888,8 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
         } else {
             glDisable(GL_BLEND); glDepthMask(GL_TRUE);
         }
-        if (mesh.material.blendMode == PbrMaterial::BlendMode::Transparent || mesh.mesh->TwoSided())
-            glDisable(GL_CULL_FACE);
-        else
-            glEnable(GL_CULL_FACE);
+        setCull(!(mesh.material.blendMode == PbrMaterial::BlendMode::Transparent
+                  || mesh.mesh->TwoSided()));
         mesh.mesh->DrawLod(SelectMeshLod(*mesh.mesh, transform, camera));
     }
     glDisable(GL_BLEND);

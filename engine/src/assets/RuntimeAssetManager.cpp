@@ -472,7 +472,7 @@ RuntimeAssetManager::ResolveReport RuntimeAssetManager::ResolveRegistryAssets(ec
                     }
                     transitionDesc.parameter    = transition.parameter;
                     transitionDesc.compare      = static_cast<AnimationGraphDesc::TransitionDesc::Compare>(
-                        std::clamp(transition.compare, 0, 3));
+                        std::clamp(transition.compare, 0, 5));
                     transitionDesc.threshold    = transition.threshold;
                     transitionDesc.fade         = transition.fade;
                     transitionDesc.exitTime     = transition.exitTime;
@@ -485,7 +485,7 @@ RuntimeAssetManager::ResolveReport RuntimeAssetManager::ResolveRegistryAssets(ec
                         transitionDesc.additionalConditions.push_back({
                             condition.parameter,
                             static_cast<AnimationGraphDesc::TransitionDesc::Compare>(
-                                std::clamp(condition.compare, 0, 3)),
+                                std::clamp(condition.compare, 0, 5)),
                             condition.threshold
                         });
                     }

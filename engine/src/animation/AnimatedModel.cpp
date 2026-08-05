@@ -172,6 +172,30 @@ void UpdateAnimations(ecs::Registry& reg, float dt) {
                 delta = rootDelta(*cur, previousBaseTime, am.controller.CurrentTime());
             }
             transform.position += transform.rotation * delta;
+
+            // Root yaw: transfer the root bone's turn to the entity so curved / turn-in-place
+            // clips steer the character (the mesh root is neutralised below, so it is not
+            // applied twice). Only the twist about the rig's up axis is used, and the single
+            // wrap frame per loop is skipped to avoid a spurious full-cycle delta.
+            const float rotLen = ClipSeconds(*cur);
+            const bool rotWrapped = rotLen > 0.0f
+                && std::floor(previousBaseTime / rotLen)
+                       != std::floor(am.controller.CurrentTime() / rotLen);
+            if (!rotWrapped) {
+                const glm::quat before =
+                    Animator::SampleRootRotation(skel, *cur, previousBaseTime);
+                const glm::quat after =
+                    Animator::SampleRootRotation(skel, *cur, am.controller.CurrentTime());
+                glm::quat d = glm::normalize(after * glm::inverse(before));
+                if (d.w < 0.0f) d = -d;                       // shortest arc
+                glm::quat yaw(d.w, 0.0f, d.y, 0.0f);          // swing-twist about local Y
+                const float n = std::sqrt(yaw.w * yaw.w + yaw.y * yaw.y);
+                if (n > 1.0e-5f) {
+                    yaw.w /= n;
+                    yaw.y /= n;
+                    transform.rotation = glm::normalize(transform.rotation * yaw);
+                }
+            }
         }
 
         float curTime = am.controller.CurrentTime();
@@ -250,6 +274,13 @@ void UpdateAnimations(ecs::Registry& reg, float dt) {
         }
         if (am.controller.CurrentRootMotion() && !local.empty() && !skel.bones.empty()) {
             local[0].pos = glm::vec3(skel.bones[0].localBind[3]);
+            // Neutralise the root's animated rotation in the mesh: the yaw was transferred
+            // to the entity above, so leaving it here too would rotate the character twice.
+            glm::mat3 bind(skel.bones[0].localBind);
+            bind[0] = glm::normalize(bind[0]);
+            bind[1] = glm::normalize(bind[1]);
+            bind[2] = glm::normalize(bind[2]);
+            local[0].rot = glm::quat_cast(bind);
         }
 
         // --- Action layer (one-shot, masked, over the base) --------------------

@@ -73,7 +73,9 @@ public:
             GreaterOrEqual = 0,
             Less = 1,
             Equal = 2,
-            NotEqual = 3
+            NotEqual = 3,
+            LessOrEqual = 4,
+            Greater = 5
         };
         struct Condition {
             std::string parameter = "Speed";

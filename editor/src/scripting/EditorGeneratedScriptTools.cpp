@@ -42,6 +42,23 @@ bool WriteText(const std::filesystem::path& path,
     return true;
 }
 
+// Only writes when the content differs, so regenerating an unchanged header (e.g. on every
+// editor launch) doesn't bump its timestamp and force a needless script rebuild.
+bool WriteTextIfChanged(const std::filesystem::path& path,
+                        const std::string& text,
+                        std::string* error) {
+    std::error_code ec;
+    if (std::filesystem::is_regular_file(path, ec)) {
+        std::ifstream existing(path, std::ios::binary);
+        if (existing) {
+            const std::string current((std::istreambuf_iterator<char>(existing)),
+                                      std::istreambuf_iterator<char>());
+            if (current == text) return true;
+        }
+    }
+    return WriteText(path, text, error);
+}
+
 const char* TemplateFilename(BehaviorTreeTemplate scriptTemplate) {
     switch (scriptTemplate) {
     case BehaviorTreeTemplate::Task:      return "TaskTemplate.h";
@@ -118,36 +135,21 @@ std::filesystem::path FindGameModuleRoot(
     return {};
 }
 
-} // namespace
+// The registration list lives with the project (next to its .project file, one level
+// above Content/Scripts) so each project owns its own script set. The generated header
+// still goes into the shared game module, but is rebuilt from only the active project's
+// list -- so opening or creating a project no longer inherits another project's scripts.
+std::filesystem::path ProjectScriptListPath(const std::filesystem::path& scriptRoot) {
+    return scriptRoot.parent_path().parent_path() / "EditorScripts.list";
+}
 
-bool RegisterScript(const std::filesystem::path& gameRoot,
-                    const std::filesystem::path& scriptRoot,
-                    const std::string& className,
-                    bool behaviorTree,
-                    std::string* error) {
-    const std::filesystem::path listPath = gameRoot / "EditorScripts.list";
-    std::vector<Registration> registrations;
-    {
-        std::ifstream input(listPath);
-        std::string line;
-        while (std::getline(input, line)) {
-            if (!line.empty() && line.back() == '\r') line.pop_back();
-            if (line.empty() || line.front() == '#') continue;
-            bool isBehaviorTree = false;
-            if (line.rfind("bt ", 0) == 0) {
-                isBehaviorTree = true;
-                line.erase(0, 3);
-            } else if (line.rfind("gameplay ", 0) == 0) {
-                line.erase(0, 9);
-            }
-            if (IsClassName(line)) registrations.push_back({line, isBehaviorTree});
-        }
-    }
-    registrations.erase(std::remove_if(registrations.begin(), registrations.end(),
-        [&](const Registration& registration) {
-            return registration.className == className;
-        }), registrations.end());
-    registrations.push_back({className, behaviorTree});
+// Rewrites <gameRoot>/include/game/EditorGeneratedScripts.h from the given registration
+// list (already de-duplicated/filtered by the caller) plus rewrites the project list file.
+bool WriteRegistrations(const std::filesystem::path& listPath,
+                        const std::filesystem::path& gameRoot,
+                        const std::filesystem::path& scriptRoot,
+                        std::vector<Registration> registrations,
+                        std::string* error) {
     registrations.erase(std::remove_if(registrations.begin(), registrations.end(),
         [&](const Registration& registration) {
             std::error_code ec;
@@ -205,8 +207,78 @@ bool RegisterScript(const std::filesystem::path& gameRoot,
     }
     if (!hasBehaviorTree) registry << "    (void)scripts;\n";
     registry << "}\n";
-    return WriteText(gameRoot / "include" / "game" / "EditorGeneratedScripts.h",
-                     registry.str(), error);
+    return WriteTextIfChanged(gameRoot / "include" / "game" / "EditorGeneratedScripts.h",
+                              registry.str(), error);
+}
+
+std::vector<Registration> ReadRegistrations(const std::filesystem::path& listPath) {
+    std::vector<Registration> registrations;
+    std::ifstream input(listPath);
+    std::string line;
+    while (std::getline(input, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty() || line.front() == '#') continue;
+        bool isBehaviorTree = false;
+        if (line.rfind("bt ", 0) == 0) {
+            isBehaviorTree = true;
+            line.erase(0, 3);
+        } else if (line.rfind("gameplay ", 0) == 0) {
+            line.erase(0, 9);
+        }
+        if (IsClassName(line)) registrations.push_back({line, isBehaviorTree});
+    }
+    return registrations;
+}
+
+// Reads the project's list, migrating one-time from the old shared game-module list when
+// the per-project file doesn't exist yet. WriteRegistrations then filters the result to the
+// headers actually present in this project's Scripts folder, so a new/empty project stays
+// empty while an existing project keeps exactly its own scripts.
+std::vector<Registration> SeedRegistrations(const std::filesystem::path& listPath,
+                                            const std::filesystem::path& gameRoot) {
+    std::error_code ec;
+    if (std::filesystem::exists(listPath, ec)) return ReadRegistrations(listPath);
+    return ReadRegistrations(gameRoot / "EditorScripts.list");
+}
+
+} // namespace
+
+bool RegisterScript(const std::filesystem::path& gameRoot,
+                    const std::filesystem::path& scriptRoot,
+                    const std::string& className,
+                    bool behaviorTree,
+                    std::string* error) {
+    const std::filesystem::path listPath = ProjectScriptListPath(scriptRoot);
+    std::vector<Registration> registrations = SeedRegistrations(listPath, gameRoot);
+    // An empty class name means "just regenerate from the current list" (used when
+    // switching projects); otherwise add/refresh this class.
+    if (!className.empty()) {
+        registrations.erase(std::remove_if(registrations.begin(), registrations.end(),
+            [&](const Registration& registration) {
+                return registration.className == className;
+            }), registrations.end());
+        registrations.push_back({className, behaviorTree});
+    }
+    return WriteRegistrations(listPath, gameRoot, scriptRoot, std::move(registrations), error);
+}
+
+bool RegenerateGeneratedScripts(const std::filesystem::path& contentRoot,
+                                std::string* error) {
+    const std::filesystem::path gameRoot = FindGameModuleRoot(contentRoot);
+    if (gameRoot.empty()) {
+        if (error) {
+            *error = "Could not find the shared game module to regenerate script "
+                "registrations.";
+        }
+        return false;
+    }
+    const std::filesystem::path scriptRoot = contentRoot / "Scripts";
+    const std::filesystem::path listPath = ProjectScriptListPath(scriptRoot);
+    // Reads only this project's list (migrating once from the legacy shared list), filtered
+    // to headers present in this project -- so the game module compiles exactly the active
+    // project's scripts and a new/empty project registers nothing.
+    return WriteRegistrations(listPath, gameRoot, scriptRoot,
+                              SeedRegistrations(listPath, gameRoot), error);
 }
 
 bool CreateBehaviorTreeScript(const std::filesystem::path& contentRoot,

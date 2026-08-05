@@ -616,7 +616,7 @@ bool CharacterAsset::Load(const std::string& path, std::string* error) {
                        >> conditionCompare >> condition.threshold;
                     condition.compare =
                         static_cast<EditorScene::AnimationStateTransition::Compare>(
-                            std::clamp(conditionCompare, 0, 3));
+                            std::clamp(conditionCompare, 0, 5));
                     transition.additionalConditions.push_back(std::move(condition));
                 }
             }

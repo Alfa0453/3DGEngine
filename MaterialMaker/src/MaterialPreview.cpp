@@ -494,6 +494,7 @@ unsigned int MaterialPreview::RenderUnchecked(const PbrMaterial& material, const
         opt.pointShadows       = false;
         opt.spotShadows        = false;
         opt.frustumCull        = false;
+        opt.backfaceCull       = false;   // show both sides of the preview object
         m_pbr->Render(m_reg, cam, aspect, size, size, opt);
         // Visible background: the HDRI panorama when set, otherwise the procedural sky.
         const engine::Texture* hdri = ResolveMap(settings.hdriPath);
