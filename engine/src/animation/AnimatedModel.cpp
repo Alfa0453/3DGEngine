@@ -1,6 +1,7 @@
 #include "engine/animation/AnimatedModel.h"
 
 #include "engine/animation/Animator.h"
+#include "engine/animation/Skeleton.h"
 #include "engine/graphics/SkinnedModel.h"
 #include "engine/graphics/Model.h"
 #include "engine/graphics/Shader.h"
@@ -9,9 +10,13 @@
 #include "engine/gameplay/GameplayComponents.h"
 
 #include <glm/gtc/matrix_inverse.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <initializer_list>
+#include <string>
 #include <utility>
 
 namespace engine {
@@ -22,7 +27,146 @@ float ClipSeconds(const Animation& a) {
     const float tps = (a.ticksPerSecond > 0.0f) ? a.ticksPerSecond : 25.0f;
     return (a.duration > 0.0f) ? a.duration / tps : 0.0f;
 }
+
+// Rotation of a world-space bone matrix (columns normalised to drop any scale).
+glm::quat QuatFromWorld(const glm::mat4& m) {
+    glm::mat3 r(m);
+    if (glm::dot(r[0], r[0]) < 1.0e-12f) return glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+    r[0] = glm::normalize(r[0]);
+    r[1] = glm::normalize(r[1]);
+    r[2] = glm::normalize(r[2]);
+    return glm::quat_cast(r);
+}
+
+// Grounded foot placement, run on the final local pose just before Compose. Opt-in via
+// am.footIK.enabled + a groundQuery; a no-op otherwise so existing characters are untouched.
+void ApplyFootIK(AnimatedModel& am, const ecs::Transform& transform, const Skeleton& skel,
+                 std::vector<BoneLocal>& local) {
+    FootIK& ik = am.footIK;
+    if (!ik.enabled || !ik.groundQuery || ik.weight <= 0.0f) return;
+    const std::size_t n = skel.bones.size();
+    if (n == 0 || local.size() != n) return;
+    if (!ik.detected && !(ik.left.Valid() && ik.right.Valid())) AutoDetectFootIKBones(skel, ik);
+    if (!ik.left.Valid() && !ik.right.Valid()) return;
+    const float w = std::min(std::max(ik.weight, 0.0f), 1.0f);
+
+    // Forward pass: local pose -> world (animation-root frame) matrices.
+    std::vector<glm::mat4> world;
+    const auto computeWorld = [&]() {
+        world.assign(n, glm::mat4(1.0f));
+        for (std::size_t i = 0; i < n; ++i) {
+            const BoneLocal& bl = local[i];
+            const glm::mat4 lm = glm::translate(glm::mat4(1.0f), bl.pos)
+                               * glm::mat4_cast(bl.rot)
+                               * glm::scale(glm::mat4(1.0f), bl.scale);
+            const int p = skel.bones[i].parent;
+            world[i] = (p >= 0) ? world[static_cast<std::size_t>(p)] * lm : lm;
+        }
+    };
+    computeWorld();
+
+    // animation-root frame <-> scene world.
+    const glm::mat4 S = transform.Model() * am.renderOffset * skel.globalInverse;
+    const glm::mat4 Sinv = glm::inverse(S);
+    const glm::vec3 upScene(0.0f, 1.0f, 0.0f);
+    const glm::vec3 downScene(0.0f, -1.0f, 0.0f);
+    const glm::vec3 upAnim = glm::normalize(glm::mat3(Sinv) * upScene);
+
+    struct Plan { bool hit = false; glm::vec3 targetAnim{0.0f}; float dropAnim = 0.0f; };
+    const auto planLeg = [&](const FootIKLeg& leg) -> Plan {
+        Plan pl;
+        if (!leg.Valid()) return pl;
+        const glm::vec3 footAnim = glm::vec3(world[static_cast<std::size_t>(leg.foot)][3]);
+        const glm::vec3 footScene = glm::vec3(S * glm::vec4(footAnim, 1.0f));
+        glm::vec3 hitPos, hitNormal;
+        if (!ik.groundQuery(footScene + upScene * ik.traceUp, downScene,
+                            ik.traceUp + ik.traceDown, hitPos, hitNormal))
+            return pl;
+        const glm::vec3 desiredScene = hitPos + upScene * ik.footHeight;
+        pl.targetAnim = glm::vec3(Sinv * glm::vec4(desiredScene, 1.0f));
+        pl.dropAnim = std::max(0.0f, glm::dot(footAnim - pl.targetAnim, upAnim));
+        pl.hit = true;
+        return pl;
+    };
+    const Plan lp = planLeg(ik.left);
+    const Plan rp = planLeg(ik.right);
+    if (!lp.hit && !rp.hit) return;
+
+    // Pelvis drop: lower toward the higher ground (the smaller drop) so the shallower foot
+    // still reaches, scaled by pelvisWeight, clamped, and faded by the IK weight.
+    if (ik.pelvis >= 0 && ik.pelvis < static_cast<int>(n)) {
+        float drop = (lp.hit && rp.hit) ? std::min(lp.dropAnim, rp.dropAnim)
+                                        : (lp.hit ? lp.dropAnim : rp.dropAnim);
+        drop = std::min(drop * ik.pelvisWeight, ik.maxPelvisDrop) * w;
+        if (drop > 1.0e-5f) {
+            const int par = skel.bones[static_cast<std::size_t>(ik.pelvis)].parent;
+            const glm::quat parentRot = (par >= 0)
+                ? QuatFromWorld(world[static_cast<std::size_t>(par)]) : glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+            local[static_cast<std::size_t>(ik.pelvis)].pos += (glm::inverse(parentRot) * (-upAnim)) * drop;
+            computeWorld();   // hips moved -> refresh the leg joint positions
+        }
+    }
+
+    // Two-bone solve per planted leg, converting the world-space delta rotations back into
+    // the pose's local rotations and blending by the IK weight.
+    const auto solveLeg = [&](const FootIKLeg& leg, const Plan& pl) {
+        if (!pl.hit || !leg.Valid()) return;
+        const glm::vec3 hip  = glm::vec3(world[static_cast<std::size_t>(leg.upper)][3]);
+        const glm::vec3 knee = glm::vec3(world[static_cast<std::size_t>(leg.mid)][3]);
+        const glm::vec3 foot = glm::vec3(world[static_cast<std::size_t>(leg.foot)][3]);
+        const Animator::TwoBoneIKResult r =
+            Animator::SolveTwoBoneIK(hip, knee, foot, pl.targetAnim, knee);
+
+        const int pu = skel.bones[static_cast<std::size_t>(leg.upper)].parent;
+        const glm::quat Rpu = (pu >= 0)
+            ? QuatFromWorld(world[static_cast<std::size_t>(pu)]) : glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+        const glm::quat RupperOld = QuatFromWorld(world[static_cast<std::size_t>(leg.upper)]);
+        const glm::quat RupperNew = glm::normalize(r.upper * RupperOld);
+        const glm::quat upperLocal = glm::normalize(glm::inverse(Rpu) * RupperNew);
+        local[static_cast<std::size_t>(leg.upper)].rot =
+            glm::normalize(glm::slerp(local[static_cast<std::size_t>(leg.upper)].rot, upperLocal, w));
+
+        // The mid bone inherits the (full) new upper world; layer the lower delta on top.
+        const glm::quat RmidInherited =
+            glm::normalize(RupperNew * local[static_cast<std::size_t>(leg.mid)].rot);
+        const glm::quat RmidNew = glm::normalize(r.lower * RmidInherited);
+        const glm::quat midLocal = glm::normalize(glm::inverse(RupperNew) * RmidNew);
+        local[static_cast<std::size_t>(leg.mid)].rot =
+            glm::normalize(glm::slerp(local[static_cast<std::size_t>(leg.mid)].rot, midLocal, w));
+    };
+    solveLeg(ik.left, lp);
+    solveLeg(ik.right, rp);
+}
 } // namespace
+
+bool AutoDetectFootIKBones(const Skeleton& skel, FootIK& ik) {
+    ik.detected = true;
+    std::vector<std::string> names(skel.bones.size());
+    for (std::size_t i = 0; i < skel.bones.size(); ++i) {
+        std::string n = skel.bones[i].name;
+        for (char& c : n) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        names[i] = std::move(n);
+    }
+    const auto find = [&](std::initializer_list<const char*> keys) -> int {
+        for (const char* key : keys)
+            for (std::size_t i = 0; i < names.size(); ++i)
+                if (names[i].find(key) != std::string::npos) return static_cast<int>(i);
+        return -1;
+    };
+    // Order matters: more specific "upleg/thigh" before the plain "leg" knee key.
+    ik.pelvis      = find({"hips", "pelvis"});
+    ik.left.upper  = find({"leftupleg", "upperleg_l", "upperleg.l", "thigh_l", "thigh.l",
+                           "leftthigh", "leftupperleg", "upleg_l"});
+    ik.left.mid    = find({"leftleg", "lowerleg_l", "lowerleg.l", "calf_l", "calf.l", "shin_l",
+                           "leftcalf", "leftlowerleg", "leftshin"});
+    ik.left.foot   = find({"leftfoot", "foot_l", "foot.l", "leftankle", "ankle_l"});
+    ik.right.upper = find({"rightupleg", "upperleg_r", "upperleg.r", "thigh_r", "thigh.r",
+                           "rightthigh", "rightupperleg", "upleg_r"});
+    ik.right.mid   = find({"rightleg", "lowerleg_r", "lowerleg.r", "calf_r", "calf.r", "shin_r",
+                           "rightcalf", "rightlowerleg", "rightshin"});
+    ik.right.foot  = find({"rightfoot", "foot_r", "foot.r", "rightankle", "ankle_r"});
+    return ik.left.Valid() && ik.right.Valid();
+}
 
 void AnimatedModel::PlayAction(int clip, std::vector<float> mask, std::vector<AnimEvent> events,
                                float fadeIn, float fadeOut, float speed) {
@@ -314,6 +458,10 @@ void UpdateAnimations(ecs::Registry& reg, float dt) {
                 }
             }
         }
+
+        // Grounded foot placement (opt-in). Runs on the final local pose so it plants the
+        // feet of whatever locomotion/action is playing, then the hierarchy is composed.
+        ApplyFootIK(am, transform, skel, local);
 
         Animator::Compose(skel, local, am.pose);
     });

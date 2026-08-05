@@ -205,8 +205,22 @@ protected:
     bool SaveValue(const std::string& key, const std::string& value);
     std::string LoadValue(const std::string& key,
                           const std::string& fallback = {}) const;
+    // Typed convenience over the flat key/value store (rides along in save slots).
+    bool SaveInt(const std::string& key, int value);
+    bool SaveFloat(const std::string& key, float value);
+    bool SaveBool(const std::string& key, bool value);
+    bool SaveVec3(const std::string& key, const glm::vec3& value);
+    int GetSavedInt(const std::string& key, int fallback = 0) const;
+    float GetSavedFloat(const std::string& key, float fallback = 0.0f) const;
+    bool GetSavedBool(const std::string& key, bool fallback = false) const;
+    glm::vec3 GetSavedVec3(const std::string& key,
+                           const glm::vec3& fallback = glm::vec3(0.0f)) const;
     bool SaveCheckpoint(const std::string& name, const glm::vec3& position);
     bool LoadCheckpoint(const std::string& name, glm::vec3* position) const;
+    // Request a full game save/load to a numbered slot. Queued and processed by the
+    // host after this script update (a load reloads the saved scene, then restores state).
+    void SaveGameToSlot(int slot, const std::string& displayName = {});
+    void LoadGameFromSlot(int slot);
     int SetTimer(float seconds, std::function<void()> callback, bool repeat = false);
     int SetTimerByEvent(float seconds, std::function<void()> event,
                         bool repeat = false) {
@@ -661,5 +675,13 @@ struct ScriptLevelStreamRequest {
     bool load = true;
 };
 std::vector<ScriptLevelStreamRequest> ConsumeScriptLevelStreamRequests();
+
+// A queued full save/load to a numbered slot. The host captures/restores world state.
+struct ScriptSaveGameRequest {
+    int slot = 0;
+    bool load = false;               // false = save, true = load
+    std::string displayName;         // save only: shown in the load menu
+};
+std::vector<ScriptSaveGameRequest> ConsumeScriptSaveGameRequests();
 
 } // namespace engine

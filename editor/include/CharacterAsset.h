@@ -52,6 +52,7 @@ struct CharacterAsset {
     engine::AssetHandle materialAssetId;
     std::string animationGraphPath;                          // .3dggraph supplying ALL animation (clips + logic)
     engine::AssetHandle animationGraphAssetId;
+    engine::ecs::FootIKSettings footIK;                      // grounded foot placement (opt-in)
     std::vector<std::string> actionClipAssets;               // standalone action .3dgclip assets
     std::vector<engine::AssetHandle> actionClipAssetIds;
     std::vector<CharacterAnimationSource> animationSources;  // legacy inline clips (used only when no graph is set)

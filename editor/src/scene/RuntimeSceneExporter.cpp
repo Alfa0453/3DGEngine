@@ -100,7 +100,7 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         return engine::MakeAssetReference(
             &assetRegistry, contentRoot, assetPath, type).id;
     };
-    out << "3DGRuntimeScene 86 " << sceneId.ToString() << '\n';
+    out << "3DGRuntimeScene 87 " << sceneId.ToString() << '\n';
     out << "# Runtime export from 3DGEditor. Editor-only flags are omitted.\n";
     const EditorScene::Environment& environment = scene.GetEnvironment();
     out << "environment "
@@ -499,6 +499,14 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
                 << StoredPath(a.materialPath) << ' '
                 << StoredPath(a.socketName) << ' ';
         }
+        // Foot IK (3DGRuntimeScene >= 87).
+        out << (object.footIK.enabled ? 1 : 0) << ' '
+            << object.footIK.traceUp << ' '
+            << object.footIK.traceDown << ' '
+            << object.footIK.footHeight << ' '
+            << object.footIK.pelvisWeight << ' '
+            << object.footIK.maxPelvisDrop << ' '
+            << object.footIK.weight << ' ';
         out
             << object.linearVelocity.x << ' ' << object.linearVelocity.y << ' ' << object.linearVelocity.z << ' '
             << object.angularVelocityAxis.x << ' ' << object.angularVelocityAxis.y << ' ' << object.angularVelocityAxis.z << ' '

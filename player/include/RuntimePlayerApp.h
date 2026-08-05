@@ -28,6 +28,7 @@
 #include <engine/gameplay/PlayerController.h>
 #include <engine/gameplay/CameraDirector.h>
 #include <engine/gameplay/Script.h>
+#include <engine/gameplay/SaveGame.h>
 #include <engine/assets/RuntimeAssetManager.h>
 #include <engine/audio/AudioEngine.h>
 #include <engine/audio/RuntimeAudioSystem.h>
@@ -155,6 +156,24 @@ private:
     bool m_simReady  = false;   // a scene loaded successfully -> ok to simulate
     bool m_paused    = false;   // P toggles: freeze the simulation
     bool m_pausePrev = false;   // edge detector for the pause key
+
+    // In-game save/load menu. F5 quicksaves to slot 0; F9 opens the load menu (Up/Down to
+    // pick, Enter to load, Delete to erase, F9/Esc to close). The menu pauses the game.
+    static constexpr int kSaveSlotCount = 6;
+    bool m_loadMenuOpen = false;
+    int  m_loadMenuSelection = 0;
+    bool m_pausedBeforeMenu = false;
+    std::vector<engine::SaveSlotInfo> m_loadMenuSlots;
+    bool m_quickSavePrev = false, m_loadMenuKeyPrev = false, m_escPrev = false;
+    bool m_menuUpPrev = false, m_menuDownPrev = false;
+    bool m_menuEnterPrev = false, m_menuDeletePrev = false;
+    float m_saveToastTime = 0.0f;      // seconds remaining for the "Saved" toast
+    std::string m_saveToastText;
+    void SaveToSlot(int slot, const std::string& name = {});
+    bool LoadFromSlot(int slot);       // reloads the saved scene + restores state
+    void CloseLoadMenu();              // restore pause/cursor when leaving the menu
+    bool UpdateSaveLoadMenu();         // input; returns true if a load reloaded the world
+    void DrawSaveLoadMenu(int screenW, int screenH);
 
     // Player controller (present when the scene has a "PlayerStart" entity); when
     // absent, the free-fly dev camera is used instead.

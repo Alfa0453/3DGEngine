@@ -7,6 +7,7 @@
 
 #include <iostream>
 #include <stdexcept>
+#include <utility>
 
 namespace engine {
 namespace {
@@ -168,6 +169,21 @@ void Window::SetTitle(const std::string &title)
 {
     m_data.title = title;
     glfwSetWindowTitle(m_window, title.c_str());
+}
+
+void Window::SetDropCallback(std::function<void(const std::vector<std::string>&)> callback)
+{
+    m_data.onDrop = std::move(callback);
+    glfwSetDropCallback(m_window,
+        [](GLFWwindow* win, int count, const char** paths) {
+            auto* data = static_cast<Data*>(glfwGetWindowUserPointer(win));
+            if (!data || !data->onDrop || count <= 0 || !paths) return;
+            std::vector<std::string> files;
+            files.reserve(static_cast<std::size_t>(count));
+            for (int i = 0; i < count; ++i)
+                if (paths[i]) files.emplace_back(paths[i]);
+            if (!files.empty()) data->onDrop(files);
+        });
 }
 bool Window::IsKeyPressed(int key) const
 {

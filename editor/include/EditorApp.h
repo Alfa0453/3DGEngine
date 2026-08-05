@@ -351,6 +351,9 @@ private:
     engine::ScriptInputState CapturePlayScriptInput(bool inputEnabled, bool includeFrameEdges);
     void StepPlayPhysics(float dt, bool inputEnabled);
     void CapturePlayPhysicsEvents();
+    // Enable/disable grounded foot IK on every play AnimatedModel and give each a ground
+    // raycast that ignores its own collider. Cheap; called each fixed step before animation.
+    void ConfigurePlayFootIK();
     bool Pressed(int key);
 
     engine::Config&       m_config;          // global editor.cfg (window settings + current project pointer)
@@ -379,6 +382,31 @@ private:
     EditorScene           m_scene;
     EditorCameraController m_cameraController;
     EditorContentController m_content;
+
+    // Drag-and-drop import: files dropped from the OS explorer open an Import Settings
+    // popup that lists each file with its detected type before importing.
+    struct PendingImportFile {
+        std::string path;          // absolute source path
+        std::string name;          // filename for display
+        std::string extension;     // lowercase, with dot
+        bool        isModel = false;
+        bool        isTexture = false;
+        int         modelMode = 0; // 0=Automatic 1=Static 2=Skeletal 3=Animation
+        // Model source inspection (fills the default mode + a summary line).
+        bool        inspected = false;
+        bool        hasBones = false;
+        int         meshCount = 0;
+        int         animationCount = 0;
+        // Texture options.
+        bool        srgb = true;   // color maps sRGB; normal/mask maps should be off
+        bool        smooth = true; // linear filtering
+    };
+    std::vector<PendingImportFile> m_pendingImports;
+    bool m_importDialogRequested = false;   // open the popup this frame
+    int  m_importGlobalModelMode = 0;       // combo that sets every model's mode
+    std::array<char, 260> m_importFolderBuffer{};   // target folder (relative to Content)
+    void BeginImportDialog(const std::vector<std::string>& paths);
+    void DrawImportDialog();
     EditorTransformController m_transformController;
     EditorViewport        m_viewport;
     engine::AudioEngine   m_audio;
@@ -548,6 +576,7 @@ private:
     bool m_showNavigationPreview = false;
     bool m_showGrid = true;               // reference ground grid + world axes (edit mode)
     bool m_previewSceneAnimations = false; // advance character animations in the edit viewport (off = paused idle)
+    bool m_playFootIK = false;             // experimental: grounded foot IK during Play (raycasts the scene)
 
     float m_fps = 60.0f;
     float m_elapsed = 0.0f;
@@ -558,6 +587,10 @@ private:
     PendingSceneAction m_pendingSceneAction = PendingSceneAction::None;
     std::string m_pendingScenePath;
     bool m_dirtyScenePromptQueued = false;
+    // A script's RequestSceneLoad during Play, deferred to the next frame's top.
+    std::string m_playSceneLoadRequest;
+    // One-time note that level streaming is a packaged-world-only feature in editor Play.
+    bool m_warnedEditorLevelStreaming = false;
     std::array<char, 260> m_scenePathDraft{};
     std::array<char, 128> m_projectNameDraft{};       // New Project: name field
     std::array<char, 260> m_projectLocationDraft{};   // New Project: parent folder field

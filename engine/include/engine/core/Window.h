@@ -1,6 +1,8 @@
 #pragma once
 
+#include <functional>
 #include <string>
+#include <vector>
 
 // Forward-declare GLFW's window type so this header does NOT pull in the whole
 // GLFW/OpenGL API. Anything that includes Window.h stays lightweight; only the
@@ -93,6 +95,11 @@ public:
     // Escape hatch for systems that need the raw handle (e.g. input polling).
     GLFWwindow* Native() const { return m_window; }
 
+    // Files dropped onto the window from the OS file explorer are delivered here with
+    // their absolute paths (one call per drop, possibly many files). Pass an empty
+    // std::function to clear. Used by the editor to import dropped assets.
+    void SetDropCallback(std::function<void(const std::vector<std::string>&)> callback);
+
 private:
     GLFWwindow* m_window = nullptr;
 
@@ -117,6 +124,9 @@ private:
         bool fullscreen = false;
         int  windowedX = 0, windowedY = 0;  // saved placement before fullscreen
         int  windowedW = 0, windowedH = 0;
+
+        // OS file-drop delivery (absolute paths). Empty = no handler.
+        std::function<void(const std::vector<std::string>&)> onDrop;
     } m_data;
 };
 

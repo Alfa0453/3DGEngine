@@ -3,6 +3,7 @@
 
 #include <engine/graphics/Primitives.h>
 #include <engine/gameplay/Script.h>
+#include <engine/gameplay/SaveGame.h>
 #include <engine/gameplay/LuaScript.h>
 #include <engine/gameplay/GameplaySystems.h>
 #include <engine/gameplay/RagdollSystem.h>
@@ -567,6 +568,121 @@ void RuntimePlayerApp::RestartScene() {
     LoadScene();
     ConfigurePhysics();
     SetPlayCursor(HasPlayer() && !m_paused);
+}
+
+void RuntimePlayerApp::SaveToSlot(int slot, const std::string& name) {
+    engine::SaveGame save = engine::CaptureSaveGame(
+        m_registry, m_scenePath,
+        name.empty() ? ("Slot " + std::to_string(slot)) : name, 0.0f);
+    if (save.SaveToFile(engine::SaveSlotPath(slot))) {
+        m_saveToastText = "Saved: " + save.displayName;
+        m_saveToastTime = 2.5f;
+    }
+}
+
+bool RuntimePlayerApp::LoadFromSlot(int slot) {
+    engine::SaveGame save;
+    if (!engine::SaveGame::LoadFromFile(engine::SaveSlotPath(slot), save)) return false;
+    if (!save.scenePath.empty()) {
+        std::filesystem::path scene(save.scenePath);
+        if (!scene.is_absolute()) scene = std::filesystem::path(m_sceneDir) / scene;
+        m_scenePath = scene.lexically_normal().string();
+        RestartScene();
+    }
+    engine::ApplySaveGame(m_registry, save);
+    return true;
+}
+
+void RuntimePlayerApp::CloseLoadMenu() {
+    if (!m_loadMenuOpen) return;
+    m_loadMenuOpen = false;
+    m_paused = m_pausedBeforeMenu;
+    if (!m_paused) engine::GameMode::Instance().Resume();
+    if (HasPlayer()) SetPlayCursor(!m_paused);
+}
+
+bool RuntimePlayerApp::UpdateSaveLoadMenu() {
+    engine::Window& w = GetWindow();
+
+    // F5 quicksave to slot 0 (edge-detected; disabled while the menu is open).
+    const bool quickSave = w.IsKeyPressed(GLFW_KEY_F5);
+    if (quickSave && !m_quickSavePrev && !m_loadMenuOpen) SaveToSlot(0, "Quicksave");
+    m_quickSavePrev = quickSave;
+
+    // F9 opens / closes the load menu.
+    const bool toggle = w.IsKeyPressed(GLFW_KEY_F9);
+    if (toggle && !m_loadMenuKeyPrev) {
+        if (m_loadMenuOpen) {
+            CloseLoadMenu();
+        } else {
+            m_loadMenuOpen = true;
+            m_loadMenuSlots = engine::ListSaveSlots(kSaveSlotCount);
+            m_loadMenuSelection = 0;
+            m_pausedBeforeMenu = m_paused;
+            m_paused = true;
+            engine::GameMode::Instance().Pause();
+            if (HasPlayer()) SetPlayCursor(false);
+        }
+    }
+    m_loadMenuKeyPrev = toggle;
+
+    if (!m_loadMenuOpen) return false;
+
+    const int slotCount = static_cast<int>(m_loadMenuSlots.size());
+    const bool up = w.IsKeyPressed(GLFW_KEY_UP);
+    if (up && !m_menuUpPrev && m_loadMenuSelection > 0) --m_loadMenuSelection;
+    m_menuUpPrev = up;
+    const bool down = w.IsKeyPressed(GLFW_KEY_DOWN);
+    if (down && !m_menuDownPrev && m_loadMenuSelection + 1 < slotCount) ++m_loadMenuSelection;
+    m_menuDownPrev = down;
+
+    const bool inRange = m_loadMenuSelection >= 0 && m_loadMenuSelection < slotCount;
+    const bool del = w.IsKeyPressed(GLFW_KEY_DELETE);
+    if (del && !m_menuDeletePrev && inRange && m_loadMenuSlots[m_loadMenuSelection].exists) {
+        engine::DeleteSaveSlot(m_loadMenuSlots[m_loadMenuSelection].slot);
+        m_loadMenuSlots = engine::ListSaveSlots(kSaveSlotCount);
+    }
+    m_menuDeletePrev = del;
+
+    const bool enter = w.IsKeyPressed(GLFW_KEY_ENTER);
+    bool loaded = false;
+    if (enter && !m_menuEnterPrev && inRange && m_loadMenuSlots[m_loadMenuSelection].exists) {
+        const int slot = m_loadMenuSlots[m_loadMenuSelection].slot;
+        CloseLoadMenu();
+        loaded = LoadFromSlot(slot);
+    }
+    m_menuEnterPrev = enter;
+    return loaded;
+}
+
+void RuntimePlayerApp::DrawSaveLoadMenu(int screenW, int screenH) {
+    if (!m_text) return;
+    if (!m_loadMenuOpen) {
+        if (m_saveToastTime > 0.0f)
+            m_text->Text(m_saveToastText, 24.0f, screenH - 40.0f, 1.0f,
+                         glm::vec3(0.7f, 1.0f, 0.7f));
+        return;
+    }
+    const float x = screenW * 0.5f - 200.0f;
+    float y = screenH * 0.26f;
+    m_text->Text("LOAD GAME", x, y, 1.8f, glm::vec3(1.0f, 0.9f, 0.5f));
+    y += 48.0f;
+    for (int i = 0; i < static_cast<int>(m_loadMenuSlots.size()); ++i) {
+        const engine::SaveSlotInfo& info = m_loadMenuSlots[i];
+        const bool selected = (i == m_loadMenuSelection);
+        std::string line = (selected ? "> " : "   ");
+        line += "Slot " + std::to_string(info.slot) + ":  ";
+        line += info.exists
+            ? (info.displayName.empty() ? std::string("(saved)") : info.displayName)
+            : std::string("(empty)");
+        const glm::vec3 color = selected ? glm::vec3(1.0f, 1.0f, 0.6f)
+                              : info.exists ? glm::vec3(0.85f) : glm::vec3(0.45f);
+        m_text->Text(line, x, y, 1.1f, color);
+        y += 30.0f;
+    }
+    y += 20.0f;
+    m_text->Text("Up/Down: select    Enter: load    Del: erase    F9/Esc: close",
+                 x, y, 0.75f, glm::vec3(0.7f));
 }
 
 void RuntimePlayerApp::DrawHudOverlay() {
@@ -1308,6 +1424,24 @@ void RuntimePlayerApp::UpdateAI(float dt) {
         for (const RuntimeAgent& a : m_agents) emitOnDamage(a.entity);
     }
 
+    // Snapshot potential targets once per frame so auto-targeting is a cheap arithmetic
+    // scan instead of N^2 registry lookups (a TryGet<Transform>/<Health> per agent pair).
+    struct TargetCandidate {
+        engine::ecs::Entity entity;
+        int team;
+        glm::vec3 position;
+        bool alive;
+    };
+    std::vector<TargetCandidate> targetCandidates;
+    targetCandidates.reserve(m_agents.size());
+    for (const RuntimeAgent& a : m_agents) {
+        if (a.team == 0) continue;   // team 0 = neutral, never an auto-target
+        const Transform* t = m_registry.TryGet<Transform>(a.entity);
+        if (!t) continue;
+        const engine::Health* h = m_registry.TryGet<engine::Health>(a.entity);
+        targetCandidates.push_back({a.entity, a.team, t->position, !h || h->alive});
+    }
+
     for (RuntimeAgent& agent : m_agents) {
         Transform* transform = m_registry.TryGet<Transform>(agent.entity);
         if (!transform) continue;
@@ -1318,21 +1452,15 @@ void RuntimePlayerApp::UpdateAI(float dt) {
 
         if (agent.autoTarget && agent.team != 0) {
             Entity nearest = engine::ecs::kNull;
-            float nearestDistance = 1.0e18f;
-            for (const RuntimeAgent& other : m_agents) {
-                if (other.entity == agent.entity || other.team == 0 ||
-                    other.team == agent.team) continue;
-                const Transform* otherTransform =
-                    m_registry.TryGet<Transform>(other.entity);
-                if (!otherTransform) continue;
-                if (const engine::Health* health =
-                    m_registry.TryGet<engine::Health>(other.entity);
-                    health && !health->alive) continue;
-                const float distance =
-                    glm::length(otherTransform->position - transform->position);
-                if (distance < nearestDistance) {
-                    nearestDistance = distance;
-                    nearest = other.entity;
+            float nearestDistanceSq = 1.0e36f;
+            for (const TargetCandidate& candidate : targetCandidates) {
+                if (candidate.entity == agent.entity
+                    || candidate.team == agent.team || !candidate.alive) continue;
+                const glm::vec3 delta = candidate.position - transform->position;
+                const float distanceSq = glm::dot(delta, delta);
+                if (distanceSq < nearestDistanceSq) {
+                    nearestDistanceSq = distanceSq;
+                    nearest = candidate.entity;
                 }
             }
             agent.targetEntity = nearest;
@@ -1886,7 +2014,19 @@ void RuntimePlayerApp::OnUpdate(float dt) {
     if (m_simReady && !m_paused)
         for (RuntimeWater& water : m_waters) water.water.Update(gameDt);
     if (dt > 0.0f) m_fps = m_fps * 0.92f + (1.0f / dt) * 0.08f;
-    if (w.IsKeyPressed(GLFW_KEY_ESCAPE)) w.SetShouldClose(true);
+    if (m_saveToastTime > 0.0f) m_saveToastTime -= dt;
+
+    // Esc closes the load menu if it is open, otherwise quits (edge-detected so a held
+    // key does not close the menu and immediately quit on the next frame).
+    const bool escDown = w.IsKeyPressed(GLFW_KEY_ESCAPE);
+    if (escDown && !m_escPrev) {
+        if (m_loadMenuOpen) CloseLoadMenu();
+        else w.SetShouldClose(true);
+    }
+    m_escPrev = escDown;
+
+    // In-game save (F5) / load menu (F9). A load reloads the world, so bail this frame.
+    if (UpdateSaveLoadMenu()) return;
 
     // P toggles pause (edge-detected). Pausing frees the cursor so the HUD's menu
     // buttons become clickable; resuming re-captures it for mouse-look.
@@ -1940,6 +2080,13 @@ void RuntimePlayerApp::OnUpdate(float dt) {
             m_scenePath = requested.lexically_normal().string();
             RestartScene();
             return;
+        }
+        // Full game save/load to a numbered slot (script-driven). A load reloads the saved
+        // scene and restores the snapshot; see SaveToSlot / LoadFromSlot.
+        for (const engine::ScriptSaveGameRequest& request
+             : engine::ConsumeScriptSaveGameRequests()) {
+            if (request.load) { LoadFromSlot(request.slot); return; }
+            SaveToSlot(request.slot, request.displayName);
         }
         for (const engine::ScriptLevelStreamRequest& request
              : engine::ConsumeScriptLevelStreamRequests()) {
@@ -2116,6 +2263,24 @@ void RuntimePlayerApp::OnFixedUpdate(float h) {
     engine::UpdateRagdollsBeforePhysics(m_registry, m_physics);
     engine::ecs::UpdateRuntimeMotion(
         m_registry, gameStep);                         // linear/angular velocity
+    // Give every foot-IK-enabled character a scene ground raycast (ignoring its own
+    // collider). Set once; enable comes baked from the character asset.
+    m_registry.view<engine::AnimatedModel>().each(
+        [&](engine::ecs::Entity e, engine::AnimatedModel& am) {
+            if (am.footIK.enabled && !am.footIK.groundQuery) {
+                am.footIK.groundQuery =
+                    [this, e](const glm::vec3& origin, const glm::vec3& down, float maxDist,
+                              glm::vec3& hitPos, glm::vec3& hitNormal) {
+                        engine::Ray ray{origin, down};
+                        const engine::RaycastHit hit =
+                            m_physics.Raycast(m_registry, ray, maxDist, 0xFFFFFFFFu, e);
+                        if (!hit.hit) return false;
+                        hitPos = hit.point;
+                        hitNormal = hit.normal;
+                        return true;
+                    };
+            }
+        });
     engine::UpdateAnimations(m_registry, gameStep);
     ApplyWaterBuoyancy(gameStep);
     m_physics.Step(m_registry, gameStep);
@@ -2310,8 +2475,8 @@ void RuntimePlayerApp::OnRender() {
         }
     }
     const char* controls = HasPlayer()
-        ? "WASD move   Space jump   Shift sprint   V view   mouse look   P pause   Esc quit"
-        : "WASD move   Q/E down/up   hold RMB look   Shift sprint   P pause   Esc quit";
+        ? "WASD move   Space jump   Shift sprint   V view   mouse look   P pause   F5 save   F9 load   Esc quit"
+        : "WASD move   Q/E down/up   hold RMB look   Shift sprint   P pause   F5 save   F9 load   Esc quit";
     m_text->Text(controls, 24.0f, static_cast<float>(hh) - 32.0f, 1.3f, glm::vec3(0.72f));
 
     // End screen: centered VICTORY / GAME OVER with score + restart prompt.
@@ -2331,6 +2496,7 @@ void RuntimePlayerApp::OnRender() {
         const float sw = m_text->Measure(sc, 1.6f);
         m_text->Text(sc, (fw - sw) * 0.5f, fh * 0.5f + 26.0f, 1.6f, glm::vec3(0.85f));
     }
+    DrawSaveLoadMenu(ww, hh);   // overlays the slot list + save toast when active
     m_text->End();
 }
 

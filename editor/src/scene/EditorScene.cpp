@@ -399,7 +399,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         return false;
     }
 
-    out << "3DGEditorScene 119 " << m_assetId.ToString() << '\n';
+    out << "3DGEditorScene 120 " << m_assetId.ToString() << '\n';
     out << "environment "
         << m_environment.timeOfDay << ' '
         << m_environment.skyLightIntensity << ' '
@@ -676,6 +676,11 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
                 << StoredPath(a.materialPath) << ' '
                 << StoredPath(a.socketName) << ' ';
         }
+        // Foot IK (3DGEditorScene >= 120).
+        out << (object.footIK.enabled ? 1 : 0) << ' '
+            << object.footIK.traceUp << ' ' << object.footIK.traceDown << ' '
+            << object.footIK.footHeight << ' ' << object.footIK.pelvisWeight << ' '
+            << object.footIK.maxPelvisDrop << ' ' << object.footIK.weight << ' ';
         out << StoredPath(object.characterAssetPath) << ' '
             << (object.characterAssetId.Valid()
                 ? object.characterAssetId.ToString() : std::string("-")) << ' ';
@@ -1212,7 +1217,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             return false;
         }
     }
-    if (magic != "3DGEditorScene" ||(version < 1 || version > 119)) {
+    if (magic != "3DGEditorScene" ||(version < 1 || version > 120)) {
         if (error) *error = "Scene file has an unknown format.";
         return false;
     }
@@ -1992,6 +1997,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         std::vector<AnimationStateTransition> animationTransitions;
         std::vector<AnimationSource> animationSources;
         std::vector<ModelAttachment> modelAttachments;
+        engine::ecs::FootIKSettings footIK;
         std::string characterAssetPath;
         engine::AssetHandle characterAssetId;
         std::string prefabAssetPath;
@@ -2395,6 +2401,13 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                 if (a.boneName == "-") a.boneName.clear();
                 modelAttachments.push_back(std::move(a));
             }
+        }
+        if (version >= 120) {
+            int footIkEnabled = 0;
+            in >> footIkEnabled
+               >> footIK.traceUp >> footIK.traceDown >> footIK.footHeight
+               >> footIK.pelvisWeight >> footIK.maxPelvisDrop >> footIK.weight;
+            footIK.enabled = footIkEnabled != 0;
         }
         if (version >= 93) {
             in >> std::quoted(characterAssetPath);
@@ -2963,6 +2976,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         m_objects.back().animationTransitions = animationTransitions;
         m_objects.back().animationSources = animationSources;
         m_objects.back().modelAttachments = modelAttachments;
+        m_objects.back().footIK = footIK;
         m_objects.back().characterAssetPath = characterAssetPath;
         m_objects.back().characterAssetId = characterAssetId;
         m_objects.back().prefabAssetPath = prefabAssetPath;
@@ -4080,6 +4094,20 @@ bool EditorScene::SetSelectedModelAttachments(const std::vector<ModelAttachment>
     }
     PushUndoSnapshot();
     selected.modelAttachments = attachments;
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedFootIK(const engine::ecs::FootIKSettings& footIK) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) {
+        return false;
+    }
+    PushUndoSnapshot();
+    selected.footIK = footIK;
     m_dirty = true;
     return true;
 }
@@ -5949,6 +5977,7 @@ bool EditorScene::DuplicateSelected(const engine::Mesh & cube, const engine::Mes
     m_objects.back().animationEvents = selectedCopy.animationEvents;
     m_objects.back().animationSources = selectedCopy.animationSources;
     m_objects.back().modelAttachments = selectedCopy.modelAttachments;
+    m_objects.back().footIK = selectedCopy.footIK;
     m_objects.back().characterAssetPath = selectedCopy.characterAssetPath;
     m_objects.back().prefabAssetPath = selectedCopy.prefabAssetPath;
     m_objects.back().prefabAssetId = selectedCopy.prefabAssetId;

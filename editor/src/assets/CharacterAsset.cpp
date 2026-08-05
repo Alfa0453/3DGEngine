@@ -19,6 +19,7 @@ void CharacterAsset::Capture(const EditorScene::Object& o) {
     modelOffsetPosition = o.modelOffsetPosition; modelOrientationEuler = o.modelOrientationEuler;
     modelOffsetScale = o.modelOffsetScale;
     colliderEnabled = o.colliderEnabled; collider = o.collider;
+    footIK = o.footIK;
     playerControllerEnabled = o.playerControllerEnabled; playerController = o.playerController;
     skeletalModel = o.skeletalModel; animationClipIndex = o.animationClipIndex;
     animationClipName = o.animationClipName; animationAutoplay = o.animationAutoplay;
@@ -182,6 +183,7 @@ bool CharacterAsset::Apply(EditorScene& scene) const {
         sceneAttachments.push_back(std::move(m));
     }
     scene.SetSelectedModelAttachments(sceneAttachments);
+    scene.SetSelectedFootIK(footIK);
     std::vector<EditorScene::AnimationSource> resolvedSources;
     if (const EditorScene::Object* selected = scene.SelectedObject()) {
         resolvedSources = selected->animationSources;
@@ -320,7 +322,7 @@ bool CharacterAsset::Save(const std::string& path, std::string* error) {
     if (!out) { if (error) *error = "Could not write character asset: " + path; return false; }
     const CharacterScript legacy{scriptEnabled, scriptClassName, scriptPath};
     const CharacterScript* primary = !scripts.empty() ? &scripts.front() : &legacy;
-    out << "3DG_CHARACTER 23 " << assetId.ToString() << '\n'
+    out << "3DG_CHARACTER 24 " << assetId.ToString() << '\n'
         << std::quoted(name) << '\n' << std::quoted(modelAssetPath) << '\n' << std::quoted(materialAssetPath) << '\n'
         << colliderEnabled << ' ' << static_cast<int>(collider.shape) << ' '
         << collider.halfExtents.x << ' ' << collider.halfExtents.y << ' ' << collider.halfExtents.z << ' '
@@ -476,6 +478,10 @@ bool CharacterAsset::Save(const std::string& path, std::string* error) {
             ? actionClipAssetIds[i] : engine::AssetHandle{};
         out << ' ' << (id.Valid() ? id.ToString() : std::string("-"));
     }
+    // Foot IK (3DG_CHARACTER >= 24). Named tail block so older readers stop before it.
+    out << '\n' << "FOOT_IK " << (footIK.enabled ? 1 : 0) << ' '
+        << footIK.traceUp << ' ' << footIK.traceDown << ' ' << footIK.footHeight << ' '
+        << footIK.pelvisWeight << ' ' << footIK.maxPelvisDrop << ' ' << footIK.weight << '\n';
     std::vector<engine::AssetHandle> dependencies;
     const auto addDependency = [&](engine::AssetHandle id) {
         if (id.Valid()
@@ -905,6 +911,16 @@ bool CharacterAsset::Load(const std::string& path, std::string* error) {
                 if (error) *error = "Character action identity is invalid: " + path;
                 return false;
             }
+        }
+    }
+    if (loadedVersion >= 24) {
+        std::string tag;
+        if ((in >> tag) && tag == "FOOT_IK") {
+            int footIkEnabled = 0;
+            in >> footIkEnabled
+               >> footIK.traceUp >> footIK.traceDown >> footIK.footHeight
+               >> footIK.pelvisWeight >> footIK.maxPelvisDrop >> footIK.weight;
+            footIK.enabled = footIkEnabled != 0;
         }
     }
     if (loadedVersion >= 19) {

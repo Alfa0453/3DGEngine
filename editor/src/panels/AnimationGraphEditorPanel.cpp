@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 
@@ -64,6 +65,119 @@ std::string UniqueClipAliasExcept(const std::vector<AnimationGraphClip>& clips,
     while (exists(desired)) desired = base + " " + std::to_string(suffix++);
     return desired;
 }
+
+// A single authoring problem found in the graph. severity: 0=error, 1=warning, 2=info.
+struct GraphIssue { int severity = 2; std::string text; };
+
+// Static analysis of the authored graph so the editor can surface the traps that made
+// locomotion misbehave: unresolved clip aliases, always-true transitions, unknown states
+// / parameters, and unreachable / dead-end states.
+std::vector<GraphIssue> ValidateGraph(const AnimationGraphAsset& asset) {
+    std::vector<GraphIssue> issues;
+    const auto add = [&](int severity, const std::string& text) {
+        issues.push_back(GraphIssue{severity, text});
+    };
+    if (asset.states.empty()) {
+        add(2, "No states yet - add a state, or use Create 1D / 2D Locomotion.");
+        return issues;
+    }
+    using PType = EditorScene::AnimationParameter::Type;
+    using Comp = EditorScene::AnimationStateTransition::Compare;
+    const auto isClip = [&](const std::string& n) {
+        return !n.empty() && std::any_of(asset.clips.begin(), asset.clips.end(),
+            [&](const AnimationGraphClip& c) { return c.clipName == n; });
+    };
+    const auto isState = [&](const std::string& n) {
+        return std::any_of(asset.states.begin(), asset.states.end(),
+            [&](const EditorScene::AnimationStateNode& s) { return s.name == n; });
+    };
+    const auto paramType = [&](const std::string& n, PType& out) {
+        for (const EditorScene::AnimationParameter& p : asset.parameters)
+            if (p.name == n) { out = p.type; return true; }
+        return false;
+    };
+    const auto stateLabel = [](const std::string& n) {
+        return n.empty() ? std::string("(unnamed)") : n;
+    };
+
+    // States: clip resolution + blend-space parameters.
+    for (const EditorScene::AnimationStateNode& s : asset.states) {
+        const std::string sn = stateLabel(s.name);
+        if (s.blendSamples.empty()) {
+            if (!s.clipName.empty() && !isClip(s.clipName))
+                add(0, "State '" + sn + "': clip '" + s.clipName + "' is not in the clip list.");
+            else if (s.clipName.empty())
+                add(1, "State '" + sn + "' has no clip assigned.");
+        } else {
+            for (const auto& sample : s.blendSamples)
+                if (!sample.clipName.empty() && !isClip(sample.clipName))
+                    add(0, "State '" + sn + "': blend clip '" + sample.clipName
+                           + "' is not in the clip list.");
+            PType t;
+            if (s.blendParameter.empty())
+                add(1, "State '" + sn + "' is a blend space but has no X parameter.");
+            else if (!paramType(s.blendParameter, t))
+                add(1, "State '" + sn + "': blend parameter '" + s.blendParameter
+                       + "' is not declared.");
+            if (s.blendSpace2D && !s.blendParameterY.empty() && !paramType(s.blendParameterY, t))
+                add(1, "State '" + sn + "': Y parameter '" + s.blendParameterY
+                       + "' is not declared.");
+        }
+    }
+
+    // Transitions: valid endpoints, declared parameters, and the always-true footgun.
+    bool hasAnyState = false;
+    for (const auto& tr : asset.transitions) if (tr.fromState.empty()) hasAnyState = true;
+    for (const auto& tr : asset.transitions) {
+        const std::string label = "Transition "
+            + (tr.fromState.empty() ? std::string("Any") : tr.fromState) + " -> "
+            + (tr.toState.empty() ? std::string("(none)") : tr.toState);
+        if (!tr.fromState.empty() && !isState(tr.fromState))
+            add(0, label + ": 'from' state does not exist.");
+        if (tr.toState.empty() || !isState(tr.toState))
+            add(0, label + ": 'to' state does not exist.");
+
+        const auto checkParam = [&](const std::string& p) {
+            PType t;
+            if (!p.empty() && !paramType(p, t))
+                add(1, label + " uses undeclared parameter '" + p + "'.");
+        };
+        checkParam(tr.parameter);
+        for (const auto& c : tr.additionalConditions) checkParam(c.parameter);
+
+        // Only flag "always true" when nothing else gates the transition.
+        if (tr.additionalConditions.empty()) {
+            if (tr.parameter.empty()) {
+                add(1, label + " has no condition - it fires immediately.");
+            } else {
+                PType t;
+                if (paramType(tr.parameter, t) && t == PType::Float
+                    && static_cast<int>(tr.compare) == static_cast<int>(Comp::GreaterOrEqual)
+                    && tr.threshold <= 0.0f)
+                    add(1, label + " is always true (" + tr.parameter
+                           + " >= 0). Give it a threshold or use '>'.");
+            }
+        }
+    }
+
+    // Reachability + dead ends (only precise without an Any-state transition).
+    if (!hasAnyState) {
+        const std::string entry = asset.states.front().name;
+        for (const EditorScene::AnimationStateNode& s : asset.states) {
+            int incoming = 0, outgoing = 0;
+            for (const auto& tr : asset.transitions) {
+                if (tr.toState == s.name) ++incoming;
+                if (tr.fromState == s.name) ++outgoing;
+            }
+            if (s.name != entry && incoming == 0)
+                add(2, "State '" + stateLabel(s.name) + "' is unreachable (nothing transitions to it).");
+            if (outgoing == 0)
+                add(2, "State '" + stateLabel(s.name) + "' has no outgoing transition (dead end).");
+        }
+    }
+    return issues;
+}
+
 // Propagate a clip rename to everything that references the clip by name, so existing
 // states / blend samples / actions keep pointing at the same animation.
 void RenameClipReferences(AnimationGraphAsset& asset,
@@ -364,6 +478,40 @@ void AnimationGraphEditorPanel::Draw(const std::string& assetRoot, bool* open, b
     ImGui::BeginChild("GraphAuthor", ImVec2(0, 0), true);
     ImGui::TextDisabled("GRAPH");
     if (ImGui::InputText("Name", m_nameBuffer.data(), m_nameBuffer.size())) m_asset.name = m_nameBuffer.data();
+
+    // Validation strip: surface authoring traps (unresolved clips, always-true transitions,
+    // unreachable / dead-end states) so a broken graph explains itself.
+    {
+        const std::vector<GraphIssue> issues = ValidateGraph(m_asset);
+        if (!issues.empty()) {
+            int errors = 0, warnings = 0;
+            for (const GraphIssue& issue : issues) {
+                if (issue.severity == 0) ++errors;
+                else if (issue.severity == 1) ++warnings;
+            }
+            const ImVec4 headColor = errors ? ImVec4(1.0f, 0.45f, 0.4f, 1.0f)
+                                   : warnings ? ImVec4(1.0f, 0.8f, 0.35f, 1.0f)
+                                              : ImVec4(0.6f, 0.8f, 0.6f, 1.0f);
+            char header[80];
+            std::snprintf(header, sizeof(header),
+                          "Validation: %d error(s), %d warning(s)###graphValidation",
+                          errors, warnings);
+            ImGui::PushStyleColor(ImGuiCol_Text, headColor);
+            const bool open = ImGui::CollapsingHeader(
+                header, errors ? ImGuiTreeNodeFlags_DefaultOpen : 0);
+            ImGui::PopStyleColor();
+            if (open) {
+                for (const GraphIssue& issue : issues) {
+                    const ImVec4 color = issue.severity == 0 ? ImVec4(1.0f, 0.5f, 0.45f, 1.0f)
+                                       : issue.severity == 1 ? ImVec4(1.0f, 0.82f, 0.4f, 1.0f)
+                                                             : ImVec4(0.72f, 0.72f, 0.72f, 1.0f);
+                    const char* tag = issue.severity == 0 ? "[error]"
+                                    : issue.severity == 1 ? "[warn] " : "[info] ";
+                    ImGui::TextColored(color, "%s %s", tag, issue.text.c_str());
+                }
+            }
+        }
+    }
 
     ImGui::SeparatorText("Clips (from .3dgclip)");
     ImGui::TextDisabled("Rename clips (e.g. Idle / Walk / Run) — states, samples and the "

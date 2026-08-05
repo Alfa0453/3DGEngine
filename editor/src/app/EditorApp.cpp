@@ -8,6 +8,9 @@
 #include <engine/gameplay/RagdollSystem.h>
 #include <engine/gameplay/GameMode.h>
 #include <engine/gameplay/Script.h>
+#include <engine/gameplay/SaveGame.h>
+#include <engine/assets/SkeletalAsset.h>
+#include <engine/assets/TextureAsset.h>
 #include <engine/ecs/Systems.h>
 #include <engine/graphics/Model.h>
 #include <engine/graphics/Primitives.h>
@@ -554,6 +557,11 @@ void EditorApp::OnInit()
     SetScenePathDraft(m_project.ScenePath());
     m_content.Refresh(m_assets, m_project, m_log);
     LoadProjectAssetRegistry();
+    // Drag-and-drop from the OS file explorer: opens an Import Settings popup listing each
+    // dropped file with its detected type; the actual import runs when the user confirms.
+    GetWindow().SetDropCallback([this](const std::vector<std::string>& paths) {
+        BeginImportDialog(paths);
+    });
     m_materialMaker.SetOutputDirectory(m_project.AssetRoot());
     m_behaviorGraph.SetOutputDirectory(m_project.AssetRoot());
     // Rebuild the shared game module's generated script header from ONLY this project's
@@ -608,6 +616,22 @@ void EditorApp::OnInit()
 
 void EditorApp::OnUpdate(float dt)
 {
+    // A script requested a scene change during Play (deferred to a safe point so we don't
+    // tear down the play registry mid-update). Exit Play, load the target scene, and resume
+    // Play in it if the load succeeded -- mirroring the packaged runtime's scene transition.
+    if (!m_playSceneLoadRequest.empty()) {
+        const std::string requested = m_playSceneLoadRequest;
+        m_playSceneLoadRequest.clear();
+        if (m_mode == EditorMode::Play) ExitPlayMode();
+        const std::string before = m_project.ScenePath();
+        RequestLoadSceneFromPath(requested);
+        if (m_project.ScenePath() != before) {
+            m_log.Info("Script scene load: " + requested);
+            EnterPlayMode();   // continue playing in the new scene
+        }
+        return;
+    }
+
     engine::Window& window = GetWindow();
     RestoreCameraBeforeShake();
     m_elapsed += dt;
@@ -652,6 +676,44 @@ void EditorApp::OnUpdate(float dt)
         engine::UpdateScripts(
             *m_playRegistry, playDt, &scriptInput, &m_runtimeAudio,
             &m_cameraShake, &m_cameraDirector, &engine::GameMode::Instance());
+        // Full game save/load requests. In the editor a load restores state onto the
+        // current play scene (matching entities by name) rather than reloading a scene.
+        for (const engine::ScriptSaveGameRequest& request
+             : engine::ConsumeScriptSaveGameRequests()) {
+            if (request.load) {
+                engine::SaveGame save;
+                if (engine::SaveGame::LoadFromFile(engine::SaveSlotPath(request.slot), save)) {
+                    engine::ApplySaveGame(*m_playRegistry, save);
+                    m_log.Info("Loaded save slot " + std::to_string(request.slot));
+                }
+            } else {
+                engine::SaveGame save = engine::CaptureSaveGame(
+                    *m_playRegistry, m_project.ScenePath(),
+                    request.displayName.empty() ? "Slot " + std::to_string(request.slot)
+                                                : request.displayName,
+                    0.0f);
+                if (save.SaveToFile(engine::SaveSlotPath(request.slot)))
+                    m_log.Info("Saved to slot " + std::to_string(request.slot));
+            }
+        }
+        // Scene transition requested from a script: defer to the top of the next frame
+        // (handled above) so we don't reload while the play registry is mid-update. Keep
+        // the last request if several are queued.
+        if (std::string requestedScene = engine::ConsumeScriptSceneLoadRequest();
+            !requestedScene.empty()) {
+            m_playSceneLoadRequest = std::move(requestedScene);
+        }
+        // Level streaming is a packaged-world feature; the editor Play preview builds a
+        // single in-memory scene, so surface a one-time note instead of silently dropping.
+        for (const engine::ScriptLevelStreamRequest& request
+             : engine::ConsumeScriptLevelStreamRequests()) {
+            if (!m_warnedEditorLevelStreaming) {
+                m_log.Warning("Level streaming ('" + request.level
+                    + "') runs in packaged worlds; ignored in editor Play. Use Play in a "
+                      "packaged build to test streaming.");
+                m_warnedEditorLevelStreaming = true;
+            }
+        }
         // Camera events are frame events. Every script has now had one opportunity
         // to observe them; fixed updates receive held input and simulation events.
         m_cameraDirector.ClearEvents();
@@ -1424,6 +1486,7 @@ void EditorApp::DrawEditorOverlay()
     dockspaceContext.showNavigationPreview = &m_showNavigationPreview;
     dockspaceContext.showGrid = &m_showGrid;
     dockspaceContext.previewAnimations = &m_previewSceneAnimations;
+    dockspaceContext.playFootIK = &m_playFootIK;
     dockspaceContext.showParticleDebug = &m_showParticleDebug;
     dockspaceContext.particleDebugSelectedOnly = &m_particleDebugSelectedOnly;
     dockspaceContext.particleDebugShapes = &m_particleDebugShapes;
@@ -1505,6 +1568,7 @@ void EditorApp::DrawEditorOverlay()
     }
     dockspaceContext.sceneDirty = m_scene.IsDirty();
     m_dockspace.Draw(dockspaceContext);
+    DrawImportDialog();   // drag-and-drop Import Settings popup (when files were dropped)
     if (dockspaceContext.animationAssetRestartRequested)
         m_animationAssetPreviewRestartRequested = true;
     if (dockspaceContext.animationAssetRefreshRequested)
@@ -6506,6 +6570,168 @@ void EditorApp::LoadProjectAssetRegistry() {
     }
 }
 
+void EditorApp::BeginImportDialog(const std::vector<std::string>& paths) {
+    m_pendingImports.clear();
+    for (const std::string& path : paths) {
+        std::error_code ec;
+        if (std::filesystem::is_directory(path, ec)) {
+            m_log.Warning("Drag-drop: skipped folder (drop the files inside): " + path);
+            continue;
+        }
+        PendingImportFile file;
+        file.path = path;
+        const std::filesystem::path fs(path);
+        file.name = fs.filename().string();
+        file.extension = fs.extension().string();
+        for (char& c : file.extension) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        file.isModel = file.extension == ".obj" || file.extension == ".fbx"
+            || file.extension == ".gltf" || file.extension == ".glb" || file.extension == ".dae"
+            || file.extension == ".ply" || file.extension == ".stl";
+        file.isTexture = file.extension == ".png" || file.extension == ".jpg"
+            || file.extension == ".jpeg" || file.extension == ".tga" || file.extension == ".bmp"
+            || file.extension == ".hdr";
+        file.modelMode = m_importGlobalModelMode;
+        if (file.isModel) {
+            // Peek the source so the default mode matches its content: a skeleton -> Skeletal
+            // (or Animation-only when there is no mesh), otherwise Static.
+            engine::ModelSourceInfo info;
+            if (engine::InspectModelSource(path, &info)) {
+                file.inspected = true;
+                file.hasBones = info.hasBones;
+                file.meshCount = static_cast<int>(info.meshCount);
+                file.animationCount = static_cast<int>(info.animationCount);
+                if (info.IsSkeletal())
+                    file.modelMode = (info.meshCount == 0) ? 3 /*Animation*/ : 2 /*Skeletal*/;
+                else
+                    file.modelMode = 1 /*Static*/;
+            }
+        }
+        if (file.isTexture) {
+            // Normal / mask / roughness maps are linear data; default those off sRGB by name.
+            const std::string lowerName = [&] {
+                std::string n = file.name;
+                for (char& c : n) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                return n;
+            }();
+            const bool linearMap =
+                lowerName.find("normal") != std::string::npos
+                || lowerName.find("_n.") != std::string::npos
+                || lowerName.find("rough") != std::string::npos
+                || lowerName.find("metal") != std::string::npos
+                || lowerName.find("_orm") != std::string::npos
+                || lowerName.find("mask") != std::string::npos
+                || lowerName.find("height") != std::string::npos
+                || lowerName.find("ao") != std::string::npos;
+            file.srgb = !linearMap;
+        }
+        m_pendingImports.push_back(std::move(file));
+    }
+    if (m_pendingImports.empty()) return;
+    // Default the target folder to the browser's current folder.
+    std::snprintf(m_importFolderBuffer.data(), m_importFolderBuffer.size(), "%s",
+                  m_assets.CurrentFolder().c_str());
+    m_importDialogRequested = true;
+}
+
+void EditorApp::DrawImportDialog() {
+    if (m_importDialogRequested) {
+        ImGui::OpenPopup("Import Settings");
+        m_importDialogRequested = false;
+    }
+    ImGui::SetNextWindowSize(ImVec2(560.0f, 0.0f), ImGuiCond_Appearing);
+    if (!ImGui::BeginPopupModal("Import Settings", nullptr,
+                                ImGuiWindowFlags_AlwaysAutoResize)) {
+        return;
+    }
+
+    ImGui::Text("Importing %zu file(s) into Content:", m_pendingImports.size());
+    ImGui::SetNextItemWidth(-1.0f);
+    ImGui::InputText("Target Folder", m_importFolderBuffer.data(), m_importFolderBuffer.size());
+    ImGui::TextDisabled("Relative to Content (blank = Content root).");
+
+    const char* modes[] = { "Automatic", "Static Mesh", "Skeletal Mesh", "Animation Only" };
+    int modelCount = 0;
+    for (const PendingImportFile& f : m_pendingImports) if (f.isModel) ++modelCount;
+    if (modelCount > 0) {
+        ImGui::Separator();
+        ImGui::SetNextItemWidth(220.0f);
+        if (ImGui::Combo("Model import (all)", &m_importGlobalModelMode, modes, 4)) {
+            for (PendingImportFile& f : m_pendingImports)
+                if (f.isModel) f.modelMode = m_importGlobalModelMode;
+        }
+    }
+
+    ImGui::Separator();
+    ImGui::BeginChild("ImportList", ImVec2(0.0f, 240.0f), true);
+    for (std::size_t i = 0; i < m_pendingImports.size(); ++i) {
+        PendingImportFile& f = m_pendingImports[i];
+        ImGui::PushID(static_cast<int>(i));
+        const char* type = f.isModel ? "Model"
+            : f.isTexture ? "Texture"
+            : (f.extension == ".wav" || f.extension == ".mp3" || f.extension == ".ogg"
+               || f.extension == ".flac") ? "Audio"
+            : "Other";
+        ImGui::TextColored(ImVec4(0.65f, 0.8f, 1.0f, 1.0f), "[%s]", type);
+        ImGui::SameLine();
+        ImGui::TextUnformatted(f.name.c_str());
+        if (f.isModel) {
+            // Detected-content summary so the chosen mode is explainable.
+            if (f.inspected) {
+                char detail[96];
+                std::snprintf(detail, sizeof(detail), "%s%d mesh, %d anim",
+                              f.hasBones ? "skeleton, " : "", f.meshCount, f.animationCount);
+                ImGui::SameLine();
+                ImGui::TextDisabled("(%s)", detail);
+            }
+            ImGui::SameLine(ImGui::GetContentRegionAvail().x - 190.0f);
+            ImGui::SetNextItemWidth(190.0f);
+            ImGui::Combo("##mode", &f.modelMode, modes, 4);
+        } else if (f.isTexture) {
+            ImGui::SameLine(ImGui::GetContentRegionAvail().x - 190.0f);
+            ImGui::Checkbox("sRGB", &f.srgb);
+            ImGui::SameLine();
+            ImGui::Checkbox("Smooth", &f.smooth);
+        }
+        ImGui::PopID();
+    }
+    ImGui::EndChild();
+
+    ImGui::Separator();
+    if (ImGui::Button("Import", ImVec2(120.0f, 0.0f))) {
+        const std::string folder = m_importFolderBuffer.data();
+        int imported = 0;
+        for (const PendingImportFile& f : m_pendingImports) {
+            const auto mode = static_cast<EditorAssets::ModelImportMode>(
+                f.isModel ? f.modelMode : 0);
+            if (f.isTexture) {   // per-file sRGB / filtering applied to this import
+                m_assets.TextureImportSettings().srgb = f.srgb;
+                m_assets.TextureImportSettings().smooth = f.smooth;
+            }
+            std::string error;
+            if (m_assets.ImportAssetToFolder(f.path, folder, mode, &error)) {
+                m_log.Info(m_assets.LastImportMessage());
+                ++imported;
+            } else {
+                m_log.Error(error);
+            }
+        }
+        if (imported > 0) {
+            m_content.Refresh(m_assets, m_project, m_log);
+            LoadProjectAssetRegistry();
+            m_log.Info("Imported " + std::to_string(imported)
+                       + (imported == 1 ? " file" : " files"));
+        }
+        m_pendingImports.clear();
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel", ImVec2(120.0f, 0.0f))) {
+        m_pendingImports.clear();
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+}
+
 void EditorApp::NewProject(const std::string& location, const std::string& name) {
     if (!m_cube || !m_plane || !m_sphere || !m_capsule || !m_cylinder || !m_cone
         || !m_pyramid || !m_torus || !m_staircase) {
@@ -7753,6 +7979,25 @@ void EditorApp::UpdateAI(float dt)
         }
     }
 
+    // Snapshot potential targets once per frame so faction auto-targeting is a cheap
+    // arithmetic scan instead of N^2 registry lookups (a TryGet per agent pair).
+    struct TargetCandidate {
+        engine::ecs::Entity entity;
+        int team;
+        glm::vec3 position;
+        bool alive;
+    };
+    std::vector<TargetCandidate> targetCandidates;
+    targetCandidates.reserve(m_playAgents.size());
+    for (const PlayAgent& a : m_playAgents) {
+        if (a.team == 0 || !m_playRegistry->Valid(a.entity)) continue;
+        const engine::ecs::Transform* at =
+            m_playRegistry->TryGet<engine::ecs::Transform>(a.entity);
+        if (!at) continue;
+        const engine::Health* h = m_playRegistry->TryGet<engine::Health>(a.entity);
+        targetCandidates.push_back({a.entity, a.team, at->position, !h || h->alive});
+    }
+
     for (PlayAgent& playAgent : m_playAgents) {
         if (!m_playRegistry->Valid(playAgent.entity)) {
             continue;
@@ -7775,19 +8020,13 @@ void EditorApp::UpdateAI(float dt)
             playAgent.targetEntity = playAgent.configuredTargetEntity;
         } else if (playAgent.autoTarget && playAgent.team != 0) {
             engine::ecs::Entity best = engine::ecs::kNull;
-            float bestDist = 1.0e18f;
-            for (const PlayAgent& other : m_playAgents) {
-                if (other.entity == playAgent.entity) continue;
-                if (other.team == 0 || other.team == playAgent.team) continue;
-                if (!m_playRegistry->Valid(other.entity)) continue;
-                const engine::ecs::Transform* ot =
-                    m_playRegistry->TryGet<engine::ecs::Transform>(other.entity);
-                if (!ot) continue;
-                if (const engine::Health* h = m_playRegistry->TryGet<engine::Health>(other.entity)) {
-                    if (!h->alive) continue;
-                }
-                const float d = glm::length(ot->position - t->position);
-                if (d < bestDist) { bestDist = d; best = other.entity; }
+            float bestDistSq = 1.0e36f;
+            for (const TargetCandidate& candidate : targetCandidates) {
+                if (candidate.entity == playAgent.entity
+                    || candidate.team == playAgent.team || !candidate.alive) continue;
+                const glm::vec3 delta = candidate.position - t->position;
+                const float distSq = glm::dot(delta, delta);
+                if (distSq < bestDistSq) { bestDistSq = distSq; best = candidate.entity; }
             }
             playAgent.targetEntity = best;
         }
@@ -8672,6 +8911,7 @@ void EditorApp::StepPlayPhysics(float dt, bool inputEnabled)
         engine::UpdateProjectiles(*m_playRegistry, step);
         engine::UpdateHealth(*m_playRegistry);
         engine::UpdateRagdollsBeforePhysics(*m_playRegistry, m_playPhysics);
+        ConfigurePlayFootIK();
         engine::UpdateAnimations(*m_playRegistry, step);
         ApplyWaterBuoyancy(step);
         m_playPhysics.Step(*m_playRegistry, step);
@@ -8707,6 +8947,7 @@ void EditorApp::StepPlayPhysics(float dt, bool inputEnabled)
         engine::UpdateProjectiles(*m_playRegistry, step);
         engine::UpdateHealth(*m_playRegistry);
         engine::UpdateRagdollsBeforePhysics(*m_playRegistry, m_playPhysics);
+        ConfigurePlayFootIK();
         engine::UpdateAnimations(*m_playRegistry, step);
         ApplyWaterBuoyancy(step);
         m_playPhysics.Step(*m_playRegistry, step);
@@ -8722,6 +8963,32 @@ void EditorApp::StepPlayPhysics(float dt, bool inputEnabled)
         m_physicsAccumulator = 0.0f;
         m_log.Warning("Play physics skipped accumulated time to keep the editor responsive");
     }
+}
+
+void EditorApp::ConfigurePlayFootIK()
+{
+    if (!m_playRegistry) return;
+    m_playRegistry->view<engine::AnimatedModel>().each(
+        [&](engine::ecs::Entity entity, engine::AnimatedModel& am) {
+            // Per-character enable comes from the character asset (set when the AnimatedModel
+            // was built). The global View toggle is a force-on override for quick testing; it
+            // never turns an asset-authored character off. (Restart Play to clear a forced-on.)
+            if (m_playFootIK) am.footIK.enabled = true;
+            if (am.footIK.enabled && !am.footIK.groundQuery) {
+                // Downward scene ray that ignores the character's own collider.
+                am.footIK.groundQuery =
+                    [this, entity](const glm::vec3& origin, const glm::vec3& down, float maxDist,
+                                   glm::vec3& hitPos, glm::vec3& hitNormal) {
+                        engine::Ray ray{origin, down};
+                        const engine::RaycastHit hit = m_playPhysics.Raycast(
+                            *m_playRegistry, ray, maxDist, 0xFFFFFFFFu, entity);
+                        if (!hit.hit) return false;
+                        hitPos = hit.point;
+                        hitNormal = hit.normal;
+                        return true;
+                    };
+            }
+        });
 }
 
 void EditorApp::CapturePlayPhysicsEvents()

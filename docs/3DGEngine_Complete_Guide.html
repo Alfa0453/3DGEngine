@@ -1,0 +1,651 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>3DGEngine — Complete Guide</title>
+<style>
+  :root{
+    --ink:#1a1f2b; --muted:#5a6474; --line:#d7dde6; --accent:#2f6fdb;
+    --accent2:#8a4fd0; --code-bg:#f4f6fa; --warn:#b9601f; --ok:#1f8a55;
+  }
+  *{ box-sizing:border-box; }
+  html{ -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+  body{
+    font-family:"Segoe UI", Arial, sans-serif; color:var(--ink);
+    line-height:1.5; font-size:11pt; margin:0;
+  }
+  /* A4 print geometry */
+  @page{ size:A4; margin:18mm 16mm 20mm 16mm; }
+  .page{ page-break-after:always; }
+  h1,h2,h3,h4{ line-height:1.2; color:var(--ink); }
+  h1{ font-size:26pt; margin:0 0 6pt; }
+  h2{ font-size:18pt; margin:22pt 0 8pt; padding-bottom:4pt;
+      border-bottom:2px solid var(--accent); page-break-after:avoid; }
+  h3{ font-size:13.5pt; margin:16pt 0 5pt; color:#25324a; page-break-after:avoid; }
+  h4{ font-size:11.5pt; margin:12pt 0 4pt; color:var(--accent2); page-break-after:avoid; }
+  p{ margin:6pt 0; }
+  ul,ol{ margin:6pt 0 6pt 18pt; }
+  li{ margin:3pt 0; }
+  code{ font-family:"Consolas","Courier New",monospace; font-size:9.5pt;
+        background:var(--code-bg); padding:1px 4px; border-radius:3px; }
+  pre{ background:var(--code-bg); border:1px solid var(--line); border-left:3px solid var(--accent);
+       border-radius:5px; padding:9pt 11pt; overflow:auto; font-size:9pt; line-height:1.42;
+       page-break-inside:avoid; }
+  pre code{ background:none; padding:0; }
+  .muted{ color:var(--muted); }
+  .lead{ font-size:12.5pt; color:#33405a; }
+  .tag{ display:inline-block; font-size:8pt; text-transform:uppercase; letter-spacing:.5px;
+        padding:2px 7px; border-radius:10px; background:#eaf1fc; color:var(--accent);
+        border:1px solid #cfe0fb; vertical-align:middle; }
+  .note,.warn,.tip{ border-radius:6px; padding:8pt 11pt; margin:10pt 0; font-size:10pt;
+        page-break-inside:avoid; }
+  .note{ background:#eef3fb; border:1px solid #cfe0fb; }
+  .warn{ background:#fdf3ea; border:1px solid #f2d3b3; }
+  .tip{ background:#eafaf1; border:1px solid #c3ead4; }
+  .note b,.warn b,.tip b{ text-transform:uppercase; font-size:8.5pt; letter-spacing:.5px; }
+  table{ border-collapse:collapse; width:100%; margin:8pt 0; font-size:9.5pt;
+         page-break-inside:avoid; }
+  th,td{ border:1px solid var(--line); padding:5pt 8pt; text-align:left; vertical-align:top; }
+  th{ background:#eef2f8; }
+  .cover{ height:250mm; display:flex; flex-direction:column; justify-content:center; }
+  .cover .badge{ font-size:10pt; letter-spacing:3px; text-transform:uppercase; color:var(--accent); }
+  .cover h1{ font-size:40pt; margin:8pt 0; }
+  .cover .sub{ font-size:15pt; color:var(--muted); }
+  .cover .rule{ height:4px; width:120px; background:linear-gradient(90deg,var(--accent),var(--accent2)); margin:14pt 0; }
+  .toc a{ color:var(--ink); text-decoration:none; }
+  .toc ol{ list-style:none; margin-left:0; }
+  .toc > ol > li{ margin:7pt 0; font-weight:600; }
+  .toc ol ol{ font-weight:400; margin:2pt 0 2pt 16pt; color:#33405a; }
+  .kbd{ font-family:Consolas,monospace; font-size:9pt; border:1px solid #c3ccd8;
+        border-bottom-width:2px; border-radius:4px; padding:1px 5px; background:#fff; }
+  .sysgrid{ display:grid; grid-template-columns:1fr 1fr; gap:8pt; margin:8pt 0; }
+  .sysgrid .card{ border:1px solid var(--line); border-radius:6px; padding:8pt 10pt; page-break-inside:avoid; }
+  .sysgrid .card h4{ margin:0 0 3pt; }
+  a{ color:var(--accent); }
+  .small{ font-size:9pt; }
+</style>
+</head>
+<body>
+
+<!-- ========================= COVER ========================= -->
+<section class="page cover">
+  <div class="badge">C++17 &nbsp;•&nbsp; OpenGL 3.3 &nbsp;•&nbsp; Editor + Runtime</div>
+  <div class="rule"></div>
+  <h1>3DGEngine</h1>
+  <div class="sub">The Complete Guide — every system, and how to build a game with them</div>
+  <div class="rule"></div>
+  <p class="muted">A practical manual covering the engine architecture, the editor workflow,
+  each runtime system, the scripting API, and an end-to-end tutorial that assembles a small
+  playable game. Print to PDF with <span class="kbd">Ctrl</span>+<span class="kbd">P</span> →
+  <em>Save as PDF</em> (A4).</p>
+</section>
+
+<!-- ========================= TOC ========================= -->
+<section class="page toc">
+  <h2>Contents</h2>
+  <ol>
+    <li><a href="#part1">Part I — Foundations</a>
+      <ol>
+        <li>1. Architecture &amp; the four targets</li>
+        <li>2. The editor at a glance</li>
+        <li>3. ECS: entities, components, systems</li>
+        <li>4. Scenes, prefabs, worlds &amp; level streaming</li>
+        <li>5. Assets: import, registry, cooking</li>
+      </ol>
+    </li>
+    <li><a href="#part2">Part II — Systems</a>
+      <ol>
+        <li>6. Rendering, lighting &amp; cameras</li>
+        <li>7. Materials, textures &amp; shader graphs</li>
+        <li>8. Skeletal animation, graphs &amp; characters</li>
+        <li>9. Physics, colliders, queries &amp; ragdolls</li>
+        <li>10. Gameplay framework &amp; the scripting API</li>
+        <li>11. AI &amp; navigation</li>
+        <li>12. Audio</li>
+        <li>13. Particles</li>
+        <li>14. UI &amp; HUD</li>
+        <li>15. Save/Load system</li>
+      </ol>
+    </li>
+    <li><a href="#part3">Part III — Build a Game</a>
+      <ol>
+        <li>16. Project setup &amp; importing assets</li>
+        <li>17. Building the level &amp; the player</li>
+        <li>18. Scripting the gameplay loop</li>
+        <li>19. Enemies, AI &amp; combat</li>
+        <li>20. HUD, audio, saving &amp; packaging</li>
+      </ol>
+    </li>
+    <li><a href="#appendix">Appendix — Scripting API quick reference</a></li>
+  </ol>
+  <div class="note"><b>Companion docs</b> &nbsp;This guide is a hands-on companion to the
+  per-system reference under <code>docs/engine-systems/</code> and the task tutorials
+  (<code>TUTORIAL_FirstGame.md</code>, <code>TUTORIAL_FireballSpell.md</code>). Where this
+  guide summarizes, those go deeper on individual headers.</div>
+</section>
+
+<!-- ========================= PART I ========================= -->
+<section class="page" id="part1">
+  <h1>Part I — Foundations</h1>
+  <p class="lead">How the codebase is organised, how the editor drives it, and the three
+  pillars every system builds on: the ECS, scenes, and assets.</p>
+
+  <h2>1. Architecture &amp; the four targets</h2>
+  <p>3DGEngine is a from-scratch C++17 engine on OpenGL 3.3 with a Dear ImGui editor. The
+  code is split into four targets with a strict dependency boundary:</p>
+  <table>
+    <tr><th>Target</th><th>Role</th><th>Depends on</th></tr>
+    <tr><td><code>engine</code></td><td>Reusable runtime library — ECS, rendering, physics, animation, audio, AI, assets.</td><td>—</td></tr>
+    <tr><td><code>game</code></td><td>Your project's gameplay scripts (native C++), registered into the engine's <code>ScriptRegistry</code>.</td><td>engine</td></tr>
+    <tr><td><code>editor</code></td><td>Authoring: scene editing, asset import, the material/animation/particle editors, and Play mode.</td><td>engine, game</td></tr>
+    <tr><td><code>player</code></td><td>The standalone runtime (<code>RuntimePlayerApp</code>) that loads an exported scene with no editor code.</td><td>engine, game</td></tr>
+  </table>
+  <p>The golden rule: <b>the runtime never depends on the editor.</b> Anything a shipped game
+  needs must live in <code>engine</code> or <code>game</code>. The editor authors data; the
+  runtime consumes exported data.</p>
+
+  <h3>The runtime frame</h3>
+  <p>Each frame runs a variable-rate update, zero or more fixed updates, then render:</p>
+  <pre><code>Window events
+  → variable Update      input, scripts (OnUpdate), audio, animation, camera, UI
+  → N fixed updates       game mode, scripts (OnFixedUpdate), gameplay, AI,
+                          controllers, ragdoll, physics step, contact events
+  → Render                shadows → PBR/static/skinned → sky/water → particles
+                          → post-process → HUD → editor overlays
+  → swap buffers</code></pre>
+  <div class="tip"><b>Rule of thumb</b> Put anything that affects collision or must be
+  frame-rate independent in <code>OnFixedUpdate</code>. Put presentation (reading input for
+  UI, camera feel, cosmetic effects) in <code>OnUpdate</code>. Gameplay time is globally
+  scalable (slow-mo, hit-stop); editor UI and audio mixing stay on unscaled time.</p>
+
+  <h2>2. The editor at a glance</h2>
+  <p>The editor is a dockable ImGui workspace. The panels you will use most:</p>
+  <div class="sysgrid">
+    <div class="card"><h4>Viewport</h4><p class="small">Scene view with gizmos. Select, move,
+      rotate, scale objects; frame the camera; enter <b>Play</b>.</p></div>
+    <div class="card"><h4>Hierarchy</h4><p class="small">The scene's object list. Multi-select,
+      lock selection, group move/delete.</p></div>
+    <div class="card"><h4>Inspector</h4><p class="small">Per-object components. Add components
+      one at a time via <b>+ Add Component</b>; each has its own header with a Remove button.</p></div>
+    <div class="card"><h4>Content Browser</h4><p class="small">Your project's assets. Import,
+      organise, and drag assets into the scene. Files dropped from Explorer open an Import dialog.</p></div>
+    <div class="card"><h4>Asset editors</h4><p class="small">Material Maker, Clip Editor, Graph
+      Editor, Character Editor, Particle Editor, Shader Editor, Behavior Graph, HUD editor.</p></div>
+    <div class="card"><h4>Console / Profiler</h4><p class="small">Log output (import results,
+      script build status, warnings) and a frame-time graph.</p></div>
+  </div>
+  <p>A <b>project</b> owns a Content root, a scene, and its scripts. <em>File → New Project</em>
+  creates one; each project's scripts are isolated (see §10). The editor autosaves and remembers
+  the last opened project and scene.</p>
+
+  <h2>3. ECS: entities, components, systems</h2>
+  <p>Everything in a scene is an <b>entity</b> (an id) with <b>components</b> (plain data) held
+  in an <code>engine::ecs::Registry</code>. Systems are free functions that iterate components.</p>
+  <h4>Core components</h4>
+  <table>
+    <tr><th>Component</th><th>Purpose</th></tr>
+    <tr><td><code>Transform</code></td><td>position (vec3), rotation (quat), scale (vec3). <code>Model()</code> builds the matrix.</td></tr>
+    <tr><td><code>RuntimeName</code></td><td>The object's name — how scripts and saves find entities across a reload.</td></tr>
+    <tr><td><code>MeshPBR</code> / <code>MeshRenderer</code></td><td>Drawable mesh + PBR material / renderer flags.</td></tr>
+    <tr><td><code>Collider</code>, <code>RigidBody</code></td><td>Physics shape and body (§9).</td></tr>
+    <tr><td><code>Light</code></td><td>Directional / point / spot light.</td></tr>
+    <tr><td><code>ModelAsset</code>, <code>MaterialAsset</code>, <code>SkinnedModelAsset</code></td><td>Asset references the runtime resolves into GPU/runtime objects.</td></tr>
+    <tr><td><code>AnimatedModel</code></td><td>A rigged model + its controller + computed pose (§8).</td></tr>
+    <tr><td><code>NativeScriptComponent</code></td><td>Attaches one or more scripts to an entity (§10).</td></tr>
+  </table>
+  <p>Typical iteration inside a system or script:</p>
+  <pre><code>registry.view&lt;Transform, Health&gt;().each(
+    [&](ecs::Entity e, Transform&amp; t, Health&amp; h) {
+        if (!h.alive) t.position.y -= 0.1f;   // sink dead things
+    });</code></pre>
+  <div class="note"><b>Why names matter</b> Entity ids are not stable across a scene reload
+  or a save/load. When you need to refer to a specific object later (a script target, a save
+  slot), match by <code>RuntimeName</code>. <code>Script::FindObject("Door")</code> does exactly this.</div>
+
+  <h2>4. Scenes, prefabs, worlds &amp; level streaming</h2>
+  <p>There are two scene formats: the <b>editor scene</b> you edit, and the <b>runtime scene</b>
+  the editor exports for Play mode and the standalone player. Authoring lives in the editor
+  scene; the runtime consumes the exported one.</p>
+  <ul>
+    <li><b>Prefabs</b> (<code>.3dgprefab</code>) — reusable object templates. Place many, edit
+      the prefab, instances update.</li>
+    <li><b>Worlds</b> (<code>WorldManifest</code>) — a set of levels with placement offsets,
+      the basis for streaming.</li>
+    <li><b>Level streaming</b> — the <code>LevelStreamingManager</code> loads/unloads levels at
+      runtime. Scripts request it with <code>RequestLevelLoad("Level2")</code> /
+      <code>RequestLevelUnload(...)</code>. Streaming runs in packaged worlds (the editor Play
+      preview is a single in-memory scene).</li>
+  </ul>
+  <p>Scene transitions from a script use <code>RequestSceneLoad("NextLevel")</code>; the host
+  loads the target scene and continues play.</p>
+
+  <h2>5. Assets: import, registry, cooking</h2>
+  <p>Assets flow from a source file to an engine-owned native asset with a stable id:</p>
+  <pre><code>Source (FBX/OBJ/glTF/PNG/JPEG/WAV…)
+  → editor Import (with settings)
+  → native asset (.3dgmesh/.3dgskmesh/.3dgskel/.3dganim/.3dgtex) + stable AssetHandle
+  → AssetRegistry (.3dgdb)
+  → scenes/materials/characters reference the ID (path is a readable fallback)
+  → RuntimeAssetManager resolves &amp; caches GPU/runtime objects at load
+  → AssetCooker copies only what an exported scene actually reaches</code></pre>
+  <h4>Importing</h4>
+  <p>Use the Content Browser's Import button, or <b>drag files from Explorer onto the window</b>.
+  A drop opens an <b>Import Settings</b> dialog that scans each file's type:</p>
+  <ul>
+    <li><b>Models</b> are peeked for a skeleton — a rig auto-selects <em>Skeletal Mesh</em>
+      (or <em>Animation Only</em> when there is no mesh), otherwise <em>Static Mesh</em>. Each
+      row shows a summary (e.g. <span class="small">skeleton, 1 mesh, 6 anim</span>) and lets
+      you override the mode.</li>
+    <li><b>Textures</b> get <em>sRGB</em> and <em>Smooth</em> toggles; sRGB defaults off for
+      normal/roughness/metal/mask/AO maps (detected by filename).</li>
+  </ul>
+  <div class="tip"><b>IDs over paths</b> Once imported, assets are referenced by a stable
+  GUID. You can move or rename assets in Content and references still resolve. Paths remain as
+  human-readable fallbacks.</div>
+</section>
+<!-- ========================= PART II ========================= -->
+<section class="page" id="part2">
+  <h1>Part II — Systems</h1>
+  <p class="lead">Each runtime system: what it is, the key concepts and types, how you drive it
+  from the editor and from code, and a worked snippet.</p>
+
+  <h2>6. Rendering, lighting &amp; cameras</h2>
+  <p>The renderer is physically based (<code>PbrRenderer</code>) with a separate skinned path
+  (<code>SkinnedRenderer</code>) for characters, plus sky, water, terrain, particles, and a
+  post-process pass. You rarely call it directly — you place drawable entities and lights and
+  the frame loop renders them.</p>
+  <h4>Making something visible</h4>
+  <ul>
+    <li>Give an entity a <code>Transform</code> and a mesh (a <code>MeshPBR</code> with a
+      material, a <code>ModelAsset</code>, or a <code>SkinnedModelAsset</code>).</li>
+    <li>Add at least one <code>Light</code> (a directional "sun" is the usual key light) and set
+      the environment (sky / IBL) for ambient.</li>
+  </ul>
+  <h4>What the renderer already optimises</h4>
+  <ul>
+    <li><b>Frustum culling</b> and <b>mesh LODs</b> (distance-based) are automatic.</li>
+    <li><b>Backface culling</b> is on for closed solids; flat planes and transparent (glass)
+      materials render two-sided.</li>
+    <li><b>Cascaded / point / spot shadows</b>; untextured meshes are instanced into one draw.</li>
+  </ul>
+  <h4>Cameras</h4>
+  <p>In Play, the camera is usually driven by the <code>PlayerController</code> view mode
+  (Third Person / First Person / Isometric / Platformer) or by a <b>Camera Zone</b> trigger
+  that blends to an authored camera preset. Scripts can shake the camera and play camera
+  sequences (cutscenes) via the scripting API (§10).</p>
+  <div class="note"><b>Editor tip</b> The Material Maker's preview draws two-sided so you can
+  inspect back faces; scene rendering keeps backface culling for performance.</div>
+
+  <h2>7. Materials, textures &amp; shader graphs</h2>
+  <p>A material (<code>.3dgmat</code>) is authored in the <b>Material Maker</b> with a live PBR
+  preview. It exposes the standard PBR inputs plus advanced lobes:</p>
+  <table>
+    <tr><th>Input</th><th>Meaning</th></tr>
+    <tr><td>Albedo / map</td><td>Base colour (sRGB texture).</td></tr>
+    <tr><td>Metallic, Roughness / map</td><td>Surface response; often packed in one texture.</td></tr>
+    <tr><td>Normal map, strength</td><td>Surface detail (linear texture).</td></tr>
+    <tr><td>Emissive</td><td>Additive glow (flash on an event from a script).</td></tr>
+    <tr><td>Clearcoat, Transmission, Sheen, Subsurface, Anisotropy</td><td>Advanced BRDF lobes for car paint, glass, cloth, skin, brushed metal.</td></tr>
+    <tr><td>UV scale / offset / rotation</td><td>Texture placement.</td></tr>
+  </table>
+  <p><b>Shader graphs</b> (<code>.3dgshader</code>) let you build custom materials in the Shader
+  Editor; the same graph compiler powers both the Material Maker preview and scene rendering,
+  so the preview is faithful.</p>
+  <h4>Using a material</h4>
+  <p>Assign a <code>.3dgmat</code> to an object's material slot in the Inspector, or drag it
+  onto the object. From a script you can tint/flash via the animated model's material fields.</p>
+  <div class="tip"><b>Texture import</b> Remember to import color maps as sRGB and data maps
+  (normal/roughness/metal/AO) as linear — the drag-drop Import dialog pre-selects this from the
+  filename, but confirm it.</div>
+
+  <h2>8. Skeletal animation, graphs &amp; characters</h2>
+  <p>Animation is layered as three authored asset types feeding a runtime controller:</p>
+  <ol>
+    <li><b>Clip</b> (<code>.3dgclip</code>) — one source FBX/native take + strip-root-motion /
+      loop / speed. Authored in the <b>Clip Editor</b> (with a live skinned preview).</li>
+    <li><b>Graph</b> (<code>.3dggraph</code>) — a state machine built from clips: states,
+      parameters, transitions, and 1D/2D blend spaces. Authored in the <b>Graph Editor</b>.</li>
+    <li><b>Character</b> (<code>.3dgcharacter</code>) — rig + collider + controller + a reference
+      to a graph, plus sockets/attachments. Authored in the <b>Character Editor</b>.</li>
+  </ol>
+  <h4>The controller &amp; blend spaces</h4>
+  <p>At runtime a graph becomes an <code>AnimationController</code> with states, parameters
+  (Float / Bool / Trigger), transitions, and blend spaces. The play loop drives parameters each
+  frame — <code>Speed</code>, <code>Direction</code>, <code>IsMoving</code>,
+  <code>IsGrounded</code>, <code>IsFalling</code>, and more — so a locomotion blend space picks
+  the right pose automatically.</p>
+  <div class="warn"><b>Transition traps</b> A transition on a Float parameter defaults matter:
+  <code>Speed &gt;= 0</code> is <em>always true</em> and will skip a state on frame 1. Give
+  numeric transitions a real threshold (e.g. <code>Speed &gt; 0.1</code>), and use
+  <code>==</code> for Bool/Trigger. The Graph Editor's <b>Validation strip</b> flags always-true
+  transitions, unresolved clip names, and unreachable/dead-end states — fix the red/yellow items
+  before testing.</div>
+  <h4>Root motion</h4>
+  <p>A state's <b>Root Motion</b> flag transfers the clip's root translation <em>and yaw</em> to
+  the character, so turning and curved-locomotion clips steer the entity while the mesh stays
+  centered. Straight clips are unaffected.</p>
+  <h4>Foot IK (opt-in)</h4>
+  <p>Enable <b>Foot IK</b> in the Character Editor to ground feet on slopes and steps at runtime.
+  It raycasts the scene, plants each foot with a two-bone solve, and drops the pelvis so both legs
+  reach. Leg bones auto-detect from common rig names (Mixamo/UE/generic). Tune trace distance,
+  foot height, pelvis strength, and IK weight per character.</p>
+  <h4>Driving animation from a script</h4>
+  <pre><code>void OnUpdate(float dt) override {
+    Anim().SetParameter("Speed", currentSpeed);
+    Anim().SetBool("IsGrounded", grounded);
+    if (WasKeyPressed(GLFW_KEY_F))   // an attack
+        Anim().PlayAction("Attack");          // one-shot over locomotion
+}</code></pre>
+
+  <h2>9. Physics, colliders, queries &amp; ragdolls</h2>
+  <p>The <code>PhysicsWorld</code> is an impulse solver with a spatial-hash broadphase. You give
+  entities colliders (and optionally rigid bodies); the fixed step integrates and resolves them.</p>
+  <h4>Components</h4>
+  <ul>
+    <li><b>Collider</b> — shape (Sphere/Box/Capsule/Cylinder/Cone/Pyramid/Torus/Staircase/Plane),
+      material (restitution, friction), collision <em>layer</em>/<em>mask</em>, and a
+      <em>trigger</em> flag (overlap-only, never blocks).</li>
+    <li><b>RigidBody</b> — mass (inverse mass; 0 = static), gravity, sleeping, CCD, freeze
+      rotation, kinematic (moved by script/animation, pushes others, never pushed).</li>
+    <li><b>Physics Setup</b> presets in the Inspector: Dynamic Body, Static Collider, Trigger.</li>
+  </ul>
+  <h4>Queries</h4>
+  <pre><code>engine::Ray ray{ origin, glm::vec3(0,-1,0) };
+engine::RaycastHit hit = physics.Raycast(registry, ray, /*maxDist*/50.f,
+                                         /*layerMask*/0xFFFFFFFF, /*ignore*/self);
+if (hit.hit) { /* hit.entity, hit.point, hit.normal, hit.distance */ }</code></pre>
+  <p><code>SphereCast</code> is available for volume queries (camera booms, thick probes).</p>
+  <h4>Triggers &amp; events</h4>
+  <p>Mark a collider as a trigger to get overlap events instead of blocking. In a script:</p>
+  <pre><code>if (WasTriggerEntered(FindObject("Checkpoint")))
+    SaveCheckpoint("cp1", Transform()-&gt;position);</code></pre>
+  <h4>Joints &amp; ragdolls</h4>
+  <p>Distance / rope / spring <b>joints</b> connect bodies. A character with a <b>Ragdoll</b>
+  (enabled on Health, activate-on-death) replaces animation with connected physics bodies at
+  zero HP — tune mass, body count, thickness, damping, and death impulse.</p>
+</section>
+
+<section class="page">
+  <h2>10. Gameplay framework &amp; the scripting API</h2>
+  <p>Gameplay logic lives in <b>scripts</b>. A native script is a C++ class deriving from
+  <code>engine::Script</code>; you attach it to an object via the Inspector's <b>+ Add Script</b>.
+  The editor generates the registration and (after a script rebuild) the script runs in Play and
+  in packaged builds. Lua is planned as a second, no-rebuild backend behind the same interface.</p>
+  <h4>Per-project script isolation</h4>
+  <p>Each project owns its script list, stored next to its <code>.project</code> file. Opening or
+  creating a project regenerates the shared game module's script header from <em>only that
+  project's</em> scripts — so a new project starts with none and never inherits another
+  project's classes. Create scripts with the Inspector or the Behavior Graph's template tools.</p>
+  <h4>Script lifecycle</h4>
+  <table>
+    <tr><th>Method</th><th>When</th></tr>
+    <tr><td><code>OnCreate()</code></td><td>Once, when the object enters Play / is spawned.</td></tr>
+    <tr><td><code>OnUpdate(dt)</code></td><td>Once per rendered frame (variable dt) — input, camera, cosmetics.</td></tr>
+    <tr><td><code>OnFixedUpdate(dt)</code></td><td>Per physics step (fixed dt) — movement, forces, anything touching collision.</td></tr>
+    <tr><td><code>OnDestroy()</code></td><td>Before the entity/script is removed.</td></tr>
+  </table>
+  <h4>What a script can reach</h4>
+  <p>The <code>Script</code> base exposes a large, grouped API. Highlights:</p>
+  <ul>
+    <li><b>Self &amp; world</b> — <code>Self()</code>, <code>Registry()</code>,
+      <code>Transform()</code>, <code>FindObject(name)</code>, <code>FindTransform(name)</code>,
+      <code>TryGet&lt;T&gt;()</code>/<code>Has&lt;T&gt;()</code>/<code>Add&lt;T&gt;()</code>,
+      <code>SpawnFromObject(prototype, pos)</code>, <code>DestroySelf()</code>.</li>
+    <li><b>Input</b> — <code>Input().KeyDown(k)</code>/<code>KeyPressed(k)</code>,
+      mouse buttons and deltas.</li>
+    <li><b>Timers &amp; sequences</b> — <code>SetTimer(sec, fn, repeat)</code>,
+      <code>Delay(sec, fn)</code>, <code>Sequence().Do(...).Wait(2).Do(...)</code>.</li>
+    <li><b>Time control</b> — <code>SetGlobalTimeDilation()</code>,
+      <code>HitStop(seconds)</code>.</li>
+    <li><b>Animation</b> — <code>Anim().SetParameter/SetBool/SetTrigger</code>,
+      <code>PlayAction(name)</code>, <code>PlayActionClip(name)</code>.</li>
+    <li><b>Audio / Particles / Camera</b> — <code>Audio().Play()</code>,
+      <code>Particles().Burst()</code>, <code>Camera().Shake()</code>,
+      <code>Camera().PlaySequence(name)</code>.</li>
+    <li><b>Triggers &amp; events</b> — <code>WasTriggerEntered/Exited(e)</code>,
+      <code>WasAnimationEvent(name)</code>.</li>
+    <li><b>Fields</b> — inspector-exposed <code>GetFieldFloat/Int/Bool/Vec3/Entity/Asset</code>
+      so designers tune a script without recompiling.</li>
+    <li><b>Persistence</b> — <code>SaveInt/Float/Bool/Vec3</code> &amp;
+      <code>GetSaved…</code>, checkpoints, and full save slots (§15).</li>
+    <li><b>Flow</b> — <code>RequestSceneLoad(path)</code>,
+      <code>RequestLevelLoad/Unload(level)</code>, and <code>Game()</code> for the shared
+      <code>GameMode</code> (score/state).</li>
+  </ul>
+  <h4>A complete script</h4>
+  <pre><code>#include &lt;engine/gameplay/Script.h&gt;
+
+class Coin final : public engine::Script {
+public:
+    void OnCreate() override {
+        m_spin = GetFieldFloat("spinSpeed", 90.0f);   // designer-tunable field
+    }
+    void OnUpdate(float dt) override {
+        if (auto* t = Transform())
+            t-&gt;rotation = glm::rotate(t-&gt;rotation, glm::radians(m_spin*dt),
+                                      glm::vec3(0,1,0));
+    }
+    void OnFixedUpdate(float) override {
+        if (WasTriggerEntered(FindObject("Player"))) {
+            Game()-&gt;AddScore(1);
+            Audio().PlayCue("Content/SFX/coin.wav");
+            DestroySelf();
+        }
+    }
+private:
+    float m_spin = 90.0f;
+};</code></pre>
+
+  <h2>11. AI &amp; navigation</h2>
+  <p>Agents combine a <b>Nav Agent</b> component, a navmesh/grid for pathing, and either a hand
+  state machine (<code>AiAgent</code>) or a <b>Behavior Graph</b> (<code>.btgraph</code>) with
+  tasks/decorators/services. Perception is vision (a cone + a line-of-sight raycast) and hearing
+  (a decaying sound field: footsteps scale with speed, combat noise on HP loss).</p>
+  <h4>Authoring an agent</h4>
+  <ul>
+    <li>Add a <b>Nav Agent</b> to a character: speed, force, reach radius, repath interval,
+      vision range/angle, hearing range, team, and either a named <em>Chase Target</em> or
+      <em>Auto-target</em> (nearest enemy of a different non-zero team).</li>
+    <li>Bake a navmesh over the level (editor Navigation preview), or use a nav grid.</li>
+    <li>Give it a Behavior Graph, or rely on the built-in Patrol → Chase → Search states, which
+      react to sightings and heard noises; squads share alerts and flank shared targets.</li>
+  </ul>
+  <div class="tip"><b>Scale note</b> Auto-targeting snapshots candidate targets once per frame,
+  so many agents stay cheap. For hundreds of agents, back it with the physics spatial hash.</div>
+
+  <h2>12. Audio</h2>
+  <p>The <code>AudioEngine</code> (miniaudio) mixes up to 64 voices with <b>priority-based voice
+  stealing</b> and per-bus groups (SFX / Music / Dialogue…). Attach an authored sound to an
+  object, or fire cues from scripts.</p>
+  <ul>
+    <li><b>Spatial sources</b> — a component with attenuation (min/max distance, rolloff),
+      Doppler, cones, occlusion, looping, and a bus. Play/pause/seek from a script:
+      <code>Audio().Play()</code>, <code>Audio().SetVolume(v)</code>,
+      <code>Audio().Stop()</code>.</li>
+    <li><b>One-shot cues</b> — <code>Audio().PlayCue("path.wav", spatial)</code>.</li>
+    <li><b>Adaptive music</b> — <code>Audio().LoadMusic(path)</code> +
+      <code>Audio().SetMusicState("combat")</code> (beat-synchronised), plus mixer snapshots
+      and dialogue ducking.</li>
+  </ul>
+
+  <h2>13. Particles</h2>
+  <p>Particle systems are authored in the <b>Particle Editor</b> (modules: emission, shape,
+  velocity, color/size over life, forces) and attached to objects. Scripts control them via
+  <code>Particles()</code>: <code>Play()</code>, <code>Stop(clear)</code>,
+  <code>Burst(count)</code>, <code>SetRate(perSec)</code>, <code>SetSpeed(sim)</code>,
+  <code>Count()</code>. Use presets to start, then tune curves. Great for pickups, impacts,
+  weather, and magic.</p>
+
+  <h2>14. UI &amp; HUD</h2>
+  <p>A HUD (<code>.hud</code>) is a document of widgets authored in the HUD editor and drawn each
+  frame by the text/UI renderer. Widgets bind to runtime values by name:</p>
+  <ul>
+    <li><b>Health</b> bars/text bound to the player's <code>Health</code>.</li>
+    <li>Named floats/strings — <code>score</code>, <code>time</code>, <code>gamestate</code>,
+      <code>gamemessage</code> from <code>GameMode</code>, plus any you push from a script via
+      the HUD context.</li>
+    <li>Buttons with actions (e.g. Restart, Exit) for pause/end screens.</li>
+  </ul>
+  <p>The standalone player draws the scene's HUD plus a status overlay and the in-game save/load
+  menu (§15).</p>
+
+  <h2>15. Save/Load system</h2>
+  <p>The engine's <code>SaveGame</code> module captures <b>world state</b> into numbered slots
+  with metadata (name, source scene, timestamp) and restores it after a scene reload. Entities
+  are matched by <code>RuntimeName</code> (ids aren't stable across a load).</p>
+  <ul>
+    <li><b>Captured</b> — per named entity: Transform, Health, linear/angular velocity — plus the
+      flat key/value store scripts write.</li>
+    <li><b>Script API</b> — typed values <code>SaveInt/Float/Bool/Vec3</code> +
+      <code>GetSaved…</code>; full slots <code>SaveGameToSlot(n, name)</code> /
+      <code>LoadGameFromSlot(n)</code>; and checkpoints
+      <code>SaveCheckpoint/LoadCheckpoint</code>.</li>
+    <li><b>In-game menu</b> — the packaged player quick-saves with <span class="kbd">F5</span>
+      and opens a slot menu with <span class="kbd">F9</span> (Up/Down select, Enter load, Del
+      erase). A load reloads the saved scene and restores the snapshot.</li>
+  </ul>
+  <pre><code>// autosave at a checkpoint trigger, then continue-from-save on death
+if (WasTriggerEntered(FindObject("Checkpoint"))) SaveGameToSlot(0, "Checkpoint");
+if (!Game() /*player died*/ ) LoadGameFromSlot(0);</code></pre>
+</section>
+
+<!-- ========================= PART III ========================= -->
+<section class="page" id="part3">
+  <h1>Part III — Build a Game</h1>
+  <p class="lead">A start-to-finish walkthrough that assembles the systems into a small playable
+  game: a third-person character collects coins in a level while an enemy hunts them, with a HUD,
+  audio, checkpoints, and a packaged build. Follow it in order; each step names the system it uses.</p>
+
+  <h2>16. Project setup &amp; importing assets</h2>
+  <ol>
+    <li><b>New Project</b> — <em>File → New Project</em>, pick a folder and name. This creates a
+      Content root and an empty, isolated script set (§10).</li>
+    <li><b>Import assets</b> — drag your files from Explorer onto the window. In the Import dialog:
+      confirm the character FBX imports as <em>Skeletal Mesh</em>, props as <em>Static Mesh</em>,
+      color textures as sRGB and normal/roughness as linear (§5).</li>
+    <li><b>Make a material</b> — open the Material Maker, set albedo/roughness/normal, save a
+      <code>.3dgmat</code> (§7).</li>
+  </ol>
+
+  <h2>17. Building the level &amp; the player</h2>
+  <ol>
+    <li><b>Floor &amp; props</b> — drop a plane and some meshes into the viewport, assign
+      materials. Give the floor a <b>Static Collider</b> and props colliders as needed (§9).</li>
+    <li><b>Light &amp; sky</b> — add a directional <code>Light</code> as the sun and set the
+      environment for ambient/IBL (§6).</li>
+    <li><b>Animate the character</b> — in the Clip Editor wrap idle/walk/run takes into
+      <code>.3dgclip</code>s; in the Graph Editor build a 1D locomotion blend space driven by
+      <code>Speed</code> (use <b>Create 1D Locomotion</b>); resolve any Validation warnings; save a
+      <code>.3dggraph</code>. In the Character Editor reference that graph, set the capsule
+      collider, and enable a Player Controller (Third Person). Optionally enable Foot IK (§8).</li>
+    <li><b>Place the player</b> — add the character to the scene, name it <code>Player</code>,
+      and add a <b>PlayerStart</b> so the runtime binds the camera + controller.</li>
+    <li><b>Test</b> — press <b>Play</b>. Walk around; the blend space should move idle→walk→run as
+      speed rises (drag the Character Editor's <code>Speed</code> slider to preview outside Play).</li>
+  </ol>
+
+  <h2>18. Scripting the gameplay loop</h2>
+  <p>Create a <code>Coin</code> script (Inspector → + Add Script) using the class from §10: it
+  spins, and on the player entering its trigger it scores, plays a cue, and destroys itself.
+  Place several coins (make one a <b>prefab</b> and stamp copies). Add a <code>GameRules</code>
+  script on an empty object to end the game when the score reaches the coin count:</p>
+  <pre><code>void OnUpdate(float) override {
+    if (Game()-&gt;Score() &gt;= GetFieldInt("coinsToWin", 5))
+        Game()-&gt;Win();     // GameMode victory -> HUD end screen
+}</code></pre>
+  <p>Rebuild scripts (the editor prompts / the Script Editor triggers the build), then Play.</p>
+
+  <h2>19. Enemies, AI &amp; combat</h2>
+  <ol>
+    <li><b>Bake navigation</b> — open the Navigation preview and bake a navmesh over the floor
+      (§11).</li>
+    <li><b>Add an enemy</b> — place another character, give it a <b>Nav Agent</b> (team 2, auto-target
+      on, vision + hearing ranges), and a name. It will chase the player when it sees or hears
+      them, search the last-known spot, then return to patrol.</li>
+    <li><b>Combat</b> — give the player and enemy <code>Health</code>. On an attack input, play an
+      attack action and, on the animation's hit event, damage whatever the player's forward
+      raycast hits:</li>
+  </ol>
+  <pre><code>void OnUpdate(float) override {
+    if (Input().KeyPressed(GLFW_KEY_SPACE)) Anim().PlayAction("Attack");
+    if (WasAnimationEvent("hit")) {
+        engine::Ray r{ Transform()-&gt;position + up, forward };
+        auto h = /* physics.Raycast via a system, or a trigger on the weapon */;
+        if (auto* hp = TryGet&lt;engine::Health&gt;(h.entity)) hp-&gt;Damage(25.f);
+    }
+}</code></pre>
+  <p>A dead enemy with a <b>Ragdoll</b> (activate-on-death) collapses into physics bodies (§9).</p>
+
+  <h2>20. HUD, audio, saving &amp; packaging</h2>
+  <ol>
+    <li><b>HUD</b> — author a <code>.hud</code> with a health bar bound to the player and a
+      <code>score</code> text bound to GameMode; add an end-screen message bound to
+      <code>gamemessage</code> (§14).</li>
+    <li><b>Audio</b> — attach ambient music (adaptive: calm ↔ combat), and cues for coins/hits.
+      Set a Music bus and duck it under dialogue if any (§12).</li>
+    <li><b>Checkpoints &amp; saves</b> — place trigger volumes that call
+      <code>SaveGameToSlot(0, "Checkpoint")</code>; the player can also F5-save / F9-load in the
+      packaged build (§15).</li>
+    <li><b>Package</b> — export the runtime scene and build the standalone <code>player</code>.
+      The AssetCooker copies only assets the exported scene reaches. Ship the player executable +
+      the cooked content.</li>
+  </ol>
+  <div class="tip"><b>Editor-Play parity</b> Scene transitions (<code>RequestSceneLoad</code>)
+  now work in editor Play as well as the packaged runtime, so you can test level flow without
+  packaging first. Level streaming still runs only in packaged worlds.</div>
+  <div class="note"><b>You now have</b> a level, an animated player with locomotion + optional foot
+  IK, collectibles with scoring, a hunting enemy with perception and ragdoll, a HUD, audio,
+  checkpoints/saves, and a shippable build — touching every major system.</div>
+</section>
+
+<!-- ========================= APPENDIX ========================= -->
+<section class="page" id="appendix">
+  <h1>Appendix — Scripting API quick reference</h1>
+  <p class="muted">Grouped highlights of <code>engine::Script</code>. Grouped proxies
+  (<code>Input()</code>, <code>Anim()</code>, <code>Audio()</code>, <code>Particles()</code>,
+  <code>Camera()</code>) are sugar over the flat methods; both work.</p>
+
+  <h3>Self &amp; world</h3>
+  <table>
+    <tr><td><code>Self()</code>, <code>Registry()</code></td><td>This entity; the registry.</td></tr>
+    <tr><td><code>Transform()</code></td><td>This entity's Transform (or null).</td></tr>
+    <tr><td><code>FindObject(name)</code>, <code>FindTransform(name)</code></td><td>Look up by RuntimeName.</td></tr>
+    <tr><td><code>TryGet&lt;T&gt;()</code>, <code>Has&lt;T&gt;()</code>, <code>Add&lt;T&gt;()</code>, <code>Remove&lt;T&gt;()</code></td><td>Components on self (or an entity arg).</td></tr>
+    <tr><td><code>SpawnEmpty(name,pos)</code>, <code>SpawnFromObject(proto,pos)</code></td><td>Create entities at runtime.</td></tr>
+    <tr><td><code>DestroySelf()</code>, <code>Destroy(e)</code></td><td>Queue destruction (safe from callbacks).</td></tr>
+    <tr><td><code>Game()</code></td><td>Shared <code>GameMode</code>: score, state, Win/Lose.</td></tr>
+  </table>
+
+  <h3>Input, timers, time</h3>
+  <table>
+    <tr><td><code>Input().KeyDown/KeyPressed(k)</code>, <code>MouseDown/MousePressed(b)</code>, <code>MouseDeltaX/Y()</code></td><td>Input this frame.</td></tr>
+    <tr><td><code>SetTimer(sec,fn,repeat)</code>, <code>Delay(sec,fn)</code>, <code>ClearTimer(id)</code></td><td>Timed callbacks.</td></tr>
+    <tr><td><code>Sequence().Do(fn).Wait(sec).WaitUntil(cond)</code></td><td>Multi-step coroutines.</td></tr>
+    <tr><td><code>SetGlobalTimeDilation(x)</code>, <code>HitStop(sec)</code></td><td>Slow-mo / impact freeze.</td></tr>
+  </table>
+
+  <h3>Animation, audio, particles, camera</h3>
+  <table>
+    <tr><td><code>Anim().SetParameter/SetBool/SetTrigger</code>, <code>PlayAction(name)</code>, <code>PlayActionClip(name)</code>, <code>IsActionPlaying()</code></td><td>Drive the controller.</td></tr>
+    <tr><td><code>Audio().Play/Pause/Stop/Seek</code>, <code>SetVolume/Pitch/Looping</code>, <code>PlayCue(path)</code>, <code>LoadMusic/SetMusicState</code></td><td>Sound.</td></tr>
+    <tr><td><code>Particles().Play/Stop/Burst/SetRate/SetSpeed/Count</code></td><td>Effects.</td></tr>
+    <tr><td><code>Camera().Shake(...)</code>, <code>PlaySequence(name)</code>, <code>StopSequence()</code></td><td>Camera feel &amp; cutscenes.</td></tr>
+  </table>
+
+  <h3>Triggers, fields, persistence, flow</h3>
+  <table>
+    <tr><td><code>IsTriggerTouching(e)</code>, <code>WasTriggerEntered/Exited(e)</code>, <code>WasAnimationEvent(name)</code></td><td>Collision &amp; notify events.</td></tr>
+    <tr><td><code>GetFieldFloat/Int/Bool/Vec3/Color/Entity/Asset(name, fallback)</code></td><td>Inspector-exposed tunables.</td></tr>
+    <tr><td><code>SaveInt/Float/Bool/Vec3</code>, <code>GetSavedInt/Float/Bool/Vec3</code></td><td>Typed key/value store.</td></tr>
+    <tr><td><code>SaveGameToSlot(n,name)</code>, <code>LoadGameFromSlot(n)</code>, <code>SaveCheckpoint/LoadCheckpoint</code></td><td>Full saves &amp; checkpoints.</td></tr>
+    <tr><td><code>RequestSceneLoad(path)</code>, <code>RequestLevelLoad/Unload(level)</code></td><td>Scene &amp; streaming flow.</td></tr>
+  </table>
+
+  <div class="note small"><b>Version note</b> This guide reflects the engine as of the current
+  source. Exact method signatures live in <code>engine/include/engine/gameplay/Script.h</code>;
+  the per-system reference under <code>docs/engine-systems/</code> documents each header in depth.
+  Print with A4 margins for correct pagination.</div>
+</section>
+
+</body>
+</html>

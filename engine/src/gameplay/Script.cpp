@@ -33,6 +33,7 @@ namespace engine {
 namespace {
 std::string g_scriptSceneLoadRequest;
 std::vector<ScriptLevelStreamRequest> g_scriptLevelStreamRequests;
+std::vector<ScriptSaveGameRequest> g_scriptSaveGameRequests;
 constexpr const char* kSaveDataPath = "3dg_savegame.dat";
 
 std::unordered_map<std::string, std::string> ReadSaveValues() {
@@ -579,6 +580,57 @@ bool Script::LoadCheckpoint(const std::string& name, glm::vec3* position) const 
     if (!(input >> x >> y >> z)) return false;
     *position = glm::vec3(x, y, z);
     return true;
+}
+
+bool Script::SaveInt(const std::string& key, int value) {
+    return SaveValue(key, std::to_string(value));
+}
+bool Script::SaveFloat(const std::string& key, float value) {
+    return SaveValue(key, std::to_string(value));
+}
+bool Script::SaveBool(const std::string& key, bool value) {
+    return SaveValue(key, value ? "1" : "0");
+}
+bool Script::SaveVec3(const std::string& key, const glm::vec3& value) {
+    return SaveValue(key, std::to_string(value.x) + " " + std::to_string(value.y)
+                        + " " + std::to_string(value.z));
+}
+int Script::GetSavedInt(const std::string& key, int fallback) const {
+    const std::string value = LoadValue(key);
+    if (value.empty()) return fallback;
+    try { return std::stoi(value); } catch (...) { return fallback; }
+}
+float Script::GetSavedFloat(const std::string& key, float fallback) const {
+    const std::string value = LoadValue(key);
+    if (value.empty()) return fallback;
+    try { return std::stof(value); } catch (...) { return fallback; }
+}
+bool Script::GetSavedBool(const std::string& key, bool fallback) const {
+    const std::string value = LoadValue(key);
+    if (value.empty()) return fallback;
+    return value == "1" || value == "true";
+}
+glm::vec3 Script::GetSavedVec3(const std::string& key, const glm::vec3& fallback) const {
+    const std::string value = LoadValue(key);
+    if (value.empty()) return fallback;
+    float x = 0.0f, y = 0.0f, z = 0.0f;
+    std::istringstream input(value);
+    if (!(input >> x >> y >> z)) return fallback;
+    return glm::vec3(x, y, z);
+}
+
+void Script::SaveGameToSlot(int slot, const std::string& displayName) {
+    ScriptSaveGameRequest request;
+    request.slot = slot;
+    request.load = false;
+    request.displayName = displayName;
+    g_scriptSaveGameRequests.push_back(std::move(request));
+}
+void Script::LoadGameFromSlot(int slot) {
+    ScriptSaveGameRequest request;
+    request.slot = slot;
+    request.load = true;
+    g_scriptSaveGameRequests.push_back(std::move(request));
 }
 
 int Script::SetTimer(float seconds, std::function<void()> callback, bool repeat) {
@@ -1305,6 +1357,12 @@ std::vector<ScriptLevelStreamRequest> ConsumeScriptLevelStreamRequests() {
     std::vector<ScriptLevelStreamRequest> requests =
         std::move(g_scriptLevelStreamRequests);
     g_scriptLevelStreamRequests.clear();
+    return requests;
+}
+
+std::vector<ScriptSaveGameRequest> ConsumeScriptSaveGameRequests() {
+    std::vector<ScriptSaveGameRequest> requests = std::move(g_scriptSaveGameRequests);
+    g_scriptSaveGameRequests.clear();
     return requests;
 }
 

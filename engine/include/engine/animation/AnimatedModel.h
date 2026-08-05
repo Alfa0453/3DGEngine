@@ -55,7 +55,43 @@ class SkinnedModel;                 // forward declared -- only a pointer is sto
 class Texture;                      // optional albedo override
 class Model;                        // static model attached to a bone (weapon, shield...)
 class Shader;
+struct Skeleton;                    // foot-IK bone auto-detection reads bone names
 namespace ecs { class Registry; }
+
+// One leg's IK chain: upper (thigh), mid (knee/calf) and end (foot/ankle) bone indices.
+struct FootIKLeg {
+    int upper = -1;
+    int mid   = -1;
+    int foot  = -1;
+    bool Valid() const { return upper >= 0 && mid >= 0 && foot >= 0; }
+};
+
+// Grounded foot placement (OPT-IN; off by default so existing characters are untouched).
+// When enabled with a `groundQuery`, UpdateAnimations plants each foot on the surface via
+// a two-bone IK solve and drops the pelvis so both legs can reach. Bone indices auto-detect
+// from common rig names (Mixamo / UE / generic) on first use if left at -1.
+struct FootIK {
+    bool      enabled = false;
+    FootIKLeg left, right;
+    int       pelvis = -1;            // hips bone, lowered so both feet reach
+    bool      detected = false;       // auto-detect ran once
+    float     traceUp = 0.5f;         // start the ray this far above the animated foot (m)
+    float     traceDown = 0.8f;       // max search below that start (m)
+    float     footHeight = 0.02f;     // hold the ankle this far above the surface (m)
+    float     pelvisWeight = 1.0f;    // 0 = never drop the pelvis, 1 = full drop
+    float     maxPelvisDrop = 0.5f;   // clamp the pelvis drop (m)
+    float     weight = 1.0f;          // overall IK blend 0..1 (fade to 0 when airborne)
+    // Downward scene ray from `origin` along `down`, searching `maxDist`. Returns true and
+    // fills the world hit position + surface normal on a ground hit. Host-provided (wraps
+    // PhysicsWorld::Raycast). Null => foot IK is skipped for this entity.
+    std::function<bool(const glm::vec3& origin, const glm::vec3& down, float maxDist,
+                       glm::vec3& hitPos, glm::vec3& hitNormal)> groundQuery;
+};
+
+// Best-effort: fill a FootIK's leg + pelvis bone indices from a skeleton's bone names
+// (Mixamo LeftUpLeg/LeftLeg/LeftFoot, UE thigh_l/calf_l/foot_l, generic thigh/calf/foot +
+// side). Returns true when both legs resolved. Sets ik.detected regardless.
+bool AutoDetectFootIKBones(const Skeleton& skeleton, FootIK& ik);
 
 // Build an attachment's local socket offset (position + Euler degrees + scale).
 inline glm::mat4 MakeAttachmentOffset(const glm::vec3& position,
@@ -149,6 +185,9 @@ struct AnimatedModel {
     // Z-up import) WITHOUT rotating the entity Transform -- so the collider and
     // controller, which read the Transform, stay upright. Identity = no offset.
     glm::mat4 renderOffset{1.0f};
+
+    // Grounded foot placement (opt-in; disabled by default). See FootIK.
+    FootIK footIK;
 
     // Static models socketed to bones (weapons, shields). Drawn after the skinned mesh.
     std::vector<ModelAttachment> attachments;

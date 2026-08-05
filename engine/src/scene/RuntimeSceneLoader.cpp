@@ -133,11 +133,11 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             return false;
         }
     }
-    if (magic != "3DGRuntimeScene" || version < 1 || version > 86) {
+    if (magic != "3DGRuntimeScene" || version < 1 || version > 87) {
         if (error) {
             *error = "Runtime scene file has an unknown format: "
                 + magic + " " + std::to_string(version)
-                + " (expected 3DGRuntimeScene 1..86).";
+                + " (expected 3DGRuntimeScene 1..87).";
         }
         return false;
     }
@@ -1077,6 +1077,17 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                 entity.attachments.push_back(std::move(a));
             }
         }
+        if (version >= 87) {
+            int footIkEnabled = 0;
+            record >> footIkEnabled
+                   >> entity.footIK.traceUp
+                   >> entity.footIK.traceDown
+                   >> entity.footIK.footHeight
+                   >> entity.footIK.pelvisWeight
+                   >> entity.footIK.maxPelvisDrop
+                   >> entity.footIK.weight;
+            entity.footIK.enabled = footIkEnabled != 0;
+        }
         if (version >= 3) {
             record >> entity.linearVelocity.x >> entity.linearVelocity.y >> entity.linearVelocity.z
                    >> entity.angularVelocityAxis.x >> entity.angularVelocityAxis.y >> entity.angularVelocityAxis.z
@@ -1858,7 +1869,8 @@ bool RuntimeSceneLoader::Instantiate(const Scene &scene, ecs::Registry &registry
                 std::move(parameters),
                 std::move(transitions),
                 std::move(animationSourceFiles),
-                std::move(attachmentDescs)
+                std::move(attachmentDescs),
+                desc.footIK
             });
         } else if (!desc.modelPath.empty()) {
             // Non-skeletal model -> static model asset. A skeletal character must NOT

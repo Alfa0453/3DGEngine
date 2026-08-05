@@ -410,6 +410,16 @@ RuntimeAssetManager::ResolveReport RuntimeAssetManager::ResolveRegistryAssets(ec
         animated.renderOffset = MakeModelRenderOffset(
             asset.modelOffsetPosition, asset.modelOrientationEuler,
             asset.modelOffsetScale, model->Center());
+        // Grounded foot placement (opt-in). The host supplies the ground raycast callback;
+        // here we just copy the authored enable + tuning across. Leg bones auto-detect on
+        // first use from the model's bone names.
+        animated.footIK.enabled       = asset.footIK.enabled;
+        animated.footIK.traceUp       = asset.footIK.traceUp;
+        animated.footIK.traceDown     = asset.footIK.traceDown;
+        animated.footIK.footHeight    = asset.footIK.footHeight;
+        animated.footIK.pelvisWeight  = asset.footIK.pelvisWeight;
+        animated.footIK.maxPelvisDrop = asset.footIK.maxPelvisDrop;
+        animated.footIK.weight        = asset.footIK.weight;
         for (const ecs::SkinnedModelAsset::Notify& notify : asset.notifies) {
             if (notify.name.empty()) {
                 continue;

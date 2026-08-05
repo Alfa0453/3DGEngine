@@ -92,7 +92,7 @@ add_custom_command(TARGET 3DGEditor POST_BUILD
     COMMENT "Copying editor assets next to the executable")
 
 if(MSVC)
-    target_compile_options(3DGEditor PRIVATE /W4)
+    target_compile_options(3DGEditor PRIVATE /W4 /bigobj)
 else()
     target_compile_options(3DGEditor PRIVATE -Wall -Wextra -Wpedantic)
 endif()

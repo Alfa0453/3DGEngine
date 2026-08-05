@@ -1415,6 +1415,23 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
                 ImGui::TextColored(ImVec4(1.0f, .4f, .3f, 1.0f), "Graph failed to load.");
             }
         }
+
+        ImGui::SeparatorText("Foot IK");
+        changed |= ImGui::Checkbox("Enable Foot IK", &m_asset.footIK.enabled);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Grounds the feet on the surface at runtime (raycasts the scene). "
+                              "Leg + pelvis bones auto-detect from the rig's bone names.");
+        }
+        if (m_asset.footIK.enabled) {
+            changed |= ImGui::SliderFloat("IK Weight", &m_asset.footIK.weight, 0.0f, 1.0f);
+            changed |= ImGui::DragFloat("Trace Up", &m_asset.footIK.traceUp, 0.01f, 0.0f, 3.0f, "%.2f m");
+            changed |= ImGui::DragFloat("Trace Down", &m_asset.footIK.traceDown, 0.01f, 0.0f, 3.0f, "%.2f m");
+            changed |= ImGui::DragFloat("Foot Height", &m_asset.footIK.footHeight, 0.005f, 0.0f, 0.5f, "%.3f m");
+            changed |= ImGui::SliderFloat("Pelvis Adjust", &m_asset.footIK.pelvisWeight, 0.0f, 1.0f);
+            changed |= ImGui::DragFloat("Max Pelvis Drop", &m_asset.footIK.maxPelvisDrop, 0.01f, 0.0f, 2.0f, "%.2f m");
+            ImGui::TextDisabled("Preview shows this in Play or with the global View toggle.");
+        }
+
         ImGui::SeparatorText("Standalone Action Clips");
         ImGui::TextWrapped(
             "Attach one-shot clips created in the Clip Editor. They remain outside "

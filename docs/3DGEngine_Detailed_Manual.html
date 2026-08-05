@@ -1,0 +1,701 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>3DGEngine — Detailed Systems Manual</title>
+<style>
+  :root{ --ink:#1a1f2b; --muted:#5a6474; --line:#d7dde6; --accent:#2f6fdb;
+    --accent2:#8a4fd0; --code-bg:#f5f7fb; --warn:#b9601f; --ok:#1f8a55; }
+  *{ box-sizing:border-box; }
+  html{ -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+  body{ font-family:"Segoe UI",Arial,sans-serif; color:var(--ink); line-height:1.5;
+        font-size:10.5pt; margin:0; }
+  @page{ size:A4; margin:16mm 15mm 18mm 15mm; }
+  .page{ page-break-after:always; }
+  h1,h2,h3,h4{ line-height:1.2; }
+  h1{ font-size:24pt; margin:0 0 6pt; }
+  h2{ font-size:17pt; margin:20pt 0 8pt; padding-bottom:4pt;
+      border-bottom:2px solid var(--accent); page-break-after:avoid; }
+  h3{ font-size:13pt; margin:15pt 0 5pt; color:#22314c; page-break-after:avoid; }
+  h4{ font-size:11pt; margin:11pt 0 4pt; color:var(--accent2); page-break-after:avoid; }
+  p{ margin:5pt 0; } ul,ol{ margin:5pt 0 5pt 18pt; } li{ margin:2.5pt 0; }
+  code{ font-family:"Consolas","Courier New",monospace; font-size:9pt;
+        background:var(--code-bg); padding:1px 4px; border-radius:3px; }
+  pre{ background:var(--code-bg); border:1px solid var(--line); border-left:3px solid var(--accent);
+       border-radius:5px; padding:8pt 10pt; overflow:auto; font-size:8.6pt; line-height:1.4;
+       page-break-inside:avoid; white-space:pre; }
+  pre code{ background:none; padding:0; }
+  pre.editor{ border-left-color:var(--accent2); background:#faf7fd; }
+  .muted{ color:var(--muted); } .lead{ font-size:12pt; color:#33405a; }
+  .note,.warn,.tip{ border-radius:6px; padding:7pt 10pt; margin:9pt 0; font-size:9.5pt;
+        page-break-inside:avoid; }
+  .note{ background:#eef3fb; border:1px solid #cfe0fb; }
+  .warn{ background:#fdf3ea; border:1px solid #f2d3b3; }
+  .tip{ background:#eafaf1; border:1px solid #c3ead4; }
+  .note b,.warn b,.tip b{ text-transform:uppercase; font-size:8pt; letter-spacing:.5px; }
+  table{ border-collapse:collapse; width:100%; margin:7pt 0; font-size:9pt; page-break-inside:avoid; }
+  th,td{ border:1px solid var(--line); padding:4pt 7pt; text-align:left; vertical-align:top; }
+  th{ background:#eef2f8; }
+  .cover{ height:250mm; display:flex; flex-direction:column; justify-content:center; }
+  .cover .badge{ font-size:9.5pt; letter-spacing:3px; text-transform:uppercase; color:var(--accent); }
+  .cover h1{ font-size:38pt; margin:8pt 0; }
+  .cover .sub{ font-size:14pt; color:var(--muted); }
+  .rule{ height:4px; width:120px; background:linear-gradient(90deg,var(--accent),var(--accent2)); margin:12pt 0; }
+  .toc ol{ list-style:none; margin-left:0; } .toc a{ color:var(--ink); text-decoration:none; }
+  .toc>ol>li{ margin:5pt 0; font-weight:600; }
+  .kbd{ font-family:Consolas,monospace; font-size:8.5pt; border:1px solid #c3ccd8;
+        border-bottom-width:2px; border-radius:4px; padding:0 4px; background:#fff; }
+  .label{ display:inline-block; font-size:7.5pt; text-transform:uppercase; letter-spacing:.5px;
+        padding:1px 6px; border-radius:9px; margin-bottom:3pt; }
+  .l-editor{ background:#f2e9fb; color:#7a3fc0; border:1px solid #e0cef5; }
+  .l-code{ background:#e7f0fd; color:var(--accent); border:1px solid #cfe0fb; }
+  a{ color:var(--accent); } .small{ font-size:8.5pt; }
+</style>
+</head>
+<body>
+
+<section class="page cover">
+  <div class="badge">C++17 • OpenGL 3.3 • Editor + Runtime</div>
+  <div class="rule"></div>
+  <h1>3DGEngine</h1>
+  <div class="sub">Detailed Systems Manual — every system, in depth, with worked examples</div>
+  <div class="rule"></div>
+  <p class="muted">Each system below is documented with its data types and fields, a step-by-step
+  editor workflow (<span class="label l-editor">Editor</span>), and multiple runnable code
+  examples (<span class="label l-code">Code</span>). Print to PDF with
+  <span class="kbd">Ctrl</span>+<span class="kbd">P</span> → <em>Save as PDF</em> (A4).</p>
+</section>
+
+<section class="page toc">
+  <h2>Contents</h2>
+  <ol>
+    <li>1. ECS — entities, components, systems</li>
+    <li>2. Scenes, prefabs, worlds &amp; level streaming</li>
+    <li>3. Assets — import, registry, references, cooking</li>
+    <li>4. Rendering, lighting &amp; cameras</li>
+    <li>5. Materials, textures &amp; shader graphs</li>
+    <li>6. Skeletal animation — clips, graphs, characters</li>
+    <li>7. Physics — colliders, bodies, queries, joints, ragdolls</li>
+    <li>8. Gameplay &amp; the scripting API</li>
+    <li>9. AI &amp; navigation</li>
+    <li>10. Audio</li>
+    <li>11. Particles</li>
+    <li>12. UI &amp; HUD</li>
+    <li>13. Save / Load</li>
+  </ol>
+  <div class="note"><b>Conventions</b> &nbsp;<span class="label l-editor">Editor</span> blocks are
+  numbered click-paths in the editor. <span class="label l-code">Code</span> blocks are C++ from a
+  native script (deriving <code>engine::Script</code>) or a system, and compile against the public
+  headers under <code>engine/include/</code>. Types shown as <code>ecs::X</code> live in
+  <code>engine::ecs</code>; unqualified gameplay types (<code>Health</code>, <code>Script</code>) live
+  in <code>engine</code>.</div>
+</section>
+
+<section class="page">
+  <h1>1. ECS — entities, components, systems</h1>
+  <p class="lead">Every object is an <b>entity</b> (an id) carrying <b>components</b> (plain data)
+  in an <code>engine::ecs::Registry</code>. Behaviour is applied by <b>systems</b> (functions that
+  iterate components) and by scripts.</p>
+
+  <h3>Key components</h3>
+  <table>
+    <tr><th>Component</th><th>Fields</th></tr>
+    <tr><td><code>ecs::Transform</code></td><td><code>glm::vec3 position</code>, <code>glm::vec3 scale</code>, <code>glm::quat rotation</code>; <code>mat4 Model()</code>.</td></tr>
+    <tr><td><code>ecs::RuntimeName</code></td><td><code>std::string value</code> — the object's name; how scripts &amp; saves find it across a reload.</td></tr>
+    <tr><td><code>ecs::LinearVelocity</code></td><td><code>glm::vec3 velocity</code>.</td></tr>
+    <tr><td><code>ecs::AngularVelocity</code></td><td><code>glm::vec3 axis</code>, <code>float radiansPerSecond</code>.</td></tr>
+    <tr><td><code>Health</code></td><td><code>float hp,maxHp</code>, <code>bool alive</code>; <code>Damage(d)</code>, <code>Reset(full)</code>.</td></tr>
+    <tr><td><code>ecs::Collider</code>, <code>ecs::RigidBody</code>, <code>ecs::Light</code></td><td>See §7 / §4.</td></tr>
+    <tr><td><code>ecs::MeshPBR</code>, <code>ecs::ModelAsset</code>, <code>ecs::SkinnedModelAsset</code>, <code>AnimatedModel</code></td><td>Drawables &amp; assets — §4/§6.</td></tr>
+  </table>
+
+  <h3>Reading &amp; writing components</h3>
+  <span class="label l-code">Code</span>
+  <pre><code>// Iterate all entities that have BOTH a Transform and Health:
+registry.view&lt;ecs::Transform, Health&gt;().each(
+    [&](ecs::Entity e, ecs::Transform&amp; t, Health&amp; h) {
+        if (!h.alive) t.position.y -= 2.0f * dt;   // sink corpses
+    });
+
+// Single-component view:
+registry.view&lt;ecs::Light&gt;().each([](ecs::Entity, ecs::Light&amp; L){ L.intensity *= 0.5f; });</code></pre>
+
+  <h3>From inside a script</h3>
+  <p>A script already knows its own entity, so component access is one call:</p>
+  <span class="label l-code">Code</span>
+  <pre><code>class Elevator final : public engine::Script {
+public:
+    void OnFixedUpdate(float dt) override {
+        // read / write my own components
+        if (auto* t = Transform())
+            t-&gt;position.y += m_dir * 1.5f * dt;
+
+        // reach another named object
+        if (auto* doorT = FindTransform("Door"))
+            doorT-&gt;position.x = t-&gt;position.y;         // silly linkage, but shows lookup
+
+        // component test + add on the fly
+        if (!Has&lt;Health&gt;()) Add&lt;Health&gt;(Health{ 50.f, 50.f, true });
+        if (Health* h = TryGet&lt;Health&gt;(); h &amp;&amp; h-&gt;hp &lt;= 0) DestroySelf();
+    }
+private:
+    float m_dir = 1.0f;
+};</code></pre>
+  <div class="note"><b>Entity ids are not stable</b> across a scene reload or save/load. To refer to
+  a specific object later, use its <code>RuntimeName</code> via <code>FindObject(name)</code>. Give
+  every object you script against a clear name in the Hierarchy.</div>
+</section>
+
+<section class="page">
+  <h1>2. Scenes, prefabs, worlds &amp; level streaming</h1>
+  <p class="lead">You edit an <b>editor scene</b>; the editor exports a <b>runtime scene</b> that
+  Play mode and the standalone player consume. Reuse objects with <b>prefabs</b>; split big games
+  into streamable <b>levels</b> inside a <b>world</b>.</p>
+
+  <h3>Prefabs</h3>
+  <span class="label l-editor">Editor</span>
+  <pre class="editor"><code>1. Build an object (mesh + material + collider + scripts).
+2. Right-click it → Create Prefab → save Coin.3dgprefab.
+3. Drag Coin.3dgprefab into the scene to stamp instances.
+4. Edit the prefab asset; placed instances update to match.</code></pre>
+
+  <h3>Spawning at runtime</h3>
+  <span class="label l-code">Code</span>
+  <pre><code>// Spawn a copy of an existing scene object (a prototype) at a position:
+void FireProjectile(const glm::vec3&amp; muzzle) {
+    ecs::Entity shot = SpawnFromObject("BulletPrototype", muzzle);
+    if (auto* v = Registry()-&gt;TryGet&lt;ecs::LinearVelocity&gt;(shot))
+        v-&gt;velocity = Forward() * 30.0f;
+}
+// A bare entity:
+ecs::Entity marker = SpawnEmpty("Marker", hitPoint);</code></pre>
+
+  <h3>Scene transitions &amp; level streaming</h3>
+  <p>Scripts request flow changes; the host performs them after the current update.</p>
+  <span class="label l-code">Code</span>
+  <pre><code>void OnFixedUpdate(float) override {
+    if (WasTriggerEntered(FindObject("ExitDoor")))
+        RequestSceneLoad("Level2");             // full scene switch (editor Play + player)
+
+    if (WasTriggerEntered(FindObject("BridgeTrigger"))) {
+        RequestLevelLoad("Chunk_East");         // stream a level in  (packaged worlds)
+        RequestLevelUnload("Chunk_West");       // and drop the old one
+    }
+}</code></pre>
+  <div class="tip"><b>Editor parity</b> <code>RequestSceneLoad</code> works in editor Play now, so
+  you can test level flow without packaging. Level streaming runs in packaged <em>worlds</em> (the
+  editor Play preview is a single in-memory scene).</div>
+</section>
+
+<section class="page">
+  <h1>3. Assets — import, registry, references, cooking</h1>
+  <p class="lead">Source art becomes an engine-owned native asset with a stable id. Scenes reference
+  the id (paths are a fallback); the runtime resolves ids to GPU/runtime objects; the cooker copies
+  only what a scene reaches.</p>
+
+  <h3>Importing (drag-and-drop)</h3>
+  <span class="label l-editor">Editor</span>
+  <pre class="editor"><code>1. Drag files from Explorer onto the editor window.
+2. The Import Settings dialog lists each file with its detected type:
+     - Models are peeked for a skeleton →
+         has skeleton + mesh  → Skeletal Mesh   (default)
+         skeleton, no mesh    → Animation Only
+         no skeleton          → Static Mesh
+       Row shows e.g. "[Model] hero.fbx (skeleton, 1 mesh, 6 anim)". Override per file.
+     - Textures get sRGB + Smooth toggles. sRGB defaults OFF for names containing
+       normal / rough / metal / _orm / mask / height / ao (linear data maps).
+3. Set the Target Folder (defaults to the current Content folder) → Import.
+4. Console logs each result; the browser + asset registry refresh.</code></pre>
+
+  <h3>Native vs authored assets</h3>
+  <table>
+    <tr><th>Native (engine-owned binary)</th><th>Authored (editable document)</th></tr>
+    <tr><td><code>.3dgmesh</code> static mesh, <code>.3dgskmesh</code> skinned mesh,
+      <code>.3dgskel</code> skeleton, <code>.3dganim</code> animation, <code>.3dgtex</code> texture</td>
+      <td><code>.3dgmat</code> material, <code>.3dgshader</code> shader graph,
+      <code>.3dgclip</code>/<code>.3dggraph</code>/<code>.3dgcharacter</code> animation,
+      <code>.particle</code>, <code>.hud</code>, <code>.3dgprefab</code>, <code>.btgraph</code></td></tr>
+  </table>
+
+  <h3>Referencing an asset on an object</h3>
+  <span class="label l-editor">Editor</span>
+  <pre class="editor"><code>Select the object → Inspector → assign the Model / Material / Character asset,
+or drag the asset from the Content Browser onto the object.</code></pre>
+  <div class="note"><b>Cooking</b> Packaging exports the runtime scene and runs the AssetCooker,
+  which walks the dependency graph from the scene and copies <em>only</em> reachable assets
+  (content-hashed, topologically ordered). Unused assets never ship.</div>
+</section>
+
+<section class="page">
+  <h1>4. Rendering, lighting &amp; cameras</h1>
+  <p class="lead">Physically-based rendering with automatic frustum culling, LODs, shadows, and
+  instancing. You place drawables + lights; the frame loop renders them. A separate skinned path
+  handles characters.</p>
+
+  <h3>Making an object visible</h3>
+  <span class="label l-editor">Editor</span>
+  <pre class="editor"><code>1. Drag a mesh into the viewport (or add a primitive).
+2. Assign a .3dgmat material in the Inspector.
+3. Add a directional Light as the "sun"; set the environment (sky / IBL) for ambient.
+4. Static geometry: give it a Static Collider so physics & AI see it (§7).</code></pre>
+
+  <h3>Lights</h3>
+  <table>
+    <tr><th>Light type</th><th>Use</th></tr>
+    <tr><td>Directional</td><td>The sun; casts cascaded shadows across the whole scene.</td></tr>
+    <tr><td>Point</td><td>Local omni light (lamps, torches); omnidirectional shadows.</td></tr>
+    <tr><td>Spot</td><td>Cone light (flashlights); perspective shadows.</td></tr>
+  </table>
+  <span class="label l-code">Code</span>
+  <pre><code>// Flicker a torch's point light from a script:
+void OnUpdate(float dt) override {
+    m_t += dt;
+    if (auto* L = TryGet&lt;ecs::Light&gt;())
+        L-&gt;intensity = 3.0f + 0.4f * std::sin(m_t * 22.0f);
+}</code></pre>
+
+  <h3>Cameras</h3>
+  <p>In Play the camera follows the <code>PlayerController</code> view mode (Third Person / First
+  Person / Isometric / Platformer), or a <b>Camera Zone</b> trigger blends to an authored preset.
+  Scripts add feel and cutscenes:</p>
+  <span class="label l-code">Code</span>
+  <pre><code>if (justLanded)          Camera().Shake(0.6f, 0.3f, 20.0f);      // intensity, duration, freq
+if (bossDefeated) {
+    Camera().PlaySequence("VictoryCam", /*lockInput*/true, /*skippable*/true);
+    if (WasCameraSequenceFinished("VictoryCam")) RequestSceneLoad("Credits");
+}</code></pre>
+  <div class="tip"><b>Two-sided preview</b> The Material Maker preview disables backface culling so
+  you can inspect interiors; scene rendering culls backfaces of closed solids for speed (glass and
+  flat planes stay two-sided).</div>
+</section>
+
+<section class="page">
+  <h1>5. Materials, textures &amp; shader graphs</h1>
+  <p class="lead">Author materials in the Material Maker with a live PBR preview; build custom
+  materials as shader graphs. The same compiler powers preview and scene, so what you see is what
+  ships.</p>
+
+  <h3>Authoring a material</h3>
+  <span class="label l-editor">Editor</span>
+  <pre class="editor"><code>1. Panels → Material Maker → New.
+2. Set Albedo (+ albedo map), Metallic/Roughness (+ packed map), Normal (+ map, strength).
+3. Optional lobes: Clearcoat (car paint), Transmission/IOR (glass), Sheen (cloth),
+   Subsurface (skin), Anisotropy (brushed metal). Set Emissive for glow.
+4. Set UV scale/offset/rotation. Save Rock.3dgmat.
+5. Assign it to objects (Inspector or drag).</code></pre>
+
+  <h3>Material fields (PbrMaterial)</h3>
+  <table>
+    <tr><th>Field</th><th>Meaning</th></tr>
+    <tr><td><code>albedo</code>, <code>albedoMap</code></td><td>Base colour (sRGB texture).</td></tr>
+    <tr><td><code>metallic</code>, <code>roughness</code>, <code>metalRoughMap</code></td><td>Surface response (often one packed texture).</td></tr>
+    <tr><td><code>normalMap</code>, <code>normalStrength</code></td><td>Surface detail (linear texture).</td></tr>
+    <tr><td><code>emissive</code></td><td>Additive glow — flash it on an event.</td></tr>
+    <tr><td><code>opacity</code>, <code>blendMode</code>, <code>alphaCutoff</code></td><td>Transparency / cutout.</td></tr>
+    <tr><td><code>clearcoat</code>, <code>transmission</code>, <code>ior</code>, <code>sheenColor</code>, <code>subsurface</code>, <code>anisotropy</code></td><td>Advanced BRDF lobes.</td></tr>
+  </table>
+
+  <h3>Reacting from a script (tint / emissive flash)</h3>
+  <span class="label l-code">Code</span>
+  <pre><code>// AnimatedModel exposes runtime material overrides (tint / emissive glow):
+void FlashHit() {
+    if (auto* am = TryGet&lt;engine::AnimatedModel&gt;()) {
+        am-&gt;emissive = glm::vec3(1.5f, 0.2f, 0.2f);          // red glow now
+        Delay(0.12f, [am]{ am-&gt;emissive = glm::vec3(0.0f); }); // clear shortly after
+    }
+}</code></pre>
+  <div class="warn"><b>Colour space</b> Import colour maps as sRGB and data maps (normal /
+  roughness / metal / AO) as linear. The drag-drop Import dialog pre-selects this from the
+  filename — verify it, since a normal map decoded as sRGB shades wrong.</div>
+</section>
+
+<section class="page">
+  <h1>6. Skeletal animation — clips, graphs, characters</h1>
+  <p class="lead">Three authored assets stack into one runtime controller: a <b>clip</b> is one
+  take; a <b>graph</b> is a state machine of clips; a <b>character</b> binds a graph to a rig +
+  collider + controller. Scripts drive parameters and fire one-shot actions.</p>
+
+  <h3>1) Clip Editor — <code>.3dgclip</code></h3>
+  <span class="label l-editor">Editor</span>
+  <pre class="editor"><code>1. Clip Editor → pick a source FBX / .3dganim.
+2. Pick the take in the "Clip" dropdown (blank = first take).
+3. Set Strip Root Motion / Loop / Speed. "Action Clip" = one-shot (script-triggered).
+4. Name it (Idle / Walk / Run) and Save Idle.3dgclip.</code></pre>
+
+  <h3>2) Graph Editor — <code>.3dggraph</code></h3>
+  <span class="label l-editor">Editor</span>
+  <pre class="editor"><code>1. Graph Editor → Add Clip… → add your Idle/Walk/Run .3dgclip assets.
+2. Add a Float parameter "Speed".
+3. Create 1D Locomotion → a blend space state (Idle@0, Walk@1.5, Run@4) on Speed.
+4. Watch the Validation strip at the top: fix red (unresolved clips / bad transitions)
+   and yellow (always-true transitions, undeclared params, dead ends) before testing.
+5. Save Locomotion.3dggraph.</code></pre>
+  <div class="warn"><b>Transition footgun</b> A Float transition of <code>Speed &gt;= 0</code> is
+  <em>always true</em> and skips the state on frame 1. Use <code>Speed &gt; 0.1</code>; use
+  <code>==</code> for Bool/Trigger. New transitions now default to a safe threshold, and the
+  Validation strip flags the rest.</div>
+
+  <h3>3) Character Editor — <code>.3dgcharacter</code></h3>
+  <span class="label l-editor">Editor</span>
+  <pre class="editor"><code>1. Character Editor → set the skeletal model + material.
+2. Animation Graph → reference Locomotion.3dggraph. The preview now plays its Idle;
+   drag the Speed slider to preview idle→walk→run without entering Play.
+3. Set the capsule Collider; enable Player Controller (Third Person) if it's the hero.
+4. (Optional) Foot IK → Enable; auto-detects leg bones; tune Trace Up/Down, Foot Height,
+   Pelvis Adjust, IK Weight. Grounds feet on slopes/steps at runtime.
+5. Save Hero.3dgcharacter and place it in the scene (name it "Player").</code></pre>
+
+  <h3>Runtime parameters &amp; driving them</h3>
+  <p>In Play the controller is driven each frame with <code>Speed</code>, <code>Direction</code>,
+  <code>IsMoving</code>, <code>IsStopping</code>, <code>IsGrounded</code>, <code>IsFalling</code>,
+  <code>VerticalSpeed</code>, <code>TurnRate</code>… A player controller feeds these automatically;
+  a script can override or add its own:</p>
+  <span class="label l-code">Code</span>
+  <pre><code>void OnUpdate(float) override {
+    Anim().SetParameter("Speed", glm::length(PlanarVelocity()));
+    Anim().SetBool("IsGrounded", grounded);
+
+    if (Input().KeyPressed(GLFW_KEY_SPACE)) Anim().SetTrigger("Jump");
+    if (Input().KeyPressed(GLFW_KEY_F))     Anim().PlayAction("Attack"); // one-shot montage
+
+    // gate movement while a full-body action plays:
+    if (Anim().IsActionPlaying() &amp;&amp; Anim().IsMovementLocked()) return;
+}</code></pre>
+
+  <h3>Root motion &amp; animation events</h3>
+  <p>Set a state's <b>Root Motion</b> flag to move (and turn) the character from the clip itself —
+  ideal for turn-in-place and curved locomotion. Author <b>notify events</b> on clips (e.g. a
+  "hit" frame) and react to them:</p>
+  <span class="label l-code">Code</span>
+  <pre><code>void OnUpdate(float) override {
+    if (WasAnimationEvent("hit"))     ApplyMeleeDamage();
+    if (WasAnimationEvent("footstep")) Audio().PlayCue("Content/SFX/step.wav");
+}</code></pre>
+  <div class="tip"><b>Actions vs states</b> Locomotion is a graph <em>state</em> driven by
+  parameters. An <b>Action Clip</b> (authored in the Clip Editor, called by name with
+  <code>PlayActionClip("Roll")</code> or <code>PlayAction("Attack")</code>) plays <em>over</em>
+  locomotion on a bone mask — use it for attacks, casts, and reactions.</div>
+</section>
+
+<section class="page">
+  <h1>7. Physics — colliders, bodies, queries, joints, ragdolls</h1>
+  <p class="lead">An impulse solver with a spatial-hash broadphase. Give entities colliders (and
+  optionally rigid bodies); the fixed step integrates and resolves them. Run gameplay that touches
+  collision in <code>OnFixedUpdate</code>.</p>
+
+  <h3>Components &amp; fields</h3>
+  <table>
+    <tr><th>Component</th><th>Key fields</th></tr>
+    <tr><td><code>ecs::Collider</code></td><td><code>shape</code> (Sphere/Box/Capsule/Cylinder/Cone/Pyramid/Torus/Staircase/Plane), <code>halfExtents/radius/halfHeight</code>, <code>restitution</code>, <code>friction</code>, <code>isTrigger</code>, <code>layer</code>, <code>mask</code>.</td></tr>
+    <tr><td><code>ecs::RigidBody</code></td><td><code>invMass</code> (0 = static), <code>velocity</code>, <code>useGravity</code>, <code>allowSleep</code>, <code>ccd</code>, <code>freezeRotation</code>, <code>kinematic</code>.</td></tr>
+  </table>
+  <span class="label l-editor">Editor</span>
+  <pre class="editor"><code>Inspector → + Add Component → Collider / Rigid Body, or use Physics Setup presets:
+  Dynamic Body    = rigid body + fitted collider (falls, collides)
+  Static Collider = collider only, immovable (floors, walls)
+  Trigger         = overlap-only collider (checkpoints, pickups, zones)
+"Match Collider to Scale" refits the collider after you resize the object.</code></pre>
+
+  <h3>Movement (kinematic controller)</h3>
+  <span class="label l-code">Code</span>
+  <pre><code>void OnFixedUpdate(float dt) override {
+    glm::vec3 move(0);
+    if (Input().KeyDown(GLFW_KEY_W)) move.z -= 1;
+    if (Input().KeyDown(GLFW_KEY_S)) move.z += 1;
+    if (Input().KeyDown(GLFW_KEY_A)) move.x -= 1;
+    if (Input().KeyDown(GLFW_KEY_D)) move.x += 1;
+    if (auto* rb = TryGet&lt;ecs::RigidBody&gt;())        // kinematic body: set velocity
+        rb-&gt;velocity = glm::length(move) &gt; 0 ? glm::normalize(move) * 6.0f : glm::vec3(0);
+}</code></pre>
+
+  <h3>Raycast &amp; sphere-cast queries</h3>
+  <span class="label l-code">Code</span>
+  <pre><code>// Ground check under the feet (systems receive the PhysicsWorld; scripts can be handed one):
+engine::Ray down{ Transform()-&gt;position + glm::vec3(0,0.1f,0), glm::vec3(0,-1,0) };
+engine::RaycastHit hit = physics.Raycast(*Registry(), down,
+                             /*maxDist*/0.4f, /*layerMask*/0xFFFFFFFF, /*ignore*/Self());
+bool grounded = hit.hit;
+glm::vec3 groundNormal = hit.normal;
+
+// Shotgun a target and read what we struck:
+engine::Ray aim{ muzzle, forward };
+engine::RaycastHit shot = physics.Raycast(*Registry(), aim, 100.f, 0xFFFFFFFF, Self());
+if (shot.hit)
+    if (auto* hp = Registry()-&gt;TryGet&lt;Health&gt;(shot.entity)) hp-&gt;Damage(25.f);</code></pre>
+  <p><code>physics.SphereCast(reg, start, end, radius, ignore)</code> sweeps a volume — use it for
+  camera booms and thick probes that a thin ray would slip through.</p>
+
+  <h3>Triggers &amp; contact events</h3>
+  <span class="label l-code">Code</span>
+  <pre><code>void OnFixedUpdate(float) override {
+    ecs::Entity player = FindObject("Player");
+    if (WasTriggerEntered(player)) { OpenDoor();  Audio().PlayCue("door_open.wav"); }
+    if (WasTriggerExited(player))  { CloseDoor(); }
+    if (IsTriggerTouching(player))  m_dwellTime += FixedDt();  // still inside
+}</code></pre>
+
+  <h3>Joints &amp; ragdolls</h3>
+  <p>Connect bodies with <b>Distance / Rope / Spring</b> joints in the Inspector's Physics Joints
+  section (pendulums, ropes, springs). A character with a <b>Ragdoll</b> (enabled on Health,
+  activate-on-death) swaps animation for connected physics bodies at zero HP:</p>
+  <span class="label l-editor">Editor</span>
+  <pre class="editor"><code>Inspector → Health → Ragdoll On Death → tune Mass, Physics Bodies, Body Thickness,
+Linear/Angular Damping, Death Impulse. At 0 HP the mesh collapses under physics.</code></pre>
+</section>
+
+<section class="page">
+  <h1>8. Gameplay &amp; the scripting API</h1>
+  <p class="lead">Gameplay logic is C++ scripts deriving <code>engine::Script</code>, attached to
+  objects. The editor generates registration; after a script build they run in Play and in
+  packaged builds. Each project's scripts are isolated.</p>
+
+  <h3>Creating &amp; attaching a script</h3>
+  <span class="label l-editor">Editor</span>
+  <pre class="editor"><code>1. Select an object → Inspector → + Add Script → name it (e.g. Coin) → Create + Attach.
+   Files land in Content/Scripts/Coin.h and are registered for THIS project only.
+2. Edit Coin.h (built-in editor or your IDE).
+3. Compile Scripts (Script Editor / prompt). Enter Play — the script runs.</code></pre>
+
+  <h3>Lifecycle</h3>
+  <table>
+    <tr><td><code>OnCreate()</code></td><td>Once on spawn / entering Play — read fields, cache lookups.</td></tr>
+    <tr><td><code>OnUpdate(dt)</code></td><td>Per rendered frame (variable dt) — input, camera, cosmetics.</td></tr>
+    <tr><td><code>OnFixedUpdate(dt)</code></td><td>Per physics step (fixed dt) — movement, forces, collision-facing logic.</td></tr>
+    <tr><td><code>OnDestroy()</code></td><td>Before removal — release, notify.</td></tr>
+  </table>
+
+  <h3>Designer-tunable fields</h3>
+  <p>Expose values so designers tune a script in the Inspector without recompiling:</p>
+  <span class="label l-code">Code</span>
+  <pre><code>void OnCreate() override {
+    m_speed    = GetFieldFloat("moveSpeed", 6.0f);
+    m_maxJumps = GetFieldInt("maxJumps", 2);
+    m_target   = GetFieldEntity("focus");            // an object picker in the Inspector
+    m_hitSfx   = GetFieldAsset("hitSound");          // an asset picker
+}</code></pre>
+
+  <h3>Timers &amp; sequences</h3>
+  <span class="label l-code">Code</span>
+  <pre><code>// repeating spawner
+int id = SetTimer(2.0f, [this]{ SpawnFromObject("Enemy", SpawnPoint()); }, /*repeat*/true);
+// one-shot delay
+Delay(0.5f, [this]{ Camera().Shake(0.4f); });
+// a scripted sequence across frames
+Sequence().Do([this]{ OpenGate(); })
+          .Wait(3.0f)
+          .WaitUntil([this]{ return AllEnemiesDead(); })
+          .Do([this]{ Game()-&gt;Win(); });</code></pre>
+
+  <h3>A full gameplay script</h3>
+  <span class="label l-code">Code</span>
+  <pre><code>#include &lt;engine/gameplay/Script.h&gt;
+
+class Coin final : public engine::Script {
+public:
+    void OnCreate() override { m_spin = GetFieldFloat("spinSpeed", 120.0f); }
+
+    void OnUpdate(float dt) override {
+        if (auto* t = Transform())
+            t-&gt;rotation = glm::rotate(t-&gt;rotation, glm::radians(m_spin*dt), glm::vec3(0,1,0));
+    }
+    void OnFixedUpdate(float) override {
+        if (WasTriggerEntered(FindObject("Player"))) {
+            Game()-&gt;AddScore(1);
+            Audio().PlayCue("Content/SFX/coin.wav");
+            Particles().Burst(24);
+            SaveInt("coins", GetSavedInt("coins") + 1);   // persists across saves
+            DestroySelf();
+        }
+    }
+private:
+    float m_spin = 120.0f;
+};</code></pre>
+  <div class="note"><b>GameMode</b> <code>Game()</code> is the shared score/state object:
+  <code>AddScore/Score</code>, <code>Win()</code>/<code>Lose()</code>, <code>State()</code>,
+  <code>Message()</code>. HUD widgets bind to these by name (§12).</div>
+</section>
+
+<section class="page">
+  <h1>9. AI &amp; navigation</h1>
+  <p class="lead">Agents = a Nav Agent component + a navmesh/grid + a brain (built-in state machine
+  or a Behavior Graph) + perception (vision cone with line-of-sight, and a decaying hearing field).</p>
+
+  <h3>Authoring an agent</h3>
+  <span class="label l-editor">Editor</span>
+  <pre class="editor"><code>1. Bake nav: open the Navigation preview → set bounds → Build (navmesh over the floor).
+2. Place a character; Inspector → + Add Component → Nav Agent:
+     Speed / Max Force / Reach Radius / Repath Interval,
+     Vision Range + Half-Angle, Hearing Range, Team,
+     Chase Target (a named object) OR Auto-target (nearest enemy, different non-zero team).
+3. Give it Health. Optionally assign a Behavior Graph (.btgraph); otherwise the built-in
+   Patrol → Chase → Search brain runs (reacts to sightings & noises; squads share alerts
+   and flank a shared target).</code></pre>
+
+  <h3>How perception drives behaviour</h3>
+  <p>Each frame the host resolves the agent's target, tests vision (in-cone + a line-of-sight
+  raycast that ignores the agent itself), and ages the sound field (fast movement emits footstep
+  noise; HP loss emits loud combat noise). Seeing beats hearing; a heard noise becomes a search
+  point of interest.</p>
+
+  <h3>Custom behaviour from a Behavior Graph</h3>
+  <span class="label l-editor">Editor</span>
+  <pre class="editor"><code>Behavior Graph panel → compose Tasks (move-to, attack), Decorators (conditions),
+Services (periodic checks) over a Blackboard. Create custom nodes from the templates
+(Task / Decorator / Service) → they generate .h files registered for this project.</code></pre>
+
+  <h3>Reacting to AI from a gameplay script</h3>
+  <span class="label l-code">Code</span>
+  <pre><code>// A guard script that shouts and speeds up when it first sees the player.
+void OnUpdate(float) override {
+    const bool sees = /* read the agent's perceivesTarget via a shared component/flag */;
+    if (sees &amp;&amp; !m_wasAlerted) {
+        Audio().PlayCue("Content/SFX/alert.wav");
+        Anim().SetTrigger("Alert");
+    }
+    m_wasAlerted = sees;
+}</code></pre>
+  <div class="tip"><b>Scale</b> Auto-targeting snapshots candidate targets once per frame (cheap
+  even with many agents). For hundreds of agents, back the nearest-enemy search with the physics
+  spatial hash.</div>
+</section>
+
+<section class="page">
+  <h1>10. Audio</h1>
+  <p class="lead">The mixer plays up to 64 voices with priority-based voice stealing and per-bus
+  groups (SFX / Music / Dialogue). Attach spatial sources to objects, or fire cues from scripts.</p>
+
+  <h3>A spatial sound source</h3>
+  <span class="label l-editor">Editor</span>
+  <pre class="editor"><code>Inspector → + Add Component → Audio Source:
+  clip, volume, pitch, looping, autoplay, bus (SFX/Music/…),
+  attenuation (min/max distance, rolloff), Doppler, cone, occlusion, priority.</code></pre>
+  <span class="label l-code">Code</span>
+  <pre><code>// Control the object's own source:
+void OnCreate() override { Audio().SetLooping(true); Audio().Play(); }
+void OnUpdate(float) override {
+    Audio().SetVolume(engineLoad);          // e.g. an engine hum tracking throttle
+    Audio().SetPitch(0.8f + engineLoad*0.6f);
+}
+void OnDestroy() override { Audio().Stop(); }</code></pre>
+
+  <h3>One-shot cues</h3>
+  <span class="label l-code">Code</span>
+  <pre><code>Audio().PlayCue("Content/SFX/coin.wav");            // 2D
+Audio().PlayCue("Content/SFX/impact.wav", /*spatial*/true);  // positioned at this entity</code></pre>
+
+  <h3>Adaptive music &amp; mix</h3>
+  <span class="label l-code">Code</span>
+  <pre><code>void OnCreate() override { Audio().LoadMusic("Content/Music/level.adaptive"); }
+void OnUpdate(float) override {
+    Audio().SetMusicState(inCombat ? "combat" : "explore");  // beat-synchronised switch
+    if (dialogueLine) Audio().SetDialogueDucking(true);      // duck music under VO
+}</code></pre>
+  <div class="note"><b>Buses &amp; snapshots</b> Route sources to buses and apply mixer snapshots
+  (<code>Audio().ApplySnapshot(preset, transitionSeconds)</code>) for scene-wide mood changes
+  (e.g. an underwater or paused mix).</div>
+</section>
+
+<section class="page">
+  <h1>11. Particles</h1>
+  <p class="lead">Author systems in the Particle Editor (emission, shape, velocity, color/size over
+  life, forces), attach them to objects, and drive them from scripts.</p>
+
+  <h3>Authoring</h3>
+  <span class="label l-editor">Editor</span>
+  <pre class="editor"><code>Particle Editor → start from a preset (Fire / Smoke / Sparks / Magic) → tune modules:
+  Emission rate + bursts, Shape (cone/sphere/box), Velocity, Color/Size over Life, Forces
+  (gravity, drag, turbulence). Save Impact.particle and add it to an object.</code></pre>
+
+  <h3>Driving from a script</h3>
+  <span class="label l-code">Code</span>
+  <pre><code>// A muzzle flash that bursts on fire and a thruster that scales with throttle.
+void Fire() {
+    Particles().Burst(30);                 // one-shot burst on THIS entity's system
+    Particles().Play(FindObject("Smoke")); // start another object's system
+}
+void OnUpdate(float) override {
+    Particles().SetRate(throttle * 200.0f);   // continuous emission tracks input
+    Particles().SetSpeed(bulletTime ? 0.2f : 1.0f);  // slow the sim in bullet-time
+    if (dead) Particles().Stop(/*clear*/true);
+}</code></pre>
+  <div class="tip"><b>Events</b> Combine with animation notifies — <code>WasAnimationEvent("cast")
+  </code> → <code>Particles().Burst(...)</code> — so effects fire exactly on the keyframe.</div>
+</section>
+
+<section class="page">
+  <h1>12. UI &amp; HUD</h1>
+  <p class="lead">A HUD (<code>.hud</code>) is a document of widgets that bind to runtime values by
+  name and draw each frame. Author it in the HUD editor; the runtime draws the scene's HUD plus the
+  save menu and status overlay.</p>
+
+  <h3>Authoring &amp; binding</h3>
+  <span class="label l-editor">Editor</span>
+  <pre class="editor"><code>HUD editor → add widgets:
+  - Health bar / text  → binds to the player's Health (health / maxhp / healthFraction).
+  - Text "Score: {}"   → binds NamedString/NamedFloat "score" from GameMode.
+  - Message            → binds "gamemessage" / "gamestate" for end screens.
+  - Button             → action (Restart / Exit) for pause & end screens.
+Save Game.hud and reference it from the scene.</code></pre>
+
+  <h3>Pushing values from a script</h3>
+  <p>GameMode values (<code>score</code>, <code>time</code>, <code>gamestate</code>,
+  <code>gamemessage</code>) and the player's Health flow to the HUD automatically. Set them via
+  gameplay:</p>
+  <span class="label l-code">Code</span>
+  <pre><code>Game()-&gt;AddScore(100);            // HUD "score" updates
+Game()-&gt;SetMessage("Wave 3");     // HUD "gamemessage" shows it
+if (bossDead) Game()-&gt;Win();      // HUD end screen (VICTORY) appears</code></pre>
+  <div class="note"><b>Runtime menus</b> The standalone player overlays an in-game save/load menu
+  (§13) on top of the HUD, plus a status line and controls hint.</div>
+</section>
+
+<section class="page">
+  <h1>13. Save / Load</h1>
+  <p class="lead">The <code>SaveGame</code> module snapshots <b>world state</b> into numbered slots
+  with metadata and restores it after a scene reload, matching entities by <code>RuntimeName</code>.
+  Scripts also get a typed key/value store and checkpoints.</p>
+
+  <h3>What is captured</h3>
+  <table>
+    <tr><th>Captured per named entity</th><th>Plus</th></tr>
+    <tr><td>Transform (position/rotation/scale), Health (hp/maxHp/alive), Linear &amp; Angular velocity</td>
+        <td>The flat key/value store scripts write; slot metadata (display name, source scene, timestamp).</td></tr>
+  </table>
+
+  <h3>Typed values &amp; checkpoints</h3>
+  <span class="label l-code">Code</span>
+  <pre><code>SaveInt("coins", 12);      SaveFloat("bestTime", 41.7f);
+SaveBool("doorOpen", true); SaveVec3("lastPos", Transform()-&gt;position);
+int coins = GetSavedInt("coins", 0);                 // 0 if unset
+
+if (WasTriggerEntered(FindObject("Checkpoint")))
+    SaveCheckpoint("cp1", Transform()-&gt;position);
+glm::vec3 respawn;
+if (LoadCheckpoint("cp1", &amp;respawn)) Transform()-&gt;position = respawn;</code></pre>
+
+  <h3>Full save slots</h3>
+  <span class="label l-code">Code</span>
+  <pre><code>void OnFixedUpdate(float) override {
+    if (WasTriggerEntered(FindObject("SaveAltar")))
+        SaveGameToSlot(1, "Cathedral");     // captures the whole world → slot 1
+    if (playerDied)
+        LoadGameFromSlot(1);                // reloads the saved scene + restores state
+}</code></pre>
+
+  <h3>In-game menu (packaged player)</h3>
+  <span class="label l-editor">Editor</span>
+  <pre class="editor"><code>In the standalone player at runtime:
+  F5        quick-save to slot 0 (shows a "Saved" toast)
+  F9        open/close the Load menu (pauses the game)
+  Up/Down   select a slot     Enter  load     Del  erase     Esc  close</code></pre>
+  <p>A load reloads the saved scene, then re-applies the snapshot — the same path
+  <code>LoadGameFromSlot</code> uses, so menu and script loads behave identically.</p>
+  <div class="note small"><b>Extending</b> To persist more (inventory, custom per-entity state),
+  add fields to the capture in <code>engine/gameplay/SaveGame.h</code> (<code>CaptureSaveGame</code>
+  / <code>ApplySaveGame</code>). Exact signatures for every API in this manual live in the public
+  headers under <code>engine/include/</code>; the per-header reference is in
+  <code>docs/engine-systems/</code>. Print with A4 margins for correct pagination.</div>
+</section>
+
+</body>
+</html>

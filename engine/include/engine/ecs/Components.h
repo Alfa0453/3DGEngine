@@ -182,6 +182,19 @@ struct LoadedModelAsset {
     const Model* model = nullptr;
 };
 
+// Grounded foot-placement settings authored per character. Plain data so it serializes
+// with the scene and travels to packaged builds; the runtime turns it into the AnimatedModel's
+// FootIK (the ground raycast callback is supplied by the host, not serialized).
+struct FootIKSettings {
+    bool  enabled       = false;
+    float traceUp       = 0.5f;    // start the ray this far above the animated foot (m)
+    float traceDown     = 0.8f;    // max search below that start (m)
+    float footHeight    = 0.02f;   // hold the ankle this far above the surface (m)
+    float pelvisWeight  = 1.0f;    // 0 = never drop the pelvis, 1 = full drop
+    float maxPelvisDrop = 0.5f;    // clamp the pelvis drop (m)
+    float weight        = 1.0f;    // overall IK blend 0..1
+};
+
 struct SkinnedModelAsset {
     struct Notify {
         int clipIndex = 0;
@@ -296,6 +309,9 @@ struct SkinnedModelAsset {
     std::vector<AnimationTransition> transitions;
     std::vector<AnimationSourceFile> animationSources;
     std::vector<Attachment> attachments;
+    // Grounded foot placement (opt-in). Appended last so the runtime-loader aggregate init
+    // stays valid (this trailing member value-initialises to "disabled" when omitted).
+    FootIKSettings footIK;
 };
 
 struct MaterialAsset {
