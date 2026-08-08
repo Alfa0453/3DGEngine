@@ -9963,11 +9963,21 @@ bool EditorDockspace::Draw(Context& context) {
                 context.panels->ResetDefaults();
             }
             ImGui::Separator();
-            for (int i = 0; i < static_cast<int>(EditorPanels::Panel::Count); ++i) {
-                const EditorPanels::Panel panel = static_cast<EditorPanels::Panel>(i);
-                const bool open = context.panels->IsOpen(panel);
-                if (ImGui::MenuItem(EditorPanels::Name(panel), nullptr, open)) {
-                    context.panels->SetOpen(panel, !open);
+            for (int groupIndex = 0;
+                 groupIndex < static_cast<int>(EditorPanels::Group::Count); ++groupIndex) {
+                const EditorPanels::Group group = static_cast<EditorPanels::Group>(groupIndex);
+                if (ImGui::BeginMenu(EditorPanels::GroupName(group))) {
+                    for (int panelIndex = 0;
+                         panelIndex < static_cast<int>(EditorPanels::Panel::Count); ++panelIndex) {
+                        const EditorPanels::Panel panel =
+                            static_cast<EditorPanels::Panel>(panelIndex);
+                        if (EditorPanels::GroupOf(panel) != group) continue;
+                        const bool open = context.panels->IsOpen(panel);
+                        if (ImGui::MenuItem(EditorPanels::Name(panel), nullptr, open)) {
+                            context.panels->SetOpen(panel, !open);
+                        }
+                    }
+                    ImGui::EndMenu();
                 }
             }
             ImGui::EndMenu();

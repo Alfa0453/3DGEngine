@@ -4,6 +4,18 @@
 
 class EditorPanels {
 public:
+    enum class Group {
+        Core,
+        WorldGameplay,
+        Content,
+        Animation,
+        EffectsAudio,
+        AiScripting,
+        LevelDesign,
+        Debug,
+        Count
+    };
+
     enum class Panel {
         Hierarchy,
         Inspector,
@@ -56,6 +68,8 @@ public:
     void ResetDefaults();
 
     static const char* Name(Panel panel);
+    static const char* GroupName(Group group);
+    static Group GroupOf(Panel panel);
 
 private:
     static constexpr int kPanelCount = static_cast<int>(Panel::Count);

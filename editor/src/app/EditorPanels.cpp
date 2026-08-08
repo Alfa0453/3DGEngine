@@ -77,3 +77,84 @@ const char *EditorPanels::Name(Panel panel)
     }
     return "Panel";
 }
+
+const char* EditorPanels::GroupName(Group group)
+{
+    switch (group) {
+    case Group::Core: return "Core";
+    case Group::WorldGameplay: return "World & Gameplay";
+    case Group::Content: return "Content Editors";
+    case Group::Animation: return "Animation & Characters";
+    case Group::EffectsAudio: return "Effects & Audio";
+    case Group::AiScripting: return "AI & Scripting";
+    case Group::LevelDesign: return "Level Design";
+    case Group::Debug: return "Debug & Diagnostics";
+    case Group::Count: break;
+    }
+    return "Panels";
+}
+
+EditorPanels::Group EditorPanels::GroupOf(Panel panel)
+{
+    switch (panel) {
+    case Panel::Hierarchy:
+    case Panel::Inspector:
+    case Panel::Assets:
+    case Panel::Console:
+    case Panel::Gizmo:
+    case Panel::Viewport:
+        return Group::Core;
+
+    case Panel::WorldSettings:
+    case Panel::GameModeSettings:
+    case Panel::CameraManager:
+    case Panel::Hud:
+    case Panel::WorldEditor:
+        return Group::WorldGameplay;
+
+    case Panel::MaterialMaker:
+    case Panel::ShaderEditor:
+    case Panel::MeshEditor:
+    case Panel::Prefab:
+        return Group::Content;
+
+    case Panel::AnimationPreview:
+    case Panel::CharacterEditor:
+    case Panel::ClipEditor:
+    case Panel::GraphEditor:
+        return Group::Animation;
+
+    case Panel::AudioEditor:
+    case Panel::AudioMixer:
+    case Panel::ParticleEditor:
+        return Group::EffectsAudio;
+
+    case Panel::BehaviorGraph:
+    case Panel::ScriptApi:
+    case Panel::ScriptDebug:
+        return Group::AiScripting;
+
+    case Panel::ModularPlacement:
+    case Panel::PrefabPalette:
+    case Panel::RoomBuilder:
+    case Panel::ScatterPaint:
+    case Panel::ArrayTool:
+    case Panel::Measurement:
+    case Panel::LevelValidation:
+    case Panel::LevelVariants:
+    case Panel::LevelLayers:
+    case Panel::ViewportBookmarks:
+    case Panel::Blockout:
+    case Panel::Alignment:
+    case Panel::SplineBuilder:
+        return Group::LevelDesign;
+
+    case Panel::PhysicsStatus:
+    case Panel::GameplayDebug:
+        return Group::Debug;
+
+    case Panel::Count:
+        break;
+    }
+    return Group::Core;
+}
