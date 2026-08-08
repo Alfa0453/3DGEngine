@@ -100,7 +100,7 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         return engine::MakeAssetReference(
             &assetRegistry, contentRoot, assetPath, type).id;
     };
-    out << "3DGRuntimeScene 87 " << sceneId.ToString() << '\n';
+    out << "3DGRuntimeScene 88 " << sceneId.ToString() << '\n';
     out << "# Runtime export from 3DGEditor. Editor-only flags are omitted.\n";
     const EditorScene::Environment& environment = scene.GetEnvironment();
     out << "environment "
@@ -161,6 +161,11 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         << (environment.skylightOcclusion ? 1 : 0) << ' '
         << environment.skylightOcclusionStrength << ' '
         << environment.minimumSkylight << '\n';
+    out << "sky "
+        << environment.skyMode << ' '
+        << StoredPath(environment.skyTexturePath) << ' '
+        << environment.skyRotation << ' '
+        << environment.skyIntensity << '\n';   // runtime scene version 88+
     for (const EditorScene::Environment::PostProcessEffect& effect :
          environment.postProcessEffects) {
         out << "post_effect "
@@ -285,6 +290,7 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
             }
         }
         out << ' ' << StoredPath(flowSpline ? flowSpline->name : std::string{});
+        out << ' ' << StoredPath(object.waterShaderPath);   // runtime scene version 88+
         out << '\n';
     }
 

@@ -299,6 +299,7 @@ public:
         struct WaterDesc {
             std::string name;
             std::string splineName;
+            std::string shaderPath;   // optional custom water fragment shader (.glsl)
             glm::vec3 center{0.0f};
             float size = 80.0f;
             int resolution = 160;
@@ -395,6 +396,10 @@ public:
                 bool enabled = true;
                 std::vector<PostProcessParameter> parameters;
             };
+            int skyMode = 0;                 // 0 = procedural, 1 = imported sky image
+            std::string skyTexturePath;      // equirectangular panorama (.png/.jpg)
+            float skyRotation = 0.0f;
+            float skyIntensity = 1.0f;
             float timeOfDay = 0.46f;
             float skyLightIntensity = 1.0f;
             bool skylightOcclusion = true;

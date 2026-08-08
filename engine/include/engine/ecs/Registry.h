@@ -189,6 +189,12 @@ class View {
 public:
     explicit View(Registry& reg) : m_reg(&reg) {}
 
+    bool empty() const {
+        using First = std::tuple_element_t<0, std::tuple<Cs...>>;
+        const Pool<First>* lead = m_reg->TryPool<First>();
+        return !lead || lead->dense.empty();
+    }
+
     template <class F> void each(F&& func) {
         using First = std::tuple_element_t<0, std::tuple<Cs...>>;
         Pool<First>* lead = m_reg->TryPool<First>();

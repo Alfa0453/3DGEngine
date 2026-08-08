@@ -1,11 +1,13 @@
 #pragma once
 
 #include "engine/graphics/Mesh.h"
+#include "engine/math/Spline.h"
 
 #include <glm/glm.hpp>
 
 #include <memory>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace engine {
@@ -75,6 +77,13 @@ struct WaterConfig {
     std::vector<glm::vec3> splinePointRotations;
     bool      splineClosed = false;
     float     riverWidth = 8.0f;
+
+    // Optional custom water shader: the GLSL fragment body (helper functions + main())
+    // for the surface. Empty = the built-in look. The engine prepends the version, the
+    // shared noise helpers and the full water declaration block, so this source has every
+    // water uniform/varying already in scope and only writes helpers + main(). If it fails
+    // to compile the water falls back to the built-in shader (see CustomShaderError()).
+    std::string customFragmentSource;
 };
 
 class Water {
@@ -111,12 +120,28 @@ public:
     bool ContainsXZ(float worldX, float worldZ, float padding = 0.0f) const;
     float Level() const { return m_config.center.y; }
 
+    // Compile diagnostics for a custom fragment shader. Empty when none is set or it
+    // compiled cleanly; otherwise the driver's error (and the built-in shader is used).
+    const std::string& CustomShaderError() const { return m_customShaderError; }
+    bool UsingCustomShader() const { return m_customShader != nullptr; }
+
 private:
     void BuildMesh();
+    // (Re)compile m_customShader from m_config.customFragmentSource. On failure clears it
+    // (falling back to the built-in shader) and records the driver message.
+    void RebuildCustomShader();
 
     WaterConfig m_config;
     std::optional<Mesh>     m_mesh;
-    std::unique_ptr<Shader> m_shader;
+    std::unique_ptr<Shader> m_shader;         // built-in surface shader (always valid)
+    std::unique_ptr<Shader> m_customShader;   // active custom shader, or null
+    std::string m_customShaderError;
+    // World-space bounds used to reject water before setting up transparent passes.
+    glm::vec3 m_boundsMin{0.0f};
+    glm::vec3 m_boundsMax{0.0f};
+    float m_splineLength = 0.0f;
+    Spline m_spline;
+    Spline m_flatSpline;
     float m_time = 0.0f;
 };
 

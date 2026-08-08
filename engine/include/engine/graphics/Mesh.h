@@ -87,6 +87,20 @@ public:
     // instanced drawing (see PbrRenderer's instanced lit pass).
     unsigned int Vao() const { return m_vao; }
 
+    // Number of floats per vertex (stride / sizeof(float)). Primitives are 8
+    // (position3/normal3/uv2); imported models are 11 (+ tangent3).
+    std::size_t VertexStrideFloats() const {
+        return m_vertexStrideBytes == 0u ? 0u : m_vertexStrideBytes / sizeof(float);
+    }
+
+    // Read the interleaved vertex floats / index data back from the GPU buffers.
+    // Editor-time only (used by the mesh-merge baker) — a GPU→CPU readback is far
+    // too slow for per-frame use but fine for a one-shot bake. Returns empty when
+    // there is no geometry. The caller must know the vertex layout (see
+    // VertexStrideFloats) to interpret the floats.
+    std::vector<float> ReadbackVertices() const;
+    std::vector<std::uint32_t> ReadbackIndices() const;
+
 private:
     void Release();     // delete the GL objects (used by dtor + move-assign)
     void UpdateBounds(const std::vector<float>& vertices,

@@ -89,6 +89,33 @@ bool Script::SocketPosition(const std::string& name, glm::vec3* position) const 
     return true;
 }
 
+RaycastHit Script::TraceLine(const glm::vec3& start, const glm::vec3& end,
+                             std::uint32_t layerMask) const {
+    RaycastHit result;
+    if (!m_context.physics || !m_context.registry) return result;
+    const glm::vec3 delta = end - start;
+    const float distance = glm::length(delta);
+    if (distance <= 1.0e-6f) return result;
+    return m_context.physics->Raycast(
+        *m_context.registry, Ray{start, delta}, distance, layerMask, m_context.entity);
+}
+
+RaycastHit Script::TraceSphere(const glm::vec3& start, const glm::vec3& end, float radius,
+                               std::uint32_t layerMask) const {
+    RaycastHit result;
+    if (!m_context.physics || !m_context.registry) return result;
+    return m_context.physics->SphereCast(
+        *m_context.registry, start, end, std::max(radius, 0.0f),
+        m_context.entity, layerMask);
+}
+
+std::vector<ecs::Entity> Script::TraceOverlapSphere(
+    const glm::vec3& center, float radius, std::uint32_t layerMask) const {
+    if (!m_context.physics || !m_context.registry) return {};
+    return m_context.physics->OverlapSphere(
+        *m_context.registry, center, std::max(radius, 0.0f), layerMask);
+}
+
 void Script::DestroySelf() {
     Destroy(m_context.entity);
 }
@@ -741,12 +768,14 @@ bool Script::IsHitStopActive() const {
 }
 
 void Script::TickTimers(float dt) {
-    std::vector<std::function<void()>> callbacks;
+    m_timerCallbacks.clear();
+    if (m_timerCallbacks.capacity() < m_timers.size())
+        m_timerCallbacks.reserve(m_timers.size());
     for (Timer& timer : m_timers) {
         if (timer.cancelled) continue;
         timer.remaining -= std::max(dt, 0.0f);
         if (timer.remaining > 0.0f) continue;
-        callbacks.push_back(timer.callback);
+        m_timerCallbacks.push_back(timer.callback);
         if (timer.repeat) {
             do timer.remaining += timer.interval;
             while (timer.remaining <= 0.0f);
@@ -758,7 +787,7 @@ void Script::TickTimers(float dt) {
         std::remove_if(m_timers.begin(), m_timers.end(),
                        [](const Timer& timer) { return timer.cancelled; }),
         m_timers.end());
-    for (auto& callback : callbacks) callback();
+    for (auto& callback : m_timerCallbacks) callback();
 
     // Index-based over the initial count: an action may start a new sequence (push_back),
     // which could reallocate and invalidate a range-for iterator. The sequence objects
@@ -1212,7 +1241,8 @@ void RunGuarded(NativeScriptSlot& script, Fn&& fn) {
 Script* PrepareScript(ecs::Registry& registry, ecs::Entity entity, NativeScriptSlot& script,
                       std::vector<ecs::Entity>& destroyQueue, const ScriptInputState* input,
                       RuntimeAudioSystem* audio, CameraShake* cameraShake,
-                      CameraDirector* cameraDirector, GameMode* gameMode) {
+                      CameraDirector* cameraDirector, GameMode* gameMode,
+                      PhysicsWorld* physics) {
     if (!script.enabled || script.className.empty()) {
         return nullptr;
     }
@@ -1236,7 +1266,7 @@ Script* PrepareScript(ecs::Registry& registry, ecs::Entity entity, NativeScriptS
     }
     script.instance->SetContext(
         ScriptContext{&registry, entity, &destroyQueue, input, audio, cameraShake,
-                      cameraDirector, &script.fields, gameMode});
+                      cameraDirector, &script.fields, gameMode, nullptr, physics});
     if (!script.created) {
         RunGuarded(script, [&] { script.instance->OnCreate(); });
         script.created = true;
@@ -1268,14 +1298,17 @@ void FlushDestroyQueue(ecs::Registry& registry, const std::vector<ecs::Entity>& 
 
 void UpdateScripts(ecs::Registry& registry, float dt, const ScriptInputState* input,
                    RuntimeAudioSystem* audio, CameraShake* cameraShake,
-                   CameraDirector* cameraDirector, GameMode* gameMode) {
-    std::vector<ecs::Entity> destroyQueue;
+                   CameraDirector* cameraDirector, GameMode* gameMode,
+                   PhysicsWorld* physics) {
+    thread_local std::vector<ecs::Entity> destroyQueueStorage;
+    auto& destroyQueue = destroyQueueStorage;
+    destroyQueue.clear();
     registry.view<NativeScriptComponent>().each(
         [&](ecs::Entity entity, NativeScriptComponent& script) {
             auto update = [&](NativeScriptSlot& slot) {
                 if (Script* instance = PrepareScript(
                         registry, entity, slot, destroyQueue, input, audio,
-                        cameraShake, cameraDirector, gameMode)) {
+                        cameraShake, cameraDirector, gameMode, physics)) {
                     RunGuarded(slot, [&] {
                         instance->TickTimers(dt);
                         instance->OnUpdate(dt);
@@ -1290,8 +1323,11 @@ void UpdateScripts(ecs::Registry& registry, float dt, const ScriptInputState* in
 
 void FixedUpdateScripts(ecs::Registry& registry, float dt, const ScriptInputState* input,
                         RuntimeAudioSystem* audio, CameraShake* cameraShake,
-                        CameraDirector* cameraDirector, GameMode* gameMode) {
-    std::vector<ecs::Entity> destroyQueue;
+                        CameraDirector* cameraDirector, GameMode* gameMode,
+                        PhysicsWorld* physics) {
+    thread_local std::vector<ecs::Entity> destroyQueueStorage;
+    auto& destroyQueue = destroyQueueStorage;
+    destroyQueue.clear();
     registry.view<NativeScriptComponent>().each(
         [&](ecs::Entity entity, NativeScriptComponent& script) {
             auto fixedUpdate = [&](NativeScriptSlot& slot) {
@@ -1299,7 +1335,8 @@ void FixedUpdateScripts(ecs::Registry& registry, float dt, const ScriptInputStat
                 if (!slot.enabled || !slot.instance || !slot.created) return;
                 slot.instance->SetContext(
                     ScriptContext{&registry, entity, &destroyQueue, input, audio,
-                                  cameraShake, cameraDirector, &slot.fields, gameMode});
+                                  cameraShake, cameraDirector, &slot.fields, gameMode,
+                                  nullptr, physics});
                 RunGuarded(slot, [&] { slot.instance->OnFixedUpdate(dt); });
             };
             fixedUpdate(script);

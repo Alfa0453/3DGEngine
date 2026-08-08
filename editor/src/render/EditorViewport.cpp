@@ -707,11 +707,162 @@ void DrawGizmoRing(engine::Renderer& renderer,
 EditorViewport::EditorViewport()
     : m_colliderLines(std::make_unique<EditorLineRenderer>()),
       m_splineLines(std::make_unique<EditorLineRenderer>()),
-      m_waterLines(std::make_unique<EditorLineRenderer>())
+      m_waterLines(std::make_unique<EditorLineRenderer>()),
+      m_roomLines(std::make_unique<EditorLineRenderer>()),
+      m_blockoutLines(std::make_unique<EditorLineRenderer>()),
+      m_scatterLines(std::make_unique<EditorLineRenderer>()),
+      m_arrayLines(std::make_unique<EditorLineRenderer>()),
+      m_measurementLines(std::make_unique<EditorLineRenderer>())
 {
 }
 
 EditorViewport::~EditorViewport() = default;
+
+void EditorViewport::DrawRoomBuilderGuide(const glm::vec3& first,
+                                          const glm::vec3& second,
+                                          float wallHeight,
+                                          const glm::mat4& viewProj) const {
+    if (!m_roomLines) return;
+    m_roomLines->Clear();
+    const float minX = std::min(first.x, second.x);
+    const float maxX = std::max(first.x, second.x);
+    const float minZ = std::min(first.z, second.z);
+    const float maxZ = std::max(first.z, second.z);
+    const float y = first.y + 0.015f;
+    const float top = y + std::max(wallHeight, 0.05f);
+    const glm::vec3 color(0.15f, 0.92f, 0.48f);
+    const glm::vec3 bottom[4] = {
+        {minX, y, minZ}, {maxX, y, minZ}, {maxX, y, maxZ}, {minX, y, maxZ}};
+    const glm::vec3 upper[4] = {
+        {minX, top, minZ}, {maxX, top, minZ}, {maxX, top, maxZ}, {minX, top, maxZ}};
+    for (int i = 0; i < 4; ++i) {
+        const int next = (i + 1) % 4;
+        m_roomLines->AddLine(bottom[i], bottom[next], color);
+        m_roomLines->AddLine(upper[i], upper[next], color * 0.75f);
+        m_roomLines->AddLine(bottom[i], upper[i], color * 0.75f);
+    }
+    m_roomLines->Draw(viewProj, 2.0f, true);
+}
+
+void EditorViewport::DrawBlockoutPreview(const glm::vec3& base,
+                                         const glm::vec3& dimensions,
+                                         float yawDegrees,
+                                         const glm::mat4& viewProj) const {
+    if (!m_blockoutLines) return;
+    m_blockoutLines->Clear();
+    const glm::vec3 half(dimensions.x * 0.5f, 0.0f, dimensions.z * 0.5f);
+    const float yaw = glm::radians(yawDegrees);
+    const float c = std::cos(yaw), s = std::sin(yaw);
+    auto rotate = [&](const glm::vec3& p) {
+        return glm::vec3(p.x * c + p.z * s, p.y, -p.x * s + p.z * c);
+    };
+    glm::vec3 corners[8];
+    int cursor = 0;
+    for (int y = 0; y < 2; ++y)
+        for (int z = 0; z < 2; ++z)
+            for (int x = 0; x < 2; ++x) {
+                const glm::vec3 local(x ? half.x : -half.x,
+                    y ? dimensions.y : 0.0f, z ? half.z : -half.z);
+                corners[cursor++] = base + rotate(local);
+            }
+    const int edges[][2] = {
+        {0,1},{1,3},{3,2},{2,0}, {4,5},{5,7},{7,6},{6,4},
+        {0,4},{1,5},{2,6},{3,7}};
+    const glm::vec3 color(1.0f, 0.62f, 0.12f);
+    for (const auto& edge : edges)
+        m_blockoutLines->AddLine(corners[edge[0]], corners[edge[1]], color);
+    m_blockoutLines->Draw(viewProj, 2.25f, true);
+}
+
+void EditorViewport::DrawScatterBrush(const glm::vec3& center,
+                                      const glm::vec3& surfaceNormal,
+                                      float radius,
+                                      bool erase,
+                                      const glm::mat4& viewProj) const {
+    if (!m_scatterLines) return;
+    m_scatterLines->Clear();
+    const glm::vec3 normal = glm::dot(surfaceNormal, surfaceNormal) > 1.0e-8f
+        ? glm::normalize(surfaceNormal) : glm::vec3(0, 1, 0);
+    const glm::vec3 helper = std::abs(normal.y) < 0.95f
+        ? glm::vec3(0, 1, 0) : glm::vec3(1, 0, 0);
+    const glm::vec3 tangent = glm::normalize(glm::cross(helper, normal));
+    const glm::vec3 bitangent = glm::normalize(glm::cross(normal, tangent));
+    const glm::vec3 color = erase ? glm::vec3(1.0f, 0.18f, 0.12f)
+                                  : glm::vec3(0.12f, 0.86f, 0.42f);
+    constexpr int segments = 64;
+    const glm::vec3 liftedCenter = center + normal * 0.018f;
+    for (int i = 0; i < segments; ++i) {
+        const float a = 6.28318530718f * static_cast<float>(i) / segments;
+        const float b = 6.28318530718f * static_cast<float>(i + 1) / segments;
+        const glm::vec3 p0 = liftedCenter + radius * (tangent * std::cos(a) + bitangent * std::sin(a));
+        const glm::vec3 p1 = liftedCenter + radius * (tangent * std::cos(b) + bitangent * std::sin(b));
+        m_scatterLines->AddLine(p0, p1, color);
+    }
+    m_scatterLines->AddLine(liftedCenter - tangent * radius * 0.15f,
+                            liftedCenter + tangent * radius * 0.15f, color);
+    m_scatterLines->AddLine(liftedCenter - bitangent * radius * 0.15f,
+                            liftedCenter + bitangent * radius * 0.15f, color);
+    m_scatterLines->Draw(viewProj, 2.5f, true);
+}
+
+void EditorViewport::DrawArrayPreview(const glm::vec3& source,
+                                      const std::vector<glm::vec3>& copies,
+                                      const glm::mat4& viewProj) const {
+    if (!m_arrayLines || copies.empty()) return;
+    m_arrayLines->Clear();
+    const glm::vec3 lineColor(0.18f, 0.65f, 1.0f);
+    const glm::vec3 pointColor(0.25f, 0.9f, 1.0f);
+    glm::vec3 previous = source;
+    for (const glm::vec3& position : copies) {
+        m_arrayLines->AddLine(previous, position, lineColor * 0.72f);
+        const float marker = 0.16f;
+        m_arrayLines->AddLine(position - glm::vec3(marker, 0, 0),
+                              position + glm::vec3(marker, 0, 0), pointColor);
+        m_arrayLines->AddLine(position - glm::vec3(0, marker, 0),
+                              position + glm::vec3(0, marker, 0), pointColor);
+        m_arrayLines->AddLine(position - glm::vec3(0, 0, marker),
+                              position + glm::vec3(0, 0, marker), pointColor);
+        previous = position;
+    }
+    m_arrayLines->Draw(viewProj, 2.0f, true);
+}
+
+void EditorViewport::DrawMeasurementGuides(
+    const std::vector<MeasurementGuide>& guides,
+    const glm::mat4& viewProj) const {
+    if (!m_measurementLines || guides.empty()) return;
+    m_measurementLines->Clear();
+    for (const MeasurementGuide& guide : guides) {
+        const glm::vec3 color = guide.selected
+            ? glm::vec3(0.2f, 0.95f, 1.0f) : glm::vec3(0.25f, 0.65f, 0.9f);
+        const float marker = guide.selected ? 0.20f : 0.14f;
+        if (!guide.box) {
+            m_measurementLines->AddLine(guide.a, guide.b, color);
+        } else {
+            const glm::vec3 minimum = glm::min(guide.a, guide.b);
+            const glm::vec3 maximum = glm::max(guide.a, guide.b);
+            const glm::vec3 c[8] = {
+                {minimum.x, minimum.y, minimum.z}, {maximum.x, minimum.y, minimum.z},
+                {maximum.x, minimum.y, maximum.z}, {minimum.x, minimum.y, maximum.z},
+                {minimum.x, maximum.y, minimum.z}, {maximum.x, maximum.y, minimum.z},
+                {maximum.x, maximum.y, maximum.z}, {minimum.x, maximum.y, maximum.z}};
+            const int edges[12][2] = {
+                {0,1},{1,2},{2,3},{3,0},{4,5},{5,6},{6,7},{7,4},
+                {0,4},{1,5},{2,6},{3,7}};
+            for (const auto& edge : edges)
+                m_measurementLines->AddLine(c[edge[0]], c[edge[1]], color);
+        }
+        for (const glm::vec3 endpoint : {guide.a, guide.b}) {
+            m_measurementLines->AddLine(endpoint - glm::vec3(marker, 0, 0),
+                                        endpoint + glm::vec3(marker, 0, 0), color);
+            m_measurementLines->AddLine(endpoint - glm::vec3(0, marker, 0),
+                                        endpoint + glm::vec3(0, marker, 0), color);
+            m_measurementLines->AddLine(endpoint - glm::vec3(0, 0, marker),
+                                        endpoint + glm::vec3(0, 0, marker), color);
+        }
+    }
+    m_measurementLines->Draw(viewProj, 2.25f, true);
+}
 
 bool EditorViewport::ContainsPoint(float x, float y, int width, int height) const {
     return x > 380.0f
@@ -1188,6 +1339,40 @@ void EditorViewport::DrawPhysicsEventGuides(engine::Renderer& renderer,
         DrawGizmoBox(renderer, shader, cube, guide.b, markerSize, color);
     }
 
+    shader.SetVec3("uEmissive", glm::vec3(0.0f));
+}
+
+void EditorViewport::DrawGameplayTraceGuides(
+    engine::Renderer& renderer, engine::Shader& shader, const engine::Mesh& cube,
+    const std::vector<GameplayTraceGuide>& guides, const glm::mat4& viewProj) const {
+    if (guides.empty()) return;
+    shader.Bind();
+    shader.SetMat4("uViewProj", viewProj);
+    shader.SetVec3("uLightDir", glm::normalize(glm::vec3(-0.4f, -1.0f, -0.3f)));
+    shader.SetInt("uHasDiffuse", 0);
+    for (const GameplayTraceGuide& guide : guides) {
+        const glm::vec3 color = guide.hit
+            ? glm::vec3(1.0f, 0.16f, 0.10f)
+            : glm::vec3(0.15f, 0.95f, 0.35f);
+        shader.SetVec3("uEmissive", color * 0.55f);
+        if (guide.type == 2) {
+            const float r = std::max(guide.radius, 0.05f);
+            DrawGuideSegment(renderer, shader, cube,
+                guide.a - glm::vec3(r, 0.0f, 0.0f), guide.a + glm::vec3(r, 0.0f, 0.0f), 0.025f, color);
+            DrawGuideSegment(renderer, shader, cube,
+                guide.a - glm::vec3(0.0f, r, 0.0f), guide.a + glm::vec3(0.0f, r, 0.0f), 0.025f, color);
+            DrawGuideSegment(renderer, shader, cube,
+                guide.a - glm::vec3(0.0f, 0.0f, r), guide.a + glm::vec3(0.0f, 0.0f, r), 0.025f, color);
+            continue;
+        }
+        if (glm::length(guide.b - guide.a) <= 0.001f) continue;
+        DrawGuideSegment(renderer, shader, cube, guide.a, guide.b,
+            guide.type == 1 ? 0.05f : 0.035f, color);
+        DrawGizmoBox(renderer, shader, cube, guide.a,
+            glm::vec3(std::max(guide.radius, 0.055f)), color);
+        DrawGizmoBox(renderer, shader, cube, guide.b,
+            glm::vec3(std::max(guide.radius, 0.055f)), color);
+    }
     shader.SetVec3("uEmissive", glm::vec3(0.0f));
 }
 
@@ -1958,7 +2143,10 @@ int EditorViewport::PickSceneObject(const EditorScene& scene,
                                     float y,
                                     const glm::mat4& viewProj,
                                     int width,
-                                    int height) const {
+                                    int height,
+                                    glm::vec3* hitPosition,
+                                    glm::vec3* hitNormal,
+                                    const char* ignoredNamePrefix) const {
     PickRay ray;
     if (!BuildPickRay(x, y, viewProj, width, height, &ray)) {
         return -1;
@@ -1966,10 +2154,13 @@ int EditorViewport::PickSceneObject(const EditorScene& scene,
 
     int picked = -1;
     float bestDistance = std::numeric_limits<float>::max();
+    glm::vec3 bestPosition(0.0f);
+    glm::vec3 bestNormal(0.0f, 1.0f, 0.0f);
 
     const std::vector<EditorScene::Object>& objects = scene.Objects();
     for (int i = 0; i < static_cast<int>(objects.size()); ++i) {
         const EditorScene::Object& object = objects[static_cast<std::size_t>(i)];
+        if (ignoredNamePrefix && object.name.rfind(ignoredNamePrefix, 0) == 0) continue;
         // Large authoring volumes surround normal level geometry; treating their
         // full AABB as solid picking geometry would block selection inside them.
         if (!object.visible || object.navMeshBoundsVolume
@@ -1978,6 +2169,8 @@ int EditorViewport::PickSceneObject(const EditorScene& scene,
         }
 
         if (object.isSpline) {
+            // Splines are screen-space editor guides, not solid placement surfaces.
+            if (hitPosition) continue;
             engine::Spline spline(object.splinePoints, object.splineClosed);
             std::vector<glm::vec3> points;
             spline.SampleUniform(std::max(24, static_cast<int>(object.splinePoints.size()) * 12), points);
@@ -2009,6 +2202,9 @@ int EditorViewport::PickSceneObject(const EditorScene& scene,
         }
 
         if (object.isWater && !object.waterFlowSpline.empty()) {
+            // A river ribbon has no simple authored AABB surface. Fall through to the
+            // ground plane for modular placement instead of returning an invalid point.
+            if (hitPosition) continue;
             const EditorScene::Object* flow = nullptr;
             for (const EditorScene::Object& candidate : objects) {
                 if (candidate.isSpline && candidate.name == object.waterFlowSpline
@@ -2071,6 +2267,11 @@ int EditorViewport::PickSceneObject(const EditorScene& scene,
         const PickRay localRay = TransformRayToLocal(ray, inverseModel);
         float hitDistance = 0.0f;
         bool hit = false;
+        glm::mat4 hitModel = transform->Model();
+        PickRay hitRay = localRay;
+        glm::vec3 hitMinimum(-0.5f);
+        glm::vec3 hitMaximum(0.5f);
+        bool planeHit = false;
         if (!object.modelAssetPath.empty()) {
             if (object.skeletalModel) {
                 // A skeletal character is drawn at Transform * renderOffset (render-only
@@ -2085,7 +2286,11 @@ int EditorViewport::PickSceneObject(const EditorScene& scene,
                     : glm::mat4(1.0f);
                 const PickRay skinnedRay =
                     TransformRayToLocal(ray, glm::inverse(transform->Model() * offset));
+                hitModel = transform->Model() * offset;
+                hitRay = skinnedRay;
                 if (skinned) {
+                    hitMinimum = skinned->Min();
+                    hitMaximum = skinned->Max();
                     hit = IntersectLocalAabb(skinnedRay, skinned->Min(), skinned->Max(), &hitDistance);
                 } else {
                     hit = IntersectLocalAabb(skinnedRay, glm::vec3(-0.5f), glm::vec3(0.5f), &hitDistance);
@@ -2093,6 +2298,8 @@ int EditorViewport::PickSceneObject(const EditorScene& scene,
             } else {
                 const engine::Model* model = assets.FindModel(object.modelAssetPath);
                 if (model) {
+                    hitMinimum = model->Min();
+                    hitMaximum = model->Max();
                     hit = IntersectLocalAabb(localRay, model->Min(), model->Max(), &hitDistance);
                 } else {
                     hit = IntersectLocalAabb(localRay, glm::vec3(-0.5f), glm::vec3(0.5f), &hitDistance);
@@ -2104,12 +2311,15 @@ int EditorViewport::PickSceneObject(const EditorScene& scene,
             // the terrain to select it (and reach the sculpt controls).
             const float s = std::max(object.terrainSize, 0.01f);
             const float h = std::max(object.terrainMaxHeight, 0.5f);
+            hitMinimum = glm::vec3(0.0f, -0.5f, 0.0f);
+            hitMaximum = glm::vec3(s, h + 0.5f, s);
             hit = IntersectLocalAabb(localRay, glm::vec3(0.0f, -0.5f, 0.0f),
                                      glm::vec3(s, h + 0.5f, s), &hitDistance);
         } else {
             switch (object.primitive) {
             case EditorScene::Primitive::Plane:
                 hit = IntersectLocalPlaneQuad(localRay, &hitDistance);
+                planeHit = true;
                 break;
             case EditorScene::Primitive::Cube:
                 hit = IntersectLocalAabb(localRay, glm::vec3(-0.5f), glm::vec3(0.5f), &hitDistance);
@@ -2134,9 +2344,35 @@ int EditorViewport::PickSceneObject(const EditorScene& scene,
         if (hit && hitDistance < bestDistance) {
             bestDistance = hitDistance;
             picked = i;
+            const glm::vec3 localPosition = hitRay.origin + hitRay.direction * hitDistance;
+            bestPosition = glm::vec3(hitModel * glm::vec4(localPosition, 1.0f));
+            glm::vec3 localNormal(0.0f, 1.0f, 0.0f);
+            if (!planeHit) {
+                float nearest = std::numeric_limits<float>::max();
+                for (int axis = 0; axis < 3; ++axis) {
+                    const float toMinimum = std::abs(localPosition[axis] - hitMinimum[axis]);
+                    if (toMinimum < nearest) {
+                        nearest = toMinimum;
+                        localNormal = glm::vec3(0.0f);
+                        localNormal[axis] = -1.0f;
+                    }
+                    const float toMaximum = std::abs(localPosition[axis] - hitMaximum[axis]);
+                    if (toMaximum < nearest) {
+                        nearest = toMaximum;
+                        localNormal = glm::vec3(0.0f);
+                        localNormal[axis] = 1.0f;
+                    }
+                }
+            }
+            const glm::mat3 normalMatrix = glm::transpose(glm::inverse(glm::mat3(hitModel)));
+            bestNormal = glm::normalize(normalMatrix * localNormal);
         }
     }
 
+    if (picked >= 0) {
+        if (hitPosition) *hitPosition = bestPosition;
+        if (hitNormal) *hitNormal = bestNormal;
+    }
     return picked;
 }
 

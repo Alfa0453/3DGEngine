@@ -201,6 +201,9 @@ bool LoadMaterialAssetFile(const std::string& path, RuntimeMaterialAsset* materi
     FindVec2(text, "uvScale", &loaded.material.uvScale);
     FindVec2(text, "uvOffset", &loaded.material.uvOffset);
     FindFloat(text, "uvRotation", &loaded.material.uvRotation);
+    float worldSpaceUv = 0.0f;
+    if (FindFloat(text, "worldSpaceUv", &worldSpaceUv))
+        loaded.material.worldSpaceUv = worldSpaceUv > 0.5f;
     FindFloat(text, "normalStrength", &loaded.material.normalStrength);
     FindFloat(text, "heightScale", &loaded.material.heightScale);
     FindFloat(text, "clearcoat", &loaded.material.clearcoat);

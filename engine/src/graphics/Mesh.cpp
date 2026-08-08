@@ -1,4 +1,5 @@
 #include "engine/graphics/Mesh.h"
+#include "engine/graphics/GpuProfiler.h"
 
 #include <glad/glad.h>
 
@@ -51,6 +52,35 @@ Mesh::Mesh(const std::vector<float> &vertices, const std::vector<std::uint32_t> 
 Mesh::~Mesh()
 {
     Release();
+}
+
+std::vector<float> Mesh::ReadbackVertices() const
+{
+    const std::size_t strideFloats = VertexStrideFloats();
+    if (m_vbo == 0 || m_vertexCount == 0 || strideFloats == 0) {
+        return {};
+    }
+    std::vector<float> out(m_vertexCount * strideFloats);
+    glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
+    glGetBufferSubData(GL_ARRAY_BUFFER, 0,
+                       static_cast<GLsizeiptr>(out.size() * sizeof(float)),
+                       out.data());
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    return out;
+}
+
+std::vector<std::uint32_t> Mesh::ReadbackIndices() const
+{
+    if (m_ebo == 0 || m_indexCount == 0) {
+        return {};
+    }
+    std::vector<std::uint32_t> out(m_indexCount);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_ebo);
+    glGetBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0,
+                       static_cast<GLsizeiptr>(out.size() * sizeof(std::uint32_t)),
+                       out.data());
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+    return out;
 }
 
 Mesh::Mesh(Mesh &&other) noexcept
@@ -125,12 +155,9 @@ void Mesh::DrawLod(int level) const
 {
     if (!m_vao || !m_indexCount) return;   // empty (not yet uploaded)
     BindLod(level);
+    GpuProfiler::RecordDrawCall();
     glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(IndexCount(level)),
                    GL_UNSIGNED_INT, nullptr);
-    // Leave no VAO bound: otherwise a later glDeleteVertexArrays on THIS still-bound VAO
-    // (e.g. when a terrain/water mesh is rebuilt after being drawn) hits a driver edge
-    // case that can crash. Unbinding here keeps deletion happening on an unbound VAO.
-    glBindVertexArray(0);
 }
 
 void Mesh::BindLod(int level) const
@@ -244,6 +271,9 @@ void Mesh::UpdateVertices(const std::vector<float>& vertices)
 void Mesh::Release()
 {
     // glDelete* ignore 0, but guarding makes the intent explicit.
+    // Mesh draws keep their VAO bound to avoid a per-draw state change; clear it
+    // at lifetime boundaries before deleting/replacing the object.
+    glBindVertexArray(0);
     if (m_ebo) glDeleteBuffers(1, &m_ebo);
     if (!m_lodEbos.empty())
         glDeleteBuffers(static_cast<GLsizei>(m_lodEbos.size()), m_lodEbos.data());

@@ -8,7 +8,10 @@
 #include <glm/glm.hpp>
 
 #include <functional>
+#include <cstddef>
 #include <memory>
+#include <unordered_map>
+#include <vector>
 
 namespace engine {
 
@@ -16,7 +19,8 @@ class Shader;
 class Camera;
 class IBL;
 class SSAO;
-namespace ecs { class Registry; }
+class Mesh;
+namespace ecs { class Registry; struct Transform; struct MeshPBR; }
 
 // A drop-in physically-based scene renderer. Give it an ECS registry and a
 // camera and it draws every MeshPBR entity, lit by every Light entity, with a
@@ -104,6 +108,21 @@ private:
     ClusteredLights         m_clustered;
     std::unique_ptr<Shader> m_pbr;
     unsigned int            m_instanceVBO = 0;   // per-instance data for batching
+    std::size_t             m_instanceCapacity = 0;
+    std::vector<glm::vec3> m_pointPositions;
+    std::vector<ClusteredLights::PointLight> m_clusterLights;
+    std::vector<glm::vec3> m_spotPositions;
+    std::vector<glm::vec3> m_spotDirections;
+    std::vector<glm::vec3> m_spotColors;
+    std::vector<float> m_spotCosInner;
+    std::vector<float> m_spotCosOuter;
+    std::vector<glm::vec3> m_areaPositions;
+    std::vector<glm::vec3> m_areaColors;
+    std::vector<float> m_areaRadii;
+    std::vector<SpotShadow::Spot> m_spotShadowLights;
+    std::unordered_map<const Mesh*, std::vector<float>> m_meshBatches;
+    std::vector<std::pair<ecs::Transform*, ecs::MeshPBR*>> m_texturedObjects;
+    std::vector<std::pair<ecs::Transform*, ecs::MeshPBR*>> m_customObjects;
 };
 
 } // namespace engine

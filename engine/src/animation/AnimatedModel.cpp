@@ -168,7 +168,7 @@ bool AutoDetectFootIKBones(const Skeleton& skel, FootIK& ik) {
     return ik.left.Valid() && ik.right.Valid();
 }
 
-void AnimatedModel::PlayAction(int clip, std::vector<float> mask, std::vector<AnimEvent> events,
+void AnimatedModel::PlayAction(int clip, std::vector<float> mask, std::vector<AnimEvent> animationEvents,
                                float fadeIn, float fadeOut, float speed) {
     action.clip      = clip;
     action.time      = 0.0f;
@@ -178,7 +178,7 @@ void AnimatedModel::PlayAction(int clip, std::vector<float> mask, std::vector<An
     action.speed     = speed;
     action.active    = (clip >= 0);
     action.mask      = std::move(mask);
-    action.events    = std::move(events);
+    action.events    = std::move(animationEvents);
     std::sort(action.events.begin(), action.events.end(),
         [](const AnimEvent& a, const AnimEvent& b) { return a.time < b.time; });
     action.nextEvent = 0;
@@ -227,7 +227,8 @@ void UpdateAnimations(ecs::Registry& reg, float dt) {
         const auto& clips = am.model->Animations();
 
         if (clips.empty()) {                       // no animation -> bind pose
-            Animator::ComputeBindPose(skel, am.pose);
+            if (am.pose.size() != skel.bones.size())
+                Animator::ComputeBindPose(skel, am.pose);
             return;
         }
 
@@ -235,7 +236,7 @@ void UpdateAnimations(ecs::Registry& reg, float dt) {
         const float previousBaseTime = am.controller.CurrentTime();
         const std::string previousState = am.controller.CurrentStateName();
         am.controller.Update(dt);
-        const std::string currentState = am.controller.CurrentStateName();
+        const std::string& currentState = am.controller.CurrentStateName();
         if (previousState != currentState) {
             if (am.onStateChanged) am.onStateChanged(previousState, currentState);
             if (am.onEvent) {
@@ -275,7 +276,11 @@ void UpdateAnimations(ecs::Registry& reg, float dt) {
 
         // --- Base locomotion pose (clip, Blend Space, and state cross-fade) -----
         const Animation* cur = clipAt(am.controller.CurrentClip());
-        if (!cur) { Animator::ComputeBindPose(skel, am.pose); return; }
+        if (!cur) {
+            if (am.pose.size() != skel.bones.size())
+                Animator::ComputeBindPose(skel, am.pose);
+            return;
+        }
 
         if (am.controller.CurrentRootMotion()
             && previousBaseClip == am.controller.CurrentClip()

@@ -6,6 +6,7 @@
 #include <glm/gtc/type_ptr.hpp>     // glm::value_ptr — raw float* into a vec/mat
 
 #include <cctype>
+#include <algorithm>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
@@ -160,7 +161,11 @@ Shader::~Shader()
 }
 
 Shader::Shader(Shader &&other) noexcept
-    : m_id(other.m_id), m_uniformCache(std::move(other.m_uniformCache))
+    : m_id(other.m_id), m_uniformCache(std::move(other.m_uniformCache)),
+      m_intValues(std::move(other.m_intValues)),
+      m_floatValues(std::move(other.m_floatValues)),
+      m_vectorValues(std::move(other.m_vectorValues)),
+      m_vectorSizes(std::move(other.m_vectorSizes))
 {
     other.m_id = 0; // leave the moved-from object harmless
 }
@@ -175,6 +180,10 @@ Shader &Shader::operator=(Shader &&other) noexcept
         }
         m_id = other.m_id;
         m_uniformCache = std::move(other.m_uniformCache);
+        m_intValues = std::move(other.m_intValues);
+        m_floatValues = std::move(other.m_floatValues);
+        m_vectorValues = std::move(other.m_vectorValues);
+        m_vectorSizes = std::move(other.m_vectorSizes);
         other.m_id = 0;
     }
     return *this;
@@ -240,34 +249,97 @@ void Shader::Unbind() const
 }
 void Shader::SetInt(const std::string &name, int value)
 {
-    glUniform1i(UniformLocation(name), value);
+    const int location = UniformLocation(name);
+    if (location < 0) return;
+    const auto it = m_intValues.find(location);
+    if (it != m_intValues.end() && it->second == value) return;
+    m_intValues[location] = value;
+    glUniform1i(location, value);
 }
 void Shader::SetFloat(const std::string &name, float value)
 {
-    glUniform1f(UniformLocation(name), value);
+    const int location = UniformLocation(name);
+    if (location < 0) return;
+    const auto it = m_floatValues.find(location);
+    if (it != m_floatValues.end() && it->second == value) return;
+    m_floatValues[location] = value;
+    glUniform1f(location, value);
 }
 
 void Shader::SetVec2(const std::string &name, const glm::vec2 &value)
 {
-    glUniform2fv(UniformLocation(name), 1, glm::value_ptr(value));
+    const int location = UniformLocation(name);
+    if (location < 0) return;
+    std::array<float, 16> next{};
+    next[0] = value.x; next[1] = value.y;
+    const auto it = m_vectorValues.find(location);
+    if (it != m_vectorValues.end() && m_vectorSizes[location] == 2
+        && std::equal(next.begin(), next.begin() + 2, it->second.begin())) return;
+    m_vectorValues[location] = next;
+    m_vectorSizes[location] = 2;
+    glUniform2fv(location, 1, glm::value_ptr(value));
 }
 void Shader::SetVec3(const std::string &name, const glm::vec3 &value)
 {
-    glUniform3fv(UniformLocation(name), 1, glm::value_ptr(value));
+    const int location = UniformLocation(name);
+    if (location < 0) return;
+    std::array<float, 16> next{};
+    next[0] = value.x; next[1] = value.y; next[2] = value.z;
+    const auto it = m_vectorValues.find(location);
+    if (it != m_vectorValues.end() && m_vectorSizes[location] == 3
+        && std::equal(next.begin(), next.begin() + 3, it->second.begin())) return;
+    m_vectorValues[location] = next;
+    m_vectorSizes[location] = 3;
+    glUniform3fv(location, 1, glm::value_ptr(value));
 }
 void Shader::SetVec4(const std::string &name, const glm::vec4 &value)
 {
-    glUniform4fv(UniformLocation(name), 1, glm::value_ptr(value));
+    const int location = UniformLocation(name);
+    if (location < 0) return;
+    std::array<float, 16> next{};
+    next[0] = value.x; next[1] = value.y; next[2] = value.z; next[3] = value.w;
+    const auto it = m_vectorValues.find(location);
+    if (it != m_vectorValues.end() && m_vectorSizes[location] == 4
+        && std::equal(next.begin(), next.begin() + 4, it->second.begin())) return;
+    m_vectorValues[location] = next;
+    m_vectorSizes[location] = 4;
+    glUniform4fv(location, 1, glm::value_ptr(value));
 }
 void Shader::SetMat3(const std::string &name, const glm::mat3 &value)
 {
-    glUniformMatrix3fv(UniformLocation(name), 1, GL_FALSE, glm::value_ptr(value));
+    const int location = UniformLocation(name);
+    if (location < 0) return;
+    std::array<float, 16> next{};
+    std::copy_n(glm::value_ptr(value), 9, next.begin());
+    const auto it = m_vectorValues.find(location);
+    if (it != m_vectorValues.end() && m_vectorSizes[location] == 9
+        && std::equal(next.begin(), next.begin() + 9, it->second.begin())) return;
+    m_vectorValues[location] = next;
+    m_vectorSizes[location] = 9;
+    glUniformMatrix3fv(location, 1, GL_FALSE, glm::value_ptr(value));
 }
 void Shader::SetMat4(const std::string &name, const glm::mat4 &value)
 {
      // `transpose = GL_FALSE`: GLM stores matrices column-major, exactly what
     // OpenGL expects, so no transpose is needed.
-    glUniformMatrix4fv(UniformLocation(name), 1, GL_FALSE, glm::value_ptr(value));
+    const int location = UniformLocation(name);
+    if (location < 0) return;
+    std::array<float, 16> next{};
+    std::copy_n(glm::value_ptr(value), 16, next.begin());
+    const auto it = m_vectorValues.find(location);
+    if (it != m_vectorValues.end() && m_vectorSizes[location] == 16
+        && std::equal(next.begin(), next.end(), it->second.begin())) return;
+    m_vectorValues[location] = next;
+    m_vectorSizes[location] = 16;
+    glUniformMatrix4fv(location, 1, GL_FALSE, glm::value_ptr(value));
+}
+
+void Shader::SetMat4Array(const std::string& name, const glm::mat4* values, int count)
+{
+    if (!values || count <= 0) return;
+    const int location = UniformLocation(name);
+    if (location < 0) return;
+    glUniformMatrix4fv(location, count, GL_FALSE, glm::value_ptr(values[0]));
 }
 
 } // namespace engine

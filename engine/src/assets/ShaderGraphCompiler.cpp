@@ -107,7 +107,8 @@ GeneratedShaderSource GenerateShaderSource(const ShaderAsset& asset, bool skinne
 
     const char* outputType = asset.domain == ShaderDomain::PostProcess ? "PostProcessOutput"
         : asset.domain == ShaderDomain::Particle ? "ParticleOutput"
-        : asset.domain == ShaderDomain::Unlit ? "UnlitOutput" : "SurfaceOutput";
+        : asset.domain == ShaderDomain::Unlit ? "UnlitOutput"
+        : asset.domain == ShaderDomain::Water ? "WaterOutput" : "SurfaceOutput";
     const ShaderGraphNode* output = nullptr;
     for (const auto& node : asset.nodes)
         if (node.type == outputType) { output = &node; break; }
@@ -131,6 +132,15 @@ GeneratedShaderSource GenerateShaderSource(const ShaderAsset& asset, bool skinne
     const bool postProcess = asset.domain == ShaderDomain::PostProcess;
     const bool particle = asset.domain == ShaderDomain::Particle;
     const bool unlit = asset.domain == ShaderDomain::Unlit;
+    // Water emits a BODY-ONLY fragment: the engine's water pipeline prepends the
+    // #version, shared sea-noise and the water declaration block (varyings + uniforms +
+    // FragColor), and supplies the wave-displacement vertex shader. So for water we skip
+    // all of those and only emit parameter uniforms, node helpers and main().
+    const bool water = asset.domain == ShaderDomain::Water;
+    const bool surface = !postProcess && !particle && !unlit && !water;
+    // Custom (unlit) surface lighting: the graph's Base Color is the final colour, so the
+    // author supplies their own lighting (e.g. a toon ramp). PBR (0) lights the outputs.
+    const bool customLit = surface && asset.lightingModel == 1;
 
     // Surface displacement must be evaluated in the vertex stage. Keep this
     // evaluator deliberately side-effect free and based on the same serialized
@@ -275,15 +285,23 @@ GeneratedShaderSource GenerateShaderSource(const ShaderAsset& asset, bool skinne
         if (nodeId) result.fragmentLineNodes[line] = nodeId;
         ++line;
     };
-    emit("#version 330 core");
-    emit((postProcess || unlit) ? "in vec2 vUV;"
+    if (!water) emit("#version 330 core");
+    if (!water) emit((postProcess || unlit) ? "in vec2 vUV;"
         : particle
             ? "in vec2 vUV; in vec4 vParticleColor; in vec3 vParticleVelocity;"
               " in float vParticleSize; in float vParticleRotation;"
               " in float vParticleFrame; in float vParticleAge;"
             : "in vec3 vNormal; in vec3 vWorldPosition; in vec3 vLocalPosition; in vec2 vUV;");
-    emit("out vec4 FragColor;");
-    if (postProcess) {
+    if (!water) emit("out vec4 FragColor;");
+    if (water) {
+        // Small self-contained helper so a Water graph can compute an analytic wave
+        // normal without a dedicated node. (sea_height comes from the water prelude.)
+        emit("vec3 WaterWaveNormal(){float e=0.15;"
+             "float h=sea_height(vWorldPos.xz,uTime,uSeaHeight,uSeaChoppy,uSeaSpeed,uSeaFreq,5);"
+             "float hx=sea_height(vWorldPos.xz+vec2(e,0.0),uTime,uSeaHeight,uSeaChoppy,uSeaSpeed,uSeaFreq,5);"
+             "float hz=sea_height(vWorldPos.xz+vec2(0.0,e),uTime,uSeaHeight,uSeaChoppy,uSeaSpeed,uSeaFreq,5);"
+             "return normalize(vec3(h-hx,e,h-hz));}");
+    } else if (postProcess) {
         emit("uniform sampler2D uSceneColor; uniform sampler2D uSceneDepth;");
         emit("uniform sampler2D uSceneNormal; uniform sampler2D uSceneVelocity;");
         emit("uniform vec2 uTexelSize; uniform float uExposure;");
@@ -293,6 +311,7 @@ GeneratedShaderSource GenerateShaderSource(const ShaderAsset& asset, bool skinne
         emit("uniform int uUseWidgetTexture; uniform vec4 uClipRect;");
     } else if (!particle) {
         emit("uniform vec3 uLightDirection; uniform float uLightIntensity;");
+        emit("uniform vec3 uLightColor; uniform vec3 uAmbient;");
         emit("uniform vec3 uCameraPosition; uniform vec4 uObjectColor;");
         emit("uniform float uTime; uniform float uDeltaTime;");
         emit("const float PI=3.14159265359;");
@@ -337,7 +356,39 @@ GeneratedShaderSource GenerateShaderSource(const ShaderAsset& asset, bool skinne
             return values;
         }();
         std::string value = node.value.empty() ? "0.0" : node.value;
-        if (node.type == "UV" || node.type == "ScreenUV") value = "vUV";
+        // Water input nodes (only in Water graphs) map onto the water prelude's
+        // varyings/uniforms. Screen-space scene samples use gl_FragCoord/uViewportSize.
+        if (water && node.type == "WaterSceneColor")
+            value = "texture(uSceneColor, gl_FragCoord.xy/uViewportSize).rgb";
+        else if (water && node.type == "WaterSceneDepth")
+            value = "texture(uSceneDepth, gl_FragCoord.xy/uViewportSize).r";
+        else if (water && node.type == "WaterShallowColor") value = "uShallow";
+        else if (water && node.type == "WaterDeepColor") value = "uDeep";
+        else if (water && node.type == "WaterReflectionColor") value = "uReflection";
+        else if (water && node.type == "WaterSunColor") value = "uSunColor";
+        else if (water && node.type == "WaterSunDirection") value = "normalize(-uSunDir)";
+        else if (water && node.type == "WaterAmbient") value = "uAmbient";
+        else if (water && node.type == "WaterFoam")
+            value = "smoothstep(uSeaHeight*0.55,uSeaHeight*0.95,"
+                    "sea_height(vWorldPos.xz,uTime,uSeaHeight,uSeaChoppy,uSeaSpeed,uSeaFreq,5))";
+        else if (water && node.type == "WaterFresnel")
+            value = "pow(1.0-clamp(dot(WaterWaveNormal(),"
+                    "normalize(uCamPos-vWorldPos)),0.0,1.0),uFresnelPower)";
+        else if (water && (node.type == "Normal" || node.type == "WaterNormal"))
+            value = "WaterWaveNormal()";
+        else if (water && node.type == "WorldPosition") value = "vWorldPos";
+        else if (water && node.type == "LocalPosition") value = "vWorldPos";
+        else if (water && node.type == "ObjectColor") value = "vec4(uShallow,1.0)";
+        else if (water && (node.type == "UV" || node.type == "ScreenUV"))
+            value = "vSurfaceCoord";
+        else if (water && node.type == "CameraPosition") value = "uCamPos";
+        else if (water && node.type == "ViewDirection")
+            value = "normalize(uCamPos-vWorldPos)";
+        else if (water && node.type == "Time") value = "uTime";
+        else if (water && node.type == "DeltaTime") value = "0.0166667";
+        else if (water && node.type == "NormalMapDecode" && !inputs.empty())
+            value = "normalize((" + inputs[0] + ").xyz*2.0-1.0)";
+        else if (node.type == "UV" || node.type == "ScreenUV") value = "vUV";
         else if (node.type == "WidgetUV") value = "vUV";
         else if (node.type == "WidgetColor") value = "uWidgetColor";
         else if (node.type == "WidgetTexture")
@@ -376,6 +427,20 @@ GeneratedShaderSource GenerateShaderSource(const ShaderAsset& asset, bool skinne
         else if (node.type == "WorldPosition") value = "vWorldPosition";
         else if (node.type == "LocalPosition") value = "vLocalPosition";
         else if (node.type == "Tangent") value = "vec3(1.0,0.0,0.0)";
+        // Lighting inputs — only meaningful on Surface shaders (the engine binds these on
+        // custom surface programs). Elsewhere they fall back to neutral constants.
+        else if (node.type == "LightDirection")
+            value = surface ? "normalize(-uLightDirection)" : "vec3(0.0,1.0,0.0)";
+        else if (node.type == "LightColor")
+            value = surface ? "uLightColor" : "vec3(1.0)";
+        else if (node.type == "LightIntensity")
+            value = surface ? "uLightIntensity" : "1.0";
+        else if (node.type == "AmbientLight")
+            value = surface ? "uAmbient" : "vec3(0.1)";
+        // Toon/cel ramp: quantize a 0..1 term (e.g. N.L) into `steps` hard bands.
+        else if (node.type == "ToonRamp" && inputs.size() >= 2)
+            value = "(floor(clamp(" + inputs[0] + ",0.0,1.0)*max(" + inputs[1]
+                + ",1.0))/max(" + inputs[1] + ",1.0))";
         else if (node.type == "ViewDirection") value =
             (!postProcess && !particle && !unlit)
                 ? "normalize(uCameraPosition-vWorldPosition)"
@@ -472,9 +537,19 @@ GeneratedShaderSource GenerateShaderSource(const ShaderAsset& asset, bool skinne
     emit(" vec4 graphColor=" + color + ";", output->id);
     if (asset.domain == ShaderDomain::Unlit
         || asset.domain == ShaderDomain::PostProcess
-        || asset.domain == ShaderDomain::Particle)
+        || asset.domain == ShaderDomain::Particle
+        || asset.domain == ShaderDomain::Water)
         emit(" FragColor=graphColor;", output->id);
-    else {
+    else if (customLit) {
+        // Custom (unlit) lighting: the graph's Base Color is the final lit colour.
+        const std::string opacity = outputValue("Opacity", "1.0", ShaderValueType::Float);
+        if (asset.blendMode == 1) {
+            const std::string cut =
+                outputValue("Alpha Cutoff", "0.5", ShaderValueType::Float);
+            emit(" if((" + opacity + ")<(" + cut + ")) discard;", output->id);
+        }
+        emit(" FragColor=vec4(graphColor.rgb," + opacity + ");", output->id);
+    } else {
         const std::string emissive = outputValue(
             "Emissive", "vec3(0.0)", ShaderValueType::Vec3);
         const std::string roughness = outputValue(
@@ -566,6 +641,52 @@ GeneratedShaderSource GenerateShaderSource(const ShaderAsset& asset, bool skinne
     result.fragment = fragment.str();
     result.success = true;
     return result;
+}
+
+std::string GenerateWaterFragmentBody(const ShaderAsset& asset, std::string* error) {
+    const GeneratedShaderSource generated = GenerateShaderSource(asset, false);
+    if (!generated.success) {
+        if (error) *error = generated.issues.empty()
+            ? std::string("Shader graph generation failed.")
+            : generated.issues.front().message;
+        return {};
+    }
+    // A native Water-domain graph is already emitted as a water-ready fragment body
+    // (no #version / varyings / prelude uniforms) — use it directly.
+    if (asset.domain == ShaderDomain::Water) {
+        if (error) error->clear();
+        return generated.fragment;
+    }
+    std::ostringstream out;
+    // Bridge the graph's varying names onto the water pipeline's varyings, and re-declare
+    // the companion uniforms that get stripped below with the clashing ones.
+    out << "// --- Shader Editor graph adapted for water (auto-generated) ---\n"
+           "#define vUV vSurfaceCoord\n"
+           "#define vWorldPosition vWorldPos\n"
+           "#define vLocalPosition vWorldPos\n"
+           "#define vNormal vBaseNormal\n"
+           "uniform float uDeltaTime;\n";
+    std::istringstream in(generated.fragment);
+    std::string line;
+    while (std::getline(in, line)) {
+        std::string trimmed = line;
+        const std::size_t start = trimmed.find_first_not_of(" \t");
+        if (start != std::string::npos) trimmed = trimmed.substr(start);
+        if (trimmed.rfind("#version", 0) == 0) continue;          // water prelude has it
+        if (trimmed.rfind("in ", 0) == 0) continue;               // graph varyings (aliased)
+        if (trimmed == "out vec4 FragColor;") continue;           // provided by prelude
+        // Drop uniform declarations that duplicate the water prelude (redeclaration is an
+        // error). The stripped uTime line also carries uDeltaTime, re-declared above.
+        if (trimmed.rfind("uniform", 0) == 0
+            && (trimmed.find("uTime;") != std::string::npos
+                || trimmed.find("uSceneColor;") != std::string::npos
+                || trimmed.find("uSceneDepth;") != std::string::npos)) {
+            continue;
+        }
+        out << line << '\n';
+    }
+    if (error) error->clear();
+    return out.str();
 }
 
 } // namespace engine

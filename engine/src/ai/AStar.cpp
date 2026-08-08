@@ -10,6 +10,14 @@ namespace engine {
 namespace ai {
 namespace {
 
+struct AStarWorkspace {
+    std::vector<float> g;
+    std::vector<int> from;
+    std::vector<char> closed;
+};
+
+thread_local AStarWorkspace g_workspace;
+
 constexpr float kOrtho = 1.0f;
 constexpr float kDiag  = 1.41421356f;
 
@@ -29,7 +37,12 @@ bool LineOfSight(const NavGrid& grid, glm::ivec2 a, glm::ivec2 b) {
     int x = a.x, y = a.y;
     const int dx = std::abs(b.x - a.x), dy = std::abs(b.y - a.y);
     const int sx = a.x < b.x ? 1 : -1, sy = a.y < b.y ? 1 : -1;
-    if (!grid.Walkable(x, y)) return false;
+    const int width = grid.width, height = grid.height;
+    const auto isWalkable = [&](int px, int py) {
+        return px >= 0 && py >= 0 && px < width && py < height
+            && grid.walkable[static_cast<std::size_t>(py) * width + px] != 0;
+    };
+    if (!isWalkable(x, y)) return false;
     int err = dx - dy;
     while (x != b.x || y != b.y) {
         const int e2 = 2 * err;
@@ -37,9 +50,9 @@ bool LineOfSight(const NavGrid& grid, glm::ivec2 a, glm::ivec2 b) {
         if (e2 > -dy) { err -= dy; x += sx; stepX = true; }
         if (e2 <  dx) { err += dx; y += sy; stepY = true; }
         if (stepX && stepY) {   // diagonal: don't cut through a blocked corner
-            if (!grid.Walkable(x - sx, y) || !grid.Walkable(x, y - sy)) return false;
+            if (!isWalkable(x - sx, y) || !isWalkable(x, y - sy)) return false;
         }
-        if (!grid.Walkable(x, y)) return false;
+        if (!isWalkable(x, y)) return false;
     }
     return true;
 }
@@ -54,10 +67,22 @@ std::vector<glm::ivec2> AStar::FindPath(const NavGrid& grid, glm::ivec2 start, g
     const int W = grid.width, H = grid.height;
     const auto idx = [&](int x, int y) { return static_cast<std::size_t>(y) * W + x; };
     const std::size_t N = static_cast<std::size_t>(W) * H;
+    // Keep the hot inner loop on the packed walkability buffer. This avoids
+    // repeating the bounds/index helper call for every neighbour expansion.
+    const auto isWalkable = [&](int x, int y) {
+        return x >= 0 && y >= 0 && x < W && y < H
+            && grid.walkable[static_cast<std::size_t>(y) * W + x] != 0;
+    };
 
-    std::vector<float> g(N, std::numeric_limits<float>::max());
-    std::vector<int>   from(N, -1);
-    std::vector<char>  closed(N, 0);
+    if (g_workspace.g.size() < N) g_workspace.g.resize(N);
+    if (g_workspace.from.size() < N) g_workspace.from.resize(N);
+    if (g_workspace.closed.size() < N) g_workspace.closed.resize(N);
+    std::fill_n(g_workspace.g.begin(), N, std::numeric_limits<float>::max());
+    std::fill_n(g_workspace.from.begin(), N, -1);
+    std::fill_n(g_workspace.closed.begin(), N, static_cast<char>(0));
+    auto& g = g_workspace.g;
+    auto& from = g_workspace.from;
+    auto& closed = g_workspace.closed;
 
     using Node = std::pair<float, int>;     // (fScore, cellIndex)
     std::priority_queue<Node, std::vector<Node>, std::greater<Node>> open;
@@ -78,9 +103,10 @@ std::vector<glm::ivec2> AStar::FindPath(const NavGrid& grid, glm::ivec2 start, g
 
         for (int d = 0; d < nDirs; ++d) {
             const int nx = cx + dirs[d][0], ny = cy + dirs[d][1];
-            if (!grid.Walkable(nx, ny)) continue;
+            if (!isWalkable(nx, ny)) continue;
             if (d >= 4) {    // diagonal: don't cut through a blocked orthogonal corner
-                if (!grid.Walkable(cx + dirs[d][0], cy) || !grid.Walkable(cx, cy + dirs[d][1])) continue;
+                if (!isWalkable(cx + dirs[d][0], cy)
+                    || !isWalkable(cx, cy + dirs[d][1])) continue;
             }
             const std::size_t ni = idx(nx, ny);
             if (closed[ni]) continue;
@@ -123,12 +149,19 @@ std::vector<glm::ivec2> AStar::SmoothPath(const NavGrid& grid, const std::vector
 }
 
 std::vector<glm::vec3> AStar::FindPathWorld(const NavGrid& grid, const glm::vec3& start, const glm::vec3& goal, bool allowDiagonal) {
+    std::vector<glm::vec3> world;
+    FindPathWorld(grid, start, goal, world, allowDiagonal);
+    return world;
+}
+
+void AStar::FindPathWorld(const NavGrid& grid, const glm::vec3& start,
+                          const glm::vec3& goal, std::vector<glm::vec3>& world,
+                          bool allowDiagonal) {
     const glm::ivec2 s = grid.WorldToCell(start), gg = grid.WorldToCell(goal);
     const std::vector<glm::ivec2> cells = SmoothPath(grid, FindPath(grid, s, gg, allowDiagonal));
-    std::vector<glm::vec3> world;
+    world.clear();
     world.reserve(cells.size());
     for (const glm::ivec2& c : cells) world.push_back(grid.CellToWorld(c.x, c.y));
-    return world;
 }
 
 } // namespace ai

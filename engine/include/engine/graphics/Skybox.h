@@ -31,13 +31,20 @@ public:
     // Load six face images (+X,-X,+Y,-Y,+Z,-Z). PNG or JPEG.
     static Skybox FromFiles(const std::array<std::string, 6>& facePaths);
 
+    // Load a single equirectangular (lat-long / 360) panorama — the common marketplace
+    // sky format — and project it onto a cubemap. PNG or JPEG (8-bit). Throws on failure.
+    static Skybox FromEquirectangular(const std::string& path, int faceSize = 1024);
+
     Skybox(const Skybox&)            = delete;
     Skybox& operator=(const Skybox&) = delete;
     Skybox(Skybox&&) noexcept            = default;
     Skybox& operator=(Skybox&&) noexcept = default;
 
     // Render the sky behind everything (depth test temporarily set to LEQUAL).
-    void Draw(const glm::mat4& view, const glm::mat4& projection, bool tonemap = true);
+    // `yawRadians` spins the sky about the vertical axis; `intensity` scales its
+    // brightness (both also affect the IBL capture when this is the environment sky).
+    void Draw(const glm::mat4& view, const glm::mat4& projection, bool tonemap = true,
+              float yawRadians = 0.0f, float intensity = 1.0f);
 
 private:
     Cubemap m_cubemap;

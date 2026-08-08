@@ -44,8 +44,15 @@ public:
 private:
     // One portal out of a polygon: the neighbour and the shared segment, oriented
     // (left,right) for travel out of this polygon.
-    struct Link { int to; glm::vec3 left, right; };
+    struct Link {
+        int to = -1;
+        glm::vec3 left{0.0f}, right{0.0f};
+        float cost = 0.0f;
+    };
     std::vector<std::vector<Link>> m_links;        // parallel to polys
+    // Polygon centroids are queried repeatedly by A* and nearest-poly tests.
+    // They are rebuilt alongside adjacency data and reused between replans.
+    std::vector<glm::vec3> m_centroids;
 };
 
 } // namespace ai

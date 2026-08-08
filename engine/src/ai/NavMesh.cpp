@@ -23,10 +23,13 @@ bool ApproxEq(const glm::vec3& a, const glm::vec3& b) { return DistXZ(a, b) < 1e
 
 int NavMesh::AddPolygon(const std::vector<int>& v) {
     polys.push_back(Poly{ v });
+    m_centroids.clear();
     return static_cast<int>(polys.size()) - 1;
 }
 
 glm::vec3 NavMesh::Centroid(int poly) const {
+    if (poly >= 0 && static_cast<std::size_t>(poly) < m_centroids.size())
+        return m_centroids[static_cast<std::size_t>(poly)];
     glm::vec3 c(0.0f);
     const Poly& p = polys[static_cast<std::size_t>(poly)];
     for (int vi : p.verts) c += vertices[static_cast<std::size_t>(vi)];
@@ -37,6 +40,14 @@ glm::vec3 NavMesh::Centroid(int poly) const {
 void NavMesh::Build() {
     const std::size_t n = polys.size();
     m_links.assign(n, {});
+    m_centroids.resize(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        glm::vec3 c(0.0f);
+        const Poly& p = polys[i];
+        for (int vi : p.verts) c += vertices[static_cast<std::size_t>(vi)];
+        if (!p.verts.empty()) c /= static_cast<float>(p.verts.size());
+        m_centroids[i] = c;
+    }
     const float kEps = 1e-3f;
 
     for (std::size_t ai = 0; ai < n; ++ai) {
@@ -75,6 +86,7 @@ void NavMesh::Build() {
                     link.to    = static_cast<int>(bi);
                     link.left  = a0 + da * lo;   // nearer a0 (= verts[ea]) -> left
                     link.right = a0 + da * hi;
+                    link.cost  = DistXZ(m_centroids[ai], m_centroids[bi]);
                     m_links[ai].push_back(link);
                 }
             }
@@ -106,7 +118,8 @@ int NavMesh::PolyAt(const glm::vec3& pt) const {
 int NavMesh::NearestPoly(const glm::vec3& pt) const {
     int best = -1; float bestD = std::numeric_limits<float>::max();
     for (std::size_t pi = 0; pi < polys.size(); ++pi) {
-        const float d = DistXZ(Centroid(static_cast<int>(pi)), pt);
+        const glm::vec3 delta = Centroid(static_cast<int>(pi)) - pt;
+        const float d = delta.x * delta.x + delta.z * delta.z;
         if (d < bestD) { bestD = d; best = static_cast<int>(pi); }
     }
     return best;
@@ -138,7 +151,7 @@ bool NavMesh::FindPath(const glm::vec3& start, const glm::vec3& goal,
         closed[static_cast<std::size_t>(cur)] = 1;
         for (const Link& l : m_links[static_cast<std::size_t>(cur)]) {
             if (closed[static_cast<std::size_t>(l.to)]) continue;
-            const float ng = g[static_cast<std::size_t>(cur)] + DistXZ(Centroid(cur), Centroid(l.to));
+            const float ng = g[static_cast<std::size_t>(cur)] + l.cost;
             if (ng < g[static_cast<std::size_t>(l.to)]) {
                 g[static_cast<std::size_t>(l.to)] = ng;
                 came[static_cast<std::size_t>(l.to)] = cur;
@@ -150,12 +163,15 @@ bool NavMesh::FindPath(const glm::vec3& start, const glm::vec3& goal,
 
     // Reconstruct the polygon corridor.
     std::vector<int> corridor;
+    corridor.reserve(n);
     for (int c = gp; c != -1; c = (c == sp) ? -1 : came[static_cast<std::size_t>(c)])
         corridor.push_back(c);
     std::reverse(corridor.begin(), corridor.end());
 
     // Portals from the stored links between consecutive corridor polys.
     std::vector<glm::vec3> portalL, portalR;
+    portalL.reserve(corridor.size() + 2);
+    portalR.reserve(corridor.size() + 2);
     portalL.push_back(start); portalR.push_back(start);
     for (std::size_t i = 0; i + 1 < corridor.size(); ++i) {
         for (const Link& l : m_links[static_cast<std::size_t>(corridor[i])]) {
@@ -164,9 +180,10 @@ bool NavMesh::FindPath(const glm::vec3& start, const glm::vec3& goal,
     }
     portalL.push_back(goal); portalR.push_back(goal);
 
-    // Simple Stupid Funnel Algorithm (Mononen).
-    std::vector<glm::vec3> path;
-    path.push_back(start);
+    // Simple Stupid Funnel Algorithm (Mononen). Write directly into the
+    // caller-owned output buffer so repeated replans reuse its capacity.
+    outPath.reserve(portalL.size());
+    outPath.push_back(start);
     glm::vec3 apex = start, left = portalL[0], right = portalR[0];
     std::size_t apexI = 0, leftI = 0, rightI = 0;
     for (std::size_t i = 1; i < portalL.size(); ++i) {
@@ -175,7 +192,7 @@ bool NavMesh::FindPath(const glm::vec3& start, const glm::vec3& goal,
             if (ApproxEq(apex, right) || TriArea2(apex, left, r) > 0.0f) {
                 right = r; rightI = i;
             } else {
-                path.push_back(left);
+                outPath.push_back(left);
                 apex = left; apexI = leftI;
                 left = right = apex; leftI = rightI = apexI;
                 i = apexI; continue;
@@ -185,15 +202,14 @@ bool NavMesh::FindPath(const glm::vec3& start, const glm::vec3& goal,
             if (ApproxEq(apex, left) || TriArea2(apex, right, l) < 0.0f) {
                 left = l; leftI = i;
             } else {
-                path.push_back(right);
+                outPath.push_back(right);
                 apex = right; apexI = rightI;
                 left = right = apex; leftI = rightI = apexI;
                 i = apexI; continue;
             }
         }
     }
-    if (path.empty() || !ApproxEq(path.back(), goal)) path.push_back(goal);
-    outPath = std::move(path);
+    if (outPath.empty() || !ApproxEq(outPath.back(), goal)) outPath.push_back(goal);
     return true;
 }
 

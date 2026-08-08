@@ -161,15 +161,22 @@ void SeedBlackboard(const std::vector<BlackboardEntry>& entries, Blackboard& out
 // ------------------------------- blackboard ---------------------------------
 
 std::vector<glm::vec3> AgentContext::Plan(const glm::vec3& from, const glm::vec3& to) const {
+    std::vector<glm::vec3> p;
+    PlanInto(from, to, p);
+    return p;
+}
+
+void AgentContext::PlanInto(const glm::vec3& from, const glm::vec3& to,
+                            std::vector<glm::vec3>& outPath) const {
+    outPath.clear();
     if (mesh && mesh->PolyCount() > 0) {
-        std::vector<glm::vec3> p;
-        mesh->FindPath(from, to, p);
-        return p;
+        mesh->FindPath(from, to, outPath);
+        return;
     }
     if (grid && grid->width > 0 && grid->height > 0) {
-        return AStar::FindPathWorld(*grid, from, to);
+        AStar::FindPathWorld(*grid, from, to, outPath);
+        return;
     }
-    return {};
 }
 
 // -------------------------------- graph edit --------------------------------
@@ -450,7 +457,7 @@ Ptr WrapService(const BtAttachment& s, Ptr child) {
     switch (s.type) {
         case BtNodeType::Repath:
             return std::make_unique<ServiceNode>(
-                [](AgentContext& c) { c.path = c.Plan(c.agent.position, c.targetPos); c.pathIndex = 0; },
+                [](AgentContext& c) { c.PlanInto(c.agent.position, c.targetPos, c.path); c.pathIndex = 0; },
                 s.param, std::move(child));
         case BtNodeType::ScriptService:
             return std::make_unique<ScriptServiceNode>(BtScriptRegistry::Instance().Create(s.script),
@@ -528,7 +535,7 @@ Ptr MakeAction(BtNodeType type, float param) {
                 const bool targetMoved = !c.pathGoalValid
                     || HorizontalDistance(c.targetPos, c.pathGoal) > goalRefreshDistance;
                 if (c.path.empty() || targetMoved || c.repathTimer > c.repathInterval) {
-                    c.path = c.Plan(c.agent.position, c.targetPos);
+                    c.PlanInto(c.agent.position, c.targetPos, c.path);
                     c.pathIndex = 0;
                     c.pathGoal = c.targetPos;
                     c.pathGoalValid = true;
@@ -560,7 +567,7 @@ Ptr MakeAction(BtNodeType type, float param) {
                 const bool targetMoved = !c.pathGoalValid
                     || HorizontalDistance(c.targetPos, c.pathGoal) > goalRefreshDistance;
                 if (c.path.empty() || targetMoved) {
-                    c.path = c.Plan(c.agent.position, c.targetPos);
+                    c.PlanInto(c.agent.position, c.targetPos, c.path);
                     c.pathIndex = 0;
                     c.pathGoal = c.targetPos;
                     c.pathGoalValid = true;
@@ -674,7 +681,7 @@ Ptr MakeAction(BtNodeType type, float param) {
                 const bool goalMoved = !c.pathGoalValid
                     || HorizontalDistance(goal, c.pathGoal) > goalRefreshDistance;
                 if (c.path.empty() || goalMoved) {
-                    c.path = c.Plan(c.agent.position, goal);
+                    c.PlanInto(c.agent.position, goal, c.path);
                     c.pathIndex = 0;
                     c.pathGoal = goal;
                     c.pathGoalValid = true;

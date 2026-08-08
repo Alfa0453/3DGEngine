@@ -208,6 +208,7 @@ public:
         GameplayDebugState gameplayDebug;
         AnimationPreviewState animationPreview;
         bool* showPhysicsEventGuides = nullptr;
+        bool* showGameplayTraces = nullptr;
         bool* showAiDebug = nullptr;
         bool* useNavMesh = nullptr;
         bool*  terrainSculpt = nullptr;
@@ -363,6 +364,7 @@ public:
         bool addSpotLightRequested = false;
         bool addAreaLightRequested = false;
         bool duplicateSelectedRequested = false;
+        bool mergeSelectedRequested = false;
         bool deleteSelectedRequested = false;
         bool frameSelectedRequested = false;
     };

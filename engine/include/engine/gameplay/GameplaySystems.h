@@ -28,6 +28,7 @@ void UpdateHealth(ecs::Registry& registry);
 // Health collider it strikes (skipping its owner), and destroy it on any solid
 // hit or once out of range. Returns damaging strikes for VFX/audio/scoring.
 std::vector<ProjectileHit> UpdateProjectiles(ecs::Registry& registry, float dt);
+void UpdateProjectilesInPlace(ecs::Registry& registry, float dt);
 
 // Drive every Attachment: set the child's Transform from its parent's Transform,
 // or from a parent bone when boneIndex >= 0 (needs the parent's AnimatedModel).

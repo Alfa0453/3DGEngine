@@ -76,13 +76,20 @@ glm::vec3 AvoidObstacles(const Agent& a, const std::vector<Obstacle>& obstacles,
 
     const Obstacle* threat = nullptr;
     float nearestAlong = lookAhead;
+    const float lateralLimit = agentRadius;
     for (const Obstacle& o : obstacles) {
         const glm::vec3 toO = o.center - a.position;
         const float along = glm::dot(toO, dir);
         if (along < 0.0f || along > lookAhead) continue;             // behind or beyond reach
         const glm::vec3 onRay = a.position + dir * along;            // closest ray point
-        const float lateral = glm::length(o.center - onRay);
-        if (lateral < o.radius + agentRadius && along < nearestAlong) { nearestAlong = along; threat = &o; }
+        const glm::vec3 lateralDelta = o.center - onRay;
+        const float lateralLimitForObstacle = o.radius + lateralLimit;
+        if (glm::dot(lateralDelta, lateralDelta)
+                < lateralLimitForObstacle * lateralLimitForObstacle
+            && along < nearestAlong) {
+            nearestAlong = along;
+            threat = &o;
+        }
     }
     if (!threat) return glm::vec3(0.0f);
 
@@ -96,7 +103,8 @@ glm::vec3 FollowPath(const Agent& a, const std::vector<glm::vec3>& path, std::si
     if (path.empty()) return glm::vec3(0.0f);
     if (index >= path.size()) index = path.size() - 1;
     if (index + 1 < path.size()) {
-        if (glm::length(path[index] - a.position) < waypointRadius) ++index;
+        const glm::vec3 delta = path[index] - a.position;
+        if (glm::dot(delta, delta) < waypointRadius * waypointRadius) ++index;
         return Seek(a, path[index]);
     }
     return Arrive(a, path.back(), slowRadius);   // final waypoint

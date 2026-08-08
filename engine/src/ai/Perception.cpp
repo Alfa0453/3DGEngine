@@ -5,17 +5,26 @@
 
 #include <glm/glm.hpp>
 
+#include <algorithm>
+#include <cmath>
+
 namespace engine {
 namespace ai {
 
 bool CanSee(const glm::vec3& eye, const glm::vec3& forward, const VisionCone& cone,
             const glm::vec3& target, ecs::Entity targetEntity,
             PhysicsWorld& world, ecs::Registry& reg, ecs::Entity observerEntity) {
-    if (!InvisionCone(eye, forward, cone, target)) return false;
-
     const glm::vec3 d = target - eye;
-    const float dist = glm::length(d);
-    if (dist < 1e-4f) return true;
+    const float dist2 = glm::dot(d, d);
+    const float range = std::max(cone.range, 0.0f);
+    if (dist2 > range * range) return false;
+    if (dist2 < 1e-10f) return true;
+    const float forwardLen2 = glm::dot(forward, forward);
+    if (forwardLen2 < 1e-10f) return false;
+    const float dist = std::sqrt(dist2);
+    const float cosToTarget = glm::dot(forward, d)
+        / (std::sqrt(forwardLen2) * dist);
+    if (cosToTarget < std::cos(glm::radians(cone.halfAngleDegrees))) return false;
 
     Ray ray;
     ray.origin = eye;

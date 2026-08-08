@@ -35,14 +35,23 @@ ClusteredLights::~ClusteredLights() {
 
 void ClusteredLights::Build(const Camera& camera, float aspect, int screenWidth, int screenHeight,
                             const std::vector<PointLight>& lights) {
+    // PbrRenderer uploads the visible point-light count separately. With no point
+    // lights the shader performs no clustered lookup, so retain the existing empty
+    // buffers and avoid all CPU projection/tile work for this frame.
+    if (lights.empty()) return;
     const glm::mat4 view = camera.ViewMatrix();
     const glm::mat4 proj = camera.ProjectionMatrix(aspect);
     const int count = std::min(static_cast<int>(lights.size()), kMaxLights);
 
     // Light data: store WORLD-space position (the lit pass works in world space).
-    std::vector<glm::vec4> posR(kMaxLights, glm::vec4(0.0f));
-    std::vector<glm::vec4> col(kMaxLights, glm::vec4(0.0f));
-    std::vector<glm::vec4> viewPos(static_cast<std::size_t>(count));
+    m_posRadius.resize(kMaxLights);
+    m_colors.resize(kMaxLights);
+    m_viewPositions.resize(static_cast<std::size_t>(count));
+    std::fill(m_posRadius.begin(), m_posRadius.end(), glm::vec4(0.0f));
+    std::fill(m_colors.begin(), m_colors.end(), glm::vec4(0.0f));
+    auto& posR = m_posRadius;
+    auto& col = m_colors;
+    auto& viewPos = m_viewPositions;
     for (int i = 0; i < count; ++i) {
         posR[static_cast<std::size_t>(i)] = glm::vec4(lights[static_cast<std::size_t>(i)].position,
                                                       lights[static_cast<std::size_t>(i)].radius);
@@ -51,7 +60,9 @@ void ClusteredLights::Build(const Camera& camera, float aspect, int screenWidth,
     }
 
     // Cull: scatter each light into the screen tiles its sphere covers.
-    std::vector<int> tiles(static_cast<std::size_t>(kTilesX * kTilesY * kTileStride), 0);
+    m_tileIndices.resize(static_cast<std::size_t>(kTilesX * kTilesY * kTileStride));
+    std::fill(m_tileIndices.begin(), m_tileIndices.end(), 0);
+    auto& tiles = m_tileIndices;
     const float tileW = static_cast<float>(screenWidth)  / kTilesX;
     const float tileH = static_cast<float>(screenHeight) / kTilesY;
     for (int i = 0; i < count; ++i) {

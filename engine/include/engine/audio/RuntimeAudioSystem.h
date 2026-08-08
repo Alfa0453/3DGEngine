@@ -3,6 +3,9 @@
 #include "engine/audio/AudioEngine.h"
 #include "engine/ecs/Entity.h"
 
+#include <glm/gtc/quaternion.hpp>
+
+#include <cstdint>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -58,10 +61,29 @@ private:
         glm::vec3 position{0.0f};
         bool cue = false;
         bool force2D = false;
+        glm::quat rotation{1.0f, 0.0f, 0.0f, 0.0f};
+        bool settingsInitialized = false;
+        bool spatial = false;
+        bool looping = false;
+        float volume = 1.0f;
+        float pitch = 1.0f;
+        float minDistance = 1.0f;
+        float maxDistance = 100.0f;
+        float rolloff = 1.0f;
+        int priority = 0;
+        float coneInnerAngle = 360.0f;
+        float coneOuterAngle = 360.0f;
+        float coneOuterGain = 0.0f;
+        float dopplerFactor = 1.0f;
+        float occlusion = 0.0f;
     };
 
     AudioEngine* m_audio = nullptr;
     std::unordered_map<ecs::Entity, Voice> m_voices;
+    std::uint64_t m_audioRevision = 0;
+    std::uint64_t m_occlusionRevision = ~std::uint64_t{0};
+    glm::vec3 m_lastOcclusionListener{0.0f};
+    bool m_haveOcclusionListener = false;
 
     ecs::Entity FindNamedEntity(ecs::Registry& registry, const std::string& name) const;
     bool ApplyAction(ecs::Registry& registry, ecs::Entity target, int action);

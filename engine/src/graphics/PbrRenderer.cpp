@@ -12,9 +12,12 @@
 #include "engine/graphics/Texture.h"
 #include "engine/graphics/Frustum.h"
 #include "engine/graphics/ShaderParameterBinding.h"
+#include "engine/graphics/GpuProfiler.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
+#include <functional>
 #include <cmath>
 #include <cstdlib>
 
@@ -35,6 +38,7 @@ namespace engine {
 namespace {
 
 void UploadCustomParameters(Shader& shader, const MeshPBR& mesh) {
+    if (mesh.shaderParameters.empty() && mesh.shaderTextures.empty()) return;
     int textureUnit = 18;
     for (const auto& entry : mesh.shaderParameters) {
         const auto type = mesh.shaderParameterTypes.find(entry.first);
@@ -59,13 +63,12 @@ int SelectMeshLod(const Mesh& mesh, const Transform& transform,
     const glm::vec3 scale = glm::abs(transform.scale);
     const float radius = std::max(mesh.BoundsRadius()
         * std::max({scale.x, scale.y, scale.z}), 0.01f);
-    const float surfaceDistance = std::max(
-        glm::length(camera.Position() - center) - radius, 0.0f);
-    const float ratio = surfaceDistance / radius;
-    if (ratio > 1.0f) level = std::max(level, 1);
-    if (ratio > 3.0f) level = std::max(level, 2);
-    if (ratio > 6.0f) level = std::max(level, 3);
-    if (ratio > 12.0f) level = std::max(level, 4);
+    const float centerDistanceSq = glm::dot(camera.Position() - center,
+                                            camera.Position() - center);
+    if (centerDistanceSq > (2.0f * radius) * (2.0f * radius)) level = std::max(level, 1);
+    if (centerDistanceSq > (4.0f * radius) * (4.0f * radius)) level = std::max(level, 2);
+    if (centerDistanceSq > (7.0f * radius) * (7.0f * radius)) level = std::max(level, 3);
+    if (centerDistanceSq > (13.0f * radius) * (13.0f * radius)) level = std::max(level, 4);
     return std::min(level, mesh.MaxLod());
 }
 
@@ -133,6 +136,7 @@ uniform float uAlphaCutoff;
 uniform vec2 uUvScale;
 uniform vec2 uUvOffset;
 uniform float uUvRotation;
+uniform int  uWorldUv;   // 1 = project UVs from world position (scale-independent)
 uniform float uNormalStrength;
 uniform float uHeightScale;
 uniform float uClearcoat;
@@ -387,6 +391,16 @@ vec2 TransformUV(vec2 uv) {
     vec2 p = uv * uUvScale - vec2(0.5);
     return mat2(c, -s, s, c) * p + vec2(0.5) + uUvOffset;
 }
+// Project a world position onto the plane facing the surface normal, so the texture
+// tiles by world size instead of the mesh's authored 0..1 UVs. uUvScale is reused as
+// tiles-per-world-unit. Cheap single-tap "triplanar": pick the dominant axis.
+vec2 WorldUV(vec3 worldPos, vec3 n) {
+    vec3 an = abs(n);
+    vec2 wuv = (an.x >= an.y && an.x >= an.z) ? worldPos.zy
+             : (an.y >= an.z)                 ? worldPos.xz
+                                              : worldPos.xy;
+    return wuv * uUvScale + uUvOffset;
+}
 vec2 ParallaxUV(vec2 uv, vec3 viewTS) {
     if (uHasHeightMap == 0 || uHeightScale <= 0.00001) return uv;
     const float layers = 16.0;
@@ -411,7 +425,7 @@ vec3 ClearcoatSpecular(vec3 N, vec3 V, vec3 L, vec3 radiance) {
 void main() {
     vec3 baseN = normalize(vNormal);
     vec3 V = normalize(uViewPos-vWorldPos);
-    vec2 uv = TransformUV(vUV);
+    vec2 uv = (uWorldUv == 1) ? WorldUV(vWorldPos, baseN) : TransformUV(vUV);
     mat3 baseTbn = CotangentFrame(baseN, vWorldPos, uv);
     uv = ParallaxUV(uv, transpose(baseTbn) * V);
     vec3 albedo = (uInstanced == 1) ? vIAlbedo : uAlbedo;
@@ -546,33 +560,54 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
 
 void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
                          int screenWidth, int screenHeight, const Options& opt) {
+    const glm::mat4 view = camera.ViewMatrix();
+    const glm::mat4 proj = camera.ProjectionMatrix(aspect);
+    const glm::mat4 viewProj = proj * view;
+    const Frustum frustum = ExtractFrustum(viewProj);
+
     // Gather lights.
     glm::vec3 sunDir(0.0f, -1.0f, 0.0f), sunColor(0.0f);
-    std::vector<glm::vec3> ppos;
-    std::vector<ClusteredLights::PointLight> clusterLights;
-    std::vector<glm::vec3> spotPos, spotDir, spotCol;
-    std::vector<float> spotCosIn, spotCosOut;
-    std::vector<glm::vec3> areaPos, areaCol;
-    std::vector<float> areaRad;
-    std::vector<SpotShadow::Spot> spotList;
-    reg.view<Transform, Light>().each([&](Entity, Transform& t, Light& l) {
+    auto& ppos = m_pointPositions;
+    auto& clusterLights = m_clusterLights;
+    auto& spotPos = m_spotPositions;
+    auto& spotDir = m_spotDirections;
+    auto& spotCol = m_spotColors;
+    auto& spotCosIn = m_spotCosInner;
+    auto& spotCosOut = m_spotCosOuter;
+    auto& areaPos = m_areaPositions;
+    auto& areaCol = m_areaColors;
+    auto& areaRad = m_areaRadii;
+    auto& spotList = m_spotShadowLights;
+    ppos.clear(); clusterLights.clear(); spotPos.clear(); spotDir.clear(); spotCol.clear();
+    spotCosIn.clear(); spotCosOut.clear(); areaPos.clear(); areaCol.clear(); areaRad.clear(); spotList.clear();
+    auto lightView = reg.view<Transform, Light>();
+    if (!lightView.empty()) lightView.each([&](Entity, Transform& t, Light& l) {
         const glm::vec3 c = l.color * l.intensity;
         if (l.type == Light::Type::Directional) { sunDir = glm::normalize(l.direction); sunColor = c; }
         else if (l.type == Light::Type::Point) {
+            if (glm::dot(c, c) <= 1.0e-8f) return;
             const float radius = std::sqrt(std::max(std::max(c.r, c.g), c.b) / 0.03f);
+            if (!SphereInFrustum(frustum, t.position, std::max(radius, 0.01f))) return;
             clusterLights.push_back({t.position, c, radius});
-            ppos.push_back(t.position);
+            if (ppos.size() < static_cast<std::size_t>(PointShadow::kMax))
+                ppos.push_back(t.position);
         }
         else if (l.type == Light::Type::Spot) {
+            if (glm::dot(c, c) <= 1.0e-8f) return;
             const glm::vec3 dir = glm::normalize(l.direction);
+            const float range = std::max(l.range, 0.01f);
+            if (!SphereInFrustum(frustum, t.position + dir * (range * 0.5f), range * 0.5f)) return;
             spotPos.push_back(t.position);
             spotDir.push_back(dir);
             spotCol.push_back(c);
             spotCosIn.push_back(glm::cos(glm::radians(l.innerAngle)));
             spotCosOut.push_back(glm::cos(glm::radians(l.outerAngle)));
-            spotList.push_back(SpotShadow::Spot{t.position, dir, l.outerAngle, l.range});
+            if (spotList.size() < static_cast<std::size_t>(SpotShadow::kMax))
+                spotList.push_back(SpotShadow::Spot{t.position, dir, l.outerAngle, range});
         }
         else {  // Area (sphere)
+            if (glm::dot(c, c) <= 1.0e-8f) return;
+            if (!SphereInFrustum(frustum, t.position, std::max(l.sourceRadius, 0.01f))) return;
             areaPos.push_back(t.position);
             areaCol.push_back(c);
             areaRad.push_back(l.sourceRadius);
@@ -580,7 +615,9 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
     });
 
     // Cascaded directional (sun) shadow pass (skipped when the sun shadow is off).
-    if (opt.directionalShadows) {
+    const bool sunShadowEnabled = opt.directionalShadows
+        && glm::dot(sunColor, sunColor) > 1.0e-8f;
+    if (sunShadowEnabled) {
         const float shadowFar = std::max(opt.shadowDistance, camera.nearPlane + 1.0f);
         m_cascade.Generate(reg, camera, aspect, sunDir, shadowFar, opt.shadowCasters);
         glViewport(0, 0, screenWidth, screenHeight);
@@ -601,11 +638,8 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
     m_clustered.Build(camera, aspect, screenWidth, screenHeight, clusterLights);
 
     // Lit pass.
-    const glm::mat4 view = camera.ViewMatrix();
-    const glm::mat4 proj = camera.ProjectionMatrix(aspect);
-    const Frustum frustum = ExtractFrustum(proj * view);
     m_pbr->Bind();
-    m_pbr->SetMat4("uViewProj", proj * view);
+    m_pbr->SetMat4("uViewProj", viewProj);
     m_pbr->SetVec3("uViewPos", camera.Position());
     m_pbr->SetVec3("uSunDir", sunDir);
     m_pbr->SetVec3("uSunColor", sunColor);
@@ -619,11 +653,12 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
     m_pbr->SetInt("uCascadeMaps", 4);
     m_pbr->SetMat4("uView", view);
     m_pbr->SetFloat("uShadowSoftness", opt.shadowSoftness);
-    m_pbr->SetInt("uSunShadow", opt.directionalShadows ? 1 : 0);
+    m_pbr->SetInt("uSunShadow", sunShadowEnabled ? 1 : 0);
+    static constexpr const char* kCascadeVpNames[] = {"uCascadeVP[0]", "uCascadeVP[1]", "uCascadeVP[2]", "uCascadeVP[3]"};
+    static constexpr const char* kCascadeSplitNames[] = {"uCascadeSplits[0]", "uCascadeSplits[1]", "uCascadeSplits[2]", "uCascadeSplits[3]"};
     for (int i = 0; i < CascadedShadow::kCascades; ++i) {
-        const std::string ix = "[" + std::to_string(i) + "]";
-        m_pbr->SetMat4("uCascadeVP" + ix, m_cascade.CascadeVP(i));
-        m_pbr->SetFloat("uCascadeSplits" + ix, m_cascade.SplitDepth(i));
+        m_pbr->SetMat4(kCascadeVpNames[i], m_cascade.CascadeVP(i));
+        m_pbr->SetFloat(kCascadeSplitNames[i], m_cascade.SplitDepth(i));
     }
     if (opt.ibl) {
         opt.ibl->Bind(5, 6, 7);
@@ -652,25 +687,32 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
     m_spotShadow.BindMaps(13);
     m_pbr->SetInt("uNumSpots", static_cast<int>(spotPos.size()));
     m_pbr->SetInt("uNumSpotShadows", numSpotShadows);
+    static constexpr const char* kSpotPosNames[] = {"uSpotPos[0]", "uSpotPos[1]", "uSpotPos[2]", "uSpotPos[3]"};
+    static constexpr const char* kSpotDirNames[] = {"uSpotDir[0]", "uSpotDir[1]", "uSpotDir[2]", "uSpotDir[3]"};
+    static constexpr const char* kSpotColorNames[] = {"uSpotColor[0]", "uSpotColor[1]", "uSpotColor[2]", "uSpotColor[3]"};
+    static constexpr const char* kSpotInnerNames[] = {"uSpotCosInner[0]", "uSpotCosInner[1]", "uSpotCosInner[2]", "uSpotCosInner[3]"};
+    static constexpr const char* kSpotOuterNames[] = {"uSpotCosOuter[0]", "uSpotCosOuter[1]", "uSpotCosOuter[2]", "uSpotCosOuter[3]"};
+    static constexpr const char* kSpotVpNames[] = {"uSpotVP[0]", "uSpotVP[1]", "uSpotVP[2]", "uSpotVP[3]"};
     for (std::size_t i = 0; i < spotPos.size() && i < static_cast<std::size_t>(SpotShadow::kMax); ++i) {
-        const std::string ix = "[" + std::to_string(i) + "]";
-        m_pbr->SetVec3("uSpotPos" + ix, spotPos[i]);
-        m_pbr->SetVec3("uSpotDir" + ix, spotDir[i]);
-        m_pbr->SetVec3("uSpotColor" + ix, spotCol[i]);
-        m_pbr->SetFloat("uSpotCosInner" + ix, spotCosIn[i]);
-        m_pbr->SetFloat("uSpotCosOuter" + ix, spotCosOut[i]);
-        m_pbr->SetMat4("uSpotVP" + ix, m_spotShadow.LightVP(static_cast<int>(i)));
+        m_pbr->SetVec3(kSpotPosNames[i], spotPos[i]);
+        m_pbr->SetVec3(kSpotDirNames[i], spotDir[i]);
+        m_pbr->SetVec3(kSpotColorNames[i], spotCol[i]);
+        m_pbr->SetFloat(kSpotInnerNames[i], spotCosIn[i]);
+        m_pbr->SetFloat(kSpotOuterNames[i], spotCosOut[i]);
+        m_pbr->SetMat4(kSpotVpNames[i], m_spotShadow.LightVP(static_cast<int>(i)));
     }
     m_pbr->SetInt("uSpotMap[0]", 13);
     m_pbr->SetInt("uSpotMap[1]", 14);
     m_pbr->SetInt("uSpotMap[2]", 15);
     m_pbr->SetInt("uSpotMap[3]", 16);
     m_pbr->SetInt("uNumAreas", static_cast<int>(areaPos.size()));
+    static constexpr const char* kAreaPosNames[] = {"uAreaPos[0]", "uAreaPos[1]", "uAreaPos[2]", "uAreaPos[3]"};
+    static constexpr const char* kAreaColorNames[] = {"uAreaColor[0]", "uAreaColor[1]", "uAreaColor[2]", "uAreaColor[3]"};
+    static constexpr const char* kAreaRadiusNames[] = {"uAreaRadius[0]", "uAreaRadius[1]", "uAreaRadius[2]", "uAreaRadius[3]"};
     for (std::size_t i = 0; i < areaPos.size() && i < 4; ++i) {
-        const std::string ix = "[" + std::to_string(i) + "]";
-        m_pbr->SetVec3("uAreaPos" + ix, areaPos[i]);
-        m_pbr->SetVec3("uAreaColor" + ix, areaCol[i]);
-        m_pbr->SetFloat("uAreaRadius" + ix, areaRad[i]);
+        m_pbr->SetVec3(kAreaPosNames[i], areaPos[i]);
+        m_pbr->SetVec3(kAreaColorNames[i], areaCol[i]);
+        m_pbr->SetFloat(kAreaRadiusNames[i], areaRad[i]);
     }
     m_pbr->SetInt("uFogEnabled", opt.fog ? 1 : 0);
     m_pbr->SetVec3("uFogColor", opt.fogColor);
@@ -696,10 +738,14 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
     // Main lit pass. Untextured MeshPBR entities that share a mesh are drawn in
     // ONE instanced call (per-instance model + material); textured ones fall back
     // to per-object draws. Instancing collapses N draw calls to ~one per mesh.
-    std::unordered_map<const Mesh*, std::vector<float>> batches;
-    std::vector<std::pair<Transform*, MeshPBR*>> textured;
-    std::vector<std::pair<Transform*, MeshPBR*>> custom;
-    reg.view<Transform, MeshPBR>().each([&](Entity, Transform& t, MeshPBR& m) {
+    auto& batches = m_meshBatches;
+    auto& textured = m_texturedObjects;
+    auto& custom = m_customObjects;
+    for (auto& batch : batches) batch.second.clear();
+    textured.clear();
+    custom.clear();
+    auto meshView = reg.view<Transform, MeshPBR>();
+    if (!meshView.empty()) meshView.each([&](Entity, Transform& t, MeshPBR& m) {
         if (!m.mesh) return;
         if (opt.frustumCull) {
             const glm::mat4 model = t.Model();
@@ -722,7 +768,8 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
             m.material.normalStrength != defaults.normalStrength || m.material.heightScale != defaults.heightScale ||
             m.material.clearcoat != defaults.clearcoat || m.material.transmission != defaults.transmission ||
             m.material.anisotropy != defaults.anisotropy || m.material.sheenColor != defaults.sheenColor ||
-            m.material.specularLevel != defaults.specularLevel || m.material.subsurface != defaults.subsurface;
+            m.material.specularLevel != defaults.specularLevel || m.material.subsurface != defaults.subsurface ||
+            m.material.worldSpaceUv != defaults.worldSpaceUv;
         if (m.material.albedoMap || m.material.normalMap || m.material.metalRoughMap ||
             m.material.heightMap || advanced || !opt.instancing) {
             textured.emplace_back(&t, &m);   // textured, or instancing disabled -> per-object
@@ -741,7 +788,22 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
         const bool at = a.second->material.blendMode == PbrMaterial::BlendMode::Transparent;
         const bool bt = b.second->material.blendMode == PbrMaterial::BlendMode::Transparent;
         if (at != bt) return !at;
-        if (!at) return false;
+        if (!at) {
+            // Opaque objects may be reordered freely. Grouping by geometry and
+            // texture set reduces shader/material changes and makes the texture
+            // binding cache effective across the whole pass.
+            const auto pointerOrder = [](const void* lhs, const void* rhs) {
+                return std::less<const void*>{}(lhs, rhs);
+            };
+            if (a.second->mesh != b.second->mesh)
+                return pointerOrder(a.second->mesh, b.second->mesh);
+            const auto& am = a.second->material;
+            const auto& bm = b.second->material;
+            if (am.albedoMap != bm.albedoMap) return pointerOrder(am.albedoMap, bm.albedoMap);
+            if (am.normalMap != bm.normalMap) return pointerOrder(am.normalMap, bm.normalMap);
+            if (am.metalRoughMap != bm.metalRoughMap) return pointerOrder(am.metalRoughMap, bm.metalRoughMap);
+            return pointerOrder(am.heightMap, bm.heightMap);
+        }
         const glm::vec3 da = a.first->position - camera.Position();
         const glm::vec3 db = b.first->position - camera.Position();
         return glm::dot(da, da) > glm::dot(db, db);
@@ -763,9 +825,18 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
 
     // Textured entities: per-object (uInstanced = 0).
     m_pbr->SetInt("uInstanced", 0);
+    std::array<const Texture*, 18> boundMaps{};
     auto bindMap = [&](const Texture* tex, int unit, const char* flag, const char* samp) {
-        if (tex) { tex->Bind(static_cast<unsigned int>(unit)); m_pbr->SetInt(samp, unit); m_pbr->SetInt(flag, 1); }
-        else m_pbr->SetInt(flag, 0);
+        const std::size_t slot = static_cast<std::size_t>(unit);
+        if (slot < boundMaps.size() && boundMaps[slot] == tex) return;
+        if (slot < boundMaps.size()) boundMaps[slot] = tex;
+        if (tex) {
+            tex->Bind(static_cast<unsigned int>(unit));
+            m_pbr->SetInt(samp, unit);
+            m_pbr->SetInt(flag, 1);
+        } else {
+            m_pbr->SetInt(flag, 0);
+        }
     };
     for (auto& pr : textured) {
         Transform& t = *pr.first; MeshPBR& m = *pr.second;
@@ -782,6 +853,7 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
         m_pbr->SetFloat("uAlphaCutoff", m.material.alphaCutoff);
         m_pbr->SetVec2("uUvScale", m.material.uvScale); m_pbr->SetVec2("uUvOffset", m.material.uvOffset);
         m_pbr->SetFloat("uUvRotation", m.material.uvRotation);
+        m_pbr->SetInt("uWorldUv", m.material.worldSpaceUv ? 1 : 0);
         m_pbr->SetFloat("uNormalStrength", m.material.normalStrength); m_pbr->SetFloat("uHeightScale", m.material.heightScale);
         m_pbr->SetFloat("uClearcoat", m.material.clearcoat); m_pbr->SetFloat("uClearcoatRoughness", m.material.clearcoatRoughness);
         m_pbr->SetFloat("uTransmission", m.material.transmission); m_pbr->SetFloat("uIor", m.material.ior);
@@ -800,6 +872,9 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
             glDisable(GL_BLEND); glDepthMask(GL_TRUE);
         }
         // Glass and flat planes render two-sided; closed solids cull their backfaces.
+        // A negative object scale reverses winding. Match the front-face rule to
+        // the transform so mirrored objects do not lose their visible exterior.
+        glFrontFace(glm::determinant(glm::mat3(model)) < 0.0f ? GL_CW : GL_CCW);
         setCull(!(m.material.blendMode == PbrMaterial::BlendMode::Transparent
                   || m.mesh->TwoSided()));
         m.mesh->DrawLod(SelectMeshLod(*m.mesh, t, camera));
@@ -816,6 +891,7 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
         m_pbr->SetInt("uHasHeightMap", 0);
         m_pbr->SetInt("uBlendMode", 0); m_pbr->SetFloat("uOpacity", 1.0f);
         m_pbr->SetVec2("uUvScale", glm::vec2(1.0f)); m_pbr->SetVec2("uUvOffset", glm::vec2(0.0f));
+        m_pbr->SetInt("uWorldUv", 0);
         m_pbr->SetFloat("uUvRotation", 0.0f); m_pbr->SetFloat("uNormalStrength", 1.0f);
         m_pbr->SetFloat("uHeightScale", 0.0f); m_pbr->SetFloat("uClearcoat", 0.0f);
         m_pbr->SetFloat("uTransmission", 0.0f); m_pbr->SetFloat("uAnisotropy", 0.0f);
@@ -825,13 +901,29 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
         for (auto& kv : batches) {
             const Mesh* mesh = kv.first;
             std::vector<float>& data = kv.second;
+            if (data.empty()) continue;
             const GLsizei count = static_cast<GLsizei>(data.size() / 25);
-            setCull(!mesh->TwoSided());   // flat planes: both sides
+            bool mirrored = false;
+            for (std::size_t offset = 0; offset + 16 <= data.size(); offset += 25) {
+                glm::mat4 instance(1.0f);
+                std::memcpy(glm::value_ptr(instance), data.data() + offset,
+                            sizeof(glm::mat4));
+                mirrored = mirrored || glm::determinant(glm::mat3(instance)) < 0.0f;
+            }
+            glFrontFace(GL_CCW);
+            // Mixed mirrored/non-mirrored instances cannot share one cull winding;
+            // render that batch two-sided rather than dropping half the objects.
+            setCull(!mesh->TwoSided() && !mirrored);   // flat planes: both sides
             glBindVertexArray(mesh->Vao());
             glBindBuffer(GL_ARRAY_BUFFER, m_instanceVBO);
-            glBufferData(GL_ARRAY_BUFFER,
-                         static_cast<GLsizeiptr>(data.size() * sizeof(float)),
-                         data.data(), GL_DYNAMIC_DRAW);
+            const std::size_t instanceBytes = data.size() * sizeof(float);
+            if (instanceBytes > m_instanceCapacity) {
+                m_instanceCapacity = std::max(instanceBytes,
+                    std::max<std::size_t>(m_instanceCapacity * 2, 4096));
+                glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(m_instanceCapacity),
+                             nullptr, GL_DYNAMIC_DRAW);
+            }
+            glBufferSubData(GL_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(instanceBytes), data.data());
             for (int c = 0; c < 4; ++c) {   // mat4 columns -> locations 3..6
                 const GLuint loc = static_cast<GLuint>(3 + c);
                 glEnableVertexAttribArray(loc);
@@ -848,6 +940,7 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
             }
             glDrawElementsInstanced(GL_TRIANGLES, static_cast<GLsizei>(mesh->IndexCount()),
                                     GL_UNSIGNED_INT, nullptr, count);
+            GpuProfiler::RecordDrawCall();
             for (GLuint loc = 3; loc <= 9; ++loc) {   // leave the mesh VAO as we found it
                 glVertexAttribDivisor(loc, 0);
                 glDisableVertexAttribArray(loc);
@@ -863,22 +956,32 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
         const bool at = a.second->material.blendMode == PbrMaterial::BlendMode::Transparent;
         const bool bt = b.second->material.blendMode == PbrMaterial::BlendMode::Transparent;
         if (at != bt) return !at;
+        // Opaque custom materials do not depend on draw order, so group them
+        // by shader to avoid switching programs between adjacent objects.
+        if (!at && a.second->customShader != b.second->customShader)
+            return std::less<const Shader*>{}(a.second->customShader, b.second->customShader);
         const glm::vec3 da = a.first->position - camera.Position();
         const glm::vec3 db = b.first->position - camera.Position();
         return at && glm::dot(da, da) > glm::dot(db, db);
     });
+    const Shader* boundCustomShader = nullptr;
     for (const auto& item : custom) {
         const Transform& transform = *item.first;
         const MeshPBR& mesh = *item.second;
         Shader& shader = *const_cast<Shader*>(mesh.customShader);
-        shader.Bind();
-        shader.SetMat4("uViewProjection", camera.ProjectionMatrix(aspect) * camera.ViewMatrix());
+        if (boundCustomShader != mesh.customShader) {
+            shader.Bind();
+            boundCustomShader = mesh.customShader;
+        }
+        shader.SetMat4("uViewProjection", viewProj);
         shader.SetMat4("uModel", transform.Model());
         shader.SetVec3("uCameraPosition", camera.Position());
         shader.SetFloat("uTime", cloudSeconds);
         shader.SetFloat("uDeltaTime", 1.0f / 60.0f);
         shader.SetVec3("uLightDirection", sunDir);
         shader.SetFloat("uLightIntensity", std::max({sunColor.x, sunColor.y, sunColor.z}));
+        shader.SetVec3("uLightColor", sunColor);      // key light radiance (for custom lighting)
+        shader.SetVec3("uAmbient", opt.ambient);      // sky/ambient term (for custom lighting)
         shader.SetVec4("uObjectColor",
             glm::vec4(mesh.material.albedo, mesh.material.opacity));
         UploadCustomParameters(shader, mesh);
@@ -888,12 +991,14 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
         } else {
             glDisable(GL_BLEND); glDepthMask(GL_TRUE);
         }
+        glFrontFace(glm::determinant(glm::mat3(transform.Model())) < 0.0f ? GL_CW : GL_CCW);
         setCull(!(mesh.material.blendMode == PbrMaterial::BlendMode::Transparent
                   || mesh.mesh->TwoSided()));
         mesh.mesh->DrawLod(SelectMeshLod(*mesh.mesh, transform, camera));
     }
     glDisable(GL_BLEND);
     glDepthMask(GL_TRUE);
+    glFrontFace(GL_CCW);
     glDisable(GL_CULL_FACE);   // restore the default (off) for subsequent passes
 }
 

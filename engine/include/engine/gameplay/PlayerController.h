@@ -89,7 +89,10 @@ public:
         body.position = p;
         m_stepVisualOffset = glm::vec3(0.0f);
     }
-    void SetCapsule(float radius, float height) { body.radius = radius; body.height = height; }
+    void SetCapsule(float radius, float height) {
+        body.radius = glm::max(radius, 0.01f);
+        body.height = glm::max(height, body.radius * 2.0f);
+    }
     void ToggleView() {
         view = view == View::ThirdPerson ? View::FirstPerson
              : view == View::FirstPerson ? View::Isometric

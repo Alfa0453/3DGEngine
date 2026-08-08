@@ -4,7 +4,10 @@
 
 namespace engine {
 
+GpuProfiler* GpuProfiler::s_active = nullptr;
+
 GpuProfiler::~GpuProfiler() {
+    if (s_active == this) s_active = nullptr;
     for (Frame& f : m_frames) {
         for (Scope& s : f.scopes) {
             if (s.query) glDeleteQueries(1, &s.query);
@@ -13,6 +16,12 @@ GpuProfiler::~GpuProfiler() {
 }
 
 void GpuProfiler::BeginFrame() {
+    if (!m_enabled) {
+        if (s_active == this) s_active = nullptr;
+        m_results.clear();
+        m_inScope = false;
+        return;
+    }
     // Rotate to a slot last written kFrames-1 frames ago -- its queries are ready.
     m_current = (m_current + 1) % kFrames;
     Frame& f = m_frames[m_current];
@@ -29,10 +38,13 @@ void GpuProfiler::BeginFrame() {
     }
 
     f.used = 0;        // reuse this slot for the new frame
+    f.drawCalls = 0;
     m_inScope = false;
+    s_active = this;
 }
 
 void GpuProfiler::Begin(const char* name) {
+    if (!m_enabled) return;
     if (m_inScope) End();   // scopes can't nest; close a dangling one defensively
     Frame& f = m_frames[m_current];
     if (f.used >= static_cast<int>(f.scopes.size())) {
@@ -47,10 +59,15 @@ void GpuProfiler::Begin(const char* name) {
 }
 
 void GpuProfiler::End() {
-    if (!m_inScope) return;
+    if (!m_enabled || !m_inScope) return;
     glEndQuery(GL_TIME_ELAPSED);
     ++m_frames[m_current].used;
     m_inScope = false;
+}
+
+void GpuProfiler::RecordDrawCall() {
+    if (s_active && s_active->m_enabled)
+        ++s_active->m_frames[s_active->m_current].drawCalls;
 }
 
 } // namespace engine

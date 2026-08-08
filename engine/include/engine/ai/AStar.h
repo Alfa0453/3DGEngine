@@ -23,6 +23,10 @@ public:
     static std::vector<glm::vec3> FindPathWorld(const NavGrid& grid,
                                                 const glm::vec3& start, const glm::vec3& goal,
                                                 bool allowDiagonal = true);
+    static void FindPathWorld(const NavGrid& grid,
+                              const glm::vec3& start, const glm::vec3& goal,
+                              std::vector<glm::vec3>& outPath,
+                              bool allowDiagonal = true);
 
     // Line-of-sight string pull: drops interior waypoints whose corner can be cut
     // by a straight walkable line, keeping only the vertices where the path must

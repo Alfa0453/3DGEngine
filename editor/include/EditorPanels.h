@@ -26,6 +26,20 @@ public:
         CharacterEditor,
         ClipEditor,
         GraphEditor,
+        MeshEditor,
+        ModularPlacement,
+        PrefabPalette,
+        RoomBuilder,
+        ScatterPaint,
+        ArrayTool,
+        Measurement,
+        LevelValidation,
+        LevelVariants,
+        LevelLayers,
+        ViewportBookmarks,
+        Blockout,
+        Alignment,
+        SplineBuilder,
         Viewport,
         Prefab,
         ScriptApi,
@@ -46,7 +60,7 @@ public:
 private:
     static constexpr int kPanelCount = static_cast<int>(Panel::Count);
     static constexpr std::array<bool, kPanelCount> kDefaultOpen{{
-        true, true, false, false, true, true, false, false, false, false, true, true, false, false, false, false, false, false, false, false, false, true, false, false, false, false
+        true, true, false, false, true, true, false, false, false, false, true, true, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, true, false, false, false, false
     }};
     std::array<bool, kPanelCount> m_open{kDefaultOpen};      
 };

@@ -41,6 +41,10 @@ public:
 private:
     unsigned int m_ubo = 0;
     unsigned int m_tileBuf = 0, m_tileTex = 0;
+    std::vector<glm::vec4> m_posRadius;
+    std::vector<glm::vec4> m_colors;
+    std::vector<glm::vec4> m_viewPositions;
+    std::vector<int> m_tileIndices;
 };
 
 } // namespace engine

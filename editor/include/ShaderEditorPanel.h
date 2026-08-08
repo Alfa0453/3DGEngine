@@ -73,6 +73,7 @@ private:
     bool m_promptQueued = false;
     bool m_autoCompile = true;
     bool m_compilePending = true;
+    std::chrono::steady_clock::time_point m_lastAutoCompile{};
     bool m_applied = false;
     int m_pendingDomain = -1;
     double m_compileMilliseconds = 0.0;

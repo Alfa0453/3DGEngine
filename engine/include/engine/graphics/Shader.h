@@ -1,5 +1,7 @@
 #pragma once
 
+#include <array>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -78,6 +80,9 @@ public:
     void SetVec4(const std::string& name, const glm::vec4& value);
     void SetMat3(const std::string& name, const glm::mat3& value);
     void SetMat4(const std::string& name, const glm::mat4& value);
+    // Upload a contiguous matrix array in one GPU call. Useful for skeletal
+    // palettes and other per-draw matrix blocks.
+    void SetMat4Array(const std::string& name, const glm::mat4* values, int count);
 
     unsigned int ID() const { return m_id; }
 
@@ -91,6 +96,12 @@ private:
 
     unsigned int m_id = 0;  // the OpenGL program object handle
     std::unordered_map<std::string, int> m_uniformCache;
+    // Last values uploaded for each uniform location. Keeping this at the shader
+    // boundary avoids redundant glUniform calls across all renderers.
+    std::unordered_map<int, int> m_intValues;
+    std::unordered_map<int, float> m_floatValues;
+    std::unordered_map<int, std::array<float, 16>> m_vectorValues;
+    std::unordered_map<int, std::uint8_t> m_vectorSizes;
 };
 
 } // namespace engine

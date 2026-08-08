@@ -59,13 +59,14 @@ inline void UploadLoadedMaterialShaderParameters(
 // `uModel` (mat4), `uNormalMat` (mat3) and `uColor` (vec3), then issues the draw.
 // A game whose shader uses different uniform names can write its own one-liner.
 inline void RenderMeshes(Registry& reg, Renderer& renderer, Shader& shader) {
-    reg.view<Transform, MeshRenderer>().each(
+    auto meshView = reg.view<Transform, MeshRenderer>();
+    if (meshView.empty()) return;
+    meshView.each(
         [&](Entity entity, Transform& t, MeshRenderer& mr) {
             if (reg.Has<LoadedModelAsset>(entity)) return;
             if (!mr.mesh) return;
             const glm::mat4 model = t.Model();
             shader.SetMat4("uModel", model);
-            shader.SetMat3("uNormalMat", model);
             shader.SetMat3("uNormalMat", glm::mat3(glm::transpose(glm::inverse(model))));
             shader.SetVec3("uColor", mr.color);
             renderer.Draw(*mr.mesh);
@@ -82,7 +83,10 @@ inline void RenderLoadedModels(
     Registry& reg, Shader& defaultShader, const glm::mat4& viewProjection,
     const glm::vec3& lightDirection = glm::vec3(0.0f, -1.0f, 0.0f),
     float lightIntensity = 1.0f) {
-    reg.view<Transform, LoadedModelAsset>().each(
+    Shader* boundShader = nullptr;
+    auto modelView = reg.view<Transform, LoadedModelAsset>();
+    if (modelView.empty()) return;
+    modelView.each(
         [&](Entity entity, Transform& t, LoadedModelAsset& loaded) {
             if (!loaded.model) return;
             const glm::mat4 model = t.Model();
@@ -91,13 +95,21 @@ inline void RenderLoadedModels(
                 reg.TryGet<LoadedMaterialAsset>(entity);
             if (material && material->shader) {
                 shader = const_cast<Shader*>(material->shader);
-                shader->Bind();
+                if (shader != boundShader) {
+                    shader->Bind();
+                    boundShader = shader;
+                }
                 shader->SetMat4("uViewProjection", viewProjection);
                 shader->SetVec3("uLightDirection", lightDirection);
                 shader->SetFloat("uLightIntensity", lightIntensity);
+                shader->SetVec3("uLightColor", glm::vec3(lightIntensity));  // custom lighting
+                shader->SetVec3("uAmbient", glm::vec3(0.05f));
                 UploadLoadedMaterialShaderParameters(*shader, *material);
             } else {
-                defaultShader.Bind();
+                if (shader != boundShader) {
+                    shader->Bind();
+                    boundShader = shader;
+                }
             }
             shader->SetMat4("uModel", model);
             shader->SetMat3(

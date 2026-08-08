@@ -2,7 +2,9 @@
 
 #include <glm/glm.hpp>
 
+#include <cstddef>
 #include <memory>
+#include <vector>
 
 namespace engine {
 
@@ -31,6 +33,8 @@ public:
 private:
     std::unique_ptr<Shader> m_shader;
     unsigned int m_instanceVbo = 0;
+    std::size_t m_instanceCapacity = 0;
+    std::vector<glm::mat4> m_lodMatrices[3];
     int m_visibleInstances = 0;
     int m_drawCalls = 0;
 };

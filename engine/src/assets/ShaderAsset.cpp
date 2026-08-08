@@ -25,7 +25,8 @@ constexpr std::size_t kMaximumTextures = 16;
 std::string CanonicalShaderAsset(const ShaderAsset& asset) {
     std::ostringstream out;
     out << asset.version << '|' << asset.id << '|' << asset.name << '|'
-        << static_cast<int>(asset.domain) << '|' << asset.blendMode;
+        << static_cast<int>(asset.domain) << '|' << asset.blendMode
+        << '|' << asset.lightingModel;
     for (const ShaderGraphNode& node : asset.nodes)
         out << "|n:" << node.id << ':' << node.type << ':' << node.name << ':'
             << node.x << ':' << node.y << ':' << node.comment << ':' << node.groupId
@@ -69,6 +70,7 @@ const char* ShaderDomainName(ShaderDomain domain) {
     case ShaderDomain::PostProcess: return "Post Process";
     case ShaderDomain::Particle: return "Particle";
     case ShaderDomain::Unlit: return "Unlit";
+    case ShaderDomain::Water: return "Water";
     }
     return "Surface";
 }
@@ -114,6 +116,7 @@ const char* ShaderDomainOutputNodeType(ShaderDomain domain) {
     case ShaderDomain::PostProcess: return "PostProcessOutput";
     case ShaderDomain::Particle: return "ParticleOutput";
     case ShaderDomain::Unlit: return "UnlitOutput";
+    case ShaderDomain::Water: return "WaterOutput";
     }
     return "SurfaceOutput";
 }
@@ -174,10 +177,16 @@ bool ConvertShaderAssetDomain(ShaderAsset& asset, ShaderDomain domain,
         "WidgetUV", "WidgetColor", "WidgetTexture", "ClipMask",
         "SignedDistance", "UnlitOutput"
     };
+    static const std::unordered_set<std::string> waterNodes = {
+        "WaterSceneColor", "WaterSceneDepth", "WaterShallowColor", "WaterDeepColor",
+        "WaterReflectionColor", "WaterSunColor", "WaterSunDirection", "WaterAmbient",
+        "WaterFoam", "WaterFresnel", "WaterOutput"
+    };
     const auto exclusiveDomain = [&](const std::string& type) {
         if (particleNodes.count(type)) return static_cast<int>(ShaderDomain::Particle);
         if (postNodes.count(type)) return static_cast<int>(ShaderDomain::PostProcess);
         if (unlitNodes.count(type)) return static_cast<int>(ShaderDomain::Unlit);
+        if (waterNodes.count(type)) return static_cast<int>(ShaderDomain::Water);
         if (type == "SurfaceOutput") return static_cast<int>(ShaderDomain::Surface);
         return -1;
     };
@@ -282,7 +291,7 @@ std::vector<ShaderAssetIssue> ValidateShaderAsset(const ShaderAsset& asset) {
     };
     if (asset.id == 0) error("Shader asset ID must be non-zero.");
     if (static_cast<int>(asset.domain) < static_cast<int>(ShaderDomain::Surface)
-        || static_cast<int>(asset.domain) > static_cast<int>(ShaderDomain::Unlit))
+        || static_cast<int>(asset.domain) > static_cast<int>(ShaderDomain::Water))
         error("Shader domain is invalid.");
     if (asset.name.empty()) error("Shader name cannot be empty.");
     if (asset.nodes.size() > kMaximumNodes) error("Shader graph exceeds 512 nodes.");
@@ -299,6 +308,7 @@ std::vector<ShaderAssetIssue> ValidateShaderAsset(const ShaderAsset& asset) {
     case ShaderDomain::PostProcess: requiredOutput = "PostProcessOutput"; break;
     case ShaderDomain::Particle: requiredOutput = "ParticleOutput"; break;
     case ShaderDomain::Unlit: requiredOutput = "UnlitOutput"; break;
+    case ShaderDomain::Water: requiredOutput = "WaterOutput"; break;
     }
     bool hasOutput = false;
     static const std::unordered_set<std::string> particleNodes = {
@@ -312,6 +322,11 @@ std::vector<ShaderAssetIssue> ValidateShaderAsset(const ShaderAsset& asset) {
     };
     static const std::unordered_set<std::string> widgetNodes = {
         "WidgetUV", "WidgetColor", "WidgetTexture", "ClipMask", "SignedDistance"
+    };
+    static const std::unordered_set<std::string> waterInputNodes = {
+        "WaterSceneColor", "WaterSceneDepth", "WaterShallowColor", "WaterDeepColor",
+        "WaterReflectionColor", "WaterSunColor", "WaterSunDirection", "WaterAmbient",
+        "WaterFoam", "WaterFresnel"
     };
     for (const ShaderGraphNode& node : asset.nodes) {
         if (node.id == 0 || !nodeIds.insert(node.id).second)
@@ -328,6 +343,8 @@ std::vector<ShaderAssetIssue> ValidateShaderAsset(const ShaderAsset& asset) {
             error("Scene input node is only valid in Post Process graphs.", node.id);
         if (widgetNodes.count(node.type) != 0 && asset.domain != ShaderDomain::Unlit)
             error("Widget input node is only valid in Unlit/UI graphs.", node.id);
+        if (waterInputNodes.count(node.type) != 0 && asset.domain != ShaderDomain::Water)
+            error("Water input node is only valid in Water graphs.", node.id);
     }
     if (!hasOutput) error(std::string(ShaderDomainName(asset.domain)) + " graph has no domain output node.");
 
@@ -530,7 +547,8 @@ bool SaveShaderAsset(const std::string& path, ShaderAsset& asset, std::string* e
     out << "3DG_SHADER " << ShaderAsset::CurrentVersion << ' '
         << asset.assetId.ToString() << '\n'
         << "graph " << asset.id << ' ' << std::quoted(asset.name) << ' '
-        << static_cast<int>(asset.domain) << ' ' << asset.blendMode << '\n';
+        << static_cast<int>(asset.domain) << ' ' << asset.blendMode << ' '
+        << asset.lightingModel << '\n';   // version 5+
     for (const ShaderGraphNode& node : asset.nodes) {
         out << "node " << node.id << ' ' << std::quoted(node.type) << ' '
             << std::quoted(node.name) << ' ' << node.x << ' ' << node.y << '\n';
@@ -642,7 +660,8 @@ bool LoadShaderAsset(const std::string& path, ShaderAsset* output, std::string* 
         if (record == "asset" || record == "graph") {
             int domain = 0;
             in >> asset.id >> std::quoted(asset.name) >> domain >> asset.blendMode;
-            asset.domain = static_cast<ShaderDomain>(std::clamp(domain, 0, 3));
+            asset.domain = static_cast<ShaderDomain>(std::clamp(domain, 0, 4));
+            if (asset.version >= 5) in >> asset.lightingModel;
         } else if (record == "node") {
             ShaderGraphNode node;
             in >> node.id >> std::quoted(node.type) >> std::quoted(node.name) >> node.x >> node.y;

@@ -17,18 +17,25 @@
 namespace engine {
 
 void UpdateHealth(ecs::Registry& reg) {
-    reg.view<Health>().each([](ecs::Entity, Health& h) {
+    auto healthView = reg.view<Health>();
+    if (healthView.empty()) return;
+    healthView.each([](ecs::Entity, Health& h) {
         h.justDied = false;
         if (h.alive && h.hp <= 0.0f) { h.hp = 0.0f; h.alive = false; h.justDied = true; }
     });
 }
 
-std::vector<ProjectileHit> UpdateProjectiles(ecs::Registry& reg, float dt) {
-    std::vector<ProjectileHit> hits;
-    std::vector<ecs::Entity>   spent;
-    const PhysicsWorld collisionQueries;
+namespace {
+void UpdateProjectilesImpl(ecs::Registry& reg, float dt,
+                           std::vector<ProjectileHit>* hitOutput) {
+    thread_local std::vector<ecs::Entity> spentStorage;
+    spentStorage.clear();
+    std::vector<ecs::Entity>& spent = spentStorage;
+    auto projectileView = reg.view<ecs::Transform, Projectile>();
+    if (projectileView.empty()) return;
+    static const PhysicsWorld collisionQueries;
 
-    reg.view<ecs::Transform, Projectile>().each([&](ecs::Entity pe, ecs::Transform& pt, Projectile& pr) {
+    projectileView.each([&](ecs::Entity pe, ecs::Transform& pt, Projectile& pr) {
         const glm::vec3 start = pt.position;
         const float step = std::max(pr.speed * dt, 0.0f);
         const glm::vec3 end = start + pr.dir * step;
@@ -46,13 +53,15 @@ std::vector<ProjectileHit> UpdateProjectiles(ecs::Registry& reg, float dt) {
             if (Health* health = reg.TryGet<Health>(contact.entity);
                 health && health->alive) {
                 health->Damage(pr.damage);
-                ProjectileHit hit;
-                hit.projectile = pe;
-                hit.target = contact.entity;
-                hit.point = contact.point;
-                hit.damage = pr.damage;
-                hit.lethal = health->hp <= 0.0f;
-                hits.push_back(hit);
+                if (hitOutput) {
+                    ProjectileHit hit;
+                    hit.projectile = pe;
+                    hit.target = contact.entity;
+                    hit.point = contact.point;
+                    hit.damage = pr.damage;
+                    hit.lethal = health->hp <= 0.0f;
+                    hitOutput->push_back(hit);
+                }
             }
             spent.push_back(pe);
         } else {
@@ -65,11 +74,23 @@ std::vector<ProjectileHit> UpdateProjectiles(ecs::Registry& reg, float dt) {
     });
 
     for (ecs::Entity e : spent) if (reg.Valid(e)) reg.Destroy(e);
+}
+} // namespace
+
+std::vector<ProjectileHit> UpdateProjectiles(ecs::Registry& reg, float dt) {
+    std::vector<ProjectileHit> hits;
+    UpdateProjectilesImpl(reg, dt, &hits);
     return hits;
 }
 
+void UpdateProjectilesInPlace(ecs::Registry& reg, float dt) {
+    UpdateProjectilesImpl(reg, dt, nullptr);
+}
+
 void UpdateAttachments(ecs::Registry& reg) {
-    reg.view<ecs::Transform, Attachment>().each([&](ecs::Entity, ecs::Transform& t, Attachment& a) {
+    auto attachmentView = reg.view<ecs::Transform, Attachment>();
+    if (attachmentView.empty()) return;
+    attachmentView.each([&](ecs::Entity, ecs::Transform& t, Attachment& a) {
         if (!reg.Valid(a.parent)) return;
         const ecs::Transform* pt = reg.TryGet<ecs::Transform>(a.parent);
         if (!pt) return;

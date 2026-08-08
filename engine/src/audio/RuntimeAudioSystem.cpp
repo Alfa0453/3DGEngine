@@ -5,6 +5,7 @@
 #include "engine/physics/PhysicsWorld.h"
 
 #include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <glm/gtc/quaternion.hpp>
 
@@ -34,7 +35,9 @@ void RuntimeAudioSystem::Update(ecs::Registry& registry, float dt) {
         }
     }
 
-    registry.view<ecs::AudioSource, ecs::Transform>().each(
+    auto audioView = registry.view<ecs::AudioSource, ecs::Transform>();
+    if (audioView.empty()) return;
+    audioView.each(
         [this, dt](ecs::Entity entity, ecs::AudioSource& source, ecs::Transform& transform) {
             auto voice = m_voices.find(entity);
             if (voice != m_voices.end()
@@ -70,25 +73,64 @@ void RuntimeAudioSystem::Update(ecs::Registry& registry, float dt) {
 
             const AudioEngine::SourceHandle handle = voice->second.handle;
             const glm::vec3 previousPosition = voice->second.position;
+            const bool moved = glm::dot(transform.position - previousPosition,
+                                        transform.position - previousPosition) > 1.0e-10f;
+            const bool rotated = std::abs(glm::dot(transform.rotation,
+                                                   voice->second.rotation)) < 0.999999f;
             voice->second.position = transform.position;
-            m_audio->SetSourceSpatial(handle, source.spatial);
-            m_audio->SetSourceLooping(handle, source.loop);
-            m_audio->SetSourceVolumePitch(handle, source.volume, source.pitch);
-            m_audio->SetSourceAttenuation(handle, source.minDistance,
-                                          source.maxDistance, source.rolloff);
+            voice->second.rotation = transform.rotation;
+            const bool settingsChanged = !voice->second.settingsInitialized
+                || voice->second.spatial != source.spatial
+                || voice->second.looping != source.loop
+                || voice->second.volume != source.volume
+                || voice->second.pitch != source.pitch
+                || voice->second.minDistance != source.minDistance
+                || voice->second.maxDistance != source.maxDistance
+                || voice->second.rolloff != source.rolloff
+                || voice->second.priority != source.priority;
+            const bool spatialSettingsChanged = !voice->second.settingsInitialized
+                || voice->second.coneInnerAngle != source.coneInnerAngle
+                || voice->second.coneOuterAngle != source.coneOuterAngle
+                || voice->second.coneOuterGain != source.coneOuterGain
+                || voice->second.dopplerFactor != source.dopplerFactor
+                || voice->second.occlusion != source.occlusion;
+            if (moved || settingsChanged || spatialSettingsChanged) ++m_audioRevision;
+            if (settingsChanged) {
+                m_audio->SetSourceSpatial(handle, source.spatial);
+                m_audio->SetSourceLooping(handle, source.loop);
+                m_audio->SetSourceVolumePitch(handle, source.volume, source.pitch);
+                m_audio->SetSourceAttenuation(handle, source.minDistance,
+                                              source.maxDistance, source.rolloff);
+                m_audio->SetSourcePriority(handle, source.priority);
+                voice->second.settingsInitialized = true;
+                voice->second.spatial = source.spatial;
+                voice->second.looping = source.loop;
+                voice->second.volume = source.volume;
+                voice->second.pitch = source.pitch;
+                voice->second.minDistance = source.minDistance;
+                voice->second.maxDistance = source.maxDistance;
+                voice->second.rolloff = source.rolloff;
+                voice->second.priority = source.priority;
+            }
             if (source.spatial) {
-                m_audio->SetSourcePosition(handle, transform.position);
-                if (dt > 0.000001f)
+                if (moved) m_audio->SetSourcePosition(handle, transform.position);
+                if (moved && dt > 0.000001f)
                     m_audio->SetSourceVelocity(handle,
                         (transform.position - previousPosition) / dt);
-                m_audio->SetSourceDirection(handle,
+                if (rotated) m_audio->SetSourceDirection(handle,
                     transform.rotation * glm::vec3(0.0f, 0.0f, -1.0f));
-                m_audio->SetSourceCone(handle, source.coneInnerAngle,
-                    source.coneOuterAngle, source.coneOuterGain);
-                m_audio->SetSourceDoppler(handle, source.dopplerFactor);
-                m_audio->SetSourceOcclusion(handle, source.occlusion);
+                if (spatialSettingsChanged) {
+                    m_audio->SetSourceCone(handle, source.coneInnerAngle,
+                        source.coneOuterAngle, source.coneOuterGain);
+                    m_audio->SetSourceDoppler(handle, source.dopplerFactor);
+                    m_audio->SetSourceOcclusion(handle, source.occlusion);
+                    voice->second.coneInnerAngle = source.coneInnerAngle;
+                    voice->second.coneOuterAngle = source.coneOuterAngle;
+                    voice->second.coneOuterGain = source.coneOuterGain;
+                    voice->second.dopplerFactor = source.dopplerFactor;
+                    voice->second.occlusion = source.occlusion;
+                }
             }
-            m_audio->SetSourcePriority(handle, source.priority);
         });
 }
 
@@ -165,7 +207,9 @@ ecs::Entity RuntimeAudioSystem::FindNamedEntity(ecs::Registry& registry,
                                                  const std::string& name) const {
     ecs::Entity result = ecs::kNull;
     if (name.empty()) return result;
-    registry.view<ecs::RuntimeName>().each(
+    auto nameView = registry.view<ecs::RuntimeName>();
+    if (nameView.empty()) return result;
+    nameView.each(
         [&result, &name](ecs::Entity entity, ecs::RuntimeName& runtimeName) {
             if (result == ecs::kNull && runtimeName.value == name) result = entity;
         });
@@ -233,12 +277,26 @@ bool RuntimeAudioSystem::ProcessAnimationEvent(ecs::Registry& registry,
 void RuntimeAudioSystem::UpdateOcclusion(ecs::Registry& registry,
                                          const PhysicsWorld& physics,
                                          const glm::vec3& listenerPosition) {
+    const glm::vec3 listenerDelta = listenerPosition - m_lastOcclusionListener;
+    if (m_haveOcclusionListener && m_occlusionRevision == m_audioRevision
+        && glm::dot(listenerDelta, listenerDelta) <= 1.0e-10f) return;
+    m_lastOcclusionListener = listenerPosition;
+    m_haveOcclusionListener = true;
+    m_occlusionRevision = m_audioRevision;
     for (const auto& entry : m_voices) {
         if (entry.second.cue || entry.second.handle == AudioEngine::InvalidSource) continue;
         const ecs::AudioSource* source = registry.TryGet<ecs::AudioSource>(entry.first);
         if (!source || !source->spatial) continue;
         const glm::vec3 delta = entry.second.position - listenerPosition;
-        const float distance = glm::length(delta);
+        const float distanceSq = glm::dot(delta, delta);
+        // Sources outside their attenuation range (or muted entirely) cannot
+        // contribute to the mix, so avoid an occlusion raycast for them. A
+        // later transform/settings change bumps m_audioRevision and revisits
+        // the source when it becomes audible again.
+        if (source->volume <= 0.0001f) continue;
+        if (source->maxDistance > 0.0f
+            && distanceSq > source->maxDistance * source->maxDistance) continue;
+        const float distance = std::sqrt(distanceSq);
         float occlusion = source->occlusion;
         if (distance > 0.01f) {
             const RaycastHit hit = physics.Raycast(registry,

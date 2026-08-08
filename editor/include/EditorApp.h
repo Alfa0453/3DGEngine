@@ -26,6 +26,7 @@
 #include <engine/graphics/RuntimeParticleSystem.h>
 #include <engine/graphics/PostProcess.h>
 #include <engine/graphics/ProceduralSky.h>
+#include <engine/graphics/Skybox.h>
 #include <engine/graphics/Renderer.h>
 #include <engine/graphics/Shader.h>
 #include <engine/graphics/SkinnedRenderer.h>
@@ -50,6 +51,20 @@
 #include "HudEditorPanel.h"
 #include "CharacterEditorPanel.h"
 #include "ClipEditorPanel.h"
+#include "MeshEditorPanel.h"
+#include "ModularPlacementPanel.h"
+#include "PrefabPalettePanel.h"
+#include "RoomBuilderPanel.h"
+#include "ScatterPaintPanel.h"
+#include "ArrayToolPanel.h"
+#include "MeasurementPanel.h"
+#include "LevelValidationPanel.h"
+#include "LevelVariantPanel.h"
+#include "LevelLayersPanel.h"
+#include "ViewportBookmarksPanel.h"
+#include "BlockoutPanel.h"
+#include "AlignmentPanel.h"
+#include "SplineBuilderPanel.h"
 #include "PrefabAsset.h"
 
 #include <engine/scene/WorldManifest.h>
@@ -77,6 +92,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <filesystem>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -184,6 +200,43 @@ private:
     void DrawCharacterEditorPanel();
     void DrawClipEditorPanel();
     void DrawGraphEditorPanel();
+    void DrawMeshEditorPanel();
+    void DrawModularPlacementPanel();
+    void DrawPrefabPalettePanel();
+    void DrawRoomBuilderPanel();
+    void DrawScatterPaintPanel();
+    void DrawArrayToolPanel();
+    void DrawMeasurementPanel();
+    void DrawLevelValidationPanel();
+    void DrawLevelVariantPanel();
+    void DrawLevelLayersPanel();
+    void DrawViewportBookmarksPanel();
+    void DrawBlockoutPanel();
+    void DrawAlignmentPanel();
+    void DrawSplineBuilderPanel();
+    void GenerateSplineBuild();
+    int DeleteGeneratedSplineBuild(const std::string& groupName);
+    void GenerateBlockout();
+    int DeleteGeneratedBlockout(const std::string& groupName);
+    void GenerateRoom();
+    int DeleteGeneratedRoom(const std::string& roomName);
+    void PaintScatterStamp(const glm::vec3& center, const glm::vec3& normal,
+                           bool projectToTerrain);
+    int EraseScatterAt(const glm::vec3& center, float radius);
+    int ClearPaintedScatter();
+    void GenerateObjectArray();
+    int DeleteGeneratedArray(const std::string& groupName);
+    bool ComputeModularPlacement(float viewportX, float viewportY,
+                                 glm::vec3* position, glm::vec3* normal);
+    bool PlaceSelectedModule(const glm::vec3& position,
+                             const glm::vec3& surfaceNormal);
+    void ReplaceSelectionWithModule();
+    bool ComputePrefabPalettePlacement(float viewportX, float viewportY,
+                                       const PrefabPalettePanel::Placement& placement,
+                                       glm::vec3* position, glm::vec3* normal);
+    bool PlacePalettePrefab(const PrefabPalettePanel::Placement& placement,
+                            const glm::vec3& position);
+    void ReplaceSelectionWithPalettePrefab();
     void DrawPrefabEditorPanel();   // author a reusable object template (.3dgprefab)
     void DrawScriptDebugPanel();    // live per-entity script field inspector (Play mode)
     void HotReloadScripts();        // rebuild + reload game_scripts.dll without restart (dev)
@@ -220,6 +273,11 @@ private:
     void DrawEditScene(const glm::mat4& viewProj);
     void UpdateEnvironmentIbl(const EditorScene::Environment& environment,
                           const engine::DayNightCycle::Sample& sky);
+    // (Re)load the imported equirectangular sky when skyTexturePath changes.
+    void EnsureImportedSky(const EditorScene::Environment& environment);
+    // Draw the active sky (procedural or imported) — used by the scene render and IBL.
+    void DrawEnvironmentSky(const glm::mat4& view, const glm::mat4& projection,
+                            const engine::DayNightCycle::Sample& sky, bool tonemap);
     void ConfigureEnvironmentPbrOptions(engine::ecs::Registry& registry,
                                         engine::PbrRenderer::Options& options,
                                         const EditorScene::Environment& environment,
@@ -236,6 +294,7 @@ private:
     engine::TerrainLayerSurface TerrainLayerMaterialSurface(const std::string& materialPath);
     bool AverageImageColor(const std::string& relativePath, glm::vec3& outColor);
     float TerrainSurfaceY(float worldX, float worldZ, bool& over);  // walkable height query
+    std::string TerrainNameAt(float worldX, float worldZ);          // terrain object under a point
     float WaterSurfaceY(float worldX, float worldZ, bool& over);     // wave height for buoyancy
     bool UpdateUnderwaterState(const engine::Camera& camera, float dt);
     void ApplyWaterBuoyancy(float dt);                               // float/sink dynamic bodies in water
@@ -283,6 +342,10 @@ private:
     void ToggleSelectedLocked();
     void FrameSelected();
     void DuplicateSelected();
+    // Bake the current multi-selection of static objects (primitives + static
+    // model assets) into one .3dgmesh and replace them with a single object
+    // referencing it (implemented in EditorApp_MergeMesh.cpp).
+    bool MergeSelectedToSingleMesh();
     void DeleteSelected();
     void Undo();
     void Redo();
@@ -431,6 +494,9 @@ private:
     std::optional<engine::ParticleRenderer> m_particleRenderer;
     std::optional<engine::PostProcess>   m_postProcess;
     std::optional<engine::ProceduralSky> m_sky;
+    std::optional<engine::Skybox>        m_importedSky;   // imported equirect sky (when skyMode=1)
+    std::string                          m_importedSkyPath;
+    std::string                          m_lastSkySignature;   // IBL re-bake key
     std::optional<engine::IBL>           m_ibl;
     std::optional<engine::SSAO>          m_ssao;
     std::optional<engine::SSR>           m_ssr;
@@ -455,6 +521,10 @@ private:
     };
     std::unordered_map<engine::ecs::Entity, TerrainCache> m_terrains;
     std::unordered_map<engine::ecs::Entity, engine::Water> m_waters;   // one Water per water object
+    // Cache of custom water-shader GLSL source keyed by file path, with the file's last
+    // write time so edits hot-reload. Returned source feeds WaterConfig.customFragmentSource.
+    std::unordered_map<std::string,
+        std::pair<std::filesystem::file_time_type, std::string>> m_waterShaderCache;
     std::unordered_map<engine::ecs::Entity, std::unique_ptr<engine::GrassField>> m_grass;   // one grass field per terrain
     std::unordered_map<std::string, engine::TerrainLayerSurface> m_terrainMaterialSurfaces;
     engine::TerrainCameraConstraint m_terrainCameraConstraint;
@@ -496,6 +566,27 @@ private:
     CharacterEditorPanel                 m_characterEditor;
     ClipEditorPanel                      m_clipEditor;
     AnimationGraphEditorPanel            m_graphEditor;
+    MeshEditorPanel                      m_meshEditor;
+    ModularPlacementPanel                m_modularPlacement;
+    PrefabPalettePanel                   m_prefabPalette;
+    RoomBuilderPanel                     m_roomBuilder;
+    ScatterPaintPanel                    m_scatterPaint;
+    ArrayToolPanel                       m_arrayTool;
+    MeasurementPanel                     m_measurementPanel;
+    LevelValidationPanel                 m_levelValidation;
+    LevelVariantPanel                    m_levelVariants;
+    LevelLayersPanel                     m_levelLayers;
+    ViewportBookmarksPanel               m_viewportBookmarks;
+    BlockoutPanel                        m_blockoutPanel;
+    AlignmentPanel                       m_alignmentPanel;
+    SplineBuilderPanel                   m_splineBuilder;
+    glm::vec3                            m_lastModulePaintPosition{0.0f};
+    bool                                 m_hasLastModulePaintPosition = false;
+    glm::vec3                            m_scatterBrushPosition{0.0f};
+    glm::vec3                            m_scatterBrushNormal{0.0f, 1.0f, 0.0f};
+    glm::vec3                            m_lastScatterStrokePosition{0.0f};
+    bool                                 m_hasScatterBrushHit = false;
+    bool                                 m_hasLastScatterStrokePosition = false;
     PrefabAsset                          m_prefabAsset;      // prefab being authored in the Prefab Editor
     engine::WorldManifest                m_worldAuthoring;   // world being composed in the World Editor
     std::string                          m_worldAuthoringPath;  // .3dgworld authoring file
@@ -540,6 +631,7 @@ private:
     std::vector<EditorViewport::PhysicsEventGuide> m_physicsEventGuides;
     std::vector<engine::ScriptAnimationEvent> m_playAnimationEvents;
     bool m_showPhysicsEventGuides = false;
+    bool m_showGameplayTraces = true;
     bool m_showAiDebug = true;
     bool m_showParticleDebug = true;
     bool m_showCameraRails = true;

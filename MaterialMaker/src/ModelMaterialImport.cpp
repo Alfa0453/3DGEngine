@@ -12,7 +12,9 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <fstream>
 #include <system_error>
+#include <vector>
 
 namespace material_maker {
 namespace {
@@ -65,6 +67,62 @@ std::string Extension(const std::string& path) {
     return extension;
 }
 
+// Write BGRA bottom-up pixels as an uncompressed 32-bit TGA (the engine loads TGA
+// natively — same format the ORM packer emits).
+bool WriteTga32(const std::string& path, int w, int h,
+                const std::vector<unsigned char>& bgraBottomUp) {
+    std::ofstream out(path, std::ios::binary);
+    if (!out) return false;
+    unsigned char header[18] = {0};
+    header[2]  = 2;                                        // uncompressed true-colour
+    header[12] = static_cast<unsigned char>(w & 0xFF);
+    header[13] = static_cast<unsigned char>((w >> 8) & 0xFF);
+    header[14] = static_cast<unsigned char>(h & 0xFF);
+    header[15] = static_cast<unsigned char>((h >> 8) & 0xFF);
+    header[16] = 32;                                       // bits per pixel
+    header[17] = 8;                                        // 8 alpha bits, bottom-up origin
+    out.write(reinterpret_cast<const char*>(header), sizeof(header));
+    out.write(reinterpret_cast<const char*>(bgraBottomUp.data()),
+              static_cast<std::streamsize>(bgraBottomUp.size()));
+    return static_cast<bool>(out);
+}
+
+// Extract one embedded engine-mesh texture (bottom-up RGBA8) to a TGA in `outputDir`
+// and return its absolute path, or "" when the slot is empty / cannot be written.
+// This is why importing from a .3dgmesh/.3dgskmesh used to lose all textures: the
+// maps live *inside* the asset rather than as external files, so they must be
+// unpacked to disk before the material can reference them.
+std::string ExtractEmbeddedTexture(
+    const std::vector<engine::StaticMeshTextureData>& textures,
+    int index, const std::string& outputDir, const std::string& stem) {
+    if (index < 0 || outputDir.empty()
+        || index >= static_cast<int>(textures.size())) {
+        return std::string();
+    }
+    const engine::StaticMeshTextureData& tex = textures[static_cast<std::size_t>(index)];
+    const int w = static_cast<int>(tex.width);
+    const int h = static_cast<int>(tex.height);
+    if (w <= 0 || h <= 0 || w > 65535 || h > 65535
+        || tex.rgba.size() < static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 4u) {
+        return std::string();
+    }
+    // Engine textures are bottom-up RGBA8; TGA true-colour expects BGRA — swap R/B.
+    std::vector<unsigned char> bgra(tex.rgba.size());
+    for (std::size_t p = 0; p + 3 < tex.rgba.size(); p += 4) {
+        bgra[p + 0] = tex.rgba[p + 2];
+        bgra[p + 1] = tex.rgba[p + 1];
+        bgra[p + 2] = tex.rgba[p + 0];
+        bgra[p + 3] = tex.rgba[p + 3];
+    }
+    std::error_code ec;
+    std::filesystem::create_directories(outputDir, ec);
+    const std::string safeStem = stem.empty() ? std::string("texture") : stem;
+    const std::string path =
+        (std::filesystem::path(outputDir) / (safeStem + ".tga")).string();
+    if (!WriteTga32(path, w, h, bgra)) return std::string();
+    return path;
+}
+
 MaterialDocument NativeMaterial(
     const engine::StaticMeshMaterialData& source) {
     MaterialDocument document;
@@ -104,7 +162,8 @@ int CountModelMaterials(const std::string& modelPath, std::string* error) {
 }
 
 ModelImportResult ImportMaterialFromModel(const std::string& modelPath, int materialIndex,
-                                          MaterialDocument* out) {
+                                          MaterialDocument* out,
+                                          const std::string& outputDir) {
     ModelImportResult result;
     if (!out) {
         result.error = "output material pointer was null.";
@@ -112,31 +171,38 @@ ModelImportResult ImportMaterialFromModel(const std::string& modelPath, int mate
     }
 
     const std::string extension = Extension(modelPath);
-    if (extension == ".3dgmesh") {
-        engine::StaticMeshAssetData asset;
-        if (!engine::LoadStaticMeshAsset(modelPath, &asset, &result.error))
-            return result;
-        result.materialCount = static_cast<int>(asset.materials.size());
+    if (extension == ".3dgmesh" || extension == ".3dgskmesh") {
+        std::vector<engine::StaticMeshMaterialData>* materials = nullptr;
+        std::vector<engine::StaticMeshTextureData>* textures = nullptr;
+        engine::StaticMeshAssetData staticAsset;
+        engine::SkeletalMeshAssetData skeletalAsset;
+        if (extension == ".3dgmesh") {
+            if (!engine::LoadStaticMeshAsset(modelPath, &staticAsset, &result.error))
+                return result;
+            materials = &staticAsset.materials;
+            textures = &staticAsset.textures;
+        } else {
+            if (!engine::LoadSkeletalMeshAsset(modelPath, &skeletalAsset, &result.error))
+                return result;
+            materials = &skeletalAsset.materials;
+            textures = &skeletalAsset.textures;
+        }
+        result.materialCount = static_cast<int>(materials->size());
         if (materialIndex < 0 || materialIndex >= result.materialCount) {
             result.error = "material index out of range.";
             return result;
         }
-        *out = NativeMaterial(
-            asset.materials[static_cast<std::size_t>(materialIndex)]);
-        result.ok = true;
-        return result;
-    }
-    if (extension == ".3dgskmesh") {
-        engine::SkeletalMeshAssetData asset;
-        if (!engine::LoadSkeletalMeshAsset(modelPath, &asset, &result.error))
-            return result;
-        result.materialCount = static_cast<int>(asset.materials.size());
-        if (materialIndex < 0 || materialIndex >= result.materialCount) {
-            result.error = "material index out of range.";
-            return result;
-        }
-        *out = NativeMaterial(
-            asset.materials[static_cast<std::size_t>(materialIndex)]);
+        const engine::StaticMeshMaterialData& src =
+            (*materials)[static_cast<std::size_t>(materialIndex)];
+        MaterialDocument doc = NativeMaterial(src);
+        // Unpack the material's embedded texture maps to disk so the imported
+        // material actually references them (previously they were dropped).
+        const std::string stem = SanitizeFileStem(doc.name);
+        doc.albedoMap = ExtractEmbeddedTexture(*textures, src.diffuseMap, outputDir,
+                                               stem + "_albedo");
+        doc.normalMap = ExtractEmbeddedTexture(*textures, src.normalMap, outputDir,
+                                               stem + "_normal");
+        *out = doc;
         result.ok = true;
         return result;
     }

@@ -2,6 +2,7 @@
 #include "engine/graphics/Shader.h"
 
 #include <glad/glad.h>
+#include <glm/glm.hpp>
 
 namespace engine {
 
@@ -23,6 +24,8 @@ void DrawModel(const Model& model, Shader& shader,
     shader.SetInt("uSpecularTex", 2);
     shader.SetInt("uEmissiveTex", 3);
 
+    // DrawModel has no object transform argument, so its model-space winding is
+    // the imported convention. Callers with mirrored transforms use the PBR path.
     for (const SubMesh& sm : model.SubMeshes()) {
         const bool valid = sm.material >= 0 && sm.material < static_cast<int>(mats.size());
         const Material def;
@@ -80,6 +83,7 @@ void DrawModel(const Model& model, Shader& shader,
     }
 
     glDisable(GL_CULL_FACE);   // restore the default (off) for subsequent draws
+    glFrontFace(GL_CCW);
 }
 
 }// namespace engine

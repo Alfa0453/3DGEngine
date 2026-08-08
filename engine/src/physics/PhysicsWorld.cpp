@@ -66,6 +66,22 @@ struct OBB {
     glm::vec3 ext;       // half-extents
 };
 
+float ColliderBoundRadius(const Collider& c) {
+    switch (c.shape) {
+        case ColliderShape::Sphere:   return std::max(c.radius, 0.0f);
+        case ColliderShape::Capsule:  return std::max(c.radius + c.halfHeight, 0.0f);
+        case ColliderShape::Box:
+        case ColliderShape::Cylinder:
+        case ColliderShape::Cone:
+        case ColliderShape::Pyramid:
+        case ColliderShape::Torus:
+        case ColliderShape::Staircase:
+            return glm::length(c.halfExtents);
+        case ColliderShape::Plane:    return std::numeric_limits<float>::infinity();
+    }
+    return 0.0f;
+}
+
 // Sleeping bodies act as immovable (invMass 0, zero velocity) until woken.
 // Kinematic bodies are immovable too (infinite mass) -- they push but aren't
 // pushed -- yet velOf() still reports their velocity so they impart momentum.
@@ -998,13 +1014,19 @@ float SweepRadiusOf(const Collider* c) {
 } // namespace
 
 void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
+    auto bodyView = reg.view<Transform, RigidBody>();
+    auto colliderView = reg.view<Transform, Collider>();
+    if (bodyView.empty() && colliderView.empty() && m_touching.empty()) {
+        m_events.clear();
+        return;
+    }
     // 0) Spring joints add forces before integration.
     for (const Joint& j : m_joints)
         if (j.type == Joint::Type::Spring) ApplySpring(reg, j);
 
     // 1) Integrate (semi-implicit Euler): velocity first, then position. A body
     //    with CCD enabled sweeps its motion and clamps to the first impact.
-    reg.view<Transform, RigidBody>().each([&](Entity e, Transform& t, RigidBody& rb) {
+    bodyView.each([&](Entity e, Transform& t, RigidBody& rb) {
         if (rb.kinematic) {
             // Driven purely by its own (scripted/animated) velocity: no gravity,
             // forces, damping, CCD, or sleep -- but it moves and can push dynamics.
@@ -1061,7 +1083,7 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
 
     // 2) Gather colliders into the reused body list.
     m_bodies.clear();
-    reg.view<Transform, Collider>().each([&](Entity e, Transform& t, Collider& c) {
+    colliderView.each([&](Entity e, Transform& t, Collider& c) {
         m_bodies.push_back(SolverBody{e, &t, &c, reg.TryGet<RigidBody>(e)});
     });
     const int N = static_cast<int>(m_bodies.size());
@@ -1118,6 +1140,8 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
     //    event is preserved without re-detecting.
     m_manifolds.clear();
     m_touchingNow.clear();
+    if (m_touchingNow.bucket_count() < m_pairs.size())
+        m_touchingNow.reserve(m_pairs.size());
     SolverBody* base = m_bodies.data();
     for (const auto& pr : m_pairs) {
         SolverBody* A = &m_bodies[pr.first];
@@ -1154,10 +1178,14 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
 
     // 5) Emit Enter/Stay/Exit events by diffing against last step. Solid contacts
     //    carry contact point + normal now; the impulse is filled in after the solve.
-    std::unordered_map<std::uint64_t, int> manifoldOf;    // pair key -> manifold index
+    m_manifoldOf.clear();    // pair key -> manifold index
+    if (m_manifoldOf.bucket_count() < m_manifolds.size())
+        m_manifoldOf.reserve(m_manifolds.size());
     for (int mi = 0; mi < static_cast<int>(m_manifolds.size()); ++mi)
-        manifoldOf[m_manifolds[mi].key] = mi;
-    std::unordered_map<std::uint64_t, int> eventOf;       // pair key -> event index (solids)
+        m_manifoldOf[m_manifolds[mi].key] = mi;
+    m_eventOf.clear();       // pair key -> event index (solids)
+    if (m_eventOf.bucket_count() < m_touchingNow.size())
+        m_eventOf.reserve(m_touchingNow.size());
 
     m_events.clear();
     for (const auto& kv : m_touchingNow) {
@@ -1167,15 +1195,15 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
         ev.b = Entity(kv.first & 0xFFFFFFFFu);
         ev.phase = was ? CollisionEvent::Phase::Stay : CollisionEvent::Phase::Enter;
         ev.trigger = kv.second;
-        const auto mit = manifoldOf.find(kv.first);
-        if (mit != manifoldOf.end()) {
+        const auto mit = m_manifoldOf.find(kv.first);
+        if (mit != m_manifoldOf.end()) {
             const ContactManifold& m = m_manifolds[mit->second];
             ev.normal = m.normal;
             glm::vec3 avg(0.0f);
             for (int k = 0; k < m.count; ++k) avg += m.points[k];
             if (m.count > 0) avg /= static_cast<float>(m.count);
             ev.point = avg;
-            eventOf[kv.first] = static_cast<int>(m_events.size());   // impulse filled after solve
+            m_eventOf[kv.first] = static_cast<int>(m_events.size());   // impulse filled after solve
         }
         m_events.push_back(ev);
     }
@@ -1227,8 +1255,8 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
             total += m.normalImpulse[k];
         }
         m_contactCache[m.key] = cc;
-        const auto eit = eventOf.find(m.key);        // O(1) instead of scanning m_events
-        if (eit != eventOf.end()) m_events[eit->second].impulse = total;
+        const auto eit = m_eventOf.find(m.key);        // O(1) instead of scanning m_events
+        if (eit != m_eventOf.end()) m_events[eit->second].impulse = total;
     }
 
     // 7) One positional-correction pass from the cached penetrations.
@@ -1367,17 +1395,47 @@ float RayCapsule(const glm::vec3& o, const glm::vec3& d,
 
 } // namespace
 
+void PhysicsWorld::RecordDebugTrace(const DebugTrace& trace) const {
+    if (!m_debugTracing) return;
+    constexpr std::size_t kMaxTraces = 512;
+    if (m_debugTraces.size() >= kMaxTraces)
+        m_debugTraces.erase(m_debugTraces.begin());
+    m_debugTraces.push_back(trace);
+}
+
 RaycastHit PhysicsWorld::Raycast(ecs::Registry& reg, const Ray& ray, float maxDistance,
                                  std::uint32_t layerMask, Entity ignored) const {
     RaycastHit best;
     best.distance = maxDistance;
+    const auto finish = [&](RaycastHit result) {
+        DebugTrace trace;
+        trace.type = DebugTrace::Type::Ray;
+        trace.start = ray.origin;
+        const float directionLength = glm::length(ray.direction);
+        const glm::vec3 direction = directionLength > 1.0e-6f
+            ? ray.direction / directionLength : glm::vec3(0.0f);
+        trace.end = ray.origin + direction * (result.hit ? result.distance : maxDistance);
+        trace.hit = result.hit;
+        trace.hitPoint = result.point;
+        RecordDebugTrace(trace);
+        return result;
+    };
     const float len2 = glm::dot(ray.direction, ray.direction);
-    if (len2 < 1e-12f) return best;              // degenerate ray
+    if (len2 < 1e-12f) return finish(best);              // degenerate ray
+    if (layerMask == 0u) return finish(best);
     const glm::vec3 d = ray.direction / std::sqrt(len2);
 
-    reg.view<Transform, Collider>().each([&](Entity e, Transform& t, Collider& c) {
+    auto colliderView = reg.view<Transform, Collider>();
+    if (colliderView.empty()) return finish(best);
+    colliderView.each([&](Entity e, Transform& t, Collider& c) {
         if (e == ignored || c.isTrigger) return;
         if ((c.layer & layerMask) == 0u) return;    // filtered out by the query mask
+        if (std::isfinite(maxDistance)) {
+            const float bound = ColliderBoundRadius(c);
+            const glm::vec3 offset = t.position - ray.origin;
+            const float reach = maxDistance + bound;
+            if (glm::dot(offset, offset) > reach * reach) return;
+        }
         glm::vec3 n(0.0f);
         float hitT = -1.0f;
         if (c.shape == ColliderShape::Sphere) {
@@ -1432,7 +1490,7 @@ RaycastHit PhysicsWorld::Raycast(ecs::Registry& reg, const Ray& ray, float maxDi
     });
 
     if (!best.hit) best.distance = 0.0f;
-    return best;
+    return finish(best);
 }
 
 RaycastHit PhysicsWorld::SphereCast(ecs::Registry& reg,
@@ -1446,17 +1504,42 @@ RaycastHit PhysicsWorld::SphereCast(ecs::Registry& reg,
     RaycastHit result;
     const glm::vec3 travel = end - start;
     const float distance = glm::length(travel);
-    if (distance < 1e-6f) return result;
+    const auto finish = [&](RaycastHit value) {
+        DebugTrace trace;
+        trace.type = DebugTrace::Type::Sphere;
+        trace.start = start;
+        trace.end = end;
+        trace.radius = std::max(radius, 0.0f);
+        trace.hit = value.hit;
+        trace.hitPoint = value.point;
+        RecordDebugTrace(trace);
+        return value;
+    };
+    if (distance < 1e-6f) return finish(result);
+    if (layerMask == 0u) return finish(result);
 
     float bestToi = 1.0f;
     glm::vec3 bestNormal(0.0f);
     Entity bestEntity = ecs::kNull;
     const float sweepRadius = std::max(radius, 0.0f);
+    const float travel2 = glm::dot(travel, travel);
 
-    reg.view<Transform, Collider>().each([&](Entity entity, Transform& transform, Collider& collider) {
+    auto colliderView = reg.view<Transform, Collider>();
+    if (colliderView.empty()) return finish(result);
+    colliderView.each([&](Entity entity, Transform& transform, Collider& collider) {
         if (entity == ignored || entity == alsoIgnored || collider.isTrigger) return;
         if ((collider.layer & layerMask) == 0u) return;    // filtered out by the query mask
         if (queryLayer != 0u && (collider.mask & queryLayer) == 0u) return;
+        const float bound = ColliderBoundRadius(collider);
+        if (std::isfinite(bound)) {
+            const float u = glm::clamp(
+                glm::dot(transform.position - start, travel) / travel2,
+                0.0f, 1.0f);
+            const glm::vec3 closest = start + travel * u;
+            const glm::vec3 offset = transform.position - closest;
+            const float reach = sweepRadius + bound;
+            if (glm::dot(offset, offset) > reach * reach) return;
+        }
 
         float toi = 1.0f;
         glm::vec3 normal(0.0f);
@@ -1518,22 +1601,42 @@ RaycastHit PhysicsWorld::SphereCast(ecs::Registry& reg,
         }
     });
 
-    if (bestEntity == ecs::kNull) return result;
+    if (bestEntity == ecs::kNull) return finish(result);
     result.hit = true;
     result.entity = bestEntity;
     result.distance = distance * bestToi;
     result.point = start + travel * bestToi;
     result.normal = bestNormal;
-    return result;
+    return finish(result);
 }
 
 std::vector<ecs::Entity> PhysicsWorld::OverlapSphere(ecs::Registry& reg,
                                                      const glm::vec3& center, float radius,
                                                      std::uint32_t layerMask) const {
     std::vector<ecs::Entity> hits;
+    const auto finish = [&](std::vector<ecs::Entity> value) {
+        DebugTrace trace;
+        trace.type = DebugTrace::Type::Overlap;
+        trace.start = center;
+        trace.end = center;
+        trace.radius = std::max(radius, 0.0f);
+        trace.hit = !value.empty();
+        trace.hitPoint = center;
+        RecordDebugTrace(trace);
+        return value;
+    };
+    if (layerMask == 0u) return finish(std::move(hits));
     const float r = std::max(radius, 0.0f);
-    reg.view<Transform, Collider>().each([&](Entity e, Transform& t, Collider& c) {
+    auto colliderView = reg.view<Transform, Collider>();
+    if (colliderView.empty()) return finish(std::move(hits));
+    colliderView.each([&](Entity e, Transform& t, Collider& c) {
         if ((c.layer & layerMask) == 0u) return;
+        const float bound = ColliderBoundRadius(c);
+        if (std::isfinite(bound)) {
+            const glm::vec3 offset = t.position - center;
+            const float reach = r + bound;
+            if (glm::dot(offset, offset) > reach * reach) return;
+        }
         // Overlap the query sphere (radius r) against the collider by closest-point.
         bool overlap = false;
         if (c.shape == ColliderShape::Sphere) {
@@ -1579,20 +1682,24 @@ std::vector<ecs::Entity> PhysicsWorld::OverlapSphere(ecs::Registry& reg,
         }
         if (overlap) hits.push_back(e);
     });
-    return hits;
+    return finish(std::move(hits));
 }
 
 void PhysicsWorld::ApplyRadialImpulse(ecs::Registry& reg, const glm::vec3& center,
                                       float radius, float strength,
                                       std::uint32_t layerMask) const {
-    if (radius <= 0.0f) return;
-    reg.view<Transform, RigidBody>().each([&](Entity e, Transform& t, RigidBody& rb) {
+    if (radius <= 0.0f || strength == 0.0f || layerMask == 0u) return;
+    auto bodyView = reg.view<Transform, RigidBody>();
+    if (bodyView.empty()) return;
+    const float radiusSq = radius * radius;
+    bodyView.each([&](Entity e, Transform& t, RigidBody& rb) {
         if (rb.invMass <= 0.0f || rb.kinematic) return;
         if (const Collider* c = reg.TryGet<Collider>(e))
             if ((c->layer & layerMask) == 0u) return;
         const glm::vec3 d = t.position - center;
-        const float dist = glm::length(d);
-        if (dist > radius) return;
+        const float distSq = glm::dot(d, d);
+        if (distSq > radiusSq) return;
+        const float dist = std::sqrt(distSq);
         const glm::vec3 dir = (dist > 1e-4f) ? d / dist : glm::vec3(0.0f, 1.0f, 0.0f);
         const float falloff = 1.0f - dist / radius;
         rb.velocity += dir * (strength * falloff * rb.invMass);

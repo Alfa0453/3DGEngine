@@ -11,6 +11,7 @@
 #include <engine/graphics/FoliageRenderer.h>
 #include <engine/graphics/SkinnedRenderer.h>
 #include <engine/graphics/ProceduralSky.h>
+#include <engine/graphics/Skybox.h>
 #include <engine/graphics/PostProcess.h>
 #include <engine/graphics/DayNightCycle.h>
 #include <engine/graphics/IBL.h>
@@ -93,6 +94,7 @@ private:
     void BuildTerrains();
     void BuildWaters();
     void DrawWaters(const engine::Camera& camera, float aspect);
+    void DrawEnvironmentSky(const glm::mat4& view, const glm::mat4& projection, bool tonemap);
     void CaptureWaterSceneBuffers();
     float WaterSurfaceY(float x, float z, bool& over) const;
     void ApplyWaterBuoyancy(float dt);
@@ -122,6 +124,7 @@ private:
     std::optional<engine::Shader>        m_modelShader;   // static-model (LoadedModelAsset) pass
     std::optional<engine::SkinnedRenderer> m_skinnedRenderer;  // animated-character pass
     std::optional<engine::ProceduralSky> m_sky;
+    std::optional<engine::Skybox>        m_importedSky;   // marketplace equirect sky (skyMode=1)
     std::optional<engine::PostProcess>   m_post;
     std::optional<engine::TextRenderer>  m_text;
     std::optional<engine::IBL>           m_ibl;

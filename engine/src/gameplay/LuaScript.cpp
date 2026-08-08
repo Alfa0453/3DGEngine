@@ -211,6 +211,9 @@ void LuaScript::RegisterEngineApi() {
         {"SpawnFromObject", ApiSpawnFromObject},
         {"ConfigureProjectile", ApiConfigureProjectile},
         {"SocketPosition", ApiSocketPosition},
+        {"TraceLine", ApiTraceLine},
+        {"TraceSphere", ApiTraceSphere},
+        {"TraceOverlapSphere", ApiTraceOverlapSphere},
         {"IsKeyDown", ApiKeyDown},
         {"WasKeyPressed", ApiKeyPressed},
         {"IsMouseButtonDown", ApiMouseDown},
@@ -359,6 +362,69 @@ int LuaScript::ApiGetForward(lua_State* state) {
     PushVec3(state, glm::normalize(
         transform->rotation * glm::vec3(0.0f, 0.0f, 1.0f)));
     return 3;
+}
+
+int LuaScript::ApiTraceLine(lua_State* state) {
+    LuaScript* script = Current(state);
+    const glm::vec3 start(
+        static_cast<float>(luaL_checknumber(state, 1)),
+        static_cast<float>(luaL_checknumber(state, 2)),
+        static_cast<float>(luaL_checknumber(state, 3)));
+    const glm::vec3 end(
+        static_cast<float>(luaL_checknumber(state, 4)),
+        static_cast<float>(luaL_checknumber(state, 5)),
+        static_cast<float>(luaL_checknumber(state, 6)));
+    const std::uint32_t mask = static_cast<std::uint32_t>(
+        luaL_optinteger(state, 7, static_cast<lua_Integer>(0xFFFFFFFFu)));
+    const RaycastHit hit = script->TraceLine(start, end, mask);
+    lua_pushboolean(state, hit.hit);
+    if (hit.hit) lua_pushinteger(state, static_cast<lua_Integer>(hit.entity));
+    else lua_pushnil(state);
+    lua_pushnumber(state, hit.distance);
+    PushVec3(state, hit.point);
+    return 6;
+}
+
+int LuaScript::ApiTraceSphere(lua_State* state) {
+    LuaScript* script = Current(state);
+    const glm::vec3 start(
+        static_cast<float>(luaL_checknumber(state, 1)),
+        static_cast<float>(luaL_checknumber(state, 2)),
+        static_cast<float>(luaL_checknumber(state, 3)));
+    const glm::vec3 end(
+        static_cast<float>(luaL_checknumber(state, 4)),
+        static_cast<float>(luaL_checknumber(state, 5)),
+        static_cast<float>(luaL_checknumber(state, 6)));
+    const float radius = static_cast<float>(luaL_checknumber(state, 7));
+    const std::uint32_t mask = static_cast<std::uint32_t>(
+        luaL_optinteger(state, 8, static_cast<lua_Integer>(0xFFFFFFFFu)));
+    const RaycastHit hit = script->TraceSphere(start, end, radius, mask);
+    lua_pushboolean(state, hit.hit);
+    if (hit.hit) lua_pushinteger(state, static_cast<lua_Integer>(hit.entity));
+    else lua_pushnil(state);
+    lua_pushnumber(state, hit.distance);
+    PushVec3(state, hit.point);
+    return 6;
+}
+
+int LuaScript::ApiTraceOverlapSphere(lua_State* state) {
+    LuaScript* script = Current(state);
+    const glm::vec3 center(
+        static_cast<float>(luaL_checknumber(state, 1)),
+        static_cast<float>(luaL_checknumber(state, 2)),
+        static_cast<float>(luaL_checknumber(state, 3)));
+    const float radius = static_cast<float>(luaL_checknumber(state, 4));
+    const std::uint32_t mask = static_cast<std::uint32_t>(
+        luaL_optinteger(state, 5, static_cast<lua_Integer>(0xFFFFFFFFu)));
+    const std::vector<ecs::Entity> entities =
+        script->TraceOverlapSphere(center, radius, mask);
+    lua_createtable(state, static_cast<int>(entities.size()), 0);
+    int index = 1;
+    for (const ecs::Entity entity : entities) {
+        lua_pushinteger(state, static_cast<lua_Integer>(entity));
+        lua_rawseti(state, -2, index++);
+    }
+    return 1;
 }
 
 int LuaScript::ApiFindObject(lua_State* state) {

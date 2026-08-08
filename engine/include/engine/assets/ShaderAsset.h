@@ -13,7 +13,8 @@ enum class ShaderDomain : std::uint8_t {
     Surface = 0,
     PostProcess,
     Particle,
-    Unlit
+    Unlit,
+    Water
 };
 
 enum class ShaderValueType : std::uint8_t {
@@ -70,7 +71,7 @@ struct ShaderParameter {
 };
 
 struct ShaderAsset {
-    static constexpr int CurrentVersion = 4;
+    static constexpr int CurrentVersion = 5;
     int version = CurrentVersion;
     AssetHandle assetId;
     // Graph-local ID seed. This is intentionally separate from the stable
@@ -79,6 +80,10 @@ struct ShaderAsset {
     std::string name = "New Shader";
     ShaderDomain domain = ShaderDomain::Surface;
     int blendMode = 0;
+    // Surface lighting model: 0 = PBR (engine lights the graph outputs), 1 = Custom
+    // (unlit) — the graph's Base Color becomes the final colour, so you author your own
+    // lighting (e.g. a toon ramp) using the Light Direction/Color/Ambient nodes.
+    int lightingModel = 0;
     std::vector<ShaderGraphNode> nodes;
     std::vector<ShaderGraphPin> pins;
     std::vector<ShaderGraphLink> links;

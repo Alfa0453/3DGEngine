@@ -76,6 +76,18 @@ struct RaycastHit {
     glm::vec3   normal{0.0f};
 };
 
+// Optional trace capture for the editor gameplay debugger. Recording is
+// disabled by default and has no query overhead when disabled.
+struct DebugTrace {
+    enum class Type { Ray, Sphere, Overlap };
+    Type type = Type::Ray;
+    glm::vec3 start{0.0f};
+    glm::vec3 end{0.0f};
+    float radius = 0.0f;
+    bool hit = false;
+    glm::vec3 hitPoint{0.0f};
+};
+
 // A collision/overlap event emitted by a step. Enter on the first step a pair
 // touches, Stay while they keep touching, Exit on the step they separate.
 // trigger is true when either collider is a trigger (overlap-only) volume.
@@ -169,6 +181,11 @@ public:
                                            const glm::vec3& center, float radius,
                                            std::uint32_t layerMask = 0xFFFFFFFFu) const;
 
+    void SetDebugTracing(bool enabled) const { m_debugTracing = enabled; }
+    bool DebugTracing() const { return m_debugTracing; }
+    void ClearDebugTraces() const { m_debugTraces.clear(); }
+    const std::vector<DebugTrace>& DebugTraces() const { return m_debugTraces; }
+
     // Apply a radial impulse to dynamic bodies within 'radius' of 'center',
     // scaled by 1 - dist/radius (linear falloff). Wakes sleeping bodies. Handy for
     // explosions. strength is the peak impulse magnitude at the centre.
@@ -232,8 +249,11 @@ public:
     }
 
 private:
+    void RecordDebugTrace(const DebugTrace& trace) const;
     std::vector<CollisionEvent>             m_events;    // events from the last step
     std::unordered_map<std::uint64_t, bool> m_touching;  // pair key -> wasTrigger (persists)
+    mutable bool m_debugTracing = false;
+    mutable std::vector<DebugTrace> m_debugTraces;
     std::vector<Joint>                      m_joints;
 
     // Persistent scratch, reused (cleared, not reallocated) every step.
@@ -245,6 +265,8 @@ private:
     std::unordered_map<std::int64_t, std::vector<int>> m_grid;
     std::unordered_map<std::uint64_t, bool> m_touchingNow;
     std::unordered_map<std::uint64_t, ContactCache> m_contactCache;  // warm-start impulses
+    std::unordered_map<std::uint64_t, int> m_manifoldOf;
+    std::unordered_map<std::uint64_t, int> m_eventOf;
 };
 
 } // namespace engine

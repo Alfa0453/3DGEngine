@@ -27,10 +27,15 @@ struct VisionCone {
 inline bool InvisionCone(const glm::vec3& eye, const glm::vec3& forward,
                          const VisionCone& cone, const glm::vec3& target) {
     const glm::vec3 d = target - eye;
-    const float dist = glm::length(d);
-    if (dist > cone.range) return false;
-    if (dist < 1e-5f) return true;
-    const float cosToTarget = glm::dot(glm::normalize(forward), d / dist);
+    const float dist2 = glm::dot(d, d);
+    const float range = std::max(cone.range, 0.0f);
+    if (dist2 > range * range) return false;
+    if (dist2 < 1e-10f) return true;
+    const float forwardLen2 = glm::dot(forward, forward);
+    if (forwardLen2 < 1e-10f) return false;
+    const float dist = std::sqrt(dist2);
+    const float cosToTarget = glm::dot(forward, d)
+        / (std::sqrt(forwardLen2) * dist);
     return cosToTarget >= std::cos(glm::radians(cone.halfAngleDegrees));
 }
 
@@ -58,13 +63,15 @@ struct SoundStimulus {
 // Writes the perceived loudness (source loudness attenuated by distance) if given.
 inline bool CanHear(const glm::vec3& ear, float hearingRange, const SoundStimulus& s,
                     float* perceivedLoudness = nullptr) {
-    const float dist  = glm::length(s.position - ear);
     const float reach = (hearingRange > 0.0f) ? std::min(hearingRange, s.radius) : s.radius;
-    if (s.radius <= 0.0f || dist > reach) {
+    const glm::vec3 delta = s.position - ear;
+    if (s.radius <= 0.0f || reach <= 0.0f
+        || glm::dot(delta, delta) > reach * reach) {
         if (perceivedLoudness) *perceivedLoudness = 0.0f;
         return false;
     }
     if (perceivedLoudness) {
+        const float dist = std::sqrt(glm::dot(delta, delta));
         const float falloff = 1.0f - (dist / s.radius);   // linear to the source radius
         *perceivedLoudness = s.loudness * (falloff > 0.0f ? falloff : 0.0f);
     }
@@ -90,6 +97,7 @@ public:
 
     // Age every stimulus and drop the ones that have expired. Call once per frame.
     void Update(float dt) {
+        if (m_entries.empty()) return;
         for (Entry& e : m_entries) e.timeLeft -= dt;
         m_entries.erase(std::remove_if(m_entries.begin(), m_entries.end(),
                         [](const Entry& e) { return e.timeLeft <= 0.0f; }),
@@ -100,13 +108,28 @@ public:
     // are audible; otherwise writes the noise position (and perceived loudness).
     bool LoudestAudible(const glm::vec3& ear, float hearingRange,
                         glm::vec3* outPosition, float* outLoudness = nullptr) const {
+        if (m_entries.empty()) {
+            if (outLoudness) *outLoudness = 0.0f;
+            return false;
+        }
         bool found = false;
         float best = -1.0f;
         glm::vec3 bestPos{0.0f};
         for (const Entry& e : m_entries) {
-            const SoundStimulus s = e.Current();
-            float perceived = 0.0f;
-            if (CanHear(ear, hearingRange, s, &perceived) && perceived > best) {
+            const SoundStimulus& s = e.stimulus;
+            const float reach = (hearingRange > 0.0f)
+                ? std::min(hearingRange, s.radius) : s.radius;
+            if (s.radius <= 0.0f || reach <= 0.0f) continue;
+            const glm::vec3 delta = s.position - ear;
+            const float distSq = glm::dot(delta, delta);
+            if (distSq > reach * reach) continue;
+            const float dist = std::sqrt(distSq);
+            const float falloff = 1.0f - dist / s.radius;
+            const float life = e.ttl > 0.0f
+                ? (e.timeLeft > 0.0f ? e.timeLeft / e.ttl : 0.0f) : 0.0f;
+            const float perceived = s.loudness * life
+                * (falloff > 0.0f ? falloff : 0.0f);
+            if (perceived > best) {
                 best = perceived; bestPos = s.position; found = true;
             }
         }

@@ -162,6 +162,7 @@ bool UpdateGpuPlayback(ParticleSystemComponent& system, const glm::vec3& positio
         AdvanceDuration(system, activeDt);
     }
     const float updateDt = active ? activeDt : dt;
+    if (!active && spawnCount == 0 && system.gpuEmitter->Alive() == 0) return true;
     system.gpuEmitter->Update(system.config, position, delta, system.localSpace, updateDt, spawnCount,
                               collisionShapes);
     return true;
@@ -171,19 +172,27 @@ bool UpdateGpuPlayback(ParticleSystemComponent& system, const glm::vec3& positio
 
 void UpdateParticleSystems(ecs::Registry& registry, float dt) {
     const float frameDt = std::max(dt, 0.0f);
-    std::vector<ParticleCollisionShape> collisionShapes;
-    std::vector<ecs::Entity> collisionOwners;
+    thread_local std::vector<ParticleCollisionShape> collisionShapesStorage;
+    thread_local std::vector<ecs::Entity> collisionOwnersStorage;
+    auto& collisionShapes = collisionShapesStorage;
+    auto& collisionOwners = collisionOwnersStorage;
+    collisionShapes.clear();
+    collisionOwners.clear();
     bool needsCollisionShapes = false;
-    registry.view<ParticleSystemComponent>().each(
+    auto particleView = registry.view<ParticleSystemComponent>();
+    if (!particleView.empty()) particleView.each(
         [&needsCollisionShapes](ecs::Entity, ParticleSystemComponent& system) {
             needsCollisionShapes |= system.config.collisionEnabled;
         });
-    registry.view<ParticleEffectComponent>().each(
+    auto effectView = registry.view<ParticleEffectComponent>();
+    if (!effectView.empty()) effectView.each(
         [&needsCollisionShapes](ecs::Entity, ParticleEffectComponent& effect) {
             for (const ParticleEffectLayer& layer : effect.layers)
                 needsCollisionShapes |= layer.system.config.collisionEnabled;
         });
-    if (needsCollisionShapes) registry.view<ecs::Collider, ecs::Transform>().each(
+    if (needsCollisionShapes) {
+        auto colliderView = registry.view<ecs::Collider, ecs::Transform>();
+        if (!colliderView.empty()) colliderView.each(
         [&collisionShapes, &collisionOwners](ecs::Entity owner, ecs::Collider& collider,
                                              ecs::Transform& transform) {
             if (collider.isTrigger) return;
@@ -217,8 +226,13 @@ void UpdateParticleSystems(ecs::Registry& registry, float dt) {
             collisionShapes.push_back(shape);
             collisionOwners.push_back(owner);
         });
-    registry.view<ParticleSystemComponent, ecs::Transform>().each(
-        [frameDt, &collisionShapes, &collisionOwners](ecs::Entity entity,
+    }
+    thread_local std::vector<ParticleCollisionShape> filteredCollisionsStorage;
+    auto& filteredCollisions = filteredCollisionsStorage;
+    filteredCollisions.clear();
+    auto particleTransformView = registry.view<ParticleSystemComponent, ecs::Transform>();
+    if (!particleTransformView.empty()) particleTransformView.each(
+        [frameDt, &collisionShapes, &collisionOwners, &filteredCollisions](ecs::Entity entity,
             ParticleSystemComponent& system, ecs::Transform& transform) {
             if (!system.initialized) ResetPlayback(system, transform.position);
             SanitizeParticleConfig(system.config);
@@ -230,14 +244,15 @@ void UpdateParticleSystems(ecs::Registry& registry, float dt) {
             system.emitter.position = transform.position;
             system.emitter.cfg = system.config;
 
-            std::vector<ParticleCollisionShape> filtered;
+            filteredCollisions.clear();
             if (system.config.collisionEnabled) {
-                filtered.reserve(collisionShapes.size());
+                filteredCollisions.reserve(collisionShapes.size());
                 for (std::size_t i = 0; i < collisionShapes.size(); ++i)
-                    if (collisionOwners[i] != entity) filtered.push_back(collisionShapes[i]);
+                    if (collisionOwners[i] != entity) filteredCollisions.push_back(collisionShapes[i]);
             }
 
-            if (UpdateGpuPlayback(system, transform.position, delta, frameDt, true, filtered)) return;
+            if (UpdateGpuPlayback(system, transform.position, delta, frameDt, true,
+                                  filteredCollisions)) return;
 
             const float scaledDt = frameDt * std::max(system.simulationSpeed, 0.0f);
             auto updateEmitter = [&](float step) {
@@ -245,15 +260,17 @@ void UpdateParticleSystems(ecs::Registry& registry, float dt) {
                     system.emitter.Update(step);
                     return;
                 }
-                system.emitter.Update(step, filtered);
+                system.emitter.Update(step, filteredCollisions);
             };
             if (!system.enabled) {
                 system.emitter.emitting = false;
+                if (system.emitter.Alive() == 0) return;
                 updateEmitter(scaledDt);
                 return;
             }
             if (!system.playing) {
                 system.emitter.emitting = false;
+                if (system.emitter.Alive() == 0) return;
                 updateEmitter(scaledDt);
                 return;
             }
@@ -275,8 +292,9 @@ void UpdateParticleSystems(ecs::Registry& registry, float dt) {
             updateEmitter(activeDt);
             AdvanceDuration(system, activeDt);
         });
-    registry.view<ParticleEffectComponent, ecs::Transform>().each(
-        [frameDt, &collisionShapes, &collisionOwners](ecs::Entity entity,
+    auto effectTransformView = registry.view<ParticleEffectComponent, ecs::Transform>();
+    if (!effectTransformView.empty()) effectTransformView.each(
+        [frameDt, &collisionShapes, &collisionOwners, &filteredCollisions](ecs::Entity entity,
             ParticleEffectComponent& effect, ecs::Transform& transform) {
             for (ParticleEffectLayer& layer : effect.layers) {
                 ParticleSystemComponent& system = layer.system;
@@ -288,21 +306,25 @@ void UpdateParticleSystems(ecs::Registry& registry, float dt) {
                 system.lastPosition = position;
                 system.emitter.position = position;
                 system.emitter.cfg = system.config;
-                std::vector<ParticleCollisionShape> filtered;
+                filteredCollisions.clear();
                 if (system.config.collisionEnabled) {
-                    filtered.reserve(collisionShapes.size());
+                    filteredCollisions.reserve(collisionShapes.size());
                     for (std::size_t i = 0; i < collisionShapes.size(); ++i)
-                        if (collisionOwners[i] != entity) filtered.push_back(collisionShapes[i]);
+                        if (collisionOwners[i] != entity)
+                            filteredCollisions.push_back(collisionShapes[i]);
                 }
                 if (UpdateGpuPlayback(system, position, delta, frameDt,
-                                      effect.enabled && layer.enabled, filtered)) continue;
+                                      effect.enabled && layer.enabled,
+                                      filteredCollisions)) continue;
                 const float scaledDt = frameDt * std::max(system.simulationSpeed, 0.0f);
                 auto update = [&](float step) {
-                    if (system.config.collisionEnabled) system.emitter.Update(step, filtered);
+                    if (system.config.collisionEnabled)
+                        system.emitter.Update(step, filteredCollisions);
                     else system.emitter.Update(step);
                 };
                 if (!effect.enabled || !layer.enabled || !system.enabled || !system.playing) {
                     system.emitter.emitting = false;
+                    if (system.emitter.Alive() == 0) continue;
                     update(scaledDt);
                     continue;
                 }
@@ -552,7 +574,8 @@ bool ProcessParticleAnimationEvent(ecs::Registry& registry, ecs::Entity emitter,
     if (separator != std::string::npos && separator + 1 < eventName.size()) {
         const std::string targetName = eventName.substr(separator + 1);
         target = ecs::kNull;
-        registry.view<ecs::RuntimeName>().each(
+        auto nameView = registry.view<ecs::RuntimeName>();
+        if (!nameView.empty()) nameView.each(
             [&](ecs::Entity entity, ecs::RuntimeName& name) {
                 if (target == ecs::kNull && name.value == targetName) target = entity;
             });
@@ -575,9 +598,11 @@ void ProcessParticleCollisionEvents(ecs::Registry& registry,
             const TriggerParticleAction* binding = registry.TryGet<TriggerParticleAction>(trigger);
             if (!binding || binding->targetName.empty()) continue;
             ecs::Entity target = ecs::kNull;
-            registry.view<ecs::RuntimeName>().each([&](ecs::Entity entity, ecs::RuntimeName& name) {
-                if (target == ecs::kNull && name.value == binding->targetName) target = entity;
-            });
+            auto nameView = registry.view<ecs::RuntimeName>();
+            if (!nameView.empty()) nameView.each(
+                [&](ecs::Entity entity, ecs::RuntimeName& name) {
+                    if (target == ecs::kNull && name.value == binding->targetName) target = entity;
+                });
             const ParticleAction action = event.phase == CollisionEvent::Phase::Exit
                 ? binding->onExit : binding->onEnter;
             ApplyParticleAction(registry, target, action);

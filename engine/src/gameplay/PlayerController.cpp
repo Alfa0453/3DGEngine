@@ -126,7 +126,10 @@ void PlayerController::Update(ecs::Registry& reg, const PlayerInput& in, float d
     }
     const float wl = glm::length(wish);
     if (wl > 1.0f) wish /= wl;
-    const float speed = in.sprint ? runSpeed : walkSpeed;                     // no faster on diagonals
+    // Sprint is a grounded movement mode. Air control remains available at walk
+    // speed, but holding Shift during a jump/fall cannot accelerate the capsule.
+    const bool sprinting = in.sprint && body.grounded && !in.jump;
+    const float speed = sprinting ? runSpeed : walkSpeed;                     // no faster on diagonals
     const glm::vec3 wishVel = wish * speed;
 
     // Body facing. CameraRelative: the mesh tracks the camera yaw (strafe style).

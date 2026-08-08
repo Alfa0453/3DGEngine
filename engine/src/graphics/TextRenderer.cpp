@@ -1,5 +1,6 @@
 #include "engine/graphics/TextRenderer.h"
 #include "engine/graphics/ShaderParameterBinding.h"
+#include "engine/graphics/GpuProfiler.h"
 
 #include "engine/graphics/Shader.h"
 #include "engine/graphics/Texture.h"
@@ -8,6 +9,8 @@
 #include <glad/glad.h>
 #include <glm/gtc/matrix_transform.hpp>
 
+#include <algorithm>
+#include <cstddef>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -304,8 +307,8 @@ void TextRenderer::Text(const std::string& text, float x, float y, float scale, 
         const float baseline = f.ascent * rs;           // baseline offset from line top
         const float fallback = f.pixelHeight * 0.5f;
 
-        std::vector<float> verts;
-        verts.reserve(text.size() * 6 * 4);
+        m_vertices.clear();
+        m_vertices.reserve(text.size() * 6 * 4);
 
         float penX = x;
         float lineTop = y;
@@ -329,22 +332,27 @@ void TextRenderer::Text(const std::string& text, float x, float y, float scale, 
                     {x1, y1, g.u1, g.v1}, {x0, y1, g.u0, g.v1}, {x0, y0, g.u0, g.v0},
                 };
                 for (const auto& vtx : quad) {
-                    verts.push_back(vtx[0]); verts.push_back(vtx[1]);
-                    verts.push_back(vtx[2]); verts.push_back(vtx[3]);
+                    m_vertices.push_back(vtx[0]); m_vertices.push_back(vtx[1]);
+                    m_vertices.push_back(vtx[2]); m_vertices.push_back(vtx[3]);
                 }
             }
             penX += g.advance * rs;
         }
-        if (verts.empty()) return;
+        if (m_vertices.empty()) return;
 
         m_shader->SetFloat("uSolid", 0.0f);
         m_shader->SetVec3("uColor", color);
         BindActiveAtlas();
         glBindVertexArray(m_vao);
         glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
-        glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(verts.size() * sizeof(float)),
-                                      verts.data(), GL_DYNAMIC_DRAW);
-        glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(verts.size() / 4));
+        const std::size_t bytes = m_vertices.size() * sizeof(float);
+        if (bytes > m_vboCapacity) {
+            m_vboCapacity = std::max(bytes, std::max<std::size_t>(m_vboCapacity * 2, 4096));
+            glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(m_vboCapacity), nullptr, GL_DYNAMIC_DRAW);
+        }
+        glBufferSubData(GL_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(bytes), m_vertices.data());
+        GpuProfiler::RecordDrawCall();
+        glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(m_vertices.size() / 4));
         return;
     }
 
@@ -353,8 +361,8 @@ void TextRenderer::Text(const std::string& text, float x, float y, float scale, 
     const float au = 1.0f / kAtlasW;
     const float av = 1.0f / kAtlasH;
 
-    std::vector<float> verts;
-    verts.reserve(text.size() * 6 * 4);
+    m_vertices.clear();
+    m_vertices.reserve(text.size() * 6 * 4);
 
     float penX = x;
     float penY = y;
@@ -381,21 +389,26 @@ void TextRenderer::Text(const std::string& text, float x, float y, float scale, 
             {x1, y1, u1, v1}, {x0, y1, u0, v1}, {x0, y0, u0, v0},
         };
         for (const auto& vtx : quad) {
-            verts.push_back(vtx[0]); verts.push_back(vtx[1]);
-            verts.push_back(vtx[2]); verts.push_back(vtx[3]);
+            m_vertices.push_back(vtx[0]); m_vertices.push_back(vtx[1]);
+            m_vertices.push_back(vtx[2]); m_vertices.push_back(vtx[3]);
         }
         penX += cell;
     }
 
-    if (verts.empty()) return;
+    if (m_vertices.empty()) return;
 
     m_shader->SetFloat("uSolid", 0.0f);
     m_shader->SetVec3("uColor", color);
     glBindVertexArray(m_vao);
     glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
-    glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(verts.size() * sizeof(float)),
-                                  verts.data(), GL_DYNAMIC_DRAW);
-    glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(verts.size() / 4));
+    const std::size_t bytes = m_vertices.size() * sizeof(float);
+    if (bytes > m_vboCapacity) {
+        m_vboCapacity = std::max(bytes, std::max<std::size_t>(m_vboCapacity * 2, 4096));
+        glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(m_vboCapacity), nullptr, GL_DYNAMIC_DRAW);
+    }
+    glBufferSubData(GL_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(bytes), m_vertices.data());
+    GpuProfiler::RecordDrawCall();
+    glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(m_vertices.size() / 4));
 }
 
 void TextRenderer::FillRect(float x, float y, float w, float h, const glm::vec3& color, float alpha) {
@@ -403,20 +416,24 @@ void TextRenderer::FillRect(float x, float y, float w, float h, const glm::vec3&
         {x,     y,     0.0f, 0.0f}, {x + w, y,     0.0f, 0.0f}, {x + w, y + h, 0.0f, 0.0f},
         {x + w, y + h, 0.0f, 0.0f}, {x,     y + h, 0.0f, 0.0f}, {x,     y,     0.0f, 0.0f},
     };
-    std::vector<float> verts;
-    verts.reserve(6 * 4);
+    m_vertices.clear();
+    m_vertices.reserve(6 * 4);
     for (const auto& v : q) {
-        verts.push_back(v[0]); verts.push_back(v[1]);
-        verts.push_back(v[2]); verts.push_back(v[3]);
+        m_vertices.push_back(v[0]); m_vertices.push_back(v[1]);
+        m_vertices.push_back(v[2]); m_vertices.push_back(v[3]);
     }
     m_shader->SetFloat("uSolid", 1.0f);
     m_shader->SetVec3("uColor", color);
     m_shader->SetFloat("uAlpha", alpha);
     glBindVertexArray(m_vao);
     glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
-    glBufferData(GL_ARRAY_BUFFER,
-                 static_cast<GLsizeiptr>(verts.size()* sizeof(float)),
-                 verts.data(), GL_DYNAMIC_DRAW);
+    const std::size_t bytes = m_vertices.size() * sizeof(float);
+    if (bytes > m_vboCapacity) {
+        m_vboCapacity = std::max(bytes, std::max<std::size_t>(m_vboCapacity * 2, 4096));
+        glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(m_vboCapacity), nullptr, GL_DYNAMIC_DRAW);
+    }
+    glBufferSubData(GL_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(bytes), m_vertices.data());
+    GpuProfiler::RecordDrawCall();
     glDrawArrays(GL_TRIANGLES, 0, 6);
     m_shader->SetFloat("uSolid", 0.0f);
 }
@@ -429,11 +446,11 @@ void TextRenderer::Image(unsigned int textureId, float x, float y, float w, floa
         {x,     y,     0.0f, 1.0f}, {x + w, y,     1.0f, 1.0f}, {x + w, y + h, 1.0f, 0.0f},
         {x + w, y + h, 1.0f, 0.0f}, {x,     y + h, 0.0f, 0.0f}, {x,     y,     0.0f, 1.0f},
     };
-    std::vector<float> verts;
-    verts.reserve(6 * 4);
+    m_vertices.clear();
+    m_vertices.reserve(6 * 4);
     for (const auto& v : q) {
-        verts.push_back(v[0]); verts.push_back(v[1]);
-        verts.push_back(v[2]); verts.push_back(v[3]);
+        m_vertices.push_back(v[0]); m_vertices.push_back(v[1]);
+        m_vertices.push_back(v[2]); m_vertices.push_back(v[3]);
     }
 
     glActiveTexture(GL_TEXTURE0);
@@ -444,9 +461,13 @@ void TextRenderer::Image(unsigned int textureId, float x, float y, float w, floa
     m_shader->SetFloat("uAlpha", alpha);
     glBindVertexArray(m_vao);
     glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
-    glBufferData(GL_ARRAY_BUFFER,
-                 static_cast<GLsizeiptr>(verts.size() * sizeof(float)),
-                 verts.data(), GL_DYNAMIC_DRAW);
+    const std::size_t bytes = m_vertices.size() * sizeof(float);
+    if (bytes > m_vboCapacity) {
+        m_vboCapacity = std::max(bytes, std::max<std::size_t>(m_vboCapacity * 2, 4096));
+        glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(m_vboCapacity), nullptr, GL_DYNAMIC_DRAW);
+    }
+    glBufferSubData(GL_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(bytes), m_vertices.data());
+    GpuProfiler::RecordDrawCall();
     glDrawArrays(GL_TRIANGLES, 0, 6);
 
     // Restore state so later Text()/FillRect() use the font atlas again.
@@ -491,6 +512,7 @@ void TextRenderer::CustomRect(
     glBindVertexArray(m_vao);
     glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
     glBufferData(GL_ARRAY_BUFFER, sizeof(q), q, GL_DYNAMIC_DRAW);
+    GpuProfiler::RecordDrawCall();
     glDrawArrays(GL_TRIANGLES, 0, 6);
 
     m_shader->Bind();

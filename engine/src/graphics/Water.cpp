@@ -3,6 +3,7 @@
 #include "engine/graphics/Shader.h"
 #include "engine/graphics/Camera.h"
 #include "engine/graphics/IBL.h"
+#include "engine/graphics/Frustum.h"
 #include "engine/graphics/VertexLayout.h"
 #include "engine/math/Spline.h"
 
@@ -12,6 +13,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -62,6 +64,13 @@ float sea_height(vec2 xz, float time, float seaHeight, float seaChoppy,
     return h;
 }
 )glsl";
+
+constexpr const char* kWaterContactUniforms[Water::kMaxContacts] = {
+    "uContacts[0]", "uContacts[1]", "uContacts[2]", "uContacts[3]",
+    "uContacts[4]", "uContacts[5]", "uContacts[6]", "uContacts[7]",
+    "uContacts[8]", "uContacts[9]", "uContacts[10]", "uContacts[11]",
+    "uContacts[12]", "uContacts[13]", "uContacts[14]", "uContacts[15]"
+};
 
 const char* kWaterVertBody = R"glsl(
 layout(location = 0) in vec3 aPos;
@@ -119,7 +128,11 @@ void main() {
 }
 )glsl";
 
-const char* kWaterFragBody = R"glsl(
+// Fragment declarations: every `in` varying and `uniform` the engine binds, plus the
+// FragColor output. This block is ALWAYS prepended (to both the built-in fragment body
+// and any custom water shader) so a custom shader has the full water interface available
+// without re-declaring anything — it only writes helper functions + main().
+const char* kWaterFragDecls = R"glsl(
 in vec3 vWorldPos;
 in vec2 vFlowDir;
 in vec3 vBaseNormal;
@@ -173,7 +186,11 @@ uniform int   uContactCount;
 uniform vec4  uContacts[kMaxContacts];   // xy = world XZ centre, z = radius, w = strength
 
 out vec4 FragColor;
+)glsl";
 
+// Default surface implementation: helper functions + main(). Swapped out wholesale when a
+// water object supplies a custom fragment shader (which provides its own helpers + main).
+const char* kWaterFragImpl = R"glsl(
 // Detailed normal from the height field via central differences of sea_height.
 vec3 waterNormal(vec2 xz, float eps) {
     float h  = sea_height(xz,                 uTime, uSeaHeight, uSeaChoppy, uSeaSpeed, uSeaFreq, 5);
@@ -357,7 +374,13 @@ std::string BuildVert() {
     return std::string("#version 330 core\n") + kWaterNoise + kWaterVertBody;
 }
 std::string BuildFrag() {
-    return std::string("#version 330 core\n") + kWaterNoise + kWaterFragBody;
+    return std::string("#version 330 core\n") + kWaterNoise + kWaterFragDecls + kWaterFragImpl;
+}
+// A custom water shader supplies only the fragment body (helpers + main). The engine
+// prepends the version, shared noise helpers, and the full declaration block so every
+// water uniform / varying is already in scope.
+std::string BuildCustomFrag(const std::string& body) {
+    return std::string("#version 330 core\n") + kWaterNoise + kWaterFragDecls + body;
 }
 
 } // namespace
@@ -366,10 +389,29 @@ Water::Water(const WaterConfig& config) : m_config(config) {
     const std::string vert = BuildVert();
     const std::string frag = BuildFrag();
     m_shader = std::make_unique<Shader>(vert.c_str(), frag.c_str());
+    RebuildCustomShader();
     BuildMesh();
 }
 
 Water::~Water() = default;
+
+void Water::RebuildCustomShader() {
+    m_customShader.reset();
+    m_customShaderError.clear();
+    if (m_config.customFragmentSource.empty()) return;
+    const std::string vert = BuildVert();
+    const std::string frag = BuildCustomFrag(m_config.customFragmentSource);
+    ShaderCompileReport report;
+    std::unique_ptr<Shader> compiled = Shader::TryCompile(vert, frag, report);
+    if (compiled && report.success) {
+        m_customShader = std::move(compiled);
+    } else {
+        // Keep rendering with the built-in shader; surface the first diagnostic.
+        m_customShaderError = report.diagnostics.empty()
+            ? std::string("Custom water shader failed to compile.")
+            : report.diagnostics.front().message;
+    }
+}
 
 void Water::SetConfig(const WaterConfig& config) {
     bool splineChanged = config.splineClosed != m_config.splineClosed
@@ -390,16 +432,27 @@ void Water::SetConfig(const WaterConfig& config) {
         }
     }
     const bool rebuild = config.size != m_config.size
-        || config.resolution != m_config.resolution || splineChanged;
+        || config.resolution != m_config.resolution
+        || config.center != m_config.center || splineChanged;
+    const bool customShaderChanged =
+        config.customFragmentSource != m_config.customFragmentSource;
     m_config = config;
+    if (customShaderChanged) RebuildCustomShader();
     if (rebuild || !m_mesh) BuildMesh();
 }
 
 void Water::BuildMesh() {
     const int res = (m_config.resolution < 1) ? 1 : m_config.resolution;
+    m_splineLength = 0.0f;
+    m_spline.SetPoints(m_config.splinePoints);
+    m_spline.SetClosed(m_config.splineClosed);
+    std::vector<glm::vec3> flatPoints = m_config.splinePoints;
+    for (glm::vec3& point : flatPoints) point.y = 0.0f;
+    m_flatSpline.SetPoints(std::move(flatPoints));
+    m_flatSpline.SetClosed(m_config.splineClosed);
     if (m_config.splinePoints.size() >= 2) {
-        const Spline spline(m_config.splinePoints, m_config.splineClosed);
-        const float length = std::max(spline.Length(), 0.01f);
+        const float length = std::max(m_spline.Length(), 0.01f);
+        m_splineLength = length;
         const float width = std::max(m_config.riverWidth, 0.1f);
         // A river needs substantially more longitudinal vertices than a square patch:
         // every row rotates to the spline tangent, so this density is what makes the
@@ -414,7 +467,7 @@ void Water::BuildMesh() {
         std::vector<glm::vec3> centers(static_cast<std::size_t>(along + 1));
         for (int z = 0; z <= along; ++z) {
             const float d = length * static_cast<float>(z) / static_cast<float>(along);
-            centers[static_cast<std::size_t>(z)] = spline.PositionAtDistance(d);
+            centers[static_cast<std::size_t>(z)] = m_spline.PositionAtDistance(d);
         }
         // Prevent the two banks crossing at turns tighter than half the authored
         // width. A short smoothing pass makes the narrowing gradual rather than a
@@ -525,6 +578,17 @@ void Water::BuildMesh() {
                 indices.insert(indices.end(), {i0, i2, i1, i1, i2, i3});
             }
         }
+        glm::vec3 boundsMin(std::numeric_limits<float>::max());
+        glm::vec3 boundsMax(std::numeric_limits<float>::lowest());
+        const float verticalPadding = std::abs(m_config.seaHeight)
+            + std::abs(m_config.seaChoppy);
+        const float halfWidth = width * 0.5f;
+        for (const glm::vec3& point : m_config.splinePoints) {
+            boundsMin = glm::min(boundsMin, point - glm::vec3(halfWidth, verticalPadding, halfWidth));
+            boundsMax = glm::max(boundsMax, point + glm::vec3(halfWidth, verticalPadding, halfWidth));
+        }
+        m_boundsMin = boundsMin;
+        m_boundsMax = boundsMax;
         m_mesh.emplace(verts, indices, VertexLayout{{3}, {3}, {2}, {3}});
         return;
     }
@@ -544,6 +608,11 @@ void Water::BuildMesh() {
             verts.push_back(0.0f); verts.push_back(0.0f); verts.push_back(0.0f); // no spline tangent
         }
     }
+    const float halfExtent = std::abs(half);
+    const float verticalPadding = std::abs(m_config.seaHeight)
+        + std::abs(m_config.seaChoppy);
+    m_boundsMin = m_config.center + glm::vec3(-halfExtent, -verticalPadding, -halfExtent);
+    m_boundsMax = m_config.center + glm::vec3(halfExtent, verticalPadding, halfExtent);
 
     std::vector<std::uint32_t> indices;
     indices.reserve(static_cast<std::size_t>(res) * res * 6);
@@ -578,6 +647,12 @@ void Water::Draw(const Camera& camera, float aspect,
             glm::vec2(0.0f));
         if (glm::length(delta) > m_config.maxRenderDistance) return;
     }
+    // Reject the whole surface before touching blend state or binding any of the
+    // opaque scene textures. This is especially important for large water patches
+    // and spline rivers that can sit outside the current camera view.
+    const glm::mat4 viewProj = camera.ProjectionMatrix(aspect) * camera.ViewMatrix();
+    const Frustum viewFrustum = ExtractFrustum(viewProj);
+    if (!AABBInFrustum(viewFrustum, m_boundsMin, m_boundsMax)) return;
 
     // Transparent surface: blend over the opaque scene, keep depth testing but don't
     // write depth (so particles / other transparents still composite correctly).
@@ -588,79 +663,82 @@ void Water::Draw(const Camera& camera, float aspect,
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glDepthMask(GL_FALSE);
 
-    m_shader->Bind();
-    m_shader->SetMat4("uViewProj", camera.ProjectionMatrix(aspect) * camera.ViewMatrix());
-    m_shader->SetVec3("uCenter", m_config.center);
-    m_shader->SetFloat("uTime", m_time);
-    m_shader->SetVec3("uCamPos", camera.Position());
-    m_shader->SetVec3("uSunDir", sunDir);
-    m_shader->SetVec3("uSunColor", sunColor);
-    m_shader->SetVec3("uAmbient", ambient);
-    m_shader->SetVec3("uShallow", m_config.shallowColor);
-    m_shader->SetVec3("uDeep", m_config.deepColor);
-    m_shader->SetVec3("uReflection", m_config.reflectionColor);
-    m_shader->SetFloat("uFresnelPower", m_config.fresnelPower);
-    m_shader->SetFloat("uSpecStrength", m_config.specularStrength);
-    m_shader->SetFloat("uShininess", m_config.shininess);
-    m_shader->SetFloat("uTransparency", m_config.transparency);
-    m_shader->SetInt("uHasSceneColor", sceneColorTexture != 0 ? 1 : 0);
-    m_shader->SetInt("uHasSceneDepth", sceneDepthTexture != 0 ? 1 : 0);
-    m_shader->SetFloat("uRefractionStrength", m_config.refractionStrength);
-    m_shader->SetFloat("uReflectionRoughness", m_config.reflectionRoughness);
-    m_shader->SetFloat("uEnvironmentReflectionStrength", m_config.environmentReflectionStrength);
+    // Use the custom water shader when one compiled; otherwise the built-in one. Both
+    // share the identical uniform interface, so the uniform block below is unchanged.
+    Shader& sh = m_customShader ? *m_customShader : *m_shader;
+    sh.Bind();
+    sh.SetMat4("uViewProj", viewProj);
+    sh.SetVec3("uCenter", m_config.center);
+    sh.SetFloat("uTime", m_time);
+    sh.SetVec3("uCamPos", camera.Position());
+    sh.SetVec3("uSunDir", sunDir);
+    sh.SetVec3("uSunColor", sunColor);
+    sh.SetVec3("uAmbient", ambient);
+    sh.SetVec3("uShallow", m_config.shallowColor);
+    sh.SetVec3("uDeep", m_config.deepColor);
+    sh.SetVec3("uReflection", m_config.reflectionColor);
+    sh.SetFloat("uFresnelPower", m_config.fresnelPower);
+    sh.SetFloat("uSpecStrength", m_config.specularStrength);
+    sh.SetFloat("uShininess", m_config.shininess);
+    sh.SetFloat("uTransparency", m_config.transparency);
+    sh.SetInt("uHasSceneColor", sceneColorTexture != 0 ? 1 : 0);
+    sh.SetInt("uHasSceneDepth", sceneDepthTexture != 0 ? 1 : 0);
+    sh.SetFloat("uRefractionStrength", m_config.refractionStrength);
+    sh.SetFloat("uReflectionRoughness", m_config.reflectionRoughness);
+    sh.SetFloat("uEnvironmentReflectionStrength", m_config.environmentReflectionStrength);
     // Screen-space scene reflection only makes sense when the opaque scene textures are bound.
-    m_shader->SetInt("uSsrEnabled",
+    sh.SetInt("uSsrEnabled",
         (m_config.reflectScene && sceneColorTexture != 0 && sceneDepthTexture != 0) ? 1 : 0);
-    m_shader->SetFloat("uSsrStrength", m_config.ssrStrength);
-    m_shader->SetFloat("uSsrDistance", m_config.ssrDistance);
-    m_shader->SetFloat("uSsrThickness", m_config.ssrThickness);
-    m_shader->SetFloat("uAbsorptionStrength", m_config.absorptionStrength);
-    m_shader->SetFloat("uCausticsStrength", m_config.causticsStrength);
-    m_shader->SetFloat("uCausticsScale", m_config.causticsScale);
-    m_shader->SetVec2("uViewportSize", glm::vec2(
+    sh.SetFloat("uSsrStrength", m_config.ssrStrength);
+    sh.SetFloat("uSsrDistance", m_config.ssrDistance);
+    sh.SetFloat("uSsrThickness", m_config.ssrThickness);
+    sh.SetFloat("uAbsorptionStrength", m_config.absorptionStrength);
+    sh.SetFloat("uCausticsStrength", m_config.causticsStrength);
+    sh.SetFloat("uCausticsScale", m_config.causticsScale);
+    sh.SetVec2("uViewportSize", glm::vec2(
         static_cast<float>(std::max(viewportWidth, 1)),
         static_cast<float>(std::max(viewportHeight, 1))));
-    m_shader->SetFloat("uNearPlane", camera.nearPlane);
-    m_shader->SetFloat("uFarPlane", camera.farPlane);
-    m_shader->SetFloat("uDepthFadeDistance", m_config.depthFadeDistance);
-    m_shader->SetFloat("uShoreFoamWidth", m_config.shorelineFoamWidth);
-    m_shader->SetFloat("uShoreFoamStrength", m_config.shorelineFoamStrength);
+    sh.SetFloat("uNearPlane", camera.nearPlane);
+    sh.SetFloat("uFarPlane", camera.farPlane);
+    sh.SetFloat("uDepthFadeDistance", m_config.depthFadeDistance);
+    sh.SetFloat("uShoreFoamWidth", m_config.shorelineFoamWidth);
+    sh.SetFloat("uShoreFoamStrength", m_config.shorelineFoamStrength);
     if (sceneColorTexture != 0) {
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_2D, sceneColorTexture);
-        m_shader->SetInt("uSceneColor", 1);
+        sh.SetInt("uSceneColor", 1);
     }
     if (sceneDepthTexture != 0) {
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, sceneDepthTexture);
-        m_shader->SetInt("uSceneDepth", 0);
+        sh.SetInt("uSceneDepth", 0);
     }
-    m_shader->SetInt("uHasEnvironment", ibl ? 1 : 0);
-    m_shader->SetFloat("uMaxReflectionLod", ibl ? ibl->MaxReflectionLod() : 0.0f);
+    sh.SetInt("uHasEnvironment", ibl ? 1 : 0);
+    sh.SetFloat("uMaxReflectionLod", ibl ? ibl->MaxReflectionLod() : 0.0f);
     if (ibl) {
         ibl->BindPrefilter(2);
-        m_shader->SetInt("uEnvironment", 2);
+        sh.SetInt("uEnvironment", 2);
     }
-    m_shader->SetFloat("uSeaHeight", m_config.seaHeight);
-    m_shader->SetFloat("uSeaChoppy", m_config.seaChoppy);
-    m_shader->SetFloat("uSeaSpeed", m_config.seaSpeed);
-    m_shader->SetFloat("uSeaFreq", m_config.seaFreq);
-    m_shader->SetVec3("uFoamColor", m_config.foamColor);
-    m_shader->SetFloat("uFoamAmount", m_config.foamAmount);
-    m_shader->SetVec2("uFlowDir", m_config.flowDir);
-    m_shader->SetFloat("uFlowStrength", m_config.flowStrength);
+    sh.SetFloat("uSeaHeight", m_config.seaHeight);
+    sh.SetFloat("uSeaChoppy", m_config.seaChoppy);
+    sh.SetFloat("uSeaSpeed", m_config.seaSpeed);
+    sh.SetFloat("uSeaFreq", m_config.seaFreq);
+    sh.SetVec3("uFoamColor", m_config.foamColor);
+    sh.SetFloat("uFoamAmount", m_config.foamAmount);
+    sh.SetVec2("uFlowDir", m_config.flowDir);
+    sh.SetFloat("uFlowStrength", m_config.flowStrength);
     const bool splineRibbon = m_config.splinePoints.size() >= 2;
-    m_shader->SetInt("uSplineRibbon", splineRibbon ? 1 : 0);
-    m_shader->SetFloat("uRiverWidth", std::max(m_config.riverWidth, 0.1f));
-    m_shader->SetFloat("uRiverLength", splineRibbon
-        ? std::max(Spline(m_config.splinePoints, m_config.splineClosed).Length(), 0.01f)
+    sh.SetInt("uSplineRibbon", splineRibbon ? 1 : 0);
+    sh.SetFloat("uRiverWidth", std::max(m_config.riverWidth, 0.1f));
+    sh.SetFloat("uRiverLength", splineRibbon
+        ? std::max(m_splineLength, 0.01f)
         : std::max(m_config.size, 0.01f));
 
     const int n = (contacts && contactCount > 0)
         ? std::min(contactCount, kMaxContacts) : 0;
-    m_shader->SetInt("uContactCount", n);
+    sh.SetInt("uContactCount", n);
     for (int i = 0; i < n; ++i) {
-        m_shader->SetVec4("uContacts[" + std::to_string(i) + "]", contacts[i]);
+        sh.SetVec4(kWaterContactUniforms[i], contacts[i]);
     }
 
     m_mesh->Draw();
@@ -700,10 +778,7 @@ float CpuSeaOctave(glm::vec2 uv, float choppy) {
 
 bool Water::ContainsXZ(float worldX, float worldZ, float padding) const {
     if (m_config.splinePoints.size() >= 2) {
-        std::vector<glm::vec3> flat = m_config.splinePoints;
-        for (glm::vec3& point : flat) point.y = 0.0f;
-        const Spline spline(std::move(flat), m_config.splineClosed);
-        const glm::vec3 closest = spline.ClosestPoint(glm::vec3(worldX, 0.0f, worldZ));
+        const glm::vec3 closest = m_flatSpline.ClosestPoint(glm::vec3(worldX, 0.0f, worldZ));
         const glm::vec2 delta(worldX - closest.x, worldZ - closest.z);
         return glm::dot(delta, delta)
             <= std::pow(m_config.riverWidth * 0.5f + std::max(padding, 0.0f), 2.0f);
@@ -723,15 +798,11 @@ float Water::HeightAt(float worldX, float worldZ) const {
     glm::vec2 uv(worldX, worldZ);
     float baseY = m_config.center.y;
     if (m_config.splinePoints.size() >= 2) {
-        std::vector<glm::vec3> flat = m_config.splinePoints;
-        for (glm::vec3& point : flat) point.y = 0.0f;
-        const Spline flatSpline(std::move(flat), m_config.splineClosed);
         float distance = 0.0f;
         glm::vec3 tangent(0.0f, 0.0f, 1.0f);
-        const glm::vec3 closest = flatSpline.ClosestPoint(
+        const glm::vec3 closest = m_flatSpline.ClosestPoint(
             glm::vec3(worldX, 0.0f, worldZ), &distance, &tangent);
-        const Spline heightSpline(m_config.splinePoints, m_config.splineClosed);
-        baseY = heightSpline.PositionAtDistance(distance).y;
+        baseY = m_spline.PositionAtDistance(distance).y;
         flow = glm::vec2(tangent.x, tangent.z);
         if (glm::dot(flow, flow) > 1.0e-8f) flow = glm::normalize(flow);
         const glm::vec2 side(flow.y, -flow.x);

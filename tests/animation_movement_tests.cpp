@@ -177,6 +177,28 @@ void TestPlayerControllerMovementGate() {
           "re-enabled movement advances horizontal capsule position");
 }
 
+void TestPlayerControllerCannotSprintInAir() {
+    engine::ecs::Registry registry;
+    engine::PlayerController controller;
+    controller.walkSpeed = 2.0f;
+    controller.runSpeed = 8.0f;
+    controller.camCollision = false;
+    controller.SetPosition(glm::vec3(0.0f, 5.0f, 0.0f));
+    controller.body.grounded = false;
+
+    engine::PlayerInput input;
+    input.moveForward = 1.0f;
+    input.sprint = true;
+
+    const glm::vec3 before = controller.Position();
+    controller.Update(registry, input, 0.1f);
+    const glm::vec2 horizontal(
+        controller.Position().x - before.x,
+        controller.Position().z - before.z);
+    Check(Near(glm::length(horizontal), controller.walkSpeed * 0.1f, 0.01f),
+          "airborne sprint input is limited to walk-speed air control");
+}
+
 void TestCameraRelativeFacingSmoothing() {
     engine::ecs::Registry registry;
     engine::PlayerController controller;
@@ -427,6 +449,7 @@ int main() {
     TestDirectionalBlendSpaceSampling();
     TestBlendSpaceInputSmoothing();
     TestPlayerControllerMovementGate();
+    TestPlayerControllerCannotSprintInAir();
     TestCameraRelativeFacingSmoothing();
     TestStairStepDoesNotSnapPresentation();
     TestIsometricCameraMode();

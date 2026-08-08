@@ -53,6 +53,7 @@ private:
     glm::mat4 m_previousViewProjection{1.0f};
     bool m_hasPreviousFrame = false;
     std::unordered_map<std::uint32_t, glm::mat4> m_previousModels;
+    std::unordered_map<std::uint32_t, glm::mat4> m_currentModels;
 };
 
 } // namespace engine

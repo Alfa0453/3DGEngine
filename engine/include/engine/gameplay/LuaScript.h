@@ -63,6 +63,9 @@ private:
     static int ApiSpawnFromObject(lua_State* state);
     static int ApiConfigureProjectile(lua_State* state);
     static int ApiSocketPosition(lua_State* state);
+    static int ApiTraceLine(lua_State* state);
+    static int ApiTraceSphere(lua_State* state);
+    static int ApiTraceOverlapSphere(lua_State* state);
     static int ApiKeyDown(lua_State* state);
     static int ApiKeyPressed(lua_State* state);
     static int ApiMouseDown(lua_State* state);

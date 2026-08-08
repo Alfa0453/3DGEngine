@@ -50,6 +50,10 @@ constexpr NodeTemplate kNodeTemplates[] = {
     {"Inputs","VertexColor",engine::ShaderValueType::Color,0,engine::ShaderValueType::Float},
     {"Inputs","Time",engine::ShaderValueType::Float,0,engine::ShaderValueType::Float},
     {"Inputs","DeltaTime",engine::ShaderValueType::Float,0,engine::ShaderValueType::Float},
+    {"Lighting","LightDirection",engine::ShaderValueType::Vec3,0,engine::ShaderValueType::Float},
+    {"Lighting","LightColor",engine::ShaderValueType::Vec3,0,engine::ShaderValueType::Float},
+    {"Lighting","LightIntensity",engine::ShaderValueType::Float,0,engine::ShaderValueType::Float},
+    {"Lighting","AmbientLight",engine::ShaderValueType::Vec3,0,engine::ShaderValueType::Float},
     {"Post Process","ScreenUV",engine::ShaderValueType::Vec2,0,engine::ShaderValueType::Float},
     {"Post Process","SceneColor",engine::ShaderValueType::Color,0,engine::ShaderValueType::Float},
     {"Post Process","SceneDepth",engine::ShaderValueType::Float,0,engine::ShaderValueType::Float},
@@ -76,6 +80,16 @@ constexpr NodeTemplate kNodeTemplates[] = {
     {"Unlit / UI","WidgetTexture",engine::ShaderValueType::Color,0,engine::ShaderValueType::Float},
     {"Unlit / UI","ClipMask",engine::ShaderValueType::Float,0,engine::ShaderValueType::Float},
     {"Unlit / UI","SignedDistance",engine::ShaderValueType::Float,1,engine::ShaderValueType::Vec2},
+    {"Water","WaterSceneColor",engine::ShaderValueType::Vec3,0,engine::ShaderValueType::Float},
+    {"Water","WaterSceneDepth",engine::ShaderValueType::Float,0,engine::ShaderValueType::Float},
+    {"Water","WaterShallowColor",engine::ShaderValueType::Vec3,0,engine::ShaderValueType::Float},
+    {"Water","WaterDeepColor",engine::ShaderValueType::Vec3,0,engine::ShaderValueType::Float},
+    {"Water","WaterReflectionColor",engine::ShaderValueType::Vec3,0,engine::ShaderValueType::Float},
+    {"Water","WaterSunColor",engine::ShaderValueType::Vec3,0,engine::ShaderValueType::Float},
+    {"Water","WaterSunDirection",engine::ShaderValueType::Vec3,0,engine::ShaderValueType::Float},
+    {"Water","WaterAmbient",engine::ShaderValueType::Vec3,0,engine::ShaderValueType::Float},
+    {"Water","WaterFoam",engine::ShaderValueType::Float,0,engine::ShaderValueType::Float},
+    {"Water","WaterFresnel",engine::ShaderValueType::Float,0,engine::ShaderValueType::Float},
     {"Parameters","ParameterFloat",engine::ShaderValueType::Float,0,engine::ShaderValueType::Float},
     {"Parameters","ParameterInt",engine::ShaderValueType::Int,0,engine::ShaderValueType::Float},
     {"Parameters","ParameterBool",engine::ShaderValueType::Bool,0,engine::ShaderValueType::Float},
@@ -118,6 +132,7 @@ constexpr NodeTemplate kNodeTemplates[] = {
     {"Utility","OneMinus",engine::ShaderValueType::Float,1,engine::ShaderValueType::Float},
     {"Utility","Remap",engine::ShaderValueType::Float,5,engine::ShaderValueType::Float},
     {"Utility","Smoothstep",engine::ShaderValueType::Float,3,engine::ShaderValueType::Float},
+    {"Utility","ToonRamp",engine::ShaderValueType::Float,2,engine::ShaderValueType::Float},
     {"Utility","Fresnel",engine::ShaderValueType::Float,2,engine::ShaderValueType::Vec3},
     {"Utility","Noise",engine::ShaderValueType::Float,1,engine::ShaderValueType::Vec2},
     {"Utility","Comparison",engine::ShaderValueType::Bool,2,engine::ShaderValueType::Float},
@@ -217,9 +232,15 @@ std::optional<engine::ShaderDomain> ExclusiveNodeDomain(
         "WidgetUV", "WidgetColor", "WidgetTexture", "ClipMask",
         "SignedDistance", "UnlitOutput"
     };
+    static const std::unordered_set<std::string> water = {
+        "WaterSceneColor", "WaterSceneDepth", "WaterShallowColor", "WaterDeepColor",
+        "WaterReflectionColor", "WaterSunColor", "WaterSunDirection", "WaterAmbient",
+        "WaterFoam", "WaterFresnel", "WaterOutput"
+    };
     if (particle.count(type)) return engine::ShaderDomain::Particle;
     if (post.count(type)) return engine::ShaderDomain::PostProcess;
     if (unlit.count(type)) return engine::ShaderDomain::Unlit;
+    if (water.count(type)) return engine::ShaderDomain::Water;
     if (type == "SurfaceOutput") return engine::ShaderDomain::Surface;
     return std::nullopt;
 }
@@ -234,6 +255,10 @@ bool TemplateAllowedForDomain(
         return domain == engine::ShaderDomain::Particle;
     if (category == "Unlit / UI")
         return domain == engine::ShaderDomain::Unlit;
+    if (category == "Water")
+        return domain == engine::ShaderDomain::Water;
+    if (category == "Lighting")
+        return domain == engine::ShaderDomain::Surface;
     return true;
 }
 
@@ -402,6 +427,41 @@ void ShaderEditorPanel::GenerateSources()
 {
     const engine::GeneratedShaderSource generated =
         engine::GenerateShaderSource(m_asset);
+    if (generated.success && m_asset.domain == engine::ShaderDomain::Water) {
+        // Water graphs compile to a BODY-ONLY fragment for the engine's water pipeline
+        // (which supplies the wave vertex + water prelude at render time). For the editor
+        // preview only, wrap that body in a self-contained shader: a mesh vertex that fills
+        // the water varyings, a simplified sea_height, and the water uniform declarations.
+        // Scene/water uniforms the preview does not set read as 0, so the live preview is
+        // approximate — author against the actual water surface in the scene.
+        m_vertexSource =
+            "#version 330 core\n"
+            "layout(location=0) in vec3 aPos;\nlayout(location=1) in vec3 aNormal;\n"
+            "layout(location=2) in vec2 aUV;\n"
+            "uniform mat4 uModel;\nuniform mat4 uViewProjection;\n"
+            "out vec3 vWorldPos; out vec2 vFlowDir; out vec3 vBaseNormal;\n"
+            "out vec2 vSurfaceCoord; out vec3 vSurfaceTangent; out vec3 vSurfaceSide;\n"
+            "void main(){ vec4 w=uModel*vec4(aPos,1.0); vWorldPos=w.xyz;\n"
+            " vBaseNormal=mat3(transpose(inverse(uModel)))*aNormal; vSurfaceCoord=w.xz;\n"
+            " vFlowDir=vec2(0.0,1.0); vSurfaceTangent=vec3(1,0,0); vSurfaceSide=vec3(0,0,1);\n"
+            " gl_Position=uViewProjection*w; }\n";
+        m_fragmentSource =
+            "#version 330 core\n"
+            "float sea_height(vec2 p,float t,float h,float choppy,float speed,float freq,int oct){\n"
+            " return h*sin(p.x*freq+t*speed)*cos(p.y*freq+t*speed); }\n"
+            "in vec3 vWorldPos; in vec2 vFlowDir; in vec3 vBaseNormal; in vec2 vSurfaceCoord;\n"
+            "in vec3 vSurfaceTangent; in vec3 vSurfaceSide;\n"
+            "uniform vec3 uCamPos; uniform vec3 uSunDir; uniform vec3 uSunColor;\n"
+            "uniform vec3 uAmbient; uniform vec3 uShallow; uniform vec3 uDeep;\n"
+            "uniform vec3 uReflection; uniform float uFresnelPower; uniform float uSpecStrength;\n"
+            "uniform float uShininess; uniform float uTransparency; uniform float uTime;\n"
+            "uniform float uSeaHeight; uniform float uSeaChoppy; uniform float uSeaSpeed;\n"
+            "uniform float uSeaFreq; uniform sampler2D uSceneColor; uniform sampler2D uSceneDepth;\n"
+            "uniform vec2 uViewportSize;\nout vec4 FragColor;\n"
+            + generated.fragment;
+        m_fragmentLineNodes.clear();   // line numbers shift under the preview prelude
+        return;
+    }
     if (generated.success) {
         m_vertexSource = generated.vertex;
         m_fragmentSource = generated.fragment;
@@ -443,6 +503,7 @@ void ShaderEditorPanel::Compile(bool force)
             ? report->diagnostics.front().message : "Compilation failed";
     }
     m_compilePending = false;
+    m_lastAutoCompile = std::chrono::steady_clock::now();
 }
 
 void ShaderEditorPanel::PushUndo()
@@ -1210,10 +1271,12 @@ void ShaderEditorPanel::DrawGraphInspector(EditorAssets& assets)
             input >> values[0] >> values[1] >> values[2] >> values[3];
             bool changed = false;
             if (parameter->type == engine::ShaderValueType::Float) {
-                changed = ImGui::DragFloat("Default", &values[0], 0.01f);
+                changed = ImGui::DragFloat("Default", &values[0], 0.01f,
+                    -1000000.0f, 1000000.0f);
             } else if (parameter->type == engine::ShaderValueType::Int) {
                 int integer = static_cast<int>(values[0]);
                 if (ImGui::InputInt("Default", &integer)) {
+                    integer = std::clamp(integer, -100000000, 100000000);
                     values[0] = static_cast<float>(integer);
                     changed = true;
                 }
@@ -1225,11 +1288,14 @@ void ShaderEditorPanel::DrawGraphInspector(EditorAssets& assets)
                     changed = true;
                 }
             } else if (parameter->type == engine::ShaderValueType::Vec2) {
-                changed = ImGui::DragFloat2("Default", values, 0.01f);
+                changed = ImGui::DragFloat2("Default", values, 0.01f,
+                    -1000000.0f, 1000000.0f);
             } else if (parameter->type == engine::ShaderValueType::Vec3) {
-                changed = ImGui::DragFloat3("Default", values, 0.01f);
+                changed = ImGui::DragFloat3("Default", values, 0.01f,
+                    -1000000.0f, 1000000.0f);
             } else if (parameter->type == engine::ShaderValueType::Vec4) {
-                changed = ImGui::DragFloat4("Default", values, 0.01f);
+                changed = ImGui::DragFloat4("Default", values, 0.01f,
+                    -1000000.0f, 1000000.0f);
             }
             if (changed) {
                 if (parameter->type != engine::ShaderValueType::Bool) {
@@ -1429,7 +1495,14 @@ unsigned int ShaderEditorPanel::RenderPreview(int width, int height)
     if (!m_framebuffer) return 0;
     m_framebuffer->Resize(std::max(width, 32), std::max(height, 32));
     m_postInput->Resize(std::max(width, 32), std::max(height, 32));
-    if (m_autoCompile && m_compilePending) Compile();
+    if (m_autoCompile && m_compilePending) {
+        const auto now = std::chrono::steady_clock::now();
+        const bool firstCompile = m_lastAutoCompile.time_since_epoch().count() == 0;
+        const bool debounceElapsed = firstCompile
+            || std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - m_lastAutoCompile).count() >= 250;
+        if (debounceElapsed) Compile();
+    }
 
     const std::string key = m_path.empty() ? "__unsaved_shader__" : m_path;
     const engine::Shader* shader = m_runtime.Find(
@@ -1489,6 +1562,10 @@ unsigned int ShaderEditorPanel::RenderPreview(int width, int height)
                                 std::cos(lightYaw))));
     mutableShader.SetFloat("uLightIntensity",
         m_lightIntensity * (m_bloom ? 1.12f : 1.0f));
+    // Key light colour + ambient for custom (unlit) surface lighting previews.
+    mutableShader.SetVec3("uLightColor",
+        glm::vec3(m_lightIntensity * (m_bloom ? 1.12f : 1.0f)));
+    mutableShader.SetVec3("uAmbient", glm::vec3(0.08f));
     mutableShader.SetVec3("uBaseColor", glm::vec3(0.68f, 0.32f, 0.12f));
     mutableShader.SetVec4("uObjectColor", glm::vec4(
         m_previewObjectColor[0], m_previewObjectColor[1],
@@ -1663,16 +1740,31 @@ void ShaderEditorPanel::Draw(EditorAssets& assets, bool* open)
         m_dirty = true;
     }
     int domain = static_cast<int>(m_asset.domain);
-    const char* domains[] = {"Surface", "Post Process", "Particle", "Unlit"};
-    if (ImGui::Combo("Domain", &domain, domains, 4))
+    const char* domains[] = {"Surface", "Post Process", "Particle", "Unlit", "Water"};
+    if (ImGui::Combo("Domain", &domain, domains, 5))
     {
         m_pendingDomain = domain;
         ImGui::OpenPopup("Change Shader Domain");
     }
+    // Surface lighting model: PBR (engine lights the outputs) vs Custom/unlit (the graph's
+    // Base Color is the final colour, so you author your own lighting — e.g. a toon ramp).
+    if (m_asset.domain == engine::ShaderDomain::Surface) {
+        int lighting = m_asset.lightingModel;
+        const char* lightingModes[] = {"PBR (lit)", "Custom (unlit)"};
+        if (ImGui::Combo("Lighting", &lighting, lightingModes, 2)
+            && lighting != m_asset.lightingModel) {
+            PushUndo();
+            m_asset.lightingModel = lighting;
+            m_dirty = true;
+            m_compilePending = true;
+        }
+        if (m_asset.lightingModel == 1)
+            ImGui::TextDisabled("Base Color = final colour. Use Lighting + ToonRamp nodes.");
+    }
     if (ImGui::BeginPopupModal("Change Shader Domain", nullptr,
                                ImGuiWindowFlags_AlwaysAutoResize)) {
         const engine::ShaderDomain target = static_cast<engine::ShaderDomain>(
-            std::clamp(m_pendingDomain, 0, 3));
+            std::clamp(m_pendingDomain, 0, 4));
         std::size_t incompatibleNodes = 0;
         for (const auto& node : m_asset.nodes) {
             if (node.type == DomainOutput(m_asset.domain)) continue;

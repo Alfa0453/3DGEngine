@@ -1,4 +1,5 @@
 #include "engine/graphics/GpuParticleSystem.h"
+#include "engine/graphics/GpuProfiler.h"
 
 #include "engine/graphics/Camera.h"
 #include "engine/graphics/ParticleSystem.h"
@@ -18,6 +19,28 @@
 
 namespace engine {
 namespace {
+
+struct ColliderUniformNames {
+    std::array<std::string, 32> type;
+    std::array<std::string, 32> positionRadius;
+    std::array<std::string, 32> data;
+    std::array<std::string, 32> rotation;
+};
+
+const ColliderUniformNames& GetColliderUniformNames() {
+    static const ColliderUniformNames names = [] {
+        ColliderUniformNames result;
+        for (std::size_t i = 0; i < result.type.size(); ++i) {
+            const std::string suffix = "[" + std::to_string(i) + "]";
+            result.type[i] = "uColliderType" + suffix;
+            result.positionRadius[i] = "uColliderPositionRadius" + suffix;
+            result.data[i] = "uColliderData" + suffix;
+            result.rotation[i] = "uColliderRotation" + suffix;
+        }
+        return result;
+    }();
+    return names;
+}
 
 constexpr std::size_t kParticleStride = sizeof(float) * 28;
 
@@ -531,6 +554,9 @@ void GpuParticleEmitter::EnsurePrograms() {
     glEnableVertexAttribArray(0); glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2*sizeof(float), nullptr);
     glBindVertexArray(0);
     glGenBuffers(1, &m_ssbo); glGenBuffers(1, &m_counterBuffer); glGenBuffers(1, &m_trailSsbo);
+    const std::array<unsigned int, 3> counters{};
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_counterBuffer);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(counters), counters.data(), GL_DYNAMIC_DRAW);
     glGenQueries(1, &m_timerQuery);
 }
 
@@ -579,7 +605,7 @@ void GpuParticleEmitter::Update(const EmitterConfig& c, const glm::vec3& positio
     EnsureCapacity(c.maxParticles);
     const std::array<unsigned int, 3> counters{{0u, 0u, 0u}};
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_counterBuffer);
-    glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(counters), counters.data(), GL_DYNAMIC_DRAW);
+    glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(counters), counters.data());
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, m_ssbo);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, m_counterBuffer);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, m_trailSsbo);
@@ -620,10 +646,12 @@ void GpuParticleEmitter::Update(const EmitterConfig& c, const glm::vec3& positio
     glUniform1i(U(m_computeProgram,"uTrailsEnabled"), c.trailsEnabled ? 1 : 0);
     glUniform1i(U(m_computeProgram,"uTrailSegments"), std::clamp(c.trailSegments, 2, 16));
     glUniform1f(U(m_computeProgram,"uTrailLength"), std::max(c.trailLength, 0.001f));
+    const ColliderUniformNames& colliderUniforms = GetColliderUniformNames();
     for (int i = 0; i < collisionCount; ++i) {
         const ParticleCollisionShape& shape = collisionShapes[static_cast<std::size_t>(i)];
-        const std::string suffix = "[" + std::to_string(i) + "]";
-        glUniform1i(U(m_computeProgram, ("uColliderType" + suffix).c_str()), static_cast<int>(shape.type));
+        const std::size_t index = static_cast<std::size_t>(i);
+        glUniform1i(U(m_computeProgram, colliderUniforms.type[index].c_str()),
+                    static_cast<int>(shape.type));
         glm::vec4 positionRadius(0.0f);
         glm::vec4 data(0.0f);
         if (shape.type == ParticleCollisionShape::Type::Plane)
@@ -635,11 +663,11 @@ void GpuParticleEmitter::Update(const EmitterConfig& c, const glm::vec3& positio
         }
         const glm::quat q = glm::normalize(shape.rotation);
         const glm::vec4 rotation(q.x, q.y, q.z, q.w);
-        glUniform4fv(U(m_computeProgram, ("uColliderPositionRadius" + suffix).c_str()), 1,
+        glUniform4fv(U(m_computeProgram, colliderUniforms.positionRadius[index].c_str()), 1,
                      glm::value_ptr(positionRadius));
-        glUniform4fv(U(m_computeProgram, ("uColliderData" + suffix).c_str()), 1,
+        glUniform4fv(U(m_computeProgram, colliderUniforms.data[index].c_str()), 1,
                      glm::value_ptr(data));
-        glUniform4fv(U(m_computeProgram, ("uColliderRotation" + suffix).c_str()), 1,
+        glUniform4fv(U(m_computeProgram, colliderUniforms.rotation[index].c_str()), 1,
                      glm::value_ptr(rotation));
     }
     if (synchronize && m_timerQuery) glBeginQuery(GL_TIME_ELAPSED, m_timerQuery);
@@ -740,6 +768,7 @@ void GpuParticleEmitter::Draw(const EmitterConfig& c, const Camera& camera, floa
             glUniform1f(U(m_trailProgram,"uTrailWidth"), c.trailWidth);
             glUniform1f(U(m_trailProgram,"uTrailOpacity"), c.trailOpacity);
             glBindVertexArray(m_vao);
+            GpuProfiler::RecordDrawCall();
             glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, (segments + 1) * 2, m_capacity);
             ++m_lastDrawCalls;
         }
@@ -751,6 +780,7 @@ void GpuParticleEmitter::Draw(const EmitterConfig& c, const Camera& camera, floa
         glUniform3fv(U(m_meshProgram,"uLightDirection"),1,glm::value_ptr(lightDirection));
         auto drawMesh = [&](const Mesh& mesh) {
             glBindVertexArray(mesh.Vao());
+            GpuProfiler::RecordDrawCall();
             glDrawElementsInstanced(GL_TRIANGLES, static_cast<GLsizei>(mesh.IndexCount()),
                                     GL_UNSIGNED_INT, nullptr, m_capacity);
             ++m_lastDrawCalls;
@@ -808,11 +838,13 @@ void GpuParticleEmitter::Draw(const EmitterConfig& c, const Camera& camera, floa
         glUniform1f(U(m_trailProgram,"uTrailWidth"), c.trailWidth);
         glUniform1f(U(m_trailProgram,"uTrailOpacity"), c.trailOpacity);
         glBindVertexArray(m_vao);
-        glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, (segments + 1) * 2, m_capacity);
+    GpuProfiler::RecordDrawCall();
+    glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, (segments + 1) * 2, m_capacity);
         ++m_lastDrawCalls;
     }
     glUseProgram(m_renderProgram);
     glBindVertexArray(m_vao);
+    GpuProfiler::RecordDrawCall();
     glDrawArraysInstanced(GL_TRIANGLES, 0, 6, m_capacity);
     ++m_lastDrawCalls;
     if (m_timerQuery) {

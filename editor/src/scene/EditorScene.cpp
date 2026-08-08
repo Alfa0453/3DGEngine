@@ -10,6 +10,7 @@
 #include <sstream>
 #include <cstddef>
 #include <filesystem>
+#include <cmath>
 #include <glm/gtc/quaternion.hpp>
 
 using engine::ecs::Entity;
@@ -20,6 +21,82 @@ using engine::ecs::Collider;
 using engine::ecs::Transform;
 
 namespace {
+
+constexpr float kMaxSceneCoordinate = 1000000.0f;
+constexpr float kMaxSceneScale = 10000.0f;
+
+float FiniteClamp(float value, float fallback, float minimum, float maximum) {
+    if (!std::isfinite(value)) return fallback;
+    return std::clamp(value, minimum, maximum);
+}
+
+void NormalizeTransformValues(Transform& transform) {
+    transform.position.x = FiniteClamp(transform.position.x, 0.0f, -kMaxSceneCoordinate, kMaxSceneCoordinate);
+    transform.position.y = FiniteClamp(transform.position.y, 0.0f, -kMaxSceneCoordinate, kMaxSceneCoordinate);
+    transform.position.z = FiniteClamp(transform.position.z, 0.0f, -kMaxSceneCoordinate, kMaxSceneCoordinate);
+    float* scales[] = {&transform.scale.x, &transform.scale.y, &transform.scale.z};
+    for (float* valuePtr : scales) {
+        float& value = *valuePtr;
+        if (!std::isfinite(value)) value = 1.0f;
+        const float sign = value < 0.0f ? -1.0f : 1.0f;
+        value = sign * std::clamp(std::abs(value), 0.0001f, kMaxSceneScale);
+    }
+    const float qLength = glm::length(transform.rotation);
+    if (!std::isfinite(qLength) || qLength < 0.000001f) {
+        transform.rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+    } else {
+        transform.rotation = glm::normalize(transform.rotation);
+    }
+}
+
+void NormalizeColliderValues(Collider& collider) {
+    collider.radius = FiniteClamp(collider.radius, 0.5f, 0.001f, kMaxSceneScale);
+    collider.halfHeight = FiniteClamp(collider.halfHeight, 0.5f, 0.0f, kMaxSceneScale);
+    collider.halfExtents.x = FiniteClamp(collider.halfExtents.x, 0.5f, 0.001f, kMaxSceneScale);
+    collider.halfExtents.y = FiniteClamp(collider.halfExtents.y, 0.5f, 0.001f, kMaxSceneScale);
+    collider.halfExtents.z = FiniteClamp(collider.halfExtents.z, 0.5f, 0.001f, kMaxSceneScale);
+    collider.majorRadius = FiniteClamp(collider.majorRadius, 0.35f, 0.0f, kMaxSceneScale);
+    collider.minorRadius = FiniteClamp(collider.minorRadius, 0.15f, 0.0f, kMaxSceneScale);
+    collider.planeOffset = FiniteClamp(collider.planeOffset, 0.0f,
+        -kMaxSceneCoordinate, kMaxSceneCoordinate);
+    const float normalLength = glm::length(collider.planeNormal);
+    if (!std::isfinite(normalLength) || normalLength < 0.000001f) {
+        collider.planeNormal = glm::vec3(0.0f, 1.0f, 0.0f);
+    } else {
+        collider.planeNormal /= normalLength;
+    }
+    collider.steps = std::clamp(collider.steps, 1, 64);
+    collider.restitution = FiniteClamp(collider.restitution, 0.4f, 0.0f, 1.0f);
+    collider.friction = FiniteClamp(collider.friction, 0.5f, 0.0f, 2.0f);
+}
+
+void NormalizeControllerValues(EditorScene::PlayerControllerSettings& settings) {
+    settings.walkSpeed = FiniteClamp(settings.walkSpeed, 4.0f, 0.0f, 1000.0f);
+    settings.runSpeed = FiniteClamp(settings.runSpeed, 7.0f, 0.0f, 1000.0f);
+    settings.runSpeed = std::max(settings.runSpeed, settings.walkSpeed);
+    settings.jumpSpeed = FiniteClamp(settings.jumpSpeed, 5.0f, 0.0f, 1000.0f);
+    settings.lookSensitivity = FiniteClamp(settings.lookSensitivity, 0.1f, 0.001f, 10.0f);
+    settings.capsuleRadius = FiniteClamp(settings.capsuleRadius, 0.4f, 0.01f, 100.0f);
+    settings.capsuleHeight = FiniteClamp(settings.capsuleHeight, 1.8f,
+        settings.capsuleRadius * 2.0f, 200.0f);
+    settings.eyeHeight = FiniteClamp(settings.eyeHeight, 0.6f, 0.0f, settings.capsuleHeight);
+    settings.cameraDistance = FiniteClamp(settings.cameraDistance, 5.0f, 0.0f, 10000.0f);
+    settings.cameraTargetHeight = FiniteClamp(settings.cameraTargetHeight, 1.0f,
+        -1000.0f, 1000.0f);
+    settings.isometricPitch = FiniteClamp(settings.isometricPitch, -35.0f, -89.0f, 89.0f);
+    settings.isometricDistance = FiniteClamp(settings.isometricDistance, 12.0f, 0.0f, 10000.0f);
+    settings.cameraProbeRadius = FiniteClamp(settings.cameraProbeRadius, 0.2f, 0.0f, 100.0f);
+    settings.cameraCollisionPadding = FiniteClamp(settings.cameraCollisionPadding, 0.08f, 0.0f, 100.0f);
+    settings.cameraReturnSpeed = FiniteClamp(settings.cameraReturnSpeed, 8.0f, 0.0f, 1000.0f);
+    settings.shoulderOffset = FiniteClamp(settings.shoulderOffset, 0.65f, 0.0f, 100.0f);
+    settings.shoulderSwitchSpeed = FiniteClamp(settings.shoulderSwitchSpeed, 12.0f, 0.0f, 1000.0f);
+    settings.lockOnRange = FiniteClamp(settings.lockOnRange, 18.0f, 0.0f, 10000.0f);
+    settings.lockOnViewAngle = FiniteClamp(settings.lockOnViewAngle, 55.0f, 0.0f, 180.0f);
+    settings.lockOnTargetHeight = FiniteClamp(settings.lockOnTargetHeight, 1.0f, -1000.0f, 1000.0f);
+    settings.lockOnTrackingSpeed = FiniteClamp(settings.lockOnTrackingSpeed, 10.0f, 0.0f, 1000.0f);
+    settings.maxSlopeDegrees = FiniteClamp(settings.maxSlopeDegrees, 50.0f, 0.0f, 89.0f);
+    settings.stepHeight = FiniteClamp(settings.stepHeight, 0.35f, 0.0f, 100.0f);
+}
 
 const char* PrimitiveName(EditorScene::Primitive primitive) {
     switch (primitive) {
@@ -399,7 +476,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         return false;
     }
 
-    out << "3DGEditorScene 120 " << m_assetId.ToString() << '\n';
+    out << "3DGEditorScene 125 " << m_assetId.ToString() << '\n';
     out << "environment "
         << m_environment.timeOfDay << ' '
         << m_environment.skyLightIntensity << ' '
@@ -475,6 +552,13 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         << (m_environment.skylightOcclusion ? 1 : 0) << ' '
         << m_environment.skylightOcclusionStrength << ' '
         << m_environment.minimumSkylight << '\n';
+    out << "sky "
+        << m_environment.skyMode << ' '
+        << StoredPath(m_environment.skyTexturePath) << ' '
+        << m_environment.skyRotation << ' '
+        << m_environment.skyIntensity << ' '
+        << (m_environment.skyTextureId.Valid()
+                ? m_environment.skyTextureId.ToString() : std::string("-")) << '\n';
     for (const Environment::PostProcessEffect& effect :
          m_environment.postProcessEffects) {
         out << "post_effect "
@@ -500,6 +584,12 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
             << camera.blendDuration << ' ' << camera.blendEasing << ' '
             << (camera.primary ? 1 : 0) << ' '
             << (camera.useInPlay ? 1 : 0) << '\n';
+    }
+    for (const ViewportBookmark& bookmark : m_viewportBookmarks) {
+        out << "viewport_bookmark " << std::quoted(bookmark.name) << ' '
+            << bookmark.position.x << ' ' << bookmark.position.y << ' ' << bookmark.position.z << ' '
+            << bookmark.target.x << ' ' << bookmark.target.y << ' ' << bookmark.target.z << ' '
+            << bookmark.fov << ' ' << bookmark.blendDuration << '\n';
     }
     for (const CameraSequence& sequence : m_cameraSequences) {
         out << "camera_sequence "
@@ -1040,6 +1130,9 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
                 << ' ' << instance.scale.x << ' ' << instance.scale.y << ' ' << instance.scale.z
                 << ' ' << (instance.enabled ? 1 : 0);
         }
+        // Owning terrain name (scene version 121+); "-" when free-standing.
+        out << ' ' << std::quoted(object.foliageTerrainOwner.empty()
+                ? std::string("-") : object.foliageTerrainOwner);
         out << '\n';
     }
 
@@ -1087,7 +1180,8 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
             << object.waterUnderwaterFogDensity << ' '
             << object.waterUnderwaterDistortion << ' '
             << object.waterUnderwaterTransitionSpeed << ' '
-            << object.waterRiverWidth << '\n';
+            << object.waterRiverWidth << ' '
+            << StoredPath(object.waterShaderPath) << '\n';   // scene version 122+
     }
 
     // Spline paths (Catmull-Rom control points).
@@ -1131,6 +1225,16 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
             << object.ragdoll.angularDamping << ' '
             << object.ragdoll.deathImpulse << ' '
             << object.ragdoll.maxBodies << '\n';
+    }
+
+    // Editor layer membership is kept on separate keyed records so the runtime object
+    // record remains compact and older scenes naturally fall back to Default.
+    for (std::size_t objectIndex = 0; objectIndex < m_objects.size(); ++objectIndex) {
+        const Object& object = m_objects[objectIndex];
+        out << "editor_layer " << objectIndex << ' '
+            << std::quoted(object.editorLayer.empty() ? std::string("Default")
+                                                       : object.editorLayer)
+            << '\n';
     }
 
     std::vector<engine::AssetHandle> dependencies;
@@ -1217,7 +1321,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             return false;
         }
     }
-    if (magic != "3DGEditorScene" ||(version < 1 || version > 120)) {
+    if (magic != "3DGEditorScene" ||(version < 1 || version > 125)) {
         if (error) *error = "Scene file has an unknown format.";
         return false;
     }
@@ -1257,6 +1361,20 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                 return false;
             }
             m_environment.skylightOcclusion = enabled != 0;
+            continue;
+        }
+        if (recordType == "sky" && version >= 123) {
+            std::string texPath, texId;
+            in >> m_environment.skyMode >> std::quoted(texPath)
+               >> m_environment.skyRotation >> m_environment.skyIntensity >> texId;
+            if (!in) {
+                if (error) *error = "Scene file contains an invalid sky record.";
+                Clear();
+                return false;
+            }
+            m_environment.skyTexturePath = (texPath == "-") ? std::string() : texPath;
+            if (texId != "-")
+                engine::AssetHandle::Parse(texId, &m_environment.skyTextureId);
             continue;
         }
         if (recordType == "clouds" && version >= 81) {
@@ -1339,6 +1457,14 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                 if (object != m_objects.end())
                     object->materialParameterOverrides[name] = value;
             }
+            continue;
+        }
+        if (recordType == "editor_layer" && version >= 124) {
+            std::size_t objectIndex = 0;
+            std::string layerName;
+            in >> objectIndex >> std::quoted(layerName);
+            if (objectIndex < m_objects.size())
+                m_objects[objectIndex].editorLayer = layerName.empty() ? "Default" : layerName;
             continue;
         }
         if (recordType == "environment") {
@@ -1494,6 +1620,23 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                 for (CameraPreset& existing : m_cameraPresets) existing.primary = false;
             }
             m_cameraPresets.push_back(std::move(camera));
+            continue;
+        }
+        if (recordType == "viewport_bookmark" && version >= 125) {
+            ViewportBookmark bookmark;
+            in >> std::quoted(bookmark.name)
+               >> bookmark.position.x >> bookmark.position.y >> bookmark.position.z
+               >> bookmark.target.x >> bookmark.target.y >> bookmark.target.z
+               >> bookmark.fov >> bookmark.blendDuration;
+            if (!in) {
+                if (error) *error = "Scene file contains an invalid viewport bookmark.";
+                Clear();
+                return false;
+            }
+            bookmark.name = bookmark.name.empty() ? "View" : bookmark.name;
+            bookmark.fov = std::clamp(bookmark.fov, 10.0f, 120.0f);
+            bookmark.blendDuration = std::clamp(bookmark.blendDuration, 0.0f, 5.0f);
+            m_viewportBookmarks.push_back(std::move(bookmark));
             continue;
         }
 
@@ -1792,6 +1935,8 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             }
             float riverWidth = 8.0f;
             if (version >= 116) in >> riverWidth;
+            std::string waterShaderPath = "-";
+            if (version >= 122) in >> std::quoted(waterShaderPath);
             for (Object& obj : m_objects) {
                 if (obj.name == name) {
                     obj.isWater = true;
@@ -1827,6 +1972,8 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                     obj.waterUnderwaterDistortion = underwaterDistortion;
                     obj.waterUnderwaterTransitionSpeed = underwaterTransitionSpeed;
                     obj.waterRiverWidth = std::max(riverWidth, 0.1f);
+                    obj.waterShaderPath =
+                        (waterShaderPath == "-") ? std::string() : waterShaderPath;
                     break;
                 }
             }
@@ -1915,6 +2062,11 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                    >> enabled;
                 instance.enabled = enabled != 0;
             }
+            std::string foliageOwner;
+            if (version >= 121) {
+                in >> std::quoted(foliageOwner);
+                if (foliageOwner == "-") foliageOwner.clear();
+            }
             if (!in) {
                 if (error) *error = "Scene contains invalid foliage instances.";
                 Clear();
@@ -1927,6 +2079,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                 object.foliageAssetId = assetId;
                 object.foliageInstances = std::move(instances);
                 object.nextFoliageInstanceId = std::max(nextId, 1u);
+                object.foliageTerrainOwner = foliageOwner;
                 SyncFoliageComponent(object);
                 break;
             }
@@ -3449,6 +3602,7 @@ void EditorScene::ScaleSelectedAxis(const glm::vec3 &axis, float factor)
         if (axis.z != 0.0f) {
             transform->scale.z *= factor;
         }
+        NormalizeTransformValues(*transform);
         m_dirty = true;
     }
 }
@@ -3461,6 +3615,7 @@ void EditorScene::ScaleSelected(float factor)
 
     if (Transform* transform = SelectedTransform()) {
         transform->scale *= factor;
+        NormalizeTransformValues(*transform);
         m_dirty = true;
     }
 }
@@ -3475,16 +3630,18 @@ bool EditorScene::SetSelectedTransform(const Transform& value) {
         return false;
     }
 
-    if (transform->position == value.position
-        && transform->scale == value.scale
-        && transform->rotation == value.rotation) {
+    Transform normalized = value;
+    NormalizeTransformValues(normalized);
+    if (transform->position == normalized.position
+        && transform->scale == normalized.scale
+        && transform->rotation == normalized.rotation) {
         return false;
     }
 
     if (!m_transformEditOpen) {
         PushUndoSnapshot();
     }
-    const glm::vec3 positionDelta = value.position - transform->position;
+    const glm::vec3 positionDelta = normalized.position - transform->position;
     Object* selected = m_selectedIndex >= 0
         ? &m_objects[static_cast<std::size_t>(m_selectedIndex)] : nullptr;
     if (selected && selected->isWater && !selected->waterFlowSpline.empty()
@@ -3495,7 +3652,7 @@ bool EditorScene::SetSelectedTransform(const Transform& value) {
             break;
         }
     }
-    *transform = value;
+    *transform = normalized;
     m_dirty = true;
     return true;
 }
@@ -3579,6 +3736,140 @@ void EditorScene::RestoreFromSnapshot(const Snapshot &snapshot, const engine::Me
     RestoreSnapshot(snapshot, cube, plane, sphere, capsule, cylinder, cone, pyramid, torus, staircase);
     ClearHistory();
     m_dirty = false;
+}
+
+bool EditorScene::SetObjectTransformsUndoable(
+    const std::vector<int>& indices,
+    const std::vector<Transform>& transforms)
+{
+    if (indices.size() != transforms.size() || indices.empty()) return false;
+    bool canApply = false;
+    for (std::size_t i = 0; i < indices.size(); ++i) {
+        const int index = indices[i];
+        if (index < 0 || index >= static_cast<int>(m_objects.size())) continue;
+        const Object& object = m_objects[static_cast<std::size_t>(index)];
+        if (!object.locked && m_registry.TryGet<Transform>(object.entity)) {
+            canApply = true;
+            break;
+        }
+    }
+    if (!canApply) return false;
+    PushUndoSnapshot();
+    for (std::size_t i = 0; i < indices.size(); ++i) {
+        const int index = indices[i];
+        if (index < 0 || index >= static_cast<int>(m_objects.size())) continue;
+        Object& object = m_objects[static_cast<std::size_t>(index)];
+        if (object.locked) continue;
+        if (Transform* transform = m_registry.TryGet<Transform>(object.entity))
+            *transform = transforms[i];
+    }
+    m_dirty = true;
+    return true;
+}
+
+void EditorScene::SelectIndices(const std::vector<int>& indices)
+{
+    m_selectedIndices.clear();
+    for (int index : indices) {
+        if (index < 0 || index >= static_cast<int>(m_objects.size())) continue;
+        if (std::find(m_selectedIndices.begin(), m_selectedIndices.end(), index)
+            == m_selectedIndices.end())
+            m_selectedIndices.push_back(index);
+    }
+    m_selectedIndex = m_selectedIndices.empty() ? -1 : m_selectedIndices.back();
+}
+
+bool EditorScene::AssignObjectsToLayer(const std::vector<int>& indices,
+                                       const std::string& requestedLayer)
+{
+    const std::string layer = requestedLayer.empty() ? "Default" : requestedLayer;
+    bool changed = false;
+    for (int index : indices) {
+        if (index >= 0 && index < static_cast<int>(m_objects.size())
+            && m_objects[static_cast<std::size_t>(index)].editorLayer != layer) {
+            changed = true;
+            break;
+        }
+    }
+    if (!changed) return false;
+    PushUndoSnapshot();
+    for (int index : indices) {
+        if (index >= 0 && index < static_cast<int>(m_objects.size()))
+            m_objects[static_cast<std::size_t>(index)].editorLayer = layer;
+    }
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetLayerVisible(const std::string& layer, bool visible)
+{
+    bool changed = false;
+    for (const Object& object : m_objects)
+        if (object.editorLayer == layer && object.visible != visible) changed = true;
+    if (!changed) return false;
+    PushUndoSnapshot();
+    for (Object& object : m_objects)
+        if (object.editorLayer == layer) object.visible = visible;
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetLayerLocked(const std::string& layer, bool locked)
+{
+    bool changed = false;
+    for (const Object& object : m_objects)
+        if (object.editorLayer == layer && object.locked != locked) changed = true;
+    if (!changed) return false;
+    PushUndoSnapshot();
+    for (Object& object : m_objects)
+        if (object.editorLayer == layer) object.locked = locked;
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::RenameLayer(const std::string& oldName,
+                              const std::string& requestedName)
+{
+    const std::string newName = requestedName.empty() ? "Default" : requestedName;
+    if (oldName.empty() || oldName == newName) return false;
+    bool found = false;
+    for (const Object& object : m_objects)
+        if (object.editorLayer == oldName) { found = true; break; }
+    if (!found) return false;
+    PushUndoSnapshot();
+    for (Object& object : m_objects)
+        if (object.editorLayer == oldName) object.editorLayer = newName;
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::ShowAllLayers()
+{
+    bool changed = false;
+    for (const Object& object : m_objects)
+        if (!object.visible) { changed = true; break; }
+    if (!changed) return false;
+    PushUndoSnapshot();
+    for (Object& object : m_objects) object.visible = true;
+    m_dirty = true;
+    return true;
+}
+
+void EditorScene::ApplySnapshotUndoable(const Snapshot& snapshot,
+                                        const engine::Mesh& cube,
+                                        const engine::Mesh& plane,
+                                        const engine::Mesh& sphere,
+                                        const engine::Mesh& capsule,
+                                        const engine::Mesh& cylinder,
+                                        const engine::Mesh& cone,
+                                        const engine::Mesh& pyramid,
+                                        const engine::Mesh& torus,
+                                        const engine::Mesh& staircase) {
+    PushUndoSnapshot();
+    RestoreSnapshot(snapshot, cube, plane, sphere, capsule, cylinder, cone,
+                    pyramid, torus, staircase);
+    m_dirty = true;
+    m_transformEditOpen = false;
 }
 
 void EditorScene::AddEmpty(const engine::Mesh& placeholderMesh)
@@ -3953,8 +4244,22 @@ bool EditorScene::SetSelectedModelOffset(const glm::vec3& position,
     }
     PushUndoSnapshot();
     selected.modelOffsetPosition = position;
+    selected.modelOffsetPosition.x = FiniteClamp(selected.modelOffsetPosition.x, 0.0f,
+        -kMaxSceneCoordinate, kMaxSceneCoordinate);
+    selected.modelOffsetPosition.y = FiniteClamp(selected.modelOffsetPosition.y, 0.0f,
+        -kMaxSceneCoordinate, kMaxSceneCoordinate);
+    selected.modelOffsetPosition.z = FiniteClamp(selected.modelOffsetPosition.z, 0.0f,
+        -kMaxSceneCoordinate, kMaxSceneCoordinate);
     selected.modelOrientationEuler = eulerDegrees;
     selected.modelOffsetScale = scale;
+    float* offsetScales[] = {&selected.modelOffsetScale.x, &selected.modelOffsetScale.y,
+        &selected.modelOffsetScale.z};
+    for (float* valuePtr : offsetScales) {
+        float& value = *valuePtr;
+        if (!std::isfinite(value)) value = 1.0f;
+        const float sign = value < 0.0f ? -1.0f : 1.0f;
+        value = sign * std::clamp(std::abs(value), 0.0001f, kMaxSceneScale);
+    }
     m_dirty = true;
     return true;
 }
@@ -4300,7 +4605,12 @@ bool EditorScene::SetSelectedAngularVelocity(const glm::vec3 &axis, float radian
 
     PushUndoSnapshot();
     selected.angularVelocityAxis = axis;
-    selected.angularVelocityRadians = radiansPerSecond;
+    const float axisLength = glm::length(selected.angularVelocityAxis);
+    if (!std::isfinite(axisLength) || axisLength < 0.000001f)
+        selected.angularVelocityAxis = glm::vec3(0.0f, 1.0f, 0.0f);
+    else
+        selected.angularVelocityAxis /= axisLength;
+    selected.angularVelocityRadians = FiniteClamp(radiansPerSecond, 0.0f, -1000.0f, 1000.0f);
     m_dirty = true;
     return true;
 }
@@ -4385,6 +4695,7 @@ bool EditorScene::SetSelectedColliderEnabled(bool enabled)
                 std::max(transform->scale.y * 0.5f, 0.001f),
                 std::max(transform->scale.z * 0.5f, 0.001f)));
         }
+        NormalizeColliderValues(selected.collider);
     }
     m_dirty = true;
     return true;
@@ -4404,6 +4715,7 @@ bool EditorScene::SetSelectedCollider(const engine::ecs::Collider &collider)
     PushUndoSnapshot();
     selected.colliderEnabled = true;
     selected.collider = collider;
+    NormalizeColliderValues(selected.collider);
     m_dirty = true;
     return true;
 }
@@ -4562,12 +4874,20 @@ bool EditorScene::SetSelectedPlayerControllerEnabled(bool enabled) {
     PushUndoSnapshot();
     selected.playerControllerEnabled = enabled;
     if (enabled) {
+        NormalizeControllerValues(selected.playerController);
+        selected.playerController.capsuleRadius =
+            std::max(selected.playerController.capsuleRadius, 0.01f);
+        selected.playerController.capsuleHeight = std::max(
+            selected.playerController.capsuleHeight,
+            selected.playerController.capsuleRadius * 2.0f);
         selected.colliderEnabled = true;
         selected.collider = engine::ecs::Collider::MakeCapsuleFromHeight(
             selected.playerController.capsuleRadius,
             selected.playerController.capsuleHeight);
+        selected.collider.isTrigger = true;
         selected.collider.layer = engine::ecs::CollisionLayer::Player;
         selected.collider.mask = engine::ecs::CollisionLayer::All;
+        NormalizeColliderValues(selected.collider);
     }
     m_dirty = true;
     return true;
@@ -4585,6 +4905,7 @@ bool EditorScene::SetSelectedPlayerController(const PlayerControllerSettings& se
 
     PushUndoSnapshot();
     PlayerControllerSettings safe = settings;
+    NormalizeControllerValues(safe);
     if (safe.firstPerson && safe.cameraMode == 0) safe.cameraMode = 1;
     safe.cameraMode = std::clamp(safe.cameraMode, 0, 3);
     safe.firstPerson = safe.cameraMode == 1;
@@ -4594,6 +4915,8 @@ bool EditorScene::SetSelectedPlayerController(const PlayerControllerSettings& se
     safe.cameraProbeRadius = std::max(safe.cameraProbeRadius, 0.0f);
     safe.cameraCollisionPadding = std::max(safe.cameraCollisionPadding, 0.0f);
     safe.cameraReturnSpeed = std::max(safe.cameraReturnSpeed, 0.0f);
+    safe.capsuleRadius = std::max(safe.capsuleRadius, 0.01f);
+    safe.capsuleHeight = std::max(safe.capsuleHeight, safe.capsuleRadius * 2.0f);
     safe.shoulderOffset = std::max(safe.shoulderOffset, 0.0f);
     safe.shoulderSwitchSpeed = std::max(safe.shoulderSwitchSpeed, 0.0f);
     safe.lockOnRange = std::max(safe.lockOnRange, 0.0f);
@@ -4603,6 +4926,7 @@ bool EditorScene::SetSelectedPlayerController(const PlayerControllerSettings& se
     selected.playerController = safe;
     selected.colliderEnabled = true;
     selected.collider = engine::ecs::Collider::MakeCapsuleFromHeight(safe.capsuleRadius, safe.capsuleHeight);
+    selected.collider.isTrigger = true;
     selected.collider.layer = engine::ecs::CollisionLayer::Player;
     selected.collider.mask = engine::ecs::CollisionLayer::All;
     m_dirty = true;
@@ -5209,6 +5533,16 @@ bool EditorScene::AddSelectedFoliageInstance(
     return true;
 }
 
+bool EditorScene::SetSelectedFoliageTerrainOwner(const std::string& terrainName) {
+    if (m_selectedIndex < 0) return false;
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (!selected.isFoliage) return false;
+    if (selected.foliageTerrainOwner == terrainName) return false;
+    selected.foliageTerrainOwner = terrainName;
+    m_dirty = true;
+    return true;
+}
+
 std::size_t EditorScene::EraseSelectedFoliageInstances(
     const glm::vec3& worldPosition, float radius) {
     if (m_selectedIndex < 0) return 0;
@@ -5353,6 +5687,16 @@ bool EditorScene::SetSelectedWaterRiverWidth(float width) {
     if (selected.locked || !selected.isWater) return false;
     PushUndoSnapshot();
     selected.waterRiverWidth = std::clamp(width, 0.1f, 500.0f);
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedWaterShaderPath(const std::string& path) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) return false;
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked || !selected.isWater) return false;
+    PushUndoSnapshot();
+    selected.waterShaderPath = path;
     m_dirty = true;
     return true;
 }
@@ -5845,6 +6189,44 @@ bool EditorScene::SetPrimaryCameraPreset(std::size_t index)
     return true;
 }
 
+std::size_t EditorScene::AddViewportBookmark(const ViewportBookmark& source)
+{
+    PushUndoSnapshot();
+    ViewportBookmark bookmark = source;
+    bookmark.name = bookmark.name.empty()
+        ? "View_" + std::to_string(m_viewportBookmarks.size() + 1)
+        : bookmark.name;
+    bookmark.fov = std::clamp(bookmark.fov, 10.0f, 120.0f);
+    bookmark.blendDuration = std::clamp(bookmark.blendDuration, 0.0f, 5.0f);
+    m_viewportBookmarks.push_back(std::move(bookmark));
+    m_dirty = true;
+    return m_viewportBookmarks.size() - 1;
+}
+
+bool EditorScene::SetViewportBookmark(std::size_t index,
+                                      const ViewportBookmark& source)
+{
+    if (index >= m_viewportBookmarks.size()) return false;
+    PushUndoSnapshot();
+    ViewportBookmark bookmark = source;
+    bookmark.name = bookmark.name.empty() ? "View" : bookmark.name;
+    bookmark.fov = std::clamp(bookmark.fov, 10.0f, 120.0f);
+    bookmark.blendDuration = std::clamp(bookmark.blendDuration, 0.0f, 5.0f);
+    m_viewportBookmarks[index] = std::move(bookmark);
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::RemoveViewportBookmark(std::size_t index)
+{
+    if (index >= m_viewportBookmarks.size()) return false;
+    PushUndoSnapshot();
+    m_viewportBookmarks.erase(
+        m_viewportBookmarks.begin() + static_cast<std::ptrdiff_t>(index));
+    m_dirty = true;
+    return true;
+}
+
 std::size_t EditorScene::AddCameraSequence(const CameraSequence& source)
 {
     PushUndoSnapshot();
@@ -6117,6 +6499,60 @@ bool EditorScene::DeleteSelected()
     if (indices.empty()) {
         return false;
     }
+    // Cascade: deleting a terrain also deletes the grass/foliage painted onto it, so
+    // grass "goes with the ground" it belongs to. Collect the names AND world XZ
+    // footprints of the terrains being removed. A foliage object is removed if either
+    // (1) it is bound to a deleted terrain by foliageTerrainOwner (set at paint time),
+    // or (2) the majority of its instances sit within a deleted terrain's footprint
+    // (a fallback so grass painted before the owner-link existed is still cleaned up).
+    struct DeletedTerrainFootprint { float minX, minZ, maxX, maxZ; };
+    std::vector<std::string> deletedTerrainNames;
+    std::vector<DeletedTerrainFootprint> deletedTerrainFootprints;
+    for (int index : indices) {
+        const Object& obj = m_objects[static_cast<std::size_t>(index)];
+        if (!obj.isTerrain) continue;
+        deletedTerrainNames.push_back(obj.name);
+        const Transform* tt = m_registry.TryGet<Transform>(obj.entity);
+        const glm::vec3 base = tt ? tt->position : glm::vec3(0.0f);
+        const glm::vec3 scl = tt ? glm::abs(tt->scale) : glm::vec3(1.0f);
+        // Matches TerrainSurfaceY: terrain spans [base, base + terrainSize * scale].
+        DeletedTerrainFootprint f;
+        f.minX = base.x;
+        f.maxX = base.x + obj.terrainSize * std::max(scl.x, 1e-4f);
+        f.minZ = base.z;
+        f.maxZ = base.z + obj.terrainSize * std::max(scl.z, 1e-4f);
+        deletedTerrainFootprints.push_back(f);
+    }
+    if (!deletedTerrainNames.empty()) {
+        for (int i = 0; i < static_cast<int>(m_objects.size()); ++i) {
+            const Object& obj = m_objects[static_cast<std::size_t>(i)];
+            if (!obj.isFoliage || obj.locked) continue;
+            if (std::find(indices.begin(), indices.end(), i) != indices.end()) continue;
+
+            bool remove = false;
+            if (!obj.foliageTerrainOwner.empty()
+                && std::find(deletedTerrainNames.begin(), deletedTerrainNames.end(),
+                             obj.foliageTerrainOwner) != deletedTerrainNames.end()) {
+                remove = true;
+            }
+            if (!remove && !obj.foliageInstances.empty()) {
+                const Transform* ft = m_registry.TryGet<Transform>(obj.entity);
+                const glm::mat4 fm = ft ? ft->Model() : glm::mat4(1.0f);
+                std::size_t inside = 0, total = 0;
+                for (const engine::ecs::FoliageInstance& inst : obj.foliageInstances) {
+                    if (!inst.enabled) continue;
+                    ++total;
+                    const glm::vec3 wp = glm::vec3(fm * glm::vec4(inst.position, 1.0f));
+                    for (const DeletedTerrainFootprint& f : deletedTerrainFootprints) {
+                        if (wp.x >= f.minX && wp.x <= f.maxX
+                            && wp.z >= f.minZ && wp.z <= f.maxZ) { ++inside; break; }
+                    }
+                }
+                if (total > 0 && inside * 2 >= total) remove = true;
+            }
+            if (remove) indices.push_back(i);
+        }
+    }
     std::sort(indices.begin(), indices.end(), [](int a, int b) { return a > b; });
     indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
 
@@ -6149,6 +6585,7 @@ EditorScene::Snapshot EditorScene::CaptureSnapshot()
     snapshot.joints = m_joints;
     snapshot.cameraPresets = m_cameraPresets;
     snapshot.cameraSequences = m_cameraSequences;
+    snapshot.viewportBookmarks = m_viewportBookmarks;
     snapshot.environment = m_environment;
     snapshot.gameMode = m_gameMode;
 
@@ -6207,6 +6644,7 @@ void EditorScene::RestoreSnapshot(const Snapshot & snapshot, const engine::Mesh 
     m_joints = snapshot.joints;
     m_cameraPresets = snapshot.cameraPresets;
     m_cameraSequences = snapshot.cameraSequences;
+    m_viewportBookmarks = snapshot.viewportBookmarks;
     m_environment = snapshot.environment;
     m_gameMode = snapshot.gameMode;
 }
@@ -6236,6 +6674,7 @@ void EditorScene::Clear()
     m_joints.clear();
     m_cameraPresets.clear();
     m_cameraSequences.clear();
+    m_viewportBookmarks.clear();
     m_environment = Environment{};
     m_gameMode = GameModeSettings{};
     m_undoStack.clear();

@@ -6,6 +6,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 namespace engine {
 
@@ -16,6 +17,7 @@ struct ParticleSystemComponent;
 class Texture;
 class Mesh;
 class Model;
+struct Particle;
 
 // Draws particles as GPU-instanced, camera-facing billboards with a soft radial
 // falloff. Output is linear HDR (no tone map), so bright particles bloom; run it
@@ -46,9 +48,11 @@ private:
     unsigned int m_vao = 0;
     unsigned int m_quadVBO = 0;
     unsigned int m_instanceVBO = 0;
+    std::size_t m_instanceCapacity = 0;
     unsigned int m_timerQuery = 0;
     unsigned int m_trailVao = 0;
     unsigned int m_trailVbo = 0;
+    std::size_t m_trailCapacity = 0;
     std::unique_ptr<Shader> m_shader;
     std::unique_ptr<Shader> m_trailShader;
     std::unique_ptr<Shader> m_meshShader;
@@ -59,6 +63,11 @@ private:
     std::unordered_map<std::string, std::unique_ptr<Model>> m_models;
     std::unordered_map<std::string, std::unique_ptr<Texture>> m_textures;
     std::unordered_set<std::string> m_failedTextures;
+    // Reused per-draw scratch storage; particle rendering is single-threaded and
+    // these buffers avoid heap churn for every emitter and frame.
+    std::vector<const Particle*> m_orderedScratch;
+    std::vector<float> m_instanceScratch;
+    std::vector<float> m_trailScratch;
     Stats m_stats;
 };
 

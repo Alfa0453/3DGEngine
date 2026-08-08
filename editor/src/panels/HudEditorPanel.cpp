@@ -314,8 +314,9 @@ HudEditorPanel::Result HudEditorPanel::Draw(HudDocument& doc, bool* open,
                 if (ImGui::InputText("Key", keyBuf, sizeof(keyBuf))) w.bindKey = keyBuf;
             }
             if (w.type == HudWidgetType::Bar && w.binding == HudBinding::NamedFloat) {
-                ImGui::DragFloat("Min", &w.minValue, 0.1f);
-                ImGui::DragFloat("Max", &w.maxValue, 0.1f);
+                ImGui::DragFloat("Min", &w.minValue, 0.1f, -1000000.0f, 1000000.0f);
+                ImGui::DragFloat("Max", &w.maxValue, 0.1f, -1000000.0f, 1000000.0f);
+                w.maxValue = std::max(w.maxValue, w.minValue + 0.0001f);
             }
             if (w.type == HudWidgetType::Text) {
                 ImGui::TextDisabled("Tip: put {} in Text for the bound value.");

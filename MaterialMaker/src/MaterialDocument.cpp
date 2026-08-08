@@ -309,6 +309,7 @@ std::string ToJson(const MaterialDocument& material) {
     out << "  \"uvScale\": " << Vec2Json(material.uvScale) << ",\n";
     out << "  \"uvOffset\": " << Vec2Json(material.uvOffset) << ",\n";
     out << "  \"uvRotation\": " << material.uvRotation << ",\n";
+    out << "  \"worldSpaceUv\": " << (material.worldSpaceUv ? 1 : 0) << ",\n";
     out << "  \"normalStrength\": " << material.normalStrength << ",\n";
     out << "  \"heightScale\": " << material.heightScale << ",\n";
     out << "  \"clearcoat\": " << material.clearcoat << ",\n";
@@ -375,6 +376,7 @@ std::string ToCppInitializer(const MaterialDocument& material) {
     out << variable << ".uvScale = " << Vec2Cpp(material.uvScale) << ";\n";
     out << variable << ".uvOffset = " << Vec2Cpp(material.uvOffset) << ";\n";
     out << variable << ".uvRotation = " << material.uvRotation << "f;\n";
+    out << variable << ".worldSpaceUv = " << (material.worldSpaceUv ? "true" : "false") << ";\n";
     out << variable << ".normalStrength = " << material.normalStrength << "f;\n";
     out << variable << ".heightScale = " << material.heightScale << "f;\n";
     out << variable << ".clearcoat = " << material.clearcoat << "f;\n";
@@ -652,6 +654,10 @@ bool LoadMaterialFile(const std::string& path, MaterialDocument* material, std::
             if (error) *error = "Material file has an invalid blend mode.";
             return false;
         }
+        // Optional (added later): world-space UV projection. Absent in older v3 files.
+        float worldSpaceUv = 0.0f;
+        if (FindFloat(top, "worldSpaceUv", &worldSpaceUv))
+            loaded.worldSpaceUv = worldSpaceUv > 0.5f;
     }
     if (version >= 4) {
         FindString(top, "shader", &loaded.shaderPath);

@@ -32,8 +32,10 @@ public:
 private:
     struct Record { const Mesh* mesh; int offsetFloats; int count; };
     unsigned int                                   m_vbo = 0;
+    std::size_t                                    m_vboCapacity = 0;
     std::vector<float>                             m_data;      // 16 floats (model) per instance
     std::vector<Record>                           m_records;   // instanced groups
+    std::unordered_map<const Mesh*, std::vector<float>> m_groups;
     struct TexturedRecord { const Mesh* mesh; glm::mat4 model; const ecs::PbrMaterial* material; };
     std::vector<TexturedRecord> m_textured;  // per-object fallback
 };

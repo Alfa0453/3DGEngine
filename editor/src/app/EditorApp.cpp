@@ -24,6 +24,8 @@
 #include <engine/graphics/GrassField.h>
 #include <engine/math/Spline.h>
 #include <engine/assets/MaterialAssetLoader.h>
+#include <engine/assets/ShaderAsset.h>
+#include <engine/assets/ShaderGraphCompiler.h>
 
 #include "GameBtScripts.h"
 #include "EditorScriptTools.h"
@@ -49,7 +51,10 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <random>
+#include <system_error>
 #include <unordered_set>
 
 using engine::ecs::Entity;
@@ -616,6 +621,10 @@ void EditorApp::OnInit()
 
 void EditorApp::OnUpdate(float dt)
 {
+    if (m_mode == EditorMode::Play) {
+        m_playPhysics.SetDebugTracing(m_showGameplayTraces);
+        m_playPhysics.ClearDebugTraces();
+    }
     // A script requested a scene change during Play (deferred to a safe point so we don't
     // tear down the play registry mid-update). Exit Play, load the target scene, and resume
     // Play in it if the load succeeded -- mirroring the packaged runtime's scene transition.
@@ -675,7 +684,8 @@ void EditorApp::OnUpdate(float dt)
             CapturePlayScriptInput(playInputEnabled, true);
         engine::UpdateScripts(
             *m_playRegistry, playDt, &scriptInput, &m_runtimeAudio,
-            &m_cameraShake, &m_cameraDirector, &engine::GameMode::Instance());
+            &m_cameraShake, &m_cameraDirector, &engine::GameMode::Instance(),
+            &m_playPhysics);
         // Full game save/load requests. In the editor a load restores state onto the
         // current play scene (matching entities by name) rather than reloading a scene.
         for (const engine::ScriptSaveGameRequest& request
@@ -826,6 +836,9 @@ void EditorApp::OnRender()
     m_renderH = window.Height();
 
     const auto cpuRenderStart = std::chrono::high_resolution_clock::now();
+    // The overlay toggle also controls query/counter work, so hiding the
+    // profiler removes its per-frame overhead rather than only hiding its UI.
+    m_gpuProfiler.SetEnabled(m_showProfiler);
     m_gpuProfiler.BeginFrame();
 
     m_renderer.SetMultisample(environment.msaa);   // MSAA toggle (direct render path)
@@ -1388,11 +1401,25 @@ void EditorApp::DrawEditorOverlay()
             ImGui::PlotLines("##frametime", m_frameMsHistory.data(), kFrameHistory,
                              m_frameMsHead, nullptr, 0.0f, plotMax, ImVec2(220.0f, 45.0f));
             ImGui::Text("min %.2f  avg %.2f  max %.2f ms", mn, avg, mx);
+            // 1% low: the worst-1% (99th percentile) frame time as an FPS figure — a far
+            // better "felt smoothness" measure than average FPS (spikes show here first).
+            if (samples > 4) {
+                std::vector<float> sorted;
+                sorted.reserve(static_cast<std::size_t>(samples));
+                for (float ms : m_frameMsHistory) if (ms > 0.0f) sorted.push_back(ms);
+                std::sort(sorted.begin(), sorted.end());
+                const std::size_t idx = std::min(sorted.size() - 1,
+                    static_cast<std::size_t>(sorted.size() * 0.99f));
+                const float p99 = sorted[idx];
+                ImGui::Text("1%% low: %.0f fps  (%.2f ms)",
+                            p99 > 0.0f ? 1000.0f / p99 : 0.0f, p99);
+            }
             ImGui::Separator();
 
             ImGui::Text("CPU render: %.2f ms", m_cpuFrameMs);
             ImGui::Text("  scene submit: %.2f ms", m_cpuSceneMs);
             ImGui::Text("  ui build:     %.2f ms", m_cpuUiMs);
+            ImGui::Text("Draw calls: %d", m_gpuProfiler.DrawCalls());
             ImGui::Separator();
             double gpuTotal = 0.0;
             for (const std::pair<std::string, double>& r : m_gpuProfiler.Results()) {
@@ -1409,16 +1436,64 @@ void EditorApp::DrawEditorOverlay()
             // Scene counts: what the frame is actually pushing through.
             ImGui::Separator();
             int objectCount = 0, visibleCount = 0, lightCount = 0;
+            int modelCount = 0, terrainCount = 0, waterCount = 0, foliageCount = 0,
+                particleCount = 0, skinnedCount = 0;
+            std::size_t triangles = 0, vertices = 0;
             for (const EditorScene::Object& object : m_scene.Objects()) {
                 ++objectCount;
-                if (object.visible) ++visibleCount;
                 if (object.light) ++lightCount;
+                if (object.isTerrain) ++terrainCount;
+                if (object.isWater) ++waterCount;
+                if (object.isFoliage) ++foliageCount;
+                if (object.particleSystemEnabled) ++particleCount;
+                if (object.skeletalModel) ++skinnedCount;
+                else if (!object.modelAssetPath.empty()) ++modelCount;
+                if (!object.visible) continue;
+                ++visibleCount;
+                // Triangle/vertex load from primitive mesh renderers (terrain is added
+                // separately below; models/skinned use their own geometry). A quick read
+                // of how heavy the visible scene is.
+                const bool primitive = object.modelAssetPath.empty() && !object.isTerrain
+                    && !object.isWater && !object.isFoliage && !object.skeletalModel
+                    && !object.light;
+                if (primitive) {
+                    if (const MeshRenderer* mr = m_scene.TryGetMeshRenderer(object.entity)) {
+                        if (mr->mesh) {
+                            triangles += mr->mesh->TriangleCount();
+                            vertices += mr->mesh->VertexCount();
+                        }
+                    }
+                }
+            }
+            for (const auto& entry : m_terrains) {
+                triangles += entry.second.terrain.GetMesh().TriangleCount();
+                vertices += entry.second.terrain.GetMesh().VertexCount();
             }
             ImGui::Text("Objects: %d  (visible %d)", objectCount, visibleCount);
             ImGui::Text("Lights:  %d", lightCount);
+            ImGui::Text("Triangles: %zu   Vertices: %zu", triangles, vertices);
+            // Scene composition — where the frame's geometry cost is going.
+            ImGui::Text("Models %d  Skinned %d  Terrain %d", modelCount, skinnedCount,
+                        terrainCount);
+            ImGui::Text("Water %d  Foliage %d  Particles %d", waterCount, foliageCount,
+                        particleCount);
             if (m_mode == EditorMode::Play) {
                 ImGui::Text("Play entities: %d",
                             m_playRegistry ? static_cast<int>(m_playEntityNames.size()) : 0);
+            }
+
+            // GPU memory (NVIDIA NVX / driver-exposed). Silently skipped on GPUs that do
+            // not report it (the query sets GL_INVALID_ENUM, which we swallow).
+            constexpr unsigned int kNvxTotalVidMem   = 0x9048;
+            constexpr unsigned int kNvxCurrentAvail  = 0x9049;
+            GLint vramTotalKb = 0, vramAvailKb = 0;
+            while (glGetError() != GL_NO_ERROR) {}   // clear any prior error
+            glGetIntegerv(kNvxTotalVidMem, &vramTotalKb);
+            glGetIntegerv(kNvxCurrentAvail, &vramAvailKb);
+            if (glGetError() == GL_NO_ERROR && vramTotalKb > 0) {
+                ImGui::Separator();
+                ImGui::Text("VRAM: %d / %d MB",
+                            (vramTotalKb - vramAvailKb) / 1024, vramTotalKb / 1024);
             }
         }
         ImGui::End();
@@ -1495,6 +1570,7 @@ void EditorApp::DrawEditorOverlay()
     dockspaceContext.particleDebugCullingState = &m_particleDebugCullingState;
     dockspaceContext.navigationPreviewPolygons = static_cast<int>(m_editorNavMesh.polys.size());
     dockspaceContext.physicsEventGuidesSelectedOnly = &m_physicsEventGuidesSelectedOnly;
+    dockspaceContext.showGameplayTraces = &m_showGameplayTraces;
     dockspaceContext.physicsEventGuidesTriggersOnly = &m_physicsEventGuidesTriggersOnly;
     dockspaceContext.physicsEventGuidesEnterExitOnly = &m_physicsEventGuidesEnterExitOnly;
     dockspaceContext.scenePathBuffer = m_scenePathDraft.data();
@@ -1672,6 +1748,20 @@ void EditorApp::DrawEditorOverlay()
     DrawCharacterEditorPanel();
     DrawClipEditorPanel();
     DrawGraphEditorPanel();
+    DrawMeshEditorPanel();
+    DrawModularPlacementPanel();
+    DrawPrefabPalettePanel();
+    DrawRoomBuilderPanel();
+    DrawScatterPaintPanel();
+    DrawArrayToolPanel();
+    DrawMeasurementPanel();
+    DrawLevelValidationPanel();
+    DrawLevelVariantPanel();
+    DrawLevelLayersPanel();
+    DrawViewportBookmarksPanel();
+    DrawBlockoutPanel();
+    DrawAlignmentPanel();
+    DrawSplineBuilderPanel();
     DrawPrefabEditorPanel();
     DrawScriptDebugPanel();
     DrawViewportPanel();
@@ -1862,12 +1952,10 @@ void EditorApp::DrawEditorOverlay()
             break;
         }
         case EditorAssets::Type::SkeletalModel:
-            m_panels.SetOpen(EditorPanels::Panel::AnimationPreview, true);
-            OpenAnimationAssetPreview(path, dockspaceContext.editorAssetOpenType);
-            m_log.Info("Opened Animation Preview for " + path);
-            break;
         case EditorAssets::Type::Model:
-            m_log.Info("Static meshes have no skeletal animation preview: " + path);
+            m_panels.SetOpen(EditorPanels::Panel::MeshEditor, true);
+            m_meshEditor.QueueOpen(path);
+            m_log.Info("Opening mesh: " + path);
             break;
         case EditorAssets::Type::Skeleton:
         case EditorAssets::Type::Animation:
@@ -2045,6 +2133,9 @@ void EditorApp::DrawEditorOverlay()
     }
     if (dockspaceContext.duplicateSelectedRequested) {
         DuplicateSelected();
+    }
+    if (dockspaceContext.mergeSelectedRequested) {
+        MergeSelectedToSingleMesh();
     }
     if (dockspaceContext.deleteSelectedRequested) {
         DeleteSelected();
@@ -2350,6 +2441,1163 @@ void EditorApp::DrawGraphEditorPanel() {
         if (!m_assets.Refresh(m_project.AssetRoot(), &error)) m_log.Warning(error);
     }
     if (!message.empty()) m_log.Info(message);
+}
+
+void EditorApp::DrawMeshEditorPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::MeshEditor)) return;
+    bool open = true;
+    bool assetSaved = false;
+    std::string message;
+    m_meshEditor.Draw(&open, &assetSaved, &message);
+    m_panels.SetOpen(EditorPanels::Panel::MeshEditor, open);
+    if (assetSaved) {
+        std::string error;
+        if (m_meshEditor.IsSkeletal())
+            m_editAssets.ReloadSkinnedModel(m_meshEditor.Path(), &error);
+        else
+            m_editAssets.ReloadModel(m_meshEditor.Path(), &error);
+        if (!error.empty()) m_log.Warning("Mesh reload: " + error);
+        error.clear();
+        if (!m_assets.Refresh(m_project.AssetRoot(), &error)) m_log.Warning(error);
+    }
+    if (!message.empty()) m_log.Info(message);
+}
+
+void EditorApp::DrawModularPlacementPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::ModularPlacement)) return;
+    bool open = true;
+    const ModularPlacementPanel::Result result =
+        m_modularPlacement.Draw(m_project.AssetRoot(), &open);
+    m_panels.SetOpen(EditorPanels::Panel::ModularPlacement, open);
+    if (!open || !m_modularPlacement.PlacementActive())
+        m_hasLastModulePaintPosition = false;
+
+    if (result.placeInFrontRequested) {
+        glm::vec3 position = m_camera.Position() + m_camera.Front() * 6.0f;
+        position = m_modularPlacement.SnapPosition(position);
+        PlaceSelectedModule(position, glm::vec3(0.0f, 1.0f, 0.0f));
+    }
+    if (result.replaceSelectedRequested) ReplaceSelectionWithModule();
+}
+
+bool EditorApp::ComputeModularPlacement(float viewportX, float viewportY,
+                                        glm::vec3* position, glm::vec3* normal) {
+    if (!position || !normal) return false;
+    const engine::Window& window = GetWindow();
+    const glm::mat4 viewProj =
+        m_camera.ProjectionMatrix(window.AspectRatio()) * m_camera.ViewMatrix();
+    glm::vec3 hitPosition(0.0f), hitNormal(0.0f, 1.0f, 0.0f);
+    const int hitObject = m_modularPlacement.SurfaceSnap()
+        ? m_viewport.PickSceneObject(m_scene, m_editAssets, viewportX, viewportY,
+              viewProj, window.Width(), window.Height(), &hitPosition, &hitNormal)
+        : -1;
+    if (hitObject < 0) {
+        hitPosition = m_viewport.SceneDropPosition(viewportX, viewportY, viewProj,
+                                                   window.Width(), window.Height());
+        hitNormal = glm::vec3(0.0f, 1.0f, 0.0f);
+    }
+
+    hitPosition = m_modularPlacement.SnapPosition(hitPosition);
+    const ModularPlacementPanel::AssetChoice* choice = m_modularPlacement.SelectedAsset();
+    if (choice && m_modularPlacement.OffsetByBounds()) {
+        glm::vec3 minimum(-0.5f), maximum(0.5f);
+        std::string modelPath = choice->path;
+        if (choice->kind == ModularPlacementPanel::AssetKind::Prefab) {
+            PrefabAsset prefab;
+            std::string error;
+            if (prefab.Load(choice->path, &error) && !prefab.object.modelAssetPath.empty())
+                modelPath = prefab.object.modelAssetPath;
+            else
+                modelPath.clear();
+        }
+        if (!modelPath.empty()) {
+            std::string error;
+            if (const engine::Model* model = m_editAssets.LoadModel(modelPath, &error)) {
+                minimum = model->Min();
+                maximum = model->Max();
+            }
+        }
+        const glm::vec3 center = (minimum + maximum) * 0.5f;
+        const glm::vec3 extent = glm::max((maximum - minimum) * 0.5f, glm::vec3(0.0f));
+        const glm::mat3 rotation = glm::mat3_cast(glm::angleAxis(
+            glm::radians(m_modularPlacement.RotationDegrees()), glm::vec3(0, 1, 0)));
+        const glm::vec3 n = glm::dot(hitNormal, hitNormal) > 1.0e-8f
+            ? glm::normalize(hitNormal) : glm::vec3(0, 1, 0);
+        const float support =
+            std::abs(glm::dot(n, rotation[0])) * extent.x
+            + std::abs(glm::dot(n, rotation[1])) * extent.y
+            + std::abs(glm::dot(n, rotation[2])) * extent.z;
+        hitPosition += n * (support - glm::dot(n, rotation * center));
+    }
+    *position = hitPosition;
+    *normal = hitNormal;
+    return true;
+}
+
+bool EditorApp::PlaceSelectedModule(const glm::vec3& position,
+                                    const glm::vec3& surfaceNormal) {
+    (void)surfaceNormal; // Reserved for optional align-to-normal placement.
+    const ModularPlacementPanel::AssetChoice* choice = m_modularPlacement.SelectedAsset();
+    if (!choice || !m_cube) return false;
+
+    engine::ecs::Transform transform;
+    transform.position = position;
+    transform.rotation = glm::angleAxis(
+        glm::radians(m_modularPlacement.RotationDegrees()), glm::vec3(0, 1, 0));
+    bool created = false;
+    if (choice->kind == ModularPlacementPanel::AssetKind::Model) {
+        created = m_scene.AddModel(choice->path, *m_cube, transform);
+        if (!created) {
+            m_log.Warning("Modular placement failed: could not add " + choice->name);
+            return false;
+        }
+    } else {
+        PrefabAsset prefab;
+        std::string error;
+        if (!prefab.Load(choice->path, &error)) {
+            m_log.Error("Modular placement failed: " + error);
+            return false;
+        }
+        AddPrefabToScene(prefab, position, choice->path);
+        created = m_scene.SelectedObject() != nullptr;
+        if (created) m_scene.SetSelectedTransform(transform);
+    }
+
+    if (created) {
+        const int selectedIndex = m_scene.SelectedIndex();
+        std::string uniqueName = choice->name;
+        int suffix = 2;
+        auto nameExists = [&](const std::string& candidate) {
+            for (int i = 0; i < static_cast<int>(m_scene.Objects().size()); ++i) {
+                if (i != selectedIndex && m_scene.Objects()[static_cast<std::size_t>(i)].name == candidate)
+                    return true;
+            }
+            return false;
+        };
+        while (nameExists(uniqueName)) uniqueName = choice->name + "_" + std::to_string(suffix++);
+        m_scene.SetSelectedName(uniqueName);
+        m_log.Info("Placed module: " + uniqueName);
+    }
+    return created;
+}
+
+void EditorApp::ReplaceSelectionWithModule() {
+    const ModularPlacementPanel::AssetChoice* choice = m_modularPlacement.SelectedAsset();
+    if (!choice || !m_scene.SelectedObject()) {
+        m_log.Warning("Replace module: select a scene object and a palette asset first");
+        return;
+    }
+    if (m_scene.SelectedLocked()) {
+        m_log.Warning("Replace module: selected object is locked");
+        return;
+    }
+
+    bool replaced = false;
+    if (choice->kind == ModularPlacementPanel::AssetKind::Model) {
+        replaced = m_scene.SetSelectedModelAsset(choice->path);
+        if (replaced) {
+            m_scene.SetSelectedAnimationSettings(
+                false, 0, std::string(), false, false, 1.0f);
+        }
+    } else {
+        PrefabAsset prefab;
+        std::string error;
+        if (!prefab.Load(choice->path, &error)) {
+            m_log.Error("Replace module failed: " + error);
+            return;
+        }
+        const engine::Mesh* mesh = m_cube ? &*m_cube : nullptr;
+        switch (prefab.object.primitive) {
+        case EditorScene::Primitive::Plane: if (m_plane) mesh = &*m_plane; break;
+        case EditorScene::Primitive::Sphere: if (m_sphere) mesh = &*m_sphere; break;
+        case EditorScene::Primitive::Capsule: if (m_capsule) mesh = &*m_capsule; break;
+        case EditorScene::Primitive::Cylinder: if (m_cylinder) mesh = &*m_cylinder; break;
+        case EditorScene::Primitive::Cone: if (m_cone) mesh = &*m_cone; break;
+        case EditorScene::Primitive::Pyramid: if (m_pyramid) mesh = &*m_pyramid; break;
+        case EditorScene::Primitive::Torus: if (m_torus) mesh = &*m_torus; break;
+        case EditorScene::Primitive::Staircase: if (m_staircase) mesh = &*m_staircase; break;
+        default: break;
+        }
+        if (mesh) m_scene.SetSelectedPrimitive(prefab.object.primitive, *mesh);
+        replaced = prefab.Apply(m_scene);
+        if (replaced) m_scene.SetSelectedPrefabAssetPath(choice->path, prefab.assetId);
+    }
+    if (replaced) m_log.Info("Replaced selected object with: " + choice->name);
+    else m_log.Warning("Replace module did not change the selected object");
+}
+
+void EditorApp::DrawPrefabPalettePanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::PrefabPalette)) return;
+    bool open = true;
+    const PrefabPalettePanel::Result result =
+        m_prefabPalette.Draw(m_project.AssetRoot(), &open);
+    m_panels.SetOpen(EditorPanels::Panel::PrefabPalette, open);
+    if (result.placeInFrontRequested) {
+        const PrefabPalettePanel::Placement placement = m_prefabPalette.NextPlacement();
+        if (!placement.path.empty()) {
+            glm::vec3 position = m_camera.Position() + m_camera.Front() * 6.0f;
+            position = m_prefabPalette.SnapPosition(position);
+            PlacePalettePrefab(placement, position);
+        }
+    }
+    if (result.replaceSelectedRequested) ReplaceSelectionWithPalettePrefab();
+}
+
+bool EditorApp::ComputePrefabPalettePlacement(
+    float viewportX, float viewportY,
+    const PrefabPalettePanel::Placement& placement,
+    glm::vec3* position, glm::vec3* normal) {
+    if (!position || !normal || placement.path.empty()) return false;
+    const engine::Window& window = GetWindow();
+    const glm::mat4 viewProj =
+        m_camera.ProjectionMatrix(window.AspectRatio()) * m_camera.ViewMatrix();
+    glm::vec3 hitPosition(0.0f), hitNormal(0.0f, 1.0f, 0.0f);
+    const int hitObject = m_prefabPalette.SurfaceSnap()
+        ? m_viewport.PickSceneObject(m_scene, m_editAssets, viewportX, viewportY,
+              viewProj, window.Width(), window.Height(), &hitPosition, &hitNormal)
+        : -1;
+    if (hitObject < 0) {
+        hitPosition = m_viewport.SceneDropPosition(viewportX, viewportY, viewProj,
+                                                   window.Width(), window.Height());
+        hitNormal = glm::vec3(0, 1, 0);
+    }
+    hitPosition = m_prefabPalette.SnapPosition(hitPosition);
+
+    if (m_prefabPalette.OffsetByBounds()) {
+        glm::vec3 minimum(-0.5f), maximum(0.5f);
+        PrefabAsset prefab;
+        std::string error;
+        if (prefab.Load(placement.path, &error) && !prefab.object.modelAssetPath.empty()) {
+            if (const engine::Model* model =
+                    m_editAssets.LoadModel(prefab.object.modelAssetPath, &error)) {
+                minimum = model->Min();
+                maximum = model->Max();
+            }
+        }
+        const glm::vec3 center = (minimum + maximum) * 0.5f * placement.uniformScale;
+        const glm::vec3 extent = glm::max((maximum - minimum) * 0.5f
+                                           * placement.uniformScale, glm::vec3(0.0f));
+        const glm::mat3 rotation = glm::mat3_cast(glm::angleAxis(
+            glm::radians(placement.yawDegrees), glm::vec3(0, 1, 0)));
+        const glm::vec3 n = glm::dot(hitNormal, hitNormal) > 1.0e-8f
+            ? glm::normalize(hitNormal) : glm::vec3(0, 1, 0);
+        const float support =
+            std::abs(glm::dot(n, rotation[0])) * extent.x
+            + std::abs(glm::dot(n, rotation[1])) * extent.y
+            + std::abs(glm::dot(n, rotation[2])) * extent.z;
+        hitPosition += n * (support - glm::dot(n, rotation * center));
+    }
+    *position = hitPosition;
+    *normal = hitNormal;
+    return true;
+}
+
+bool EditorApp::PlacePalettePrefab(const PrefabPalettePanel::Placement& placement,
+                                   const glm::vec3& position) {
+    if (placement.path.empty()) return false;
+    PrefabAsset prefab;
+    std::string error;
+    if (!prefab.Load(placement.path, &error)) {
+        m_log.Error("Prefab Palette: " + error);
+        return false;
+    }
+    AddPrefabToScene(prefab, position, placement.path);
+    if (!m_scene.SelectedObject()) return false;
+
+    engine::ecs::Transform transform = *m_scene.SelectedTransform();
+    transform.position = position;
+    transform.rotation = glm::angleAxis(glm::radians(placement.yawDegrees),
+                                         glm::vec3(0, 1, 0));
+    transform.scale *= placement.uniformScale;
+    m_scene.SetSelectedTransform(transform);
+
+    const int selectedIndex = m_scene.SelectedIndex();
+    std::string uniqueName = placement.name;
+    int suffix = 2;
+    auto nameExists = [&](const std::string& candidate) {
+        for (int i = 0; i < static_cast<int>(m_scene.Objects().size()); ++i) {
+            if (i != selectedIndex && m_scene.Objects()[static_cast<std::size_t>(i)].name == candidate)
+                return true;
+        }
+        return false;
+    };
+    while (nameExists(uniqueName)) uniqueName = placement.name + "_" + std::to_string(suffix++);
+    m_scene.SetSelectedName(uniqueName);
+    m_log.Info("Prefab Palette placed: " + uniqueName);
+    return true;
+}
+
+void EditorApp::ReplaceSelectionWithPalettePrefab() {
+    if (!m_scene.SelectedObject() || m_scene.SelectedLocked()) {
+        m_log.Warning("Prefab Palette: select an unlocked scene object first");
+        return;
+    }
+    const PrefabPalettePanel::Placement placement = m_prefabPalette.NextPlacement();
+    if (placement.path.empty()) return;
+    PrefabAsset prefab;
+    std::string error;
+    if (!prefab.Load(placement.path, &error)) {
+        m_log.Error("Prefab Palette: " + error);
+        return;
+    }
+    const engine::Mesh* mesh = m_cube ? &*m_cube : nullptr;
+    switch (prefab.object.primitive) {
+    case EditorScene::Primitive::Plane: if (m_plane) mesh = &*m_plane; break;
+    case EditorScene::Primitive::Sphere: if (m_sphere) mesh = &*m_sphere; break;
+    case EditorScene::Primitive::Capsule: if (m_capsule) mesh = &*m_capsule; break;
+    case EditorScene::Primitive::Cylinder: if (m_cylinder) mesh = &*m_cylinder; break;
+    case EditorScene::Primitive::Cone: if (m_cone) mesh = &*m_cone; break;
+    case EditorScene::Primitive::Pyramid: if (m_pyramid) mesh = &*m_pyramid; break;
+    case EditorScene::Primitive::Torus: if (m_torus) mesh = &*m_torus; break;
+    case EditorScene::Primitive::Staircase: if (m_staircase) mesh = &*m_staircase; break;
+    default: break;
+    }
+    if (mesh) m_scene.SetSelectedPrimitive(prefab.object.primitive, *mesh);
+    if (prefab.Apply(m_scene)) {
+        m_scene.SetSelectedPrefabAssetPath(placement.path, prefab.assetId);
+        m_log.Info("Prefab Palette replaced selection with: " + placement.name);
+    } else {
+        m_log.Warning("Prefab Palette could not replace the selected object");
+    }
+}
+
+void EditorApp::DrawRoomBuilderPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::RoomBuilder)) return;
+    bool open = true;
+    const RoomBuilderPanel::Result result =
+        m_roomBuilder.Draw(m_project.AssetRoot(), &open);
+    m_panels.SetOpen(EditorPanels::Panel::RoomBuilder, open);
+    if (result.deleteExistingRequested) {
+        const int removed = DeleteGeneratedRoom(m_roomBuilder.RoomName());
+        m_log.Info("Room Builder removed " + std::to_string(removed) + " piece(s)");
+    }
+    if (result.generateRequested) GenerateRoom();
+}
+
+int EditorApp::DeleteGeneratedRoom(const std::string& roomName) {
+    if (roomName.empty()) return 0;
+    const std::string prefix = roomName + "_";
+    std::vector<int> indices;
+    for (int i = 0; i < static_cast<int>(m_scene.Objects().size()); ++i) {
+        const std::string& name = m_scene.Objects()[static_cast<std::size_t>(i)].name;
+        if (name.rfind(prefix, 0) == 0) indices.push_back(i);
+    }
+    if (indices.empty()) return 0;
+    m_scene.SelectIndex(indices.front());
+    for (std::size_t i = 1; i < indices.size(); ++i) m_scene.ToggleSelection(indices[i]);
+    return m_scene.DeleteSelected() ? static_cast<int>(indices.size()) : 0;
+}
+
+void EditorApp::GenerateRoom() {
+    if (!m_cube || !m_roomBuilder.HasRoom()) return;
+    const std::string roomName = m_roomBuilder.RoomName();
+    if (roomName.empty()) return;
+    if (m_roomBuilder.ReplaceExisting()) DeleteGeneratedRoom(roomName);
+
+    const glm::vec3 a = m_roomBuilder.FirstCorner();
+    const glm::vec3 b = m_roomBuilder.SecondCorner();
+    const float minX = std::min(a.x, b.x), maxX = std::max(a.x, b.x);
+    const float minZ = std::min(a.z, b.z), maxZ = std::max(a.z, b.z);
+    const float width = std::max(maxX - minX, 0.1f);
+    const float depth = std::max(maxZ - minZ, 0.1f);
+    const float baseY = a.y;
+    const float wallHeight = m_roomBuilder.WallHeight();
+    const float thickness = std::min(m_roomBuilder.WallThickness(),
+                                     std::min(width, depth) * 0.45f);
+    const float centerX = (minX + maxX) * 0.5f;
+    const float centerZ = (minZ + maxZ) * 0.5f;
+    engine::ecs::Collider collider = engine::ecs::Collider::MakeBox(glm::vec3(0.5f));
+    collider.layer = engine::ecs::CollisionLayer::WorldStatic;
+    collider.mask = engine::ecs::CollisionLayer::All;
+    const engine::ecs::Collider* colliderPtr = m_roomBuilder.CreateColliders()
+        ? &collider : nullptr;
+
+    bool firstPiece = true;
+    int pieceCount = 0;
+    auto addPiece = [&](const std::string& suffix, const glm::vec3& position,
+                        const glm::vec3& scale) {
+        if (scale.x <= 0.001f || scale.y <= 0.001f || scale.z <= 0.001f) return;
+        m_scene.SuppressUndo(!firstPiece);
+        engine::ecs::Transform transform;
+        transform.position = position;
+        transform.scale = scale;
+        m_scene.AddConfiguredPrimitive(EditorScene::Primitive::Cube, *m_cube,
+                                       transform, colliderPtr, roomName + "_" + suffix);
+        if (firstPiece) {
+            firstPiece = false;
+            m_scene.SuppressUndo(true);
+        }
+        if (!m_roomBuilder.MaterialPath().empty())
+            m_scene.SetSelectedMaterialAsset(m_roomBuilder.MaterialPath());
+        ++pieceCount;
+    };
+
+    const float floorThickness = m_roomBuilder.FloorThickness();
+    if (m_roomBuilder.CreateFloor()) {
+        addPiece("Floor", {centerX, baseY - floorThickness * 0.5f, centerZ},
+                 {width, floorThickness, depth});
+    }
+    if (m_roomBuilder.CreateCeiling()) {
+        addPiece("Ceiling", {centerX, baseY + wallHeight + floorThickness * 0.5f, centerZ},
+                 {width, floorThickness, depth});
+    }
+
+    auto horizontalWall = [&](const std::string& name, float z, bool doorway) {
+        if (!doorway) {
+            addPiece(name, {centerX, baseY + wallHeight * 0.5f, z},
+                     {width, wallHeight, thickness});
+            return;
+        }
+        const float openingWidth = std::clamp(
+            m_roomBuilder.DoorWidth(), thickness, std::max(thickness, width - thickness * 2.0f));
+        if (width <= openingWidth + thickness * 1.5f) {
+            addPiece(name, {centerX, baseY + wallHeight * 0.5f, z},
+                     {width, wallHeight, thickness});
+            return;
+        }
+        const float start = minX, end = maxX;
+        const float doorCenter = std::clamp(centerX + m_roomBuilder.DoorOffset(),
+            start + openingWidth * 0.5f + thickness,
+            end - openingWidth * 0.5f - thickness);
+        const float doorMin = doorCenter - openingWidth * 0.5f;
+        const float doorMax = doorCenter + openingWidth * 0.5f;
+        addPiece(name + "_Left", {(start + doorMin) * 0.5f, baseY + wallHeight * 0.5f, z},
+                 {doorMin - start, wallHeight, thickness});
+        addPiece(name + "_Right", {(doorMax + end) * 0.5f, baseY + wallHeight * 0.5f, z},
+                 {end - doorMax, wallHeight, thickness});
+        const float doorHeight = std::min(m_roomBuilder.DoorHeight(), wallHeight - 0.05f);
+        const float headerHeight = wallHeight - doorHeight;
+        addPiece(name + "_Header", {doorCenter, baseY + doorHeight + headerHeight * 0.5f, z},
+                 {openingWidth, headerHeight, thickness});
+    };
+    auto verticalWall = [&](const std::string& name, float x, bool doorway) {
+        if (!doorway) {
+            addPiece(name, {x, baseY + wallHeight * 0.5f, centerZ},
+                     {thickness, wallHeight, depth});
+            return;
+        }
+        const float openingWidth = std::clamp(
+            m_roomBuilder.DoorWidth(), thickness, std::max(thickness, depth - thickness * 2.0f));
+        if (depth <= openingWidth + thickness * 1.5f) {
+            addPiece(name, {x, baseY + wallHeight * 0.5f, centerZ},
+                     {thickness, wallHeight, depth});
+            return;
+        }
+        const float start = minZ, end = maxZ;
+        const float doorCenter = std::clamp(centerZ + m_roomBuilder.DoorOffset(),
+            start + openingWidth * 0.5f + thickness,
+            end - openingWidth * 0.5f - thickness);
+        const float doorMin = doorCenter - openingWidth * 0.5f;
+        const float doorMax = doorCenter + openingWidth * 0.5f;
+        addPiece(name + "_Left", {x, baseY + wallHeight * 0.5f, (start + doorMin) * 0.5f},
+                 {thickness, wallHeight, doorMin - start});
+        addPiece(name + "_Right", {x, baseY + wallHeight * 0.5f, (doorMax + end) * 0.5f},
+                 {thickness, wallHeight, end - doorMax});
+        const float doorHeight = std::min(m_roomBuilder.DoorHeight(), wallHeight - 0.05f);
+        const float headerHeight = wallHeight - doorHeight;
+        addPiece(name + "_Header", {x, baseY + doorHeight + headerHeight * 0.5f, doorCenter},
+                 {thickness, headerHeight, openingWidth});
+    };
+
+    const bool door = m_roomBuilder.DoorEnabled();
+    horizontalWall("Wall_North", maxZ, door && m_roomBuilder.DoorWall() == 0);
+    horizontalWall("Wall_South", minZ, door && m_roomBuilder.DoorWall() == 1);
+    verticalWall("Wall_East", maxX, door && m_roomBuilder.DoorWall() == 2);
+    verticalWall("Wall_West", minX, door && m_roomBuilder.DoorWall() == 3);
+
+    if (m_roomBuilder.CreateCornerPosts()) {
+        addPiece("Corner_NW", {minX, baseY + wallHeight * 0.5f, maxZ},
+                 {thickness, wallHeight, thickness});
+        addPiece("Corner_NE", {maxX, baseY + wallHeight * 0.5f, maxZ},
+                 {thickness, wallHeight, thickness});
+        addPiece("Corner_SW", {minX, baseY + wallHeight * 0.5f, minZ},
+                 {thickness, wallHeight, thickness});
+        addPiece("Corner_SE", {maxX, baseY + wallHeight * 0.5f, minZ},
+                 {thickness, wallHeight, thickness});
+    }
+    m_scene.SuppressUndo(false);
+    m_log.Info("Room Builder generated " + roomName + " ("
+        + std::to_string(pieceCount) + " editable pieces)");
+}
+
+void EditorApp::DrawScatterPaintPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::ScatterPaint)) return;
+    bool open = true;
+    const ScatterPaintPanel::Result result =
+        m_scatterPaint.Draw(m_project.AssetRoot(), &open);
+    m_panels.SetOpen(EditorPanels::Panel::ScatterPaint, open);
+    if (result.clearAllRequested) {
+        const int removed = ClearPaintedScatter();
+        m_log.Info("Scatter & Paint removed " + std::to_string(removed) + " object(s)");
+    }
+}
+
+void EditorApp::PaintScatterStamp(const glm::vec3& center, const glm::vec3& normal,
+                                  bool projectToTerrain) {
+    const ScatterPaintPanel::AssetChoice* asset = m_scatterPaint.SelectedAsset();
+    if (!asset || !m_cube || !m_scatterPaint.SlopeAllowed(normal)) return;
+    const std::vector<ScatterPaintPanel::StampPoint> points =
+        m_scatterPaint.MakeStamp(center, normal);
+    if (points.empty()) return;
+
+    glm::vec3 minimum(-0.5f), maximum(0.5f);
+    std::string error;
+    if (const engine::Model* model = m_editAssets.LoadModel(asset->path, &error)) {
+        minimum = model->Min();
+        maximum = model->Max();
+    }
+    const glm::vec3 n = glm::dot(normal, normal) > 1.0e-8f
+        ? glm::normalize(normal) : glm::vec3(0, 1, 0);
+    bool first = true;
+    int placed = 0;
+    for (const ScatterPaintPanel::StampPoint& sourcePoint : points) {
+        ScatterPaintPanel::StampPoint point = sourcePoint;
+        if (projectToTerrain) {
+            bool overTerrain = false;
+            const float terrainY = TerrainSurfaceY(point.position.x, point.position.z,
+                                                   overTerrain);
+            if (overTerrain) point.position.y = terrainY + m_scatterPaint.HeightOffset();
+        }
+        bool spaced = true;
+        if (m_scatterPaint.MinimumSpacing() > 0.0f) {
+            for (const EditorScene::Object& object : m_scene.Objects()) {
+                if (object.name.rfind("Scatter_", 0) != 0) continue;
+                const engine::ecs::Transform* existing = m_scene.TryGetTransform(object.entity);
+                if (existing && glm::distance(existing->position, point.position)
+                    < m_scatterPaint.MinimumSpacing()) {
+                    spaced = false;
+                    break;
+                }
+            }
+        }
+        if (!spaced) continue;
+
+        engine::ecs::Transform transform;
+        transform.position = point.position;
+        transform.rotation = point.rotation;
+        transform.scale = glm::vec3(point.uniformScale);
+        if (m_scatterPaint.KeepOutsideSurface()) {
+            const glm::vec3 centerLocal = (minimum + maximum) * 0.5f * point.uniformScale;
+            const glm::vec3 extent = glm::max((maximum - minimum) * 0.5f
+                                               * point.uniformScale, glm::vec3(0.0f));
+            const glm::mat3 rotation = glm::mat3_cast(point.rotation);
+            const float support = std::abs(glm::dot(n, rotation[0])) * extent.x
+                + std::abs(glm::dot(n, rotation[1])) * extent.y
+                + std::abs(glm::dot(n, rotation[2])) * extent.z;
+            transform.position += n * (support - glm::dot(n, rotation * centerLocal));
+        }
+
+        m_scene.SuppressUndo(!first);
+        if (!m_scene.AddModel(asset->path, *m_cube, transform)) continue;
+        if (first) {
+            first = false;
+            m_scene.SuppressUndo(true);
+        }
+        std::string name = "Scatter_" + asset->name;
+        const std::string base = name;
+        int suffix = 1;
+        auto exists = [&](const std::string& candidate) {
+            for (const EditorScene::Object& object : m_scene.Objects())
+                if (object.name == candidate) return true;
+            return false;
+        };
+        while (exists(name)) name = base + "_" + std::to_string(++suffix);
+        m_scene.SetSelectedName(name);
+        ++placed;
+    }
+    m_scene.SuppressUndo(false);
+    if (placed > 0) m_log.Info("Scatter & Paint placed " + std::to_string(placed)
+                                + " " + asset->name + " object(s)");
+}
+
+int EditorApp::EraseScatterAt(const glm::vec3& center, float radius) {
+    std::vector<int> indices;
+    const float radiusSquared = radius * radius;
+    for (int i = 0; i < static_cast<int>(m_scene.Objects().size()); ++i) {
+        const EditorScene::Object& object = m_scene.Objects()[static_cast<std::size_t>(i)];
+        if (object.name.rfind("Scatter_", 0) != 0 || object.locked) continue;
+        const engine::ecs::Transform* transform = m_scene.TryGetTransform(object.entity);
+        if (!transform) continue;
+        const glm::vec3 delta = transform->position - center;
+        if (glm::dot(delta, delta) <= radiusSquared) indices.push_back(i);
+    }
+    if (indices.empty()) return 0;
+    m_scene.SelectIndex(indices.front());
+    for (std::size_t i = 1; i < indices.size(); ++i) m_scene.ToggleSelection(indices[i]);
+    return m_scene.DeleteSelected() ? static_cast<int>(indices.size()) : 0;
+}
+
+int EditorApp::ClearPaintedScatter() {
+    std::vector<int> indices;
+    for (int i = 0; i < static_cast<int>(m_scene.Objects().size()); ++i) {
+        const EditorScene::Object& object = m_scene.Objects()[static_cast<std::size_t>(i)];
+        if (!object.locked && object.name.rfind("Scatter_", 0) == 0) indices.push_back(i);
+    }
+    if (indices.empty()) return 0;
+    m_scene.SelectIndex(indices.front());
+    for (std::size_t i = 1; i < indices.size(); ++i) m_scene.ToggleSelection(indices[i]);
+    return m_scene.DeleteSelected() ? static_cast<int>(indices.size()) : 0;
+}
+
+void EditorApp::DrawArrayToolPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::ArrayTool)) return;
+    bool open = true;
+    const ArrayToolPanel::Result result = m_arrayTool.Draw(m_scene, &open);
+    m_panels.SetOpen(EditorPanels::Panel::ArrayTool, open);
+    if (result.deleteGeneratedRequested) {
+        const int removed = DeleteGeneratedArray(m_arrayTool.GroupName());
+        m_log.Info("Array Tool removed " + std::to_string(removed) + " generated object(s)");
+    }
+    if (result.createRequested) GenerateObjectArray();
+}
+
+void EditorApp::DrawMeasurementPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::Measurement)) return;
+    bool open = true;
+    m_measurementPanel.Draw(&open);
+    m_panels.SetOpen(EditorPanels::Panel::Measurement, open);
+}
+
+void EditorApp::DrawLevelValidationPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::LevelValidation)) return;
+    bool open = true;
+    m_levelValidation.Draw(m_scene, m_project.AssetRoot(), &open);
+    m_panels.SetOpen(EditorPanels::Panel::LevelValidation, open);
+}
+
+void EditorApp::DrawLevelVariantPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::LevelVariants)) return;
+    bool open = true;
+    const LevelVariantPanel::Result result =
+        m_levelVariants.Draw(m_project.AssetRoot(), &open);
+    m_panels.SetOpen(EditorPanels::Panel::LevelVariants, open);
+    if (result.action == LevelVariantPanel::Action::None) return;
+    if (!m_cube || !m_plane || !m_sphere || !m_capsule || !m_cylinder
+        || !m_cone || !m_pyramid || !m_torus || !m_staircase) {
+        m_levelVariants.SetStatus("Editor meshes are not ready.", true);
+        return;
+    }
+
+    auto loadVariant = [&](const std::string& path, EditorScene* output,
+                           std::string* error) {
+        return output && output->Load(path, *m_cube, *m_plane, *m_sphere,
+            *m_capsule, *m_cylinder, *m_cone, *m_pyramid, *m_torus,
+            *m_staircase, error);
+    };
+    auto refreshWithStatus = [&](const std::string& status, bool error) {
+        m_levelVariants.Refresh(m_project.AssetRoot());
+        m_levelVariants.SetStatus(status, error);
+        if (error) m_log.Warning("Level Variant: " + status);
+        else m_log.Info("Level Variant: " + status);
+    };
+
+    std::error_code ec;
+    switch (result.action) {
+    case LevelVariantPanel::Action::Capture:
+    case LevelVariantPanel::Action::Overwrite: {
+        if (result.targetPath.empty()) break;
+        if (result.action == LevelVariantPanel::Action::Capture
+            && std::filesystem::exists(result.targetPath, ec)) {
+            refreshWithStatus("A variant with that name already exists. Use Overwrite.", true);
+            break;
+        }
+        std::filesystem::create_directories(
+            std::filesystem::path(result.targetPath).parent_path(), ec);
+        std::string error;
+        if (m_scene.Save(result.targetPath, &error, false))
+            refreshWithStatus("Captured "
+                + std::filesystem::path(result.targetPath).stem().string() + ".", false);
+        else refreshWithStatus("Capture failed: " + error, true);
+        break;
+    }
+    case LevelVariantPanel::Action::Restore: {
+        EditorScene variant;
+        std::string error;
+        if (!loadVariant(result.sourcePath, &variant, &error)) {
+            refreshWithStatus("Restore failed: " + error, true);
+            break;
+        }
+        m_scene.ApplySnapshotUndoable(variant.CreateSnapshot(), *m_cube, *m_plane,
+            *m_sphere, *m_capsule, *m_cylinder, *m_cone, *m_pyramid,
+            *m_torus, *m_staircase);
+        m_terrains.clear();
+        m_waters.clear();
+        m_editAssets.ResolveRegistryAssets(m_scene.Registry());
+        refreshWithStatus("Restored "
+            + std::filesystem::path(result.sourcePath).stem().string()
+            + ". Use Undo to return to the previous layout.", false);
+        break;
+    }
+    case LevelVariantPanel::Action::Compare: {
+        EditorScene variant;
+        std::string error;
+        if (!loadVariant(result.sourcePath, &variant, &error)) {
+            refreshWithStatus("Compare failed: " + error, true);
+            break;
+        }
+        int added = 0, removed = 0, modified = 0;
+        auto findByName = [](const EditorScene& scene, const std::string& name)
+            -> const EditorScene::Object* {
+            for (const EditorScene::Object& object : scene.Objects())
+                if (object.name == name) return &object;
+            return nullptr;
+        };
+        for (const EditorScene::Object& object : variant.Objects()) {
+            const EditorScene::Object* current = findByName(m_scene, object.name);
+            if (!current) { ++added; continue; }
+            const Transform* a = variant.TryGetTransform(object.entity);
+            const Transform* b = m_scene.TryGetTransform(current->entity);
+            bool changed = !a || !b;
+            if (a && b) {
+                changed = glm::distance(a->position, b->position) > 0.0001f
+                    || glm::distance(a->scale, b->scale) > 0.0001f
+                    || std::abs(glm::dot(a->rotation, b->rotation)) < 0.99999f;
+            }
+            changed = changed || object.visible != current->visible
+                || object.modelAssetPath != current->modelAssetPath
+                || object.materialAssetPath != current->materialAssetPath
+                || object.colliderEnabled != current->colliderEnabled
+                || object.scriptEnabled != current->scriptEnabled
+                || object.scriptPath != current->scriptPath;
+            if (changed) ++modified;
+        }
+        for (const EditorScene::Object& object : m_scene.Objects())
+            if (!findByName(variant, object.name)) ++removed;
+        refreshWithStatus("Comparison: variant adds " + std::to_string(added)
+            + ", removes " + std::to_string(removed) + ", and modifies "
+            + std::to_string(modified) + " named object(s).", false);
+        break;
+    }
+    case LevelVariantPanel::Action::Duplicate: {
+        if (result.targetPath.empty() || result.targetPath == result.sourcePath) {
+            refreshWithStatus("Choose a different name for the duplicate.", true);
+            break;
+        }
+        if (std::filesystem::exists(result.targetPath, ec)) {
+            refreshWithStatus("The duplicate target name already exists.", true);
+            break;
+        }
+        std::filesystem::copy_file(result.sourcePath, result.targetPath,
+                                   std::filesystem::copy_options::none, ec);
+        refreshWithStatus(ec ? "Duplicate failed: " + ec.message() : "Variant duplicated.",
+                          static_cast<bool>(ec));
+        break;
+    }
+    case LevelVariantPanel::Action::Rename: {
+        if (result.targetPath.empty() || result.targetPath == result.sourcePath) {
+            refreshWithStatus("Choose a different name for the variant.", true);
+            break;
+        }
+        if (std::filesystem::exists(result.targetPath, ec)) {
+            refreshWithStatus("The rename target already exists.", true);
+            break;
+        }
+        std::filesystem::rename(result.sourcePath, result.targetPath, ec);
+        refreshWithStatus(ec ? "Rename failed: " + ec.message() : "Variant renamed.",
+                          static_cast<bool>(ec));
+        break;
+    }
+    case LevelVariantPanel::Action::Delete:
+        if (!std::filesystem::remove(result.sourcePath, ec) || ec)
+            refreshWithStatus("Delete failed: " + ec.message(), true);
+        else refreshWithStatus("Variant deleted.", false);
+        break;
+    case LevelVariantPanel::Action::None:
+        break;
+    }
+}
+
+void EditorApp::DrawLevelLayersPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::LevelLayers)) return;
+    bool open = true;
+    m_levelLayers.Draw(m_scene, &open);
+    m_panels.SetOpen(EditorPanels::Panel::LevelLayers, open);
+}
+
+void EditorApp::DrawViewportBookmarksPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::ViewportBookmarks)) return;
+    bool open = true;
+    const ViewportBookmarksPanel::Result result = m_viewportBookmarks.Draw(m_scene, &open);
+    m_panels.SetOpen(EditorPanels::Panel::ViewportBookmarks, open);
+    using Action = ViewportBookmarksPanel::Action;
+    if (result.action == Action::None) return;
+    if (result.action == Action::FrameSelected) {
+        FrameSelected();
+        return;
+    }
+
+    auto capture = [&](const std::string& name, float blendDuration) {
+        EditorScene::ViewportBookmark bookmark;
+        bookmark.name = name;
+        bookmark.position = m_camera.Position();
+        bookmark.target = m_camera.Position() + m_camera.Front() * 10.0f;
+        bookmark.fov = m_camera.fov;
+        bookmark.blendDuration = blendDuration;
+        return bookmark;
+    };
+    if (result.action == Action::Capture) {
+        m_scene.AddViewportBookmark(capture(result.name, result.blendDuration));
+        m_log.Info("Captured viewport bookmark: " + result.name);
+        return;
+    }
+    if (result.index >= m_scene.ViewportBookmarks().size()) return;
+    const EditorScene::ViewportBookmark current = m_scene.ViewportBookmarks()[result.index];
+    if (result.action == Action::Visit) {
+        EditorScene::CameraPreset target;
+        target.position = current.position;
+        target.target = current.target;
+        target.fov = current.fov;
+        target.nearPlane = m_camera.nearPlane;
+        target.farPlane = m_camera.farPlane;
+        target.blendDuration = result.blendDuration;
+        target.blendEasing = static_cast<int>(engine::CameraBlend::Easing::SmoothStep);
+        BeginCameraBlend(target);
+    } else if (result.action == Action::Overwrite) {
+        EditorScene::ViewportBookmark updated = capture(current.name, result.blendDuration);
+        m_scene.SetViewportBookmark(result.index, updated);
+        m_log.Info("Updated viewport bookmark: " + current.name);
+    } else if (result.action == Action::Rename) {
+        EditorScene::ViewportBookmark renamed = current;
+        renamed.name = result.name;
+        renamed.blendDuration = result.blendDuration;
+        m_scene.SetViewportBookmark(result.index, renamed);
+    } else if (result.action == Action::Delete) {
+        m_scene.RemoveViewportBookmark(result.index);
+        m_log.Info("Deleted viewport bookmark: " + current.name);
+    }
+}
+
+void EditorApp::DrawBlockoutPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::Blockout)) return;
+    bool open = true;
+    const BlockoutPanel::Result result =
+        m_blockoutPanel.Draw(m_project.AssetRoot(), &open);
+    m_panels.SetOpen(EditorPanels::Panel::Blockout, open);
+    if (result.deleteRequested) {
+        const int removed = DeleteGeneratedBlockout(m_blockoutPanel.GroupName());
+        m_log.Info("Blockout removed " + std::to_string(removed) + " piece(s)");
+    }
+    if (result.createRequested) GenerateBlockout();
+}
+
+void EditorApp::DrawAlignmentPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::Alignment)) return;
+    bool open = true;
+    m_alignmentPanel.Draw(m_scene, &open);
+    m_panels.SetOpen(EditorPanels::Panel::Alignment, open);
+}
+
+void EditorApp::DrawSplineBuilderPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::SplineBuilder)) return;
+    bool open = true;
+    const SplineBuilderPanel::Result result =
+        m_splineBuilder.Draw(m_scene, m_project.AssetRoot(), &open);
+    m_panels.SetOpen(EditorPanels::Panel::SplineBuilder, open);
+    if (result.remove) {
+        const int removed = DeleteGeneratedSplineBuild(m_splineBuilder.GroupName());
+        m_log.Info("Spline Builder removed " + std::to_string(removed) + " piece(s)");
+    }
+    if (result.generate) GenerateSplineBuild();
+}
+
+int EditorApp::DeleteGeneratedSplineBuild(const std::string& groupName) {
+    if (groupName.empty()) return 0;
+    const std::string prefix = "SplineBuild_" + groupName + "_";
+    std::vector<int> indices;
+    for (int i = 0; i < static_cast<int>(m_scene.Objects().size()); ++i)
+        if (m_scene.Objects()[static_cast<std::size_t>(i)].name.rfind(prefix, 0) == 0)
+            indices.push_back(i);
+    if (indices.empty()) return 0;
+    m_scene.SelectIndices(indices);
+    return m_scene.DeleteSelected() ? static_cast<int>(indices.size()) : 0;
+}
+
+void EditorApp::GenerateSplineBuild() {
+    if (!m_cube) return;
+    const EditorScene::Object* splineObject = nullptr;
+    for (const EditorScene::Object& object : m_scene.Objects())
+        if (object.isSpline && object.name == m_splineBuilder.SplineName()
+            && object.splinePoints.size() >= 2) { splineObject = &object; break; }
+    if (!splineObject) {
+        m_log.Warning("Spline Builder: selected spline is unavailable");
+        return;
+    }
+    const std::string group = m_splineBuilder.GroupName();
+    if (group.empty()) return;
+    const std::vector<glm::vec3> splinePoints = splineObject->splinePoints;
+    const bool closed = splineObject->splineClosed;
+    if (m_splineBuilder.ReplaceExisting()) DeleteGeneratedSplineBuild(group);
+    const engine::Spline spline(splinePoints, closed);
+    const float length = spline.Length();
+    if (length <= 0.001f) return;
+    const int spans = std::clamp(
+        static_cast<int>(std::ceil(length / std::max(m_splineBuilder.Spacing(), 0.1f))), 1, 2048);
+    const std::string prefix = "SplineBuild_" + group + "_";
+
+    engine::ecs::Collider boxCollider = engine::ecs::Collider::MakeBox(glm::vec3(0.5f));
+    boxCollider.layer = engine::ecs::CollisionLayer::WorldStatic;
+    boxCollider.mask = engine::ecs::CollisionLayer::All;
+    const engine::ecs::Collider* collider = m_splineBuilder.CreateColliders() ? &boxCollider : nullptr;
+    bool first = true;
+    int generated = 0;
+    auto orientation = [](glm::vec3 tangent) {
+        if (glm::dot(tangent, tangent) < 1.0e-8f) tangent = glm::vec3(0, 0, 1);
+        tangent = glm::normalize(tangent);
+        const float yaw = std::atan2(tangent.x, tangent.z);
+        const float pitch = -std::asin(std::clamp(tangent.y, -1.0f, 1.0f));
+        return glm::angleAxis(yaw, glm::vec3(0, 1, 0))
+            * glm::angleAxis(pitch, glm::vec3(1, 0, 0));
+    };
+    auto addCube = [&](const std::string& suffix, const glm::vec3& position,
+                       const glm::vec3& scale, const glm::quat& rotation) {
+        m_scene.SuppressUndo(!first);
+        engine::ecs::Transform transform;
+        transform.position = position;
+        transform.scale = glm::max(scale, glm::vec3(0.01f));
+        transform.rotation = rotation;
+        m_scene.AddConfiguredPrimitive(EditorScene::Primitive::Cube, *m_cube,
+            transform, collider, prefix + suffix);
+        if (first) { first = false; m_scene.SuppressUndo(true); }
+        if (!m_splineBuilder.MaterialPath().empty())
+            m_scene.SetSelectedMaterialAsset(m_splineBuilder.MaterialPath());
+        ++generated;
+    };
+
+    const float offset = m_splineBuilder.VerticalOffset();
+    using Mode = SplineBuilderPanel::Mode;
+    if (m_splineBuilder.CurrentMode() == Mode::Road) {
+        for (int i = 0; i < spans; ++i) {
+            const float d0 = length * static_cast<float>(i) / static_cast<float>(spans);
+            const float d1 = length * static_cast<float>(i + 1) / static_cast<float>(spans);
+            const glm::vec3 a = spline.PositionAtDistance(d0);
+            const glm::vec3 b = spline.PositionAtDistance(d1);
+            const float segmentLength = glm::length(b - a);
+            addCube("Road_" + std::to_string(i + 1),
+                (a + b) * 0.5f + glm::vec3(0, offset - m_splineBuilder.Thickness() * 0.5f, 0),
+                {m_splineBuilder.Width(), m_splineBuilder.Thickness(), segmentLength * 1.04f},
+                orientation(b - a));
+        }
+    } else if (m_splineBuilder.CurrentMode() == Mode::Fence) {
+        const int postCount = closed ? spans : spans + 1;
+        for (int i = 0; i < postCount; ++i) {
+            const float distance = length * static_cast<float>(i) / static_cast<float>(spans);
+            const glm::vec3 position = spline.PositionAtDistance(distance);
+            addCube("Post_" + std::to_string(i + 1),
+                position + glm::vec3(0, offset + m_splineBuilder.Height() * 0.5f, 0),
+                {m_splineBuilder.PostSize(), m_splineBuilder.Height(), m_splineBuilder.PostSize()},
+                orientation(spline.TangentAtDistance(distance)));
+        }
+        for (int i = 0; i < spans; ++i) {
+            const float d0 = length * static_cast<float>(i) / static_cast<float>(spans);
+            const float d1 = length * static_cast<float>(i + 1) / static_cast<float>(spans);
+            const glm::vec3 a = spline.PositionAtDistance(d0);
+            const glm::vec3 b = spline.PositionAtDistance(d1);
+            for (int rail = 0; rail < m_splineBuilder.RailCount(); ++rail) {
+                const float fraction = static_cast<float>(rail + 1)
+                    / static_cast<float>(m_splineBuilder.RailCount() + 1);
+                addCube("Rail_" + std::to_string(rail + 1) + "_" + std::to_string(i + 1),
+                    (a + b) * 0.5f + glm::vec3(0, offset + m_splineBuilder.Height() * fraction, 0),
+                    {m_splineBuilder.Thickness(), m_splineBuilder.Thickness(), glm::length(b - a) * 1.04f},
+                    orientation(b - a));
+            }
+        }
+    } else {
+        const int itemCount = closed ? spans : spans + 1;
+        for (int i = 0; i < itemCount; ++i) {
+            const float distance = length * static_cast<float>(i) / static_cast<float>(spans);
+            engine::ecs::Transform transform;
+            transform.position = spline.PositionAtDistance(distance) + glm::vec3(0, offset, 0);
+            transform.scale = glm::vec3(m_splineBuilder.PropScale());
+            if (m_splineBuilder.AlignProps())
+                transform.rotation = orientation(spline.TangentAtDistance(distance));
+            m_scene.SuppressUndo(!first);
+            if (!m_scene.AddModel(m_splineBuilder.ModelPath(), *m_cube, transform)) continue;
+            if (first) { first = false; m_scene.SuppressUndo(true); }
+            m_scene.SetSelectedName(prefix + "Prop_" + std::to_string(i + 1));
+            if (collider) {
+                m_scene.SetSelectedColliderEnabled(true);
+                m_scene.SetSelectedCollider(*collider);
+            }
+            ++generated;
+        }
+    }
+    m_scene.SuppressUndo(false);
+    m_log.Info("Spline Builder generated " + group + " ("
+        + std::to_string(generated) + " editable piece(s))");
+}
+
+int EditorApp::DeleteGeneratedBlockout(const std::string& groupName) {
+    if (groupName.empty()) return 0;
+    const std::string prefix = "Blockout_" + groupName + "_";
+    std::vector<int> indices;
+    for (int i = 0; i < static_cast<int>(m_scene.Objects().size()); ++i)
+        if (m_scene.Objects()[static_cast<std::size_t>(i)].name.rfind(prefix, 0) == 0)
+            indices.push_back(i);
+    if (indices.empty()) return 0;
+    m_scene.SelectIndices(indices);
+    return m_scene.DeleteSelected() ? static_cast<int>(indices.size()) : 0;
+}
+
+void EditorApp::GenerateBlockout() {
+    if (!m_cube) return;
+    const std::string group = m_blockoutPanel.GroupName();
+    if (group.empty()) return;
+    if (m_blockoutPanel.ReplaceExisting()) DeleteGeneratedBlockout(group);
+
+    glm::vec3 base = m_blockoutPanel.ManualPosition();
+    if (m_blockoutPanel.PlacementMode() == BlockoutPanel::Placement::ViewportCursor)
+        base = SceneDropPosition();
+    else if (m_blockoutPanel.PlacementMode() == BlockoutPanel::Placement::SelectedObject) {
+        if (const engine::ecs::Transform* selected = m_scene.SelectedTransform())
+            base = selected->position;
+        else {
+            m_log.Warning("Blockout: select an object or choose another placement mode");
+            return;
+        }
+    }
+
+    const glm::vec3 dimensions = glm::max(m_blockoutPanel.Dimensions(), glm::vec3(0.05f));
+    const float yaw = glm::radians(m_blockoutPanel.Yaw());
+    const glm::quat yawRotation = glm::angleAxis(yaw, glm::vec3(0, 1, 0));
+    auto rotateOffset = [&](const glm::vec3& value) { return yawRotation * value; };
+    engine::ecs::Collider collider = engine::ecs::Collider::MakeBox(glm::vec3(0.5f));
+    collider.layer = engine::ecs::CollisionLayer::WorldStatic;
+    collider.mask = engine::ecs::CollisionLayer::All;
+    const engine::ecs::Collider* colliderPtr = m_blockoutPanel.CreateCollider() ? &collider : nullptr;
+    const std::string prefix = "Blockout_" + group + "_";
+    bool first = true;
+    int count = 0;
+    auto addPiece = [&](const std::string& suffix, const glm::vec3& localPosition,
+                        const glm::vec3& scale, const glm::quat& localRotation = glm::quat(1,0,0,0)) {
+        m_scene.SuppressUndo(!first);
+        engine::ecs::Transform transform;
+        transform.position = base + rotateOffset(localPosition);
+        transform.scale = glm::max(scale, glm::vec3(0.01f));
+        transform.rotation = yawRotation * localRotation;
+        m_scene.AddConfiguredPrimitive(EditorScene::Primitive::Cube, *m_cube,
+            transform, colliderPtr, prefix + suffix);
+        if (first) { first = false; m_scene.SuppressUndo(true); }
+        if (!m_blockoutPanel.MaterialPath().empty())
+            m_scene.SetSelectedMaterialAsset(m_blockoutPanel.MaterialPath());
+        ++count;
+    };
+
+    using Shape = BlockoutPanel::Shape;
+    const Shape shape = m_blockoutPanel.CurrentShape();
+    if (shape == Shape::Wall || shape == Shape::Floor || shape == Shape::Platform) {
+        addPiece(shape == Shape::Wall ? "Wall" : shape == Shape::Floor ? "Floor" : "Platform",
+                 {0, dimensions.y * 0.5f, 0}, dimensions);
+    } else if (shape == Shape::Ramp) {
+        const float slope = std::atan2(dimensions.y, dimensions.z);
+        const float length = std::sqrt(dimensions.y * dimensions.y + dimensions.z * dimensions.z);
+        addPiece("Ramp", {0, dimensions.y * 0.5f, 0},
+                 {dimensions.x, std::max(0.08f, std::min(dimensions.y, dimensions.z) * 0.08f), length},
+                 glm::angleAxis(-slope, glm::vec3(1, 0, 0)));
+    } else if (shape == Shape::Doorway) {
+        const float openingWidth = std::clamp(m_blockoutPanel.DoorWidth(), 0.1f, dimensions.x - 0.05f);
+        const float openingHeight = std::clamp(m_blockoutPanel.DoorHeight(), 0.1f, dimensions.y - 0.05f);
+        const float sideWidth = (dimensions.x - openingWidth) * 0.5f;
+        const float headerHeight = dimensions.y - openingHeight;
+        addPiece("Door_Left", {-(openingWidth + sideWidth) * 0.5f, dimensions.y * 0.5f, 0},
+                 {sideWidth, dimensions.y, dimensions.z});
+        addPiece("Door_Right", {(openingWidth + sideWidth) * 0.5f, dimensions.y * 0.5f, 0},
+                 {sideWidth, dimensions.y, dimensions.z});
+        addPiece("Door_Header", {0, openingHeight + headerHeight * 0.5f, 0},
+                 {openingWidth, headerHeight, dimensions.z});
+    } else if (shape == Shape::Stairs) {
+        const int steps = std::clamp(m_blockoutPanel.StepCount(), 2, 64);
+        const float stepDepth = dimensions.z / static_cast<float>(steps);
+        const float stepHeight = dimensions.y / static_cast<float>(steps);
+        for (int i = 0; i < steps; ++i) {
+            const float height = stepHeight * static_cast<float>(i + 1);
+            const float z = -dimensions.z * 0.5f + stepDepth * (static_cast<float>(i) + 0.5f);
+            addPiece("Step_" + std::to_string(i + 1), {0, height * 0.5f, z},
+                     {dimensions.x, height, stepDepth});
+        }
+    }
+    m_scene.SuppressUndo(false);
+    m_log.Info("Blockout generated " + group + " (" + std::to_string(count) + " editable piece(s))");
+}
+
+int EditorApp::DeleteGeneratedArray(const std::string& groupName) {
+    if (groupName.empty()) return 0;
+    const std::string prefix = "Array_" + groupName + "_";
+    std::vector<int> indices;
+    for (int i = 0; i < static_cast<int>(m_scene.Objects().size()); ++i) {
+        const EditorScene::Object& object = m_scene.Objects()[static_cast<std::size_t>(i)];
+        if (!object.locked && object.name.rfind(prefix, 0) == 0) indices.push_back(i);
+    }
+    if (indices.empty()) return 0;
+    m_scene.SelectIndex(indices.front());
+    for (std::size_t i = 1; i < indices.size(); ++i) m_scene.ToggleSelection(indices[i]);
+    return m_scene.DeleteSelected() ? static_cast<int>(indices.size()) : 0;
+}
+
+void EditorApp::GenerateObjectArray() {
+    if (!m_cube || !m_plane || !m_sphere || !m_capsule || !m_cylinder
+        || !m_cone || !m_pyramid || !m_torus || !m_staircase) {
+        m_log.Error("Array Tool failed: editor meshes are not ready");
+        return;
+    }
+    const EditorScene::Object* selected = m_scene.SelectedObject();
+    const engine::ecs::Transform* sourceTransform = m_scene.SelectedTransform();
+    if (!selected || !sourceTransform || selected->locked) {
+        m_log.Warning("Array Tool: select an unlocked scene object first");
+        return;
+    }
+    const std::string groupName = m_arrayTool.GroupName();
+    if (groupName.empty()) return;
+    const std::string prefix = "Array_" + groupName + "_";
+    if (selected->name.rfind(prefix, 0) == 0 && m_arrayTool.ReplaceExisting()) {
+        m_log.Warning("Array Tool: the source belongs to the group being replaced; select the original source");
+        return;
+    }
+
+    const engine::ecs::Entity sourceEntity = selected->entity;
+    const std::vector<engine::ecs::Transform> transforms =
+        m_arrayTool.BuildTransforms(*sourceTransform, m_scene);
+    if (transforms.empty()) {
+        m_log.Warning("Array Tool: the current layout produced no copies");
+        return;
+    }
+
+    int removed = 0;
+    if (m_arrayTool.ReplaceExisting()) removed = DeleteGeneratedArray(groupName);
+    int sourceIndex = -1;
+    for (int i = 0; i < static_cast<int>(m_scene.Objects().size()); ++i) {
+        if (m_scene.Objects()[static_cast<std::size_t>(i)].entity == sourceEntity) {
+            sourceIndex = i;
+            break;
+        }
+    }
+    if (sourceIndex < 0) {
+        m_log.Error("Array Tool: source object was removed before duplication");
+        return;
+    }
+    m_scene.SelectIndex(sourceIndex);
+
+    bool first = removed == 0;
+    int created = 0;
+    for (std::size_t i = 0; i < transforms.size(); ++i) {
+        m_scene.SuppressUndo(!first);
+        if (!m_scene.DuplicateSelected(*m_cube, *m_plane, *m_sphere, *m_capsule,
+                *m_cylinder, *m_cone, *m_pyramid, *m_torus, *m_staircase)) {
+            m_scene.SuppressUndo(false);
+            break;
+        }
+        if (first) {
+            first = false;
+            m_scene.SuppressUndo(true);
+        }
+        m_scene.SetSelectedTransform(transforms[i]);
+        std::string index = std::to_string(i + 1);
+        while (index.size() < 3) index.insert(index.begin(), '0');
+        m_scene.SetSelectedName(prefix + index);
+        ++created;
+    }
+    m_scene.SuppressUndo(false);
+    m_log.Info("Array Tool generated " + std::to_string(created)
+        + " editable copies in group " + groupName);
 }
 
 void EditorApp::DrawViewportPanel() {
@@ -3609,10 +4857,10 @@ void EditorApp::DrawPlayScene(const glm::mat4 & viewProj)
 {
     const EditorScene::Environment& environment = m_scene.GetEnvironment();
     const engine::DayNightCycle::Sample sky = engine::DayNightCycle::At(environment.timeOfDay);
-    if (m_sky) {
+    {
         const engine::Window& window = GetWindow();
-        m_sky->Draw(m_camera.ViewMatrix(), m_camera.ProjectionMatrix(window.AspectRatio()),
-                    sky, true, SkyClouds(environment));
+        DrawEnvironmentSky(m_camera.ViewMatrix(),
+                           m_camera.ProjectionMatrix(window.AspectRatio()), sky, true);
     }
 
     if (m_pbrRenderer && m_playRegistry) {
@@ -3794,6 +5042,19 @@ void EditorApp::DrawPlayScene(const glm::mat4 & viewProj)
         if (!visibleGuides.empty()) {
             m_viewport.DrawPhysicsEventGuides(m_renderer, *m_shader, *m_cube, visibleGuides, viewProj);
         }
+    }
+
+    if (m_shader && m_cube && m_mode == EditorMode::Play
+        && m_showGameplayTraces && !m_playPhysics.DebugTraces().empty()) {
+        std::vector<EditorViewport::GameplayTraceGuide> traceGuides;
+        traceGuides.reserve(m_playPhysics.DebugTraces().size());
+        for (const engine::DebugTrace& trace : m_playPhysics.DebugTraces()) {
+            traceGuides.push_back(EditorViewport::GameplayTraceGuide{
+                trace.start, trace.end, trace.radius,
+                static_cast<int>(trace.type), trace.hit});
+        }
+        m_viewport.DrawGameplayTraceGuides(
+            m_renderer, *m_shader, *m_cube, traceGuides, viewProj);
     }
 
     if (m_shader && m_cube && m_showAiDebug && !m_playAgents.empty()) {
@@ -4017,10 +5278,10 @@ void EditorApp::DrawEditScene(const glm::mat4 & viewProj)
 {
     const EditorScene::Environment& environment = m_scene.GetEnvironment();
     const engine::DayNightCycle::Sample sky = engine::DayNightCycle::At(environment.timeOfDay);
-    if (m_sky) {
+    {
         const engine::Window& window = GetWindow();
-        m_sky->Draw(m_camera.ViewMatrix(), m_camera.ProjectionMatrix(window.AspectRatio()),
-                    sky, true, SkyClouds(environment));
+        DrawEnvironmentSky(m_camera.ViewMatrix(),
+                           m_camera.ProjectionMatrix(window.AspectRatio()), sky, true);
     }
 
     if (m_pbrRenderer) {
@@ -4182,6 +5443,68 @@ void EditorApp::DrawEditScene(const glm::mat4 & viewProj)
             m_foliageBrushRing, m_foliageBrushCenterWorld,
             m_foliageErase, m_foliageBrushApplying, viewProj);
     }
+    if (m_panels.IsOpen(EditorPanels::Panel::RoomBuilder)
+        && m_roomBuilder.HasFirstCorner()) {
+        m_viewport.DrawRoomBuilderGuide(
+            m_roomBuilder.FirstCorner(), m_roomBuilder.PreviewCorner(),
+            m_roomBuilder.WallHeight(), viewProj);
+    }
+    if (m_panels.IsOpen(EditorPanels::Panel::Blockout)) {
+        glm::vec3 base = m_blockoutPanel.ManualPosition();
+        if (m_blockoutPanel.PlacementMode() == BlockoutPanel::Placement::ViewportCursor)
+            base = SceneDropPosition();
+        else if (m_blockoutPanel.PlacementMode() == BlockoutPanel::Placement::SelectedObject) {
+            if (const engine::ecs::Transform* selected = m_scene.SelectedTransform())
+                base = selected->position;
+        }
+        m_viewport.DrawBlockoutPreview(base, m_blockoutPanel.Dimensions(),
+                                       m_blockoutPanel.Yaw(), viewProj);
+    }
+    if (m_panels.IsOpen(EditorPanels::Panel::ScatterPaint)
+        && m_scatterPaint.BrushActive() && m_hasScatterBrushHit) {
+        m_viewport.DrawScatterBrush(
+            m_scatterBrushPosition, m_scatterBrushNormal, m_scatterPaint.Radius(),
+            !m_scatterPaint.Painting(), viewProj);
+    }
+    if (m_panels.IsOpen(EditorPanels::Panel::ArrayTool)) {
+        const EditorScene::Object* selected = m_scene.SelectedObject();
+        const engine::ecs::Transform* source = m_scene.SelectedTransform();
+        if (selected && source && !selected->locked) {
+            const std::vector<engine::ecs::Transform> preview =
+                m_arrayTool.BuildTransforms(*source, m_scene);
+            std::vector<glm::vec3> positions;
+            positions.reserve(preview.size());
+            for (const engine::ecs::Transform& transform : preview)
+                positions.push_back(transform.position);
+            m_viewport.DrawArrayPreview(source->position, positions, viewProj);
+        }
+    }
+    if (m_panels.IsOpen(EditorPanels::Panel::SplineBuilder)) {
+        const std::vector<glm::vec3> points = m_splineBuilder.PreviewPoints(m_scene);
+        if (!points.empty()) {
+            std::vector<glm::vec3> rest(points.begin() + 1, points.end());
+            m_viewport.DrawArrayPreview(points.front(), rest, viewProj);
+        }
+    }
+    if (m_panels.IsOpen(EditorPanels::Panel::Measurement)) {
+        std::vector<EditorViewport::MeasurementGuide> guides;
+        const auto& measurements = m_measurementPanel.Measurements();
+        guides.reserve(measurements.size() + 1);
+        for (int i = 0; i < static_cast<int>(measurements.size()); ++i) {
+            const MeasurementPanel::Measurement& measurement =
+                measurements[static_cast<std::size_t>(i)];
+            if (!measurement.visible) continue;
+            guides.push_back({measurement.a, measurement.b,
+                measurement.type == MeasurementPanel::Type::Box,
+                i == m_measurementPanel.SelectedIndex()});
+        }
+        if (m_measurementPanel.Capturing() && m_measurementPanel.HasFirstPoint()) {
+            guides.push_back({m_measurementPanel.FirstPoint(),
+                m_measurementPanel.PreviewPoint(),
+                m_measurementPanel.CaptureType() == MeasurementPanel::Type::Box, true});
+        }
+        m_viewport.DrawMeasurementGuides(guides, viewProj);
+    }
     if (m_shader && m_cube && environment.showPhysicsGuides) {
         std::vector<EditorViewport::PhysicsJointGuide> jointGuides;
         for (const EditorScene::PhysicsJoint& joint : m_scene.PhysicsJoints()) {
@@ -4261,6 +5584,41 @@ void EditorApp::DrawLogOverlay(float x, float y, const glm::vec3 & text, const g
     }
 }
 
+void EditorApp::EnsureImportedSky(const EditorScene::Environment& environment) {
+    if (environment.skyMode != 1 || environment.skyTexturePath.empty()) {
+        return;   // procedural mode — nothing to load (keep any cached sky for quick toggle)
+    }
+    if (m_importedSky && m_importedSkyPath == environment.skyTexturePath) {
+        return;   // already loaded
+    }
+    try {
+        m_importedSky.emplace(
+            engine::Skybox::FromEquirectangular(environment.skyTexturePath, 1024));
+        m_importedSkyPath = environment.skyTexturePath;
+        m_log.Info("Loaded sky: " + environment.skyTexturePath);
+    } catch (const std::exception& e) {
+        m_importedSky.reset();
+        m_importedSkyPath.clear();
+        if (!m_editTextureLoadErrors[environment.skyTexturePath]) {
+            m_editTextureLoadErrors[environment.skyTexturePath] = true;
+            m_log.Warning(std::string("Sky import failed: ") + e.what());
+        }
+    }
+}
+
+void EditorApp::DrawEnvironmentSky(const glm::mat4& view, const glm::mat4& projection,
+                                   const engine::DayNightCycle::Sample& sky, bool tonemap) {
+    const EditorScene::Environment& environment = m_scene.GetEnvironment();
+    EnsureImportedSky(environment);
+    if (environment.skyMode == 1 && m_importedSky) {
+        m_importedSky->Draw(view, projection, tonemap,
+                            glm::radians(environment.skyRotation),
+                            std::max(environment.skyIntensity, 0.0f));
+    } else if (m_sky) {
+        m_sky->Draw(view, projection, sky, tonemap, SkyClouds(environment));
+    }
+}
+
 void EditorApp::UpdateEnvironmentIbl(const EditorScene::Environment& environment,
                                      const engine::DayNightCycle::Sample& sky) {
     if (!environment.ibl || !m_sky) {
@@ -4271,11 +5629,25 @@ void EditorApp::UpdateEnvironmentIbl(const EditorScene::Environment& environment
         m_ibl.emplace(256);
     }
 
-    if (std::abs(sky.dayFactor - m_lastIblDay) > 0.04f) {
+    EnsureImportedSky(environment);
+
+    // Re-bake the IBL when the sky source changes (imported path/rotation/intensity/mode)
+    // or, for the procedural sky, as the day/night shifts.
+    std::string signature = "proc";
+    if (environment.skyMode == 1 && m_importedSky) {
+        signature = "img|" + environment.skyTexturePath + "|"
+            + std::to_string(environment.skyRotation) + "|"
+            + std::to_string(environment.skyIntensity);
+    }
+    const bool skyChanged = signature != m_lastSkySignature;
+    const bool dayChanged = (environment.skyMode != 1)
+        && std::abs(sky.dayFactor - m_lastIblDay) > 0.04f;
+    if (skyChanged || dayChanged) {
         m_ibl->Generate([&](const glm::mat4& view, const glm::mat4& projection) {
-            m_sky->Draw(view, projection, sky, false);
+            DrawEnvironmentSky(view, projection, sky, false);
         });
         m_lastIblDay = sky.dayFactor;
+        m_lastSkySignature = signature;
     }
 }
 
@@ -4409,6 +5781,126 @@ void EditorApp::HandleMouseViewportSelection()
     }
 
     const glm::mat4 viewProj = m_camera.ProjectionMatrix(window.AspectRatio()) * m_camera.ViewMatrix();
+
+    if (m_panels.IsOpen(EditorPanels::Panel::Measurement)
+        && m_measurementPanel.Capturing()) {
+        glm::vec3 hitPosition(0.0f), hitNormal(0.0f, 1.0f, 0.0f);
+        const int hit = m_viewport.PickSceneObject(
+            m_scene, m_editAssets, px, py, viewProj, window.Width(), window.Height(),
+            &hitPosition, &hitNormal);
+        if (hit < 0) {
+            hitPosition = m_viewport.SceneDropPosition(
+                px, py, viewProj, window.Width(), window.Height());
+        } else if (hit < static_cast<int>(m_scene.Objects().size())
+            && m_scene.Objects()[static_cast<std::size_t>(hit)].isTerrain) {
+            bool overTerrain = false;
+            const float terrainY = TerrainSurfaceY(
+                hitPosition.x, hitPosition.z, overTerrain);
+            if (overTerrain) hitPosition.y = terrainY;
+        }
+        m_measurementPanel.SetHoverPoint(hitPosition);
+        if (left.pressed) m_measurementPanel.CapturePoint(hitPosition);
+        return;
+    }
+
+    if (m_panels.IsOpen(EditorPanels::Panel::ScatterPaint)
+        && m_scatterPaint.BrushActive()) {
+        glm::vec3 hitPosition(0.0f), hitNormal(0.0f, 1.0f, 0.0f);
+        const int hit = m_viewport.PickSceneObject(
+            m_scene, m_editAssets, px, py, viewProj, window.Width(), window.Height(),
+            &hitPosition, &hitNormal, "Scatter_");
+        if (hit < 0) {
+            hitPosition = m_viewport.SceneDropPosition(
+                px, py, viewProj, window.Width(), window.Height());
+            hitNormal = glm::vec3(0, 1, 0);
+        }
+        const bool terrainHit = hit >= 0
+            && hit < static_cast<int>(m_scene.Objects().size())
+            && m_scene.Objects()[static_cast<std::size_t>(hit)].isTerrain;
+        if (terrainHit) {
+            bool overTerrain = false;
+            const float terrainSurfaceY = TerrainSurfaceY(
+                hitPosition.x, hitPosition.z, overTerrain);
+            if (overTerrain) {
+                hitPosition.y = terrainSurfaceY;
+                const float sample = 0.25f;
+                bool leftOver = false, rightOver = false, backOver = false, frontOver = false;
+                const float leftY = TerrainSurfaceY(hitPosition.x - sample, hitPosition.z, leftOver);
+                const float rightY = TerrainSurfaceY(hitPosition.x + sample, hitPosition.z, rightOver);
+                const float backY = TerrainSurfaceY(hitPosition.x, hitPosition.z - sample, backOver);
+                const float frontY = TerrainSurfaceY(hitPosition.x, hitPosition.z + sample, frontOver);
+                if (leftOver && rightOver && backOver && frontOver) {
+                    hitNormal = glm::normalize(glm::vec3(
+                        leftY - rightY, sample * 2.0f, backY - frontY));
+                }
+            }
+        }
+        m_scatterBrushPosition = hitPosition;
+        m_scatterBrushNormal = hitNormal;
+        m_hasScatterBrushHit = true;
+        if (left.pressed) m_hasLastScatterStrokePosition = false;
+        if (left.released) m_hasLastScatterStrokePosition = false;
+        if (left.down) {
+            const bool spaced = !m_hasLastScatterStrokePosition
+                || glm::distance(hitPosition, m_lastScatterStrokePosition)
+                   >= m_scatterPaint.StrokeSpacing();
+            if (spaced) {
+                if (m_scatterPaint.Painting())
+                    PaintScatterStamp(hitPosition, hitNormal, terrainHit);
+                else EraseScatterAt(hitPosition, m_scatterPaint.Radius());
+                m_lastScatterStrokePosition = hitPosition;
+                m_hasLastScatterStrokePosition = true;
+            }
+        }
+        return;
+    }
+
+    if (m_panels.IsOpen(EditorPanels::Panel::RoomBuilder)
+        && m_roomBuilder.CapturingOutline()) {
+        const glm::vec3 point = m_viewport.SceneDropPosition(
+            px, py, viewProj, window.Width(), window.Height());
+        m_roomBuilder.SetHoverPoint(point);
+        if (left.pressed) m_roomBuilder.CapturePoint(point);
+        return;
+    }
+
+    if (m_panels.IsOpen(EditorPanels::Panel::PrefabPalette)
+        && m_prefabPalette.PlacementActive()) {
+        if (left.pressed) {
+            const PrefabPalettePanel::Placement placement = m_prefabPalette.NextPlacement();
+            glm::vec3 placementPosition(0.0f), surfaceNormal(0.0f, 1.0f, 0.0f);
+            if (ComputePrefabPalettePlacement(
+                    px, py, placement, &placementPosition, &surfaceNormal)) {
+                PlacePalettePrefab(placement, placementPosition);
+            }
+        }
+        return;
+    }
+
+    // Modular placement owns left-clicks while active. This prevents the same click
+    // from selecting an object or starting a gizmo drag underneath the placement tool.
+    if (m_panels.IsOpen(EditorPanels::Panel::ModularPlacement)
+        && m_modularPlacement.PlacementActive()) {
+        if (left.pressed) m_hasLastModulePaintPosition = false;
+        if (left.released) m_hasLastModulePaintPosition = false;
+        const bool wantsPlacement = left.pressed
+            || (m_modularPlacement.PaintMode() && left.down);
+        if (wantsPlacement) {
+            glm::vec3 placementPosition(0.0f), surfaceNormal(0.0f, 1.0f, 0.0f);
+            if (ComputeModularPlacement(px, py, &placementPosition, &surfaceNormal)) {
+                const bool spaced = !m_hasLastModulePaintPosition
+                    || glm::distance(placementPosition, m_lastModulePaintPosition)
+                       >= m_modularPlacement.PaintSpacing();
+                if (!m_modularPlacement.PaintMode() || spaced) {
+                    if (PlaceSelectedModule(placementPosition, surfaceNormal)) {
+                        m_lastModulePaintPosition = placementPosition;
+                        m_hasLastModulePaintPosition = true;
+                    }
+                }
+            }
+        }
+        return;
+    }
 
     if (left.pressed) {
         const EditorScene::Object* selected = m_scene.SelectedObject();
@@ -4712,6 +6204,33 @@ float EditorApp::TerrainSurfaceY(float worldX, float worldZ, bool& over)
     return best;
 }
 
+// Name of the highest terrain object whose footprint contains (worldX, worldZ), or empty.
+// Mirrors the footprint test in TerrainSurfaceY so painted foliage can be bound to its ground.
+std::string EditorApp::TerrainNameAt(float worldX, float worldZ)
+{
+    std::string name;
+    float best = 0.0f;
+    bool found = false;
+    for (const EditorScene::Object& object : m_scene.Objects()) {
+        if (!object.isTerrain) continue;
+        const auto it = m_terrains.find(object.entity);
+        if (it == m_terrains.end() || it->second.terrain.Map().h.empty()) continue;
+        const Transform* t = m_scene.TryGetTransform(object.entity);
+        const glm::vec3 base = t ? t->position : glm::vec3(0.0f);
+        const glm::vec3 scale = t ? glm::abs(t->scale) : glm::vec3(1.0f);
+        const float sx = std::max(scale.x, 0.0001f);
+        const float sy = std::max(scale.y, 0.0001f);
+        const float sz = std::max(scale.z, 0.0001f);
+        const float lx = (worldX - base.x) / sx;
+        const float lz = (worldZ - base.z) / sz;
+        const float size = it->second.terrain.Map().size;
+        if (lx < 0.0f || lz < 0.0f || lx > size || lz > size) continue;
+        const float y = base.y + it->second.terrain.HeightAt(lx, lz) * sy;
+        if (!found || y > best) { best = y; found = true; name = object.name; }
+    }
+    return name;
+}
+
 void EditorApp::HandleFoliagePaint()
 {
     m_foliageBrushHoverValid = false;
@@ -4828,6 +6347,12 @@ void EditorApp::HandleFoliagePaint()
         }
         m_scene.AddSelectedFoliageInstance(position, rotation, scale,
                                            static_cast<std::uint32_t>(typeIndex));
+    }
+    // Bind this foliage to the terrain under the brush so deleting the terrain also
+    // removes the grass painted onto it (grass "belongs" to its ground).
+    if (overTerrain && selected->foliageTerrainOwner.empty()) {
+        const std::string terrainName = TerrainNameAt(center.x, center.z);
+        if (!terrainName.empty()) m_scene.SetSelectedFoliageTerrainOwner(terrainName);
     }
     // Resolve after each stroke so a freshly assigned foliage asset becomes visible.
     m_editAssets.ResolveRegistryAssets(m_scene.Registry());
@@ -5776,9 +7301,59 @@ void EditorApp::DrawWaterBodies(const engine::Camera& camera, float aspect) {
             }
         }
 
+        // Custom water shader: load (and hot-reload) the fragment GLSL from disk. The
+        // engine prepends the water declaration prelude, so the file only holds helpers
+        // + main(). On a compile error Water falls back to the built-in look.
+        bool waterShaderReloaded = false;
+        if (!object.waterShaderPath.empty()) {
+            std::error_code sec;
+            const std::filesystem::file_time_type mtime =
+                std::filesystem::last_write_time(object.waterShaderPath, sec);
+            auto cached = m_waterShaderCache.find(object.waterShaderPath);
+            if (sec) {
+                if (!m_editTextureLoadErrors[object.waterShaderPath]) {
+                    m_editTextureLoadErrors[object.waterShaderPath] = true;
+                    m_log.Warning("Water shader not found: " + object.waterShaderPath);
+                }
+            } else if (cached == m_waterShaderCache.end() || cached->second.first != mtime) {
+                std::string source;
+                if (std::filesystem::path(object.waterShaderPath).extension()
+                        == ".3dgshader") {
+                    // Node-graph shader authored in the Shader Editor: generate its GLSL
+                    // and adapt it into a water fragment body.
+                    engine::ShaderAsset asset;
+                    std::string genError;
+                    if (engine::LoadShaderAsset(object.waterShaderPath, &asset, &genError)) {
+                        source = engine::GenerateWaterFragmentBody(asset, &genError);
+                    }
+                    if (source.empty() && !genError.empty()) {
+                        m_log.Warning("Water graph shader '" + object.waterShaderPath
+                                      + "': " + genError);
+                    }
+                } else {
+                    std::ifstream file(object.waterShaderPath, std::ios::binary);
+                    source.assign(std::istreambuf_iterator<char>(file),
+                                  std::istreambuf_iterator<char>());
+                }
+                cached = m_waterShaderCache.insert_or_assign(
+                    object.waterShaderPath, std::make_pair(mtime, std::move(source))).first;
+                waterShaderReloaded = true;
+            }
+            if (cached != m_waterShaderCache.end()) cfg.customFragmentSource = cached->second.second;
+        }
+
         auto res = m_waters.try_emplace(object.entity, cfg);
         if (!res.second) res.first->second.SetConfig(cfg);
         res.first->second.Update(m_dt);
+
+        // Report a bad custom shader once per reload; the water keeps the built-in look.
+        if (waterShaderReloaded) {
+            const std::string& shaderErr = res.first->second.CustomShaderError();
+            if (!shaderErr.empty())
+                m_log.Warning("Water shader '" + object.waterShaderPath + "': " + shaderErr);
+            else
+                m_log.Info("Water shader loaded: " + object.waterShaderPath);
+        }
 
         // Gather objects piercing this water's surface so the shader can draw a foam
         // ring where they meet the water. Each contact = (worldX, worldZ, radius, strength).
@@ -6661,6 +8236,52 @@ void EditorApp::DrawImportDialog() {
         }
     }
 
+    bool hasAnimationImports = false;
+
+    for (const PendingImportFile& f : m_pendingImports) {
+        if (f.isModel && f.modelMode == 3 /*Animation Only*/) {
+            hasAnimationImports = true;
+            break;
+        }
+    }
+
+    if (hasAnimationImports) {
+        ImGui::Separator();
+        ImGui::TextUnformatted("Animation Import Settings");
+
+        auto& skeletalSettings = m_assets.SkeletalImportSettings();
+        const std::vector<std::string> skeletons = m_assets.ContentAssetPaths(EditorAssets::Type::Skeleton);
+        const std::string skeletonLabel = skeletalSettings.reuseSkeletonPath.empty()
+            ? std::string("Select Skeleton")
+            : skeletalSettings.reuseSkeletonPath;
+
+        ImGui::SetNextItemWidth(420.0f);
+        if (ImGui::BeginCombo("Skeleton", skeletonLabel.c_str())) {
+            for (const std::string& path : skeletons) {
+                const bool selected = skeletalSettings.reuseSkeletonPath == path;
+                if (ImGui::Selectable(path.c_str(), selected)) {
+                    skeletalSettings.reuseSkeletonPath = path;
+
+                    // we are reusing an existing skeleton.
+                    skeletalSettings.importSkeleton = false;
+                }
+
+                if (selected) {
+                    ImGui::SetItemDefaultFocus();
+                }
+            }
+
+            ImGui::EndCombo();
+        }
+
+        if (skeletalSettings.reuseSkeletonPath.empty()) {
+            ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.25f, 1.0f), "Select a skeleton for the animation files.");
+        }
+        else {
+            ImGui::TextDisabled("All animations Only files will use this skeleton.");
+        }
+    }
+
     ImGui::Separator();
     ImGui::BeginChild("ImportList", ImVec2(0.0f, 240.0f), true);
     for (std::size_t i = 0; i < m_pendingImports.size(); ++i) {
@@ -6697,12 +8318,40 @@ void EditorApp::DrawImportDialog() {
     ImGui::EndChild();
 
     ImGui::Separator();
+
+    bool canImport = true;
+    bool requiresSkeleton = false;
+
+    for (const PendingImportFile& f : m_pendingImports) {
+        if (f.isModel && f.modelMode == 3 /*Animation Only*/) {
+            requiresSkeleton = true;
+            break;
+        }
+    }
+
+    if (requiresSkeleton && m_assets.SkeletalImportSettings().reuseSkeletonPath.empty()) {
+        canImport = false;
+    }
+
+    if (!canImport) {
+        ImGui::BeginDisabled();
+    }
+
     if (ImGui::Button("Import", ImVec2(120.0f, 0.0f))) {
         const std::string folder = m_importFolderBuffer.data();
         int imported = 0;
         for (const PendingImportFile& f : m_pendingImports) {
             const auto mode = static_cast<EditorAssets::ModelImportMode>(
                 f.isModel ? f.modelMode : 0);
+            if (f.isModel && f.modelMode == 3) {
+                auto& skeletalSettings = m_assets.SkeletalImportSettings();
+                // Animation-only import.
+                skeletalSettings.importSkeletalMesh = false;
+                // We selected an existing engine skeleon.
+                if (!skeletalSettings.reuseSkeletonPath.empty()) {
+                    skeletalSettings.importSkeleton = false;
+                }
+            }
             if (f.isTexture) {   // per-file sRGB / filtering applied to this import
                 m_assets.TextureImportSettings().srgb = f.srgb;
                 m_assets.TextureImportSettings().smooth = f.smooth;
@@ -6724,6 +8373,11 @@ void EditorApp::DrawImportDialog() {
         m_pendingImports.clear();
         ImGui::CloseCurrentPopup();
     }
+
+    if (!canImport) {
+        ImGui::EndDisabled();
+    }
+
     ImGui::SameLine();
     if (ImGui::Button("Cancel", ImVec2(120.0f, 0.0f))) {
         m_pendingImports.clear();
@@ -8757,9 +10411,11 @@ void EditorApp::UpdatePlayPlayerController(float dt, bool inputEnabled)
     const bool movementLocked = animated && animated->BlocksMovement();
     if (animated) {
         const float moveMagnitude = std::min(glm::length(glm::vec2(input.moveForward, input.moveRight)), 1.0f);
+        const bool sprinting = input.sprint
+            && m_playPlayerController->body.grounded && !input.jump;
         const float speed = movementLocked
             ? 0.0f
-            : moveMagnitude * (input.sprint
+            : moveMagnitude * (sprinting
                 ? m_playPlayerController->runSpeed
                 : m_playPlayerController->walkSpeed);
         const float previousSpeed = animated->controller.Parameter("Speed", 0.0f);
@@ -8903,12 +10559,13 @@ void EditorApp::StepPlayPhysics(float dt, bool inputEnabled)
         UpdatePlayPlayerController(step, inputEnabled);
         engine::FixedUpdateScripts(
             *m_playRegistry, step, &scriptInput, &m_runtimeAudio,
-            &m_cameraShake, &m_cameraDirector, &engine::GameMode::Instance());
+            &m_cameraShake, &m_cameraDirector, &engine::GameMode::Instance(),
+            &m_playPhysics);
         engine::ecs::UpdateGameplay(*m_playRegistry, step);
         engine::ecs::UpdateRuntimeMotion(*m_playRegistry, step);
         m_playAnimationEvents.clear();
         UpdateAI(step);
-        engine::UpdateProjectiles(*m_playRegistry, step);
+        engine::UpdateProjectilesInPlace(*m_playRegistry, step);
         engine::UpdateHealth(*m_playRegistry);
         engine::UpdateRagdollsBeforePhysics(*m_playRegistry, m_playPhysics);
         ConfigurePlayFootIK();
@@ -8940,11 +10597,12 @@ void EditorApp::StepPlayPhysics(float dt, bool inputEnabled)
         UpdatePlayPlayerController(step, inputEnabled);
         engine::FixedUpdateScripts(
             *m_playRegistry, step, &scriptInput, &m_runtimeAudio,
-            &m_cameraShake, &m_cameraDirector, &engine::GameMode::Instance());
+            &m_cameraShake, &m_cameraDirector, &engine::GameMode::Instance(),
+            &m_playPhysics);
         engine::ecs::UpdateGameplay(*m_playRegistry, step);
         engine::ecs::UpdateRuntimeMotion(*m_playRegistry, step);
         UpdateAI(step);
-        engine::UpdateProjectiles(*m_playRegistry, step);
+        engine::UpdateProjectilesInPlace(*m_playRegistry, step);
         engine::UpdateHealth(*m_playRegistry);
         engine::UpdateRagdollsBeforePhysics(*m_playRegistry, m_playPhysics);
         ConfigurePlayFootIK();

@@ -1,6 +1,7 @@
 #include "engine/graphics/SkinnedRenderer.h"
 
 #include "engine/graphics/SkinnedModel.h"
+#include "engine/graphics/Frustum.h"
 #include "engine/graphics/Shader.h"
 #include "engine/graphics/Camera.h"
 #include "engine/graphics/Texture.h"
@@ -14,6 +15,7 @@
 #include <glad/glad.h>
 #include <glm/gtc/matrix_transform.hpp>
 
+#include <array>
 #include <string>
 #include <algorithm>
 #include <chrono>
@@ -306,8 +308,7 @@ void main() {}
 void UploadBones(Shader& sh, const std::vector<glm::mat4>& bones) {
     const std::size_t n = (bones.size() < static_cast<std::size_t>(SkinnedRenderer::kMaxBones))
                           ? bones.size() : static_cast<std::size_t>(SkinnedRenderer::kMaxBones);
-    for (std::size_t i = 0; i < n; ++i)
-        sh.SetMat4("uBones[" + std::to_string(i) + "]", bones[i]);
+    if (n > 0) sh.SetMat4Array("uBones[0]", bones.data(), static_cast<int>(n));
 }
 
 } // namespace
@@ -327,8 +328,9 @@ void SkinnedRenderer::Draw(const SkinnedModel& model,
                            const glm::vec3& ambient,
                            const glm::vec3& tint,
                            const Texture* albedoOverride) {
+    const glm::mat4 viewProj = camera.ProjectionMatrix(aspect) * camera.ViewMatrix();
     m_shader->Bind();
-    m_shader->SetMat4("uViewProj", camera.ProjectionMatrix(aspect) * camera.ViewMatrix());
+    m_shader->SetMat4("uViewProj", viewProj);
     m_shader->SetMat4("uModel", modelMatrix);
     m_shader->SetVec3("uViewPos", camera.Position());
     m_shader->SetVec3("uSunDir", sunDir);
@@ -338,6 +340,7 @@ void SkinnedRenderer::Draw(const SkinnedModel& model,
 
     const auto& mats = model.Materials();
     const auto& texs = model.Textures();
+    const Texture* boundDiffuse = nullptr;
     for (const SubMesh& sm : model.SubMeshes()) {
         glm::vec3 color(0.8f), specular(0.2f), emissive(0.0f);
         float shininess = 32.0f;
@@ -354,11 +357,18 @@ void SkinnedRenderer::Draw(const SkinnedModel& model,
         m_shader->SetVec3("uEmissive", emissive);
         m_shader->SetFloat("uShininess", shininess);
         if (albedoOverride) {
-            albedoOverride->Bind(0);
+            if (boundDiffuse != albedoOverride) {
+                albedoOverride->Bind(0);
+                boundDiffuse = albedoOverride;
+            }
             m_shader->SetInt("uDiffuseTex", 0);
             m_shader->SetInt("uHasDiffuse", 1);
         } else if (diffuseMap >= 0 && diffuseMap < static_cast<int>(texs.size()) && texs[static_cast<std::size_t>(diffuseMap)]) {
-            texs[static_cast<std::size_t>(diffuseMap)]->Bind(0);
+            const Texture* diffuse = texs[static_cast<std::size_t>(diffuseMap)].get();
+            if (boundDiffuse != diffuse) {
+                diffuse->Bind(0);
+                boundDiffuse = diffuse;
+            }
             m_shader->SetInt("uDiffuseTex", 0);
             m_shader->SetInt("uHasDiffuse", 1);
         } else {
@@ -372,9 +382,12 @@ void SkinnedRenderer::DrawScene(ecs::Registry& reg, const Camera& camera, float 
                                 const SkinnedLighting& lit) {
     if (!lit.cascade) return;
 
+    const glm::mat4 view = camera.ViewMatrix();
+    const glm::mat4 proj = camera.ProjectionMatrix(aspect);
+    const glm::mat4 viewProj = proj * view;
     m_pbr->Bind();
-    m_pbr->SetMat4("uViewProj", camera.ProjectionMatrix(aspect) * camera.ViewMatrix());
-    m_pbr->SetMat4("uView", camera.ViewMatrix());
+    m_pbr->SetMat4("uViewProj", viewProj);
+    m_pbr->SetMat4("uView", view);
     m_pbr->SetVec3("uViewPos", camera.Position());
     m_pbr->SetVec3("uSunDir", lit.sunDir);
     m_pbr->SetVec3("uSunColor", lit.sunColor);
@@ -386,10 +399,11 @@ void SkinnedRenderer::DrawScene(ecs::Registry& reg, const Camera& camera, float 
     lit.cascade->BindArray(4);
     m_pbr->SetInt("uCascadeMaps", 4);
     m_pbr->SetInt("uHasShadow", 1);
+    static constexpr const char* kCascadeVpNames[] = {"uCascadeVP[0]", "uCascadeVP[1]", "uCascadeVP[2]", "uCascadeVP[3]"};
+    static constexpr const char* kCascadeSplitNames[] = {"uCascadeSplits[0]", "uCascadeSplits[1]", "uCascadeSplits[2]", "uCascadeSplits[3]"};
     for (int i = 0; i < CascadedShadow::kCascades; ++i) {
-        const std::string ix = "[" + std::to_string(i) + "]";
-        m_pbr->SetMat4("uCascadeVP" + ix, lit.cascade->CascadeVP(i));
-        m_pbr->SetFloat("uCascadeSplits" + ix, lit.cascade->SplitDepth(i));
+        m_pbr->SetMat4(kCascadeVpNames[i], lit.cascade->CascadeVP(i));
+        m_pbr->SetFloat(kCascadeSplitNames[i], lit.cascade->SplitDepth(i));
     }
     // Image-based ambient is optional. The ambient term remains available when
     // an editor environment deliberately disables IBL.
@@ -429,16 +443,30 @@ void SkinnedRenderer::DrawScene(ecs::Registry& reg, const Camera& camera, float 
     glCullFace(GL_BACK);
     glFrontFace(GL_CCW);
 
-    reg.view<ecs::Transform, AnimatedModel>().each([&](ecs::Entity entity, ecs::Transform& t, AnimatedModel& am) {
+    // Skinned meshes are considerably more expensive than static meshes. Use
+    // one conservative model-space sphere to reject characters that cannot
+    // contribute to the current camera view before uploading bones or binding
+    // their materials. Shadow rendering has its own pass and is unaffected.
+    const Frustum viewFrustum = ExtractFrustum(viewProj);
+
+    auto animatedView = reg.view<ecs::Transform, AnimatedModel>();
+    if (!animatedView.empty()) animatedView.each([&](ecs::Entity entity, ecs::Transform& t, AnimatedModel& am) {
         if (!am.model || am.pose.empty()) return;
+        const glm::mat4 modelMatrix = t.Model() * am.renderOffset;
+        const glm::mat4& boundsModel = modelMatrix;
+        const glm::vec3 boundsCenter = glm::vec3(
+            boundsModel * glm::vec4(am.model->Center(), 1.0f));
+        const glm::vec3 scale = glm::abs(t.scale);
+        const float boundsRadius = am.model->BoundingRadius()
+            * std::max({scale.x, scale.y, scale.z});
+        if (!SphereInFrustum(viewFrustum, boundsCenter, boundsRadius)) return;
         if (const ecs::LoadedMaterialAsset* custom =
                 reg.TryGet<ecs::LoadedMaterialAsset>(entity);
             custom && custom->skinnedShader) {
             Shader& shader = *const_cast<Shader*>(custom->skinnedShader);
             shader.Bind();
-            shader.SetMat4("uViewProjection",
-                camera.ProjectionMatrix(aspect) * camera.ViewMatrix());
-            shader.SetMat4("uModel", t.Model() * am.renderOffset);
+            shader.SetMat4("uViewProjection", viewProj);
+            shader.SetMat4("uModel", modelMatrix);
             shader.SetVec3("uCameraPosition", camera.Position());
             shader.SetFloat("uTime", cloudSeconds);
             shader.SetFloat("uDeltaTime", 1.0f / 60.0f);
@@ -453,11 +481,17 @@ void SkinnedRenderer::DrawScene(ecs::Registry& reg, const Camera& camera, float 
                 submesh.mesh.Draw();
             return;
         }
-        m_pbr->SetMat4("uModel", t.Model() * am.renderOffset);
+        m_pbr->SetMat4("uModel", modelMatrix);
+        glFrontFace(glm::determinant(glm::mat3(modelMatrix)) < 0.0f ? GL_CW : GL_CCW);
         UploadBones(*m_pbr, am.pose);
 
         // An albedo override (a shared palette atlas, say) applies to every submesh.
-        if (am.albedoOverride) { am.albedoOverride->Bind(0); m_pbr->SetInt("uAlbedoMap", 0); }
+        const Texture* boundAlbedo = nullptr;
+        if (am.albedoOverride) {
+            am.albedoOverride->Bind(0);
+            boundAlbedo = am.albedoOverride;
+            m_pbr->SetInt("uAlbedoMap", 0);
+        }
 
         const auto& mats = am.model->Materials();
         const auto& texs = am.model->Textures();
@@ -476,7 +510,11 @@ void SkinnedRenderer::DrawScene(ecs::Registry& reg, const Camera& camera, float 
             if (am.albedoOverride) {
                 m_pbr->SetInt("uHasAlbedoMap", 1);              // override bound above
             } else if (diffuseMap >= 0 && diffuseMap < static_cast<int>(texs.size()) && texs[static_cast<std::size_t>(diffuseMap)]) {
-                texs[static_cast<std::size_t>(diffuseMap)]->Bind(0);
+                const Texture* diffuseTexture = texs[static_cast<std::size_t>(diffuseMap)].get();
+                if (diffuseTexture != boundAlbedo) {
+                    diffuseTexture->Bind(0);
+                    boundAlbedo = diffuseTexture;
+                }
                 m_pbr->SetInt("uAlbedoMap", 0);
                 m_pbr->SetInt("uHasAlbedoMap", 1);
             } else {
@@ -486,6 +524,7 @@ void SkinnedRenderer::DrawScene(ecs::Registry& reg, const Camera& camera, float 
         }
     });
 
+    glFrontFace(GL_CCW);
     glDisable(GL_CULL_FACE);   // restore the default (off) for subsequent passes
 }
 
@@ -502,9 +541,21 @@ void SkinnedRenderer::DrawDepth(const SkinnedModel& model,
 void SkinnedRenderer::DrawSceneDepth(ecs::Registry& reg, const glm::mat4& lightVP) {
     m_depth->Bind();
     m_depth->SetMat4("uLightVP", lightVP);
-    reg.view<ecs::Transform, AnimatedModel>().each([&](ecs::Entity, ecs::Transform& t, AnimatedModel& am) {
+    // Reject animated characters outside the light's orthographic/frustum volume
+    // before uploading their bone palette. This is especially important for
+    // large scenes where only a fraction of characters can cast into a cascade.
+    const Frustum lightFrustum = ExtractFrustum(lightVP);
+    auto animatedView = reg.view<ecs::Transform, AnimatedModel>();
+    if (!animatedView.empty()) animatedView.each([&](ecs::Entity, ecs::Transform& t, AnimatedModel& am) {
         if (!am.model || am.pose.empty() || !am.castShadow) return;
-        m_depth->SetMat4("uModel", t.Model() * am.renderOffset);
+        const glm::mat4 modelMatrix = t.Model() * am.renderOffset;
+        const glm::vec3 boundsCenter = glm::vec3(
+            modelMatrix * glm::vec4(am.model->Center(), 1.0f));
+        const glm::vec3 scale = glm::abs(t.scale);
+        const float boundsRadius = am.model->BoundingRadius()
+            * std::max({scale.x, scale.y, scale.z});
+        if (!SphereInFrustum(lightFrustum, boundsCenter, boundsRadius)) return;
+        m_depth->SetMat4("uModel", modelMatrix);
         UploadBones(*m_depth, am.pose);
         for (const SubMesh& sm : am.model->SubMeshes()) sm.mesh.Draw();
     });

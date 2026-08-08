@@ -26,6 +26,12 @@ namespace ai { struct NavGrid; class NavMesh; }
 
 class EditorViewport {
 public:
+    struct MeasurementGuide {
+        glm::vec3 a{0.0f};
+        glm::vec3 b{0.0f};
+        bool box = false;
+        bool selected = false;
+    };
     EditorViewport();
     ~EditorViewport();
 
@@ -36,6 +42,14 @@ public:
         std::string objectB;
         int phase = 0; // 0 enter, 1 stay, 2 exit
         bool trigger = false;
+    };
+
+    struct GameplayTraceGuide {
+        glm::vec3 a{0.0f};
+        glm::vec3 b{0.0f};
+        float radius = 0.0f;
+        int type = 0; // 0 ray, 1 sphere cast, 2 overlap sphere
+        bool hit = false;
     };
 
     struct PhysicsJointGuide {
@@ -119,6 +133,12 @@ public:
                                 const engine::Mesh& cube,
                                 const std::vector<PhysicsEventGuide>& guides,
                                 const glm::mat4& viewProj) const;
+
+    void DrawGameplayTraceGuides(engine::Renderer& renderer,
+                                 engine::Shader& shader,
+                                 const engine::Mesh& cube,
+                                 const std::vector<GameplayTraceGuide>& guides,
+                                 const glm::mat4& viewProj) const;
 
     void DrawPhysicsJointGuides(engine::Renderer& renderer,
                             engine::Shader& shader,
@@ -244,13 +264,39 @@ public:
                               int height,
                               glm::vec2* screen) const;
 
+    void DrawRoomBuilderGuide(const glm::vec3& first,
+                              const glm::vec3& second,
+                              float wallHeight,
+                              const glm::mat4& viewProj) const;
+
+    void DrawBlockoutPreview(const glm::vec3& base,
+                             const glm::vec3& dimensions,
+                             float yawDegrees,
+                             const glm::mat4& viewProj) const;
+
+    void DrawScatterBrush(const glm::vec3& center,
+                          const glm::vec3& normal,
+                          float radius,
+                          bool erase,
+                          const glm::mat4& viewProj) const;
+
+    void DrawArrayPreview(const glm::vec3& source,
+                          const std::vector<glm::vec3>& copies,
+                          const glm::mat4& viewProj) const;
+
+    void DrawMeasurementGuides(const std::vector<MeasurementGuide>& guides,
+                               const glm::mat4& viewProj) const;
+
     int PickSceneObject(const EditorScene& scene,
                         const engine::RuntimeAssetManager& assets,
                         float x,
                         float y,
                         const glm::mat4& viewProj,
                         int width,
-                        int height) const;
+                        int height,
+                        glm::vec3* hitPosition = nullptr,
+                        glm::vec3* hitNormal = nullptr,
+                        const char* ignoredNamePrefix = nullptr) const;
 
     int PickSplinePoint(const EditorScene& scene,
                         float x, float y,
@@ -277,4 +323,9 @@ private:
     mutable std::unique_ptr<EditorLineRenderer> m_colliderLines;
     mutable std::unique_ptr<EditorLineRenderer> m_splineLines;
     mutable std::unique_ptr<EditorLineRenderer> m_waterLines;
+    mutable std::unique_ptr<EditorLineRenderer> m_roomLines;
+    mutable std::unique_ptr<EditorLineRenderer> m_blockoutLines;
+    mutable std::unique_ptr<EditorLineRenderer> m_scatterLines;
+    mutable std::unique_ptr<EditorLineRenderer> m_arrayLines;
+    mutable std::unique_ptr<EditorLineRenderer> m_measurementLines;
 };

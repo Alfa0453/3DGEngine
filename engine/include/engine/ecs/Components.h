@@ -88,6 +88,12 @@ struct PbrMaterial {
     glm::vec2 uvScale{1.0f};
     glm::vec2 uvOffset{0.0f};
     float uvRotation = 0.0f;            // degrees around UV centre
+    // World-space (triplanar-lite) UVs: project the texture from world position so
+    // texel density stays constant no matter how the object is scaled — a wall made
+    // 4x wider tiles the texture 4x instead of stretching it. uvScale then means
+    // "tiles per world unit". Exact on axis-aligned faces (walls/floors); seams on
+    // 45-degree blends. Off = classic mesh UVs.
+    bool  worldSpaceUv = false;
     float normalStrength = 1.0f;
     float heightScale = 0.0f;
     float clearcoat = 0.0f;

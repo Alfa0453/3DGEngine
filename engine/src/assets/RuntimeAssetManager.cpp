@@ -24,6 +24,12 @@ void SetError(std::string* out, const std::string& message) {
     }
 }
 
+std::string CacheKey(const std::string& path) {
+    std::filesystem::path normalized(path);
+    normalized = normalized.lexically_normal();
+    return normalized.generic_string();
+}
+
 } // namespace
 
 const Model* RuntimeAssetManager::LoadModel(const std::string &path, std::string *error)
@@ -33,7 +39,8 @@ const Model* RuntimeAssetManager::LoadModel(const std::string &path, std::string
         return nullptr;
     }
 
-    const auto existing = m_models.find(path);
+    const std::string key = CacheKey(path);
+    const auto existing = m_models.find(key);
     if (existing != m_models.end()) {
         SetError(error, std::string{});
         return existing->second.get();
@@ -42,7 +49,7 @@ const Model* RuntimeAssetManager::LoadModel(const std::string &path, std::string
     try {
         auto model = std::make_unique<Model>(Model::FromFile(path));
         const Model* result = model.get();
-        m_models.emplace(path, std::move(model));
+        m_models.emplace(key, std::move(model));
         SetError(error, std::string{});
         return result;
     } catch (const std::exception& ex) {
@@ -57,7 +64,8 @@ const Model* RuntimeAssetManager::ReloadModel(
         SetError(error, "RuntimeAssetManager: model path is empty");
         return nullptr;
     }
-    const auto existing = m_models.find(path);
+    const std::string key = CacheKey(path);
+    const auto existing = m_models.find(key);
     if (existing == m_models.end()) return LoadModel(path, error);
     try {
         Model replacement = Model::FromFile(path);
@@ -76,7 +84,8 @@ const SkinnedModel* RuntimeAssetManager::LoadSkinnedModel(const std::string& pat
         return nullptr;
     }
 
-    const auto existing = m_skinnedModels.find(path);
+    const std::string key = CacheKey(path);
+    const auto existing = m_skinnedModels.find(key);
     if (existing != m_skinnedModels.end()) {
         SetError(error, std::string{});
         return existing->second.get();
@@ -85,7 +94,7 @@ const SkinnedModel* RuntimeAssetManager::LoadSkinnedModel(const std::string& pat
     try {
         auto model = std::make_unique<SkinnedModel>(SkinnedModel::FromFile(path));
         const SkinnedModel* result = model.get();
-        m_skinnedModels.emplace(path, std::move(model));
+        m_skinnedModels.emplace(key, std::move(model));
         SetError(error, std::string{});
         return result;
     } catch (const std::exception& ex) {
@@ -100,7 +109,7 @@ const SkinnedModel* RuntimeAssetManager::ReloadSkinnedModel(
         SetError(error, "RuntimeAssetManager: skinned model path is empty");
         return nullptr;
     }
-    const auto existing = m_skinnedModels.find(path);
+    const auto existing = m_skinnedModels.find(CacheKey(path));
     if (existing == m_skinnedModels.end()) return LoadSkinnedModel(path, error);
     try {
         SkinnedModel replacement = SkinnedModel::FromFile(path);
@@ -126,14 +135,14 @@ const SkinnedModel* RuntimeAssetManager::LoadSkinnedModel(
 
     // Cache key = model path + each source (name/strip/path), so a model with a
     // given set of merged clips is loaded once and shared.
-    std::string key = path;
+    std::string key = CacheKey(path);
     for (const SkinnedAnimationSource& source : extraAnimations) {
         key += '\n';
         key += source.name;
         key += source.stripRootMotion ? "|1|" : "|0|";
         key += source.sourceName;
         key += '|';
-        key += source.path;
+        key += CacheKey(source.path);
     }
 
     const auto existing = m_skinnedModels.find(key);
@@ -172,7 +181,8 @@ const Texture* RuntimeAssetManager::LoadTexture(const std::string &path, std::st
         return nullptr;
     }
 
-    const auto existing = m_textures.find(path);
+    const std::string key = CacheKey(path);
+    const auto existing = m_textures.find(key);
     if (existing != m_textures.end()) {
         SetError(error, std::string{});
         return existing->second.get();
@@ -194,7 +204,7 @@ const Texture* RuntimeAssetManager::LoadTexture(const std::string &path, std::st
             texture = std::make_unique<Texture>(path);
         }
         const Texture* result = texture.get();
-        m_textures.emplace(path, std::move(texture));
+        m_textures.emplace(key, std::move(texture));
         SetError(error, std::string{});
         return result;
     } catch (const std::exception& ex) {
@@ -210,7 +220,8 @@ const RuntimeMaterialAsset* RuntimeAssetManager::LoadMaterial(const std::string&
         return nullptr;
     }
 
-    const auto existing = m_materials.find(path);
+    const std::string key = CacheKey(path);
+    const auto existing = m_materials.find(key);
     if (existing != m_materials.end()) {
         SetError(error, std::string{});
         return existing->second.get();
@@ -222,7 +233,7 @@ const RuntimeMaterialAsset* RuntimeAssetManager::LoadMaterial(const std::string&
     }
 
     const RuntimeMaterialAsset* result = material.get();
-    m_materials.emplace(path, std::move(material));
+    m_materials.emplace(key, std::move(material));
     SetError(error, std::string{});
     return result;
 }
@@ -233,7 +244,8 @@ const FoliageAssetData* RuntimeAssetManager::LoadFoliage(
         SetError(error, "RuntimeAssetManager: foliage path is empty");
         return nullptr;
     }
-    const auto existing = m_foliage.find(path);
+    const std::string key = CacheKey(path);
+    const auto existing = m_foliage.find(key);
     if (existing != m_foliage.end()) {
         SetError(error, {});
         return existing->second.get();
@@ -241,14 +253,14 @@ const FoliageAssetData* RuntimeAssetManager::LoadFoliage(
     auto foliage = std::make_unique<FoliageAssetData>();
     if (!LoadFoliageAsset(path, foliage.get(), error)) return nullptr;
     const FoliageAssetData* result = foliage.get();
-    m_foliage.emplace(path, std::move(foliage));
+    m_foliage.emplace(key, std::move(foliage));
     SetError(error, {});
     return result;
 }
 
 const FoliageAssetData* RuntimeAssetManager::ReloadFoliage(
     const std::string& path, std::string* error) {
-    m_foliage.erase(path);
+    m_foliage.erase(CacheKey(path));
     return LoadFoliage(path, error);
 }
 
@@ -259,7 +271,8 @@ const Shader* RuntimeAssetManager::LoadShader(
         SetError(error, "RuntimeAssetManager: shader path is empty");
         return nullptr;
     }
-    auto asset = m_shaderAssets.find(path);
+    const std::string key = CacheKey(path);
+    auto asset = m_shaderAssets.find(key);
     if (asset == m_shaderAssets.end()) {
         ShaderAsset loaded;
         std::string loadError;
@@ -267,7 +280,7 @@ const Shader* RuntimeAssetManager::LoadShader(
             SetError(error, loadError);
             return nullptr;
         }
-        asset = m_shaderAssets.emplace(path, std::move(loaded)).first;
+        asset = m_shaderAssets.emplace(key, std::move(loaded)).first;
     }
     const std::string variant =
         asset->second.domain == ShaderDomain::Surface
@@ -282,7 +295,7 @@ const Shader* RuntimeAssetManager::LoadShader(
     // avoids regenerating graph source, validating nodes, and hashing the full
     // program every frame. Explicit asset reload/manager Clear still invalidates
     // this cache in the normal editor refresh workflow.
-    if (const Shader* cached = m_shaderPrograms.Find(path, variant)) {
+    if (const Shader* cached = m_shaderPrograms.Find(key, variant)) {
         SetError(error, {});
         return cached;
     }
@@ -297,9 +310,9 @@ const Shader* RuntimeAssetManager::LoadShader(
         return nullptr;
     }
     m_shaderPrograms.CompileOrReload(
-        path, variant, asset->second, generated.vertex, generated.fragment, {path});
-    const Shader* shader = m_shaderPrograms.Find(path, variant);
-    const ShaderCompileReport* report = m_shaderPrograms.LastReport(path, variant);
+        key, variant, asset->second, generated.vertex, generated.fragment, {path});
+    const Shader* shader = m_shaderPrograms.Find(key, variant);
+    const ShaderCompileReport* report = m_shaderPrograms.LastReport(key, variant);
     if ((!report || !report->success) && !shader) {
         SetError(error, report && !report->diagnostics.empty()
             ? report->diagnostics.front().message : "Shader compilation failed.");
@@ -310,28 +323,28 @@ const Shader* RuntimeAssetManager::LoadShader(
 }
 const Model *RuntimeAssetManager::FindModel(const std::string &path) const
 {
-    const auto found = m_models.find(path);
+    const auto found = m_models.find(CacheKey(path));
     return found == m_models.end() ? nullptr : found->second.get();
 }
 
 const SkinnedModel* RuntimeAssetManager::FindSkinnedModel(const std::string& path) const {
-    const auto found = m_skinnedModels.find(path);
+    const auto found = m_skinnedModels.find(CacheKey(path));
     return found == m_skinnedModels.end() ? nullptr : found->second.get();
 }
 const Texture *RuntimeAssetManager::FindTexture(const std::string &path) const
 {
-    const auto found = m_textures.find(path);
+    const auto found = m_textures.find(CacheKey(path));
     return found == m_textures.end() ? nullptr : found->second.get();
 }
 
 const RuntimeMaterialAsset* RuntimeAssetManager::FindMaterial(const std::string& path) const
 {
-    const auto found = m_materials.find(path);
+    const auto found = m_materials.find(CacheKey(path));
     return found == m_materials.end() ? nullptr : found->second.get();
 }
 
 const FoliageAssetData* RuntimeAssetManager::FindFoliage(const std::string& path) const {
-    const auto found = m_foliage.find(path);
+    const auto found = m_foliage.find(CacheKey(path));
     return found == m_foliage.end() ? nullptr : found->second.get();
 }
 RuntimeAssetManager::ResolveReport RuntimeAssetManager::ResolveRegistryAssets(ecs::Registry &registry)

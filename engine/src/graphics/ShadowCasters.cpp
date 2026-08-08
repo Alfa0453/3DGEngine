@@ -6,11 +6,13 @@
 #include "engine/ecs/Registry.h"
 #include "engine/ecs/Components.h"
 #include "engine/graphics/Texture.h"
+#include "engine/graphics/GpuProfiler.h"
 
 #include <glad/glad.h>
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
+#include <algorithm>
 #include <cstddef>
 
 using engine::ecs::Entity;
@@ -41,8 +43,10 @@ void ShadowCasterBatch::Build(ecs::Registry &reg)
     m_records.clear();
     m_textured.clear();
 
-    std::unordered_map<const Mesh*, std::vector<float>> groups;
-    reg.view<Transform, MeshPBR>().each([&](Entity, Transform& t, MeshPBR& m) {
+    auto& groups = m_groups;
+    for (auto& group : groups) group.second.clear();
+    auto meshView = reg.view<Transform, MeshPBR>();
+    if (!meshView.empty()) meshView.each([&](Entity, Transform& t, MeshPBR& m) {
         if (!m.mesh) return;
         if (m.material.blendMode == ecs::PbrMaterial::BlendMode::Transparent) return;
         const glm::vec3& e = m.material.emissive;
@@ -61,7 +65,8 @@ void ShadowCasterBatch::Build(ecs::Registry &reg)
 
     // Foliage is stored as many light-weight instances under one actor. Feed its
     // enabled, shadow-casting types into the same batch as ordinary static meshes.
-    reg.view<Transform, ecs::FoliageComponent>().each(
+    auto foliageView = reg.view<Transform, ecs::FoliageComponent>();
+    if (!foliageView.empty()) foliageView.each(
         [&](Entity, Transform& owner, ecs::FoliageComponent& foliage) {
             if (!foliage.visible) return;
             for (std::size_t typeIndex = 0; typeIndex < foliage.types.size(); ++typeIndex) {
@@ -86,6 +91,7 @@ void ShadowCasterBatch::Build(ecs::Registry &reg)
         });
 
     for (auto& kv : groups) {
+        if (kv.second.empty()) continue;
         Record r;
         r.mesh = kv.first;
         r.offsetFloats = static_cast<int>(m_data.size());
@@ -95,9 +101,13 @@ void ShadowCasterBatch::Build(ecs::Registry &reg)
     }
     if (!m_data.empty()) {
         glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
-        glBufferData(GL_ARRAY_BUFFER,
-                     static_cast<GLsizeiptr>(m_data.size() * sizeof(float)),
-                     m_data.data(), GL_DYNAMIC_DRAW);
+        const std::size_t bytes = m_data.size() * sizeof(float);
+        if (bytes > m_vboCapacity) {
+            m_vboCapacity = std::max(bytes, std::max<std::size_t>(m_vboCapacity * 2, 4096));
+            glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(m_vboCapacity),
+                         nullptr, GL_DYNAMIC_DRAW);
+        }
+        glBufferSubData(GL_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(bytes), m_data.data());
         glBindBuffer(GL_ARRAY_BUFFER, 0);
     }
 }
@@ -124,6 +134,7 @@ void ShadowCasterBatch::Draw(Shader &sh)
             glDrawElementsInstanced(GL_TRIANGLES,
                                     static_cast<GLsizei>(r.mesh->IndexCount(lod)),
                                     GL_UNSIGNED_INT, nullptr, r.count);
+            GpuProfiler::RecordDrawCall();
             for (GLuint loc = 3; loc <= 6; ++loc) {
                 glVertexAttribDivisor(loc, 0);
                 glDisableVertexAttribArray(loc);
@@ -135,6 +146,7 @@ void ShadowCasterBatch::Draw(Shader &sh)
 
     if (!m_textured.empty()) {
         sh.SetInt("uInstanced", 0);
+        const Texture* boundAlbedo = nullptr;
         for (const auto& pr : m_textured) {
             sh.SetMat4("uModel", pr.model);
             const bool masked = pr.material && pr.material->blendMode == ecs::PbrMaterial::BlendMode::Masked;
@@ -146,7 +158,10 @@ void ShadowCasterBatch::Draw(Shader &sh)
             sh.SetFloat("uUvRotation", pr.material ? pr.material->uvRotation : 0.0f);
             const bool hasMap = pr.material && pr.material->albedoMap;
             sh.SetInt("uHasAlbedoMap", hasMap ? 1 : 0); sh.SetInt("uAlbedoMap", 0);
-            if (hasMap) pr.material->albedoMap->Bind(0);
+            if (hasMap && pr.material->albedoMap != boundAlbedo) {
+                pr.material->albedoMap->Bind(0);
+                boundAlbedo = pr.material->albedoMap;
+            }
             pr.mesh->DrawLod(pr.mesh->LodForTriangleBudget(50000u));
         }
     }

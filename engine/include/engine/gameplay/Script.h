@@ -6,6 +6,7 @@
 #include "engine/physics/PhysicsWorld.h"
 
 #include <functional>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <unordered_set>
@@ -42,6 +43,7 @@ struct ScriptContext {
     const std::vector<struct ScriptField>* fields = nullptr;
     GameMode* gameMode = nullptr;              // host-owned; scripts reach it via Game()
     std::string* sceneLoadRequest = nullptr;   // where RequestSceneLoad writes when the host sets it
+    PhysicsWorld* physics = nullptr;           // optional runtime query/debug world
 };
 
 struct ScriptInputState {
@@ -285,6 +287,12 @@ protected:
     bool SetAnimationParameter(const std::string& name, float value);
     bool SetAnimationBool(const std::string& name, bool value);
     bool SetAnimationTrigger(const std::string& name);
+    RaycastHit TraceLine(const glm::vec3& start, const glm::vec3& end,
+                         std::uint32_t layerMask = 0xFFFFFFFFu) const;
+    RaycastHit TraceSphere(const glm::vec3& start, const glm::vec3& end, float radius,
+                           std::uint32_t layerMask = 0xFFFFFFFFu) const;
+    std::vector<ecs::Entity> TraceOverlapSphere(const glm::vec3& center, float radius,
+                                                 std::uint32_t layerMask = 0xFFFFFFFFu) const;
     float GetAnimationParameter(const std::string& name, float fallback = 0.0f) const;
     bool GetAnimationBool(const std::string& name, bool fallback = false) const;
     bool IsAnimationActionPlaying() const;
@@ -432,6 +440,7 @@ private:
     };
     ScriptContext m_context;
     std::vector<Timer> m_timers;
+    std::vector<std::function<void()>> m_timerCallbacks;
     std::unordered_map<std::string, std::function<void()>> m_timerFunctions;
     int m_nextTimerId = 1;
     std::vector<std::unique_ptr<ScriptSequence>> m_sequences;
@@ -646,13 +655,15 @@ private:
 // Per-frame update: creates instances, calls OnCreate once, then OnUpdate(dt).
 void UpdateScripts(ecs::Registry& registry, float dt, const ScriptInputState* input = nullptr,
                    RuntimeAudioSystem* audio = nullptr, CameraShake* cameraShake = nullptr,
-                   CameraDirector* cameraDirector = nullptr, GameMode* gameMode = nullptr);
+                   CameraDirector* cameraDirector = nullptr, GameMode* gameMode = nullptr,
+                   PhysicsWorld* physics = nullptr);
 
 // Per-physics-step update: calls OnFixedUpdate(dt) on already-created scripts. Call
 // this from the fixed-timestep loop; instance creation stays in UpdateScripts.
 void FixedUpdateScripts(ecs::Registry& registry, float dt, const ScriptInputState* input = nullptr,
                         RuntimeAudioSystem* audio = nullptr, CameraShake* cameraShake = nullptr,
-                        CameraDirector* cameraDirector = nullptr, GameMode* gameMode = nullptr);
+                        CameraDirector* cameraDirector = nullptr, GameMode* gameMode = nullptr,
+                        PhysicsWorld* physics = nullptr);
 
 // Calls OnDestroy() on every live script and releases the instances. Call when
 // leaving Play mode or unloading the scene so scripts can clean up.

@@ -15,6 +15,7 @@ add_executable(3DGEditor
     src/app/EditorApp.cpp
     src/app/EditorApp_Camera.cpp
     src/app/EditorApp_Prefab.cpp
+    src/app/EditorApp_MergeMesh.cpp
     src/app/EditorApp_ScriptDebug.cpp
     src/app/EditorApp_World.cpp
     src/app/EditorLog.cpp
@@ -47,6 +48,20 @@ add_executable(3DGEditor
     src/panels/CharacterEditorPanel.cpp
     src/panels/ClipEditorPanel.cpp
     src/panels/AnimationGraphEditorPanel.cpp
+    src/panels/MeshEditorPanel.cpp
+    src/panels/ModularPlacementPanel.cpp
+    src/panels/PrefabPalettePanel.cpp
+    src/panels/RoomBuilderPanel.cpp
+    src/panels/ScatterPaintPanel.cpp
+    src/panels/ArrayToolPanel.cpp
+    src/panels/MeasurementPanel.cpp
+    src/panels/LevelValidationPanel.cpp
+    src/panels/LevelVariantPanel.cpp
+    src/panels/LevelLayersPanel.cpp
+    src/panels/ViewportBookmarksPanel.cpp
+    src/panels/BlockoutPanel.cpp
+    src/panels/AlignmentPanel.cpp
+    src/panels/SplineBuilderPanel.cpp
     # viewport rendering
     src/render/EditorViewport.cpp
     src/render/EditorLineRenderer.cpp

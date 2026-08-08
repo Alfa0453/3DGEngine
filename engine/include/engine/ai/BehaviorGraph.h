@@ -78,6 +78,8 @@ struct AgentContext {
 
     // Plan a path from 'from' to 'to' on whichever nav source is set (mesh preferred).
     std::vector<glm::vec3> Plan(const glm::vec3& from, const glm::vec3& to) const;
+    void PlanInto(const glm::vec3& from, const glm::vec3& to,
+                  std::vector<glm::vec3>& outPath) const;
 };
 
 // The fixed node vocabulary the editor offers. Order is serialized as an int, so

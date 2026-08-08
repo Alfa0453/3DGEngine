@@ -106,10 +106,34 @@ bool CharacterAsset::Apply(EditorScene& scene) const {
     scene.SetSelectedModelAsset(modelAssetPath, modelAssetId);
     scene.SetSelectedMaterialAsset(materialAssetPath, materialAssetId);
     scene.SetSelectedModelOffset(modelOffsetPosition, modelOrientationEuler, modelOffsetScale);
-    scene.SetSelectedColliderEnabled(colliderEnabled);
-    if (colliderEnabled) scene.SetSelectedCollider(collider);
+    // A character capsule has two consumers: the movement controller and the
+    // scene collider/overlap proxy.  Keep them identical when applying an
+    // asset.  Previously the controller was applied first and then the
+    // collider was copied independently, so editing one view could leave the
+    // other at a different size (and produce a capsule that did not match the
+    // Character Editor preview).
+    EditorScene::PlayerControllerSettings appliedController = playerController;
+    engine::ecs::Collider appliedCollider = collider;
+    if (playerControllerEnabled && colliderEnabled
+        && collider.shape == engine::ecs::ColliderShape::Capsule) {
+        appliedController.capsuleRadius = std::max(collider.radius, 0.01f);
+        appliedController.capsuleHeight = std::max(
+            2.0f * (std::max(collider.halfHeight, 0.0f) + appliedController.capsuleRadius),
+            appliedController.capsuleRadius * 2.0f);
+        appliedCollider = engine::ecs::Collider::MakeCapsuleFromHeight(
+            appliedController.capsuleRadius, appliedController.capsuleHeight);
+        // Preserve the asset's collision response settings while using the
+        // normalized capsule dimensions.
+        appliedCollider.layer = collider.layer;
+        appliedCollider.mask = collider.mask;
+        appliedCollider.isTrigger = collider.isTrigger;
+        appliedCollider.restitution = collider.restitution;
+        appliedCollider.friction = collider.friction;
+    }
     scene.SetSelectedPlayerControllerEnabled(playerControllerEnabled);
-    if (playerControllerEnabled) scene.SetSelectedPlayerController(playerController);
+    if (playerControllerEnabled) scene.SetSelectedPlayerController(appliedController);
+    scene.SetSelectedColliderEnabled(colliderEnabled);
+    if (colliderEnabled) scene.SetSelectedCollider(appliedCollider);
     scene.SetSelectedAnimationSettings(skeletalModel, animationClipIndex, animationClipName,
         animationAutoplay, animationLoop, animationSpeed);
     // Animation is supplied entirely by the referenced .3dggraph (its own clips + states +

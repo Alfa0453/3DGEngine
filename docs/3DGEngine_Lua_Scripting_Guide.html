@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>3DGEngine — Lua Scripting Guide</title>
+<style>
+  :root{ --ink:#1a1f2b; --muted:#5a6474; --line:#d7dde6; --accent:#1f6f8b;
+    --accent2:#2e9e5b; --code-bg:#f5f7fb; --warn:#b9601f; }
+  *{ box-sizing:border-box; }
+  html{ -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+  body{ font-family:"Segoe UI",Arial,sans-serif; color:var(--ink); line-height:1.5;
+        font-size:10.5pt; margin:0; }
+  @page{ size:A4; margin:16mm 15mm 18mm 15mm; }
+  .page{ page-break-after:always; }
+  h1,h2,h3,h4{ line-height:1.2; }
+  h1{ font-size:23pt; margin:0 0 6pt; }
+  h2{ font-size:16pt; margin:18pt 0 8pt; padding-bottom:4pt;
+      border-bottom:2px solid var(--accent); page-break-after:avoid; }
+  h3{ font-size:12.5pt; margin:14pt 0 5pt; color:#22314c; page-break-after:avoid; }
+  p{ margin:5pt 0; } ul,ol{ margin:5pt 0 5pt 18pt; } li{ margin:3pt 0; }
+  code{ font-family:"Consolas","Courier New",monospace; font-size:9pt;
+        background:var(--code-bg); padding:1px 4px; border-radius:3px; }
+  pre{ background:var(--code-bg); border:1px solid var(--line); border-left:3px solid var(--accent);
+       border-radius:5px; padding:8pt 10pt; overflow:auto; font-size:8.6pt; line-height:1.4;
+       page-break-inside:avoid; white-space:pre; }
+  pre code{ background:none; padding:0; }
+  pre.editor{ border-left-color:var(--accent2); background:#f0f8f3; }
+  .muted{ color:var(--muted); } .lead{ font-size:12pt; color:#33405a; }
+  .note,.warn,.tip{ border-radius:6px; padding:7pt 10pt; margin:9pt 0; font-size:9.5pt;
+        page-break-inside:avoid; }
+  .note{ background:#e9f3f6; border:1px solid #bfdfe8; }
+  .warn{ background:#fdf3ea; border:1px solid #f2d3b3; }
+  .tip{ background:#eef9f2; border:1px solid #c6e9d3; }
+  .note b,.warn b,.tip b{ text-transform:uppercase; font-size:8pt; letter-spacing:.5px; }
+  table{ border-collapse:collapse; width:100%; margin:7pt 0; font-size:9pt; page-break-inside:avoid; }
+  th,td{ border:1px solid var(--line); padding:4pt 7pt; text-align:left; vertical-align:top; }
+  th{ background:#eef2f8; }
+  .cover{ height:250mm; display:flex; flex-direction:column; justify-content:center; }
+  .cover .badge{ font-size:9.5pt; letter-spacing:3px; text-transform:uppercase; color:var(--accent); }
+  .cover h1{ font-size:38pt; margin:6pt 0; }
+  .cover .sub{ font-size:14pt; color:var(--muted); }
+  .rule{ height:4px; width:130px; background:linear-gradient(90deg,var(--accent),var(--accent2)); margin:12pt 0; }
+  .kbd{ font-family:Consolas,monospace; font-size:8.5pt; border:1px solid #c3ccd8;
+        border-bottom-width:2px; border-radius:4px; padding:0 4px; background:#fff; }
+  .label{ display:inline-block; font-size:7.5pt; text-transform:uppercase; letter-spacing:.5px;
+        padding:1px 6px; border-radius:9px; margin-bottom:3pt; }
+  .l-editor{ background:#e4f3ea; color:#227a48; border:1px solid #c6e6d2; }
+  .l-lua{ background:#e4eff3; color:var(--accent); border:1px solid #c6dee8; }
+  a{ color:var(--accent); } .small{ font-size:8.5pt; }
+</style>
+</head>
+<body>
+
+<section class="page cover">
+  <div class="badge">3DGEngine • scripting</div>
+  <div class="rule"></div>
+  <h1>Scripting in Lua</h1>
+  <div class="sub">The no-rebuild scripting backend — the API, worked examples, and when to reach
+  for it instead of C++.</div>
+  <div class="rule"></div>
+  <p class="muted">The game tutorials (Coin Rush, Arena Assault, Cloud Climber) use native C++
+  scripts. This guide is their Lua counterpart: how the Lua backend works, the complete
+  <code>Engine</code> API, gameplay recipes written in Lua, and an honest map of what Lua can and
+  can't do versus C++. Print to PDF with <span class="kbd">Ctrl</span>+<span class="kbd">P</span> →
+  <em>Save as PDF</em> (A4).</p>
+</section>
+
+<section class="page">
+  <h1>1. The Lua backend</h1>
+  <p class="lead">A script can be a native C++ class (compiled into the game module) <b>or</b> a Lua
+  file. They share the same lifecycle and attach the same way; the difference is iteration speed and
+  reach.</p>
+  <table>
+    <tr><th></th><th>Native C++ script</th><th>Lua script</th></tr>
+    <tr><td>File</td><td><code>Content/Scripts/Name.h</code></td><td><code>Content/Scripts/Name.lua</code></td></tr>
+    <tr><td>Change → run</td><td>Recompile the game module</td><td><b>Edit &amp; play — no rebuild</b></td></tr>
+    <tr><td>Reach</td><td>Full engine: any component, triggers, save slots, raycasts</td><td>The curated <code>Engine</code> API (this guide)</td></tr>
+    <tr><td>Best for</td><td>Hot paths, deep systems, shipping-critical logic</td><td>Fast iteration, gameplay glue, designer tweaks</td></tr>
+  </table>
+  <p>Both run in Editor Play and in packaged builds. A single object can even mix native and Lua
+  scripts. Use Lua to prototype quickly, then move anything performance-critical (per-frame work over
+  many entities) or anything needing triggers/save-slots to a C++ script.</p>
+  <div class="tip"><b>The mental model</b> A Lua script is four optional global functions
+  (<code>OnCreate</code>, <code>OnUpdate</code>, <code>OnFixedUpdate</code>, <code>OnDestroy</code>)
+  that call into a global <code>Engine</code> table. That's the whole surface.</div>
+</section>
+
+<section class="page">
+  <h1>2. Creating a Lua script</h1>
+  <span class="label l-editor">Editor</span>
+  <pre class="editor"><code>1. Select an object → Inspector → + Add Script.
+2. Set the language to Lua, name it (e.g. Coin) → Create + Attach.
+   A file Content/Scripts/Coin.lua is generated with the four lifecycle stubs.
+3. Edit Coin.lua (built-in editor or your text editor) and Save.
+4. Press Play — the change runs immediately. No compile step.</code></pre>
+  <h3>The generated stub</h3>
+  <span class="label l-lua">Lua</span>
+  <pre><code>-- Coin.lua  — runs in Editor Play and packaged games without rebuilding.
+
+function OnCreate()
+    -- Called once when this object enters Play mode.
+end
+
+function OnUpdate(dt)
+    -- Once per rendered frame (variable dt). Example: Engine.Translate(0, 0, dt)
+end
+
+function OnFixedUpdate(dt)
+    -- Per physics step (fixed dt). Put movement / collision-facing logic here.
+end
+
+function OnDestroy()
+    -- Called before this object or script is removed.
+end</code></pre>
+  <div class="note"><b>Key codes</b> Lua input takes raw GLFW key numbers. Define a small table at
+  the top of your script for readability:
+  <br><code>local Key = { W=87, A=65, S=83, D=68, Space=32, F=70, Up=265, Down=264, Left=263, Right=262 }</code></div>
+</section>
+
+<section class="page">
+  <h1>3. Gameplay recipes in Lua</h1>
+  <p class="lead">The same mechanics from the C++ tutorials, written in Lua. Because Lua has no
+  trigger-event API, pickups and contact use <b>distance checks</b> (<code>Engine.GetPosition</code>
+  + <code>Engine.FindObject</code>) — a common, perfectly good pattern.</p>
+
+  <h3>A collectible coin (bob + distance pickup)</h3>
+  <span class="label l-lua">Lua</span>
+  <pre><code>local t = 0
+function OnUpdate(dt)
+    t = t + dt
+    Engine.Translate(0, math.sin(t * 3.0) * dt * 0.3, 0)   -- gentle bob
+end
+function OnFixedUpdate(dt)
+    local player = Engine.FindObject("Player")
+    if not player then return end
+    local px, py, pz = Engine.GetPosition(player)
+    local x,  y,  z  = Engine.GetPosition()               -- no arg = self
+    local dx, dy, dz = px - x, py - y, pz - z
+    if dx*dx + dy*dy + dz*dz &lt; 1.5 * 1.5 then              -- within reach
+        Engine.AddScore(1)
+        Engine.PlayAudioCue("Content/SFX/coin.wav")
+        Engine.BurstParticles(16)
+        Engine.DestroySelf()
+    end
+end</code></pre>
+  <div class="warn"><b>No rotation setter in Lua</b> The Lua API can <code>Translate</code> and
+  <code>SetPosition/SetScale</code> but not set rotation. For a spinning coin, either accept the bob
+  (above), drive the spin from the animation graph, or use a C++ script (which has full transform
+  access).</div>
+
+  <h3>Firing a projectile</h3>
+  <p>Spawn a prototype that carries a <code>Projectile</code> component, then configure it — the
+  projectile system handles motion, hit detection, and damage for you.</p>
+  <span class="label l-lua">Lua</span>
+  <pre><code>local Key = { Up=265, Down=264, Left=263, Right=262 }
+local cooldown, fireRate = 0, 0.15
+local aimX, aimZ = 0, -1
+
+function OnUpdate(dt)
+    local ax, az = 0, 0
+    if Engine.IsKeyDown(Key.Up)    then az = az - 1 end
+    if Engine.IsKeyDown(Key.Down)  then az = az + 1 end
+    if Engine.IsKeyDown(Key.Left)  then ax = ax - 1 end
+    if Engine.IsKeyDown(Key.Right) then ax = ax + 1 end
+    local firing = (ax ~= 0 or az ~= 0)
+    if firing then
+        local len = math.sqrt(ax*ax + az*az)
+        aimX, aimZ = ax / len, az / len
+    end
+    cooldown = cooldown - dt
+    if firing and cooldown &lt;= 0 then
+        local x, y, z = Engine.GetPosition()
+        local b = Engine.SpawnFromObject("Bullet", x + aimX*0.8, y + 0.8, z + aimZ*0.8)
+        if b then
+            -- entity, dirX,dirY,dirZ, speed, damage, range
+            Engine.ConfigureProjectile(b, aimX, 0, aimZ, 26, 34, 40)
+        end
+        Engine.PlayAudioCue("Content/SFX/shoot.wav")
+        Engine.BurstParticles(6)
+        cooldown = fireRate
+    end
+end</code></pre>
+
+  <h3>An enemy: contact damage &amp; death reward</h3>
+  <span class="label l-lua">Lua</span>
+  <pre><code>local hitCooldown = 0
+function OnFixedUpdate(dt)
+    if Engine.GetHealth() &lt;= 0 then                        -- self is dead
+        Engine.AddScore(10)
+        Engine.BurstParticles(30)
+        Engine.PlayAudioCue("Content/SFX/explode.wav")
+        Engine.DestroySelf()
+        return
+    end
+    hitCooldown = hitCooldown - dt
+    local player = Engine.FindObject("Player")
+    if player and hitCooldown &lt;= 0 then
+        local px, py, pz = Engine.GetPosition(player)
+        local x,  y,  z  = Engine.GetPosition()
+        local dx, dy, dz = px - x, py - y, pz - z
+        if dx*dx + dy*dy + dz*dz &lt; 1.5 * 1.5 then
+            Engine.Damage(player, 12)                     -- Damage(entity, amount)
+            hitCooldown = 0.6
+        end
+    end
+end</code></pre>
+
+  <h3>A melee attack keyed to an animation event</h3>
+  <span class="label l-lua">Lua</span>
+  <pre><code>local Key = { Space = 32 }
+function OnUpdate(dt)
+    if Engine.WasKeyPressed(Key.Space) then Engine.PlayActionClip("Attack") end
+    if Engine.WasAnimationEvent("hit") then                -- fires on the authored frame
+        local g = Engine.FindObject("Guard")
+        if g then
+            local gx, gy, gz = Engine.GetPosition(g)
+            local x,  y,  z  = Engine.GetPosition()
+            local dx, dy, dz = gx - x, gy - y, gz - z
+            if dx*dx + dy*dy + dz*dz &lt; 2.2 * 2.2 then Engine.Damage(g, 50) end
+        end
+    end
+end</code></pre>
+
+  <h3>Waves, saving, winning &amp; juice</h3>
+  <span class="label l-lua">Lua</span>
+  <pre><code>-- Wave spawner: call a named global on a repeating timer.
+function SpawnEnemy()
+    local a = math.random() * 6.2831853
+    Engine.SpawnFromObject("Enemy", math.cos(a) * 16, 0, math.sin(a) * 16)
+end
+function OnCreate() Engine.SetTimerByFunctionName("SpawnEnemy", 1.5, true) end   -- repeat
+
+-- The flat store is strings; wrap it for numbers.
+local function saveInt(k, v) Engine.SaveValue(k, tostring(v)) end
+local function loadInt(k, fb) return tonumber(Engine.LoadValue(k, tostring(fb or 0))) or (fb or 0) end
+
+function OnUpdate(dt)
+    if Engine.GetScore() &gt;= Engine.GetFieldInt("scoreToWin", 20) then
+        saveInt("best", math.max(loadInt("best", 0), Engine.GetScore()))
+        Engine.Win()                                        -- GameMode → HUD end screen
+    end
+end
+
+-- Impact juice, anywhere:
+-- Engine.ShakeCamera(0.5, 0.25, 20)   -- intensity, duration, frequency
+-- Engine.HitStop(0.05)                 -- brief freeze
+-- Engine.SetGlobalTimeDilation(0.3)    -- slow-mo (reset to 1.0 when done)</code></pre>
+</section>
+
+<section class="page">
+  <h1>4. The <code>Engine</code> API reference</h1>
+  <p class="muted">Every function is a member of the global <code>Engine</code> table. Entity
+  handles are integers (returned by <code>FindObject</code>/<code>Spawn…</code>, or
+  <code>nil</code>). Functions that take an optional entity default to the script's own object.</p>
+
+  <h3>World &amp; transform</h3>
+  <table>
+    <tr><td><code>Engine.Self()</code></td><td>This entity's handle.</td></tr>
+    <tr><td><code>Engine.Log(msg)</code></td><td>Print to the console.</td></tr>
+    <tr><td><code>Engine.FindObject(name)</code></td><td>Entity by name, or nil.</td></tr>
+    <tr><td><code>Engine.GetPosition([e])</code> → x,y,z</td><td>Position (self if no arg).</td></tr>
+    <tr><td><code>Engine.SetPosition([e,] x,y,z)</code></td><td>Set position.</td></tr>
+    <tr><td><code>Engine.Translate(dx,dy,dz)</code></td><td>Move self by a delta.</td></tr>
+    <tr><td><code>Engine.GetScale([e])</code> / <code>SetScale([e,] x,y,z)</code></td><td>Scale.</td></tr>
+    <tr><td><code>Engine.GetForward([e])</code> → x,y,z</td><td>Facing vector.</td></tr>
+    <tr><td><code>Engine.SocketPosition(name)</code> → x,y,z</td><td>World position of a character socket.</td></tr>
+  </table>
+
+  <h3>Spawn / destroy / projectiles</h3>
+  <table>
+    <tr><td><code>Engine.SpawnEmpty(name, x,y,z)</code></td><td>New bare entity → handle.</td></tr>
+    <tr><td><code>Engine.SpawnFromObject(prototype, x,y,z)</code></td><td>Clone a scene prototype → handle.</td></tr>
+    <tr><td><code>Engine.ConfigureProjectile(e, dx,dy,dz, speed, dmg, range [,radius,owner])</code></td><td>Aim a spawned Projectile; the projectile system moves it and applies damage.</td></tr>
+    <tr><td><code>Engine.Destroy(e)</code> / <code>Engine.DestroySelf()</code></td><td>Queue destruction.</td></tr>
+  </table>
+
+  <h3>Input</h3>
+  <table>
+    <tr><td><code>Engine.IsKeyDown(k)</code> / <code>WasKeyPressed(k)</code></td><td>Keyboard (GLFW codes).</td></tr>
+    <tr><td><code>Engine.IsMouseButtonDown(b)</code> / <code>WasMouseButtonPressed(b)</code></td><td>Mouse buttons.</td></tr>
+    <tr><td><code>Engine.MouseDelta()</code> → dx,dy</td><td>Mouse movement this frame.</td></tr>
+  </table>
+
+  <h3>Health, score &amp; game state</h3>
+  <table>
+    <tr><td><code>Engine.GetHealth([e])</code> / <code>GetMaxHealth([e])</code></td><td>Read HP.</td></tr>
+    <tr><td><code>Engine.Damage([e,] amount)</code> / <code>Heal([e,] amount)</code></td><td>Change HP.</td></tr>
+    <tr><td><code>Engine.AddScore(n)</code> / <code>GetScore()</code></td><td>GameMode score.</td></tr>
+    <tr><td><code>Engine.Win()</code> / <code>Lose()</code> / <code>ResetGame()</code></td><td>End / reset the run.</td></tr>
+    <tr><td><code>Engine.GetGameState()</code> / <code>GetElapsed()</code></td><td>State name / elapsed time.</td></tr>
+  </table>
+
+  <h3>Animation, audio, particles, camera</h3>
+  <table>
+    <tr><td><code>Engine.SetAnimationParameter(name, v)</code> / <code>SetAnimationBool(name, b)</code> / <code>SetAnimationTrigger(name)</code></td><td>Drive the controller.</td></tr>
+    <tr><td><code>Engine.PlayActionClip(name)</code> / <code>IsAnimationActionPlaying()</code></td><td>One-shot actions.</td></tr>
+    <tr><td><code>Engine.WasAnimationEvent(name)</code></td><td>Notify fired this frame.</td></tr>
+    <tr><td><code>Engine.PlayAudio([e])</code> / <code>StopAudio([e])</code> / <code>PlayAudioCue(path [,spatial])</code></td><td>Sound.</td></tr>
+    <tr><td><code>Engine.LoadAdaptiveMusic(path)</code> / <code>SetMusicState(name)</code></td><td>Adaptive music.</td></tr>
+    <tr><td><code>Engine.PlayParticles([e])</code> / <code>StopParticles([e])</code> / <code>BurstParticles([e,] n)</code></td><td>Effects.</td></tr>
+    <tr><td><code>Engine.ShakeCamera(intensity, duration, freq)</code></td><td>Camera shake.</td></tr>
+    <tr><td><code>Engine.PlayCameraSequence(name)</code> / <code>IsCameraSequencePlaying()</code> / <code>WasCameraSequenceEvent(seq, ev)</code></td><td>Cutscenes.</td></tr>
+  </table>
+
+  <h3>Fields, saving, flow, time &amp; timers</h3>
+  <table>
+    <tr><td><code>Engine.GetFieldFloat/Int/Bool/String/Vec3/Color/Entity/Asset(name [,fallback])</code></td><td>Inspector-exposed tunables.</td></tr>
+    <tr><td><code>Engine.SaveValue(key, str)</code> / <code>Engine.LoadValue(key [,fallback])</code></td><td>Flat string key/value store.</td></tr>
+    <tr><td><code>Engine.RequestSceneLoad(path)</code> / <code>RequestLevelLoad(l)</code> / <code>RequestLevelUnload(l)</code></td><td>Scene &amp; streaming flow.</td></tr>
+    <tr><td><code>Engine.SetTimerByFunctionName(fn, sec, repeat)</code> / <code>ClearTimer(id)</code> / <code>ClearTimerByFunctionName(fn)</code> / <code>IsTimerActive(id|fn)</code></td><td>Timers call a named global Lua function.</td></tr>
+    <tr><td><code>Engine.SetGlobalTimeDilation(x)</code> / <code>GetGlobalTimeDilation()</code> / <code>GetEffectiveTimeDilation()</code></td><td>Slow-mo.</td></tr>
+    <tr><td><code>Engine.HitStop(sec)</code> / <code>IsHitStopActive()</code></td><td>Impact freeze.</td></tr>
+    <tr><td>Spline: <code>Engine.SplinePointCount</code>, <code>GetSplinePoint</code>, <code>SetSplinePoint</code>, <code>AddSplinePoint</code>, <code>SplinePositionAt</code>, <code>SplineTangentAt</code>, …</td><td>Read/edit spline objects.</td></tr>
+  </table>
+
+  <h1>5. Lua vs C++ — choosing, and the gaps</h1>
+  <p>Lua covers most gameplay glue. A few capabilities are <b>C++ only</b> today; reach for a native
+  script when you need them:</p>
+  <table>
+    <tr><th>Capability</th><th>Lua</th><th>C++</th><th>Lua workaround</th></tr>
+    <tr><td>Set rotation / rotate an object</td><td>—</td><td>✔ full Transform</td><td>Bob via Translate; spin via the animation graph</td></tr>
+    <tr><td>Trigger enter/exit/touch events</td><td>—</td><td>✔ <code>WasTriggerEntered</code></td><td>Distance checks (as in the recipes above)</td></tr>
+    <tr><td>Typed saves &amp; save <em>slots</em>, checkpoints</td><td>strings only</td><td>✔ <code>SaveInt</code>/<code>SaveGameToSlot</code>/<code>SaveCheckpoint</code></td><td><code>SaveValue</code> + <code>tostring</code>/<code>tonumber</code></td></tr>
+    <tr><td>Arbitrary components (<code>TryGet&lt;T&gt;</code>, add/remove)</td><td>curated set</td><td>✔ any component</td><td>Use the exposed getters/setters</td></tr>
+    <tr><td>Raycasts / sphere-casts</td><td>—</td><td>✔ <code>PhysicsWorld</code></td><td>Distance/geometry math, or a C++ helper script</td></tr>
+    <tr><td>Sequences (<code>Do/Wait/WaitUntil</code>)</td><td>—</td><td>✔ <code>Sequence()</code></td><td>Timers + your own state, or coroutines</td></tr>
+    <tr><td>Iteration speed</td><td>✔ edit &amp; play, no rebuild</td><td>needs a recompile</td><td>—</td></tr>
+    <tr><td>Per-frame cost over many entities</td><td>higher (interpreted)</td><td>✔ native</td><td>Keep heavy loops in C++</td></tr>
+  </table>
+  <div class="tip"><b>Recommended split</b> Prototype and iterate in Lua (pickups, triggers-by-distance,
+  spawners, simple AI reactions, UI glue). Promote to C++ anything that (a) runs a heavy per-frame
+  loop, (b) needs trigger events, raycasts, save slots, or rotation, or (c) is shipping-critical.
+  Both live side by side on the same objects.</div>
+  <div class="note small"><b>Reference</b> The full C++ surface is in
+  <code>engine/include/engine/gameplay/Script.h</code>; the Lua bindings are in
+  <code>LuaScript.cpp</code> (the <code>Engine</code> table). The three genre tutorials (Coin Rush,
+  Arena Assault, Cloud Climber) show the C++ side of these same mechanics. Print with A4 margins.</div>
+</section>
+
+</body>
+</html>

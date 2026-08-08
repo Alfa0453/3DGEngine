@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace engine {
 class Shader;
@@ -77,6 +78,7 @@ private:
 
     unsigned int m_vao = 0;
     unsigned int m_vbo = 0;
+    std::size_t m_vboCapacity = 0;
     std::unique_ptr<Shader> m_shader;   // built from inline GLSL
     std::unique_ptr<Texture> m_atlas;   // 128x48 built-in font atlas (16x6 cells)
     glm::mat4 m_projection{1.0f};
@@ -85,6 +87,7 @@ private:
     struct FontStore;
     std::unique_ptr<FontStore> m_fonts;
     int m_activeFont = 0;               // 0 = built-in bitmap font
+    std::vector<float> m_vertices;
 };
 
 } // namespace engine

@@ -133,7 +133,7 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             return false;
         }
     }
-    if (magic != "3DGRuntimeScene" || version < 1 || version > 87) {
+    if (magic != "3DGRuntimeScene" || version < 1 || version > 88) {
         if (error) {
             *error = "Runtime scene file has an unknown format: "
                 + magic + " " + std::to_string(version)
@@ -205,6 +205,18 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                 return false;
             }
             loaded.environment.skylightOcclusion = enabled != 0;
+            continue;
+        }
+        if (recordType == "sky" && version >= 88) {
+            std::string texPath;
+            record >> loaded.environment.skyMode >> std::quoted(texPath)
+                   >> loaded.environment.skyRotation
+                   >> loaded.environment.skyIntensity;
+            if (!record) {
+                if (error) *error = "Runtime scene contains an invalid sky record.";
+                return false;
+            }
+            loaded.environment.skyTexturePath = (texPath == "-") ? std::string() : texPath;
             continue;
         }
         if (recordType == "clouds" && version >= 52) {
@@ -362,6 +374,10 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                     record >> std::quoted(water.splineName);
                     if (water.splineName == "-") water.splineName.clear();
                 }
+            }
+            if (version >= 88) {
+                record >> std::quoted(water.shaderPath);
+                if (water.shaderPath == "-") water.shaderPath.clear();
             }
             if (!record || water.name.empty()) {
                 if (error) *error = "Runtime scene contains invalid water data.";

@@ -396,18 +396,10 @@ void main(){
             engine::Animator::ComputeBindPose(m_previewModel->GetSkeleton(), m_previewPose);
         }
 
-        const float radius = std::max(m_previewModel->BoundingRadius(), 0.001f);
-        const float fit = (0.88f * m_previewZoom) / radius;
-        // View framing: orbit + fit-scale. The offset axes live in this frame, so the
-        // gizmo handles follow the orbit.
-        glm::mat4 frame(1.0f);
-        frame = glm::rotate(frame, glm::radians(m_previewYaw), glm::vec3(0, 1, 0));
-        frame = glm::rotate(frame, glm::radians(m_previewPitch), glm::vec3(1, 0, 0));
-        frame = glm::scale(frame, glm::vec3(fit));
-
         // Render-only model offset (pos/rot/scale about the model centre). For a fresh
         // Z-up rig with no offset set yet, preview an automatic stand-up so it matches
         // what dropping it into the scene will do.
+        const float radius = std::max(m_previewModel->BoundingRadius(), 0.001f);
         const glm::vec3 boundsSize = m_previewModel->Max() - m_previewModel->Min();
         const glm::vec3 scaleDelta = m_asset.modelOffsetScale - glm::vec3(1.0f);
         const bool assetHasOffset =
@@ -421,13 +413,63 @@ void main(){
             m_asset.modelOffsetScale.x != 0.0f ? m_asset.modelOffsetScale.x : 1e-4f,
             m_asset.modelOffsetScale.y != 0.0f ? m_asset.modelOffsetScale.y : 1e-4f,
             m_asset.modelOffsetScale.z != 0.0f ? m_asset.modelOffsetScale.z : 1e-4f);
+
+        // Character instances are automatically converted from their imported
+        // mesh units to a nominal 1.8 m character when they are added to a scene.
+        // Apply that same conversion to the preview mesh only. Colliders and the
+        // controller are already authored in world metres and must not inherit the
+        // FBX/model import scale.
+        const float importedHeight = std::max(std::max(boundsSize.y, boundsSize.z), 0.001f);
+        const float previewSceneScale = 1.8f / importedHeight;
+
+        // Frame the visible character and its collider as one object. Previously
+        // the camera fitted only the mesh, so a tall/wide capsule extended beyond
+        // the preview and only tiny pieces of its wireframe remained visible.
+        const float modelScale = std::max({
+            std::abs(previewScale.x), std::abs(previewScale.y),
+            std::abs(previewScale.z)});
+        float framingRadius = previewSceneScale * (radius * modelScale
+            + glm::length(m_asset.modelOffsetPosition));
+        if (m_showColliderGuide && m_asset.colliderEnabled) {
+            const auto& c = m_asset.collider;
+            float colliderRadius = 0.0f;
+            switch (c.shape) {
+            case engine::ecs::ColliderShape::Sphere:
+                colliderRadius = c.radius; break;
+            case engine::ecs::ColliderShape::Capsule:
+                colliderRadius = c.halfHeight + c.radius; break;
+            case engine::ecs::ColliderShape::Cylinder:
+            case engine::ecs::ColliderShape::Cone:
+                colliderRadius = std::sqrt(c.radius * c.radius
+                    + c.halfHeight * c.halfHeight); break;
+            case engine::ecs::ColliderShape::Box:
+            case engine::ecs::ColliderShape::Pyramid:
+            case engine::ecs::ColliderShape::Staircase:
+                colliderRadius = glm::length(c.halfExtents); break;
+            case engine::ecs::ColliderShape::Torus:
+                colliderRadius = c.majorRadius + c.minorRadius; break;
+            case engine::ecs::ColliderShape::Plane:
+                break;
+            }
+            framingRadius = std::max(framingRadius, colliderRadius);
+        }
+        const float fit = (0.88f * m_previewZoom)
+            / std::max(framingRadius, 0.001f);
+        // View framing: orbit + fit-scale. The offset axes live in this frame, so the
+        // gizmo handles follow the orbit.
+        glm::mat4 frame(1.0f);
+        frame = glm::rotate(frame, glm::radians(m_previewYaw), glm::vec3(0, 1, 0));
+        frame = glm::rotate(frame, glm::radians(m_previewPitch), glm::vec3(1, 0, 0));
+        frame = glm::scale(frame, glm::vec3(fit));
+
+        glm::mat4 modelFrame = glm::scale(frame, glm::vec3(previewSceneScale));
         glm::mat4 offset(1.0f);
         offset = glm::translate(offset, m_asset.modelOffsetPosition);
         offset *= glm::mat4_cast(glm::quat(glm::radians(previewEuler)));
         offset = glm::scale(offset, previewScale);
         offset = glm::translate(offset, -m_previewModel->Center());
 
-        const glm::mat4 model = frame * offset;
+        const glm::mat4 model = modelFrame * offset;
         engine::Camera camera(glm::vec3(0.0f, 0.0f, 2.5f));
         camera.LookAt(glm::vec3(0.0f));
         const float aspect = static_cast<float>(width) / static_cast<float>(height);
@@ -457,7 +499,7 @@ void main(){
         // Cache the transforms so Draw() can project the gizmo handles onto the image.
         m_previewViewProj = camera.ProjectionMatrix(aspect) * camera.ViewMatrix();
         m_previewModelMatrix = model;
-        m_previewGizmoFrame = frame;
+        m_previewGizmoFrame = modelFrame;
         m_previewModelCenter = m_previewModel->Center();
 
         // Cache every animated socket transform for preview markers, selection and the
@@ -530,12 +572,15 @@ void main(){
         if (m_showColliderGuide && m_asset.colliderEnabled && m_colliderGuideShader) {
             if (m_colliderGuideDirty || !m_colliderGuideMesh) RebuildColliderGuide();
             if (m_colliderGuideMesh) {
-                const float worldHeight = std::max(m_asset.playerController.capsuleHeight, .001f);
-                const float units = (1.76f * m_previewZoom) / worldHeight;
-                glm::mat4 colliderModel(1.0f);
-                colliderModel = glm::rotate(colliderModel, glm::radians(m_previewYaw), glm::vec3(0,1,0));
-                colliderModel = glm::rotate(colliderModel, glm::radians(m_previewPitch), glm::vec3(1,0,0));
-                const auto& c = m_asset.collider;
+                // Draw the collider in the same fitted preview frame as the
+                // character.  Scaling it by its own height kept its visible
+                // height constant, so changing Height appeared to alter Radius.
+                // The mesh offset deliberately is not included: it is render-only
+                // while the controller capsule remains at the object origin.
+                const auto& guideCollider = m_asset.collider;
+                constexpr float units = 1.0f;
+                glm::mat4 colliderModel = frame;
+                const auto& c = guideCollider;
                 if (c.shape == engine::ecs::ColliderShape::Sphere)
                     colliderModel = glm::scale(colliderModel, glm::vec3(2.0f*c.radius*units));
                 else if (c.shape == engine::ecs::ColliderShape::Box
@@ -1234,11 +1279,43 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
         } else if (collider.shape == engine::ecs::ColliderShape::Capsule
             || collider.shape == engine::ecs::ColliderShape::Cylinder
             || collider.shape == engine::ecs::ColliderShape::Cone) {
-            changed |= ImGui::DragFloat("Radius", &collider.radius, .01f, .001f, 1000.0f);
-            changed |= ImGui::DragFloat("Half Height", &collider.halfHeight, .01f, 0.0f, 1000.0f);
-            if (collider.shape != engine::ecs::ColliderShape::Capsule)
+            // Keep the dimension controls in their own ID scope.  The character
+            // panel can coexist with the scene inspector, which also exposes a
+            // Radius field; explicit IDs prevent ImGui from routing a drag to the
+            // wrong value.  Capsules expose total tip-to-tip Height because that
+            // is the value artists expect to edit.  Internally halfHeight remains
+            // the central segment half-length (the end caps are radius-sized).
+            ImGui::PushID("CharacterColliderDimensions");
+            if (collider.shape == engine::ecs::ColliderShape::Capsule) {
+                float totalHeight = 2.0f * (std::max(collider.halfHeight, 0.0f)
+                    + std::max(collider.radius, 0.001f));
+                float radius = collider.radius;
+                if (ImGui::DragFloat("Radius##radius", &radius,
+                                     .01f, .001f, 1000.0f)) {
+                    // Radius and height are independent authoring values. Keep
+                    // the current total height and resize only the rounded caps.
+                    collider.radius = std::clamp(
+                        radius, 0.001f, std::max(totalHeight * 0.5f, 0.001f));
+                    collider.halfHeight = std::max(
+                        0.0f, totalHeight * 0.5f - collider.radius);
+                    changed = true;
+                }
+                if (ImGui::DragFloat("Height##height", &totalHeight,
+                                     .01f, 0.002f, 2000.0f)) {
+                    totalHeight = std::max(totalHeight, 2.0f * collider.radius);
+                    collider.halfHeight = std::max(
+                        0.0f, totalHeight * 0.5f - collider.radius);
+                    changed = true;
+                }
+                ImGui::TextDisabled("Total capsule height includes both rounded caps");
+            } else {
+                changed |= ImGui::DragFloat("Radius##radius", &collider.radius,
+                                            .01f, .001f, 1000.0f);
+                changed |= ImGui::DragFloat("Half Height##halfHeight",
+                                            &collider.halfHeight, .01f, 0.0f, 1000.0f);
                 collider.halfExtents = glm::vec3(collider.radius, collider.halfHeight, collider.radius);
-            ImGui::TextDisabled("Total capsule height = 2 x (Radius + Half Height)");
+            }
+            ImGui::PopID();
         } else if (collider.shape == engine::ecs::ColliderShape::Torus) {
             changed |= ImGui::DragFloat("Major Radius", &collider.majorRadius, .01f, .001f, 1000.0f);
             changed |= ImGui::DragFloat("Minor Radius", &collider.minorRadius, .01f, .001f, 1000.0f);

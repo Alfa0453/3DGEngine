@@ -190,6 +190,8 @@ public:
         engine::ecs::Light lightData;
         bool visible = true;
         bool locked = false;
+        // Editor-only organization. Kept in the scene file but ignored by runtime export.
+        std::string editorLayer = "Default";
         std::string modelAssetPath;
         engine::AssetHandle modelAssetId;
         std::string materialAssetPath;
@@ -407,6 +409,9 @@ public:
         // A water body may follow a spline (by name) for directional flow -- see below.
         std::string waterFlowSpline;
         float waterRiverWidth = 8.0f;
+        // Optional custom water fragment shader (a .glsl file holding helper funcs + main()).
+        // Empty = built-in look. The engine prepends the water declaration prelude.
+        std::string waterShaderPath;
 
         // Spline (Catmull-Rom path). General purpose: river flow, motion paths, camera
         // rails, spawn lanes, etc. Control points are world-space. splineType is a label
@@ -426,6 +431,9 @@ public:
         engine::AssetHandle foliageAssetId;
         std::vector<engine::ecs::FoliageInstance> foliageInstances;
         std::uint32_t nextFoliageInstanceId = 1;
+        // Name of the terrain object this foliage was painted onto (empty = free-standing).
+        // Deleting that terrain cascade-deletes this foliage so grass "belongs" to its ground.
+        std::string foliageTerrainOwner;
     };
 
     struct ObjectSnapshot {
@@ -463,6 +471,14 @@ public:
         int blendEasing = 1; // engine::CameraBlend::Easing, kept as editor data
         bool primary = false;
         bool useInPlay = false;
+    };
+
+    struct ViewportBookmark {
+        std::string name = "View";
+        glm::vec3 position{0.0f, 3.0f, 8.0f};
+        glm::vec3 target{0.0f, 1.0f, 0.0f};
+        float fov = 45.0f;
+        float blendDuration = 0.3f;
     };
 
     struct CameraSequenceShot {
@@ -507,6 +523,14 @@ public:
             std::vector<PostProcessParameter> parameters;
         };
 
+        // Sky source. 0 = procedural atmosphere (day/night, clouds), 1 = imported sky
+        // image. An imported sky also lights the scene through IBL. skyRotation spins the
+        // sky yaw (degrees); skyIntensity scales its brightness.
+        int skyMode = 0;
+        std::string skyTexturePath;          // equirectangular panorama (.png/.jpg)
+        engine::AssetHandle skyTextureId;
+        float skyRotation = 0.0f;
+        float skyIntensity = 1.0f;
         float timeOfDay = 0.46f;
         float skyLightIntensity = 1.0f;
         bool skylightOcclusion = true;
@@ -580,6 +604,7 @@ public:
         std::vector<PhysicsJoint> joints;
         std::vector<CameraPreset> cameraPresets;
         std::vector<CameraSequence> cameraSequences;
+        std::vector<ViewportBookmark> viewportBookmarks;
         Environment environment;
         GameModeSettings gameMode;
         int selectedIndex = -1;
@@ -595,6 +620,7 @@ public:
     const std::vector<PhysicsJoint>& PhysicsJoints() const { return m_joints; }
     const std::vector<CameraPreset>& CameraPresets() const { return m_cameraPresets; }
     const std::vector<CameraSequence>& CameraSequences() const { return m_cameraSequences; }
+    const std::vector<ViewportBookmark>& ViewportBookmarks() const { return m_viewportBookmarks; }
     const CameraPreset* PrimaryCameraPreset() const;
     bool IsDirty() const { return m_dirty; }
     engine::AssetHandle AssetId() const { return m_assetId; }
@@ -605,6 +631,7 @@ public:
     // While suppressed, edits do not push undo snapshots (used for live drag-sync from
     // the Character Editor, which would otherwise spam the undo stack every frame).
     void SuppressUndo(bool suppress) { m_undoSuppressed = suppress; }
+    void PushUndoSnapshot();
     const Object* SelectedObject() const;
     engine::ecs::Transform* SelectedTransform();
     const engine::ecs::Transform* TryGetTransform(engine::ecs::Entity entity) const;
@@ -627,12 +654,21 @@ public:
     // Every selected object (includes the primary). Single selection = one entry.
     // Self-heals against the many sites that set the primary directly (add/duplicate/undo).
     const std::vector<int>& SelectedIndices() const;
+    void SelectIndices(const std::vector<int>& indices);
+    bool AssignObjectsToLayer(const std::vector<int>& indices, const std::string& layer);
+    bool SetLayerVisible(const std::string& layer, bool visible);
+    bool SetLayerLocked(const std::string& layer, bool locked);
+    bool RenameLayer(const std::string& oldName, const std::string& newName);
+    bool ShowAllLayers();
     void MoveSelected(const glm::vec3& delta);
     void RotateSelected(const glm::vec3& axis, float degrees);
     void RotateSelectedYaw(float degrees);
     void ScaleSelectedAxis(const glm::vec3& axis, float factor);
     void ScaleSelected(float factor);
     bool SetSelectedTransform(const engine::ecs::Transform& transform);
+    bool SetObjectTransformsUndoable(
+        const std::vector<int>& indices,
+        const std::vector<engine::ecs::Transform>& transforms);
     void ResetSelectedTransform();
     void BeginTransformEdit();
     void EndTransformEdit();
@@ -642,6 +678,11 @@ public:
     bool Redo(const engine::Mesh& cube, const engine::Mesh& plane, const engine::Mesh& sphere, const engine::Mesh& capsule, const engine::Mesh& cylinder, const engine::Mesh& cone, const engine::Mesh& pyramid, const engine::Mesh& torus, const engine::Mesh& staircase);
     Snapshot CreateSnapshot();
     void RestoreFromSnapshot(const Snapshot& snapshot, const engine::Mesh& cube, const engine::Mesh& plane, const engine::Mesh& sphere, const engine::Mesh& capsule, const engine::Mesh& cylinder, const engine::Mesh& cone, const engine::Mesh& pyramid, const engine::Mesh& torus, const engine::Mesh& staircase);
+    void ApplySnapshotUndoable(const Snapshot& snapshot, const engine::Mesh& cube,
+                               const engine::Mesh& plane, const engine::Mesh& sphere,
+                               const engine::Mesh& capsule, const engine::Mesh& cylinder,
+                               const engine::Mesh& cone, const engine::Mesh& pyramid,
+                               const engine::Mesh& torus, const engine::Mesh& staircase);
     void AddEmpty(const engine::Mesh& placeholderMesh);
     void AddFoliage(const engine::Mesh& placeholderMesh);
     void AddCube(const engine::Mesh& cube);
@@ -791,6 +832,7 @@ public:
                                     std::uint32_t typeIndex = 0);
     std::size_t EraseSelectedFoliageInstances(const glm::vec3& worldPosition,
                                                float radius);
+    bool SetSelectedFoliageTerrainOwner(const std::string& terrainName);
     bool SetSelectedFoliageInstance(std::uint32_t id,
                                     const engine::ecs::FoliageInstance& instance);
     bool RemoveSelectedFoliageInstance(std::uint32_t id);
@@ -829,6 +871,7 @@ public:
                                  float underwaterTransitionSpeed);
     bool SetSelectedWaterFlowSpline(const std::string& splineName);   // river follows a spline
     bool SetSelectedWaterRiverWidth(float width);
+    bool SetSelectedWaterShaderPath(const std::string& path);   // custom water fragment shader
 
     // Spline authoring (Catmull-Rom path).
     bool SetSelectedSpline(bool enabled, bool closed, int type);
@@ -853,6 +896,9 @@ public:
     bool RemoveCameraPreset(std::size_t index);
     std::size_t DuplicateCameraPreset(std::size_t index);
     bool SetPrimaryCameraPreset(std::size_t index);
+    std::size_t AddViewportBookmark(const ViewportBookmark& bookmark);
+    bool SetViewportBookmark(std::size_t index, const ViewportBookmark& bookmark);
+    bool RemoveViewportBookmark(std::size_t index);
     std::size_t AddCameraSequence(const CameraSequence& sequence);
     bool SetCameraSequence(std::size_t index, const CameraSequence& sequence);
     bool RemoveCameraSequence(std::size_t index);
@@ -867,7 +913,6 @@ private:
                                      const glm::vec3& color);
     Snapshot CaptureSnapshot();
     void RestoreSnapshot(const Snapshot& snapshot, const engine::Mesh& cube, const engine::Mesh& plane, const engine::Mesh& sphere, const engine::Mesh& capsule, const engine::Mesh& cylinder, const engine::Mesh& cone, const engine::Mesh& pyramid, const engine::Mesh& torus, const engine::Mesh& staircase);
-    void PushUndoSnapshot();
     void SyncSplineComponent(Object& object);
     void SyncFoliageComponent(Object& object);
     void ClearHistory();
@@ -879,6 +924,7 @@ private:
     std::vector<PhysicsJoint> m_joints;
     std::vector<CameraPreset> m_cameraPresets;
     std::vector<CameraSequence> m_cameraSequences;
+    std::vector<ViewportBookmark> m_viewportBookmarks;
     std::vector<Snapshot> m_undoStack;
     std::vector<Snapshot> m_redoStack;
     Environment m_environment;

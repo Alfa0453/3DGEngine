@@ -1,4 +1,5 @@
 #include "engine/graphics/FoliageRenderer.h"
+#include "engine/graphics/Frustum.h"
 
 #include "engine/ecs/Components.h"
 #include "engine/ecs/Registry.h"
@@ -6,6 +7,7 @@
 #include "engine/graphics/Model.h"
 #include "engine/graphics/Shader.h"
 #include "engine/graphics/Texture.h"
+#include "engine/graphics/GpuProfiler.h"
 
 #include <glad/glad.h>
 #include <glm/gtc/matrix_transform.hpp>
@@ -122,9 +124,12 @@ void FoliageRenderer::Draw(ecs::Registry& registry, const Camera& camera, float 
     m_visibleInstances = 0;
     m_drawCalls = 0;
     if (!m_shader) return;
+    auto foliageView = registry.view<ecs::Transform, ecs::FoliageComponent>();
+    if (foliageView.empty()) return;
 
+    const glm::mat4 viewProj = camera.ProjectionMatrix(aspect) * camera.ViewMatrix();
     m_shader->Bind();
-    m_shader->SetMat4("uViewProjection", camera.ProjectionMatrix(aspect) * camera.ViewMatrix());
+    m_shader->SetMat4("uViewProjection", viewProj);
     m_shader->SetVec3("uSunDirection", sunDirection);
     m_shader->SetVec3("uSunColor", sunColor);
     m_shader->SetVec3("uAmbient", ambient);
@@ -132,11 +137,13 @@ void FoliageRenderer::Draw(ecs::Registry& registry, const Camera& camera, float 
     m_shader->SetInt("uAlbedo", 0);
     m_shader->SetFloat("uTime", time);
     m_shader->SetVec3("uCameraPos", camera.Position());
+    const Frustum viewFrustum = ExtractFrustum(viewProj);
 
     const GLboolean cull = glIsEnabled(GL_CULL_FACE);
     glDisable(GL_CULL_FACE); // leaves and cards are commonly two-sided
+    const Texture* boundAlbedo = nullptr;
 
-    registry.view<ecs::Transform, ecs::FoliageComponent>().each(
+    foliageView.each(
         [&](ecs::Entity, ecs::Transform& owner, ecs::FoliageComponent& foliage) {
             if (!foliage.visible) return;
             for (std::size_t typeIndex = 0; typeIndex < foliage.types.size(); ++typeIndex) {
@@ -149,17 +156,30 @@ void FoliageRenderer::Draw(ecs::Registry& registry, const Camera& camera, float 
                 // Keep the placement batch, but select one optional authored mesh
                 // per distance tier. A missing tier always falls back to LOD0.
                 const Model* lodModels[3] = {type.model, type.lod1Model, type.lod2Model};
-                std::vector<glm::mat4> matrices[3];
-                for (auto& tier : matrices) tier.reserve(foliage.instances.size());
+                auto& matrices = m_lodMatrices;
+                for (auto& tier : matrices) {
+                    tier.clear();
+                    if (tier.capacity() < foliage.instances.size()) tier.reserve(foliage.instances.size());
+                }
                 for (const ecs::FoliageInstance& instance : foliage.instances) {
                     if (!instance.enabled || instance.typeIndex != typeIndex) continue;
                     const glm::mat4 model = InstanceMatrix(owner, instance);
                     const glm::vec3 worldPosition = glm::vec3(model[3]);
-                    const float distance = glm::length(worldPosition - camera.Position());
-                    if (distance > std::max(type.cullEndDistance, 0.0f)) continue;
+                    const glm::vec3 cameraDelta = worldPosition - camera.Position();
+                    const float distanceSq = glm::dot(cameraDelta, cameraDelta);
+                    const float cullEnd = std::max(type.cullEndDistance, 0.0f);
+                    if (distanceSq > cullEnd * cullEnd) continue;
+                    const glm::vec3 boundsCenter = glm::vec3(
+                        model * glm::vec4(type.model->Center(), 1.0f));
+                    const float scaleX = glm::length(glm::vec3(model[0]));
+                    const float scaleY = glm::length(glm::vec3(model[1]));
+                    const float scaleZ = glm::length(glm::vec3(model[2]));
+                    const float boundsRadius = type.model->BoundingRadius()
+                        * std::max({scaleX, scaleY, scaleZ});
+                    if (!SphereInFrustum(viewFrustum, boundsCenter, boundsRadius)) continue;
                     int lod = 0;
-                    if (type.lod2Model && distance >= type.lod2Distance) lod = 2;
-                    else if (type.lod1Model && distance >= type.lod1Distance) lod = 1;
+                    if (type.lod2Model && distanceSq >= type.lod2Distance * type.lod2Distance) lod = 2;
+                    else if (type.lod1Model && distanceSq >= type.lod1Distance * type.lod1Distance) lod = 1;
                     matrices[lod].push_back(model);
                 }
                 for (int lod = 0; lod < 3; ++lod) {
@@ -167,9 +187,15 @@ void FoliageRenderer::Draw(ecs::Registry& registry, const Camera& camera, float 
                     m_visibleInstances += static_cast<int>(matrices[lod].size());
 
                     glBindBuffer(GL_ARRAY_BUFFER, m_instanceVbo);
-                    glBufferData(GL_ARRAY_BUFFER,
-                        static_cast<GLsizeiptr>(matrices[lod].size() * sizeof(glm::mat4)),
-                        matrices[lod].data(), GL_DYNAMIC_DRAW);
+                    const std::size_t instanceBytes = matrices[lod].size() * sizeof(glm::mat4);
+                    if (instanceBytes > m_instanceCapacity) {
+                        m_instanceCapacity = std::max(instanceBytes,
+                            std::max<std::size_t>(m_instanceCapacity * 2, 4096));
+                        glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(m_instanceCapacity),
+                                     nullptr, GL_DYNAMIC_DRAW);
+                    }
+                    glBufferSubData(GL_ARRAY_BUFFER, 0,
+                                    static_cast<GLsizeiptr>(instanceBytes), matrices[lod].data());
 
                     const Model* lodModel = lodModels[lod];
                     const auto& subMeshes = lodModel->SubMeshes();
@@ -191,7 +217,10 @@ void FoliageRenderer::Draw(ecs::Registry& registry, const Camera& camera, float 
                         albedo = textures[static_cast<std::size_t>(sourceMaterial->diffuseMap)].get();
                     }
                     m_shader->SetInt("uHasAlbedo", albedo ? 1 : 0);
-                    if (albedo) albedo->Bind(0);
+                    if (albedo && albedo != boundAlbedo) {
+                        albedo->Bind(0);
+                        boundAlbedo = albedo;
+                    }
 
                     glBindVertexArray(subMesh.mesh.Vao());
                     glBindBuffer(GL_ARRAY_BUFFER, m_instanceVbo);
@@ -207,6 +236,7 @@ void FoliageRenderer::Draw(ecs::Registry& registry, const Camera& camera, float 
                         glDrawElementsInstanced(GL_TRIANGLES,
                             static_cast<GLsizei>(subMesh.mesh.IndexCount()), GL_UNSIGNED_INT,
                             nullptr, static_cast<GLsizei>(matrices[lod].size()));
+                        GpuProfiler::RecordDrawCall();
                     for (GLuint location = 4; location <= 7; ++location) {
                         glVertexAttribDivisor(location, 0);
                         glDisableVertexAttribArray(location);

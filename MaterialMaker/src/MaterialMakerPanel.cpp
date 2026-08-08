@@ -591,9 +591,18 @@ void MaterialMakerPanel::DrawAdvancedControls() {
         ImGui::SliderFloat("Alpha Cutoff", &m_material.alphaCutoff, 0.0f, 1.0f, "%.2f");
 
     if (ImGui::TreeNode("UV Transform")) {
-        ImGui::DragFloat2("Tiling", m_material.uvScale.data(), 0.02f, 0.01f, 100.0f, "%.2f");
+        ImGui::Checkbox("World-space UV (scale-independent)", &m_material.worldSpaceUv);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Projects the texture from world position so it never "
+                              "stretches when the object is scaled.\nTiling becomes "
+                              "tiles-per-world-unit. Best for walls, floors and\nmerged "
+                              "meshes; rotation is ignored in this mode.");
+        }
+        ImGui::DragFloat2(m_material.worldSpaceUv ? "Tiling (per world unit)" : "Tiling",
+                          m_material.uvScale.data(), 0.02f, 0.01f, 100.0f, "%.2f");
         ImGui::DragFloat2("Offset", m_material.uvOffset.data(), 0.01f, -100.0f, 100.0f, "%.2f");
-        ImGui::SliderFloat("Rotation", &m_material.uvRotation, -180.0f, 180.0f, "%.0f deg");
+        if (!m_material.worldSpaceUv)
+            ImGui::SliderFloat("Rotation", &m_material.uvRotation, -180.0f, 180.0f, "%.0f deg");
         ImGui::TreePop();
     }
     if (ImGui::TreeNode("Surface Detail")) {
@@ -832,7 +841,8 @@ void MaterialMakerPanel::DrawModelImport() {
 
     if (ImGui::Button("Import Material") && !m_importModelPath.empty()) {
         const ModelImportResult result =
-            ImportMaterialFromModel(m_importModelPath, m_importMaterialIndex, &m_material);
+            ImportMaterialFromModel(m_importModelPath, m_importMaterialIndex, &m_material,
+                                    m_outputDirectory);
         if (result.ok) {
             m_material.emissiveStrength = 1.0f;
             m_importMaterialCount = result.materialCount;
@@ -865,7 +875,7 @@ void MaterialMakerPanel::DrawModelImport() {
             SyncBuffersFromMaterial();
             char line[96];
             std::snprintf(line, sizeof(line), "Imported material %d of %d.",
-                          m_importMaterialIndex, result.materialCount);
+                          m_importMaterialIndex + 1, result.materialCount);
             if (!packFailed) m_status = line;
         } else {
             m_status = "Import failed: " + result.error;
@@ -1032,7 +1042,8 @@ void MaterialMakerPanel::DrawPreview() {
         pbr.opacity = m_material.opacity; pbr.alphaCutoff = m_material.alphaCutoff;
         pbr.uvScale = glm::vec2(m_material.uvScale[0], m_material.uvScale[1]);
         pbr.uvOffset = glm::vec2(m_material.uvOffset[0], m_material.uvOffset[1]);
-        pbr.uvRotation = m_material.uvRotation; pbr.normalStrength = m_material.normalStrength;
+        pbr.uvRotation = m_material.uvRotation; pbr.worldSpaceUv = m_material.worldSpaceUv;
+        pbr.normalStrength = m_material.normalStrength;
         pbr.heightScale = m_material.heightScale; pbr.clearcoat = m_material.clearcoat;
         pbr.clearcoatRoughness = m_material.clearcoatRoughness; pbr.transmission = m_material.transmission;
         pbr.ior = m_material.ior; pbr.thickness = m_material.thickness;

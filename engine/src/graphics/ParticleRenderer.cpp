@@ -9,6 +9,7 @@
 #include "engine/graphics/Model.h"
 #include "engine/graphics/Primitives.h"
 #include "engine/graphics/ShaderParameterBinding.h"
+#include "engine/graphics/GpuProfiler.h"
 
 #include <glad/glad.h>
 #include <glm/gtc/type_ptr.hpp>
@@ -178,8 +179,9 @@ void ParticleRenderer::Draw(const ParticleEmitter& emitter, const Camera& camera
 
     const glm::mat4 view = camera.ViewMatrix();
     const glm::mat4 proj = camera.ProjectionMatrix(aspect);
+    const glm::mat4 viewProj = proj * view;
     if (emitter.cfg.cullingEnabled) {
-        const glm::vec4 clip = proj * view * glm::vec4(emitter.position, 1.0f);
+        const glm::vec4 clip = viewProj * glm::vec4(emitter.position, 1.0f);
         const float radius = std::max(emitter.cfg.boundsRadius, 0.01f)
             * std::max(std::abs(proj[0][0]), std::abs(proj[1][1]));
         if (clip.w <= 0.0f || clip.x + radius < -clip.w || clip.x - radius > clip.w
@@ -191,9 +193,34 @@ void ParticleRenderer::Draw(const ParticleEmitter& emitter, const Camera& camera
             return;
         }
     }
-    std::vector<const Particle*> ordered;
-    ordered.reserve(ps.size());
-    for (const Particle& particle : ps) ordered.push_back(&particle);
+    auto& ordered = m_orderedScratch;
+    ordered.clear();
+    if (ordered.capacity() < ps.size()) ordered.reserve(ps.size());
+    const float projectionScale = std::max(std::abs(proj[0][0]), std::abs(proj[1][1]));
+    for (const Particle& particle : ps) {
+        if (emitter.cfg.cullingEnabled) {
+            // Use a conservative screen-space sphere for each particle. The
+            // emitter bounds above rejects whole systems; this second test
+            // prevents off-screen particles from entering sort/instance/trail
+            // buffers when a large emitter straddles the view.
+            const float particleRadius = std::max(
+                std::abs(particle.size * emitter.cfg.meshScale), 0.01f)
+                * projectionScale;
+            const glm::vec4 clip = viewProj * glm::vec4(particle.pos, 1.0f);
+            if (clip.w <= 0.0f
+                || clip.x + particleRadius < -clip.w || clip.x - particleRadius > clip.w
+                || clip.y + particleRadius < -clip.w || clip.y - particleRadius > clip.w
+                || clip.z + particleRadius < -clip.w || clip.z - particleRadius > clip.w) {
+                continue;
+            }
+        }
+        ordered.push_back(&particle);
+    }
+    if (ordered.empty()) {
+        m_stats.cpuMilliseconds += std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - cpuStart).count();
+        return;
+    }
     if (emitter.cfg.blend == ParticleBlend::Alpha) {
         const glm::vec3 cameraPosition = camera.Position();
         std::stable_sort(ordered.begin(), ordered.end(),
@@ -224,7 +251,7 @@ void ParticleRenderer::Draw(const ParticleEmitter& emitter, const Camera& camera
             }
         }
         m_meshShader->Bind();
-        m_meshShader->SetMat4("uViewProj", proj * view);
+        m_meshShader->SetMat4("uViewProj", viewProj);
         m_meshShader->SetVec3("uLightDir", glm::vec3(-0.4f, -1.0f, -0.3f));
         glEnable(GL_BLEND);
         if (emitter.cfg.blend == ParticleBlend::Additive) glBlendFunc(GL_SRC_ALPHA, GL_ONE);
@@ -270,15 +297,16 @@ void ParticleRenderer::Draw(const ParticleEmitter& emitter, const Camera& camera
         glDepthMask(GL_TRUE);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         glDisable(GL_BLEND);
-        m_stats.particles += ps.size();
+        m_stats.particles += ordered.size();
         m_stats.cpuMilliseconds += std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - cpuStart).count();
         return;
     }
 
     // Pack per-instance data: center, size, color, rotation, flipbook frame.
-    std::vector<float> inst;
-    inst.reserve(ps.size() * 14);
+    auto& inst = m_instanceScratch;
+    inst.clear();
+    if (inst.capacity() < ps.size() * 14) inst.reserve(ps.size() * 14);
     for (const Particle* particle : ordered) {
         const Particle& p = *particle;
         inst.push_back(p.pos.x); inst.push_back(p.pos.y); inst.push_back(p.pos.z);
@@ -294,7 +322,9 @@ void ParticleRenderer::Draw(const ParticleEmitter& emitter, const Camera& camera
     const glm::vec3 camRight(view[0][0], view[1][0], view[2][0]);
     const glm::vec3 camUp   (view[0][1], view[1][1], view[2][1]);
 
-    std::vector<float> trailVertices;
+    auto& trailVertices = m_trailScratch;
+    trailVertices.clear();
+    if (trailVertices.capacity() < ordered.size() * 16) trailVertices.reserve(ordered.size() * 16);
     if (emitter.cfg.trailsEnabled && emitter.cfg.trailWidth > 0.0f) {
         for (const Particle* particle : ordered) {
             const Particle& p = *particle;
@@ -338,12 +368,12 @@ void ParticleRenderer::Draw(const ParticleEmitter& emitter, const Camera& camera
         ? const_cast<Shader*>(emitter.cfg.customShader) : m_shader.get();
     billboardShader->Bind();
     if (emitter.cfg.customShader) {
-        billboardShader->SetMat4("uViewProjection", proj * view);
+        billboardShader->SetMat4("uViewProjection", viewProj);
         billboardShader->SetVec3("uCameraRight", camRight);
         billboardShader->SetVec3("uCameraUp", camUp);
         UploadParticleShaderParameters(*billboardShader, emitter.cfg);
     } else {
-        billboardShader->SetMat4("uViewProj", proj * view);
+        billboardShader->SetMat4("uViewProj", viewProj);
         billboardShader->SetVec3("uCamRight", camRight);
         billboardShader->SetVec3("uCamUp", camUp);
     }
@@ -380,17 +410,22 @@ void ParticleRenderer::Draw(const ParticleEmitter& emitter, const Camera& camera
     if (m_timerQuery) glBeginQuery(GL_TIME_ELAPSED, m_timerQuery);
     if (!trailVertices.empty()) {
         m_trailShader->Bind();
-        m_trailShader->SetMat4("uViewProj", proj * view);
+        m_trailShader->SetMat4("uViewProj", viewProj);
         glBindVertexArray(m_trailVao);
         glBindBuffer(GL_ARRAY_BUFFER, m_trailVbo);
-        glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(trailVertices.size() * sizeof(float)),
-                     trailVertices.data(), GL_DYNAMIC_DRAW);
+        const std::size_t trailBytes = trailVertices.size() * sizeof(float);
+        if (trailBytes > m_trailCapacity) {
+            m_trailCapacity = std::max(trailBytes, std::max<std::size_t>(m_trailCapacity * 2, 4096));
+            glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(m_trailCapacity), nullptr, GL_DYNAMIC_DRAW);
+        }
+        glBufferSubData(GL_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(trailBytes), trailVertices.data());
         constexpr GLsizei trailStride = 7 * sizeof(float);
         glEnableVertexAttribArray(0);
         glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, trailStride, nullptr);
         glEnableVertexAttribArray(1);
         glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, trailStride,
                               reinterpret_cast<void*>(3 * sizeof(float)));
+        GpuProfiler::RecordDrawCall();
         glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(trailVertices.size() / 7));
         ++m_stats.drawCalls;
     }
@@ -398,7 +433,13 @@ void ParticleRenderer::Draw(const ParticleEmitter& emitter, const Camera& camera
     billboardShader->Bind();
     glBindVertexArray(m_vao);
     glBindBuffer(GL_ARRAY_BUFFER, m_instanceVBO);
-    glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(inst.size() * sizeof(float)), inst.data(), GL_DYNAMIC_DRAW);
+    const std::size_t instanceBytes = inst.size() * sizeof(float);
+    if (instanceBytes > m_instanceCapacity) {
+        m_instanceCapacity = std::max(instanceBytes,
+            std::max<std::size_t>(m_instanceCapacity * 2, 4096));
+        glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(m_instanceCapacity), nullptr, GL_DYNAMIC_DRAW);
+    }
+    glBufferSubData(GL_ARRAY_BUFFER, 0, static_cast<GLsizeiptr>(instanceBytes), inst.data());
     const GLsizei stride = 14 * sizeof(float);
     glEnableVertexAttribArray(1);
     glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<void*>(0));
@@ -422,6 +463,7 @@ void ParticleRenderer::Draw(const ParticleEmitter& emitter, const Camera& camera
     glVertexAttribPointer(7, 1, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<void*>(13 * sizeof(float)));
     glVertexAttribDivisor(7, 1);
 
+    GpuProfiler::RecordDrawCall();
     glDrawArraysInstanced(GL_TRIANGLES, 0, 6, static_cast<GLsizei>(ps.size()));
     if (m_timerQuery) {
         glEndQuery(GL_TIME_ELAPSED);
@@ -440,7 +482,7 @@ void ParticleRenderer::Draw(const ParticleEmitter& emitter, const Camera& camera
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glDisable(GL_BLEND);
     ++m_stats.drawCalls;
-    m_stats.particles += ps.size();
+    m_stats.particles += ordered.size();
     m_stats.cpuMilliseconds += std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - cpuStart).count();
 }
@@ -451,7 +493,7 @@ void ParticleRenderer::Draw(const ParticleSystemComponent& system, const Camera&
         if (system.config.cullingEnabled) {
             const glm::mat4 view = camera.ViewMatrix();
             const glm::mat4 proj = camera.ProjectionMatrix(aspect);
-            const glm::vec4 clip = proj * view * glm::vec4(system.lastPosition, 1.0f);
+            const glm::vec4 clip = (proj * view) * glm::vec4(system.lastPosition, 1.0f);
             const float radius = std::max(system.config.boundsRadius, 0.01f)
                 * std::max(std::abs(proj[0][0]), std::abs(proj[1][1]));
             if (clip.w <= 0.0f || clip.x + radius < -clip.w || clip.x - radius > clip.w

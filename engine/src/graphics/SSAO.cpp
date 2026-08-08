@@ -2,12 +2,14 @@
 
 #include "engine/graphics/VertexLayout.h"
 #include "engine/graphics/Camera.h"
+#include "engine/graphics/Frustum.h"
 #include "engine/ecs/Registry.h"
 #include "engine/ecs/Components.h"
 
 #include <glad/glad.h>
 #include <glm/gtc/matrix_transform.hpp>
 
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <random>
@@ -224,6 +226,7 @@ void SSAO::Generate(ecs::Registry& reg, const Camera& camera, float aspect, int 
     const glm::mat4 view = camera.ViewMatrix();
     const glm::mat4 proj = camera.ProjectionMatrix(aspect);
     const glm::mat4 viewProjection = proj * view;
+    const Frustum frustum = ExtractFrustum(viewProjection);
 
     GLint prevFbo = 0;
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFbo);
@@ -232,25 +235,35 @@ void SSAO::Generate(ecs::Registry& reg, const Camera& camera, float aspect, int 
     // 1. Geometry prepass -> view-space position + normal.
     glBindFramebuffer(GL_FRAMEBUFFER, m_gFbo);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    m_geom.Bind();
-    m_geom.SetMat4("uView", view);
-    m_geom.SetMat4("uProj", proj);
-    m_geom.SetMat4("uPreviousViewProjection",
-        m_hasPreviousFrame ? m_previousViewProjection : viewProjection);
-    std::unordered_map<std::uint32_t, glm::mat4> currentModels;
-    reg.view<Transform, MeshPBR>().each([&](Entity entity, Transform& t, MeshPBR& m) {
-        if (!m.mesh) return;
-        const glm::mat4 model = t.Model();
-        const auto previous = m_previousModels.find(
-            static_cast<std::uint32_t>(entity));
-        m_geom.SetMat4("uModel", model);
-        m_geom.SetMat4("uPreviousModel",
-            m_hasPreviousFrame && previous != m_previousModels.end()
-                ? previous->second : model);
-        m.mesh->Draw();
-        currentModels[static_cast<std::uint32_t>(entity)] = model;
-    });
-    m_previousModels = std::move(currentModels);
+    m_currentModels.clear();
+    if (m_currentModels.bucket_count() < m_previousModels.bucket_count())
+        m_currentModels.reserve(m_previousModels.size());
+    auto meshView = reg.view<Transform, MeshPBR>();
+    if (!meshView.empty()) {
+        m_geom.Bind();
+        m_geom.SetMat4("uView", view);
+        m_geom.SetMat4("uProj", proj);
+        m_geom.SetMat4("uPreviousViewProjection",
+            m_hasPreviousFrame ? m_previousViewProjection : viewProjection);
+        meshView.each([&](Entity entity, Transform& t, MeshPBR& m) {
+            if (!m.mesh) return;
+            const glm::vec3 scale = glm::abs(t.scale);
+            const float maxScale = std::max({scale.x, scale.y, scale.z});
+            const glm::vec3 center = t.position + t.rotation * (m.mesh->BoundsCenter() * t.scale);
+            if (!SphereInFrustum(frustum, center,
+                                 std::max(m.mesh->BoundsRadius() * maxScale, 0.01f))) return;
+            const glm::mat4 model = t.Model();
+            const auto previous = m_previousModels.find(
+                static_cast<std::uint32_t>(entity));
+            m_geom.SetMat4("uModel", model);
+            m_geom.SetMat4("uPreviousModel",
+                m_hasPreviousFrame && previous != m_previousModels.end()
+                    ? previous->second : model);
+            m.mesh->Draw();
+            m_currentModels[static_cast<std::uint32_t>(entity)] = model;
+        });
+    }
+    m_previousModels.swap(m_currentModels);
     m_previousViewProjection = viewProjection;
     m_hasPreviousFrame = true;
 
@@ -258,8 +271,14 @@ void SSAO::Generate(ecs::Registry& reg, const Camera& camera, float aspect, int 
     glBindFramebuffer(GL_FRAMEBUFFER, m_ssaoFbo);
     glClear(GL_COLOR_BUFFER_BIT);
     m_ssao.Bind();
-    for (int i = 0; i < 64; ++i)
-        m_ssao.SetVec3("uSamples[" + std::to_string(i) + "]", m_kernel[static_cast<std::size_t>(i)]);
+    static const auto kSampleUniforms = [] {
+        std::array<std::string, 64> names{};
+        for (std::size_t i = 0; i < names.size(); ++i)
+            names[i] = "uSamples[" + std::to_string(i) + "]";
+        return names;
+    }();
+    for (std::size_t i = 0; i < kSampleUniforms.size(); ++i)
+        m_ssao.SetVec3(kSampleUniforms[i], m_kernel[i]);
     m_ssao.SetMat4("uProjection", proj);
     m_ssao.SetVec2("uNoiseScale", glm::vec2(m_width / 4.0f, m_height / 4.0f));
     m_ssao.SetFloat("uRadius", radius);

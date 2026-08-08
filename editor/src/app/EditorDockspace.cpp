@@ -2164,6 +2164,42 @@ void DrawWorldSettings(EditorScene& scene, EditorDockspace::Context& context, bo
         }
     }
 
+    if (ImGui::CollapsingHeader("Sky", ImGuiTreeNodeFlags_DefaultOpen)) {
+        int mode = environment.skyMode;
+        const char* modes[] = {"Procedural Atmosphere", "Imported Sky"};
+        if (ImGui::Combo("Sky Source", &mode, modes, 2) && mode != environment.skyMode) {
+            environment.skyMode = mode;
+            changed = true;
+        }
+        if (environment.skyMode == 1) {
+            ImGui::TextWrapped("Image: %s", environment.skyTexturePath.empty()
+                ? "(none)" : environment.skyTexturePath.c_str());
+            if (ImGui::Button("Import PNG...")) {
+                const std::string picked = editor::OpenFileDialog(
+                    "Choose an equirectangular sky", "Panorama PNG", "png");
+                if (!picked.empty()) { environment.skyTexturePath = picked; changed = true; }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Import JPG...")) {
+                const std::string picked = editor::OpenFileDialog(
+                    "Choose an equirectangular sky", "Panorama JPEG", "jpg");
+                if (!picked.empty()) { environment.skyTexturePath = picked; changed = true; }
+            }
+            if (!environment.skyTexturePath.empty()) {
+                ImGui::SameLine();
+                if (ImGui::Button("Clear")) { environment.skyTexturePath.clear(); changed = true; }
+            }
+            changed |= ImGui::SliderFloat("Sky Rotation", &environment.skyRotation,
+                                          0.0f, 360.0f, "%.0f deg");
+            changed |= ImGui::DragFloat("Sky Brightness", &environment.skyIntensity,
+                                        0.02f, 0.0f, 8.0f, "%.2f");
+            ImGui::TextDisabled("A 360 equirectangular panorama (marketplace sky). Also "
+                                "lights the scene via IBL. .hdr not yet supported.");
+        } else {
+            ImGui::TextDisabled("Procedural atmosphere — edit Time of Day, Clouds and Fog below.");
+        }
+    }
+
     if (ImGui::CollapsingHeader("Lighting", ImGuiTreeNodeFlags_DefaultOpen)) {
         if (ImGui::SmallButton("Reset Lighting")) {
             environment.timeOfDay = defaults.timeOfDay;
@@ -2892,8 +2928,59 @@ void DrawGameplayDebug(EditorDockspace::Context& context, bool* open) {
 
     const EditorDockspace::GameplayDebugState& debug = context.gameplayDebug;
     ImGui::Text("Mode: %s", context.playMode ? "Play" : "Edit");
+
+    if (ImGui::CollapsingHeader("Runtime Controls", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (!context.playMode) {
+            ImGui::TextDisabled("Enter Play mode to control the runtime.");
+        } else {
+            if (ImGui::Button(context.physicsPaused ? "Resume" : "Pause"))
+                context.physicsPauseToggleRequested = true;
+            ImGui::SameLine();
+            ImGui::BeginDisabled(!context.physicsPaused);
+            if (ImGui::Button("Step Physics")) context.physicsStepRequested = true;
+            ImGui::EndDisabled();
+            ImGui::Text("Fixed step: %.4f s", context.physicsFixedTimestep);
+            ImGui::Text("Accumulator: %.4f s", context.physicsAccumulator);
+            ImGui::Text("Steps this frame: %d", context.physicsStepsLastFrame);
+            ImGui::Text("State: %s", context.physicsPaused ? "Paused" : "Running");
+        }
+        if (context.showGameplayTraces) {
+            ImGui::Checkbox("Show Trace Guides", context.showGameplayTraces);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Draw Raycast, SphereCast and OverlapSphere queries from Play mode.");
+        }
+    }
+
+    const auto drawRecentEvents = [&]() {
+        if (!ImGui::CollapsingHeader("Recent Runtime Events", ImGuiTreeNodeFlags_DefaultOpen))
+            return;
+        ImGui::Text("Enter %d  Stay %d  Exit %d  Actions %d",
+            context.physicsEventEnterCount, context.physicsEventStayCount,
+            context.physicsEventExitCount, context.physicsActionCount);
+        if (!context.physicsEventRows || context.physicsEventRows->empty()) {
+            ImGui::TextDisabled("No runtime events recorded.");
+            return;
+        }
+        ImGui::BeginChild("##GameplayDebugEvents", ImVec2(0.0f, 150.0f), true);
+        const auto& rows = *context.physicsEventRows;
+        const std::size_t first = rows.size() > 32 ? rows.size() - 32 : 0;
+        for (std::size_t i = first; i < rows.size(); ++i) {
+            const auto& row = rows[i];
+            const ImVec4 color = row.phase == 0
+                ? ImVec4(0.40f, 0.90f, 0.55f, 1.0f)
+                : row.phase == 2
+                    ? ImVec4(1.0f, 0.55f, 0.35f, 1.0f)
+                    : ImVec4(0.75f, 0.80f, 0.90f, 1.0f);
+            ImGui::PushStyleColor(ImGuiCol_Text, color);
+            ImGui::TextWrapped("%s", row.text.c_str());
+            ImGui::PopStyleColor();
+        }
+        ImGui::EndChild();
+    };
+
     if (!debug.hasSelection) {
         ImGui::TextUnformatted("No object selected.");
+        drawRecentEvents();
         ImGui::End();
         return;
     }
@@ -2947,6 +3034,8 @@ void DrawGameplayDebug(EditorDockspace::Context& context, bool* open) {
             ImGui::TextUnformatted("Counts come from the most recent physics event rows.");
         }
     }
+
+    drawRecentEvents();
 
     ImGui::End();
 }
@@ -3353,8 +3442,11 @@ void DrawAnimationPreview(EditorDockspace::Context& context, bool* open) {
                     if (ImGui::InputText("Blend Parameter", blendParameter.data(), blendParameter.size())) {
                         node.blendParameter = blendParameter.data(); changed = true;
                     }
-                    changed |= ImGui::DragFloat("Blend Min", &node.blendMin, 0.01f);
-                    changed |= ImGui::DragFloat("Blend Max", &node.blendMax, 0.01f);
+                    changed |= ImGui::DragFloat("Blend Min", &node.blendMin, 0.01f,
+                        -1000000.0f, 1000000.0f);
+                    changed |= ImGui::DragFloat("Blend Max", &node.blendMax, 0.01f,
+                        -1000000.0f, 1000000.0f);
+                    node.blendMax = std::max(node.blendMax, node.blendMin + 0.0001f);
                 }
                 if (ImGui::Checkbox("Root Motion", &node.rootMotion)) changed = true;
                 if (ImGui::Button("Remove State")) {
@@ -4009,6 +4101,10 @@ void DrawHierarchy(EditorDockspace::Context& context, bool* open) {
             if (!selectionLocked && !isRowSelected(i)) context.scene->SelectIndex(i);
             if (ImGui::MenuItem("Duplicate", nullptr, false, !object.locked)) {
                 context.duplicateSelectedRequested = true;
+            }
+            if (ImGui::MenuItem("Merge to Single Mesh", nullptr, false,
+                    context.scene->SelectedIndices().size() >= 2)) {
+                context.mergeSelectedRequested = true;
             }
             if (ImGui::MenuItem(object.visible ? "Hide" : "Show")) {
                 context.scene->ToggleSelectVisible();
@@ -5387,6 +5483,7 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             changed |= ImGui::DragFloat("Look Sensitivity", &player.lookSensitivity, 0.005f, 0.001f, 10.0f);
             changed |= ImGui::DragFloat("Capsule Radius", &player.capsuleRadius, 0.01f, 0.01f, 100.0f);
             changed |= ImGui::DragFloat("Capsule Height", &player.capsuleHeight, 0.01f, 0.02f, 100.0f);
+            ImGui::TextDisabled("The controller capsule is authoritative in Play mode; the scene collider is an overlap proxy.");
             changed |= ImGui::DragFloat("Eye Height", &player.eyeHeight, 0.01f, 0.0f, 100.0f);
             changed |= ImGui::DragFloat("Camera Target Height", &player.cameraTargetHeight, 0.01f, 0.0f, 100.0f);
             if (isometric) {
@@ -6923,6 +7020,35 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
         } else {
             ImGui::TextDisabled("Assign a spline to turn this water patch into a flowing river ribbon.");
         }
+
+        // Custom water shader: a .glsl file holding the fragment body (helpers + main()).
+        ImGui::Separator();
+        const std::string& shaderPath = selected->waterShaderPath;
+        ImGui::TextUnformatted("Custom Shader:");
+        ImGui::SameLine();
+        ImGui::TextWrapped("%s", shaderPath.empty() ? "(built-in)" : shaderPath.c_str());
+        if (ImGui::Button("Set GLSL...")) {
+            const std::string picked = editor::OpenFileDialog(
+                "Choose a water fragment shader", "GLSL shader", "glsl");
+            if (!picked.empty()) context.scene->SetSelectedWaterShaderPath(picked);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Set Graph Shader...")) {
+            const std::string picked = editor::OpenFileDialog(
+                "Choose a Shader Editor graph", "Shader graph", "3dgshader");
+            if (!picked.empty()) context.scene->SetSelectedWaterShaderPath(picked);
+        }
+        if (!shaderPath.empty()) {
+            ImGui::SameLine();
+            if (ImGui::Button("Clear Shader")) {
+                context.scene->SetSelectedWaterShaderPath(std::string());
+            }
+        }
+        ImGui::TextDisabled("GLSL: a .glsl file with helper funcs + main() writing FragColor.\n"
+                            "Graph: a .3dgshader from the Shader Editor (any domain), adapted "
+                            "onto the water surface.\nThe engine prepends the water "
+                            "uniforms/varyings. Hot-reloads on save; falls back to built-in "
+                            "on error.");
     }
 
     if (selected->isSpline && ImGui::CollapsingHeader("Spline", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -9527,6 +9653,10 @@ bool EditorDockspace::Draw(Context& context) {
             if (ImGui::MenuItem("Duplicate", "Ctrl+D", false, context.scene && context.scene->SelectedObject())) {
                 context.duplicateSelectedRequested = true;
             }
+            if (ImGui::MenuItem("Merge to Single Mesh", nullptr, false,
+                    context.scene && context.scene->SelectedIndices().size() >= 2)) {
+                context.mergeSelectedRequested = true;
+            }
             if (ImGui::MenuItem("Delete", "Del", false, context.scene && context.scene->SelectedObject())) {
                 context.deleteSelectedRequested = true;
             }
@@ -9903,6 +10033,34 @@ bool EditorDockspace::Draw(Context& context) {
             break; // drawn by EditorApp (owns the clip preview renderer)
         case EditorPanels::Panel::GraphEditor:
             break; // drawn by EditorApp (owns the graph preview renderer)
+        case EditorPanels::Panel::MeshEditor:
+            break; // drawn by EditorApp (owns native mesh editing state)
+        case EditorPanels::Panel::ModularPlacement:
+            break; // drawn by EditorApp (owns viewport placement interaction)
+        case EditorPanels::Panel::PrefabPalette:
+            break; // drawn by EditorApp (owns prefab browsing and placement)
+        case EditorPanels::Panel::RoomBuilder:
+            break; // drawn by EditorApp (owns procedural room generation)
+        case EditorPanels::Panel::ScatterPaint:
+            break; // drawn by EditorApp (owns surface scatter painting)
+        case EditorPanels::Panel::ArrayTool:
+            break; // drawn by EditorApp (owns smart duplication previews)
+        case EditorPanels::Panel::Measurement:
+            break; // drawn by EditorApp (owns editor-only measurements)
+        case EditorPanels::Panel::LevelValidation:
+            break; // drawn by EditorApp (owns scene validation and cleanup)
+        case EditorPanels::Panel::LevelVariants:
+            break; // drawn by EditorApp (owns persistent scene variants)
+        case EditorPanels::Panel::LevelLayers:
+            break; // drawn by EditorApp (owns scene organization)
+        case EditorPanels::Panel::ViewportBookmarks:
+            break; // drawn by EditorApp (owns editor camera navigation)
+        case EditorPanels::Panel::Blockout:
+            break; // drawn by EditorApp (owns blockout generation)
+        case EditorPanels::Panel::Alignment:
+            break; // drawn by EditorApp (owns batch transform operations)
+        case EditorPanels::Panel::SplineBuilder:
+            break; // drawn by EditorApp (owns spline construction)
         case EditorPanels::Panel::Viewport:
             break; // drawn by EditorApp::DrawViewportPanel (owns the scene FBO)
         case EditorPanels::Panel::Prefab:

@@ -31,6 +31,10 @@ struct MaterialDocument {
     std::array<float, 2> uvScale{1.0f, 1.0f};
     std::array<float, 2> uvOffset{0.0f, 0.0f};
     float uvRotation = 0.0f;
+    // Project UVs from world position so texel density is constant regardless of
+    // object scale (uvScale becomes tiles-per-world-unit). Fixes stretched textures
+    // on scaled objects. See ecs::PbrMaterial::worldSpaceUv.
+    bool worldSpaceUv = false;
     float normalStrength = 1.0f;
     float heightScale = 0.0f;
     float clearcoat = 0.0f;

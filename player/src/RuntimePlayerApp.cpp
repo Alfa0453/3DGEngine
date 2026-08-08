@@ -18,6 +18,8 @@
 #include <engine/ai/Steering.h>
 #include <engine/ecs/Systems.h>          // RenderLoadedModels
 #include <engine/animation/AnimatedModel.h>
+#include <engine/assets/ShaderAsset.h>
+#include <engine/assets/ShaderGraphCompiler.h>
 
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
@@ -29,6 +31,8 @@
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <limits>
 #include <vector>
 
@@ -98,6 +102,22 @@ engine::WaterConfig RuntimeWaterConfig(
     config.causticsStrength = water.causticsStrength;
     config.causticsScale = water.causticsScale;
     config.maxRenderDistance = water.maxRenderDistance;
+    if (!water.shaderPath.empty()) {
+        if (std::filesystem::path(water.shaderPath).extension() == ".3dgshader") {
+            engine::ShaderAsset asset;
+            std::string error;
+            if (engine::LoadShaderAsset(water.shaderPath, &asset, &error)) {
+                config.customFragmentSource =
+                    engine::GenerateWaterFragmentBody(asset, &error);
+            }
+        } else {
+            std::ifstream file(water.shaderPath, std::ios::binary);
+            if (file) {
+                config.customFragmentSource.assign(
+                    std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+            }
+        }
+    }
     return config;
 }
 
@@ -262,9 +282,21 @@ void RuntimePlayerApp::OnInit() {
     LoadScene();
     ConfigurePhysics();
 
-    // Image-based lighting baked from the sky at the scene's time of day.
+    // Imported (marketplace) equirectangular sky, when the scene uses one.
+    if (m_scene.environment.skyMode == 1 && !m_scene.environment.skyTexturePath.empty()) {
+        try {
+            m_importedSky.emplace(engine::Skybox::FromEquirectangular(
+                m_scene.environment.skyTexturePath, 1024));
+        } catch (const std::exception&) {
+            m_importedSky.reset();
+        }
+    }
+
+    // Image-based lighting baked from the active sky at the scene's time of day.
     m_ibl.emplace(256);
-    m_ibl->Generate([&](const glm::mat4& v, const glm::mat4& p) { m_sky->Draw(v, p, m_sample, false); });
+    m_ibl->Generate([&](const glm::mat4& v, const glm::mat4& p) {
+        DrawEnvironmentSky(v, p, false);
+    });
 
     glfwGetCursorPos(GetWindow().Native(), &m_lastMouseX, &m_lastMouseY);
     if (HasPlayer() && !m_paused) SetPlayCursor(true);   // FPS-style mouse-look
@@ -1011,6 +1043,17 @@ void RuntimePlayerApp::CaptureWaterSceneBuffers() {
     glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(previousRead));
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(previousDraw));
     glViewport(0, 0, width, height);
+}
+
+void RuntimePlayerApp::DrawEnvironmentSky(const glm::mat4& view, const glm::mat4& projection,
+                                         bool tonemap) {
+    const RuntimeSceneLoader::Scene::Environment& env = m_scene.environment;
+    if (env.skyMode == 1 && m_importedSky) {
+        m_importedSky->Draw(view, projection, tonemap,
+                            glm::radians(env.skyRotation), std::max(env.skyIntensity, 0.0f));
+    } else if (m_sky) {
+        m_sky->Draw(view, projection, m_sample, tonemap, SkyClouds(env));
+    }
 }
 
 void RuntimePlayerApp::DrawWaters(const engine::Camera& camera, float aspect) {
@@ -2070,7 +2113,7 @@ void RuntimePlayerApp::OnUpdate(float dt) {
             CaptureScriptInput(inputEnabled, true);
         engine::UpdateScripts(
             m_registry, gameDt, &input, &m_runtimeAudio,
-            &m_cameraShake, &m_cameraDirector, &gameMode);
+            &m_cameraShake, &m_cameraDirector, &gameMode, &m_physics);
         if (std::string requestedScene = engine::ConsumeScriptSceneLoadRequest();
             !requestedScene.empty()) {
             (void)engine::ConsumeScriptLevelStreamRequests();
@@ -2196,8 +2239,10 @@ void RuntimePlayerApp::OnFixedUpdate(float h) {
         if (animated) {
             const float moveMagnitude = std::min(
                 glm::length(glm::vec2(in.moveForward, in.moveRight)), 1.0f);
+            const bool sprinting = in.sprint
+                && m_playerController->body.grounded && !in.jump;
             const float movementSpeed = movementLocked ? 0.0f : moveMagnitude *
-                (in.sprint ? m_playerController->runSpeed : m_playerController->walkSpeed);
+                (sprinting ? m_playerController->runSpeed : m_playerController->walkSpeed);
             const float previousSpeed = animated->controller.Parameter("Speed", 0.0f);
             const float invStep =
                 gameStep > 0.0001f ? 1.0f / gameStep : 0.0f;
@@ -2247,6 +2292,20 @@ void RuntimePlayerApp::OnFixedUpdate(float h) {
             }
             t->position = m_playerController->CapsulePosition();
             t->rotation = m_playerController->CapsuleRotation();
+            // The kinematic CharacterController is authoritative for player
+            // collision. Keep the trigger proxy (used by projectiles, overlaps,
+            // and scripts) exactly the same capsule every fixed step; authored
+            // scene collider dimensions must never drift from the controller.
+            if (engine::ecs::Collider* proxy =
+                    m_registry.TryGet<engine::ecs::Collider>(m_playerEntity)) {
+                proxy->shape = engine::ecs::ColliderShape::Capsule;
+                proxy->radius = std::max(m_playerController->body.radius, 0.01f);
+                proxy->halfHeight = std::max(
+                    m_playerController->body.height * 0.5f - proxy->radius, 0.0f);
+                proxy->isTrigger = true;
+                proxy->layer = engine::ecs::CollisionLayer::Player;
+                proxy->mask = engine::ecs::CollisionLayer::All;
+            }
         }
     }
 
@@ -2254,9 +2313,10 @@ void RuntimePlayerApp::OnFixedUpdate(float h) {
         CaptureScriptInput(inputEnabled, false);
     engine::FixedUpdateScripts(
         m_registry, gameStep, &input, &m_runtimeAudio,
-        &m_cameraShake, &m_cameraDirector, &engine::GameMode::Instance());
+        &m_cameraShake, &m_cameraDirector, &engine::GameMode::Instance(),
+        &m_physics);
     UpdateAI(gameStep);
-    engine::UpdateProjectiles(m_registry, gameStep);
+    engine::UpdateProjectilesInPlace(m_registry, gameStep);
     engine::ecs::UpdateGameplay(
         m_registry, gameStep);                         // rotators + movers
     engine::UpdateHealth(m_registry);
@@ -2411,8 +2471,7 @@ void RuntimePlayerApp::OnRender() {
         }
     }
 
-    m_sky->Draw(cam.ViewMatrix(), cam.ProjectionMatrix(aspect), m_sample, false,
-                SkyClouds(env));
+    DrawEnvironmentSky(cam.ViewMatrix(), cam.ProjectionMatrix(aspect), false);
     CaptureWaterSceneBuffers();
     DrawWaters(cam, aspect);
     if (m_particleRenderer) {

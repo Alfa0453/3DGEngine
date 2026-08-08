@@ -18,23 +18,36 @@ class GpuProfiler {
 public:
     ~GpuProfiler();
 
+    void SetEnabled(bool enabled) { m_enabled = enabled; }
+    bool Enabled() const { return m_enabled; }
+
     void BeginFrame();               // rotate buffers + publish the ready results
     void Begin(const char* name);    // start a timed scope
     void End();                      // end the current scope
 
     // Per-scope GPU milliseconds from the most recently completed frame.
     const std::vector<std::pair<std::string, double>>& Results() const { return m_results; }
+    int DrawCalls() const {
+        return m_enabled ? m_frames[m_current].drawCalls : 0;
+    }
+
+    // Render backends call this once for every glDraw* submission. The active
+    // profiler is optional, so player builds can use the same renderers without
+    // paying for counters when no profiler is installed.
+    static void RecordDrawCall();
 
 private:
     static constexpr int kFrames = 3;   // frames in flight before a query is read
 
     struct Scope { std::string name; unsigned int query = 0; };
-    struct Frame { std::vector<Scope> scopes; int used = 0; };
+    struct Frame { std::vector<Scope> scopes; int used = 0; int drawCalls = 0; };
 
     Frame m_frames[kFrames];
     int   m_current = 0;
     bool  m_inScope = false;
+    bool  m_enabled = true;
     std::vector<std::pair<std::string, double>> m_results;
+    static GpuProfiler* s_active;
 };
 
 } // namespace engine
