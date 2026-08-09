@@ -46,6 +46,10 @@ public:
     // Replace the window's title-bar text (used here as a simple scoreboard).
     void SetTitle(const std::string& title);
 
+    // Set the native window/taskbar icon from RGBA8 pixels. The pixels are
+    // copied by GLFW, so callers may release their buffer after this returns.
+    void SetIcon(int width, int height, const unsigned char* rgbaPixels);
+
     int Width() const { return m_data.width; }
     int Height() const { return m_data.height; }
 

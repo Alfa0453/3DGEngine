@@ -1,4 +1,5 @@
 #include "ClipEditorPanel.h"
+#include "EditorPanels.h"
 
 #include <engine/animation/Animator.h>
 #include <engine/assets/SkeletalAsset.h>
@@ -228,7 +229,7 @@ void ClipEditorPanel::Draw(const std::string& assetRoot, bool* open, bool* asset
         SyncBuffers();
     }
 
-    if (!ImGui::Begin("Clip Editor", open, ImGuiWindowFlags_MenuBar)) { ImGui::End(); return; }
+    if (!ImGui::Begin(EditorPanels::Name(EditorPanels::Panel::ClipEditor), open, ImGuiWindowFlags_MenuBar)) { ImGui::End(); return; }
     if (ImGui::BeginMenuBar()) {
         if (ImGui::MenuItem("New")) { m_asset = {}; m_path.clear(); SyncBuffers(); ResetPreview(); }
         if (ImGui::MenuItem("Save")) {

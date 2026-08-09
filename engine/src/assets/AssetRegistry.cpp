@@ -451,9 +451,11 @@ bool AssetRegistry::SynchronizeAuthoredAssets(
         if (native) {
             if (!ReadNativeAssetHeaderFile(
                     it->path().string(), &header, &metadataError)) {
-                SetError(error, "Could not read native asset metadata: "
-                    + it->path().string() + ": " + metadataError);
-                return false;
+                // A partial copy, legacy placeholder, or corrupt asset must not
+                // prevent every other Content operation. Leave it unregistered;
+                // validation/import UI can report the individual bad file while
+                // valid authored assets continue to synchronize.
+                continue;
             }
         } else {
             if (authoredType == AssetType::Unknown) continue;

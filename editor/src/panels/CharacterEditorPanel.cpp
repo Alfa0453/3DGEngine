@@ -3,6 +3,7 @@
 #include "AnimationClipAsset.h"
 #include "AnimationGraphAsset.h"
 #include "AnimationGraphBuilder.h"
+#include "EditorPanels.h"
 
 #include <engine/animation/AnimatedModel.h>
 #include <engine/animation/Animator.h>
@@ -705,7 +706,7 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
         m_path = (std::filesystem::path(assetRoot) / "Assets" / "Characters" / "Character.3dgcharacter").string();
         SyncBuffers();
     }
-    if (!ImGui::Begin("Character Editor", open, ImGuiWindowFlags_MenuBar)) { ImGui::End(); return; }
+    if (!ImGui::Begin(EditorPanels::Name(EditorPanels::Panel::CharacterEditor), open, ImGuiWindowFlags_MenuBar)) { ImGui::End(); return; }
     if (ImGui::BeginMenuBar()) {
         if (ImGui::MenuItem("New")) {
             m_asset = {};
@@ -2129,6 +2130,30 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
             if (!script.path.empty() && ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("%s", script.path.c_str());
             }
+            if (ImGui::TreeNode("Scheduling")) {
+                changed |= ImGui::DragInt(
+                    "Execution Order", &script.executionOrder, 1.0f, -10000, 10000);
+                const std::string dependencyPreview = script.dependencies.empty()
+                    ? "None" : std::to_string(script.dependencies.size()) + " selected";
+                if (ImGui::BeginCombo("Required Scripts", dependencyPreview.c_str())) {
+                    for (const AssetChoice& choice : m_scriptChoices) {
+                        if (choice.displayName == script.className) continue;
+                        const auto found = std::find(script.dependencies.begin(),
+                            script.dependencies.end(), choice.displayName);
+                        const bool required = found != script.dependencies.end();
+                        if (ImGui::Selectable(choice.displayName.c_str(), required,
+                                              ImGuiSelectableFlags_DontClosePopups)) {
+                            if (required) script.dependencies.erase(found);
+                            else script.dependencies.push_back(choice.displayName);
+                            changed = true;
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::TextDisabled(
+                    "Required scripts initialize and update before this script.");
+                ImGui::TreePop();
+            }
             ImGui::PopID();
             if (remove) {
                 m_asset.scripts.erase(m_asset.scripts.begin()
@@ -2167,11 +2192,14 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
                     const CharacterScript& primary = m_asset.scripts.front();
                     scene.SetSelectedScript(
                         primary.className, primary.path, primary.enabled);
+                    scene.SetSelectedScriptScheduling(
+                        primary.executionOrder, primary.dependencies);
                     std::vector<EditorScene::ScriptBinding> additional;
                     for (std::size_t i = 1; i < m_asset.scripts.size(); ++i) {
                         const CharacterScript& script = m_asset.scripts[i];
-                        additional.push_back(
-                            {script.enabled, script.className, script.path, {}});
+                        additional.push_back({script.enabled, script.className,
+                            script.path, {}, script.executionOrder,
+                            script.dependencies});
                     }
                     scene.SetSelectedAdditionalScripts(additional);
                 }

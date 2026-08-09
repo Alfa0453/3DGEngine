@@ -4,8 +4,11 @@
 
 #include <engine/core/Config.h>
 
-int main() {
+int main(int argc, char** argv) {
     engine::Config config("editor.cfg");
+    if (argc > 1 && argv[1] && *argv[1]) {
+        config.Set("editor.current_project", argv[1]);
+    }
     EditorApp app(config);
     app.Run();
     return 0;

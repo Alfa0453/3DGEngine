@@ -1,5 +1,6 @@
 #include "PrefabPalettePanel.h"
 
+#include "EditorPanels.h"
 #include "PrefabAsset.h"
 
 #include <engine/assets/StaticMeshAsset.h>
@@ -216,7 +217,7 @@ PrefabPalettePanel::Result PrefabPalettePanel::Draw(const std::string& assetRoot
                                                      bool* open) {
     Result result;
     if (m_assetRoot != assetRoot) Refresh(assetRoot);
-    if (!ImGui::Begin("Prefab Palette", open)) { ImGui::End(); return result; }
+    if (!ImGui::Begin(EditorPanels::Name(EditorPanels::Panel::PrefabPalette), open)) { ImGui::End(); return result; }
 
     if (ImGui::Button("Refresh")) Refresh(assetRoot);
     ImGui::SameLine();

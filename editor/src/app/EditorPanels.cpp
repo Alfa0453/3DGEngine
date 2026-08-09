@@ -1,4 +1,8 @@
 #include "EditorPanels.h"
+#include "EditorPanelIcons.h"
+
+#include <array>
+#include <string>
 
 bool EditorPanels::IsOpen(Panel panel) const
 {
@@ -30,8 +34,10 @@ void EditorPanels::ResetDefaults()
     m_open = kDefaultOpen;
 }
 
-const char *EditorPanels::Name(Panel panel)
+namespace {
+const char* PlainPanelName(EditorPanels::Panel panel)
 {
+    using Panel = EditorPanels::Panel;
     switch (panel) {
     case Panel::Hierarchy: return "Hierarchy";
     case Panel::Inspector: return "Inspector";
@@ -78,8 +84,9 @@ const char *EditorPanels::Name(Panel panel)
     return "Panel";
 }
 
-const char* EditorPanels::GroupName(Group group)
+const char* PlainGroupName(EditorPanels::Group group)
 {
+    using Group = EditorPanels::Group;
     switch (group) {
     case Group::Core: return "Core";
     case Group::WorldGameplay: return "World & Gameplay";
@@ -92,6 +99,29 @@ const char* EditorPanels::GroupName(Group group)
     case Group::Count: break;
     }
     return "Panels";
+}
+} // namespace
+
+const char* EditorPanels::Name(Panel panel)
+{
+    const char* plain = PlainPanelName(panel);
+    if (panel == Panel::Count || !editor::icons::Available()) return plain;
+    static std::array<std::string, static_cast<int>(Panel::Count)> labels;
+    std::string& label = labels[static_cast<int>(panel)];
+    if (label.empty())
+        label = editor::icons::WindowLabel(editor::icons::ForPanel(panel), plain);
+    return label.c_str();
+}
+
+const char* EditorPanels::GroupName(Group group)
+{
+    const char* plain = PlainGroupName(group);
+    if (group == Group::Count || !editor::icons::Available()) return plain;
+    static std::array<std::string, static_cast<int>(Group::Count)> labels;
+    std::string& label = labels[static_cast<int>(group)];
+    if (label.empty())
+        label = editor::icons::Label(editor::icons::ForGroup(group), plain);
+    return label.c_str();
 }
 
 EditorPanels::Group EditorPanels::GroupOf(Panel panel)

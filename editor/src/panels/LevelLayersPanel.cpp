@@ -1,5 +1,6 @@
 #include "LevelLayersPanel.h"
 
+#include "EditorPanels.h"
 #include "EditorScene.h"
 
 #include <imgui.h>
@@ -40,7 +41,7 @@ bool ContainsInsensitive(const std::string& text, const char* filter) {
 } // namespace
 
 void LevelLayersPanel::Draw(EditorScene& scene, bool* open) {
-    if (!ImGui::Begin("Level Layers & Visibility", open)) {
+    if (!ImGui::Begin(EditorPanels::Name(EditorPanels::Panel::LevelLayers), open)) {
         ImGui::End();
         return;
     }

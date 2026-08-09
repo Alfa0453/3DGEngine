@@ -31,6 +31,8 @@ struct CharacterScript {
     bool enabled = true;
     std::string className;
     std::string path;
+    int executionOrder = 0;
+    std::vector<std::string> dependencies;
 };
 
 // A static model (weapon, shield, hat...) mounted to a named socket.
@@ -43,7 +45,7 @@ struct CharacterAttachment {
 };
 
 struct CharacterAsset {
-    int version = 21;
+    int version = 25;
     engine::AssetHandle assetId;
     std::string name = "Character";
     std::string modelAssetPath;

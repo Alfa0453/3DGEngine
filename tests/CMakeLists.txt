@@ -102,6 +102,22 @@ else()
 endif()
 add_test(NAME script_system_regression COMMAND script_system_tests)
 
+add_executable(project_script_tools_tests
+    project_script_tools_tests.cpp
+    ${CMAKE_SOURCE_DIR}/editor/src/scripting/EditorGeneratedScriptTools.cpp)
+target_include_directories(project_script_tools_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/editor/include)
+target_compile_definitions(project_script_tools_tests PRIVATE
+    THREEDG_TEST_GAME_ROOT="${CMAKE_SOURCE_DIR}/game"
+    THREEDG_GAME_MODULE_DIR="${CMAKE_SOURCE_DIR}/game")
+target_link_libraries(project_script_tools_tests PRIVATE engine)
+if(MSVC)
+    target_compile_options(project_script_tools_tests PRIVATE /W4)
+else()
+    target_compile_options(project_script_tools_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME project_script_tools_regression COMMAND project_script_tools_tests)
+
 add_executable(runtime_ai_tests
     runtime_ai_tests.cpp)
 target_link_libraries(runtime_ai_tests PRIVATE engine)

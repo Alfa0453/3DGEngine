@@ -2,6 +2,7 @@
 
 #include "AnimationClipAsset.h"
 #include "AnimationGraphBuilder.h"
+#include "EditorPanels.h"
 
 #include <engine/animation/Animator.h>
 #include <engine/assets/SkeletalAsset.h>
@@ -397,7 +398,7 @@ void AnimationGraphEditorPanel::Draw(const std::string& assetRoot, bool* open, b
         SyncBuffers();
     }
 
-    if (!ImGui::Begin("Graph Editor", open, ImGuiWindowFlags_MenuBar)) { ImGui::End(); return; }
+    if (!ImGui::Begin(EditorPanels::Name(EditorPanels::Panel::GraphEditor), open, ImGuiWindowFlags_MenuBar)) { ImGui::End(); return; }
     if (ImGui::BeginMenuBar()) {
         if (ImGui::MenuItem("New")) { m_asset = {}; m_path.clear(); SyncBuffers(); ResetPreview(); }
         if (ImGui::MenuItem("Save")) {
@@ -497,10 +498,10 @@ void AnimationGraphEditorPanel::Draw(const std::string& assetRoot, bool* open, b
                           "Validation: %d error(s), %d warning(s)###graphValidation",
                           errors, warnings);
             ImGui::PushStyleColor(ImGuiCol_Text, headColor);
-            const bool open = ImGui::CollapsingHeader(
+            const bool validationOpen = ImGui::CollapsingHeader(
                 header, errors ? ImGuiTreeNodeFlags_DefaultOpen : 0);
             ImGui::PopStyleColor();
-            if (open) {
+            if (validationOpen) {
                 for (const GraphIssue& issue : issues) {
                     const ImVec4 color = issue.severity == 0 ? ImVec4(1.0f, 0.5f, 0.45f, 1.0f)
                                        : issue.severity == 1 ? ImVec4(1.0f, 0.82f, 0.4f, 1.0f)

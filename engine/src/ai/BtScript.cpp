@@ -35,6 +35,17 @@ std::vector<std::string> BtScriptRegistry::Names() const {
     return names;
 }
 
+void BtScriptRegistry::Remove(const std::string& name) {
+    m_factories.erase(name);
+}
+
+void BtScriptRegistry::MergeFrom(BtScriptRegistry&& other) {
+    for (auto& entry : other.m_factories) {
+        m_factories[entry.first] = std::move(entry.second);
+    }
+    other.m_factories.clear();
+}
+
 // ------------------------------ example scripts -----------------------------
 namespace {
 

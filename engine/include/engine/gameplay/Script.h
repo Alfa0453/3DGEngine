@@ -6,6 +6,8 @@
 #include "engine/physics/PhysicsWorld.h"
 
 #include <functional>
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -26,10 +28,45 @@ class ScriptCameraApi;
 class ScriptParticlesApi;
 class ScriptAudioApi;
 class ScriptAnimApi;
+class LuaScript;
 
 struct ScriptAnimationEvent {
     ecs::Entity entity = ecs::kNull;
     std::string name;
+};
+
+// A typed, forwards-compatible payload for queued gameplay messages.
+struct ScriptEvent {
+    std::string name;
+    ecs::Entity sender = ecs::kNull;
+    ecs::Entity target = ecs::kNull; // kNull broadcasts to every listening script
+    std::unordered_map<std::string, bool> bools;
+    std::unordered_map<std::string, int> ints;
+    std::unordered_map<std::string, float> floats;
+    std::unordered_map<std::string, std::string> strings;
+    std::unordered_map<std::string, glm::vec3> vectors;
+    std::unordered_map<std::string, ecs::Entity> entities;
+
+    bool GetBool(const std::string& key, bool fallback = false) const;
+    int GetInt(const std::string& key, int fallback = 0) const;
+    float GetFloat(const std::string& key, float fallback = 0.0f) const;
+    std::string GetString(const std::string& key,
+                          const std::string& fallback = {}) const;
+    glm::vec3 GetVector(const std::string& key,
+                        const glm::vec3& fallback = glm::vec3(0.0f)) const;
+    ecs::Entity GetEntity(const std::string& key,
+                          ecs::Entity fallback = ecs::kNull) const;
+};
+
+// Stable script reference: no DLL object pointer is retained. Every operation
+// resolves entity + class against the current registry, so hot reload and scene
+// streaming cannot leave a dangling Script pointer in gameplay code.
+struct ScriptHandle {
+    ecs::Entity entity = ecs::kNull;
+    std::string className;
+    explicit operator bool() const {
+        return entity != ecs::kNull && !className.empty();
+    }
 };
 
 struct ScriptContext {
@@ -87,12 +124,15 @@ struct ScriptField {
 //   Sequence().WaitUntil([&]{ return PlayerNear(); }).Do([&]{ Trigger(); });
 class ScriptSequence {
 public:
+    explicit ScriptSequence(int handle = 0) : m_handle(handle) {}
+
+    int Handle() const { return m_handle; }
     ScriptSequence& Do(std::function<void()> action) {
         m_steps.push_back(Step{Step::Kind::Action, std::move(action), 0.0f, {}});
         return *this;
     }
     ScriptSequence& Wait(float seconds) {
-        m_steps.push_back(Step{Step::Kind::WaitTime, {}, seconds, {}});
+        m_steps.push_back(Step{Step::Kind::WaitTime, {}, std::max(seconds, 0.0f), {}});
         return *this;
     }
     ScriptSequence& WaitUntil(std::function<bool()> condition) {
@@ -102,16 +142,23 @@ public:
     // Advance by dt; driven by the owning Script every update. Actions run and advance
     // immediately; waits hold until their time elapses or their condition is true.
     void Tick(float dt) {
+        if (m_paused || m_cancelled) return;
+        float remainingDt = std::max(dt, 0.0f);
         while (m_current < m_steps.size()) {
             Step& step = m_steps[m_current];
             if (step.kind == Step::Kind::Action) {
                 if (step.action) step.action();
                 ++m_current;
+                if (m_paused || m_cancelled) return;
                 continue;
             }
             if (step.kind == Step::Kind::WaitTime) {
-                m_timer += dt;
-                if (m_timer < step.seconds) return;
+                const float timeLeft = std::max(step.seconds - m_timer, 0.0f);
+                if (remainingDt < timeLeft) {
+                    m_timer += remainingDt;
+                    return;
+                }
+                remainingDt -= timeLeft;
                 m_timer = 0.0f;
                 ++m_current;
                 continue;
@@ -120,7 +167,13 @@ public:
             ++m_current;
         }
     }
-    bool Done() const { return m_current >= m_steps.size(); }
+    void Pause() { if (!Done()) m_paused = true; }
+    void Resume() { if (!m_cancelled) m_paused = false; }
+    void Cancel() { m_cancelled = true; m_paused = false; }
+    bool Paused() const { return m_paused && !m_cancelled; }
+    bool Cancelled() const { return m_cancelled; }
+    bool Done() const { return m_cancelled || m_current >= m_steps.size(); }
+    bool Running() const { return !Done() && !m_paused; }
 
 private:
     struct Step {
@@ -131,17 +184,92 @@ private:
         std::function<bool()> condition;
     };
     std::vector<Step> m_steps;
+    int m_handle = 0;
     std::size_t m_current = 0;
     float m_timer = 0.0f;
+    bool m_paused = false;
+    bool m_cancelled = false;
+};
+
+class ScriptTestContext {
+public:
+    void Expect(bool condition, std::string message) {
+        ++m_assertions;
+        if (!condition) m_failures.push_back(std::move(message));
+    }
+    void ExpectNear(float actual, float expected, float tolerance,
+                    std::string message) {
+        Expect(std::abs(actual - expected) <= std::max(tolerance, 0.0f),
+               std::move(message));
+    }
+    int AssertionCount() const { return m_assertions; }
+    bool Passed() const { return m_failures.empty(); }
+    const std::vector<std::string>& Failures() const { return m_failures; }
+private:
+    int m_assertions = 0;
+    std::vector<std::string> m_failures;
+};
+
+class ScriptTestSuite {
+public:
+    using TestFunction = std::function<void(ScriptTestContext&)>;
+    struct TestCase {
+        std::string name;
+        TestFunction function;
+    };
+    void Add(std::string name, TestFunction function) {
+        if (!name.empty() && function)
+            m_tests.push_back({std::move(name), std::move(function)});
+    }
+    const std::vector<TestCase>& Tests() const { return m_tests; }
+private:
+    std::vector<TestCase> m_tests;
+};
+
+struct ScriptTestResult {
+    std::string suite;
+    std::string name;
+    bool passed = false;
+    int assertions = 0;
+    double milliseconds = 0.0;
+    std::vector<std::string> failures;
 };
 
 class Script {
 public:
+    using StateMap = std::unordered_map<std::string, std::string>;
+    using ReloadState = StateMap;
+    using CallableFunction =
+        std::function<bool(const ScriptEvent& arguments, ScriptEvent& result)>;
+
     virtual ~Script() = default;
     virtual void OnCreate() {}                          // once, when the script starts
+    virtual void OnEnable() {}                          // after create and each reactivation
+    virtual void OnDisable() {}                         // before deactivation or destruction
     virtual void OnUpdate(float dt) { (void)dt; }       // once per rendered frame (variable dt)
     virtual void OnFixedUpdate(float dt) { (void)dt; }  // per physics step (fixed dt)
+    virtual void OnEvent(const ScriptEvent& event) { (void)event; }
+    virtual bool OnScriptCall(const std::string& functionName,
+                              const ScriptEvent& arguments,
+                              ScriptEvent& result) {
+        (void)functionName; (void)arguments; (void)result; return false;
+    }
     virtual void OnDestroy() {}                          // once, before the entity/script is destroyed
+    // Versioned save-slot state. Named entities automatically capture this map
+    // into full game saves and restore it after OnCreate. Increment the version
+    // when the schema changes; OnLoadState receives the version stored in the save.
+    // Return 0 (the default) to opt out of per-script persistence.
+    virtual int PersistentStateVersion() const { return 0; }
+    virtual void OnSaveState(StateMap& state) const { (void)state; }
+    virtual void OnLoadState(int savedVersion, const StateMap& state) {
+        (void)savedVersion; (void)state;
+    }
+    virtual void DefineTests(ScriptTestSuite& suite) { (void)suite; }
+    // Optional hot-reload bridge for transient values that are not exposed ScriptFields.
+    // Store compact, version-tolerant strings here; the replacement instance receives them
+    // after OnCreate. Authored/exposed fields are preserved by the engine automatically.
+    virtual void OnBeforeHotReload(ReloadState& state) const { (void)state; }
+    virtual void OnAfterHotReload(const ReloadState& state) { (void)state; }
     // Runtime-system hook. Games normally use SetTimer/Delay below instead.
     void TickTimers(float dt);
 
@@ -152,6 +280,9 @@ public:
     friend class ScriptParticlesApi;
     friend class ScriptAudioApi;
     friend class ScriptAnimApi;
+    friend class ScriptEventDispatcher;
+    friend class ScriptCallDispatcher;
+    friend class LuaScript;
 
 protected:
     ScriptContext& Context() { return m_context; }
@@ -251,6 +382,12 @@ protected:
     bool IsHitStopActive() const;
     // Start a multi-step sequence (Do / Wait / WaitUntil), ticked automatically each update.
     ScriptSequence& Sequence();
+    bool CancelSequence(int handle);
+    bool PauseSequence(int handle);
+    bool ResumeSequence(int handle);
+    bool IsSequenceActive(int handle) const;
+    bool IsSequencePaused(int handle) const;
+    void CancelAllSequences();
     bool IsKeyDown(int key) const;
     bool WasKeyPressed(int key) const;
     bool IsMouseButtonDown(int button) const;
@@ -262,6 +399,29 @@ protected:
     bool WasTriggerExited(ecs::Entity entity) const;
     bool WasAnimationEvent(const std::string& name) const;
     bool WasAnimationEvent(ecs::Entity entity, const std::string& name) const;
+    // Events are always queued. A broadcast has target == kNull; a targeted event
+    // is delivered only to scripts attached to that entity.
+    void PublishEvent(ScriptEvent event);
+    void PublishEvent(const std::string& name, ecs::Entity target = ecs::kNull);
+    bool ListenForEvent(const std::string& name);
+    bool StopListeningForEvent(const std::string& name);
+    int SubscribeEvent(const std::string& name,
+                       std::function<void(const ScriptEvent&)> callback);
+    bool UnsubscribeEvent(int subscriptionId);
+    void UnsubscribeAllEvents();
+    ScriptHandle FindScript(ecs::Entity entity,
+                            const std::string& className = {}) const;
+    ScriptHandle FindScript(const std::string& objectName,
+                            const std::string& className = {}) const;
+    bool IsScriptValid(const ScriptHandle& handle) const;
+    bool IsScriptEnabled(const ScriptHandle& handle) const;
+    bool SetScriptEnabled(const ScriptHandle& handle, bool enabled);
+    bool SetSelfEnabled(bool enabled);
+    bool BindScriptFunction(const std::string& functionName,
+                            CallableFunction function);
+    bool UnbindScriptFunction(const std::string& functionName);
+    bool CallScript(const ScriptHandle& handle, const std::string& functionName,
+                    ScriptEvent arguments = {}, ScriptEvent* result = nullptr);
     bool PlayAnimationAction(int clipIndex,
                              float fadeIn = 0.1f,
                              float fadeOut = 0.2f,
@@ -438,12 +598,28 @@ private:
         std::string functionName;
         std::function<void()> callback;
     };
+    struct EventSubscription {
+        int id = 0;
+        std::string name;
+        std::function<void(const ScriptEvent&)> callback;
+    };
+    bool WantsEvent(const std::string& name) const;
+    void DispatchEvent(const ScriptEvent& event);
+    bool InvokeScriptFunction(const std::string& functionName,
+                              const ScriptEvent& arguments, ScriptEvent& result);
+    ScriptSequence* FindSequence(int handle);
+    const ScriptSequence* FindSequence(int handle) const;
     ScriptContext m_context;
     std::vector<Timer> m_timers;
     std::vector<std::function<void()>> m_timerCallbacks;
     std::unordered_map<std::string, std::function<void()>> m_timerFunctions;
     int m_nextTimerId = 1;
+    int m_nextSequenceId = 1;
     std::vector<std::unique_ptr<ScriptSequence>> m_sequences;
+    std::unordered_set<std::string> m_listenedEvents;
+    std::vector<EventSubscription> m_eventSubscriptions;
+    int m_nextEventSubscriptionId = 1;
+    std::unordered_map<std::string, CallableFunction> m_scriptFunctions;
 };
 
 // ---- Grouped script API proxies -------------------------------------------------
@@ -626,11 +802,21 @@ inline ScriptAnimApi Script::Anim() { return ScriptAnimApi(this); }
 struct NativeScriptSlot {
     bool enabled = true;
     bool created = false;
+    bool active = false;
     bool missingFactory = false;
+    int executionOrder = 0; // lower values initialize/update first
+    std::vector<std::string> dependencies; // required script class names
+    std::string dependencyError; // runtime diagnostic; not authored
+    std::string reportedDependencyError;
     std::string className;
     std::string sourcePath;
     std::vector<ScriptField> fields;
     std::unique_ptr<Script> instance;
+    Script::ReloadState reloadState;
+    bool restoreReloadState = false;
+    Script::StateMap persistentState;
+    int persistentStateVersion = 1;
+    bool restorePersistentState = false;
 };
 
 struct NativeScriptComponent : NativeScriptSlot {
@@ -646,11 +832,64 @@ public:
     void Register(const std::string& className, Factory factory);
     bool Has(const std::string& className) const;
     std::unique_ptr<Script> Create(const std::string& className) const;
+    std::vector<std::string> Names() const;
+    void Remove(const std::string& className);
+    void MergeFrom(ScriptRegistry&& other);
     void Clear() { m_factories.clear(); }   // hot-reload: drop factories before unloading their DLL
 
 private:
     std::unordered_map<std::string, Factory> m_factories;
 };
+
+enum class ScriptCallbackKind {
+    OnCreate = 0,
+    OnEnable,
+    OnDisable,
+    OnUpdate,
+    OnFixedUpdate,
+    OnEvent,
+    OnScriptCall
+};
+
+struct ScriptExecutionStat {
+    ecs::Entity entity = ecs::kNull;
+    std::string className;
+    ScriptCallbackKind callback = ScriptCallbackKind::OnUpdate;
+    double lastMilliseconds = 0.0;
+    double averageMilliseconds = 0.0;
+    double maximumMilliseconds = 0.0;
+    std::uint64_t callCount = 0;
+};
+
+struct ScriptDebugState {
+    bool enabled = false;
+    bool paused = false;
+    std::string stopReason;
+    std::vector<ScriptExecutionStat> statistics;
+};
+
+// Runtime callback debugger. Breakpoints stop after the matching callback completes,
+// leaving the registry in a valid state. A step executes exactly one pending lifecycle
+// callback while paused. This complements source-level breakpoints in VS/Rider/VS Code.
+void SetScriptDebuggingEnabled(bool enabled);
+void SetScriptExecutionPaused(bool paused);
+void RequestScriptExecutionStep();
+void SetScriptCallbackBreakpoint(const std::string& className,
+                                 ScriptCallbackKind callback, bool enabled);
+bool HasScriptCallbackBreakpoint(const std::string& className,
+                                 ScriptCallbackKind callback);
+void ClearScriptCallbackBreakpoints();
+void ClearScriptExecutionStatistics();
+ScriptDebugState GetScriptDebugState();
+const char* ScriptCallbackKindName(ScriptCallbackKind callback);
+
+// Runtime-system bridges. They enqueue only; game code runs later at the safe
+// dispatch point inside UpdateScripts.
+void QueueScriptEvent(ecs::Registry& registry, ScriptEvent event);
+void QueueScriptAnimationEvent(ecs::Registry& registry, ecs::Entity entity,
+                               const std::string& eventName);
+void QueueScriptCollisionEvents(ecs::Registry& registry,
+                                const std::vector<CollisionEvent>& events);
 
 // Per-frame update: creates instances, calls OnCreate once, then OnUpdate(dt).
 void UpdateScripts(ecs::Registry& registry, float dt, const ScriptInputState* input = nullptr,
@@ -671,6 +910,11 @@ void ShutdownScripts(ecs::Registry& registry);
 // Level streaming variant: invokes OnDestroy and releases scripts only for the
 // entities being unloaded, leaving scripts in other resident levels untouched.
 void ShutdownScripts(ecs::Registry& registry, const std::vector<ecs::Entity>& entities);
+
+// Captures optional transient reload state, invokes OnDestroy, and releases every live
+// native instance while preserving its authored fields. New instances consume the saved
+// state after OnCreate on their next UpdateScripts call.
+void PrepareScriptsForHotReload(ecs::Registry& registry);
 
 // Optional sink for script errors (a script that threw and was disabled). The editor
 // wires this to its console so failures are visible instead of only hitting stderr.
@@ -694,5 +938,26 @@ struct ScriptSaveGameRequest {
     std::string displayName;         // save only: shown in the load menu
 };
 std::vector<ScriptSaveGameRequest> ConsumeScriptSaveGameRequests();
+
+// Discovers native registered suites plus Lua ScriptTests tables and executes
+// every case in a fresh temporary registry/entity.
+std::vector<ScriptTestResult> RunScriptTests(
+    const std::vector<std::string>& luaSourcePaths = {});
+
+// SaveGame and level-streaming hosts use these to preserve versioned state for
+// scripts attached to named entities. Values are encoded into the existing save
+// key/value map, keeping the on-disk format backward compatible.
+void CaptureScriptPersistentStates(
+    ecs::Registry& registry,
+    std::unordered_map<std::string, std::string>& values);
+void CaptureScriptPersistentStates(
+    ecs::Registry& registry, const std::vector<ecs::Entity>& entities,
+    std::unordered_map<std::string, std::string>& values);
+void RestoreScriptPersistentStates(
+    ecs::Registry& registry,
+    const std::unordered_map<std::string, std::string>& values);
+void RestoreScriptPersistentStates(
+    ecs::Registry& registry, const std::vector<ecs::Entity>& entities,
+    const std::unordered_map<std::string, std::string>& values);
 
 } // namespace engine

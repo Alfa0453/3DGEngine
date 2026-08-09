@@ -93,10 +93,12 @@ void CharacterAsset::Capture(const EditorScene::Object& o) {
     scriptEnabled = o.scriptEnabled; scriptClassName = o.scriptClassName; scriptPath = o.scriptPath;
     scripts.clear();
     if (!o.scriptClassName.empty()) {
-        scripts.push_back({o.scriptEnabled, o.scriptClassName, o.scriptPath});
+        scripts.push_back({o.scriptEnabled, o.scriptClassName, o.scriptPath,
+                           o.scriptExecutionOrder, o.scriptDependencies});
     }
     for (const EditorScene::ScriptBinding& script : o.additionalScripts) {
-        scripts.push_back({script.enabled, script.className, script.path});
+        scripts.push_back({script.enabled, script.className, script.path,
+                           script.executionOrder, script.dependencies});
     }
 }
 
@@ -276,12 +278,14 @@ bool CharacterAsset::Apply(EditorScene& scene) const {
     const CharacterScript legacy{scriptEnabled, scriptClassName, scriptPath};
     const CharacterScript* primary = !scripts.empty() ? &scripts.front() : &legacy;
     scene.SetSelectedScript(primary->className, primary->path, primary->enabled);
+    scene.SetSelectedScriptScheduling(primary->executionOrder, primary->dependencies);
     std::vector<EditorScene::ScriptBinding> additional;
     if (scripts.size() > 1) {
         additional.reserve(scripts.size() - 1);
         for (std::size_t i = 1; i < scripts.size(); ++i) {
-            additional.push_back(
-                {scripts[i].enabled, scripts[i].className, scripts[i].path, {}});
+            additional.push_back({scripts[i].enabled, scripts[i].className,
+                scripts[i].path, {}, scripts[i].executionOrder,
+                scripts[i].dependencies});
         }
     }
     scene.SetSelectedAdditionalScripts(additional);
@@ -290,7 +294,7 @@ bool CharacterAsset::Apply(EditorScene& scene) const {
 
 bool CharacterAsset::Save(const std::string& path, std::string* error) {
     if (!assetId.Valid()) assetId = engine::AssetHandle::Generate();
-    version = 20;
+    version = 25;
     const std::string contentRoot = engine::FindContentRootForAsset(path);
     engine::AssetRegistry registry;
     bool haveRegistry = false;
@@ -346,7 +350,7 @@ bool CharacterAsset::Save(const std::string& path, std::string* error) {
     if (!out) { if (error) *error = "Could not write character asset: " + path; return false; }
     const CharacterScript legacy{scriptEnabled, scriptClassName, scriptPath};
     const CharacterScript* primary = !scripts.empty() ? &scripts.front() : &legacy;
-    out << "3DG_CHARACTER 24 " << assetId.ToString() << '\n'
+    out << "3DG_CHARACTER 25 " << assetId.ToString() << '\n'
         << std::quoted(name) << '\n' << std::quoted(modelAssetPath) << '\n' << std::quoted(materialAssetPath) << '\n'
         << colliderEnabled << ' ' << static_cast<int>(collider.shape) << ' '
         << collider.halfExtents.x << ' ' << collider.halfExtents.y << ' ' << collider.halfExtents.z << ' '
@@ -373,7 +377,10 @@ bool CharacterAsset::Save(const std::string& path, std::string* error) {
         << "SCRIPTS " << scripts.size();
     for (const CharacterScript& script : scripts) {
         out << ' ' << script.enabled << ' ' << std::quoted(script.className)
-            << ' ' << std::quoted(script.path);
+            << ' ' << std::quoted(script.path)
+            << ' ' << script.executionOrder << ' ' << script.dependencies.size();
+        for (const std::string& dependency : script.dependencies)
+            out << ' ' << std::quoted(dependency);
     }
     out << '\n'
         << "GRAPH " << animationStates.size() << ' ' << animationParameters.size() << ' '
@@ -571,7 +578,7 @@ bool CharacterAsset::Load(const std::string& path, std::string* error) {
     if (!in) { if (error) *error = "Character asset is incomplete: " + path; return false; }
     collider.shape = static_cast<engine::ecs::ColliderShape>(shape);
     navMovementMode = static_cast<engine::ai::AiMovementMode>(movementMode);
-    version = 21; // Upgrade legacy assets when they are next saved.
+    version = 25; // Upgrade legacy assets when they are next saved.
     modelAssetId = {};
     materialAssetId = {};
     animationGraphAssetId = {};
@@ -589,6 +596,17 @@ bool CharacterAsset::Load(const std::string& path, std::string* error) {
         for (std::size_t i = 0; i < scriptCount; ++i) {
             CharacterScript script;
             in >> script.enabled >> std::quoted(script.className) >> std::quoted(script.path);
+            if (loadedVersion >= 25) {
+                std::size_t dependencyCount = 0;
+                in >> script.executionOrder >> dependencyCount;
+                for (std::size_t dependencyIndex = 0;
+                     dependencyIndex < dependencyCount; ++dependencyIndex) {
+                    std::string dependency;
+                    in >> std::quoted(dependency);
+                    if (!dependency.empty())
+                        script.dependencies.push_back(std::move(dependency));
+                }
+            }
             scripts.push_back(std::move(script));
         }
         if (scripts.empty() && !scriptClassName.empty()) {

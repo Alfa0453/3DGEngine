@@ -1,6 +1,8 @@
 #include "EditorDockspace.h"
 #include "EditorScriptTools.h"
 #include "EditorGeneratedScriptTools.h"
+#include "EditorAssetIcons.h"
+#include "EditorIcons.h"
 #include "NativeDialog.h"
 #include "ParticlePresets.h"
 #include "ParticleAsset.h"
@@ -51,6 +53,8 @@ int g_preferredCodeEditor = static_cast<int>(PreferredCodeEditor::BuiltIn);
 std::array<char, 512> g_customCodeEditorPath{};
 std::string g_scriptBuildLog;
 bool g_scriptBuildLogOpen = false;
+int g_scriptEditorTargetLine = 0;
+int g_scriptEditorTargetColumn = 0;
 ImGuiTextFilter g_hierarchyFilter;
 // When on, clicking rows in the Hierarchy does not change the scene selection. This
 // keeps a viewport selection safe from a stray hierarchy click (and the delete that
@@ -1180,6 +1184,28 @@ bool LoadScriptSource(const std::string& path, std::string* error) {
     g_scriptSourceLoaded = true;
     g_scriptSourceDirty = false;
     return true;
+}
+
+int ScriptSourceNavigationCallback(ImGuiInputTextCallbackData* data) {
+    if (!data || g_scriptEditorTargetLine <= 0) return 0;
+    int offset = 0;
+    int line = 1;
+    while (offset < data->BufTextLen && line < g_scriptEditorTargetLine) {
+        if (data->Buf[offset++] == '\n') ++line;
+    }
+    const int lineStart = offset;
+    while (offset < data->BufTextLen && data->Buf[offset] != '\n'
+           && data->Buf[offset] != '\r') {
+        ++offset;
+    }
+    const int columnOffset = std::clamp(g_scriptEditorTargetColumn - 1, 0,
+                                        offset - lineStart);
+    data->CursorPos = lineStart + columnOffset;
+    data->SelectionStart = data->CursorPos;
+    data->SelectionEnd = data->CursorPos;
+    g_scriptEditorTargetLine = 0;
+    g_scriptEditorTargetColumn = 0;
+    return 0;
 }
 
 bool OpenScriptInPreferredEditor(EditorDockspace::Context& context,
@@ -3060,15 +3086,18 @@ void DrawAnimationPreview(EditorDockspace::Context& context, bool* open) {
 
     if (state.assetMode) {
         if (context.animationPreviewAssetPath
-            && ImGui::Button("Use Scene Selection")) {
+            && editor::icons::LabeledButton(editor::icons::Contact,
+                "Use Scene Selection")) {
             context.animationPreviewAssetPath->clear();
         }
         ImGui::SameLine();
-        if (ImGui::Button("Refresh Compatible Rigs"))
+        if (editor::icons::LabeledButton(editor::icons::Refresh,
+                "Refresh Compatible Rigs"))
             context.animationAssetRefreshRequested = true;
         if (state.assetIsAnimation) {
             ImGui::SameLine();
-            if (ImGui::Button("Open in Clip Editor"))
+            if (editor::icons::LabeledButton(editor::icons::Open,
+                    "Open in Clip Editor"))
                 context.animationAssetOpenInClipEditorRequested = true;
         }
 
@@ -3141,10 +3170,12 @@ void DrawAnimationPreview(EditorDockspace::Context& context, bool* open) {
         }
 
         if (context.animationAssetPlaying) {
-            if (ImGui::Button(*context.animationAssetPlaying ? "Pause" : "Play"))
+            if (editor::icons::LabeledButton(*context.animationAssetPlaying
+                    ? editor::icons::Stop : editor::icons::Play,
+                    *context.animationAssetPlaying ? "Pause" : "Play"))
                 *context.animationAssetPlaying = !*context.animationAssetPlaying;
             ImGui::SameLine();
-            if (ImGui::Button("Restart"))
+            if (editor::icons::LabeledButton(editor::icons::Refresh, "Restart"))
                 context.animationAssetRestartRequested = true;
         }
         if (context.animationAssetLoop)
@@ -3214,7 +3245,9 @@ void DrawAnimationPreview(EditorDockspace::Context& context, bool* open) {
 
     if (!state.playMode && context.scene) {
         if (ImGui::CollapsingHeader("Preview Controls", ImGuiTreeNodeFlags_DefaultOpen)) {
-            if (ImGui::Button(state.autoplay ? "Pause" : "Play")) {
+            if (editor::icons::LabeledButton(state.autoplay
+                    ? editor::icons::Stop : editor::icons::Play,
+                    state.autoplay ? "Pause" : "Play")) {
                 context.scene->SetSelectedAnimationSettings(true,
                     state.defaultClipIndex,
                     state.defaultClipName,
@@ -3223,7 +3256,8 @@ void DrawAnimationPreview(EditorDockspace::Context& context, bool* open) {
                     state.playbackSpeed);
             }
             ImGui::SameLine();
-            if (ImGui::Button("Reset") && context.animationPreviewTime) {
+            if (editor::icons::LabeledButton(editor::icons::Refresh, "Reset")
+                && context.animationPreviewTime) {
                 *context.animationPreviewTime = 0.0f;
             }
 
@@ -5736,6 +5770,41 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
         ImGui::Combo("Language", &g_scriptLanguageIndex, scriptLanguages,
                      IM_ARRAYSIZE(scriptLanguages));
         ImGui::Text("Script Path: %s", selected->scriptPath.empty() ? "-" : selected->scriptPath.c_str());
+        if (!selected->scriptClassName.empty()) {
+            int executionOrder = selected->scriptExecutionOrder;
+            if (ImGui::DragInt("Execution Order", &executionOrder, 1.0f, -10000, 10000)) {
+                context.scene->SetSelectedScriptScheduling(
+                    executionOrder, selected->scriptDependencies);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip(
+                    "Lower values run first. Required scripts always run before this value.");
+            }
+
+            std::vector<std::string> dependencies = selected->scriptDependencies;
+            const std::string dependencyPreview = dependencies.empty()
+                ? "None" : std::to_string(dependencies.size()) + " selected";
+            if (ImGui::BeginCombo("Required Scripts", dependencyPreview.c_str())) {
+                for (const SavedScriptEntry& entry : savedScripts) {
+                    if (entry.className == selected->scriptClassName) continue;
+                    const auto found = std::find(
+                        dependencies.begin(), dependencies.end(), entry.className);
+                    bool required = found != dependencies.end();
+                    if (ImGui::Selectable(entry.className.c_str(), required,
+                                          ImGuiSelectableFlags_DontClosePopups)) {
+                        if (required) dependencies.erase(found);
+                        else dependencies.push_back(entry.className);
+                        context.scene->SetSelectedScriptScheduling(
+                            selected->scriptExecutionOrder, dependencies);
+                    }
+                }
+                if (savedScripts.empty())
+                    ImGui::TextDisabled("No saved scripts are available.");
+                ImGui::EndCombo();
+            }
+            ImGui::TextDisabled(
+                "Dependencies control initialization, frame, fixed, and event order.");
+        }
         const std::string currentClass = SanitizeScriptClassName(g_scriptClassBuffer.data());
         const bool creatingLua = g_scriptLanguageIndex == 1;
         const bool classExists = std::any_of(savedScripts.begin(), savedScripts.end(),
@@ -7215,23 +7284,15 @@ void DrawAssets(EditorDockspace::Context& context, bool* open) {
         return;
     }
 
-    ImGui::Text("Root: %s", context.assets->RootPath().c_str());
-    ImGui::Text("Folder: /%s", context.assets->CurrentFolder().c_str());
-    ImGui::Text("%d files", static_cast<int>(context.assets->TotalFileCount()));
-    if (ImGui::Button("Up")) {
-        std::string error;
-        if (!context.assets->GoUp(&error) && context.log) {
-            context.log->Error(error);
-        }
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Refresh")) {
-        std::string error;
-        if (!context.assets->Refresh(context.assets->RootPath(), &error) && context.log) {
-            context.log->Error(error);
-        }
-    }
-    if (ImGui::Button("Copy")) {
+    static char renameEntryName[128] = "";
+    static char newFolderName[128] = "NewFolder";
+    static std::string pendingDeleteName;
+    bool requestRenamePopup = false;
+    bool requestDeletePopup = false;
+    bool requestCreateFolderPopup = false;
+    bool requestImportPopup = false;
+
+    const auto copySelected = [&]() {
         std::string error;
         if (context.assets->CopySelected(&error)) {
             const EditorAssets::Asset* selectedAsset = context.assets->SelectedAsset();
@@ -7239,152 +7300,165 @@ void DrawAssets(EditorDockspace::Context& context, bool* open) {
                 const std::string texturePath = context.assets->SelectedAssetFullPath();
                 ImGui::SetClipboardText(texturePath.c_str());
             }
-            if (context.log) {
-                context.log->Info("Copied Content entry: " + context.assets->CopiedDisplayName());
-                if (selectedAsset && selectedAsset->type == EditorAssets::Type::Texture) {
-                    context.log->Info("Texture path ready for Material Maker paste");
-                }
-            }
-        } else if (context.log) {
-            context.log->Warning(error);
-        }
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Cut")) {
+            if (context.log)
+                context.log->Info("Copied Content entry: "
+                    + context.assets->CopiedDisplayName());
+        } else if (context.log) context.log->Warning(error);
+    };
+    const auto cutSelected = [&]() {
         std::string error;
         if (context.assets->CutSelected(&error)) {
-            if (context.log) context.log->Info("Cut Content entry: " + context.assets->CopiedDisplayName()
-                + " (Paste to move it here)");
-        } else if (context.log) {
-            context.log->Warning(error);
-        }
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Paste")) {
+            if (context.log) context.log->Info("Cut Content entry: "
+                + context.assets->CopiedDisplayName() + " (Paste to move)");
+        } else if (context.log) context.log->Warning(error);
+    };
+    const auto pasteCopied = [&]() {
         std::string error;
-        const bool wasCut = context.assets->HasCopiedEntry() && context.assets->CopiedEntryIsCut();
+        const bool wasCut = context.assets->HasCopiedEntry()
+            && context.assets->CopiedEntryIsCut();
         if (context.assets->PasteCopied(&error)) {
-            if (context.log) {
-                context.log->Info(wasCut ? "Moved Content entry" : "Pasted Content entry");
-            }
-        } else if (context.log) {
-            context.log->Warning(error);
-        }
-    }
-    ImGui::SameLine();
-    const bool canRenameFolder =
-        context.assets->SelectedType() == EditorAssets::SelectionType::Folder;
-    static char renameFolderName[128] = "";
-    if (!canRenameFolder) ImGui::BeginDisabled();
-    if (ImGui::Button("Rename")) {
-        const EditorAssets::Folder* selectedFolder = context.assets->SelectedFolder();
-        std::snprintf(renameFolderName, sizeof(renameFolderName), "%s",
-            selectedFolder ? selectedFolder->displayName.c_str() : "");
-        ImGui::OpenPopup("Rename Content Folder");
-    }
-    if (!canRenameFolder) ImGui::EndDisabled();
-    ImGui::SameLine();
-    if (ImGui::Button("Delete")) {
+            if (context.log) context.log->Info(
+                wasCut ? "Moved Content entry" : "Pasted Content entry");
+        } else if (context.log) context.log->Warning(error);
+    };
+    const auto beginRename = [&]() {
+        std::string currentName;
+        if (const EditorAssets::Folder* folder = context.assets->SelectedFolder())
+            currentName = folder->displayName;
+        else if (const EditorAssets::Asset* asset = context.assets->SelectedAsset())
+            currentName = std::filesystem::path(asset->displayName).stem().string();
+        std::snprintf(renameEntryName, sizeof(renameEntryName), "%s", currentName.c_str());
+        requestRenamePopup = true;
+    };
+    const auto beginDelete = [&]() {
+        if (const EditorAssets::Folder* folder = context.assets->SelectedFolder())
+            pendingDeleteName = folder->displayName;
+        else if (const EditorAssets::Asset* asset = context.assets->SelectedAsset())
+            pendingDeleteName = asset->displayName;
+        else
+            pendingDeleteName.clear();
+        requestDeletePopup = true;
+    };
+    const auto reimportSelected = [&]() {
+        const EditorAssets::Asset* selected = context.assets->SelectedAsset();
+        const bool staticMesh = selected && selected->type == EditorAssets::Type::Model
+            && std::filesystem::path(selected->relativePath).extension() == ".3dgmesh";
+        const bool skeletalMesh = selected
+            && selected->type == EditorAssets::Type::SkeletalModel
+            && std::filesystem::path(selected->relativePath).extension() == ".3dgskmesh";
+        const bool texture = selected && selected->type == EditorAssets::Type::Texture
+            && std::filesystem::path(selected->relativePath).extension() == ".3dgtex";
         std::string error;
-        if (context.assets->DeleteSelectedEntry(&error)) {
-            if (context.log) {
-                context.log->Info("Deleted Content entry");
-            }
-        } else if (context.log) {
-            context.log->Warning(error);
-        }
-    }
-    const EditorAssets::Asset* selectedForReimport = context.assets->SelectedAsset();
-    const bool canReimportStaticMesh = selectedForReimport
-        && selectedForReimport->type == EditorAssets::Type::Model
-        && std::filesystem::path(selectedForReimport->relativePath).extension()
-               == ".3dgmesh";
-    const bool canReimportSkeletalMesh = selectedForReimport
-        && selectedForReimport->type == EditorAssets::Type::SkeletalModel
-        && std::filesystem::path(selectedForReimport->relativePath).extension()
-               == ".3dgskmesh";
-    const bool canReimportTexture = selectedForReimport
-        && selectedForReimport->type == EditorAssets::Type::Texture
-        && std::filesystem::path(selectedForReimport->relativePath).extension()
-               == ".3dgtex";
-    ImGui::SameLine();
-    if (!canReimportStaticMesh && !canReimportSkeletalMesh
-        && !canReimportTexture) ImGui::BeginDisabled();
-    if (ImGui::Button("Reimport")) {
-        std::string error;
-        const bool reimported = canReimportTexture
+        const bool reimported = texture
             ? context.assets->ReimportSelectedTexture(&error)
-            : canReimportSkeletalMesh
+            : skeletalMesh
                 ? context.assets->ReimportSelectedSkeletalAssets(&error)
-                : context.assets->ReimportSelectedStaticMesh(&error);
-        if (reimported) {
-            const std::string meshPath = context.assets->SelectedAssetFullPath();
-            const bool liveReloadFailed = context.runtimeAssets
-                && !canReimportTexture
-                && ((canReimportSkeletalMesh
-                        && context.runtimeAssets->FindSkinnedModel(meshPath)
-                        && !context.runtimeAssets->ReloadSkinnedModel(meshPath, &error))
-                    || (canReimportStaticMesh
-                        && context.runtimeAssets->FindModel(meshPath)
-                        && !context.runtimeAssets->ReloadModel(meshPath, &error)));
-            if (liveReloadFailed) {
-                if (context.log) {
-                    context.log->Error("Mesh was reimported but its live "
-                                       "preview could not reload: " + error);
-                }
-            }
-            if (context.log) context.log->Info(context.assets->LastImportMessage());
-        } else if (context.log) {
+                : staticMesh && context.assets->ReimportSelectedStaticMesh(&error);
+        if (!reimported) {
+            if (context.log) context.log->Error(error.empty()
+                ? "The selected asset cannot be reimported." : error);
+            return;
+        }
+        const std::string assetPath = context.assets->SelectedAssetFullPath();
+        const bool liveReloadFailed = context.runtimeAssets && !texture
+            && ((skeletalMesh && context.runtimeAssets->FindSkinnedModel(assetPath)
+                    && !context.runtimeAssets->ReloadSkinnedModel(assetPath, &error))
+                || (staticMesh && context.runtimeAssets->FindModel(assetPath)
+                    && !context.runtimeAssets->ReloadModel(assetPath, &error)));
+        if (liveReloadFailed) {
+            if (context.log) context.log->Error(
+                "Asset was reimported but its live preview could not reload: " + error);
+        } else if (context.log) context.log->Info(context.assets->LastImportMessage());
+    };
+
+    const std::string breadcrumb = context.assets->CurrentFolder().empty()
+        ? std::string("Content")
+        : std::string("Content/") + context.assets->CurrentFolder();
+    ImGui::TextUnformatted(breadcrumb.c_str());
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", context.assets->RootPath().c_str());
+    ImGui::SameLine();
+    ImGui::TextDisabled("(%d files)", static_cast<int>(context.assets->TotalFileCount()));
+    if (editor::icons::Button(editor::icons::Up, "Up")) {
+        std::string error;
+        if (!context.assets->GoUp(&error) && context.log) {
             context.log->Error(error);
         }
     }
-    if (!canReimportStaticMesh && !canReimportSkeletalMesh
-        && !canReimportTexture) ImGui::EndDisabled();
-    if (ImGui::BeginPopupModal("Rename Content Folder", nullptr,
+    ImGui::SameLine();
+    if (editor::icons::Button(editor::icons::Refresh, "Refresh")) {
+        std::string error;
+        if (!context.assets->Refresh(context.assets->RootPath(), &error) && context.log) {
+            context.log->Error(error);
+        }
+    }
+    if (ImGui::BeginPopupModal("Rename Content Entry", nullptr,
                                ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::TextUnformatted("New folder name");
+        ImGui::TextUnformatted("New name");
         ImGui::SetNextItemWidth(300.0f);
         const bool submitted = ImGui::InputText(
-            "##RenameFolderName", renameFolderName, sizeof(renameFolderName),
+            "##RenameContentEntryName", renameEntryName, sizeof(renameEntryName),
             ImGuiInputTextFlags_EnterReturnsTrue);
-        ImGui::TextDisabled("Renaming changes the Content path of assets inside this folder.");
+        if (context.assets->SelectedType() == EditorAssets::SelectionType::Asset)
+            ImGui::TextDisabled("The asset's current file extension is preserved.");
+        else
+            ImGui::TextDisabled("Assets inside a renamed folder receive a new Content path.");
         const bool confirm = ImGui::Button("Rename", ImVec2(110.0f, 0.0f)) || submitted;
         ImGui::SameLine();
         const bool cancel = ImGui::Button("Cancel", ImVec2(110.0f, 0.0f));
         if (confirm) {
             std::string error;
-            if (context.assets->RenameSelectedFolder(renameFolderName, &error)) {
-                if (context.log) {
-                    context.log->Info(std::string("Renamed Content folder to: ")
-                        + renameFolderName);
-                }
+            if (context.assets->RenameSelectedEntry(renameEntryName, &error)) {
+                if (context.log) context.log->Info(
+                    std::string("Renamed Content entry to: ") + renameEntryName);
                 ImGui::CloseCurrentPopup();
-            } else if (context.log) {
-                context.log->Error(error);
-            }
+            } else if (context.log) context.log->Error(error);
         } else if (cancel) {
             ImGui::CloseCurrentPopup();
         }
         ImGui::EndPopup();
     }
-    if (context.assets->HasCopiedEntry()) {
-        ImGui::Text("Copied: %s", context.assets->CopiedDisplayName().c_str());
+    if (ImGui::BeginPopupModal("Create Content Folder", nullptr,
+                               ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text("Create inside Content/%s", context.assets->CurrentFolder().c_str());
+        ImGui::SetNextItemWidth(300.0f);
+        const bool submitted = ImGui::InputText("##NewContentFolderName",
+            newFolderName, sizeof(newFolderName), ImGuiInputTextFlags_EnterReturnsTrue);
+        const bool confirm = ImGui::Button("Create", ImVec2(110.0f, 0.0f)) || submitted;
+        ImGui::SameLine();
+        const bool cancel = ImGui::Button("Cancel", ImVec2(110.0f, 0.0f));
+        if (confirm) {
+            std::string error;
+            if (context.assets->CreateFolder(newFolderName, &error)) {
+                if (context.log) context.log->Info(
+                    std::string("Created Content folder: ") + newFolderName);
+                std::snprintf(newFolderName, sizeof(newFolderName), "%s", "NewFolder");
+                ImGui::CloseCurrentPopup();
+            } else if (context.log) context.log->Error(error);
+        } else if (cancel) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
     }
-
-    static char folderName[128] = "NewFolder";
-    ImGui::InputText("Folder name", folderName, sizeof(folderName));
-    ImGui::SameLine();
-    if (ImGui::Button("Create folder")) {
-        std::string error;
-        if (context.assets->CreateFolder(folderName, &error)) {
-            if (context.log) {
-                context.log->Info(std::string("Created Content folder: ") + folderName);
-            }
-            folderName[0] = '\0';
-        } else if (context.log) {
-            context.log->Error(error);
+    if (ImGui::BeginPopupModal("Delete Content Entry", nullptr,
+                               ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextWrapped("Delete '%s'?", pendingDeleteName.c_str());
+        ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f),
+            "Folders and their contents are deleted permanently.");
+        if (ImGui::Button("Delete", ImVec2(110.0f, 0.0f))) {
+            std::string error;
+            if (context.assets->DeleteSelectedEntry(&error)) {
+                if (context.log) context.log->Info("Deleted Content entry: "
+                    + pendingDeleteName);
+                ImGui::CloseCurrentPopup();
+            } else if (context.log) context.log->Error(error);
         }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(110.0f, 0.0f)))
+            ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
     }
+    if (context.assets->HasCopiedEntry())
+        ImGui::TextDisabled("Clipboard: %s%s", context.assets->CopiedDisplayName().c_str(),
+            context.assets->CopiedEntryIsCut() ? " (cut)" : "");
 
     static std::string importSource;
     static std::string importDestination;
@@ -7426,7 +7500,7 @@ void DrawAssets(EditorDockspace::Context& context, bool* open) {
             }
         }
     };
-    if (ImGui::Button("Import Asset...")) {
+    if (editor::icons::Button(editor::icons::Download, "Import Asset")) {
         const std::string selected =
             editor::OpenAssetImportDialog("Import Asset into Content");
         if (!selected.empty()) {
@@ -7436,8 +7510,8 @@ void DrawAssets(EditorDockspace::Context& context, bool* open) {
             ImGui::OpenPopup("Asset Import Settings##ContentBrowser");
         }
     }
-    ImGui::SameLine();
-    ImGui::TextDisabled("Browse system files, then choose a project folder.");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Browse system files and import into the current Content folder.");
 
     if (ImGui::BeginPopupModal("Asset Import Settings##ContentBrowser", nullptr,
                                ImGuiWindowFlags_AlwaysAutoResize)) {
@@ -7724,13 +7798,38 @@ void DrawAssets(EditorDockspace::Context& context, bool* open) {
     for (int i = 0; i < static_cast<int>(folders.size()); ++i) {
         const EditorAssets::Folder& folder = folders[static_cast<std::size_t>(i)];
         char label[256];
-        std::snprintf(label, sizeof(label), "[Folder] %s", folder.displayName.c_str());
+        const std::string folderLabel = editor::icons::Label(
+            editor::icons::Folder, folder.displayName.c_str());
+        std::snprintf(label, sizeof(label), "%s", folderLabel.c_str());
         const bool selected = context.assets->SelectedType() == EditorAssets::SelectionType::Folder
             && context.assets->SelectedFolderIndex() == i;
+        ImGui::PushStyleColor(ImGuiCol_Text, editor::icons::FolderColor());
         if (ImGui::Selectable(label, selected)) {
             context.assets->SelectFolderIndex(i);
         }
-        if (selected && ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+        ImGui::PopStyleColor();
+        bool openFromContext = false;
+        ImGui::PushID(i);
+        if (ImGui::BeginPopupContextItem("FolderActions")) {
+            context.assets->SelectFolderIndex(i);
+            if (editor::icons::MenuItem(editor::icons::Open, "Open"))
+                openFromContext = true;
+            ImGui::Separator();
+            if (editor::icons::MenuItem(editor::icons::Copy, "Copy")) copySelected();
+            if (editor::icons::MenuItem(editor::icons::Cut, "Cut")) cutSelected();
+            if (editor::icons::MenuItem(editor::icons::Copy, "Duplicate")) {
+                copySelected();
+                pasteCopied();
+            }
+            if (editor::icons::MenuItem(editor::icons::Edit, "Rename...")) beginRename();
+            ImGui::Separator();
+            if (editor::icons::MenuItem(editor::icons::Delete, "Delete...")) beginDelete();
+            ImGui::EndPopup();
+        }
+        ImGui::PopID();
+        if (openFromContext
+            || (selected && ImGui::IsItemHovered()
+                && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))) {
             std::string error;
             if (!context.assets->EnterFolder(i, &error) && context.log) {
                 context.log->Error(error);
@@ -7742,19 +7841,58 @@ void DrawAssets(EditorDockspace::Context& context, bool* open) {
     for (int i = 0; i < static_cast<int>(assets.size()); ++i) {
         const EditorAssets::Asset& asset = assets[static_cast<std::size_t>(i)];
         char label[256];
-        std::snprintf(label, sizeof(label), "[%s] %s",
-            EditorAssets::TypeName(asset.type), asset.displayName.c_str());
+        const std::string assetText = std::string("[")
+            + EditorAssets::TypeName(asset.type) + "] " + asset.displayName;
+        const editor::icons::AssetStyle iconStyle = editor::icons::ForAsset(asset.type);
+        const std::string assetLabel = editor::icons::Label(
+            iconStyle.glyph, assetText.c_str());
+        std::snprintf(label, sizeof(label), "%s", assetLabel.c_str());
 
         const bool selected = context.assets->SelectedType() == EditorAssets::SelectionType::Asset
             && i == context.assets->SelectedIndex();
+        ImGui::PushStyleColor(ImGuiCol_Text, iconStyle.color);
         if (ImGui::Selectable(label, selected)) {
             context.assets->SelectIndex(i);
         }
+        ImGui::PopStyleColor();
         const bool assetHovered = ImGui::IsItemHovered();
+        bool openFromContext = false;
+        ImGui::PushID(i);
+        if (ImGui::BeginPopupContextItem("AssetActions")) {
+            context.assets->SelectIndex(i);
+            if (editor::icons::MenuItem(editor::icons::Open, "Open"))
+                openFromContext = true;
+            ImGui::Separator();
+            if (editor::icons::MenuItem(editor::icons::Copy, "Copy")) copySelected();
+            if (editor::icons::MenuItem(editor::icons::Cut, "Cut")) cutSelected();
+            if (editor::icons::MenuItem(editor::icons::Copy, "Duplicate")) {
+                copySelected();
+                pasteCopied();
+            }
+            if (editor::icons::MenuItem(editor::icons::Edit, "Rename...")) beginRename();
+            if (editor::icons::MenuItem(editor::icons::Copy, "Copy Asset Path")) {
+                const std::string path = context.assets->SelectedAssetFullPath();
+                ImGui::SetClipboardText(path.c_str());
+                if (context.log) context.log->Info("Copied asset path: " + path);
+            }
+            const std::string extension =
+                std::filesystem::path(asset.relativePath).extension().string();
+            const bool canReimport = extension == ".3dgmesh"
+                || extension == ".3dgskmesh" || extension == ".3dgtex";
+            if (!canReimport) ImGui::BeginDisabled();
+            if (editor::icons::MenuItem(editor::icons::Refresh, "Reimport"))
+                reimportSelected();
+            if (!canReimport) ImGui::EndDisabled();
+            ImGui::Separator();
+            if (editor::icons::MenuItem(editor::icons::Delete, "Delete...")) beginDelete();
+            ImGui::EndPopup();
+        }
+        ImGui::PopID();
         if (assetHovered && asset.relativePath != asset.displayName) {
             ImGui::SetTooltip("Content/%s", asset.relativePath.c_str());
         }
-        if (assetHovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+        if (openFromContext
+            || (assetHovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))) {
             const std::string fullPath =
                 (std::filesystem::path(context.assets->RootPath()) / asset.relativePath).string();
             if (asset.type == EditorAssets::Type::Scene) {
@@ -7817,6 +7955,37 @@ void DrawAssets(EditorDockspace::Context& context, bool* open) {
         }
     }
 
+    if (ImGui::BeginPopupContextWindow("ContentBrowserActions",
+            ImGuiPopupFlags_MouseButtonRight | ImGuiPopupFlags_NoOpenOverItems)) {
+        if (editor::icons::MenuItem(editor::icons::Add, "Create Folder..."))
+            requestCreateFolderPopup = true;
+        if (!context.assets->HasCopiedEntry()) ImGui::BeginDisabled();
+        if (editor::icons::MenuItem(editor::icons::Paste, "Paste")) pasteCopied();
+        if (!context.assets->HasCopiedEntry()) ImGui::EndDisabled();
+        ImGui::Separator();
+        if (editor::icons::MenuItem(editor::icons::Download, "Import Asset...")) {
+            const std::string selected =
+                editor::OpenAssetImportDialog("Import Asset into Content");
+            if (!selected.empty()) {
+                prepareImportSource(selected);
+                importDestination = context.assets->CurrentFolder();
+                importFolderName[0] = '\0';
+                requestImportPopup = true;
+            }
+        }
+        if (editor::icons::MenuItem(editor::icons::Refresh, "Refresh")) {
+            std::string error;
+            if (!context.assets->Refresh(context.assets->RootPath(), &error)
+                && context.log) context.log->Error(error);
+        }
+        ImGui::EndPopup();
+    }
+
+    if (requestRenamePopup) ImGui::OpenPopup("Rename Content Entry");
+    if (requestDeletePopup) ImGui::OpenPopup("Delete Content Entry");
+    if (requestCreateFolderPopup) ImGui::OpenPopup("Create Content Folder");
+    if (requestImportPopup) ImGui::OpenPopup("Asset Import Settings##ContentBrowser");
+
     ImGui::End();
 }
 
@@ -7840,7 +8009,7 @@ void DrawStandaloneScriptEditor(EditorDockspace::Context& context) {
         }
     }
     if (g_preferredCodeEditor != static_cast<int>(PreferredCodeEditor::BuiltIn)) {
-        if (ImGui::Button("Open in Selected Editor")) {
+        if (editor::icons::LabeledButton(editor::icons::Open, "Open in Selected Editor")) {
             std::string error;
             if (!EditorScriptTools::OpenExternalEditor(
                     static_cast<PreferredCodeEditor>(g_preferredCodeEditor),
@@ -7854,16 +8023,33 @@ void DrawStandaloneScriptEditor(EditorDockspace::Context& context) {
         std::filesystem::path(g_scriptSourcePath).extension() == ".lua";
     ImGui::TextDisabled(editingLua
         ? "Lua runs directly. Save it, then restart Play to load changes."
-        : "Compile Scripts saves native code, closes the editor, rebuilds editor + player, and reopens the project.");
+        : "Native scripts can compile and hot-reload automatically after saving.");
+    if (!editingLua && context.autoCompileScripts) {
+        if (ImGui::Checkbox("Compile automatically when saved", context.autoCompileScripts)) {
+            if (context.config) {
+                context.config->Set("scripting.auto_compile_on_save", *context.autoCompileScripts);
+                context.config->Save();
+            }
+        }
+        ImGui::SameLine();
+        if (context.scriptBuildRunning) {
+            ImGui::TextDisabled("Building...");
+        } else if (context.scriptBuildStatus) {
+            ImGui::TextDisabled("%s", context.scriptBuildStatus->c_str());
+        }
+    }
     ImGui::Separator();
+    if (g_scriptEditorTargetLine > 0) ImGui::SetKeyboardFocusHere();
     if (ImGui::InputTextMultiline("##StandaloneScriptSource",
             g_scriptSourceBuffer.data(), g_scriptSourceBuffer.size(),
             ImVec2(-1.0f, -ImGui::GetFrameHeightWithSpacing() * 2.0f),
-            ImGuiInputTextFlags_AllowTabInput)) {
+            ImGuiInputTextFlags_AllowTabInput | ImGuiInputTextFlags_CallbackAlways,
+            ScriptSourceNavigationCallback)) {
         g_scriptSourceDirty = true;
     }
 
-    if (ImGui::Button(g_scriptSourceDirty ? "Save Source *" : "Save Source")) {
+    if (editor::icons::LabeledButton(editor::icons::Save,
+            g_scriptSourceDirty ? "Save Source *" : "Save Source")) {
         std::string error;
         if (WriteTextFile(g_scriptSourcePath, g_scriptSourceBuffer.data(), &error)) {
             g_scriptSourceDirty = false;
@@ -7873,7 +8059,7 @@ void DrawStandaloneScriptEditor(EditorDockspace::Context& context) {
         }
     }
     ImGui::SameLine();
-    if (ImGui::Button("Reload Source")) {
+    if (editor::icons::LabeledButton(editor::icons::Refresh, "Reload Source")) {
         std::string error;
         if (!LoadScriptSource(g_scriptSourcePath, &error) && context.log) {
             context.log->Error("Script source reload failed: " + error);
@@ -7882,8 +8068,8 @@ void DrawStandaloneScriptEditor(EditorDockspace::Context& context) {
     ImGui::SameLine();
     ImGui::TextDisabled(g_scriptSourceDirty ? "Unsaved changes" : "Saved");
     ImGui::Separator();
-    ImGui::BeginDisabled(context.playMode || editingLua);
-    if (ImGui::Button("Compile Scripts & Restart")) {
+    ImGui::BeginDisabled(context.playMode || editingLua || context.scriptBuildRunning);
+    if (editor::icons::LabeledButton(editor::icons::Code, "Compile Scripts & Restart")) {
         std::string error;
         bool saved = true;
         if (g_scriptSourceDirty) {
@@ -7894,15 +8080,15 @@ void DrawStandaloneScriptEditor(EditorDockspace::Context& context) {
         else if (context.log) context.log->Error("Script source save failed: " + error);
     }
     ImGui::EndDisabled();
-    if ((context.playMode || editingLua)
+    if ((context.playMode || editingLua || context.scriptBuildRunning)
         && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-        ImGui::SetTooltip(editingLua
-            ? "Lua scripts do not need compilation."
-            : "Exit Play mode before compiling scripts.");
+        ImGui::SetTooltip(editingLua ? "Lua scripts do not need compilation."
+            : (context.scriptBuildRunning ? "A script build is already running."
+                                          : "Exit Play mode before compiling and restarting."));
     }
     ImGui::SameLine();
-    ImGui::BeginDisabled(context.playMode || editingLua);
-    if (ImGui::Button("Hot Reload (dev)")) {
+    ImGui::BeginDisabled(editingLua || context.scriptBuildRunning);
+    if (editor::icons::LabeledButton(editor::icons::Refresh, "Hot Reload")) {
         std::string error;
         bool saved = true;
         if (g_scriptSourceDirty) {
@@ -7916,10 +8102,12 @@ void DrawStandaloneScriptEditor(EditorDockspace::Context& context) {
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
         ImGui::SetTooltip(editingLua
             ? "Lua scripts reload when Play starts."
-            : "Rebuild game_scripts.dll and reload it without restarting the editor.");
+            : (context.scriptBuildRunning
+                ? "A script build is already running."
+                : "Build the project script module and safely reload it in Edit or Play mode."));
     }
     ImGui::SameLine();
-    if (ImGui::Button("Last Build Log")) {
+    if (editor::icons::LabeledButton(editor::icons::Document, "Last Build Log")) {
         g_scriptBuildLog = EditorScriptTools::ReadLastBuildLog(ProjectRootFor(context));
         if (g_scriptBuildLog.empty()) g_scriptBuildLog = "No script build has run yet.";
         g_scriptBuildLogOpen = true;
@@ -7931,6 +8119,7 @@ struct CompileDiagnostic {
     bool error = true;
     std::string file;
     int line = 0;
+    int column = 0;
     std::string message;   // e.g. "error C2065: 'foo': undeclared identifier"
 };
 
@@ -7972,7 +8161,8 @@ std::vector<CompileDiagnostic> ParseCompileDiagnostics(const std::string& log) {
         const std::size_t close = before.rfind(')');
         if (open != std::string::npos && close != std::string::npos && close > open) {
             diagnostic.file = before.substr(0, open);
-            std::sscanf(before.substr(open + 1, close - open - 1).c_str(), "%d", &diagnostic.line);
+            std::sscanf(before.substr(open + 1, close - open - 1).c_str(),
+                        "%d,%d", &diagnostic.line, &diagnostic.column);
         } else {
             diagnostic.file = before;   // file-less (e.g. "LINK")
         }
@@ -7985,7 +8175,16 @@ std::vector<CompileDiagnostic> ParseCompileDiagnostics(const std::string& log) {
     return diagnostics;
 }
 
-void DrawScriptBuildLog() {
+void DrawScriptBuildLog(EditorDockspace::Context& context) {
+    static std::string observedBuildStatus;
+    if (context.scriptBuildStatus && *context.scriptBuildStatus != observedBuildStatus) {
+        observedBuildStatus = *context.scriptBuildStatus;
+        if (observedBuildStatus.rfind("Compilation failed", 0) == 0) {
+            g_scriptBuildLog = EditorScriptTools::ReadLastBuildLog(ProjectRootFor(context));
+            if (g_scriptBuildLog.empty()) g_scriptBuildLog = observedBuildStatus;
+            g_scriptBuildLogOpen = true;
+        }
+    }
     if (!g_scriptBuildLogOpen) return;
     if (ImGui::Begin("Script Compiler Output", &g_scriptBuildLogOpen)) {
         const std::vector<CompileDiagnostic> diagnostics =
@@ -8008,17 +8207,52 @@ void DrawScriptBuildLog() {
                 std::string label = d.file.empty()
                     ? std::string("(build)")
                     : std::filesystem::path(d.file).filename().string();
-                if (d.line > 0) label += "(" + std::to_string(d.line) + ")";
-                label += ": " + d.message;
-                const bool clicked = ImGui::Selectable(label.c_str());
-                ImGui::PopStyleColor();
-                if (!d.file.empty() && ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("%s", d.file.c_str());
+                if (d.line > 0) {
+                    label += "(" + std::to_string(d.line);
+                    if (d.column > 0) label += "," + std::to_string(d.column);
+                    label += ")";
                 }
-                if (clicked && !d.file.empty()) {
+                label += ": " + d.message;
+                std::filesystem::path resolvedSource = d.file;
+                std::error_code sourceErrorCode;
+                if (resolvedSource.is_relative()) {
+                    const std::filesystem::path fromProject =
+                        ProjectRootFor(context) / resolvedSource;
+                    if (std::filesystem::is_regular_file(fromProject, sourceErrorCode)) {
+                        resolvedSource = fromProject;
+                    }
+                }
+                sourceErrorCode.clear();
+                const bool canOpen = !d.file.empty()
+                    && std::filesystem::is_regular_file(resolvedSource, sourceErrorCode);
+                const bool clicked = ImGui::Selectable(label.c_str(), false,
+                    canOpen ? ImGuiSelectableFlags_None : ImGuiSelectableFlags_Disabled);
+                ImGui::PopStyleColor();
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                    ImGui::SetTooltip("%s", canOpen ? resolvedSource.string().c_str()
+                                                     : "Build-system message (no source location)");
+                }
+                if (clicked && canOpen) {
+                    const std::filesystem::path& sourcePath = resolvedSource;
                     std::string sourceError;
-                    if (LoadScriptSource(d.file, &sourceError)) {
-                        g_scriptEditorWindowOpen = true;
+                    EnsureScriptEditorSettings(context);
+                    const PreferredCodeEditor preferred = static_cast<PreferredCodeEditor>(
+                        std::clamp(g_preferredCodeEditor, 0, 4));
+                    if (preferred == PreferredCodeEditor::BuiltIn) {
+                        if (LoadScriptSource(sourcePath.string(), &sourceError)) {
+                            g_scriptEditorTargetLine = std::max(d.line, 1);
+                            g_scriptEditorTargetColumn = std::max(d.column, 1);
+                            g_scriptEditorWindowOpen = true;
+                        }
+                    } else if (!EditorScriptTools::OpenExternalEditor(
+                            preferred, g_customCodeEditorPath.data(), sourcePath,
+                            ProjectRootFor(context), &sourceError, d.line, d.column)) {
+                        // sourceError is reported below.
+                    } else {
+                        sourceError.clear();
+                    }
+                    if (!sourceError.empty() && context.log) {
+                        context.log->Error("Could not open compiler diagnostic: " + sourceError);
                     }
                 }
                 ImGui::PopID();
@@ -8903,7 +9137,8 @@ void DrawCameraSequences(EditorDockspace::Context& context) {
     if (context.showCameraRails) {
         ImGui::Checkbox("Show Rails In Viewport", context.showCameraRails);
     }
-    if (ImGui::Button("New Sequence", ImVec2(112.0f, 0.0f))) {
+    if (editor::icons::LabeledButton(editor::icons::Add, "New Sequence",
+            ImVec2(132.0f, 0.0f))) {
         EditorScene::CameraSequence sequence;
         sequence.name = "Sequence_" + std::to_string(sequences.size() + 1);
         if (!cameras.empty()) {
@@ -8954,14 +9189,16 @@ void DrawCameraSequences(EditorDockspace::Context& context) {
     sequenceChanged |= ImGui::Checkbox("Loop Sequence", &sequence.loop);
 
     ImGui::BeginDisabled(sequence.shots.empty());
-    if (ImGui::Button("Play Sequence", ImVec2(112.0f, 0.0f))) {
+    if (editor::icons::LabeledButton(editor::icons::Play, "Play Sequence",
+            ImVec2(132.0f, 0.0f))) {
         context.cameraSequence = sequence;
         context.cameraSequencePlayRequested = true;
     }
     ImGui::EndDisabled();
     ImGui::SameLine();
     ImGui::BeginDisabled(!context.cameraSequenceActive);
-    if (ImGui::Button("Stop Sequence", ImVec2(112.0f, 0.0f))) {
+    if (editor::icons::LabeledButton(editor::icons::Stop, "Stop Sequence",
+            ImVec2(132.0f, 0.0f))) {
         context.cameraSequenceStopRequested = true;
     }
     ImGui::EndDisabled();
@@ -8996,7 +9233,7 @@ void DrawCameraSequences(EditorDockspace::Context& context) {
     }
 
     ImGui::BeginDisabled(cameras.empty());
-    if (ImGui::Button("Add Shot")) {
+    if (editor::icons::LabeledButton(editor::icons::Add, "Add Shot")) {
         sequence.shots.push_back({cameras.front().name, 1.0f, 0.25f, 1});
         g_cameraSequenceShotSelection = static_cast<int>(sequence.shots.size()) - 1;
         sequenceChanged = true;
@@ -9069,7 +9306,7 @@ void DrawCameraSequences(EditorDockspace::Context& context) {
         }
         ImGui::EndDisabled();
         ImGui::SameLine();
-        if (ImGui::Button("Remove Shot")) {
+        if (editor::icons::LabeledButton(editor::icons::Delete, "Remove Shot")) {
             sequence.shots.erase(sequence.shots.begin()
                 + static_cast<std::ptrdiff_t>(shotIndex));
             g_cameraSequenceShotSelection = std::min(
@@ -9212,7 +9449,7 @@ void DrawCameraSequences(EditorDockspace::Context& context) {
 
     if (sequenceChanged) scene.SetCameraSequence(sequenceIndex, sequence);
 
-    if (ImGui::Button("Delete Sequence")) {
+    if (editor::icons::LabeledButton(editor::icons::Delete, "Delete Sequence")) {
         scene.RemoveCameraSequence(sequenceIndex);
         g_cameraSequenceSelection = std::min(
             g_cameraSequenceSelection,
@@ -9238,7 +9475,8 @@ void DrawCameraManager(EditorDockspace::Context& context, bool* open) {
     ImGui::TextDisabled("Saved with the current scene.");
     if (!context.camera) ImGui::TextDisabled("Viewport camera is unavailable.");
 
-    if (ImGui::Button("Capture Current", ImVec2(132.0f, 0.0f)) && context.camera) {
+    if (editor::icons::LabeledButton(editor::icons::Image, "Capture Current",
+            ImVec2(152.0f, 0.0f)) && context.camera) {
         EditorScene::CameraPreset preset;
         preset.name = "Camera_" + std::to_string(cameras.size() + 1);
         preset.position = context.camera->Position();
@@ -9251,7 +9489,8 @@ void DrawCameraManager(EditorDockspace::Context& context, bool* open) {
         g_cameraPresetNameSelection = -1;
     }
     ImGui::SameLine();
-    if (ImGui::Button("New Default", ImVec2(112.0f, 0.0f))) {
+    if (editor::icons::LabeledButton(editor::icons::Add, "New Default",
+            ImVec2(132.0f, 0.0f))) {
         EditorScene::CameraPreset preset;
         preset.name = "Camera_" + std::to_string(cameras.size() + 1);
         preset.primary = cameras.empty();
@@ -9290,13 +9529,15 @@ void DrawCameraManager(EditorDockspace::Context& context, bool* open) {
                       0.05f, 0.0f, 45.0f, "%.2f deg");
     ImGui::DragFloat("FOV Amplitude", &shake.fovAmplitude,
                      0.05f, 0.0f, 30.0f, "%.2f deg");
-    if (ImGui::Button("Preview Shake", ImVec2(112.0f, 0.0f))) {
+    if (editor::icons::LabeledButton(editor::icons::Play, "Preview Shake",
+            ImVec2(132.0f, 0.0f))) {
         context.cameraShakeSettings = shake;
         context.cameraShakeRequested = true;
     }
     ImGui::SameLine();
     ImGui::BeginDisabled(!context.cameraShakeActive);
-    if (ImGui::Button("Stop Shake", ImVec2(96.0f, 0.0f))) {
+    if (editor::icons::LabeledButton(editor::icons::Stop, "Stop Shake",
+            ImVec2(116.0f, 0.0f))) {
         context.cameraShakeStopRequested = true;
     }
     ImGui::EndDisabled();
@@ -9337,7 +9578,8 @@ void DrawCameraManager(EditorDockspace::Context& context, bool* open) {
         scene.SetCameraPreset(selected, preset);
     }
     ImGui::SameLine();
-    if (ImGui::Button("Duplicate", ImVec2(88.0f, 0.0f))) {
+    if (editor::icons::LabeledButton(editor::icons::Copy, "Duplicate",
+            ImVec2(108.0f, 0.0f))) {
         const std::size_t duplicate = scene.DuplicateCameraPreset(selected);
         if (duplicate != static_cast<std::size_t>(-1)) {
             g_cameraPresetSelection = static_cast<int>(duplicate);
@@ -9551,7 +9793,7 @@ bool EditorDockspace::Draw(Context& context) {
     }
 
     if (ImGui::BeginMenuBar()) {
-        if (ImGui::BeginMenu("Project")) {
+        if (ImGui::BeginMenu(editor::icons::Label(editor::icons::Folder, "Project").c_str())) {
             if (context.project) {
                 ImGui::Text("Name: %s", context.project->ProjectName().c_str());
                 ImGui::Text("Scene: %s", context.project->ScenePath().c_str());
@@ -9567,7 +9809,7 @@ bool EditorDockspace::Draw(Context& context) {
                 ImGui::Text("Gizmo: %s %s (%s)", context.gizmo->ModeName(), context.gizmo->AxisName(), context.gizmo->SpaceName());
             }
             ImGui::Separator();
-            if (ImGui::BeginMenu("Project")) {
+            if (ImGui::BeginMenu(editor::icons::Label(editor::icons::Folder, "Manage Project").c_str())) {
                 if (context.project) {
                     ImGui::TextDisabled("Current: %s", context.project->ProjectName().c_str());
                     ImGui::Separator();
@@ -9582,49 +9824,49 @@ bool EditorDockspace::Draw(Context& context) {
                 } else {
                     ImGui::TextDisabled("Location: (none chosen)");
                 }
-                if (ImGui::MenuItem("Choose Location...")) {
+                if (editor::icons::MenuItem(editor::icons::Folder, "Choose Location...")) {
                     context.browseProjectLocationRequested = true;
                 }
-                if (ImGui::MenuItem("Create Project")) {
+                if (editor::icons::MenuItem(editor::icons::Add, "Create Project")) {
                     context.newProjectRequested = true;
                 }
                 ImGui::Separator();
-                if (ImGui::MenuItem("Open Project...")) {
+                if (editor::icons::MenuItem(editor::icons::Open, "Open Project...")) {
                     context.browseOpenProjectRequested = true;
                 }
                 ImGui::EndMenu();
             }
             ImGui::Separator();
-            if (ImGui::MenuItem("New Scene")) {
+            if (editor::icons::MenuItem(editor::icons::Document, "New Scene")) {
                 context.newSceneRequested = true;
             }
-            if (ImGui::MenuItem("Play", "P", false, !context.playMode)) {
+            if (editor::icons::MenuItem(editor::icons::Play, "Play", "P", false, !context.playMode)) {
                 context.enterPlayModeRequested = true;
             }
-            if (ImGui::MenuItem("Stop", "P", false, context.playMode)) {
+            if (editor::icons::MenuItem(editor::icons::Stop, "Stop", "P", false, context.playMode)) {
                 context.exitPlayModeRequested = true;
             }
             ImGui::Separator();
-            if (ImGui::MenuItem("Save")) {
+            if (editor::icons::MenuItem(editor::icons::Save, "Save")) {
                 context.saveSceneRequested = true;
             }
             if (context.scenePathBuffer && context.scenePathBufferSize > 0) {
                 ImGui::SetNextItemWidth(280.0f);
                 ImGui::InputText("Scene Path", context.scenePathBuffer, context.scenePathBufferSize);
             }
-            if (ImGui::MenuItem("Save As")) {
+            if (editor::icons::MenuItem(editor::icons::Save, "Save As")) {
                 context.saveAsSceneRequested = true;
             }
-            if (ImGui::MenuItem("Load")) {
+            if (editor::icons::MenuItem(editor::icons::Open, "Load")) {
                 context.loadSceneRequested = true;
             }
-            if (ImGui::MenuItem("Export Runtime")) {
+            if (editor::icons::MenuItem(editor::icons::Download, "Export Runtime")) {
                 context.exportRuntimeRequested = true;
             }
-            if (ImGui::MenuItem("Cook Project")) {
+            if (editor::icons::MenuItem(editor::icons::Archive, "Cook Project")) {
                 context.cookProjectRequested = true;
             }
-            if (ImGui::MenuItem("Validate Runtime")) {
+            if (editor::icons::MenuItem(editor::icons::Settings, "Validate Runtime")) {
                 context.validateRuntimeRequested = true;
             }
             if (context.project && !context.project->RecentScenes().empty()) {
@@ -9642,7 +9884,7 @@ bool EditorDockspace::Draw(Context& context) {
             ImGui::EndMenu();
         }
 
-        if (ImGui::BeginMenu("Edit")) {
+        if (ImGui::BeginMenu(editor::icons::Label(editor::icons::Edit, "Edit").c_str())) {
             if (ImGui::MenuItem("Undo", "Ctrl+Z")) {
                 context.undoRequested = true;
             }
@@ -9666,7 +9908,7 @@ bool EditorDockspace::Draw(Context& context) {
             ImGui::EndMenu();
         }
 
-        if (ImGui::BeginMenu("Add")) {
+        if (ImGui::BeginMenu(editor::icons::Label(editor::icons::Add, "Add").c_str())) {
             if (ImGui::MenuItem("Create Object...", "Ctrl+Shift+A")) {
                 g_creationPaletteOpenRequested = true;
             }
@@ -9811,7 +10053,7 @@ bool EditorDockspace::Draw(Context& context) {
             ImGui::EndMenu();
         }
 
-        if (context.gizmo && ImGui::BeginMenu("Gizmo")) {
+        if (context.gizmo && ImGui::BeginMenu(editor::icons::Label(editor::icons::Edit, "Gizmo").c_str())) {
             if (ImGui::BeginMenu("Mode")) {
                 const EditorGizmo::Mode mode = context.gizmo->CurrentMode();
                 if (ImGui::MenuItem("Move", "W", mode == EditorGizmo::Mode::Translate)) {
@@ -9863,7 +10105,7 @@ bool EditorDockspace::Draw(Context& context) {
             ImGui::EndMenu();
         }
 
-        if (ImGui::BeginMenu("Debug")) {
+        if (ImGui::BeginMenu(editor::icons::Label(editor::icons::Settings, "Debug").c_str())) {
             if (ImGui::BeginMenu("Physics")) {
                 if (context.showPhysicsEventGuides) {
                     ImGui::MenuItem("Show Play Event Lines", nullptr,
@@ -9952,14 +10194,14 @@ bool EditorDockspace::Draw(Context& context) {
             ImGui::EndMenu();
         }
 
-        if (ImGui::BeginMenu("Panels")) {
-            if (ImGui::MenuItem("Show All")) {
+        if (ImGui::BeginMenu(editor::icons::Label(editor::icons::Layers, "Panels").c_str())) {
+            if (editor::icons::MenuItem(editor::icons::Layers, "Show All")) {
                 context.panels->ShowAll();
             }
-            if (ImGui::MenuItem("Hide All")) {
+            if (editor::icons::MenuItem(editor::icons::Stop, "Hide All")) {
                 context.panels->HideAll();
             }
-            if (ImGui::MenuItem("Reset Defaults")) {
+            if (editor::icons::MenuItem(editor::icons::Refresh, "Reset Defaults")) {
                 context.panels->ResetDefaults();
             }
             ImGui::Separator();
@@ -10102,7 +10344,7 @@ bool EditorDockspace::Draw(Context& context) {
     }
 
     DrawStandaloneScriptEditor(context);
-    DrawScriptBuildLog();
+    DrawScriptBuildLog(context);
 
     ImGui::End();
     return true;

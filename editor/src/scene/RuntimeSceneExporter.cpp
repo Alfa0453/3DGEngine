@@ -100,7 +100,7 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         return engine::MakeAssetReference(
             &assetRegistry, contentRoot, assetPath, type).id;
     };
-    out << "3DGRuntimeScene 88 " << sceneId.ToString() << '\n';
+    out << "3DGRuntimeScene 89 " << sceneId.ToString() << '\n';
     out << "# Runtime export from 3DGEditor. Editor-only flags are omitted.\n";
     const EditorScene::Environment& environment = scene.GetEnvironment();
     out << "environment "
@@ -563,6 +563,10 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
                 << static_cast<int>(field.type) << ' '
                 << StoredPath(field.value);
         }
+        out << ' ' << object.scriptExecutionOrder
+            << ' ' << object.scriptDependencies.size();
+        for (const std::string& dependency : object.scriptDependencies)
+            out << ' ' << StoredPath(dependency);
         out << ' ' << object.additionalScripts.size();
         for (const EditorScene::ScriptBinding& script : object.additionalScripts) {
             out << ' ' << (script.enabled ? 1 : 0)
@@ -574,6 +578,10 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
                     << ' ' << static_cast<int>(field.type)
                     << ' ' << StoredPath(field.value);
             }
+            out << ' ' << script.executionOrder
+                << ' ' << script.dependencies.size();
+            for (const std::string& dependency : script.dependencies)
+                out << ' ' << StoredPath(dependency);
         }
         out << ' '
             << (object.audioSourceEnabled ? 1 : 0) << ' '

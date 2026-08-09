@@ -1,4 +1,5 @@
 #include "BlockoutPanel.h"
+#include "EditorPanels.h"
 
 #include <imgui.h>
 
@@ -34,7 +35,7 @@ void BlockoutPanel::RefreshMaterials(const std::string& assetRoot) {
 BlockoutPanel::Result BlockoutPanel::Draw(const std::string& assetRoot, bool* open) {
     Result result;
     if (m_materialRoot != assetRoot) RefreshMaterials(assetRoot);
-    if (!ImGui::Begin("Blockout & Shape Editing", open)) {
+    if (!ImGui::Begin(EditorPanels::Name(EditorPanels::Panel::Blockout), open)) {
         ImGui::End();
         return result;
     }

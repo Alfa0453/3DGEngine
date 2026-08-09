@@ -1,4 +1,5 @@
 #include "MeasurementPanel.h"
+#include "EditorPanels.h"
 
 #include <imgui.h>
 
@@ -69,7 +70,7 @@ std::string MeasurementPanel::BuildReport(const Measurement& measurement) const 
 }
 
 void MeasurementPanel::Draw(bool* open) {
-    if (!ImGui::Begin("Measurement & Ruler", open)) { ImGui::End(); return; }
+    if (!ImGui::Begin(EditorPanels::Name(EditorPanels::Panel::Measurement), open)) { ImGui::End(); return; }
 
     ImGui::SeparatorText("New Measurement");
     if (ImGui::RadioButton("Distance", m_type == Type::Distance)) m_type = Type::Distance;

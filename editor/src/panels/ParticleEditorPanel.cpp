@@ -2,6 +2,7 @@
 
 #include "EditorScene.h"
 #include "EditorAssets.h"
+#include "EditorPanels.h"
 #include "ParticleAsset.h"
 #include <engine/assets/ShaderAsset.h>
 #include "ParticlePresets.h"
@@ -1014,7 +1015,7 @@ bool ParticleEditorPanel::DrawSettings(engine::ParticleSystemComponent& s) {
 void ParticleEditorPanel::Draw(EditorScene& scene, EditorAssets& assets, bool* open, float dt) {
     m_assetsContext = &assets;
     SyncSelection(scene);
-    if (!ImGui::Begin("Particle Editor", open)) { ImGui::End(); return; }
+    if (!ImGui::Begin(EditorPanels::Name(EditorPanels::Panel::ParticleEditor), open)) { ImGui::End(); return; }
 
     const EditorScene::Object* object = scene.SelectedObject();
     const bool attachedToObject = object && object->particleSystemEnabled;

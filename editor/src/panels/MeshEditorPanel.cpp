@@ -1,4 +1,5 @@
 #include "MeshEditorPanel.h"
+#include "EditorPanels.h"
 
 #include <imgui.h>
 #include <glm/gtc/matrix_transform.hpp>
@@ -211,7 +212,7 @@ void MeshEditorPanel::Draw(bool* open, bool* assetSaved, std::string* message) {
         m_pendingOpen.clear();
     }
 
-    if (!ImGui::Begin("Mesh Editor", open)) {
+    if (!ImGui::Begin(EditorPanels::Name(EditorPanels::Panel::MeshEditor), open)) {
         ImGui::End();
         return;
     }

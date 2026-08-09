@@ -63,6 +63,8 @@ bool PrefabAsset::Apply(EditorScene& scene) const {
     if (o.healthEnabled) scene.SetSelectedHealth(o.health);
 
     scene.SetSelectedScript(o.scriptClassName, o.scriptPath, o.scriptEnabled);
+    scene.SetSelectedScriptScheduling(o.scriptExecutionOrder, o.scriptDependencies);
+    scene.SetSelectedAdditionalScripts(o.additionalScripts);
     return true;
 }
 
@@ -115,7 +117,11 @@ bool PrefabAsset::Save(const std::string& path, std::string* error) const {
         << o.health.alive << '\n';
 
     out << o.scriptEnabled << ' ' << std::quoted(OrDash(o.scriptClassName)) << ' '
-        << std::quoted(OrDash(o.scriptPath)) << '\n';
+        << std::quoted(OrDash(o.scriptPath)) << ' '
+        << o.scriptExecutionOrder << ' ' << o.scriptDependencies.size();
+    for (const std::string& dependency : o.scriptDependencies)
+        out << ' ' << std::quoted(OrDash(dependency));
+    out << '\n';
 
     return static_cast<bool>(out);
 }
@@ -192,6 +198,16 @@ bool PrefabAsset::Load(const std::string& path, std::string* error) {
     in >> o.scriptEnabled >> std::quoted(o.scriptClassName) >> std::quoted(o.scriptPath);
     Undash(o.scriptClassName);
     Undash(o.scriptPath);
+    if (loadedVersion >= 2) {
+        std::size_t dependencyCount = 0;
+        in >> o.scriptExecutionOrder >> dependencyCount;
+        for (std::size_t i = 0; i < dependencyCount; ++i) {
+            std::string dependency;
+            in >> std::quoted(dependency);
+            Undash(dependency);
+            if (!dependency.empty()) o.scriptDependencies.push_back(std::move(dependency));
+        }
+    }
 
     if (in.fail()) {
         if (error) *error = "Prefab file is malformed: " + path;

@@ -15,7 +15,7 @@
 // and packaged pipeline stay unchanged because a prefab bakes its values onto ordinary
 // scene objects, exactly like a character does.
 struct PrefabAsset {
-    int version = 1;
+    int version = 2;
     engine::AssetHandle assetId;
     std::string name = "Prefab";
 

@@ -188,6 +188,10 @@ int main() {
             << "3DGAUDIO_CUE 2 " << audioId.ToString()
             << "\nASSET_DEPS 0\n";
     }
+    const fs::path corruptNativePath =
+        root / "Assets" / "Meshes" / "Broken.3dgmesh";
+    std::ofstream(corruptNativePath, std::ios::binary)
+        << "incomplete native asset";
     Check(references.SynchronizeAuthoredAssets(root.string(), &error)
           && references.Find(nativeHeader.id)
           && references.Find(nativeHeader.id)->type
@@ -198,6 +202,8 @@ int main() {
           && references.Find(clipId)->dependencies.size() == 1
           && references.Find(clipId)->dependencies[0] == referencedMesh.id,
           "Content synchronization registers native and authored asset IDs and dependencies");
+    Check(!references.FindByPath("/Game/Assets/Meshes/Broken.3dgmesh"),
+          "Content synchronization skips a corrupt native asset without blocking valid assets");
     Check(references.Find(hudId)
               && references.Find(hudId)->type == engine::AssetType::Hud
           && references.Find(behaviorId)

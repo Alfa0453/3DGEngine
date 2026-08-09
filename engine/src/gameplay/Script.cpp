@@ -3,6 +3,7 @@
 #include "engine/graphics/CameraShake.h"
 #include "engine/gameplay/CameraDirector.h"
 #include "engine/gameplay/GameMode.h"
+#include "engine/gameplay/GameplayComponents.h"
 
 #include "engine/animation/AnimatedModel.h"
 #include "engine/animation/Animator.h"
@@ -13,10 +14,12 @@
 #include "engine/math/Spline.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
@@ -30,11 +33,61 @@
 #endif
 
 namespace engine {
+class ScriptEventDispatcher {
+public:
+    static void Dispatch(ecs::Registry& registry,
+                         std::vector<ecs::Entity>& destroyQueue,
+                         const ScriptInputState* input, RuntimeAudioSystem* audio,
+                         CameraShake* cameraShake, CameraDirector* cameraDirector,
+                         GameMode* gameMode, PhysicsWorld* physics);
+};
+class ScriptCallDispatcher {
+public:
+    static bool Invoke(const ScriptContext& caller, const ScriptHandle& handle,
+                       const std::string& functionName, ScriptEvent arguments,
+                       ScriptEvent* result);
+};
+
 namespace {
 std::string g_scriptSceneLoadRequest;
 std::vector<ScriptLevelStreamRequest> g_scriptLevelStreamRequests;
 std::vector<ScriptSaveGameRequest> g_scriptSaveGameRequests;
+struct QueuedScriptEvent {
+    ecs::Registry* registry = nullptr;
+    ScriptEvent event;
+};
+std::vector<QueuedScriptEvent> g_scriptEvents;
+struct ObservedHealth {
+    float hp = 0.0f;
+    float maxHp = 0.0f;
+    bool alive = true;
+};
+std::unordered_map<ecs::Registry*, std::unordered_map<ecs::Entity, ObservedHealth>>
+    g_observedHealth;
 constexpr const char* kSaveDataPath = "3dg_savegame.dat";
+
+struct RuntimeScriptDebugger {
+    bool enabled = false;
+    bool paused = false;
+    bool stepRequested = false;
+    std::string stopReason;
+    std::unordered_set<std::string> breakpoints;
+    std::unordered_map<std::string, ScriptExecutionStat> statistics;
+};
+
+RuntimeScriptDebugger& ScriptDebugger() {
+    static RuntimeScriptDebugger debugger;
+    return debugger;
+}
+
+std::string ScriptDebugKey(const std::string& className, ScriptCallbackKind callback) {
+    return className + '#' + std::to_string(static_cast<int>(callback));
+}
+
+std::string ScriptStatKey(ecs::Entity entity, const std::string& className,
+                          ScriptCallbackKind callback) {
+    return std::to_string(entity) + '#' + ScriptDebugKey(className, callback);
+}
 
 std::unordered_map<std::string, std::string> ReadSaveValues() {
     std::unordered_map<std::string, std::string> values;
@@ -45,6 +98,246 @@ std::unordered_map<std::string, std::string> ReadSaveValues() {
     return values;
 }
 } // namespace
+
+bool ScriptEvent::GetBool(const std::string& key, bool fallback) const {
+    const auto it = bools.find(key);
+    return it == bools.end() ? fallback : it->second;
+}
+
+int ScriptEvent::GetInt(const std::string& key, int fallback) const {
+    const auto it = ints.find(key);
+    return it == ints.end() ? fallback : it->second;
+}
+
+float ScriptEvent::GetFloat(const std::string& key, float fallback) const {
+    const auto it = floats.find(key);
+    return it == floats.end() ? fallback : it->second;
+}
+
+std::string ScriptEvent::GetString(const std::string& key,
+                                   const std::string& fallback) const {
+    const auto it = strings.find(key);
+    return it == strings.end() ? fallback : it->second;
+}
+
+glm::vec3 ScriptEvent::GetVector(const std::string& key,
+                                 const glm::vec3& fallback) const {
+    const auto it = vectors.find(key);
+    return it == vectors.end() ? fallback : it->second;
+}
+
+ecs::Entity ScriptEvent::GetEntity(const std::string& key, ecs::Entity fallback) const {
+    const auto it = entities.find(key);
+    return it == entities.end() ? fallback : it->second;
+}
+
+void QueueScriptEvent(ecs::Registry& registry, ScriptEvent event) {
+    if (event.name.empty()) return;
+    g_scriptEvents.push_back(QueuedScriptEvent{&registry, std::move(event)});
+}
+
+void QueueScriptAnimationEvent(ecs::Registry& registry, ecs::Entity entity,
+                               const std::string& eventName) {
+    if (eventName.empty()) return;
+    ScriptEvent event;
+    event.name = "animation.event";
+    event.sender = entity;
+    event.target = entity;
+    event.strings["name"] = eventName;
+    QueueScriptEvent(registry, std::move(event));
+}
+
+void QueueScriptCollisionEvents(ecs::Registry& registry,
+                                const std::vector<CollisionEvent>& events) {
+    for (const CollisionEvent& collision : events) {
+        const char* phase = collision.phase == CollisionEvent::Phase::Enter ? "enter"
+            : collision.phase == CollisionEvent::Phase::Stay ? "stay" : "exit";
+        const std::string name = std::string(collision.trigger ? "trigger." : "collision.")
+            + phase;
+        auto queueFor = [&](ecs::Entity target, ecs::Entity other, const glm::vec3& normal) {
+            if (target == ecs::kNull) return;
+            ScriptEvent event;
+            event.name = name;
+            event.sender = other;
+            event.target = target;
+            event.entities["other"] = other;
+            event.bools["trigger"] = collision.trigger;
+            event.vectors["point"] = collision.point;
+            event.vectors["normal"] = normal;
+            event.floats["impulse"] = collision.impulse;
+            QueueScriptEvent(registry, std::move(event));
+        };
+        queueFor(collision.a, collision.b, collision.normal);
+        queueFor(collision.b, collision.a, -collision.normal);
+    }
+}
+
+void Script::PublishEvent(ScriptEvent event) {
+    if (!m_context.registry || event.name.empty()) return;
+    if (event.sender == ecs::kNull) event.sender = m_context.entity;
+    QueueScriptEvent(*m_context.registry, std::move(event));
+}
+
+void Script::PublishEvent(const std::string& name, ecs::Entity target) {
+    ScriptEvent event;
+    event.name = name;
+    event.target = target;
+    PublishEvent(std::move(event));
+}
+
+bool Script::ListenForEvent(const std::string& name) {
+    return !name.empty() && m_listenedEvents.insert(name).second;
+}
+
+bool Script::StopListeningForEvent(const std::string& name) {
+    return m_listenedEvents.erase(name) != 0;
+}
+
+int Script::SubscribeEvent(const std::string& name,
+                           std::function<void(const ScriptEvent&)> callback) {
+    if (name.empty() || !callback) return 0;
+    const int id = m_nextEventSubscriptionId++;
+    m_eventSubscriptions.push_back(EventSubscription{id, name, std::move(callback)});
+    return id;
+}
+
+bool Script::UnsubscribeEvent(int subscriptionId) {
+    const auto oldSize = m_eventSubscriptions.size();
+    m_eventSubscriptions.erase(
+        std::remove_if(m_eventSubscriptions.begin(), m_eventSubscriptions.end(),
+            [subscriptionId](const EventSubscription& subscription) {
+                return subscription.id == subscriptionId;
+            }),
+        m_eventSubscriptions.end());
+    return oldSize != m_eventSubscriptions.size();
+}
+
+void Script::UnsubscribeAllEvents() {
+    m_listenedEvents.clear();
+    m_eventSubscriptions.clear();
+}
+
+bool Script::WantsEvent(const std::string& name) const {
+    if (m_listenedEvents.count(name) != 0 || m_listenedEvents.count("*") != 0) return true;
+    return std::any_of(m_eventSubscriptions.begin(), m_eventSubscriptions.end(),
+        [&name](const EventSubscription& subscription) {
+            return subscription.name == name || subscription.name == "*";
+        });
+}
+
+void Script::DispatchEvent(const ScriptEvent& event) {
+    if (m_listenedEvents.count(event.name) != 0 || m_listenedEvents.count("*") != 0)
+        OnEvent(event);
+
+    // Handlers may unsubscribe themselves. Copy matching functions first so those
+    // edits cannot invalidate the active callback iteration.
+    std::vector<std::function<void(const ScriptEvent&)>> callbacks;
+    for (const EventSubscription& subscription : m_eventSubscriptions) {
+        if (subscription.name == event.name || subscription.name == "*")
+            callbacks.push_back(subscription.callback);
+    }
+    for (const auto& callback : callbacks) callback(event);
+}
+
+ScriptHandle Script::FindScript(ecs::Entity entity,
+                                const std::string& className) const {
+    if (!m_context.registry || entity == ecs::kNull
+        || !m_context.registry->Valid(entity)) return {};
+    const NativeScriptComponent* component =
+        m_context.registry->TryGet<NativeScriptComponent>(entity);
+    if (!component) return {};
+    auto matches = [&className](const NativeScriptSlot& slot) {
+        return !slot.className.empty()
+            && (className.empty() || slot.className == className);
+    };
+    if (matches(*component)) return {entity, component->className};
+    for (const NativeScriptSlot& additional : component->additional)
+        if (matches(additional)) return {entity, additional.className};
+    return {};
+}
+
+ScriptHandle Script::FindScript(const std::string& objectName,
+                                const std::string& className) const {
+    return FindScript(FindObject(objectName), className);
+}
+
+bool Script::IsScriptValid(const ScriptHandle& handle) const {
+    if (!handle) return false;
+    const ScriptHandle resolved = FindScript(handle.entity, handle.className);
+    return resolved && resolved.className == handle.className;
+}
+
+bool Script::IsScriptEnabled(const ScriptHandle& handle) const {
+    if (!m_context.registry || !handle || !m_context.registry->Valid(handle.entity))
+        return false;
+    const NativeScriptComponent* component =
+        m_context.registry->TryGet<NativeScriptComponent>(handle.entity);
+    if (!component) return false;
+    auto enabled = [&handle](const NativeScriptSlot& slot) {
+        return slot.className == handle.className && slot.enabled;
+    };
+    if (enabled(*component)) return true;
+    return std::any_of(component->additional.begin(), component->additional.end(), enabled);
+}
+
+bool Script::SetScriptEnabled(const ScriptHandle& handle, bool enabled) {
+    if (!m_context.registry || !handle || !m_context.registry->Valid(handle.entity))
+        return false;
+    NativeScriptComponent* component =
+        m_context.registry->TryGet<NativeScriptComponent>(handle.entity);
+    if (!component) return false;
+    auto set = [&](NativeScriptSlot& slot) {
+        if (slot.className != handle.className) return false;
+        slot.enabled = enabled;
+        return true;
+    };
+    if (set(*component)) return true;
+    for (NativeScriptSlot& additional : component->additional)
+        if (set(additional)) return true;
+    return false;
+}
+
+bool Script::SetSelfEnabled(bool enabled) {
+    if (!m_context.registry || m_context.entity == ecs::kNull
+        || !m_context.registry->Valid(m_context.entity)) return false;
+    NativeScriptComponent* component =
+        m_context.registry->TryGet<NativeScriptComponent>(m_context.entity);
+    if (!component) return false;
+    auto set = [&](NativeScriptSlot& slot) {
+        if (slot.instance.get() != this) return false;
+        slot.enabled = enabled;
+        return true;
+    };
+    if (set(*component)) return true;
+    for (NativeScriptSlot& additional : component->additional)
+        if (set(additional)) return true;
+    return false;
+}
+
+bool Script::BindScriptFunction(const std::string& functionName,
+                                CallableFunction function) {
+    if (functionName.empty() || !function) return false;
+    m_scriptFunctions[functionName] = std::move(function);
+    return true;
+}
+
+bool Script::UnbindScriptFunction(const std::string& functionName) {
+    return m_scriptFunctions.erase(functionName) != 0;
+}
+
+bool Script::CallScript(const ScriptHandle& handle, const std::string& functionName,
+                        ScriptEvent arguments, ScriptEvent* result) {
+    return ScriptCallDispatcher::Invoke(
+        m_context, handle, functionName, std::move(arguments), result);
+}
+
+bool Script::InvokeScriptFunction(const std::string& functionName,
+                                  const ScriptEvent& arguments,
+                                  ScriptEvent& result) {
+    const auto bound = m_scriptFunctions.find(functionName);
+    if (bound != m_scriptFunctions.end() && bound->second(arguments, result)) return true;
+    return OnScriptCall(functionName, arguments, result);
+}
 
 ecs::Transform* Script::Transform() {
     return TryGet<ecs::Transform>();
@@ -803,8 +1096,63 @@ void Script::TickTimers(float dt) {
 }
 
 ScriptSequence& Script::Sequence() {
-    m_sequences.push_back(std::make_unique<ScriptSequence>());
+    if (m_nextSequenceId <= 0) m_nextSequenceId = 1;
+    m_sequences.push_back(std::make_unique<ScriptSequence>(m_nextSequenceId++));
     return *m_sequences.back();
+}
+
+ScriptSequence* Script::FindSequence(int handle) {
+    if (handle <= 0) return nullptr;
+    const auto found = std::find_if(m_sequences.begin(), m_sequences.end(),
+        [handle](const std::unique_ptr<ScriptSequence>& sequence) {
+            return sequence && sequence->Handle() == handle;
+        });
+    return found == m_sequences.end() ? nullptr : found->get();
+}
+
+const ScriptSequence* Script::FindSequence(int handle) const {
+    if (handle <= 0) return nullptr;
+    const auto found = std::find_if(m_sequences.begin(), m_sequences.end(),
+        [handle](const std::unique_ptr<ScriptSequence>& sequence) {
+            return sequence && sequence->Handle() == handle;
+        });
+    return found == m_sequences.end() ? nullptr : found->get();
+}
+
+bool Script::CancelSequence(int handle) {
+    ScriptSequence* sequence = FindSequence(handle);
+    if (!sequence || sequence->Done()) return false;
+    sequence->Cancel();
+    return true;
+}
+
+bool Script::PauseSequence(int handle) {
+    ScriptSequence* sequence = FindSequence(handle);
+    if (!sequence || sequence->Done() || sequence->Paused()) return false;
+    sequence->Pause();
+    return true;
+}
+
+bool Script::ResumeSequence(int handle) {
+    ScriptSequence* sequence = FindSequence(handle);
+    if (!sequence || sequence->Done() || !sequence->Paused()) return false;
+    sequence->Resume();
+    return true;
+}
+
+bool Script::IsSequenceActive(int handle) const {
+    const ScriptSequence* sequence = FindSequence(handle);
+    return sequence && !sequence->Done();
+}
+
+bool Script::IsSequencePaused(int handle) const {
+    const ScriptSequence* sequence = FindSequence(handle);
+    return sequence && sequence->Paused();
+}
+
+void Script::CancelAllSequences() {
+    for (const std::unique_ptr<ScriptSequence>& sequence : m_sequences)
+        if (sequence) sequence->Cancel();
 }
 
 bool Script::IsAnimationMovementLocked() const {
@@ -1163,6 +1511,96 @@ std::unique_ptr<Script> ScriptRegistry::Create(const std::string& className) con
     return it == m_factories.end() ? nullptr : it->second();
 }
 
+std::vector<std::string> ScriptRegistry::Names() const {
+    std::vector<std::string> names;
+    names.reserve(m_factories.size());
+    for (const auto& entry : m_factories) names.push_back(entry.first);
+    std::sort(names.begin(), names.end());
+    return names;
+}
+
+void ScriptRegistry::Remove(const std::string& className) {
+    m_factories.erase(className);
+}
+
+void ScriptRegistry::MergeFrom(ScriptRegistry&& other) {
+    for (auto& entry : other.m_factories) {
+        m_factories[entry.first] = std::move(entry.second);
+    }
+    other.m_factories.clear();
+}
+
+const char* ScriptCallbackKindName(ScriptCallbackKind callback) {
+    switch (callback) {
+    case ScriptCallbackKind::OnCreate: return "OnCreate";
+    case ScriptCallbackKind::OnEnable: return "OnEnable";
+    case ScriptCallbackKind::OnDisable: return "OnDisable";
+    case ScriptCallbackKind::OnFixedUpdate: return "OnFixedUpdate";
+    case ScriptCallbackKind::OnEvent: return "OnEvent";
+    case ScriptCallbackKind::OnScriptCall: return "OnScriptCall";
+    default: return "OnUpdate";
+    }
+}
+
+void SetScriptDebuggingEnabled(bool enabled) {
+    RuntimeScriptDebugger& debugger = ScriptDebugger();
+    debugger.enabled = enabled;
+    if (!enabled) {
+        debugger.paused = false;
+        debugger.stepRequested = false;
+        debugger.stopReason.clear();
+    }
+}
+
+void SetScriptExecutionPaused(bool paused) {
+    RuntimeScriptDebugger& debugger = ScriptDebugger();
+    debugger.paused = paused;
+    debugger.stepRequested = false;
+    debugger.stopReason = paused ? "Paused by user" : std::string();
+}
+
+void RequestScriptExecutionStep() {
+    RuntimeScriptDebugger& debugger = ScriptDebugger();
+    debugger.enabled = true;
+    debugger.paused = true;
+    debugger.stepRequested = true;
+    debugger.stopReason = "Waiting to step one callback";
+}
+
+void SetScriptCallbackBreakpoint(const std::string& className,
+                                 ScriptCallbackKind callback, bool enabled) {
+    RuntimeScriptDebugger& debugger = ScriptDebugger();
+    const std::string key = ScriptDebugKey(className, callback);
+    if (enabled && !className.empty()) debugger.breakpoints.insert(key);
+    else debugger.breakpoints.erase(key);
+}
+
+bool HasScriptCallbackBreakpoint(const std::string& className,
+                                 ScriptCallbackKind callback) {
+    return ScriptDebugger().breakpoints.count(ScriptDebugKey(className, callback)) != 0;
+}
+
+void ClearScriptCallbackBreakpoints() { ScriptDebugger().breakpoints.clear(); }
+void ClearScriptExecutionStatistics() { ScriptDebugger().statistics.clear(); }
+
+ScriptDebugState GetScriptDebugState() {
+    const RuntimeScriptDebugger& debugger = ScriptDebugger();
+    ScriptDebugState state;
+    state.enabled = debugger.enabled;
+    state.paused = debugger.paused;
+    state.stopReason = debugger.stopReason;
+    state.statistics.reserve(debugger.statistics.size());
+    for (const auto& entry : debugger.statistics) state.statistics.push_back(entry.second);
+    std::sort(state.statistics.begin(), state.statistics.end(),
+        [](const ScriptExecutionStat& a, const ScriptExecutionStat& b) {
+            if (a.maximumMilliseconds != b.maximumMilliseconds)
+                return a.maximumMilliseconds > b.maximumMilliseconds;
+            if (a.className != b.className) return a.className < b.className;
+            return static_cast<int>(a.callback) < static_cast<int>(b.callback);
+        });
+    return state;
+}
+
 namespace {
 
 std::function<void(const std::string&)>& ScriptErrorSink() {
@@ -1234,6 +1672,161 @@ void RunGuarded(NativeScriptSlot& script, Fn&& fn) {
 #endif
 }
 
+template <class Fn>
+bool RunDebugged(ecs::Entity entity, NativeScriptSlot& script,
+                 ScriptCallbackKind callback, Fn&& fn) {
+    RuntimeScriptDebugger& debugger = ScriptDebugger();
+    if (!debugger.enabled) {
+        RunGuarded(script, std::forward<Fn>(fn));
+        return true;
+    }
+
+    const bool stepping = debugger.paused && debugger.stepRequested;
+    if (debugger.paused && !stepping) return false;
+    if (stepping) debugger.stepRequested = false;
+
+    const auto start = std::chrono::high_resolution_clock::now();
+    RunGuarded(script, std::forward<Fn>(fn));
+    const double elapsed = std::chrono::duration<double, std::milli>(
+        std::chrono::high_resolution_clock::now() - start).count();
+    ScriptExecutionStat& stat = debugger.statistics[
+        ScriptStatKey(entity, script.className, callback)];
+    stat.entity = entity;
+    stat.className = script.className;
+    stat.callback = callback;
+    stat.lastMilliseconds = elapsed;
+    stat.maximumMilliseconds = std::max(stat.maximumMilliseconds, elapsed);
+    ++stat.callCount;
+    stat.averageMilliseconds += (elapsed - stat.averageMilliseconds)
+        / static_cast<double>(stat.callCount);
+
+    const bool hitBreakpoint = debugger.breakpoints.count(
+        ScriptDebugKey(script.className, callback)) != 0;
+    if (stepping || hitBreakpoint) {
+        debugger.paused = true;
+        debugger.stopReason = (stepping ? "Stepped " : "Breakpoint: ")
+            + script.className + "::" + ScriptCallbackKindName(callback)
+            + " on entity " + std::to_string(entity);
+    }
+    return true;
+}
+
+void ObserveHealthEvents(ecs::Registry& registry) {
+    auto& observed = g_observedHealth[&registry];
+    std::unordered_set<ecs::Entity> present;
+    registry.view<Health>().each([&](ecs::Entity entity, Health& health) {
+        present.insert(entity);
+        const bool alive = health.alive && health.hp > 0.0f;
+        const ObservedHealth current{health.hp, health.maxHp, alive};
+        const auto previous = observed.find(entity);
+        if (previous != observed.end()) {
+            auto emit = [&](const char* name) {
+                ScriptEvent event;
+                event.name = name;
+                event.target = entity;
+                event.floats["health"] = health.hp;
+                event.floats["maxHealth"] = health.maxHp;
+                event.floats["delta"] = health.hp - previous->second.hp;
+                QueueScriptEvent(registry, std::move(event));
+            };
+            if (health.hp < previous->second.hp) emit("health.damage");
+            else if (health.hp > previous->second.hp) emit("health.healed");
+            if (previous->second.alive && !alive) emit("health.death");
+            else if (!previous->second.alive && alive) emit("health.revived");
+        }
+        observed[entity] = current;
+    });
+    for (auto it = observed.begin(); it != observed.end();) {
+        if (present.count(it->first) == 0) it = observed.erase(it);
+        else ++it;
+    }
+}
+
+struct OrderedScriptSlot {
+    ecs::Entity entity = ecs::kNull;
+    NativeScriptSlot* slot = nullptr;
+    int attachmentIndex = 0;
+};
+
+std::vector<OrderedScriptSlot> BuildScriptExecutionOrder(ecs::Registry& registry) {
+    std::vector<OrderedScriptSlot> nodes;
+    registry.view<NativeScriptComponent>().each(
+        [&](ecs::Entity entity, NativeScriptComponent& component) {
+            nodes.push_back({entity, &component, 0});
+            for (std::size_t i = 0; i < component.additional.size(); ++i)
+                nodes.push_back({entity, &component.additional[i], static_cast<int>(i) + 1});
+        });
+    std::stable_sort(nodes.begin(), nodes.end(),
+        [](const OrderedScriptSlot& a, const OrderedScriptSlot& b) {
+            if (a.slot->executionOrder != b.slot->executionOrder)
+                return a.slot->executionOrder < b.slot->executionOrder;
+            if (a.entity != b.entity) return a.entity < b.entity;
+            return a.attachmentIndex < b.attachmentIndex;
+        });
+
+    std::unordered_map<std::string, std::vector<std::size_t>> providers;
+    for (std::size_t i = 0; i < nodes.size(); ++i) {
+        NativeScriptSlot& slot = *nodes[i].slot;
+        slot.dependencyError.clear();
+        if (slot.enabled && !slot.className.empty()) providers[slot.className].push_back(i);
+    }
+
+    std::vector<std::vector<std::size_t>> outgoing(nodes.size());
+    std::vector<int> indegree(nodes.size(), 0);
+    for (std::size_t i = 0; i < nodes.size(); ++i) {
+        NativeScriptSlot& slot = *nodes[i].slot;
+        if (!slot.enabled || slot.className.empty()) continue;
+        for (const std::string& dependency : slot.dependencies) {
+            if (dependency.empty()) continue;
+            const auto found = providers.find(dependency);
+            if (found == providers.end()) {
+                if (!slot.dependencyError.empty()) slot.dependencyError += ", ";
+                slot.dependencyError += "missing " + dependency;
+                continue;
+            }
+            for (const std::size_t provider : found->second) {
+                if (provider == i) continue;
+                outgoing[provider].push_back(i);
+                ++indegree[i];
+            }
+        }
+    }
+
+    std::vector<OrderedScriptSlot> ordered;
+    ordered.reserve(nodes.size());
+    std::vector<bool> emitted(nodes.size(), false);
+    while (ordered.size() < nodes.size()) {
+        std::size_t ready = nodes.size();
+        for (std::size_t i = 0; i < nodes.size(); ++i) {
+            if (!emitted[i] && indegree[i] == 0) { ready = i; break; }
+        }
+        if (ready == nodes.size()) break;
+        emitted[ready] = true;
+        ordered.push_back(nodes[ready]);
+        for (const std::size_t dependent : outgoing[ready]) --indegree[dependent];
+    }
+    if (ordered.size() != nodes.size()) {
+        for (std::size_t i = 0; i < nodes.size(); ++i) {
+            if (emitted[i]) continue;
+            if (!nodes[i].slot->dependencyError.empty())
+                nodes[i].slot->dependencyError += ", ";
+            nodes[i].slot->dependencyError += "circular dependency";
+            ordered.push_back(nodes[i]); // deterministic fallback for diagnostics
+        }
+    }
+    for (OrderedScriptSlot& node : nodes) {
+        NativeScriptSlot& slot = *node.slot;
+        if (slot.dependencyError != slot.reportedDependencyError) {
+            if (!slot.dependencyError.empty()) {
+                ReportScriptError("'" + slot.className + "' dependency error: "
+                                  + slot.dependencyError);
+            }
+            slot.reportedDependencyError = slot.dependencyError;
+        }
+    }
+    return ordered;
+}
+
 // Ensure the script has a live instance and has run OnCreate, and REFRESH its
 // context every call — destroyQueue/input are per-call, so the pointers captured
 // at creation time would otherwise dangle. Returns the instance, or nullptr if the
@@ -1268,10 +1861,89 @@ Script* PrepareScript(ecs::Registry& registry, ecs::Entity entity, NativeScriptS
         ScriptContext{&registry, entity, &destroyQueue, input, audio, cameraShake,
                       cameraDirector, &script.fields, gameMode, nullptr, physics});
     if (!script.created) {
-        RunGuarded(script, [&] { script.instance->OnCreate(); });
+        if (!RunDebugged(entity, script, ScriptCallbackKind::OnCreate,
+                [&] { script.instance->OnCreate(); })) {
+            return nullptr;
+        }
         script.created = true;
+        if (script.enabled && script.restoreReloadState) {
+            RunGuarded(script, [&] { script.instance->OnAfterHotReload(script.reloadState); });
+            script.reloadState.clear();
+            script.restoreReloadState = false;
+        }
+    }
+    if (script.enabled && script.created && script.restorePersistentState) {
+        RunGuarded(script, [&] {
+            script.instance->OnLoadState(
+                script.persistentStateVersion, script.persistentState);
+        });
+        script.persistentState.clear();
+        script.restorePersistentState = false;
     }
     return script.enabled ? script.instance.get() : nullptr;
+}
+
+bool ScriptDependenciesReady(const NativeScriptSlot& slot,
+                             const std::vector<OrderedScriptSlot>& ordered) {
+    for (const std::string& dependency : slot.dependencies) {
+        if (dependency.empty() || dependency == slot.className) continue;
+        const bool ready = std::any_of(ordered.begin(), ordered.end(),
+            [&dependency](const OrderedScriptSlot& candidate) {
+                return candidate.slot->enabled && candidate.slot->active
+                    && candidate.slot->className == dependency
+                    && candidate.slot->created && candidate.slot->instance;
+            });
+        if (!ready) return false;
+    }
+    return true;
+}
+
+void SetRuntimeScriptContext(ecs::Registry& registry, ecs::Entity entity,
+                             NativeScriptSlot& slot,
+                             std::vector<ecs::Entity>* destroyQueue,
+                             const ScriptInputState* input,
+                             RuntimeAudioSystem* audio, CameraShake* cameraShake,
+                             CameraDirector* cameraDirector, GameMode* gameMode,
+                             PhysicsWorld* physics) {
+    if (!slot.instance) return;
+    slot.instance->SetContext(
+        ScriptContext{&registry, entity, destroyQueue, input, audio, cameraShake,
+                      cameraDirector, &slot.fields, gameMode, nullptr, physics});
+}
+
+void DeactivateScript(ecs::Registry& registry, ecs::Entity entity,
+                      NativeScriptSlot& slot,
+                      std::vector<ecs::Entity>* destroyQueue = nullptr,
+                      const ScriptInputState* input = nullptr,
+                      RuntimeAudioSystem* audio = nullptr,
+                      CameraShake* cameraShake = nullptr,
+                      CameraDirector* cameraDirector = nullptr,
+                      GameMode* gameMode = nullptr,
+                      PhysicsWorld* physics = nullptr) {
+    if (!slot.active || !slot.instance || !slot.created) {
+        slot.active = false;
+        return;
+    }
+    SetRuntimeScriptContext(registry, entity, slot, destroyQueue, input, audio,
+                            cameraShake, cameraDirector, gameMode, physics);
+    RunDebugged(entity, slot, ScriptCallbackKind::OnDisable,
+                [&] { slot.instance->OnDisable(); });
+    slot.active = false;
+}
+
+// Teardown cannot be paused by the callback debugger: once destruction has been
+// committed, OnDisable must run before the instance and its module-owned vtable
+// disappear.
+void ForceDeactivateScript(ecs::Registry& registry, ecs::Entity entity,
+                           NativeScriptSlot& slot) {
+    if (!slot.active || !slot.instance || !slot.created) {
+        slot.active = false;
+        return;
+    }
+    SetRuntimeScriptContext(registry, entity, slot, nullptr, nullptr, nullptr,
+                            nullptr, nullptr, nullptr, nullptr);
+    RunGuarded(slot, [&] { slot.instance->OnDisable(); });
+    slot.active = false;
 }
 
 // Destroy queued entities, giving each scripted entity an OnDestroy() first.
@@ -1281,10 +1953,12 @@ void FlushDestroyQueue(ecs::Registry& registry, const std::vector<ecs::Entity>& 
             continue;
         }
         if (NativeScriptComponent* script = registry.TryGet<NativeScriptComponent>(entity)) {
+            ForceDeactivateScript(registry, entity, *script);
             if (script->instance && script->created) {
                 RunGuarded(*script, [&] { script->instance->OnDestroy(); });
             }
             for (NativeScriptSlot& additional : script->additional) {
+                ForceDeactivateScript(registry, entity, additional);
                 if (additional.instance && additional.created) {
                     RunGuarded(additional, [&] { additional.instance->OnDestroy(); });
                 }
@@ -1296,6 +1970,87 @@ void FlushDestroyQueue(ecs::Registry& registry, const std::vector<ecs::Entity>& 
 
 } // namespace
 
+void ScriptEventDispatcher::Dispatch(
+    ecs::Registry& registry, std::vector<ecs::Entity>& destroyQueue,
+    const ScriptInputState* input, RuntimeAudioSystem* audio,
+    CameraShake* cameraShake, CameraDirector* cameraDirector,
+    GameMode* gameMode, PhysicsWorld* physics) {
+    std::vector<ScriptEvent> pending;
+    for (auto it = g_scriptEvents.begin(); it != g_scriptEvents.end();) {
+        if (it->registry == &registry) {
+            pending.push_back(std::move(it->event));
+            it = g_scriptEvents.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    for (const ScriptEvent& event : pending) {
+        for (const OrderedScriptSlot& node : BuildScriptExecutionOrder(registry)) {
+            NativeScriptSlot& slot = *node.slot;
+            if (event.target != ecs::kNull && event.target != node.entity) continue;
+            if (!slot.enabled || !slot.active || !slot.created || !slot.instance
+                || !slot.dependencyError.empty()
+                || !slot.instance->WantsEvent(event.name)) continue;
+            slot.instance->SetContext(
+                ScriptContext{&registry, node.entity, &destroyQueue, input, audio,
+                              cameraShake, cameraDirector, &slot.fields, gameMode,
+                              nullptr, physics});
+            RunDebugged(node.entity, slot, ScriptCallbackKind::OnEvent,
+                [&] { slot.instance->DispatchEvent(event); });
+        }
+    }
+}
+
+bool ScriptCallDispatcher::Invoke(
+    const ScriptContext& caller, const ScriptHandle& handle,
+    const std::string& functionName, ScriptEvent arguments, ScriptEvent* result) {
+    if (!caller.registry || !handle || functionName.empty()
+        || !caller.registry->Valid(handle.entity)) return false;
+    NativeScriptComponent* component =
+        caller.registry->TryGet<NativeScriptComponent>(handle.entity);
+    if (!component) return false;
+    NativeScriptSlot* target = nullptr;
+    auto choose = [&](NativeScriptSlot& slot) {
+        if (!target && slot.enabled && slot.className == handle.className) target = &slot;
+    };
+    choose(*component);
+    for (NativeScriptSlot& additional : component->additional) choose(additional);
+        if (!target || !target->active || !target->created || !target->instance
+        || !target->dependencyError.empty()) return false;
+
+    thread_local std::vector<std::string> activeCalls;
+    const std::string callKey = std::to_string(handle.entity) + '#'
+        + handle.className + '#' + functionName;
+    if (activeCalls.size() >= 32
+        || std::find(activeCalls.begin(), activeCalls.end(), callKey) != activeCalls.end()) {
+        ReportScriptError("Blocked recursive script call: " + handle.className
+                          + "::" + functionName);
+        return false;
+    }
+
+    if (arguments.name.empty()) arguments.name = functionName;
+    if (arguments.sender == ecs::kNull) arguments.sender = caller.entity;
+    arguments.target = handle.entity;
+    ScriptEvent callResult;
+    callResult.name = functionName + ".result";
+    callResult.sender = handle.entity;
+    callResult.target = caller.entity;
+    bool handled = false;
+    activeCalls.push_back(callKey);
+    target->instance->SetContext(
+        ScriptContext{caller.registry, handle.entity, caller.destroyQueue, caller.input,
+                      caller.audio, caller.cameraShake, caller.cameraDirector,
+                      &target->fields, caller.gameMode, caller.sceneLoadRequest,
+                      caller.physics});
+    const bool ran = RunDebugged(handle.entity, *target, ScriptCallbackKind::OnScriptCall,
+        [&] { handled = target->instance->InvokeScriptFunction(
+            functionName, arguments, callResult); });
+    activeCalls.pop_back();
+    if (ran && handled && result) *result = std::move(callResult);
+    return ran && handled;
+}
+
 void UpdateScripts(ecs::Registry& registry, float dt, const ScriptInputState* input,
                    RuntimeAudioSystem* audio, CameraShake* cameraShake,
                    CameraDirector* cameraDirector, GameMode* gameMode,
@@ -1303,21 +2058,36 @@ void UpdateScripts(ecs::Registry& registry, float dt, const ScriptInputState* in
     thread_local std::vector<ecs::Entity> destroyQueueStorage;
     auto& destroyQueue = destroyQueueStorage;
     destroyQueue.clear();
-    registry.view<NativeScriptComponent>().each(
-        [&](ecs::Entity entity, NativeScriptComponent& script) {
-            auto update = [&](NativeScriptSlot& slot) {
-                if (Script* instance = PrepareScript(
-                        registry, entity, slot, destroyQueue, input, audio,
-                        cameraShake, cameraDirector, gameMode, physics)) {
-                    RunGuarded(slot, [&] {
-                        instance->TickTimers(dt);
-                        instance->OnUpdate(dt);
-                    });
-                }
-            };
-            update(script);
-            for (NativeScriptSlot& additional : script.additional) update(additional);
-        });
+    ObserveHealthEvents(registry);
+    const std::vector<OrderedScriptSlot> ordered = BuildScriptExecutionOrder(registry);
+    for (const OrderedScriptSlot& node : ordered) {
+        NativeScriptSlot& slot = *node.slot;
+        const bool shouldBeActive = slot.enabled && slot.dependencyError.empty()
+            && ScriptDependenciesReady(slot, ordered);
+        if (!shouldBeActive) {
+            DeactivateScript(registry, node.entity, slot, &destroyQueue, input, audio,
+                             cameraShake, cameraDirector, gameMode, physics);
+            continue;
+        }
+        if (Script* instance = PrepareScript(
+                registry, node.entity, slot, destroyQueue, input, audio,
+                cameraShake, cameraDirector, gameMode, physics)) {
+            if (!slot.active) {
+                if (!RunDebugged(node.entity, slot, ScriptCallbackKind::OnEnable,
+                        [&] { instance->OnEnable(); })) continue;
+                slot.active = true;
+            }
+            // OnCreate/OnEnable may safely request deactivation. The matching
+            // OnDisable is delivered at the next callback boundary.
+            if (!slot.enabled || !slot.active) continue;
+            RunDebugged(node.entity, slot, ScriptCallbackKind::OnUpdate, [&] {
+                instance->TickTimers(dt);
+                instance->OnUpdate(dt);
+            });
+        }
+    }
+    ScriptEventDispatcher::Dispatch(registry, destroyQueue, input, audio, cameraShake,
+                                    cameraDirector, gameMode, physics);
     FlushDestroyQueue(registry, destroyQueue);
 }
 
@@ -1328,20 +2098,26 @@ void FixedUpdateScripts(ecs::Registry& registry, float dt, const ScriptInputStat
     thread_local std::vector<ecs::Entity> destroyQueueStorage;
     auto& destroyQueue = destroyQueueStorage;
     destroyQueue.clear();
-    registry.view<NativeScriptComponent>().each(
-        [&](ecs::Entity entity, NativeScriptComponent& script) {
-            auto fixedUpdate = [&](NativeScriptSlot& slot) {
-                // Creation + OnCreate happen in UpdateScripts; only run live scripts.
-                if (!slot.enabled || !slot.instance || !slot.created) return;
-                slot.instance->SetContext(
-                    ScriptContext{&registry, entity, &destroyQueue, input, audio,
-                                  cameraShake, cameraDirector, &slot.fields, gameMode,
-                                  nullptr, physics});
-                RunGuarded(slot, [&] { slot.instance->OnFixedUpdate(dt); });
-            };
-            fixedUpdate(script);
-            for (NativeScriptSlot& additional : script.additional) fixedUpdate(additional);
-        });
+    const std::vector<OrderedScriptSlot> ordered = BuildScriptExecutionOrder(registry);
+    for (const OrderedScriptSlot& node : ordered) {
+        NativeScriptSlot& slot = *node.slot;
+        const bool shouldBeActive = slot.enabled && slot.dependencyError.empty()
+            && ScriptDependenciesReady(slot, ordered);
+        if (!shouldBeActive) {
+            DeactivateScript(registry, node.entity, slot, &destroyQueue, input, audio,
+                             cameraShake, cameraDirector, gameMode, physics);
+            continue;
+        }
+        // Creation + OnCreate/OnEnable happen in UpdateScripts; fixed update only
+        // runs fully active scripts.
+        if (!slot.active || !slot.instance || !slot.created) continue;
+        slot.instance->SetContext(
+            ScriptContext{&registry, node.entity, &destroyQueue, input, audio,
+                          cameraShake, cameraDirector, &slot.fields, gameMode,
+                          nullptr, physics});
+        RunDebugged(node.entity, slot, ScriptCallbackKind::OnFixedUpdate,
+            [&] { slot.instance->OnFixedUpdate(dt); });
+    }
     FlushDestroyQueue(registry, destroyQueue);
 }
 
@@ -1349,6 +2125,7 @@ void ShutdownScripts(ecs::Registry& registry) {
     registry.view<NativeScriptComponent>().each(
         [&](ecs::Entity entity, NativeScriptComponent& script) {
             auto shutdown = [&](NativeScriptSlot& slot) {
+                ForceDeactivateScript(registry, entity, slot);
                 if (slot.instance && slot.created) {
                     // No destroy queue / input during teardown.
                     slot.instance->SetContext(
@@ -1358,9 +2135,48 @@ void ShutdownScripts(ecs::Registry& registry) {
                 }
                 slot.instance.reset();
                 slot.created = false;
+                slot.active = false;
             };
             shutdown(script);
             for (NativeScriptSlot& additional : script.additional) shutdown(additional);
+        });
+    g_scriptEvents.erase(
+        std::remove_if(g_scriptEvents.begin(), g_scriptEvents.end(),
+            [&registry](const QueuedScriptEvent& queued) {
+                return queued.registry == &registry;
+            }),
+        g_scriptEvents.end());
+    g_observedHealth.erase(&registry);
+}
+
+void PrepareScriptsForHotReload(ecs::Registry& registry) {
+    registry.view<NativeScriptComponent>().each(
+        [&](ecs::Entity entity, NativeScriptComponent& script) {
+            auto capture = [&](NativeScriptSlot& slot) {
+                slot.reloadState.clear();
+                slot.restoreReloadState = false;
+                if (slot.instance && slot.created) {
+                    slot.instance->SetContext(
+                        ScriptContext{&registry, entity, nullptr, nullptr, nullptr,
+                                      nullptr, nullptr, &slot.fields});
+                    RunGuarded(slot, [&] {
+                        slot.instance->OnBeforeHotReload(slot.reloadState);
+                    });
+                    // Deliver the callback even when the old instance stored no keys; a
+                    // replacement may use the hook simply to rebind external resources.
+                    slot.restoreReloadState = true;
+                }
+            };
+            capture(script);
+            for (NativeScriptSlot& additional : script.additional) capture(additional);
+        });
+    ShutdownScripts(registry);
+    registry.view<NativeScriptComponent>().each(
+        [](ecs::Entity, NativeScriptComponent& script) {
+            script.missingFactory = false;
+            for (NativeScriptSlot& additional : script.additional) {
+                additional.missingFactory = false;
+            }
         });
 }
 
@@ -1370,6 +2186,7 @@ void ShutdownScripts(ecs::Registry& registry, const std::vector<ecs::Entity>& en
         NativeScriptComponent* script = registry.TryGet<NativeScriptComponent>(entity);
         if (!script) continue;
         auto shutdown = [&](NativeScriptSlot& slot) {
+            ForceDeactivateScript(registry, entity, slot);
             if (slot.instance && slot.created) {
                 slot.instance->SetContext(
                     ScriptContext{&registry, entity, nullptr, nullptr, nullptr,
@@ -1378,10 +2195,266 @@ void ShutdownScripts(ecs::Registry& registry, const std::vector<ecs::Entity>& en
             }
             slot.instance.reset();
             slot.created = false;
+            slot.active = false;
         };
         shutdown(*script);
         for (NativeScriptSlot& additional : script->additional) shutdown(additional);
     }
+}
+
+namespace {
+
+std::string EncodeScriptStateSegment(const std::string& value) {
+    static constexpr char kHex[] = "0123456789ABCDEF";
+    std::string encoded;
+    encoded.reserve(value.size() * 2);
+    for (const unsigned char byte : value) {
+        encoded.push_back(kHex[byte >> 4]);
+        encoded.push_back(kHex[byte & 0x0F]);
+    }
+    return encoded;
+}
+
+int HexDigit(char value) {
+    if (value >= '0' && value <= '9') return value - '0';
+    if (value >= 'A' && value <= 'F') return value - 'A' + 10;
+    if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+    return -1;
+}
+
+std::string DecodeScriptStateSegment(const std::string& value) {
+    if ((value.size() & 1u) != 0u) return {};
+    std::string decoded;
+    decoded.reserve(value.size() / 2);
+    for (std::size_t i = 0; i < value.size(); i += 2) {
+        const int high = HexDigit(value[i]);
+        const int low = HexDigit(value[i + 1]);
+        if (high < 0 || low < 0) return {};
+        decoded.push_back(static_cast<char>((high << 4) | low));
+    }
+    return decoded;
+}
+
+std::string ScriptStateBase(const std::string& entityName,
+                            const NativeScriptSlot& slot, std::size_t slotIndex) {
+    return "__3dg_script_state|" + EncodeScriptStateSegment(entityName) + '|'
+        + EncodeScriptStateSegment(slot.className) + '|'
+        + std::to_string(slotIndex) + '|';
+}
+
+} // namespace
+
+void CaptureScriptPersistentStatesImpl(
+    ecs::Registry& registry,
+    std::unordered_map<std::string, std::string>& values,
+    const std::unordered_set<ecs::Entity>* filter) {
+    registry.view<ecs::RuntimeName, NativeScriptComponent>().each(
+        [&](ecs::Entity entity, ecs::RuntimeName& runtimeName,
+            NativeScriptComponent& component) {
+            if (filter && filter->count(entity) == 0) return;
+            if (runtimeName.value.empty()) return;
+            auto capture = [&](NativeScriptSlot& slot, std::size_t slotIndex) {
+                if (slot.className.empty()) return;
+                const std::string base =
+                    ScriptStateBase(runtimeName.value, slot, slotIndex);
+                for (auto it = values.begin(); it != values.end();) {
+                    if (it->first.rfind(base, 0) == 0) it = values.erase(it);
+                    else ++it;
+                }
+
+                Script::StateMap state;
+                int version = std::max(slot.persistentStateVersion, 1);
+                bool available = false;
+                if (slot.instance && slot.created) {
+                    slot.instance->SetContext(
+                        ScriptContext{&registry, entity, nullptr, nullptr, nullptr,
+                                      nullptr, nullptr, &slot.fields});
+                    RunGuarded(slot, [&] {
+                        version = std::max(slot.instance->PersistentStateVersion(), 0);
+                        if (version > 0) {
+                            slot.instance->OnSaveState(state);
+                            available = true;
+                        }
+                    });
+                } else if (slot.restorePersistentState) {
+                    state = slot.persistentState;
+                    available = true;
+                }
+                if (!available) return;
+
+                values[base + 'v'] = std::to_string(version);
+                for (const auto& field : state)
+                    values[base + "f|" + EncodeScriptStateSegment(field.first)] = field.second;
+            };
+            capture(component, 0);
+            for (std::size_t i = 0; i < component.additional.size(); ++i)
+                capture(component.additional[i], i + 1);
+        });
+}
+
+void RestoreScriptPersistentStatesImpl(
+    ecs::Registry& registry,
+    const std::unordered_map<std::string, std::string>& values,
+    const std::unordered_set<ecs::Entity>* filter) {
+    registry.view<ecs::RuntimeName, NativeScriptComponent>().each(
+        [&](ecs::Entity entity, ecs::RuntimeName& runtimeName,
+            NativeScriptComponent& component) {
+            if (filter && filter->count(entity) == 0) return;
+            if (runtimeName.value.empty()) return;
+            auto restore = [&](NativeScriptSlot& slot, std::size_t slotIndex) {
+                if (slot.className.empty()) return;
+                const std::string base =
+                    ScriptStateBase(runtimeName.value, slot, slotIndex);
+                const auto version = values.find(base + 'v');
+                if (version == values.end()) return; // old save or non-persistent script
+                try {
+                    slot.persistentStateVersion = std::max(std::stoi(version->second), 1);
+                } catch (...) {
+                    slot.persistentStateVersion = 1;
+                }
+                slot.persistentState.clear();
+                const std::string fieldPrefix = base + "f|";
+                for (const auto& value : values) {
+                    if (value.first.rfind(fieldPrefix, 0) != 0) continue;
+                    const std::string name = DecodeScriptStateSegment(
+                        value.first.substr(fieldPrefix.size()));
+                    if (!name.empty()) slot.persistentState[name] = value.second;
+                }
+                slot.restorePersistentState = true;
+            };
+            restore(component, 0);
+            for (std::size_t i = 0; i < component.additional.size(); ++i)
+                restore(component.additional[i], i + 1);
+        });
+}
+
+void CaptureScriptPersistentStates(
+    ecs::Registry& registry,
+    std::unordered_map<std::string, std::string>& values) {
+    CaptureScriptPersistentStatesImpl(registry, values, nullptr);
+}
+
+void CaptureScriptPersistentStates(
+    ecs::Registry& registry, const std::vector<ecs::Entity>& entities,
+    std::unordered_map<std::string, std::string>& values) {
+    const std::unordered_set<ecs::Entity> filter(entities.begin(), entities.end());
+    CaptureScriptPersistentStatesImpl(registry, values, &filter);
+}
+
+void RestoreScriptPersistentStates(
+    ecs::Registry& registry,
+    const std::unordered_map<std::string, std::string>& values) {
+    RestoreScriptPersistentStatesImpl(registry, values, nullptr);
+}
+
+void RestoreScriptPersistentStates(
+    ecs::Registry& registry, const std::vector<ecs::Entity>& entities,
+    const std::unordered_map<std::string, std::string>& values) {
+    const std::unordered_set<ecs::Entity> filter(entities.begin(), entities.end());
+    RestoreScriptPersistentStatesImpl(registry, values, &filter);
+}
+
+std::vector<ScriptTestResult> RunScriptTests(
+    const std::vector<std::string>& luaSourcePaths) {
+    struct Source {
+        std::string suite;
+        std::function<std::unique_ptr<Script>()> create;
+    };
+    std::vector<Source> sources;
+    for (const std::string& className : ScriptRegistry::Instance().Names()) {
+        sources.push_back(Source{className, [className] {
+            return ScriptRegistry::Instance().Create(className);
+        }});
+    }
+    for (const std::string& path : luaSourcePaths) {
+        if (!IsLuaScriptPath(path)) continue;
+        const std::filesystem::path sourcePath(path);
+        sources.push_back(Source{
+            sourcePath.stem().string().empty() ? path : sourcePath.stem().string(),
+            [path] { return std::make_unique<LuaScript>(path); }});
+    }
+
+    std::vector<ScriptTestResult> results;
+    for (const Source& source : sources) {
+        std::vector<std::string> testNames;
+        try {
+            std::unique_ptr<Script> discovery = source.create();
+            if (!discovery) continue;
+            ScriptTestSuite suite;
+            discovery->DefineTests(suite);
+            for (const ScriptTestSuite::TestCase& test : suite.Tests())
+                testNames.push_back(test.name);
+        } catch (const std::exception& error) {
+            results.push_back(ScriptTestResult{
+                source.suite, "Discovery", false, 0, 0.0,
+                {std::string("Test discovery failed: ") + error.what()}});
+            continue;
+        } catch (...) {
+            results.push_back(ScriptTestResult{
+                source.suite, "Discovery", false, 0, 0.0,
+                {"Test discovery failed with an unknown exception"}});
+            continue;
+        }
+
+        for (const std::string& testName : testNames) {
+            ScriptTestResult result;
+            result.suite = source.suite;
+            result.name = testName;
+            const auto start = std::chrono::high_resolution_clock::now();
+            std::unique_ptr<ecs::Registry> isolatedRegistry;
+            try {
+                std::unique_ptr<Script> script = source.create();
+                if (!script) throw std::runtime_error("Could not create test script");
+                isolatedRegistry = std::make_unique<ecs::Registry>();
+                const ecs::Entity entity = isolatedRegistry->Create();
+                isolatedRegistry->Add<ecs::RuntimeName>(
+                    entity, ecs::RuntimeName{"ScriptTestEntity"});
+                isolatedRegistry->Add<ecs::Transform>(entity);
+                std::vector<ecs::Entity> destroyQueue;
+                script->SetContext(
+                    ScriptContext{isolatedRegistry.get(), entity, &destroyQueue});
+
+                ScriptTestSuite suite;
+                script->DefineTests(suite);
+                const auto test = std::find_if(
+                    suite.Tests().begin(), suite.Tests().end(),
+                    [&testName](const ScriptTestSuite::TestCase& candidate) {
+                        return candidate.name == testName;
+                    });
+                if (test == suite.Tests().end())
+                    throw std::runtime_error("Test disappeared during isolated discovery");
+                ScriptTestContext context;
+                test->function(context);
+                result.assertions = context.AssertionCount();
+                result.failures = context.Failures();
+                result.passed = context.Passed();
+            } catch (const std::exception& error) {
+                result.passed = false;
+                result.failures.push_back(error.what());
+            } catch (...) {
+                result.passed = false;
+                result.failures.push_back("Unknown exception");
+            }
+            if (isolatedRegistry) {
+                ecs::Registry* registry = isolatedRegistry.get();
+                g_scriptEvents.erase(
+                    std::remove_if(g_scriptEvents.begin(), g_scriptEvents.end(),
+                        [registry](const QueuedScriptEvent& event) {
+                            return event.registry == registry;
+                        }),
+                    g_scriptEvents.end());
+                g_observedHealth.erase(registry);
+            }
+            result.milliseconds = std::chrono::duration<double, std::milli>(
+                std::chrono::high_resolution_clock::now() - start).count();
+            results.push_back(std::move(result));
+        }
+    }
+    std::sort(results.begin(), results.end(),
+        [](const ScriptTestResult& a, const ScriptTestResult& b) {
+            return a.suite != b.suite ? a.suite < b.suite : a.name < b.name;
+        });
+    return results;
 }
 
 std::string ConsumeScriptSceneLoadRequest() {

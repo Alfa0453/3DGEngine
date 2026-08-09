@@ -1,5 +1,6 @@
 #include "ArrayToolPanel.h"
 
+#include "EditorPanels.h"
 #include "EditorScene.h"
 
 #include <engine/math/Spline.h>
@@ -23,7 +24,7 @@ glm::quat FaceDirection(const glm::vec3& direction, glm::vec3 up) {
 
 ArrayToolPanel::Result ArrayToolPanel::Draw(const EditorScene& scene, bool* open) {
     Result result;
-    if (!ImGui::Begin("Smart Duplicate & Array", open)) { ImGui::End(); return result; }
+    if (!ImGui::Begin(EditorPanels::Name(EditorPanels::Panel::ArrayTool), open)) { ImGui::End(); return result; }
 
     const EditorScene::Object* selected = scene.SelectedObject();
     ImGui::Text("Source: %s", selected ? selected->name.c_str() : "Select a scene object");

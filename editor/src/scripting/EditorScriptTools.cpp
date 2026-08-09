@@ -1,8 +1,10 @@
 #include "EditorScriptTools.h"
 
+#include <algorithm>
 #include <fstream>
 #include <cstdint>
 #include <sstream>
+#include <utility>
 
 #if defined(_WIN32)
 #define NOMINMAX
@@ -23,6 +25,44 @@ std::string ReadFile(const std::filesystem::path& path) {
 std::wstring Quote(const std::filesystem::path& path) {
     return L"\"" + path.wstring() + L"\"";
 }
+
+bool RunCommand(std::wstring command, const std::filesystem::path& workingDirectory,
+                const std::filesystem::path& logPath, bool append,
+                DWORD* exitCode, std::string* error) {
+    std::error_code ec;
+    std::filesystem::create_directories(logPath.parent_path(), ec);
+    HANDLE log = CreateFileW(logPath.wstring().c_str(), GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+        append ? OPEN_ALWAYS : CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (log == INVALID_HANDLE_VALUE) {
+        if (error) *error = "Could not open build log: " + logPath.string();
+        return false;
+    }
+    if (append) SetFilePointer(log, 0, nullptr, FILE_END);
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    startup.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    startup.wShowWindow = SW_HIDE;
+    startup.hStdOutput = log;
+    startup.hStdError = log;
+    startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    PROCESS_INFORMATION process{};
+    const BOOL launched = CreateProcessW(nullptr, command.data(), nullptr, nullptr,
+        TRUE, CREATE_NO_WINDOW, nullptr, workingDirectory.wstring().c_str(),
+        &startup, &process);
+    CloseHandle(log);
+    if (!launched) {
+        if (error) *error = "Could not start the build process.";
+        return false;
+    }
+    WaitForSingleObject(process.hProcess, INFINITE);
+    DWORD code = 1;
+    GetExitCodeProcess(process.hProcess, &code);
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+    if (exitCode) *exitCode = code;
+    return true;
+}
 #endif
 
 } // namespace
@@ -33,22 +73,33 @@ bool OpenExternalEditor(PreferredCodeEditor editor,
                         const std::string& customExecutable,
                         const std::filesystem::path& scriptPath,
                         const std::filesystem::path& projectRoot,
-                        std::string* error) {
+                        std::string* error, int line, int column) {
 #if defined(_WIN32)
     std::wstring executable;
     std::wstring arguments;
     switch (editor) {
     case PreferredCodeEditor::VisualStudioCode:
         executable = L"code.cmd";
-        arguments = L"-g " + Quote(scriptPath);
+        if (line > 0) {
+            std::filesystem::path target = scriptPath.wstring() + L":"
+                + std::to_wstring(line) + L":" + std::to_wstring(std::max(column, 1));
+            arguments = L"-g " + Quote(target);
+        } else {
+            arguments = L"-g " + Quote(scriptPath);
+        }
         break;
     case PreferredCodeEditor::VisualStudio:
         executable = L"devenv";
         arguments = L"/Edit " + Quote(scriptPath);
+        if (line > 0) {
+            arguments += L" /Command \"Edit.Goto " + std::to_wstring(line) + L"\"";
+        }
         break;
     case PreferredCodeEditor::Rider:
         executable = L"rider64.exe";
-        arguments = Quote(scriptPath);
+        arguments = line > 0
+            ? L"--line " + std::to_wstring(line) + L" " + Quote(scriptPath)
+            : Quote(scriptPath);
         break;
     case PreferredCodeEditor::Custom:
         executable.assign(customExecutable.begin(), customExecutable.end());
@@ -74,6 +125,7 @@ bool OpenExternalEditor(PreferredCodeEditor editor,
     return true;
 #else
     (void)editor; (void)customExecutable; (void)scriptPath; (void)projectRoot;
+    (void)line; (void)column;
     if (error) *error = "External editor launching is not implemented on this platform.";
     return false;
 #endif
@@ -128,42 +180,35 @@ bool BuildTarget(const std::filesystem::path& projectRoot,
                  const std::string& target,
                  std::string* error) {
 #if defined(_WIN32)
-    const std::filesystem::path buildDir = projectRoot / "build";
-    const std::filesystem::path logPath = buildDir / "target_build.log";
-    HANDLE log = CreateFileW(logPath.wstring().c_str(), GENERIC_WRITE,
-        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, CREATE_ALWAYS,
-        FILE_ATTRIBUTE_NORMAL, nullptr);
+    const std::filesystem::path sourceDir = EngineSourceDirectory();
+    const std::filesystem::path buildDir = EngineBuildDirectory();
+    const std::filesystem::path logPath = projectRoot / "Intermediate" / "Scripts"
+        / (target == "game_scripts" ? "script_compile.log" : "target_build.log");
+    if (sourceDir.empty() || buildDir.empty()) {
+        if (error) *error = "Engine source/build location is unavailable.";
+        return false;
+    }
+
+    std::wstring configure = L"cmake -S " + Quote(sourceDir) + L" -B " + Quote(buildDir)
+        + L" -DTHREEDG_ACTIVE_PROJECT_ROOT=" + Quote(projectRoot);
+    DWORD configureExit = 1;
+    if (!RunCommand(std::move(configure), sourceDir, logPath, false,
+                    &configureExit, error) || configureExit != 0) {
+        if (error && error->empty()) {
+            *error = "CMake configuration failed; see " + logPath.string();
+        }
+        return false;
+    }
 
     std::wstring command = L"cmake --build \"" + buildDir.wstring()
         + L"\" --config \"" + std::wstring(configuration.begin(), configuration.end())
         + L"\" --target " + std::wstring(target.begin(), target.end()) + L" -- /m";
-
-    STARTUPINFOW startup{};
-    startup.cb = sizeof(startup);
-    if (log != INVALID_HANDLE_VALUE) {
-        startup.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
-        startup.wShowWindow = SW_HIDE;
-        startup.hStdOutput = log;
-        startup.hStdError = log;
-        startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
-    }
-    PROCESS_INFORMATION process{};
-    std::wstring mutableCommand = command;
-    const BOOL launched = CreateProcessW(nullptr, mutableCommand.data(), nullptr, nullptr,
-        TRUE, CREATE_NO_WINDOW, nullptr, projectRoot.wstring().c_str(), &startup, &process);
-    if (log != INVALID_HANDLE_VALUE) CloseHandle(log);
-    if (!launched) {
-        if (error) *error = "Could not start cmake to build target: " + target;
-        return false;
-    }
-    WaitForSingleObject(process.hProcess, INFINITE);
     DWORD exitCode = 1;
-    GetExitCodeProcess(process.hProcess, &exitCode);
-    CloseHandle(process.hThread);
-    CloseHandle(process.hProcess);
+    if (!RunCommand(std::move(command), projectRoot, logPath, true,
+                    &exitCode, error)) return false;
     if (exitCode != 0) {
         if (error) *error = "cmake build of '" + target + "' failed (exit "
-            + std::to_string(exitCode) + "); see build/target_build.log";
+            + std::to_string(exitCode) + "); see " + logPath.string();
         return false;
     }
     return true;
@@ -189,12 +234,48 @@ std::filesystem::path ExecutableDirectory() {
 #endif
 }
 
+std::filesystem::path EngineSourceDirectory() {
+#ifdef THREEDG_ENGINE_SOURCE_DIR
+    return std::filesystem::path(THREEDG_ENGINE_SOURCE_DIR);
+#else
+    return {};
+#endif
+}
+
+std::filesystem::path EngineBuildDirectory() {
+#ifdef THREEDG_ENGINE_BUILD_DIR
+    return std::filesystem::path(THREEDG_ENGINE_BUILD_DIR);
+#else
+    return {};
+#endif
+}
+
+std::filesystem::path ProjectScriptBinary(const std::filesystem::path& projectRoot) {
+#if defined(_WIN32)
+    return projectRoot / "Binaries" / "game_scripts.dll";
+#else
+    return projectRoot / "Binaries" / "libgame_scripts.so";
+#endif
+}
+
+std::filesystem::path ProjectScriptStagingPath(
+    const std::filesystem::path& projectRoot, int slot) {
+    const char suffix = slot == 1 ? 'b' : 'a';
+#if defined(_WIN32)
+    return projectRoot / "Intermediate" / "Scripts" /
+        (std::string("game_scripts_loaded_") + suffix + ".dll");
+#else
+    return projectRoot / "Intermediate" / "Scripts" /
+        (std::string("libgame_scripts_loaded_") + suffix + ".so");
+#endif
+}
+
 std::string ReadLastBuildLog(const std::filesystem::path& projectRoot) {
-    return ReadFile(projectRoot / "build" / "script_compile.log");
+    return ReadFile(projectRoot / "Intermediate" / "Scripts" / "script_compile.log");
 }
 
 std::string ReadLastBuildStatus(const std::filesystem::path& projectRoot) {
-    return ReadFile(projectRoot / "build" / "script_compile.status");
+    return ReadFile(projectRoot / "Intermediate" / "Scripts" / "script_compile.status");
 }
 
 } // namespace EditorScriptTools

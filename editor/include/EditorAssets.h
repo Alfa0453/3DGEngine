@@ -95,6 +95,7 @@ public:
     bool CopySelected(std::string* error);
     bool CutSelected(std::string* error);   // mark for move; Paste relocates it
     bool PasteCopied(std::string* error);
+    bool RenameSelectedEntry(const std::string& newName, std::string* error);
     bool RenameSelectedFolder(const std::string& newName, std::string* error);
     bool DeleteSelectedEntry(std::string* error);
 

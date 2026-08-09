@@ -20,6 +20,7 @@
 #include <engine/animation/AnimatedModel.h>
 #include <engine/assets/ShaderAsset.h>
 #include <engine/assets/ShaderGraphCompiler.h>
+#include <engine/core/Paths.h>
 
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
@@ -187,6 +188,40 @@ void RuntimePlayerApp::OnInit() {
     engine::ai::RegisterExampleBtScripts();
     RegisterGameScripts();
 
+    // Cooked games place the project-owned native script module beside player.exe.
+    // Development runs may point directly into Content, so also walk up to the project
+    // root and check its Binaries folder.
+    {
+        std::vector<std::filesystem::path> candidates;
+#if defined(_WIN32)
+        candidates.emplace_back(std::filesystem::path(engine::ExecutableDir())
+            / "game_scripts.dll");
+        std::error_code moduleEc;
+        std::filesystem::path cursor =
+            std::filesystem::absolute(m_scenePath, moduleEc).parent_path();
+        for (int depth = 0; depth < 8 && !cursor.empty(); ++depth) {
+            candidates.emplace_back(cursor / "Binaries" / "game_scripts.dll");
+            const std::filesystem::path parent = cursor.parent_path();
+            if (parent == cursor) break;
+            cursor = parent;
+        }
+#endif
+        for (const std::filesystem::path& candidate : candidates) {
+            std::error_code existsEc;
+            if (!std::filesystem::is_regular_file(candidate, existsEc)) continue;
+            std::string moduleError;
+            if (!m_projectScriptModule.Load(candidate.string(),
+                    engine::ScriptRegistry::Instance(),
+                    engine::ai::BtScriptRegistry::Instance(), &moduleError)) {
+                std::fprintf(stderr, "[Scripts] %s\n", moduleError.c_str());
+            } else {
+                std::fprintf(stdout, "[Scripts] Loaded project module: %s\n",
+                             candidate.string().c_str());
+            }
+            break;
+        }
+    }
+
     m_renderer.Init();
 
     // Primitive meshes the runtime scene loader maps names onto.
@@ -312,6 +347,7 @@ void RuntimePlayerApp::PostProcessLoadedEntities(const std::vector<Entity>& enti
                 if (name.empty()) return;
                 m_runtimeAudio.ProcessAnimationEvent(m_registry, entity, name);
                 engine::ProcessParticleAnimationEvent(m_registry, entity, name);
+                engine::QueueScriptAnimationEvent(m_registry, entity, name);
                 m_animationEvents.push_back({entity, name});
             };
         }
@@ -380,6 +416,10 @@ void RuntimePlayerApp::ActivateStreamedLevel(
     const RuntimeSceneLoader::Scene& scene,
     const std::vector<Entity>& entities) {
     PostProcessLoadedEntities(entities);
+    if (const auto state = m_streamedScriptStates.find(levelIndex);
+        state != m_streamedScriptStates.end()) {
+        engine::RestoreScriptPersistentStates(m_registry, entities, state->second);
+    }
     m_entityCount += entities.size();
     m_streamedScenes[levelIndex] = scene;
     RebuildResidentSystems();
@@ -389,7 +429,8 @@ void RuntimePlayerApp::PrepareStreamedLevelUnload(
     std::size_t levelIndex,
     const RuntimeSceneLoader::Scene&,
     const std::vector<Entity>& entities) {
-    (void)levelIndex;
+    auto& scriptState = m_streamedScriptStates[levelIndex];
+    engine::CaptureScriptPersistentStates(m_registry, entities, scriptState);
     engine::ShutdownScripts(m_registry, entities);
     m_entityCount = entities.size() > m_entityCount
         ? 0 : m_entityCount - entities.size();
@@ -451,6 +492,7 @@ void RuntimePlayerApp::LoadScene() {
     }
     m_persistentScene = m_scene;
     m_streamedScenes.clear();
+    m_streamedScriptStates.clear();
 
     RuntimeSceneLoader::PrimitiveMeshes meshes;
     meshes.cube      = &*m_cube;
@@ -2348,6 +2390,7 @@ void RuntimePlayerApp::OnFixedUpdate(float h) {
     ProcessLevelPhysicsEvents();
     m_runtimeAudio.ProcessCollisionEvents(m_registry, m_physics.Events());
     engine::ProcessParticleCollisionEvents(m_registry, m_physics.Events());
+    engine::QueueScriptCollisionEvents(m_registry, m_physics.Events());
 
     // Evaluate game rules (built-in: lose when the player dies). Scripts can also
     // drive it directly via engine::GameMode::Instance().
@@ -2561,6 +2604,9 @@ void RuntimePlayerApp::OnRender() {
 
 void RuntimePlayerApp::OnShutdown() {
     engine::ShutdownScripts(m_registry);   // OnDestroy() + release script instances
+    engine::ScriptRegistry::Instance().Clear();
+    engine::ai::BtScriptRegistry::Instance().Clear();
+    m_projectScriptModule.Unload();
     m_runtimeAudio.Stop();
     m_audio.StopAllSounds();
     m_audio.StopMusic();

@@ -1,5 +1,6 @@
 #include "LevelValidationPanel.h"
 
+#include "EditorPanels.h"
 #include "EditorScene.h"
 
 #include <engine/physics/PhysicsComponents.h>
@@ -279,7 +280,7 @@ void LevelValidationPanel::Draw(EditorScene& scene, const std::string& assetRoot
                                 bool* open) {
     if (m_assetRoot != assetRoot
         || m_lastObjectCount != static_cast<int>(scene.Objects().size())) Scan(scene, assetRoot);
-    if (!ImGui::Begin("Level Validation & Cleanup", open)) { ImGui::End(); return; }
+    if (!ImGui::Begin(EditorPanels::Name(EditorPanels::Panel::LevelValidation), open)) { ImGui::End(); return; }
 
     if (ImGui::Button("Scan Level")) Scan(scene, assetRoot);
     ImGui::SameLine();

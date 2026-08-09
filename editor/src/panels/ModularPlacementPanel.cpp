@@ -1,4 +1,5 @@
 #include "ModularPlacementPanel.h"
+#include "EditorPanels.h"
 
 #include <imgui.h>
 
@@ -85,7 +86,7 @@ ModularPlacementPanel::Result ModularPlacementPanel::Draw(
     Result result;
     if (m_scannedRoot != assetRoot) Refresh(assetRoot);
 
-    if (!ImGui::Begin("Modular Placement", open)) {
+    if (!ImGui::Begin(EditorPanels::Name(EditorPanels::Panel::ModularPlacement), open)) {
         ImGui::End();
         return result;
     }

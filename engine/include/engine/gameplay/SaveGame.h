@@ -23,6 +23,7 @@
 #include "engine/ecs/Registry.h"
 #include "engine/ecs/Components.h"
 #include "engine/gameplay/GameplayComponents.h"
+#include "engine/gameplay/Script.h"
 
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -189,6 +190,7 @@ inline SaveGame CaptureSaveGame(ecs::Registry& registry, const std::string& scen
     save.playtimeSeconds = playtimeSeconds;
     save.timestamp = static_cast<std::int64_t>(std::time(nullptr));
     save.values = ReadSaveKeyValues();
+    CaptureScriptPersistentStates(registry, save.values);
 
     registry.view<ecs::RuntimeName>().each(
         [&](ecs::Entity entity, ecs::RuntimeName& runtimeName) {
@@ -248,6 +250,7 @@ inline void ApplySaveGame(ecs::Registry& registry, const SaveGame& save) {
                 }
             }
         });
+    RestoreScriptPersistentStates(registry, save.values);
 }
 
 // ---- Slots ----------------------------------------------------------------------

@@ -10,6 +10,7 @@ add_executable(player
 )
 target_include_directories(player PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(player PRIVATE engine game)
+add_dependencies(player game_scripts)
 
 # --- Packaging -------------------------------------------------------------
 # `cmake --install build --prefix dist --component player` stages a runnable folder:

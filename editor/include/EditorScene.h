@@ -79,6 +79,8 @@ public:
         std::string className;
         std::string path;
         std::vector<ScriptField> fields;
+        int executionOrder = 0;
+        std::vector<std::string> dependencies;
     };
 
     struct AnimationEvent {
@@ -269,6 +271,8 @@ public:
         std::string scriptClassName;
         std::string scriptPath;
         std::vector<ScriptField> scriptFields;
+        int scriptExecutionOrder = 0;
+        std::vector<std::string> scriptDependencies;
         std::vector<ScriptBinding> additionalScripts;
         bool audioSourceEnabled = false;
         std::string audioAssetPath;
@@ -788,6 +792,8 @@ public:
     bool SetSelectedRagdollEnabled(bool enabled);
     bool SetSelectedRagdoll(const engine::Ragdoll& ragdoll);
     bool SetSelectedScript(const std::string& className, const std::string& path, bool enabled);
+    bool SetSelectedScriptScheduling(int executionOrder,
+                                     const std::vector<std::string>& dependencies);
     bool SetSelectedAdditionalScripts(const std::vector<ScriptBinding>& scripts);
     bool SetSelectedAudioSource(bool enabled, const std::string& path,
                                 float volume, float pitch, bool spatial,

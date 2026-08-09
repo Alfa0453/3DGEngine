@@ -20,9 +20,19 @@ public:
     LuaScript& operator=(const LuaScript&) = delete;
 
     void OnCreate() override;
+    void OnEnable() override;
+    void OnDisable() override;
     void OnUpdate(float dt) override;
     void OnFixedUpdate(float dt) override;
+    void OnEvent(const ScriptEvent& event) override;
+    bool OnScriptCall(const std::string& functionName,
+                      const ScriptEvent& arguments,
+                      ScriptEvent& result) override;
     void OnDestroy() override;
+    int PersistentStateVersion() const override;
+    void OnSaveState(StateMap& state) const override;
+    void OnLoadState(int savedVersion, const StateMap& state) override;
+    void DefineTests(ScriptTestSuite& suite) override;
 
     const std::string& SourcePath() const { return m_sourcePath; }
 
@@ -30,6 +40,7 @@ private:
     void Load();
     void Call(const char* functionName);
     void Call(const char* functionName, float argument);
+    bool CallPredicate(const std::string& functionName);
     void RegisterEngineApi();
     bool HasTimerFunction(const std::string& functionName) const override;
     bool InvokeTimerFunction(const std::string& functionName) override;
@@ -72,6 +83,30 @@ private:
     static int ApiMousePressed(lua_State* state);
     static int ApiMouseDelta(lua_State* state);
     static int ApiWasAnimationEvent(lua_State* state);
+    static int ApiListenForEvent(lua_State* state);
+    static int ApiStopListeningForEvent(lua_State* state);
+    static int ApiPublishEvent(lua_State* state);
+    static int ApiEventBool(lua_State* state);
+    static int ApiEventFloat(lua_State* state);
+    static int ApiEventString(lua_State* state);
+    static int ApiEventEntity(lua_State* state);
+    static int ApiEventVector(lua_State* state);
+    static int ApiFindScript(lua_State* state);
+    static int ApiIsScriptValid(lua_State* state);
+    static int ApiIsScriptEnabled(lua_State* state);
+    static int ApiSetScriptEnabled(lua_State* state);
+    static int ApiSetSelfEnabled(lua_State* state);
+    static int ApiCallScript(lua_State* state);
+    static int ApiCreateSequence(lua_State* state);
+    static int ApiSequenceDo(lua_State* state);
+    static int ApiSequenceWait(lua_State* state);
+    static int ApiSequenceWaitUntil(lua_State* state);
+    static int ApiPauseSequence(lua_State* state);
+    static int ApiResumeSequence(lua_State* state);
+    static int ApiCancelSequence(lua_State* state);
+    static int ApiCancelAllSequences(lua_State* state);
+    static int ApiIsSequenceActive(lua_State* state);
+    static int ApiIsSequencePaused(lua_State* state);
     static int ApiFieldFloat(lua_State* state);
     static int ApiFieldInt(lua_State* state);
     static int ApiFieldBool(lua_State* state);
@@ -122,10 +157,14 @@ private:
     static int ApiGetEffectiveTimeDilation(lua_State* state);
     static int ApiHitStop(lua_State* state);
     static int ApiIsHitStopActive(lua_State* state);
+    static int ApiTestAssert(lua_State* state);
+    static int ApiTestExpectNear(lua_State* state);
 
     std::string m_sourcePath;
     lua_State* m_state = nullptr;
     bool m_loaded = false;
+    const ScriptEvent* m_currentEvent = nullptr;
+    ScriptTestContext* m_currentTest = nullptr;
 };
 
 bool IsLuaScriptPath(const std::string& path);

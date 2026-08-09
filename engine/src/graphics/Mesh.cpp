@@ -270,6 +270,18 @@ void Mesh::UpdateVertices(const std::vector<float>& vertices)
 }
 void Mesh::Release()
 {
+    // Empty meshes are used as editor placeholders and by headless tools/tests.
+    // GLAD may not have been initialized in those processes, so even binding VAO
+    // zero would call through a null OpenGL function pointer.
+    if (m_vao == 0 && m_vbo == 0 && m_ebo == 0 && m_lodEbos.empty()) {
+        m_lodIndexCounts.clear();
+        m_vertexCount = 0;
+        m_indexCount = 0;
+        m_vertexStrideBytes = 0;
+        m_boundsCenter = glm::vec3(0.0f);
+        m_boundsRadius = 0.0f;
+        return;
+    }
     // glDelete* ignore 0, but guarding makes the intent explicit.
     // Mesh draws keep their VAO bound to avoid a per-draw state change; clear it
     // at lifetime boundaries before deleting/replacing the object.

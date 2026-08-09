@@ -9,6 +9,7 @@
 #include <cctype>
 #include <filesystem>
 #include <system_error>
+#include <utility>
 
 namespace fs = std::filesystem;
 
@@ -798,6 +799,40 @@ bool EditorAssets::RenameSelectedFolder(const std::string& newName, std::string*
 
     const std::string newRelative = NormalizeSlashes(
         (fs::path(oldRelative).parent_path() / cleanName).string());
+    if (m_assetRegistry) {
+        const std::string oldVirtual = engine::AssetRegistry::NormalizeVirtualPath(
+            std::string("/Game/") + oldRelative);
+        const std::string newVirtual = engine::AssetRegistry::NormalizeVirtualPath(
+            std::string("/Game/") + newRelative);
+        std::vector<std::pair<engine::AssetHandle, std::string>> registryMoves;
+        for (const engine::AssetRegistryEntry& entry : m_assetRegistry->Entries()) {
+            if (entry.virtualPath.size() > oldVirtual.size()
+                && entry.virtualPath.compare(0, oldVirtual.size(), oldVirtual) == 0
+                && entry.virtualPath[oldVirtual.size()] == '/') {
+                registryMoves.emplace_back(entry.id, entry.virtualPath);
+            }
+        }
+        std::size_t movedCount = 0;
+        std::string registryError;
+        for (const auto& move : registryMoves) {
+            const std::string targetVirtual = newVirtual
+                + move.second.substr(oldVirtual.size());
+            if (!m_assetRegistry->Move(move.first, targetVirtual, &registryError)) break;
+            ++movedCount;
+        }
+        const bool registrySaved = movedCount == registryMoves.size()
+            && m_assetRegistry->Save(
+                engine::AssetRegistry::DefaultRegistryPath(m_rootPath), &registryError);
+        if (!registrySaved) {
+            for (std::size_t i = movedCount; i > 0; --i)
+                m_assetRegistry->Move(registryMoves[i - 1].first,
+                    registryMoves[i - 1].second, nullptr);
+            std::error_code rollbackError;
+            fs::rename(destination, source, rollbackError);
+            if (error) *error = "Could not update the asset registry: " + registryError;
+            return false;
+        }
+    }
     if (m_clipboardRelativePath == oldRelative
         || (m_clipboardRelativePath.size() > oldRelative.size()
             && m_clipboardRelativePath.compare(0, oldRelative.size(), oldRelative) == 0
@@ -812,6 +847,116 @@ bool EditorAssets::RenameSelectedFolder(const std::string& newName, std::string*
     for (int i = 0; i < static_cast<int>(m_folders.size()); ++i) {
         if (m_folders[static_cast<std::size_t>(i)].relativePath == newRelative) {
             SelectFolderIndex(i);
+            break;
+        }
+    }
+    return true;
+}
+
+bool EditorAssets::RenameSelectedEntry(const std::string& newName, std::string* error)
+{
+    if (m_selectedType == SelectionType::Folder)
+        return RenameSelectedFolder(newName, error);
+
+    const Asset* asset = SelectedAsset();
+    if (m_selectedType != SelectionType::Asset || !asset) {
+        if (error) *error = "Select an asset or folder to rename.";
+        return false;
+    }
+
+    std::string cleanName = SanitizeFolderName(newName);
+    if (cleanName.empty() || cleanName == "." || cleanName == "..") {
+        if (error) *error = "Enter a valid asset name.";
+        return false;
+    }
+    if (cleanName.back() == '.') {
+        if (error) *error = "Asset names cannot end with a period.";
+        return false;
+    }
+
+    const std::string oldRelative = asset->relativePath;
+    const fs::path source = FullPathForRelative(oldRelative);
+    const std::string extension = source.extension().string();
+    fs::path requested(cleanName);
+    if (Lower(requested.extension().string()) == Lower(extension))
+        cleanName = requested.stem().string() + extension;
+    else
+        cleanName += extension;
+    if (cleanName == extension) {
+        if (error) *error = "Enter a valid asset name.";
+        return false;
+    }
+
+    const fs::path destination = source.parent_path() / cleanName;
+    if (source.filename().string() == cleanName) {
+        if (error) *error = "The asset already has that name.";
+        return false;
+    }
+
+    std::error_code ec;
+    const bool caseOnlyRename = Lower(source.filename().string()) == Lower(cleanName);
+    if (!caseOnlyRename && fs::exists(destination, ec)) {
+        if (error) *error = "A folder or asset with that name already exists.";
+        return false;
+    }
+
+    if (caseOnlyRename) {
+        const fs::path temporary = UniqueDestinationPath(
+            source.parent_path() / (source.filename().string() + ".rename_tmp"));
+        fs::rename(source, temporary, ec);
+        if (!ec) {
+            fs::rename(temporary, destination, ec);
+            if (ec) {
+                std::error_code rollbackError;
+                fs::rename(temporary, source, rollbackError);
+            }
+        }
+    } else {
+        fs::rename(source, destination, ec);
+    }
+    if (ec) {
+        if (error) *error = "Could not rename asset to: " + cleanName;
+        return false;
+    }
+
+    const std::string newRelative = NormalizeSlashes(
+        (fs::path(oldRelative).parent_path() / cleanName).string());
+    if (m_assetRegistry) {
+        const std::string oldVirtual = engine::AssetRegistry::NormalizeVirtualPath(
+            std::string("/Game/") + oldRelative);
+        const engine::AssetRegistryEntry* registered =
+            m_assetRegistry->FindByPath(oldVirtual);
+        if (registered) {
+            const engine::AssetHandle id = registered->id;
+            const std::string newVirtual = engine::AssetRegistry::NormalizeVirtualPath(
+                std::string("/Game/") + newRelative);
+            std::string registryError;
+            if (!m_assetRegistry->Move(id, newVirtual, &registryError)) {
+                std::error_code rollbackError;
+                fs::rename(destination, source, rollbackError);
+                if (error) *error = "Could not update the asset registry: " + registryError;
+                return false;
+            }
+            if (!m_assetRegistry->Save(
+                    engine::AssetRegistry::DefaultRegistryPath(m_rootPath),
+                    &registryError)) {
+                m_assetRegistry->Move(id, oldVirtual, nullptr);
+                std::error_code rollbackError;
+                fs::rename(destination, source, rollbackError);
+                if (error) *error = "Could not save the asset registry: " + registryError;
+                return false;
+            }
+        }
+    }
+
+    if (m_clipboardRelativePath == oldRelative)
+        m_clipboardRelativePath = newRelative;
+    m_selectedType = SelectionType::None;
+    m_selectedIndex = -1;
+    if (!Refresh(m_rootPath, error)) return false;
+    for (int i = 0; i < static_cast<int>(m_assets.size()); ++i) {
+        if (m_assets[static_cast<std::size_t>(i)].relativePath == newRelative) {
+            SelectIndex(i);
             break;
         }
     }

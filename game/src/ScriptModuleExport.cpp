@@ -10,6 +10,7 @@
 #include "game/scripts/Spinner.h"
 
 #include <engine/gameplay/Script.h>
+#include <engine/ai/BtScript.h>
 
 #include <memory>
 
@@ -19,7 +20,9 @@
 #define SCRIPT_MODULE_EXPORT extern "C"
 #endif
 
-SCRIPT_MODULE_EXPORT void RegisterScriptModule(engine::ScriptRegistry& scripts) {
+SCRIPT_MODULE_EXPORT void RegisterScriptModule(
+    engine::ScriptRegistry& scripts, engine::ai::BtScriptRegistry& bt) {
     scripts.Register("Spinner", [] { return std::make_unique<Spinner>(); });
     RegisterEditorGeneratedScripts(scripts);
+    RegisterEditorGeneratedBtScripts(bt);
 }

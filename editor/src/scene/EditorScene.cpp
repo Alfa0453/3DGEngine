@@ -476,7 +476,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         return false;
     }
 
-    out << "3DGEditorScene 125 " << m_assetId.ToString() << '\n';
+    out << "3DGEditorScene 126 " << m_assetId.ToString() << '\n';
     out << "environment "
         << m_environment.timeOfDay << ' '
         << m_environment.skyLightIntensity << ' '
@@ -878,6 +878,10 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
                 << StoredPath(field.tooltip) << ' '
                 << StoredPath(field.group);
         }
+        out << ' ' << object.scriptExecutionOrder
+            << ' ' << object.scriptDependencies.size();
+        for (const std::string& dependency : object.scriptDependencies)
+            out << ' ' << StoredPath(dependency);
         out << ' ' << object.additionalScripts.size();
         for (const ScriptBinding& script : object.additionalScripts) {
             out << ' ' << (script.enabled ? 1 : 0)
@@ -892,6 +896,10 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
                     << ' ' << StoredPath(field.tooltip)
                     << ' ' << StoredPath(field.group);
             }
+            out << ' ' << script.executionOrder
+                << ' ' << script.dependencies.size();
+            for (const std::string& dependency : script.dependencies)
+                out << ' ' << StoredPath(dependency);
         }
         // NavAgent (scene version 37+).
         out << ' ' << (object.navAgentEnabled ? 1 : 0) << ' '
@@ -1321,7 +1329,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             return false;
         }
     }
-    if (magic != "3DGEditorScene" ||(version < 1 || version > 125)) {
+    if (magic != "3DGEditorScene" ||(version < 1 || version > 126)) {
         if (error) *error = "Scene file has an unknown format.";
         return false;
     }
@@ -2203,6 +2211,8 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         std::string scriptClassName;
         std::string scriptPath;
         std::vector<ScriptField> scriptFields;
+        int scriptExecutionOrder = 0;
+        std::vector<std::string> scriptDependencies;
         std::vector<ScriptBinding> additionalScripts;
         int navAgentEnabled = 0;
         float navAgentSpeed = 3.0f;
@@ -2771,6 +2781,15 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                     scriptFields.push_back(field);
                 }
             }
+            if (version >= 126) {
+                std::size_t dependencyCount = 0;
+                in >> scriptExecutionOrder >> dependencyCount;
+                for (std::size_t i = 0; i < dependencyCount; ++i) {
+                    std::string dependency;
+                    in >> std::quoted(dependency);
+                    if (dependency != "-") scriptDependencies.push_back(std::move(dependency));
+                }
+            }
             if (version >= 100) {
                 std::size_t additionalCount = 0;
                 in >> additionalCount;
@@ -2801,6 +2820,16 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                             if (field.group == "-") field.group.clear();
                         }
                         script.fields.push_back(std::move(field));
+                    }
+                    if (version >= 126) {
+                        std::size_t dependencyCount = 0;
+                        in >> script.executionOrder >> dependencyCount;
+                        for (std::size_t i = 0; i < dependencyCount; ++i) {
+                            std::string dependency;
+                            in >> std::quoted(dependency);
+                            if (dependency != "-")
+                                script.dependencies.push_back(std::move(dependency));
+                        }
                     }
                     additionalScripts.push_back(std::move(script));
                 }
@@ -3192,6 +3221,8 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         m_objects.back().scriptClassName = scriptClassName;
         m_objects.back().scriptPath = scriptPath;
         m_objects.back().scriptFields = scriptFields;
+        m_objects.back().scriptExecutionOrder = scriptExecutionOrder;
+        m_objects.back().scriptDependencies = std::move(scriptDependencies);
         m_objects.back().additionalScripts = std::move(additionalScripts);
         m_objects.back().navAgentEnabled = navAgentEnabled != 0;
         m_objects.back().navAgentSpeed = navAgentSpeed;
@@ -5054,7 +5085,31 @@ bool EditorScene::SetSelectedScript(const std::string& className, const std::str
     selected.scriptEnabled = enabled && !className.empty();
     if (className.empty()) {
         selected.scriptFields.clear();
+        selected.scriptExecutionOrder = 0;
+        selected.scriptDependencies.clear();
     }
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedScriptScheduling(
+    int executionOrder, const std::vector<std::string>& dependencies) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size()))
+        return false;
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    executionOrder = std::clamp(executionOrder, -10000, 10000);
+    std::vector<std::string> normalized;
+    for (const std::string& dependency : dependencies) {
+        if (dependency.empty()
+            || std::find(normalized.begin(), normalized.end(), dependency) != normalized.end())
+            continue;
+        normalized.push_back(dependency);
+    }
+    if (selected.scriptExecutionOrder == executionOrder
+        && selected.scriptDependencies == normalized) return false;
+    PushUndoSnapshot();
+    selected.scriptExecutionOrder = executionOrder;
+    selected.scriptDependencies = std::move(normalized);
     m_dirty = true;
     return true;
 }
@@ -6419,6 +6474,8 @@ bool EditorScene::DuplicateSelected(const engine::Mesh & cube, const engine::Mes
     m_objects.back().scriptClassName = selectedCopy.scriptClassName;
     m_objects.back().scriptPath = selectedCopy.scriptPath;
     m_objects.back().scriptFields = selectedCopy.scriptFields;
+    m_objects.back().scriptExecutionOrder = selectedCopy.scriptExecutionOrder;
+    m_objects.back().scriptDependencies = selectedCopy.scriptDependencies;
     m_objects.back().additionalScripts = selectedCopy.additionalScripts;
     m_objects.back().audioSourceEnabled = selectedCopy.audioSourceEnabled;
     m_objects.back().audioAssetPath = selectedCopy.audioAssetPath;

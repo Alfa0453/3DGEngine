@@ -1,6 +1,7 @@
 #include "ShaderEditorPanel.h"
 
 #include "EditorAssets.h"
+#include "EditorPanels.h"
 
 #include <engine/graphics/Primitives.h>
 #include <engine/graphics/ShaderParameterBinding.h>
@@ -1679,7 +1680,7 @@ void ShaderEditorPanel::Draw(EditorAssets& assets, bool* open)
 {
     if (m_asset.nodes.empty() && m_path.empty() && !m_dirty) NewDocument();
     bool requestedOpen = open ? *open : true;
-    if (!ImGui::Begin("Shader Editor", &requestedOpen))
+    if (!ImGui::Begin(EditorPanels::Name(EditorPanels::Panel::ShaderEditor), &requestedOpen))
     {
         m_keyboardFocused =
             ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);

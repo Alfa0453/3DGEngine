@@ -1,4 +1,5 @@
 #include "LevelVariantPanel.h"
+#include "EditorPanels.h"
 
 #include <imgui.h>
 
@@ -62,7 +63,7 @@ LevelVariantPanel::Result LevelVariantPanel::Draw(const std::string& assetRoot,
                                                    bool* open) {
     Result result;
     if (m_scannedRoot != assetRoot) Refresh(assetRoot);
-    if (!ImGui::Begin("Level Snapshots & Variants", open)) { ImGui::End(); return result; }
+    if (!ImGui::Begin(EditorPanels::Name(EditorPanels::Panel::LevelVariants), open)) { ImGui::End(); return result; }
 
     if (ImGui::Button("Refresh")) Refresh(assetRoot);
     ImGui::SameLine();

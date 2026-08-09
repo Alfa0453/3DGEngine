@@ -1,4 +1,5 @@
 #include "HudEditorPanel.h"
+#include "EditorPanels.h"
 
 #include <imgui.h>
 
@@ -57,7 +58,7 @@ HudEditorPanel::Result HudEditorPanel::Draw(HudDocument& doc, bool* open,
     Result result;
 
     ImGui::SetNextWindowSize(ImVec2(960.0f, 620.0f), ImGuiCond_FirstUseEver);
-    if (!ImGui::Begin("HUD Editor", open)) {
+    if (!ImGui::Begin(EditorPanels::Name(EditorPanels::Panel::Hud), open)) {
         ImGui::End();
         return result;
     }

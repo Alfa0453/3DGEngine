@@ -238,6 +238,23 @@ bool EditorRuntimeController::CookProject(
         return false;
     }
 
+    // Native scripts are project-owned binaries rather than part of the shared player.
+    // Place the module at the cooked root so RuntimePlayerApp discovers it beside the
+    // executable after packaging.
+    {
+        std::error_code copyEc;
+        const std::filesystem::path scriptModule =
+            ProjectRootFor(project) / "Binaries" / "game_scripts.dll";
+        if (std::filesystem::is_regular_file(scriptModule, copyEc)) {
+            std::filesystem::copy_file(scriptModule, output / scriptModule.filename(),
+                std::filesystem::copy_options::overwrite_existing, copyEc);
+            if (copyEc) {
+                log.Warning("Cooked content but could not copy project scripts: "
+                    + copyEc.message());
+            }
+        }
+    }
+
     log.Info("Cooked project to " + result.outputRoot + " ("
         + std::to_string(result.assets.size())
         + " required engine asset(s))");

@@ -65,6 +65,9 @@ public:
     bool Has(const std::string& name) const;
     std::unique_ptr<BtScript> Create(const std::string& name) const;   // nullptr if unknown
     std::vector<std::string>  Names() const;                           // sorted, for the UI
+    void Remove(const std::string& name);
+    void MergeFrom(BtScriptRegistry&& other);
+    void Clear() { m_factories.clear(); }   // project-module reload: discard DLL-owned factories
 
 private:
     std::unordered_map<std::string, Factory> m_factories;

@@ -133,11 +133,11 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             return false;
         }
     }
-    if (magic != "3DGRuntimeScene" || version < 1 || version > 88) {
+    if (magic != "3DGRuntimeScene" || version < 1 || version > 89) {
         if (error) {
             *error = "Runtime scene file has an unknown format: "
                 + magic + " " + std::to_string(version)
-                + " (expected 3DGRuntimeScene 1..87).";
+                + " (expected 3DGRuntimeScene 1..89).";
         }
         return false;
     }
@@ -1236,6 +1236,16 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                     entity.scriptFields.push_back(field);
                 }
             }
+            if (version >= 89) {
+                std::size_t dependencyCount = 0;
+                record >> entity.scriptExecutionOrder >> dependencyCount;
+                for (std::size_t i = 0; i < dependencyCount; ++i) {
+                    std::string dependency;
+                    record >> std::quoted(dependency);
+                    if (dependency != "-")
+                        entity.scriptDependencies.push_back(std::move(dependency));
+                }
+            }
             if (version >= 72) {
                 std::size_t additionalCount = 0;
                 record >> additionalCount;
@@ -1258,6 +1268,16 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                         field.type = static_cast<ScriptField::Type>(
                             std::clamp(fieldType, 0, 3));
                         script.fields.push_back(std::move(field));
+                    }
+                    if (version >= 89) {
+                        std::size_t dependencyCount = 0;
+                        record >> script.executionOrder >> dependencyCount;
+                        for (std::size_t i = 0; i < dependencyCount; ++i) {
+                            std::string dependency;
+                            record >> std::quoted(dependency);
+                            if (dependency != "-")
+                                script.dependencies.push_back(std::move(dependency));
+                        }
                     }
                     entity.additionalScripts.push_back(std::move(script));
                 }
@@ -1939,6 +1959,8 @@ bool RuntimeSceneLoader::Instantiate(const Scene &scene, ecs::Registry &registry
             script.className = desc.scriptClassName;
             script.sourcePath = desc.scriptPath;
             script.fields = desc.scriptFields;
+            script.executionOrder = desc.scriptExecutionOrder;
+            script.dependencies = desc.scriptDependencies;
             for (const RuntimeSceneLoader::EntityDesc::AdditionalScript& authored
                  : desc.additionalScripts) {
                 NativeScriptSlot additional;
@@ -1946,6 +1968,8 @@ bool RuntimeSceneLoader::Instantiate(const Scene &scene, ecs::Registry &registry
                 additional.className = authored.className;
                 additional.sourcePath = authored.path;
                 additional.fields = authored.fields;
+                additional.executionOrder = authored.executionOrder;
+                additional.dependencies = authored.dependencies;
                 script.additional.push_back(std::move(additional));
             }
             registry.Add<NativeScriptComponent>(entity, std::move(script));
@@ -1959,6 +1983,8 @@ bool RuntimeSceneLoader::Instantiate(const Scene &scene, ecs::Registry &registry
                 additional.className = authored.className;
                 additional.sourcePath = authored.path;
                 additional.fields = authored.fields;
+                additional.executionOrder = authored.executionOrder;
+                additional.dependencies = authored.dependencies;
                 script.additional.push_back(std::move(additional));
             }
             registry.Add<NativeScriptComponent>(entity, std::move(script));

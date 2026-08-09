@@ -5,9 +5,8 @@
 # that BOTH the editor (Play mode) and the standalone player link. Write a script
 # once here and it runs in both -- no duplicated registration.
 #
-# Editor-created header-only scripts live in Content/Scripts and are pulled in by
-# EditorGeneratedScripts.h. Manually maintained game-module headers may still live
-# under include/game/scripts.
+# Editor-created scripts are compiled into a project-owned DLL. This static target
+# contains only engine-shipped/manual game scripts.
 # ---------------------------------------------------------------------------
 add_library(game STATIC
     src/GameModule.cpp
@@ -28,11 +27,38 @@ target_link_libraries(game PUBLIC engine)
 # reaches scripts through ScriptContext, so the two engine copies stay consistent.
 # Nothing links this yet — Stage 3 wires the editor's reload path to it.
 # ---------------------------------------------------------------------------
-add_library(game_scripts SHARED src/ScriptModuleExport.cpp)
+set(THREEDG_ACTIVE_PROJECT_ROOT "" CACHE PATH
+    "3DG project whose Content/Scripts are compiled into game_scripts")
+set(_3dg_project_module "")
+if(THREEDG_ACTIVE_PROJECT_ROOT)
+    set(_3dg_project_module
+        "${THREEDG_ACTIVE_PROJECT_ROOT}/Intermediate/Scripts/ProjectScriptModule.cpp")
+endif()
+if(_3dg_project_module AND EXISTS "${_3dg_project_module}")
+    add_library(game_scripts SHARED "${_3dg_project_module}")
+else()
+    add_library(game_scripts SHARED src/ScriptModuleExport.cpp)
+endif()
 target_include_directories(game_scripts
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
     PRIVATE ${CMAKE_SOURCE_DIR}/Content
 )
+if(THREEDG_ACTIVE_PROJECT_ROOT)
+    target_include_directories(game_scripts PRIVATE
+        "${THREEDG_ACTIVE_PROJECT_ROOT}/Intermediate/Scripts")
+endif()
 target_link_libraries(game_scripts PRIVATE engine)
-set_target_properties(game_scripts PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/editor")
+if(THREEDG_ACTIVE_PROJECT_ROOT)
+    set_target_properties(game_scripts PROPERTIES
+        OUTPUT_NAME "game_scripts"
+        DEBUG_POSTFIX ""
+        RUNTIME_OUTPUT_DIRECTORY "${THREEDG_ACTIVE_PROJECT_ROOT}/Binaries"
+        RUNTIME_OUTPUT_DIRECTORY_DEBUG "${THREEDG_ACTIVE_PROJECT_ROOT}/Binaries"
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${THREEDG_ACTIVE_PROJECT_ROOT}/Binaries"
+        RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${THREEDG_ACTIVE_PROJECT_ROOT}/Binaries"
+        RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${THREEDG_ACTIVE_PROJECT_ROOT}/Binaries")
+else()
+    set_target_properties(game_scripts PROPERTIES
+        DEBUG_POSTFIX ""
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/editor")
+endif()

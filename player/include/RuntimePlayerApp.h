@@ -29,6 +29,7 @@
 #include <engine/gameplay/PlayerController.h>
 #include <engine/gameplay/CameraDirector.h>
 #include <engine/gameplay/Script.h>
+#include <engine/gameplay/ScriptModule.h>
 #include <engine/gameplay/SaveGame.h>
 #include <engine/assets/RuntimeAssetManager.h>
 #include <engine/audio/AudioEngine.h>
@@ -143,6 +144,7 @@ private:
     bool m_cinematicSkipPrev = false;
 
     engine::ecs::Registry              m_registry;
+    engine::ScriptModule               m_projectScriptModule;
     engine::RuntimeSceneLoader::Scene  m_scene;
     engine::RuntimeSceneLoader::Scene  m_persistentScene;
     engine::PhysicsWorld               m_physics;
@@ -226,6 +228,8 @@ private:
     std::string m_lastStreamingError;
     bool m_streamingEnabled = false;
     std::unordered_map<std::size_t, engine::RuntimeSceneLoader::Scene> m_streamedScenes;
+    std::unordered_map<std::size_t,
+        std::unordered_map<std::string, std::string>> m_streamedScriptStates;
 
     struct RuntimeTriggerAction {
         engine::ecs::Entity target = engine::ecs::kNull;

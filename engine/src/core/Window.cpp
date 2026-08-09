@@ -171,6 +171,16 @@ void Window::SetTitle(const std::string &title)
     glfwSetWindowTitle(m_window, title.c_str());
 }
 
+void Window::SetIcon(int width, int height, const unsigned char* rgbaPixels)
+{
+    if (!m_window || width <= 0 || height <= 0 || !rgbaPixels) return;
+    GLFWimage icon{};
+    icon.width = width;
+    icon.height = height;
+    icon.pixels = const_cast<unsigned char*>(rgbaPixels);
+    glfwSetWindowIcon(m_window, 1, &icon);
+}
+
 void Window::SetDropCallback(std::function<void(const std::vector<std::string>&)> callback)
 {
     m_data.onDrop = std::move(callback);

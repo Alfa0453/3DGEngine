@@ -1,4 +1,5 @@
 #include "ScatterPaintPanel.h"
+#include "EditorPanels.h"
 
 #include <imgui.h>
 
@@ -117,7 +118,7 @@ ScatterPaintPanel::Result ScatterPaintPanel::Draw(const std::string& assetRoot,
                                                    bool* open) {
     Result result;
     if (m_scannedRoot != assetRoot) Refresh(assetRoot);
-    if (!ImGui::Begin("Scatter & Paint", open)) { ImGui::End(); return result; }
+    if (!ImGui::Begin(EditorPanels::Name(EditorPanels::Panel::ScatterPaint), open)) { ImGui::End(); return result; }
 
     if (ImGui::Button("Refresh Meshes")) Refresh(assetRoot);
     ImGui::SameLine();

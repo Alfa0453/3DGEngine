@@ -1,5 +1,6 @@
 #include "AlignmentPanel.h"
 
+#include "EditorPanels.h"
 #include "EditorScene.h"
 
 #include <imgui.h>
@@ -62,7 +63,7 @@ float Maximum(const Entry& entry, int axis) {
 } // namespace
 
 void AlignmentPanel::Draw(EditorScene& scene, bool* open) {
-    if (!ImGui::Begin("Object Alignment & Distribution", open)) {
+    if (!ImGui::Begin(EditorPanels::Name(EditorPanels::Panel::Alignment), open)) {
         ImGui::End();
         return;
     }

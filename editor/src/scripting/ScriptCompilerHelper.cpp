@@ -1,6 +1,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <utility>
 
 #if defined(_WIN32)
 #define NOMINMAX
@@ -14,20 +15,8 @@ std::wstring Quote(const std::filesystem::path& path) {
     return L"\"" + path.wstring() + L"\"";
 }
 
-bool RunBuild(const std::filesystem::path& root, const std::wstring& configuration,
-              DWORD* exitCode) {
-    const std::filesystem::path logPath = root / "build" / "script_compile.log";
-    HANDLE log = CreateFileW(logPath.wstring().c_str(), GENERIC_WRITE,
-        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, CREATE_ALWAYS,
-        FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (log == INVALID_HANDLE_VALUE) return false;
-
-    // Fast iterate loop: build ONLY the editor, in parallel across all cores (/m). The
-    // standalone player is (re)built at cook/package time (EditorApp::CookProject), so a
-    // routine script edit no longer pays a second executable link here.
-    std::wstring command = L"cmake --build " + Quote(root / "build")
-        + L" --config \"" + configuration
-        + L"\" --target 3DGEditor -- /m";
+bool RunProcess(std::wstring command, const std::filesystem::path& workingDirectory,
+                HANDLE log, DWORD* exitCode) {
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);
     startup.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
@@ -37,8 +26,8 @@ bool RunBuild(const std::filesystem::path& root, const std::wstring& configurati
     startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
     PROCESS_INFORMATION process{};
     const BOOL launched = CreateProcessW(nullptr, command.data(), nullptr, nullptr,
-        TRUE, CREATE_NO_WINDOW, nullptr, root.wstring().c_str(), &startup, &process);
-    CloseHandle(log);
+        TRUE, CREATE_NO_WINDOW, nullptr, workingDirectory.wstring().c_str(),
+        &startup, &process);
     if (!launched) return false;
     WaitForSingleObject(process.hProcess, INFINITE);
     GetExitCodeProcess(process.hProcess, exitCode);
@@ -47,23 +36,40 @@ bool RunBuild(const std::filesystem::path& root, const std::wstring& configurati
     return true;
 }
 
-bool SyncEditorScripts(const std::filesystem::path& editor,
-                       const std::filesystem::path& root) {
-    const std::filesystem::path source = editor.parent_path() / "Content" / "Scripts";
-    const std::filesystem::path destination = root / "Content" / "Scripts";
+bool RunBuild(const std::filesystem::path& projectRoot,
+              const std::wstring& configuration,
+              DWORD* exitCode) {
+    const std::filesystem::path sourceRoot(THREEDG_ENGINE_SOURCE_DIR);
+    const std::filesystem::path buildRoot(THREEDG_ENGINE_BUILD_DIR);
+    const std::filesystem::path intermediate =
+        projectRoot / "Intermediate" / "Scripts";
     std::error_code ec;
-    if (!std::filesystem::is_directory(source, ec)) return true;
-    std::filesystem::create_directories(destination, ec);
-    if (ec) return false;
+    std::filesystem::create_directories(intermediate, ec);
+    const std::filesystem::path logPath = intermediate / "script_compile.log";
+    HANDLE log = CreateFileW(logPath.wstring().c_str(), GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, CREATE_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (log == INVALID_HANDLE_VALUE) return false;
 
-    for (std::filesystem::directory_iterator it(source, ec), end;
-         !ec && it != end; it.increment(ec)) {
-        if (!it->is_regular_file(ec) || it->path().extension() != ".h") continue;
-        std::filesystem::copy_file(it->path(), destination / it->path().filename(),
-            std::filesystem::copy_options::overwrite_existing, ec);
-        if (ec) return false;
+    std::wstring configure = L"cmake -S " + Quote(sourceRoot)
+        + L" -B " + Quote(buildRoot)
+        + L" -DTHREEDG_ACTIVE_PROJECT_ROOT=" + Quote(projectRoot);
+    DWORD configureExit = 1;
+    if (!RunProcess(std::move(configure), sourceRoot, log, &configureExit)
+        || configureExit != 0) {
+        CloseHandle(log);
+        *exitCode = configureExit;
+        return false;
     }
-    return !ec;
+
+    // Project scripts compile into <Project>/Binaries/game_scripts.dll; rebuilding the
+    // editor itself is no longer necessary for a gameplay-script change.
+    std::wstring command = L"cmake --build " + Quote(buildRoot)
+        + L" --config \"" + configuration
+        + L"\" --target game_scripts -- /m";
+    const bool launched = RunProcess(std::move(command), projectRoot, log, exitCode);
+    CloseHandle(log);
+    return launched;
 }
 
 } // namespace
@@ -84,15 +90,14 @@ int main(int argc, char** argv) {
     }
 
     DWORD exitCode = 1;
-    const bool synchronized = SyncEditorScripts(editor, root);
-    const bool launched = synchronized && RunBuild(root, configuration, &exitCode);
-    std::ofstream status(root / "build" / "script_compile.status");
+    const bool launched = RunBuild(root, configuration, &exitCode);
+    std::filesystem::create_directories(root / "Intermediate" / "Scripts");
+    std::ofstream status(root / "Intermediate" / "Scripts" / "script_compile.status");
     if (launched && exitCode == 0) status << "success\n";
-    else if (!synchronized) status << "failed script synchronization\n";
     else status << "failed " << (launched ? exitCode : GetLastError()) << "\n";
     status.close();
 
-    std::wstring command = Quote(editor);
+    std::wstring command = Quote(editor) + L" " + Quote(root / "Project.3dgproject");
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);
     PROCESS_INFORMATION process{};

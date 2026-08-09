@@ -1,5 +1,6 @@
 #include "SplineBuilderPanel.h"
 
+#include "EditorPanels.h"
 #include "EditorScene.h"
 
 #include <engine/math/Spline.h>
@@ -50,7 +51,7 @@ SplineBuilderPanel::Result SplineBuilderPanel::Draw(
     const EditorScene& scene, const std::string& assetRoot, bool* open) {
     Result result;
     if (m_assetRoot != assetRoot) RefreshAssets(assetRoot);
-    if (!ImGui::Begin("Spline Road & Fence Builder", open)) { ImGui::End(); return result; }
+    if (!ImGui::Begin(EditorPanels::Name(EditorPanels::Panel::SplineBuilder), open)) { ImGui::End(); return result; }
 
     std::vector<const EditorScene::Object*> splines;
     for (const EditorScene::Object& object : scene.Objects())

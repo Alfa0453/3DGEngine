@@ -1,0 +1,4 @@
+# Generated script registrations: `gameplay ClassName` or `bt ClassName`.
+# This file is maintained by the editor. Empty lines and comments are ignored.
+gameplay Coin
+gameplay GoalTracker

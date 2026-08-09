@@ -1,4 +1,5 @@
 #include "RoomBuilderPanel.h"
+#include "EditorPanels.h"
 
 #include <imgui.h>
 
@@ -71,7 +72,7 @@ void RoomBuilderPanel::RefreshMaterials(const std::string& assetRoot) {
 RoomBuilderPanel::Result RoomBuilderPanel::Draw(const std::string& assetRoot, bool* open) {
     Result result;
     if (m_materialRoot != assetRoot) RefreshMaterials(assetRoot);
-    if (!ImGui::Begin("Room Builder", open)) { ImGui::End(); return result; }
+    if (!ImGui::Begin(EditorPanels::Name(EditorPanels::Panel::RoomBuilder), open)) { ImGui::End(); return result; }
 
     ImGui::InputText("Room Name", m_roomName.data(), m_roomName.size());
     ImGui::DragFloat("Grid Size", &m_gridSize, 0.05f, 0.05f, 10.0f, "%.2f");

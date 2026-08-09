@@ -18,6 +18,7 @@ add_executable(3DGEditor
     src/app/EditorApp_MergeMesh.cpp
     src/app/EditorApp_ScriptDebug.cpp
     src/app/EditorApp_World.cpp
+    src/app/EditorBranding.cpp
     src/app/EditorLog.cpp
     src/app/EditorProject.cpp
     src/app/EditorPanels.cpp
@@ -80,9 +81,12 @@ target_include_directories(3DGEditor PRIVATE
 target_compile_definitions(3DGEditor PRIVATE
     THREEDG_BT_SCRIPT_TEMPLATE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/btscripts/templates"
     THREEDG_GAME_MODULE_DIR="${CMAKE_SOURCE_DIR}/game"
+    THREEDG_ENGINE_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+    THREEDG_ENGINE_BUILD_DIR="${CMAKE_BINARY_DIR}"
     _CRT_SECURE_NO_WARNINGS)   # editor tool code uses sscanf/snprintf; silence MSVC C4996
 target_link_libraries(3DGEditor PRIVATE engine MaterialMaker game)
 if(WIN32)
+    target_sources(3DGEditor PRIVATE assets/branding/3DGEditor.rc)
     # shell32 + ole32: IFileDialog folder picker; comdlg32: GetOpenFileName.
     target_link_libraries(3DGEditor PRIVATE shell32 ole32 comdlg32)
 endif()
@@ -93,12 +97,40 @@ set_target_properties(3DGEditor PROPERTIES
 
 add_executable(3DGScriptCompiler src/scripting/ScriptCompilerHelper.cpp)
 add_dependencies(3DGEditor 3DGScriptCompiler)
+target_compile_definitions(3DGScriptCompiler PRIVATE
+    THREEDG_ENGINE_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+    THREEDG_ENGINE_BUILD_DIR="${CMAKE_BINARY_DIR}")
 set_target_properties(3DGScriptCompiler PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/editor")
 if(MSVC)
     target_compile_options(3DGScriptCompiler PRIVATE /W4)
 else()
     target_compile_options(3DGScriptCompiler PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+# Project launcher. Kept beside the editor executable so it can start the
+# matching build without hard-coded installation paths.
+add_executable(3DGLauncher
+    src/launcher/main.cpp
+    src/launcher/LauncherApp.cpp
+    src/app/EditorBranding.cpp
+    src/app/EditorProject.cpp
+    src/platform/NativeDialog.cpp)
+add_dependencies(3DGLauncher 3DGEditor)
+target_include_directories(3DGLauncher PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/engine/include)
+target_link_libraries(3DGLauncher PRIVATE engine)
+set_target_properties(3DGLauncher PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/editor")
+if(WIN32)
+    target_sources(3DGLauncher PRIVATE assets/branding/3DGEditor.rc)
+    target_link_libraries(3DGLauncher PRIVATE shell32 ole32 comdlg32)
+endif()
+if(MSVC)
+    target_compile_options(3DGLauncher PRIVATE /W4)
+else()
+    target_compile_options(3DGLauncher PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
 add_custom_command(TARGET 3DGEditor POST_BUILD

@@ -1,5 +1,6 @@
 #include "ViewportBookmarksPanel.h"
 
+#include "EditorPanels.h"
 #include "EditorScene.h"
 
 #include <imgui.h>
@@ -21,7 +22,7 @@ bool ContainsInsensitive(const std::string& value, const char* filter) {
 ViewportBookmarksPanel::Result ViewportBookmarksPanel::Draw(
     const EditorScene& scene, bool* open) {
     Result result;
-    if (!ImGui::Begin("Viewport Bookmarks & Navigation", open)) {
+    if (!ImGui::Begin(EditorPanels::Name(EditorPanels::Panel::ViewportBookmarks), open)) {
         ImGui::End();
         return result;
     }

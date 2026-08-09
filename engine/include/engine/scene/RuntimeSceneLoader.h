@@ -210,11 +210,15 @@ public:
         std::string scriptClassName;
         std::string scriptPath;
         std::vector<ScriptField> scriptFields;
+        int scriptExecutionOrder = 0;
+        std::vector<std::string> scriptDependencies;
         struct AdditionalScript {
             bool enabled = true;
             std::string className;
             std::string path;
             std::vector<ScriptField> fields;
+            int executionOrder = 0;
+            std::vector<std::string> dependencies;
         };
         std::vector<AdditionalScript> additionalScripts;
         bool audioSourceEnabled = false;

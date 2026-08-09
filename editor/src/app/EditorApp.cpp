@@ -28,6 +28,7 @@
 #include <engine/assets/ShaderGraphCompiler.h>
 
 #include "GameBtScripts.h"
+#include "EditorBranding.h"
 #include "EditorScriptTools.h"
 #include "EditorGeneratedScriptTools.h"
 #include "AnimationGraphBuilder.h"
@@ -291,6 +292,10 @@ EditorApp::~EditorApp() = default;
 
 void EditorApp::OnInit()
 {
+    m_autoCompileScripts = m_config.GetBool("scripting.auto_compile_on_save", true);
+    const editor::branding::WindowIcon& editorIcon = editor::branding::Icon();
+    GetWindow().SetIcon(editorIcon.width, editorIcon.height, editorIcon.rgba.data());
+
     m_renderer.Init();
     m_renderer.SetClearColor({0.08f, 0.09f, 0.11f, 1.0f});
 
@@ -580,7 +585,8 @@ void EditorApp::OnInit()
     }
     engine::ai::RegisterExampleBtScripts();   // built-in example scripts (idempotent)
     RegisterGameBtScripts();                  // legacy: editor/src/GameBtScripts.cpp
-    RegisterGameModule();                     // shared game module (scripts used by editor + player)
+    RegisterGameModule();                     // engine/manual scripts
+    LoadProjectScriptModule(false);           // active project's compiled native scripts
     {
         std::error_code ec;
         const std::filesystem::path projectRoot =
@@ -592,7 +598,8 @@ void EditorApp::OnInit()
         } else if (scriptBuildStatus.rfind("failed", 0) == 0) {
             m_log.Error("Script compilation failed. Open the Script Editor to view the build log.");
         }
-        std::filesystem::remove(projectRoot / "build" / "script_compile.status", ec);
+        std::filesystem::remove(
+            projectRoot / "Intermediate" / "Scripts" / "script_compile.status", ec);
     }
     bool restoredLastScene = false;
     std::error_code savedSceneError;
@@ -614,6 +621,11 @@ void EditorApp::OnInit()
             *m_cone, *m_pyramid, *m_torus, *m_staircase);
         if (m_project.HasLastSavedScene()) {
             m_log.Warning("Last saved scene was unavailable; opened the default scene instead");
+        } else if (m_project.HasProjectFile()) {
+            // Launcher-created projects begin with an empty project file. Save
+            // their generated starter level immediately, matching the in-editor
+            // Create Project workflow.
+            SaveScene();
         }
     }
     m_imgui.Init(GetWindow());
@@ -621,6 +633,7 @@ void EditorApp::OnInit()
 
 void EditorApp::OnUpdate(float dt)
 {
+    UpdateScriptAutoReload(dt);
     if (m_mode == EditorMode::Play) {
         m_playPhysics.SetDebugTracing(m_showGameplayTraces);
         m_playPhysics.ClearDebugTraces();
@@ -969,7 +982,12 @@ void EditorApp::OnShutdown()
     // Clear script factories before the loaded module (their DLL) unloads, so the static
     // ScriptRegistry singleton doesn't destroy DLL-owned callables after FreeLibrary.
     engine::ScriptRegistry::Instance().Clear();
+    engine::ai::BtScriptRegistry::Instance().Clear();
     m_scriptModule.Unload();
+    m_projectScriptClasses.clear();
+    m_projectBtScriptClasses.clear();
+    m_projectScriptStageSlot = -1;
+    ResetScriptAutoReloadWatcher();
     m_imgui.Shutdown();
     if (m_hasProjectFile) {
         m_project.Save(m_projectConfig);
@@ -1522,6 +1540,9 @@ void EditorApp::DrawEditorOverlay()
     dockspaceContext.cameraSequencePaused = m_cameraSequencePaused;
     dockspaceContext.modeName = m_mode == EditorMode::Edit ? "Edit" : "Play";
     dockspaceContext.playMode = m_mode == EditorMode::Play;
+    dockspaceContext.autoCompileScripts = &m_autoCompileScripts;
+    dockspaceContext.scriptBuildRunning = m_scriptBuildRunning;
+    dockspaceContext.scriptBuildStatus = &m_scriptBuildStatus;
     dockspaceContext.physicsPaused = m_physicsPaused;
     dockspaceContext.physicsFixedTimestep = m_physicsFixedTimestep;
     dockspaceContext.physicsAccumulator = m_physicsAccumulator;
@@ -1669,7 +1690,7 @@ void EditorApp::DrawEditorOverlay()
                 std::string error;
                 if (EditorScriptTools::LaunchCompileAndRestart(
                         projectRoot, "Debug", &error)) {
-                    m_log.Info("Script compiler started; rebuilding editor (player rebuilds at cook time)");
+                    m_log.Info("Script compiler started; building the project-owned script module");
                     GetWindow().SetShouldClose(true);
                 } else {
                     m_log.Error("Script compiler: " + error);
@@ -3607,7 +3628,7 @@ void EditorApp::DrawViewportPanel() {
     }
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
     // No close button (nullptr) and no collapse arrow: the Viewport is always present.
-    const bool visible = ImGui::Begin("Viewport", nullptr,
+    const bool visible = ImGui::Begin(EditorPanels::Name(EditorPanels::Panel::Viewport), nullptr,
                  ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse
                  | ImGuiWindowFlags_NoCollapse);
 
@@ -8412,8 +8433,8 @@ void EditorApp::NewProject(const std::string& location, const std::string& name)
     m_behaviorGraph.SetOutputDirectory(m_project.AssetRoot());
     m_content.Refresh(m_assets, m_project, m_log);
     LoadProjectAssetRegistry();
-    // A brand-new project has no script list, so this resets the shared game module's
-    // generated header to register nothing -- previous projects' scripts are dropped.
+    // Generate an empty project-owned module description and detach the previous
+    // project's factories before continuing in the new project.
     {
         std::string regenError;
         if (!EditorGeneratedScriptTools::RegenerateGeneratedScripts(
@@ -8421,6 +8442,17 @@ void EditorApp::NewProject(const std::string& location, const std::string& name)
             m_log.Info("Project scripts: " + regenError);
         }
     }
+    engine::ScriptRegistry::Instance().Clear();
+    engine::ai::BtScriptRegistry::Instance().Clear();
+    m_scriptModule.Unload();
+    m_projectScriptClasses.clear();
+    m_projectBtScriptClasses.clear();
+    m_projectScriptStageSlot = -1;
+    ResetScriptAutoReloadWatcher();
+    engine::ai::RegisterExampleBtScripts();
+    RegisterGameBtScripts();
+    RegisterGameModule();
+    LoadProjectScriptModule(false);
 
     // Start the project from a clean default scene and save it into the project.
     m_scene.BuildDefault(*m_cube, *m_plane, *m_sphere, *m_capsule, *m_cylinder,
@@ -8456,8 +8488,7 @@ void EditorApp::OpenProjectFromPath(const std::string& projectFile) {
     m_content.Refresh(m_assets, m_project, m_log);
     LoadProjectAssetRegistry();
     SetScenePathDraft(m_project.ScenePath());
-    // Regenerate the shared game module's script header from this project's list only, so
-    // opening a project no longer carries over the previously open project's scripts.
+    // Regenerate and load this project's independent native-script module.
     {
         std::string regenError;
         if (!EditorGeneratedScriptTools::RegenerateGeneratedScripts(
@@ -8465,6 +8496,17 @@ void EditorApp::OpenProjectFromPath(const std::string& projectFile) {
             m_log.Info("Project scripts: " + regenError);
         }
     }
+    engine::ScriptRegistry::Instance().Clear();
+    engine::ai::BtScriptRegistry::Instance().Clear();
+    m_scriptModule.Unload();
+    m_projectScriptClasses.clear();
+    m_projectBtScriptClasses.clear();
+    m_projectScriptStageSlot = -1;
+    ResetScriptAutoReloadWatcher();
+    engine::ai::RegisterExampleBtScripts();
+    RegisterGameBtScripts();
+    RegisterGameModule();
+    LoadProjectScriptModule(false);
 
     std::error_code ec;
     if (m_project.HasLastSavedScene()
@@ -8908,6 +8950,7 @@ void EditorApp::EnterPlayMode()
 
 void EditorApp::ExitPlayMode()
 {
+    engine::SetScriptExecutionPaused(false);
     if (m_playRegistry) engine::ShutdownScripts(*m_playRegistry);
     m_runtimeAudio.Stop();
     m_audio.StopAllSounds();
@@ -9024,6 +9067,7 @@ bool EditorApp::BuildPlayRuntimePreview(std::string * error)
                     if (m_playRegistry) {
                         m_runtimeAudio.ProcessAnimationEvent(*m_playRegistry, entity, name);
                         engine::ProcessParticleAnimationEvent(*m_playRegistry, entity, name);
+                        engine::QueueScriptAnimationEvent(*m_playRegistry, entity, name);
                     }
                     m_playAnimationEvents.push_back(engine::ScriptAnimationEvent{
                         entity,
@@ -10656,6 +10700,7 @@ void EditorApp::CapturePlayPhysicsEvents()
     if (m_playRegistry) {
         m_runtimeAudio.ProcessCollisionEvents(*m_playRegistry, m_playPhysics.Events());
         engine::ProcessParticleCollisionEvents(*m_playRegistry, m_playPhysics.Events());
+        engine::QueueScriptCollisionEvents(*m_playRegistry, m_playPhysics.Events());
     }
 
     auto entityName = [this](engine::ecs::Entity entity) {

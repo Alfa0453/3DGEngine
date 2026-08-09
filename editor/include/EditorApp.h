@@ -89,6 +89,8 @@
 #include <glm/glm.hpp>
 
 #include <array>
+#include <cstdint>
+#include <future>
 #include <memory>
 #include <optional>
 #include <string>
@@ -240,6 +242,10 @@ private:
     void DrawPrefabEditorPanel();   // author a reusable object template (.3dgprefab)
     void DrawScriptDebugPanel();    // live per-entity script field inspector (Play mode)
     void HotReloadScripts();        // rebuild + reload game_scripts.dll without restart (dev)
+    bool LoadProjectScriptModule(bool reportMissing = false);
+    void UpdateScriptAutoReload(float dt);
+    void StartScriptAutoBuild();
+    void ResetScriptAutoReloadWatcher();
     void DrawWorldEditorPanel();    // compose a streamed world (.3dgworld) from level scenes
     // Cook an authoring world (editor-scene refs) into a runnable one: export each level
     // to a runtime scene, compute bounds, and write the cooked .3dgworld.
@@ -594,6 +600,23 @@ private:
     std::string                          m_worldStatus;      // last save/load/cook message
     std::string                          m_prefabPath;       // current .3dgprefab path ("" = unsaved)
     engine::ScriptModule                 m_scriptModule;     // loaded hot-reload script DLL (dev)
+    std::vector<std::string>             m_projectScriptClasses;
+    std::vector<std::string>             m_projectBtScriptClasses;
+    int                                  m_projectScriptStageSlot = -1;
+    struct ScriptBuildResult {
+        bool success = false;
+        std::string error;
+        std::filesystem::path projectRoot;
+    };
+    std::future<ScriptBuildResult>       m_scriptBuildFuture;
+    std::unordered_map<std::string, std::uint64_t> m_scriptSourceSnapshot;
+    bool                                 m_scriptSourceSnapshotInitialized = false;
+    bool                                 m_autoCompileScripts = true;
+    bool                                 m_scriptBuildRunning = false;
+    bool                                 m_scriptBuildPending = false;
+    float                                m_scriptWatchPoll = 0.0f;
+    float                                m_scriptBuildDebounce = 0.0f;
+    std::string                          m_scriptBuildStatus = "Watching Content/Scripts";
     engine::HudDocument                  m_hud;              // active HUD document (in memory)
     std::string                          m_hudPath;          // last saved/loaded .hud path
     std::unordered_map<std::string, float>       m_hudFloats;   // named numeric HUD values

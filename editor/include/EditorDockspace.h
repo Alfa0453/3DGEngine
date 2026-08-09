@@ -194,6 +194,9 @@ public:
         bool playMode = false;
         bool scriptCompileAndRestartRequested = false;
         bool scriptHotReloadRequested = false;
+        bool* autoCompileScripts = nullptr;
+        bool scriptBuildRunning = false;
+        const std::string* scriptBuildStatus = nullptr;
         bool physicsPaused = false;
         bool physicsPauseToggleRequested = false;
         bool physicsStepRequested = false;

@@ -61,6 +61,53 @@ const char* OptionalString(lua_State* state, int index, const char* fallback) {
     return luaL_optstring(state, index, fallback);
 }
 
+void ReadEventTable(lua_State* state, int index, ScriptEvent& event) {
+    if (!lua_istable(state, index)) return;
+    index = lua_absindex(state, index);
+    lua_pushnil(state);
+    while (lua_next(state, index) != 0) {
+        if (lua_type(state, -2) == LUA_TSTRING) {
+            const std::string key = lua_tostring(state, -2);
+            switch (lua_type(state, -1)) {
+            case LUA_TBOOLEAN:
+                event.bools[key] = lua_toboolean(state, -1) != 0;
+                break;
+            case LUA_TNUMBER:
+                event.floats[key] = static_cast<float>(lua_tonumber(state, -1));
+                break;
+            case LUA_TSTRING:
+                event.strings[key] = lua_tostring(state, -1);
+                break;
+            default:
+                break;
+            }
+        }
+        lua_pop(state, 1);
+    }
+}
+
+void PushScriptHandle(lua_State* state, const ScriptHandle& handle) {
+    if (!handle) { lua_pushnil(state); return; }
+    lua_createtable(state, 0, 2);
+    lua_pushinteger(state, static_cast<lua_Integer>(handle.entity));
+    lua_setfield(state, -2, "entity");
+    lua_pushlstring(state, handle.className.data(), handle.className.size());
+    lua_setfield(state, -2, "class");
+}
+
+ScriptHandle ReadScriptHandle(lua_State* state, int index) {
+    ScriptHandle handle;
+    if (!lua_istable(state, index)) return handle;
+    index = lua_absindex(state, index);
+    lua_getfield(state, index, "entity");
+    handle.entity = static_cast<ecs::Entity>(lua_tointeger(state, -1));
+    lua_pop(state, 1);
+    lua_getfield(state, index, "class");
+    if (const char* value = lua_tostring(state, -1)) handle.className = value;
+    lua_pop(state, 1);
+    return handle;
+}
+
 } // namespace
 
 bool IsLuaScriptPath(const std::string& path) {
@@ -151,6 +198,23 @@ void LuaScript::Call(const char* functionName, float argument) {
     }
 }
 
+bool LuaScript::CallPredicate(const std::string& functionName) {
+    Load();
+    lua_getglobal(m_state, functionName.c_str());
+    if (!lua_isfunction(m_state, -1)) {
+        lua_pop(m_state, 1);
+        throw std::runtime_error(functionName + " must be a function");
+    }
+    if (lua_pcall(m_state, 0, 1, 0) != LUA_OK) {
+        const std::string error = lua_tostring(m_state, -1);
+        lua_pop(m_state, 1);
+        throw std::runtime_error(functionName + ": " + error);
+    }
+    const bool result = lua_toboolean(m_state, -1) != 0;
+    lua_pop(m_state, 1);
+    return result;
+}
+
 bool LuaScript::HasTimerFunction(const std::string& functionName) const {
     if (functionName.empty()) return false;
     const_cast<LuaScript*>(this)->Load();
@@ -167,10 +231,218 @@ bool LuaScript::InvokeTimerFunction(const std::string& functionName) {
 }
 
 void LuaScript::OnCreate() { Call("OnCreate"); }
+void LuaScript::OnEnable() { Call("OnEnable"); }
+void LuaScript::OnDisable() {
+    if (m_loaded) Call("OnDisable");
+}
 void LuaScript::OnUpdate(float dt) { Call("OnUpdate", dt); }
 void LuaScript::OnFixedUpdate(float dt) { Call("OnFixedUpdate", dt); }
+void LuaScript::OnEvent(const ScriptEvent& event) {
+    Load();
+    lua_getglobal(m_state, "OnEvent");
+    if (lua_isnil(m_state, -1)) {
+        lua_pop(m_state, 1);
+        return;
+    }
+    if (!lua_isfunction(m_state, -1)) {
+        lua_pop(m_state, 1);
+        throw std::runtime_error("OnEvent must be a function");
+    }
+    const ScriptEvent* previousEvent = m_currentEvent;
+    m_currentEvent = &event;
+    lua_pushstring(m_state, event.name.c_str());
+    lua_pushinteger(m_state, static_cast<lua_Integer>(event.sender));
+    lua_pushinteger(m_state, static_cast<lua_Integer>(event.target));
+    if (lua_pcall(m_state, 3, 0, 0) != LUA_OK) {
+        const std::string error = lua_tostring(m_state, -1);
+        lua_pop(m_state, 1);
+        m_currentEvent = previousEvent;
+        throw std::runtime_error("OnEvent: " + error);
+    }
+    m_currentEvent = previousEvent;
+}
+
+bool LuaScript::OnScriptCall(const std::string& functionName,
+                             const ScriptEvent& arguments,
+                             ScriptEvent& result) {
+    Load();
+    lua_getglobal(m_state, functionName.c_str());
+    if (lua_isnil(m_state, -1)) {
+        lua_pop(m_state, 1);
+        return false;
+    }
+    if (!lua_isfunction(m_state, -1)) {
+        lua_pop(m_state, 1);
+        throw std::runtime_error(functionName + " must be a function");
+    }
+    const ScriptEvent* previousEvent = m_currentEvent;
+    m_currentEvent = &arguments;
+    lua_pushinteger(m_state, static_cast<lua_Integer>(arguments.sender));
+    lua_pushinteger(m_state, static_cast<lua_Integer>(arguments.target));
+    if (lua_pcall(m_state, 2, 2, 0) != LUA_OK) {
+        const std::string error = lua_tostring(m_state, -1);
+        lua_pop(m_state, 1);
+        m_currentEvent = previousEvent;
+        throw std::runtime_error(functionName + ": " + error);
+    }
+    const bool handled = lua_isnil(m_state, -2)
+        || lua_toboolean(m_state, -2) != 0;
+    switch (lua_type(m_state, -1)) {
+    case LUA_TBOOLEAN:
+        result.bools["value"] = lua_toboolean(m_state, -1) != 0;
+        break;
+    case LUA_TNUMBER:
+        result.floats["value"] = static_cast<float>(lua_tonumber(m_state, -1));
+        break;
+    case LUA_TSTRING:
+        result.strings["value"] = lua_tostring(m_state, -1);
+        break;
+    default:
+        break;
+    }
+    lua_pop(m_state, 2);
+    m_currentEvent = previousEvent;
+    return handled;
+}
 void LuaScript::OnDestroy() {
     if (m_loaded) Call("OnDestroy");
+}
+
+int LuaScript::PersistentStateVersion() const {
+    LuaScript* self = const_cast<LuaScript*>(this);
+    self->Load();
+    lua_getglobal(m_state, "PersistentStateVersion");
+    if (lua_isnil(m_state, -1)) {
+        lua_pop(m_state, 1);
+        lua_getglobal(m_state, "OnSaveState");
+        const bool persistent = lua_isfunction(m_state, -1) != 0;
+        lua_pop(m_state, 1);
+        return persistent ? 1 : 0;
+    }
+    if (!lua_isfunction(m_state, -1)) {
+        lua_pop(m_state, 1);
+        throw std::runtime_error("PersistentStateVersion must be a function");
+    }
+    if (lua_pcall(m_state, 0, 1, 0) != LUA_OK) {
+        const std::string error = lua_tostring(m_state, -1);
+        lua_pop(m_state, 1);
+        throw std::runtime_error("PersistentStateVersion: " + error);
+    }
+    const int version = lua_isinteger(m_state, -1)
+        ? static_cast<int>(lua_tointeger(m_state, -1)) : 1;
+    lua_pop(m_state, 1);
+    return std::max(version, 0);
+}
+
+void LuaScript::OnSaveState(StateMap& state) const {
+    LuaScript* self = const_cast<LuaScript*>(this);
+    self->Load();
+    lua_getglobal(m_state, "OnSaveState");
+    if (lua_isnil(m_state, -1)) {
+        lua_pop(m_state, 1);
+        return;
+    }
+    if (!lua_isfunction(m_state, -1)) {
+        lua_pop(m_state, 1);
+        throw std::runtime_error("OnSaveState must be a function");
+    }
+    if (lua_pcall(m_state, 0, 1, 0) != LUA_OK) {
+        const std::string error = lua_tostring(m_state, -1);
+        lua_pop(m_state, 1);
+        throw std::runtime_error("OnSaveState: " + error);
+    }
+    if (!lua_istable(m_state, -1)) {
+        lua_pop(m_state, 1);
+        throw std::runtime_error("OnSaveState must return a table");
+    }
+    lua_pushnil(m_state);
+    while (lua_next(m_state, -2) != 0) {
+        if (lua_type(m_state, -2) == LUA_TSTRING) {
+            const std::string key = lua_tostring(m_state, -2);
+            switch (lua_type(m_state, -1)) {
+            case LUA_TBOOLEAN:
+                state[key] = lua_toboolean(m_state, -1) != 0 ? "1" : "0";
+                break;
+            case LUA_TNUMBER:
+            case LUA_TSTRING: {
+                std::size_t length = 0;
+                const char* value = lua_tolstring(m_state, -1, &length);
+                state[key] = value ? std::string(value, length) : std::string();
+                break;
+            }
+            default:
+                break;
+            }
+        }
+        lua_pop(m_state, 1);
+    }
+    lua_pop(m_state, 1);
+}
+
+void LuaScript::OnLoadState(int savedVersion, const StateMap& state) {
+    Load();
+    lua_getglobal(m_state, "OnLoadState");
+    if (lua_isnil(m_state, -1)) {
+        lua_pop(m_state, 1);
+        return;
+    }
+    if (!lua_isfunction(m_state, -1)) {
+        lua_pop(m_state, 1);
+        throw std::runtime_error("OnLoadState must be a function");
+    }
+    lua_pushinteger(m_state, savedVersion);
+    lua_createtable(m_state, 0, static_cast<int>(state.size()));
+    for (const auto& value : state) {
+        lua_pushlstring(m_state, value.second.data(), value.second.size());
+        lua_setfield(m_state, -2, value.first.c_str());
+    }
+    if (lua_pcall(m_state, 2, 0, 0) != LUA_OK) {
+        const std::string error = lua_tostring(m_state, -1);
+        lua_pop(m_state, 1);
+        throw std::runtime_error("OnLoadState: " + error);
+    }
+}
+
+void LuaScript::DefineTests(ScriptTestSuite& suite) {
+    Load();
+    lua_getglobal(m_state, "ScriptTests");
+    if (lua_isnil(m_state, -1)) {
+        lua_pop(m_state, 1);
+        return;
+    }
+    if (!lua_istable(m_state, -1)) {
+        lua_pop(m_state, 1);
+        throw std::runtime_error("ScriptTests must be a table of named functions");
+    }
+    std::vector<std::string> names;
+    lua_pushnil(m_state);
+    while (lua_next(m_state, -2) != 0) {
+        if (lua_type(m_state, -2) == LUA_TSTRING && lua_isfunction(m_state, -1))
+            names.emplace_back(lua_tostring(m_state, -2));
+        lua_pop(m_state, 1);
+    }
+    lua_pop(m_state, 1);
+    std::sort(names.begin(), names.end());
+    for (const std::string& name : names) {
+        suite.Add(name, [this, name](ScriptTestContext& context) {
+            m_currentTest = &context;
+            lua_getglobal(m_state, "ScriptTests");
+            lua_getfield(m_state, -1, name.c_str());
+            lua_remove(m_state, -2);
+            if (!lua_isfunction(m_state, -1)) {
+                lua_pop(m_state, 1);
+                m_currentTest = nullptr;
+                throw std::runtime_error("Lua test function disappeared: " + name);
+            }
+            if (lua_pcall(m_state, 0, 0, 0) != LUA_OK) {
+                const std::string error = lua_tostring(m_state, -1);
+                lua_pop(m_state, 1);
+                m_currentTest = nullptr;
+                throw std::runtime_error(name + ": " + error);
+            }
+            m_currentTest = nullptr;
+        });
+    }
 }
 
 LuaScript* LuaScript::Current(lua_State* state) {
@@ -220,6 +492,30 @@ void LuaScript::RegisterEngineApi() {
         {"WasMouseButtonPressed", ApiMousePressed},
         {"MouseDelta", ApiMouseDelta},
         {"WasAnimationEvent", ApiWasAnimationEvent},
+        {"ListenForEvent", ApiListenForEvent},
+        {"StopListeningForEvent", ApiStopListeningForEvent},
+        {"PublishEvent", ApiPublishEvent},
+        {"EventBool", ApiEventBool},
+        {"EventFloat", ApiEventFloat},
+        {"EventString", ApiEventString},
+        {"EventEntity", ApiEventEntity},
+        {"EventVector", ApiEventVector},
+        {"FindScript", ApiFindScript},
+        {"IsScriptValid", ApiIsScriptValid},
+        {"IsScriptEnabled", ApiIsScriptEnabled},
+        {"SetScriptEnabled", ApiSetScriptEnabled},
+        {"SetSelfEnabled", ApiSetSelfEnabled},
+        {"CallScript", ApiCallScript},
+        {"CreateSequence", ApiCreateSequence},
+        {"SequenceDo", ApiSequenceDo},
+        {"SequenceWait", ApiSequenceWait},
+        {"SequenceWaitUntil", ApiSequenceWaitUntil},
+        {"PauseSequence", ApiPauseSequence},
+        {"ResumeSequence", ApiResumeSequence},
+        {"CancelSequence", ApiCancelSequence},
+        {"CancelAllSequences", ApiCancelAllSequences},
+        {"IsSequenceActive", ApiIsSequenceActive},
+        {"IsSequencePaused", ApiIsSequencePaused},
         {"GetFieldFloat", ApiFieldFloat},
         {"GetFieldInt", ApiFieldInt},
         {"GetFieldBool", ApiFieldBool},
@@ -270,6 +566,8 @@ void LuaScript::RegisterEngineApi() {
         {"GetEffectiveTimeDilation", ApiGetEffectiveTimeDilation},
         {"HitStop", ApiHitStop},
         {"IsHitStopActive", ApiIsHitStopActive},
+        {"TestAssert", ApiTestAssert},
+        {"TestExpectNear", ApiTestExpectNear},
         {nullptr, nullptr}
     };
     luaL_newlib(m_state, functions);
@@ -656,6 +954,218 @@ int LuaScript::ApiWasAnimationEvent(lua_State* state) {
     return 1;
 }
 
+int LuaScript::ApiListenForEvent(lua_State* state) {
+    lua_pushboolean(state, Current(state)->ListenForEvent(luaL_checkstring(state, 1)));
+    return 1;
+}
+
+int LuaScript::ApiStopListeningForEvent(lua_State* state) {
+    lua_pushboolean(state,
+        Current(state)->StopListeningForEvent(luaL_checkstring(state, 1)));
+    return 1;
+}
+
+int LuaScript::ApiPublishEvent(lua_State* state) {
+    LuaScript* script = Current(state);
+    ScriptEvent event;
+    event.name = luaL_checkstring(state, 1);
+    event.target = EntityArgument(state, 2, ecs::kNull);
+    ReadEventTable(state, 3, event);
+    script->PublishEvent(std::move(event));
+    return 0;
+}
+
+int LuaScript::ApiEventBool(lua_State* state) {
+    LuaScript* script = Current(state);
+    const bool fallback = lua_toboolean(state, 2) != 0;
+    lua_pushboolean(state, script->m_currentEvent
+        ? script->m_currentEvent->GetBool(luaL_checkstring(state, 1), fallback)
+        : fallback);
+    return 1;
+}
+
+int LuaScript::ApiEventFloat(lua_State* state) {
+    LuaScript* script = Current(state);
+    const float fallback = static_cast<float>(luaL_optnumber(state, 2, 0.0));
+    lua_pushnumber(state, script->m_currentEvent
+        ? script->m_currentEvent->GetFloat(luaL_checkstring(state, 1), fallback)
+        : fallback);
+    return 1;
+}
+
+int LuaScript::ApiEventString(lua_State* state) {
+    LuaScript* script = Current(state);
+    const std::string fallback = OptionalString(state, 2, "");
+    const std::string value = script->m_currentEvent
+        ? script->m_currentEvent->GetString(luaL_checkstring(state, 1), fallback)
+        : fallback;
+    lua_pushlstring(state, value.data(), value.size());
+    return 1;
+}
+
+int LuaScript::ApiEventEntity(lua_State* state) {
+    LuaScript* script = Current(state);
+    const ecs::Entity fallback = EntityArgument(state, 2, ecs::kNull);
+    lua_pushinteger(state, static_cast<lua_Integer>(script->m_currentEvent
+        ? script->m_currentEvent->GetEntity(luaL_checkstring(state, 1), fallback)
+        : fallback));
+    return 1;
+}
+
+int LuaScript::ApiEventVector(lua_State* state) {
+    LuaScript* script = Current(state);
+    const glm::vec3 fallback(
+        static_cast<float>(luaL_optnumber(state, 2, 0.0)),
+        static_cast<float>(luaL_optnumber(state, 3, 0.0)),
+        static_cast<float>(luaL_optnumber(state, 4, 0.0)));
+    PushVec3(state, script->m_currentEvent
+        ? script->m_currentEvent->GetVector(luaL_checkstring(state, 1), fallback)
+        : fallback);
+    return 3;
+}
+
+int LuaScript::ApiFindScript(lua_State* state) {
+    LuaScript* script = Current(state);
+    const std::string className = OptionalString(state, 2, "");
+    ScriptHandle handle;
+    if (lua_type(state, 1) == LUA_TNUMBER) {
+        handle = script->FindScript(
+            static_cast<ecs::Entity>(lua_tointeger(state, 1)), className);
+    } else {
+        handle = script->FindScript(luaL_checkstring(state, 1), className);
+    }
+    PushScriptHandle(state, handle);
+    return 1;
+}
+
+int LuaScript::ApiIsScriptValid(lua_State* state) {
+    lua_pushboolean(state, Current(state)->IsScriptValid(ReadScriptHandle(state, 1)));
+    return 1;
+}
+
+int LuaScript::ApiIsScriptEnabled(lua_State* state) {
+    lua_pushboolean(state, Current(state)->IsScriptEnabled(ReadScriptHandle(state, 1)));
+    return 1;
+}
+
+int LuaScript::ApiSetScriptEnabled(lua_State* state) {
+    lua_pushboolean(state, Current(state)->SetScriptEnabled(
+        ReadScriptHandle(state, 1), lua_toboolean(state, 2) != 0));
+    return 1;
+}
+
+int LuaScript::ApiSetSelfEnabled(lua_State* state) {
+    lua_pushboolean(state, Current(state)->SetSelfEnabled(
+        lua_toboolean(state, 1) != 0));
+    return 1;
+}
+
+int LuaScript::ApiCallScript(lua_State* state) {
+    LuaScript* script = Current(state);
+    const ScriptHandle handle = ReadScriptHandle(state, 1);
+    const std::string functionName = luaL_checkstring(state, 2);
+    ScriptEvent arguments;
+    ReadEventTable(state, 3, arguments);
+    ScriptEvent result;
+    const bool handled = script->CallScript(
+        handle, functionName, std::move(arguments), &result);
+    lua_pushboolean(state, handled);
+    if (const auto boolValue = result.bools.find("value");
+        boolValue != result.bools.end())
+        lua_pushboolean(state, boolValue->second);
+    else if (const auto floatValue = result.floats.find("value");
+             floatValue != result.floats.end())
+        lua_pushnumber(state, floatValue->second);
+    else if (const auto stringValue = result.strings.find("value");
+             stringValue != result.strings.end())
+        lua_pushlstring(state, stringValue->second.data(), stringValue->second.size());
+    else
+        lua_pushnil(state);
+    return 2;
+}
+
+int LuaScript::ApiCreateSequence(lua_State* state) {
+    lua_pushinteger(state, Current(state)->Sequence().Handle());
+    return 1;
+}
+
+int LuaScript::ApiSequenceDo(lua_State* state) {
+    LuaScript* script = Current(state);
+    ScriptSequence* sequence = script->FindSequence(
+        static_cast<int>(luaL_checkinteger(state, 1)));
+    const std::string functionName = luaL_checkstring(state, 2);
+    if (!sequence || sequence->Cancelled() || functionName.empty()) {
+        lua_pushboolean(state, false);
+        return 1;
+    }
+    sequence->Do([script, functionName] { script->Call(functionName.c_str()); });
+    lua_pushboolean(state, true);
+    return 1;
+}
+
+int LuaScript::ApiSequenceWait(lua_State* state) {
+    LuaScript* script = Current(state);
+    ScriptSequence* sequence = script->FindSequence(
+        static_cast<int>(luaL_checkinteger(state, 1)));
+    if (!sequence || sequence->Cancelled()) {
+        lua_pushboolean(state, false);
+        return 1;
+    }
+    sequence->Wait(static_cast<float>(luaL_checknumber(state, 2)));
+    lua_pushboolean(state, true);
+    return 1;
+}
+
+int LuaScript::ApiSequenceWaitUntil(lua_State* state) {
+    LuaScript* script = Current(state);
+    ScriptSequence* sequence = script->FindSequence(
+        static_cast<int>(luaL_checkinteger(state, 1)));
+    const std::string functionName = luaL_checkstring(state, 2);
+    if (!sequence || sequence->Cancelled() || functionName.empty()) {
+        lua_pushboolean(state, false);
+        return 1;
+    }
+    sequence->WaitUntil(
+        [script, functionName] { return script->CallPredicate(functionName); });
+    lua_pushboolean(state, true);
+    return 1;
+}
+
+int LuaScript::ApiPauseSequence(lua_State* state) {
+    lua_pushboolean(state, Current(state)->PauseSequence(
+        static_cast<int>(luaL_checkinteger(state, 1))));
+    return 1;
+}
+
+int LuaScript::ApiResumeSequence(lua_State* state) {
+    lua_pushboolean(state, Current(state)->ResumeSequence(
+        static_cast<int>(luaL_checkinteger(state, 1))));
+    return 1;
+}
+
+int LuaScript::ApiCancelSequence(lua_State* state) {
+    lua_pushboolean(state, Current(state)->CancelSequence(
+        static_cast<int>(luaL_checkinteger(state, 1))));
+    return 1;
+}
+
+int LuaScript::ApiCancelAllSequences(lua_State* state) {
+    Current(state)->CancelAllSequences();
+    return 0;
+}
+
+int LuaScript::ApiIsSequenceActive(lua_State* state) {
+    lua_pushboolean(state, Current(state)->IsSequenceActive(
+        static_cast<int>(luaL_checkinteger(state, 1))));
+    return 1;
+}
+
+int LuaScript::ApiIsSequencePaused(lua_State* state) {
+    lua_pushboolean(state, Current(state)->IsSequencePaused(
+        static_cast<int>(luaL_checkinteger(state, 1))));
+    return 1;
+}
+
 int LuaScript::ApiFieldFloat(lua_State* state) {
     lua_pushnumber(state, Current(state)->GetFieldFloat(
         luaL_checkstring(state, 1), static_cast<float>(luaL_optnumber(state, 2, 0.0))));
@@ -958,6 +1468,28 @@ int LuaScript::ApiHitStop(lua_State* state) {
 int LuaScript::ApiIsHitStopActive(lua_State* state) {
     lua_pushboolean(state, Current(state)->IsHitStopActive());
     return 1;
+}
+
+int LuaScript::ApiTestAssert(lua_State* state) {
+    LuaScript* script = Current(state);
+    if (!script->m_currentTest)
+        return luaL_error(state, "TestAssert can only be used inside ScriptTests");
+    script->m_currentTest->Expect(
+        lua_toboolean(state, 1) != 0,
+        OptionalString(state, 2, "Lua assertion failed"));
+    return 0;
+}
+
+int LuaScript::ApiTestExpectNear(lua_State* state) {
+    LuaScript* script = Current(state);
+    if (!script->m_currentTest)
+        return luaL_error(state, "TestExpectNear can only be used inside ScriptTests");
+    script->m_currentTest->ExpectNear(
+        static_cast<float>(luaL_checknumber(state, 1)),
+        static_cast<float>(luaL_checknumber(state, 2)),
+        static_cast<float>(luaL_optnumber(state, 3, 0.0001)),
+        OptionalString(state, 4, "Lua values are not within tolerance"));
+    return 0;
 }
 
 int LuaScript::ApiSaveValue(lua_State* state) {
