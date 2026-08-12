@@ -48,6 +48,7 @@ inline const char* ForPanel(EditorPanels::Panel panel) {
     case P::ScriptApi:
     case P::ScriptDebug: return Code;
     case P::WorldEditor: return World;
+    case P::TerrainCreator: return World;
     case P::Count: break;
     }
     return Document;

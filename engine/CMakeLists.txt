@@ -55,7 +55,9 @@ add_library(engine STATIC
     src/assets/AssetRegistry.cpp
     src/assets/StaticMeshAsset.cpp
     src/assets/FoliageAsset.cpp
+    src/assets/TerrainAsset.cpp
     src/assets/TextureAsset.cpp
+    src/assets/ForgeMaterialImporter.cpp
     src/assets/SkeletalAsset.cpp
     src/assets/MaterialAssetLoader.cpp
     src/assets/ParticleAsset.cpp
@@ -97,10 +99,21 @@ add_library(engine STATIC
     src/gameplay/ScriptModule.cpp
 )
 
+# Precompiled headers for faster builds (reduces template instantiation + std includes)
+# Apply the PCH only for C++ compilation units so C sources (e.g. miniaudio_impl.c)
+# are not forced to include C++ headers which would trigger compiler errors.
+target_precompile_headers(engine PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:"${CMAKE_CURRENT_SOURCE_DIR}/include/engine_pch.h">
+)
+
 # PUBLIC headers live under include/ so consumers write:  #include <engine/...>
 target_include_directories(engine
     PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/include
     PRIVATE ${CMAKE_SOURCE_DIR}/vendor/miniaudio)
+
+# Allow use of GLM experimental extensions (e.g. <glm/gtx/quaternion.hpp>).
+# Some GLM GT* headers are marked experimental and require this define.
+target_compile_definitions(engine PUBLIC GLM_ENABLE_EXPERIMENTAL)
 
 # OpenGL itself (opengl32 on Windows, libGL on Linux, the framework on macOS).
 find_package(OpenGL REQUIRED)
@@ -147,4 +160,13 @@ if(MSVC)
     target_compile_options(engine PRIVATE /W4)
 else()
     target_compile_options(engine PRIVATE -Wall -Wextra -Wpedantic)
+
+    # Install rules so the engine can be packaged independently (headers + archive).
+    install(TARGETS engine
+        ARCHIVE DESTINATION lib
+        LIBRARY DESTINATION lib
+        RUNTIME DESTINATION bin
+    )
+
+    install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/include/ DESTINATION include)
 endif()

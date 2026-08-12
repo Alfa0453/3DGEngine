@@ -148,6 +148,7 @@ bool MaterialMakerPanel::DrawContent() {
     ImGui::Separator();
     DrawPresetControls();
     DrawSurfaceControls();
+    DrawTilingControls();
     DrawAdvancedControls();
     DrawValidation();
     ImGui::Separator();
@@ -560,6 +561,61 @@ void MaterialMakerPanel::DrawSurfaceControls() {
     m_material.ao = Clamp01(m_material.ao);
 }
 
+void MaterialMakerPanel::DrawTilingControls() {
+    if (!ImGui::CollapsingHeader("Texture Tiling", ImGuiTreeNodeFlags_DefaultOpen))
+        return;
+
+    if (ImGui::Checkbox("Link U and V", &m_linkTilingAxes) && m_linkTilingAxes)
+        m_material.uvScale[1] = m_material.uvScale[0];
+
+    if (m_linkTilingAxes) {
+        float uniformTiling = m_material.uvScale[0];
+        if (ImGui::DragFloat(
+                m_material.worldSpaceUv ? "Tiles per World Unit" : "Tiling",
+                &uniformTiling, 0.05f, 0.01f, 100.0f, "%.2fx")) {
+            uniformTiling = std::clamp(uniformTiling, 0.01f, 100.0f);
+            m_material.uvScale = {uniformTiling, uniformTiling};
+        }
+    } else {
+        ImGui::DragFloat2(
+            m_material.worldSpaceUv ? "Tiles per World Unit (U/V)" : "Tiling (U/V)",
+            m_material.uvScale.data(), 0.05f, 0.01f, 100.0f, "%.2fx");
+    }
+
+    ImGui::TextDisabled("Quick tiling:");
+    const float presets[] = {0.5f, 1.0f, 2.0f, 4.0f, 8.0f};
+    for (int i = 0; i < IM_ARRAYSIZE(presets); ++i) {
+        if (i > 0) ImGui::SameLine();
+        ImGui::PushID(i);
+        char label[16]{};
+        std::snprintf(label, sizeof(label), "%.1fx", presets[i]);
+        if (ImGui::SmallButton(label))
+            m_material.uvScale = {presets[i], presets[i]};
+        ImGui::PopID();
+    }
+
+    ImGui::Checkbox("World-space Tiling", &m_material.worldSpaceUv);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Projects textures from world position so texture density "
+                          "does not stretch with object scale. In this mode tiling "
+                          "is measured per world unit.");
+    }
+    ImGui::DragFloat2("UV Offset", m_material.uvOffset.data(),
+                      0.01f, -100.0f, 100.0f, "%.2f");
+    ImGui::BeginDisabled(m_material.worldSpaceUv);
+    ImGui::SliderFloat("UV Rotation", &m_material.uvRotation,
+                       -180.0f, 180.0f, "%.0f deg");
+    ImGui::EndDisabled();
+    if (m_material.worldSpaceUv)
+        ImGui::TextDisabled("UV Rotation is unavailable with world-space tiling.");
+
+    m_material.uvScale[0] = std::clamp(m_material.uvScale[0], 0.01f, 100.0f);
+    m_material.uvScale[1] = std::clamp(m_material.uvScale[1], 0.01f, 100.0f);
+    m_material.uvOffset[0] = std::clamp(m_material.uvOffset[0], -100.0f, 100.0f);
+    m_material.uvOffset[1] = std::clamp(m_material.uvOffset[1], -100.0f, 100.0f);
+    m_material.uvRotation = std::clamp(m_material.uvRotation, -180.0f, 180.0f);
+}
+
 void MaterialMakerPanel::DrawAdvancedControls() {
     if (!ImGui::CollapsingHeader("Advanced Surface")) return;
     ImGui::TextDisabled("Quick setups:");
@@ -590,21 +646,6 @@ void MaterialMakerPanel::DrawAdvancedControls() {
     if (m_material.blendMode == 1)
         ImGui::SliderFloat("Alpha Cutoff", &m_material.alphaCutoff, 0.0f, 1.0f, "%.2f");
 
-    if (ImGui::TreeNode("UV Transform")) {
-        ImGui::Checkbox("World-space UV (scale-independent)", &m_material.worldSpaceUv);
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Projects the texture from world position so it never "
-                              "stretches when the object is scaled.\nTiling becomes "
-                              "tiles-per-world-unit. Best for walls, floors and\nmerged "
-                              "meshes; rotation is ignored in this mode.");
-        }
-        ImGui::DragFloat2(m_material.worldSpaceUv ? "Tiling (per world unit)" : "Tiling",
-                          m_material.uvScale.data(), 0.02f, 0.01f, 100.0f, "%.2f");
-        ImGui::DragFloat2("Offset", m_material.uvOffset.data(), 0.01f, -100.0f, 100.0f, "%.2f");
-        if (!m_material.worldSpaceUv)
-            ImGui::SliderFloat("Rotation", &m_material.uvRotation, -180.0f, 180.0f, "%.0f deg");
-        ImGui::TreePop();
-    }
     if (ImGui::TreeNode("Surface Detail")) {
         ImGui::SliderFloat("Normal Strength", &m_material.normalStrength, 0.0f, 4.0f, "%.2f");
         ImGui::SliderFloat("Height / Parallax", &m_material.heightScale, 0.0f, 0.12f, "%.3f");
@@ -1019,6 +1060,8 @@ void MaterialMakerPanel::DrawPreview() {
     if (m_preview) {
         ImGui::SameLine();
         ImGui::Checkbox("Live", &m_useLivePreview);   // always toggleable
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Refresh##MaterialPreview")) m_preview->Invalidate();
     }
 
     // Try the live, engine-rendered PBR preview first; fall back to the hand-drawn

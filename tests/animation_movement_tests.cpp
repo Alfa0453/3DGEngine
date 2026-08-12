@@ -199,6 +199,68 @@ void TestPlayerControllerCannotSprintInAir() {
           "airborne sprint input is limited to walk-speed air control");
 }
 
+void TestPlayerControllerCrouchAndStandClearance() {
+    engine::ecs::Registry registry;
+    engine::PlayerController controller;
+    controller.SetCapsule(0.4f, 1.8f);
+    controller.crouchedHeight = 1.0f;
+    controller.SetPosition(glm::vec3(0.0f, 0.9f, 0.0f));
+    controller.camCollision = false;
+
+    engine::PlayerInput crouch;
+    crouch.crouch = true;
+    controller.Update(registry, crouch, 0.0f);
+    Check(controller.Crouching() && Near(controller.body.height, 1.0f),
+          "crouch input reduces the authoritative capsule height");
+    Check(Near(controller.body.position.y - controller.body.height * 0.5f, 0.0f),
+          "crouching preserves the capsule foot position");
+
+    const engine::ecs::Entity ceiling = registry.Create();
+    engine::ecs::Transform ceilingTransform;
+    ceilingTransform.position = glm::vec3(0.0f, 1.5f, 0.0f);
+    registry.Add<engine::ecs::Transform>(ceiling, ceilingTransform);
+    registry.Add<engine::ecs::Collider>(ceiling,
+        engine::ecs::Collider::MakeBox(glm::vec3(2.0f, 0.2f, 2.0f)));
+    controller.Update(registry, engine::PlayerInput{}, 0.0f);
+    Check(controller.Crouching() && Near(controller.body.height, 1.0f),
+          "standing remains blocked while head room is occupied");
+
+    registry.Destroy(ceiling);
+    controller.Update(registry, engine::PlayerInput{}, 0.0f);
+    Check(!controller.Crouching() && Near(controller.body.height, 1.8f),
+          "controller returns to standing height once head room is clear");
+}
+
+void TestPlayerControllerSwimming() {
+    engine::ecs::Registry registry;
+    engine::PlayerController controller;
+    controller.SetCapsule(0.4f, 1.8f);
+    controller.SetPosition(glm::vec3(0.0f, 0.5f, 0.0f));
+    controller.camCollision = false;
+    controller.SetWaterSurface(true, 0.0f);
+
+    engine::PlayerInput input;
+    input.moveForward = 1.0f;
+    input.jump = true;
+    const glm::vec3 before = controller.Position();
+    controller.Update(registry, input, 0.1f);
+    Check(controller.Swimming() && !controller.Grounded(),
+          "submerged controller enters non-grounded swimming movement");
+    Check(controller.Position().y > before.y,
+          "Space moves a swimming controller upward");
+
+    input = {};
+    input.crouch = true;
+    const float beforeDescend = controller.Position().y;
+    controller.Update(registry, input, 0.1f);
+    Check(controller.Position().y < beforeDescend,
+          "crouch input moves a swimming controller downward");
+
+    controller.SetWaterSurface(false, 0.0f);
+    controller.Update(registry, engine::PlayerInput{}, 0.0f);
+    Check(!controller.Swimming(), "leaving a water footprint exits swimming mode");
+}
+
 void TestCameraRelativeFacingSmoothing() {
     engine::ecs::Registry registry;
     engine::PlayerController controller;
@@ -450,6 +512,8 @@ int main() {
     TestBlendSpaceInputSmoothing();
     TestPlayerControllerMovementGate();
     TestPlayerControllerCannotSprintInAir();
+    TestPlayerControllerCrouchAndStandClearance();
+    TestPlayerControllerSwimming();
     TestCameraRelativeFacingSmoothing();
     TestStairStepDoesNotSnapPresentation();
     TestIsometricCameraMode();

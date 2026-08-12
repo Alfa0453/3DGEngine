@@ -110,7 +110,8 @@ void FlipRowsRGBA(std::vector<unsigned char>& px, int w, int h) {
 
 } // anonymous namespace
 
-void Texture::Create(const unsigned char* rgba, int width, int height, bool smooth) {
+void Texture::Create(const unsigned char* rgba, int width, int height, bool smooth,
+                     const TextureAssetData* asset) {
     TexTrace("Create: begin w=%d h=%d smooth=%d rgba=%p thisId=%u", width, height,
              smooth ? 1 : 0, static_cast<const void*>(rgba), m_id);
     m_width  = width;
@@ -149,8 +150,22 @@ void Texture::Create(const unsigned char* rgba, int width, int height, bool smoo
                  GL_RGBA, GL_UNSIGNED_BYTE, rgba);
     TexTrace("Create: glTexImage2D done");
     if (smooth) {
-        glGenerateMipmap(GL_TEXTURE_2D);
-        TexTrace("Create: glGenerateMipmap done");
+        if (asset && !asset->mipmaps.empty()) {
+            int level = 1;
+            for (const TextureMipData& mip : asset->mipmaps) {
+                glTexImage2D(
+                    GL_TEXTURE_2D, level++, GL_RGBA,
+                    static_cast<int>(mip.width), static_cast<int>(mip.height),
+                    0, GL_RGBA, GL_UNSIGNED_BYTE, mip.rgba.data());
+            }
+            glTexParameteri(
+                GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL,
+                static_cast<GLint>(asset->mipmaps.size()));
+            TexTrace("Create: authored mip chain uploaded levels=%d", level);
+        } else {
+            glGenerateMipmap(GL_TEXTURE_2D);
+            TexTrace("Create: glGenerateMipmap done");
+        }
     }
 
     glBindTexture(GL_TEXTURE_2D, 0);
@@ -175,7 +190,7 @@ Texture::Texture(const std::string& path, bool smooth) {
         if (!LoadTextureAsset(path, &asset, &error))
             throw std::runtime_error("Texture: " + error);
         Create(asset.rgba.data(), static_cast<int>(asset.width),
-               static_cast<int>(asset.height), asset.smooth);
+               static_cast<int>(asset.height), asset.smooth, &asset);
     } else if (kind == "png" || kind == "jpg" || kind == "jpeg") {
         engine::image::Image im = (kind == "png") ? engine::image::DecodePNG(path)
                                                   : engine::image::DecodeJPEG(path);
@@ -185,6 +200,11 @@ Texture::Texture(const std::string& path, bool smooth) {
         const Image img = LoadTGA(path);   // already bottom-up for GL
         Create(img.rgba.data(), img.width, img.height, smooth);
     }
+}
+
+Texture::Texture(const TextureAssetData& asset) {
+    Create(asset.rgba.data(), static_cast<int>(asset.width),
+           static_cast<int>(asset.height), asset.smooth, &asset);
 }
 
 Texture::Texture(const unsigned char* rgbaPixels, int width, int height, bool smooth) {

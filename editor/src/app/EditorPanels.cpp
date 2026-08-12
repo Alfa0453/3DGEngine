@@ -79,6 +79,7 @@ const char* PlainPanelName(EditorPanels::Panel panel)
     case Panel::ScriptApi: return "Script API";
     case Panel::ScriptDebug: return "Script Debug";
     case Panel::WorldEditor: return "World Editor";
+    case Panel::TerrainCreator: return "Terrain Creator";
     case Panel::Count:     break;
     }
     return "Panel";
@@ -146,6 +147,7 @@ EditorPanels::Group EditorPanels::GroupOf(Panel panel)
     case Panel::ShaderEditor:
     case Panel::MeshEditor:
     case Panel::Prefab:
+    case Panel::TerrainCreator:
         return Group::Content;
 
     case Panel::AnimationPreview:

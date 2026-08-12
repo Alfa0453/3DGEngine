@@ -23,6 +23,7 @@ struct PlayerInput {
     float lookPitch   = 0.0f;   // mouse dy this frame (down = look down)
     bool  jump        = false;
     bool  sprint      = false;
+    bool  crouch      = false;   // hold to crouch; while swimming, descend
     bool  toggleView  = false;  // deprecated: camera mode is fixed before gameplay
     bool  toggleShoulder = false; // switch left/right third-person shoulder
 };
@@ -64,6 +65,10 @@ public:
     float walkSpeed        = 4.0f;
     float runSpeed         = 7.0f;
     float jumpSpeed        = 5.0f;
+    float crouchSpeed      = 2.0f;
+    float crouchedHeight   = 1.1f;        // total crouched capsule height
+    float swimSpeed        = 3.5f;
+    float swimVerticalSpeed = 2.5f;
     float lookSensitivity  = 0.1f;        // degrees per pixel of mouse motion
     float eyeHeight        = 0.6f;        // eye offset above the capsule centre (1st person)
     float camDistance      = 5.0f;        // orbit distance (3rd person)
@@ -92,6 +97,9 @@ public:
     void SetCapsule(float radius, float height) {
         body.radius = glm::max(radius, 0.01f);
         body.height = glm::max(height, body.radius * 2.0f);
+        m_standingHeight = body.height;
+        crouchedHeight = glm::clamp(crouchedHeight,
+            body.radius * 2.0f, m_standingHeight);
     }
     void ToggleView() {
         view = view == View::ThirdPerson ? View::FirstPerson
@@ -130,6 +138,10 @@ public:
     void SetLockOnTarget(const glm::vec3& target) { m_lockOnTarget = target; }
     void ClearLockOnTarget() { m_lockOnTarget.reset(); }
     bool LockedOn() const { return m_lockOnTarget.has_value(); }
+    void SetWaterSurface(bool overWater, float surfaceY) {
+        m_overWater = overWater;
+        m_waterSurfaceY = surfaceY;
+    }
 
     // Advance one fixed step: apply look, move camera-relative, jump, and sweep the
     // capsule against the scene colliders in `reg`. Set movementEnabled=false while
@@ -141,6 +153,8 @@ public:
     float Yaw()   const { return m_yaw; }
     float Pitch() const { return m_pitch; }
     bool  Grounded() const { return body.grounded; }
+    bool  Crouching() const { return m_crouching; }
+    bool  Swimming() const { return m_swimming; }
     const glm::vec3& Position() const { return body.position; }   // capsule centre
 
     glm::vec3 LookDirection() const;      // full forward from yaw+pitch
@@ -173,9 +187,15 @@ private:
     bool m_shoulderInitialized = false;
     std::optional<glm::vec3> m_lockOnTarget;
     glm::vec3 m_stepVisualOffset{0.0f};
+    float m_standingHeight = 1.8f;
+    float m_waterSurfaceY = 0.0f;
+    bool m_overWater = false;
+    bool m_crouching = false;
+    bool m_swimming = false;
 
     glm::vec3 ThirdPersonAnchor() const;
     glm::vec3 ThirdPersonOffset(float distance) const;
+    float StanceCameraOffset() const;
 };
 
 } // namespace engine

@@ -55,13 +55,13 @@ The final game, **Wizard's Trial**, has this flow:
 | Native assets and registry | Imported meshes, skeletons, animations, textures, materials, shaders, audio, and dependencies |
 | Rendering | Static and skinned meshes, PBR, clustered lights, culling, framebuffers, and GPU profiling |
 | Lighting and shadows | Directional, point, spot, area, cascaded, point, and spot shadows |
-| Environment | Procedural sky, day/night, clouds, IBL, terrain, toggleable randomized grass, spline-driven water, and indoor occlusion |
+| Environment | Procedural sky, day/night, clouds, IBL, terrain, toggleable randomized grass, spline-driven water/swimming volumes, and indoor occlusion |
 | Post-processing | Bloom, SSAO, SSR, FXAA/MSAA, render scale, and a custom post-process shader |
 | Materials and shader graphs | Stone, metal, water-side rock, emissive runes, dissolve shield, and HUD image shader |
-| Animation | Skeletal import, locomotion blend space, jump states, transitions, action clips, events, root motion, and sockets |
+| Animation | Skeletal import, locomotion blend space, jump/crouch/swim states, transitions, action clips, events, root motion, and sockets |
 | Physics | Rigid bodies, all collider families, channels, triggers, contacts, queries, joints, controller, stairs, and ragdoll |
 | AI and navigation | Nav bounds, navmesh, grid fallback, A*, steering, perception, teams, state machine, BT, blackboard, tasks, decorators, services |
-| Gameplay | Player controller, health, projectiles, attachments, game mode, C++/Lua scripts, runtime spline manipulation, named timers, global time dilation, and hit stops |
+| Gameplay | Player controller with walking, sprinting, jumping, crouching, and swimming; health, projectiles, attachments, game mode, C++/Lua scripts, runtime spline manipulation, named timers, global time dilation, and hit stops |
 | Cameras | Third-person, first-person preview, isometric zone, collision, shake, saved cameras, editable splines, and sequences |
 | Audio | Engine audio assets, spatial sources, cues, buses, effects, snapshots, adaptive music, occlusion, and doppler |
 | Particles | CPU/GPU simulation, spawn/update/render modules, fireball, trail, impact, weather dust, and scripted control |
@@ -81,8 +81,8 @@ for every public subsystem.
 | M0 | Project and Content layout | The project reopens its last saved scene |
 | M1 | Imported engine-owned assets | Assets show native types and valid registry dependencies |
 | M2 | Streamed world, landscape, and observatory | Persistent and streamed levels load correctly; terrain, water, grass, sky, materials, and shadows render |
-| M3 | Physics graybox | Player, camera, stairs, gate, triggers, and collision channels behave correctly |
-| M4 | Animated player character | Idle, walk, run, jump, direction changes, and camera are smooth |
+| M3 | Physics graybox | Player, camera, stairs, crouch clearance, swimming, gate, triggers, and collision channels behave correctly |
+| M4 | Animated player character | Idle, walk, run, jump, crouch, swim, direction changes, and camera are smooth |
 | M5 | Staff, sockets, and action clips | Staff follows the hand; socket gizmo matches the visible staff tip |
 | M6 | Fireball effects and audio | Fireball, trail, impact, whoosh, and impact cue preview correctly |
 | M7 | Player spell scripting | A single input produces one timed projectile from the staff tip |
@@ -277,6 +277,13 @@ Configure:
   `0.75x` to `1.25x`, to break up repeated silhouettes;
 - a water plane for the observatory pool;
 - reflection/refraction and shoreline placement.
+
+The visible pool water also defines the swimming footprint. Keep the water
+object enabled and place its surface at the intended water line. When the
+controller capsule enters that footprint below the surface, the controller
+switches to Swimming: gravity stops, horizontal input becomes swim movement,
+and vertical swim input becomes available. Test the actual water object rather
+than adding a separate invisible trigger with a different boundary.
 
 The randomizer changes vertical height only. Disable it when the design needs a
 uniform lawn or readable gameplay boundary. With the toggle off, every blade
@@ -568,6 +575,33 @@ Maximum fall speed   35
 Test capsule movement up the staircase. Step smoothing should prevent the
 character and camera from snapping at every riser.
 
+Configure the additional movement values on the character asset:
+
+```text
+Crouch speed          1.80
+Crouched height       1.05
+Swim speed            3.20
+Vertical swim speed   2.20
+```
+
+`Crouched height` is the total capsule height. It must remain at least twice
+the capsule radius. Crouching resizes the authoritative controller capsule
+while preserving the character's foot position. When crouch is released, the
+controller only stands if an overlap test confirms enough headroom; under a
+low arch it remains crouched instead of penetrating the ceiling.
+
+Default movement controls are:
+
+| Action | Input | Controller result |
+|---|---|---|
+| Move | WASD | Walk or swim horizontally |
+| Sprint | Shift | Run only while grounded and standing |
+| Jump / swim up | Space | Jump on land; rise while swimming |
+| Crouch / swim down | Ctrl or C | Crouch on land; descend while swimming |
+
+Sprint and ordinary jumping are disabled while crouching or swimming. On
+leaving the water, gravity and grounded movement resume automatically.
+
 ### 7.4 Physics gate
 
 Create `RuneGate` as a dynamic rigid body. Connect it to a frame with a distance,
@@ -595,6 +629,8 @@ boundaries, then turn them off for final Play.
 - The player cannot pass through walls.
 - Pickups never stop the player or retract the camera.
 - Stairs are smooth.
+- The character crouches under a low obstacle and only stands in clear space.
+- Entering the pool enables swimming; Space rises and Ctrl/C descends.
 - The gate moves without tunneling or exploding.
 - Projectiles stop at the first wall and never damage a target behind it.
 
@@ -615,7 +651,7 @@ Configure:
 - skeletal model and material assets from searchable dropdowns;
 - render-only orientation, position offset, and scale;
 - capsule collision;
-- walk, run, jump, slope, and step settings;
+- walk, run, jump, crouch, swim, slope, and step settings;
 - Health `100 / 100`;
 - gameplay team `1`;
 - third-person camera settings;
@@ -647,6 +683,8 @@ game-mode workflow uses one.
 - The model faces gameplay forward.
 - Move, scale, and rotation gizmos follow scene axes.
 - The capsule encloses the visible character.
+- Crouching changes capsule height without changing radius or moving the feet.
+- Swimming begins and ends at the visible pool boundary.
 - Camera collision retracts and returns smoothly.
 
 ---
@@ -672,8 +710,14 @@ Add parameters:
 | `Direction` | Float | strafe/turn direction |
 | `VerticalSpeed` | Float | rising/falling |
 | `Grounded` | Bool | floor state |
+| `IsCrouching` | Bool | crouched locomotion and pose |
+| `IsSwimming` | Bool | swimming locomotion and pose |
 | `Jump` | Trigger | jump start |
 | `Land` | Trigger | landing |
+
+The controller updates `Speed`, `VerticalSpeed`, `IsGrounded`, `IsFalling`,
+`IsCrouching`, and `IsSwimming` automatically. The graph reads those movement
+flags; the behavior tree does not author locomotion state.
 
 ### 9.2 Locomotion blend space
 
@@ -686,6 +730,21 @@ Create a 1D or 2D Locomotion state:
 
 Enable synchronized samples and tune parameter damping. Smooth character
 rotation separately with turn speed so direction changes do not snap.
+
+Add `CrouchLocomotion` and `SwimLocomotion` states if matching clips are
+available. Use crouch idle/walk samples in the crouch state and swim idle/forward
+samples in the swim state. Recommended high-priority transitions are:
+
+```text
+Any State -> SwimLocomotion: IsSwimming == true
+SwimLocomotion -> Locomotion: IsSwimming == false AND IsCrouching == false
+Any State -> CrouchLocomotion: IsCrouching == true AND IsSwimming == false
+CrouchLocomotion -> Locomotion: IsCrouching == false AND IsSwimming == false
+```
+
+Place these transitions ahead of ordinary jump/land transitions so a water
+entry cannot leave the character stuck in an airborne pose. Add transition
+blend time and parameter damping to avoid a hard pose snap.
 
 ### 9.3 Jump states and multi-condition transitions
 
@@ -1984,7 +2043,8 @@ Perform this exact route on a clean run:
 
 1. Start from the title HUD.
 2. Watch or skip the opening camera sequence.
-3. Walk, run, turn, jump, and climb stairs.
+3. Walk, run, turn, jump, crouch under a low obstacle, swim across the pool,
+   leave the water, and climb stairs.
 4. Enter the isometric puzzle zone.
 5. Collect the rune without blocking the capsule or camera.
 6. Activate the physics gate and hear its spatial cue.
@@ -2052,6 +2112,31 @@ Perform this exact route on a clean run:
 - Check ground probe, gravity, step height, and maximum slope.
 - Rebuild navmesh after floor/collider edits.
 - Confirm AI steering does not write vertical position directly.
+
+### Crouching changes the wrong capsule dimension
+
+- Edit **Radius** and **Crouched Height** independently in Character Editor.
+- Treat height as total capsule height, including both rounded caps.
+- Keep crouched height at least `2 x radius`.
+- Confirm the scene object uses the saved character asset and controller capsule,
+  not a second manually scaled collider.
+
+### The player cannot stand after crouching
+
+- Move away from the low ceiling; standing is intentionally blocked by the
+  clearance overlap test.
+- Confirm the standing capsule height is valid for the corridor.
+- Check collision channel responses for an unexpected blocking trigger.
+
+### Swimming does not activate
+
+- Confirm the visible Water object is enabled and saved in the active scene.
+- Confirm its surface level and horizontal footprint contain the controller.
+- Enter the water deeply enough for the capsule to cross the swim threshold.
+- Check that another script is not writing the character's vertical position or
+  forcing grounded movement every frame.
+- Confirm the animation graph uses `IsSwimming`; animation does not enable the
+  controller's swimming state by itself.
 
 ### HUD values remain placeholders
 
@@ -2168,6 +2253,9 @@ Use this checklist before calling the tutorial complete.
 - [ ] Rigid bodies, solver, contacts, events, queries, and channels work.
 - [ ] Trigger/ignore/block responses are correct.
 - [ ] Joints and character controller are stable.
+- [ ] Crouch preserves foot position, respects ceiling clearance, and restores
+      the standing capsule only when space is clear.
+- [ ] Water entry/exit, horizontal swimming, rise, and descend controls work.
 - [ ] AI grounding and ragdoll work.
 
 ### AI
@@ -2183,6 +2271,8 @@ Use this checklist before calling the tutorial complete.
 
 - [ ] Game mode state, score, timer, victory, defeat, pause, and message work.
 - [ ] Player controller and camera policy work.
+- [ ] Character movement supports walk, sprint, jump, crouch, and swim, and
+      publishes the matching animation flags.
 - [ ] Health, projectile, attachment, rotator, mover, and camera zone work.
 - [ ] Multiple scripts attach and lifecycle methods execute.
 - [ ] Native C++ and Lua scripts both run in Editor Play and the player.

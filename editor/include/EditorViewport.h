@@ -94,10 +94,7 @@ public:
 
     // Reference ground grid on the XZ plane (minor + brighter major lines) with
     // coloured world axes through the origin: X red, Z blue, Y green.
-    void DrawWorldGrid(engine::Renderer& renderer,
-                       engine::Shader& shader,
-                       const engine::Mesh& cube,
-                       const glm::mat4& viewProj) const;
+    void DrawWorldGrid(const glm::mat4& viewProj) const;
 
     void DrawPhysicsColliderGuides(const EditorScene& scene,
                                    const glm::mat4& viewProj,
@@ -320,6 +317,8 @@ public:
                                 int height) const;
 
 private:
+    mutable std::unique_ptr<EditorLineRenderer> m_gridLines;
+    mutable std::unique_ptr<EditorLineRenderer> m_gizmoLines;
     mutable std::unique_ptr<EditorLineRenderer> m_colliderLines;
     mutable std::unique_ptr<EditorLineRenderer> m_splineLines;
     mutable std::unique_ptr<EditorLineRenderer> m_waterLines;

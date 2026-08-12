@@ -24,6 +24,13 @@ struct Image {
 Image DecodePNG(const std::string& path);
 Image DecodePNGFromMemeory(const unsigned char* data, std::size_t size);
 
+// Decode one complete RFC 1950 zlib stream and require exactly expectedSize
+// output bytes. Shared by PNG decoding and importers for compressed source
+// assets; validates the zlib header and Adler-32 trailer.
+std::vector<unsigned char> InflateZlib(const unsigned char* data,
+                                       std::size_t size,
+                                       std::size_t expectedSize);
+
 // Decode a baseline JPEG file to RGBA. (Added in the JPEG milestone.)
 Image DecodeJPEG(const std::string& path);
 Image DecodeJPEGFromMemory(const unsigned char* data, std::size_t size);

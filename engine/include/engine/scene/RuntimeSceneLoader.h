@@ -120,6 +120,10 @@ public:
         float walkSpeed = 4.0f;
         float runSpeed = 7.0f;
         float jumpSpeed = 5.0f;
+        float crouchSpeed = 2.0f;
+        float crouchedHeight = 1.1f;
+        float swimSpeed = 3.5f;
+        float swimVerticalSpeed = 2.5f;
         float lookSensitivity = 0.1f;
         float capsuleRadius = 0.4f;
         float capsuleHeight = 1.8f;

@@ -1,8 +1,10 @@
 #include <engine/graphics/Terrain.h>
+#include <engine/assets/TerrainAsset.h>
 
 #include <cassert>
 #include <cmath>
 #include <iostream>
+#include <filesystem>
 
 namespace {
 bool Near(float a, float b, float epsilon = 0.02f) {
@@ -47,6 +49,47 @@ int main() {
     assert(Near(Channel(orm, centre, 0), 0.65f));
     assert(Near(Channel(orm, centre, 1), 0.25f));
     assert(Near(Channel(orm, centre, 2), 0.75f));
+
+    // Assigning a manual layer must not recolour unpainted automatic terrain.
+    layers[1].albedo = {1.0f, 0.0f, 1.0f};
+    engine::BuildTerrainSurfaceMaps(heightmap, {}, layers, albedo, orm, 4);
+    assert(!(Near(Channel(albedo, centre, 0), 1.0f)
+             && Near(Channel(albedo, centre, 2), 1.0f)));
+
+    // Painted material textures are sampled and tiled, rather than reduced to
+    // the old default terrain colour.
+    layers[2].albedo = glm::vec3(1.0f);
+    engine::TerrainLayerTexture textures[6];
+    textures[2].albedoWidth = 2;
+    textures[2].albedoHeight = 1;
+    textures[2].tiling = glm::vec2(1.0f);
+    textures[2].albedoRgba = {255, 0, 0, 255, 0, 0, 255, 255};
+    engine::BuildTerrainSurfaceMaps(heightmap,
+        std::vector<std::uint8_t>(4, 2), layers, albedo, orm, 4, textures);
+    assert(Channel(albedo, centre, 2) > 0.9f);
+    assert(Channel(albedo, centre, 0) < 0.1f);
+
+    engine::TerrainAssetData asset;
+    asset.name = "Test Landscape";
+    asset.resolution = 2;
+    asset.size = 12.0f;
+    asset.maxHeight = 3.0f;
+    asset.heights = {0.0f, 1.0f, 2.0f, 3.0f};
+    asset.paint = {0, 1, 2, 3};
+    asset.layerMaterials[2] = "GameAssets/Materials/Rock.3dgmat";
+    asset.grassEnabled = true;
+    asset.grassRandomizeHeight = true;
+    const std::filesystem::path terrainPath =
+        std::filesystem::temp_directory_path() / "3dg_terrain_asset_test.3dgterrain";
+    std::string assetError;
+    assert(engine::SaveTerrainAsset(terrainPath.string(), asset, &assetError));
+    engine::TerrainAssetData loaded;
+    assert(engine::LoadTerrainAsset(terrainPath.string(), &loaded, &assetError));
+    assert(loaded.name == asset.name && loaded.heights == asset.heights);
+    assert(loaded.paint == asset.paint && loaded.layerMaterials[2] == asset.layerMaterials[2]);
+    assert(loaded.grassEnabled && loaded.grassRandomizeHeight);
+    std::error_code ignored;
+    std::filesystem::remove(terrainPath, ignored);
 
     engine::TerrainCameraConstraint cameraConstraint;
     glm::vec3 resolved = cameraConstraint.Resolve(

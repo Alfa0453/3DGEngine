@@ -44,6 +44,10 @@ public:
         float walkSpeed = 4.0f;
         float runSpeed = 7.0f;
         float jumpSpeed = 5.0f;
+        float crouchSpeed = 2.0f;
+        float crouchedHeight = 1.1f;
+        float swimSpeed = 3.5f;
+        float swimVerticalSpeed = 2.5f;
         float lookSensitivity = 0.1f;
         float capsuleRadius = 0.4f;
         float capsuleHeight = 1.8f;
@@ -722,6 +726,10 @@ public:
                                 const glm::vec3& eulerDegrees,
                                 const glm::vec3& scale);
     bool SetSelectedMaterialAsset(
+        const std::string& path, engine::AssetHandle id = {});
+    // Assign one material to every unlocked object in the current selection.
+    // Returns the number assigned and records the whole operation as one undo step.
+    int SetSelectedMaterialAssetToSelection(
         const std::string& path, engine::AssetHandle id = {});
     bool SetSelectedMaterialParameterOverride(const std::string& name,
                                               const std::string& value);

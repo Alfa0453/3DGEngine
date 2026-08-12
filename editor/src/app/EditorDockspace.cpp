@@ -5514,6 +5514,25 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             changed |= ImGui::DragFloat("Walk Speed", &player.walkSpeed, 0.05f, 0.0f, 100.0f);
             changed |= ImGui::DragFloat("Run Speed", &player.runSpeed, 0.05f, 0.0f, 100.0f);
             changed |= ImGui::DragFloat("Jump Speed", &player.jumpSpeed, 0.05f, 0.0f, 100.0f);
+            if (ImGui::TreeNodeEx("Crouching", ImGuiTreeNodeFlags_DefaultOpen
+                    | ImGuiTreeNodeFlags_SpanAvailWidth)) {
+                changed |= ImGui::DragFloat("Crouch Speed", &player.crouchSpeed,
+                                            0.05f, 0.0f, 100.0f);
+                changed |= ImGui::DragFloat("Crouched Height", &player.crouchedHeight,
+                                            0.01f, player.capsuleRadius * 2.0f,
+                                            player.capsuleHeight);
+                ImGui::TextDisabled("Hold Ctrl or C. The capsule only stands when clear.");
+                ImGui::TreePop();
+            }
+            if (ImGui::TreeNodeEx("Swimming", ImGuiTreeNodeFlags_DefaultOpen
+                    | ImGuiTreeNodeFlags_SpanAvailWidth)) {
+                changed |= ImGui::DragFloat("Swim Speed", &player.swimSpeed,
+                                            0.05f, 0.0f, 100.0f);
+                changed |= ImGui::DragFloat("Vertical Swim Speed", &player.swimVerticalSpeed,
+                                            0.05f, 0.0f, 100.0f);
+                ImGui::TextDisabled("WASD swims; Space rises; Ctrl or C descends.");
+                ImGui::TreePop();
+            }
             changed |= ImGui::DragFloat("Look Sensitivity", &player.lookSensitivity, 0.005f, 0.001f, 10.0f);
             changed |= ImGui::DragFloat("Capsule Radius", &player.capsuleRadius, 0.01f, 0.01f, 100.0f);
             changed |= ImGui::DragFloat("Capsule Height", &player.capsuleHeight, 0.01f, 0.02f, 100.0f);
@@ -5601,6 +5620,8 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             changed |= ImGui::DragFloat("Max Slope", &player.maxSlopeDegrees, 0.5f, 0.0f, 89.0f);
             changed |= ImGui::DragFloat("Step Height", &player.stepHeight, 0.01f, 0.0f, 10.0f);
             player.capsuleHeight = std::max(player.capsuleHeight, player.capsuleRadius * 2.0f);
+            player.crouchedHeight = std::clamp(player.crouchedHeight,
+                player.capsuleRadius * 2.0f, player.capsuleHeight);
             if (changed) {
                 context.scene->SetSelectedPlayerController(player);
             }
@@ -6441,9 +6462,12 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
         }
     }
 
-    // Terrain controls only appear for terrain objects (created via Add > Terrain),
-    // so an ordinary mesh can't be accidentally converted into terrain.
-    if (selected->isTerrain && ImGui::CollapsingHeader("Terrain", ImGuiTreeNodeFlags_DefaultOpen)) {
+    // Landscape authoring belongs to the dedicated Terrain Creator. Keep the
+    // former scene-object controls dormant so selecting a placed landscape in
+    // the level only exposes ordinary object controls in the Inspector.
+    constexpr bool terrainAuthoringInInspector = false;
+    if (terrainAuthoringInInspector && selected->isTerrain
+        && ImGui::CollapsingHeader("Terrain", ImGuiTreeNodeFlags_DefaultOpen)) {
         int   res = selected->terrainRes;
         float size = selected->terrainSize;
         float maxHeight = selected->terrainMaxHeight;
@@ -8269,6 +8293,88 @@ void DrawScriptBuildLog(EditorDockspace::Context& context) {
     ImGui::End();
 }
 
+void DrawPackageSettings(EditorDockspace::Context& context) {
+    if (context.packageSettingsRequested) ImGui::OpenPopup("Package Project");
+
+    bool open = true;
+    if (!ImGui::BeginPopupModal("Package Project", &open,
+            ImGuiWindowFlags_AlwaysAutoResize)) return;
+
+    ImGui::TextUnformatted("Build a standalone, distributable game from the current project.");
+    ImGui::Separator();
+
+    const bool validSettings = context.packageOutputBuffer
+        && context.packageOutputBufferSize > 0
+        && context.packageConfiguration
+        && context.packageStaticRuntime
+        && context.packageCleanOutput
+        && context.packageCreateZip;
+    if (!validSettings) {
+        ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f),
+            "Packaging settings are unavailable for this project.");
+        if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+        return;
+    }
+
+    ImGui::BeginDisabled(context.packageBuildRunning);
+    ImGui::SetNextItemWidth(430.0f);
+    if (ImGui::InputText("Output Folder", context.packageOutputBuffer,
+            context.packageOutputBufferSize))
+        context.packageSettingsChanged = true;
+    ImGui::SameLine();
+    if (ImGui::Button("Browse...")) context.browsePackageOutputRequested = true;
+
+    static const char* configurations[] = {"Release", "RelWithDebInfo", "Debug"};
+    ImGui::SetNextItemWidth(190.0f);
+    if (ImGui::Combo("Configuration", context.packageConfiguration,
+            configurations, IM_ARRAYSIZE(configurations)))
+        context.packageSettingsChanged = true;
+    if (ImGui::Checkbox("Static C/C++ runtime", context.packageStaticRuntime))
+        context.packageSettingsChanged = true;
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Recommended for distribution: reduces runtime prerequisites.");
+    if (ImGui::Checkbox("Clean previous staged package", context.packageCleanOutput))
+        context.packageSettingsChanged = true;
+    if (ImGui::Checkbox("Create ZIP archive", context.packageCreateZip))
+        context.packageSettingsChanged = true;
+
+    ImGui::Spacing();
+    ImGui::TextDisabled("Pipeline:");
+    ImGui::BulletText("Save and cook the current scene and required assets");
+    ImGui::BulletText("Build the standalone player and project scripts");
+    ImGui::BulletText("Stage a runnable folder in the selected output location");
+    if (*context.packageCreateZip)
+        ImGui::BulletText("Create a ZIP beside the staged folder");
+
+    const bool canPackage = context.project && !context.playMode
+        && context.packageOutputBuffer[0] != '\0';
+    ImGui::BeginDisabled(!canPackage);
+    if (ImGui::Button(editor::icons::Label(
+            editor::icons::Archive, "Package Project").c_str()))
+        context.packageProjectRequested = true;
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+    ImGui::EndDisabled();
+
+    if (context.playMode)
+        ImGui::TextDisabled("Stop Play mode before packaging.");
+    if (context.packageBuildRunning) {
+        ImGui::Spacing();
+        ImGui::TextColored(ImVec4(0.25f, 0.75f, 0.90f, 1.0f),
+            "Packaging in progress...");
+    }
+    if (context.packageBuildStatus && !context.packageBuildStatus->empty()) {
+        ImGui::PushTextWrapPos(560.0f);
+        ImGui::TextWrapped("%s", context.packageBuildStatus->c_str());
+        ImGui::PopTextWrapPos();
+    }
+
+    if (context.packageProjectRequested) ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+}
+
 void DrawScriptApiBrowser(EditorDockspace::Context& /*context*/, bool* open) {
     if (!ImGui::Begin(EditorPanels::Name(EditorPanels::Panel::ScriptApi), open)) {
         ImGui::End();
@@ -9866,6 +9972,9 @@ bool EditorDockspace::Draw(Context& context) {
             if (editor::icons::MenuItem(editor::icons::Archive, "Cook Project")) {
                 context.cookProjectRequested = true;
             }
+            if (editor::icons::MenuItem(editor::icons::Archive, "Package Project...")) {
+                context.packageSettingsRequested = true;
+            }
             if (editor::icons::MenuItem(editor::icons::Settings, "Validate Runtime")) {
                 context.validateRuntimeRequested = true;
             }
@@ -9951,10 +10060,6 @@ bool EditorDockspace::Draw(Context& context) {
                     ResetPrimitiveCreator(EditorScene::Primitive::Staircase);
                 }
                 ImGui::EndMenu();
-            }
-            if (ImGui::MenuItem("Terrain")) {
-                context.addTerrainRequested = true;
-                context.frameSelectedRequested = true;
             }
             if (ImGui::MenuItem("Foliage Actor")) {
                 context.addFoliageRequested = true;
@@ -10321,6 +10426,8 @@ bool EditorDockspace::Draw(Context& context) {
             break; // drawn by EditorApp::DrawScriptDebugPanel (needs the play registry)
         case EditorPanels::Panel::WorldEditor:
             break; // drawn by EditorApp::DrawWorldEditorPanel (owns the world authoring state)
+        case EditorPanels::Panel::TerrainCreator:
+            break; // drawn by EditorApp (owns reusable terrain authoring state)
         case EditorPanels::Panel::PhysicsStatus:
             DrawPhysicsStatus(context, &open);
             break;
@@ -10345,6 +10452,7 @@ bool EditorDockspace::Draw(Context& context) {
 
     DrawStandaloneScriptEditor(context);
     DrawScriptBuildLog(context);
+    DrawPackageSettings(context);
 
     ImGui::End();
     return true;

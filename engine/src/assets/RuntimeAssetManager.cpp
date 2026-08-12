@@ -197,9 +197,7 @@ const Texture* RuntimeAssetManager::LoadTexture(const std::string &path, std::st
                 SetError(error, loadError);
                 return nullptr;
             }
-            texture = std::make_unique<Texture>(
-                asset.rgba.data(), static_cast<int>(asset.width),
-                static_cast<int>(asset.height), asset.smooth);
+            texture = std::make_unique<Texture>(asset);
         } else {
             texture = std::make_unique<Texture>(path);
         }

@@ -1,6 +1,7 @@
 #include "EditorAssets.h"
 
 #include <engine/assets/AssetRegistry.h>
+#include <engine/assets/ForgeMaterialImporter.h>
 #include <engine/assets/SkeletalAsset.h>
 #include <engine/assets/StaticMeshAsset.h>
 #include <engine/assets/TextureAsset.h>
@@ -358,6 +359,33 @@ bool EditorAssets::ImportAsset(const std::string& sourcePath,
             fs::relative(selectedPath, m_rootPath, ec).string());
         for (int i = 0; i < static_cast<int>(m_assets.size()); ++i) {
             if (m_assets[static_cast<std::size_t>(i)].relativePath == importedRelative) {
+                SelectIndex(i);
+                break;
+            }
+        }
+        return true;
+    }
+
+    if (extension == ".3dgtexpack") {
+        const fs::path destination = UniqueDestinationPath(
+            fs::path(CurrentPath()) / source.stem());
+        engine::ForgeMaterialImportResult result;
+        if (!engine::ImportForgeMaterialPackage(
+                source.string(), destination.string(), m_rootPath,
+                m_assetRegistry, &result, error))
+            return false;
+        m_lastImportMessage = "Imported Forge material: "
+            + fs::path(result.materialPath).filename().string() + " ("
+            + std::to_string(result.width) + "x"
+            + std::to_string(result.height) + ", 4 cooked textures)";
+        m_currentFolder = NormalizeSlashes(
+            fs::relative(destination, m_rootPath, ec).string());
+        if (!Refresh(m_rootPath, error)) return false;
+        const std::string importedRelative = NormalizeSlashes(
+            fs::relative(result.materialPath, m_rootPath, ec).string());
+        for (int i = 0; i < static_cast<int>(m_assets.size()); ++i) {
+            if (m_assets[static_cast<std::size_t>(i)].relativePath
+                == importedRelative) {
                 SelectIndex(i);
                 break;
             }
@@ -1115,6 +1143,7 @@ const char *EditorAssets::TypeName(Type type)
         case Type::Script: return "Script";
         case Type::World: return "World";
         case Type::Foliage: return "Foliage";
+        case Type::Terrain: return "Terrain";
         case Type::Other: return "Other";
     }
     return "Other";
@@ -1188,6 +1217,9 @@ EditorAssets::Type EditorAssets::ClassifyExtension(const std::string &extension)
     }
     if (extension == ".3dgfoliage") {
         return Type::Foliage;
+    }
+    if (extension == ".3dgterrain") {
+        return Type::Terrain;
     }
     if (extension == ".h" || extension == ".hpp" || extension == ".lua"
         || extension == ".cpp" || extension == ".cc") {

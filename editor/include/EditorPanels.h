@@ -57,6 +57,7 @@ public:
         ScriptApi,
         ScriptDebug,
         WorldEditor,
+        TerrainCreator,
         Count
     };
 

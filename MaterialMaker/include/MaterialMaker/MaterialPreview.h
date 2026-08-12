@@ -18,6 +18,7 @@
 #include <memory>
 #include <optional>
 #include <filesystem>
+#include <chrono>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
@@ -81,6 +82,8 @@ public:
     // Load (cached) a texture map and report its GL id / size / status, so the
     // panel can show a thumbnail. Must be called while a GL context is current.
     MapInfo AcquireMap(const std::string& path);
+    // Force one new preview frame without discarding the loaded GL resources.
+    void Invalidate() { m_hasRenderedFrame = false; }
     void Retry();
 
     bool Available() const { return m_ready; }
@@ -93,6 +96,7 @@ private:
         std::filesystem::file_time_type writeTime{};
         std::uintmax_t fileSize = 0;
         bool exists = false;
+        std::chrono::steady_clock::time_point nextFileCheck{};
     };
 
     void EnsureInitialized();
@@ -134,6 +138,9 @@ private:
     // Loaded texture maps, keyed by path (unique_ptr keeps addresses stable so
     // material pointers into the cache stay valid).
     std::unordered_map<std::string, std::unique_ptr<CachedTexture>> m_textures;
+    std::uint64_t m_textureRevision = 0;
+    std::uint64_t m_lastRenderSignature = 0;
+    bool m_hasRenderedFrame = false;
 };
 
 } // namespace material_maker

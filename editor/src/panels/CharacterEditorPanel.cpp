@@ -1387,6 +1387,19 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
         changed |= ImGui::DragFloat("Walk Speed", &v.walkSpeed,.05f,0.0f,100.0f);
         changed |= ImGui::DragFloat("Run Speed", &v.runSpeed,.05f,0.0f,100.0f);
         changed |= ImGui::DragFloat("Jump Speed", &v.jumpSpeed,.05f,0.0f,100.0f);
+        if (ImGui::TreeNodeEx("Crouching", ImGuiTreeNodeFlags_DefaultOpen)) {
+            changed |= ImGui::DragFloat("Crouch Speed", &v.crouchSpeed,.05f,0.0f,100.0f);
+            changed |= ImGui::DragFloat("Crouched Height", &v.crouchedHeight,.01f,
+                                        v.capsuleRadius * 2.0f, v.capsuleHeight);
+            ImGui::TextDisabled("Hold Ctrl or C. Standing is blocked under a low ceiling.");
+            ImGui::TreePop();
+        }
+        if (ImGui::TreeNodeEx("Swimming", ImGuiTreeNodeFlags_DefaultOpen)) {
+            changed |= ImGui::DragFloat("Swim Speed", &v.swimSpeed,.05f,0.0f,100.0f);
+            changed |= ImGui::DragFloat("Vertical Swim Speed", &v.swimVerticalSpeed,.05f,0.0f,100.0f);
+            ImGui::TextDisabled("WASD swims; Space rises; Ctrl or C descends.");
+            ImGui::TreePop();
+        }
         changed |= ImGui::DragFloat("Step Height", &v.stepHeight,.01f,0.0f,5.0f);
         changed |= ImGui::DragFloat("Max Slope", &v.maxSlopeDegrees,.5f,0.0f,89.0f);
         ImGui::SeparatorText("Camera");
@@ -1818,6 +1831,7 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
             };
             ensureBool("IsMoving", false); ensureBool("IsStopping", false);
             ensureBool("IsGrounded", true); ensureBool("IsFalling", false);
+            ensureBool("IsCrouching", false); ensureBool("IsSwimming", false);
             EditorScene::AnimationStateNode locomotion;
             locomotion.name="Directional Locomotion"; locomotion.blendParameter="Speed";
             locomotion.blendParameterY="Direction"; locomotion.blendSpace2D=true;

@@ -8,6 +8,10 @@ add_executable(player
     # then register them in src/GameScripts.cpp. e.g.:
     # src/MyPlayerScript.cpp
 )
+
+# Precompiled headers for faster builds
+target_precompile_headers(player PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../engine/include/engine_pch.h")
+
 target_include_directories(player PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(player PRIVATE engine game)
 add_dependencies(player game_scripts)

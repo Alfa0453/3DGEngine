@@ -705,7 +705,9 @@ void DrawGizmoRing(engine::Renderer& renderer,
 } // namespace
 
 EditorViewport::EditorViewport()
-    : m_colliderLines(std::make_unique<EditorLineRenderer>()),
+    : m_gridLines(std::make_unique<EditorLineRenderer>()),
+      m_gizmoLines(std::make_unique<EditorLineRenderer>()),
+      m_colliderLines(std::make_unique<EditorLineRenderer>()),
       m_splineLines(std::make_unique<EditorLineRenderer>()),
       m_waterLines(std::make_unique<EditorLineRenderer>()),
       m_roomLines(std::make_unique<EditorLineRenderer>()),
@@ -907,7 +909,6 @@ void EditorViewport::DrawSceneGizmo(engine::Renderer& renderer,
     gizmoTransform.position = center;
     const float gizmoScale = GizmoWorldScale(gizmoTransform, camera, viewportHeight) * gizmo.VisualScale();
     const float length = gizmoScale * 0.78f;
-    const float thickness = gizmoScale * 0.022f;
     const float head = gizmoScale * 0.16f;
     const float ringRadius = gizmoScale * 0.72f;
     const float ringMarker = gizmoScale * 0.018f;
@@ -921,6 +922,16 @@ void EditorViewport::DrawSceneGizmo(engine::Renderer& renderer,
     const GLboolean depthEnabled = glIsEnabled(GL_DEPTH_TEST);
     glDisable(GL_DEPTH_TEST);
 
+    if (m_gizmoLines && gizmo.CurrentMode() != EditorGizmo::Mode::Rotate) {
+        m_gizmoLines->Clear();
+        m_gizmoLines->AddLine(center, center + localX * length, xColor);
+        m_gizmoLines->AddLine(center, center + localY * length, yColor);
+        m_gizmoLines->AddLine(center, center + localZ * length, zColor);
+        m_gizmoLines->Draw(viewProj, 3.0f, false, false);
+        shader.Bind();
+        shader.SetMat4("uViewProj", viewProj);
+    }
+
     auto setAxisStyle = [&](const glm::vec3& color) {
         shader.SetVec3("uEmissive", color * 0.45f);
     };
@@ -928,15 +939,12 @@ void EditorViewport::DrawSceneGizmo(engine::Renderer& renderer,
     switch (gizmo.CurrentMode()) {
     case EditorGizmo::Mode::Translate:
         setAxisStyle(xColor);
-        DrawGuideSegment(renderer, shader, cube, center, center + localX * length, thickness, xColor);
         DrawGizmoCone(renderer, shader, cone, center + localX * (length + head * 0.55f), localX, xColor, head);
 
         setAxisStyle(yColor);
-        DrawGuideSegment(renderer, shader, cube, center, center + localY * length, thickness, yColor);
         DrawGizmoCone(renderer, shader, cone, center + localY * (length + head * 0.55f), localY, yColor, head);
 
         setAxisStyle(zColor);
-        DrawGuideSegment(renderer, shader, cube, center, center + localZ * length, thickness, zColor);
         DrawGizmoCone(renderer, shader, cone, center + localZ * (length + head * 0.55f), localZ, zColor, head);
         break;
 
@@ -944,17 +952,14 @@ void EditorViewport::DrawSceneGizmo(engine::Renderer& renderer,
         DrawGizmoBox(renderer, shader, cube, center, glm::vec3(head * 0.48f),
             gizmo.CurrentAxis() == EditorGizmo::Axis::All ? glm::vec3(1.0f, 0.86f, 0.24f) : glm::vec3(0.82f));
         setAxisStyle(xColor);
-        DrawGuideSegment(renderer, shader, cube, center, center + localX * length, thickness, xColor);
         DrawGizmoBox(renderer, shader, cube, center + localX * length,
             glm::vec3(head * 0.72f), xColor);
 
         setAxisStyle(yColor);
-        DrawGuideSegment(renderer, shader, cube, center, center + localY * length, thickness, yColor);
         DrawGizmoBox(renderer, shader, cube, center + localY * length,
             glm::vec3(head * 0.72f), yColor);
 
         setAxisStyle(zColor);
-        DrawGuideSegment(renderer, shader, cube, center, center + localZ * length, thickness, zColor);
         DrawGizmoBox(renderer, shader, cube, center + localZ * length,
             glm::vec3(head * 0.72f), zColor);
         break;
@@ -1039,45 +1044,34 @@ void EditorViewport::DrawSelectedLightGuide(engine::Renderer& renderer,
     shader.SetVec3("uEmissive", glm::vec3(0.0f));
 }
 
-void EditorViewport::DrawWorldGrid(engine::Renderer& renderer,
-                                   engine::Shader& shader,
-                                   const engine::Mesh& cube,
-                                   const glm::mat4& viewProj) const {
-    shader.Bind();
-    shader.SetMat4("uViewProj", viewProj);
-    shader.SetVec3("uLightDir", glm::normalize(glm::vec3(-0.4f, -1.0f, -0.3f)));
-    shader.SetInt("uHasDiffuse", 0);
+void EditorViewport::DrawWorldGrid(const glm::mat4& viewProj) const {
+    if (!m_gridLines) return;
 
     const int   half   = 20;                 // grid half-extent in units (covers -20..+20)
     const float span   = static_cast<float>(half);
-    const float thinT  = 0.012f;             // minor line thickness
-    const float thickT = 0.020f;             // major line / axis thickness
     const glm::vec3 minorColor(0.30f, 0.32f, 0.36f);
     const glm::vec3 majorColor(0.45f, 0.48f, 0.53f);
 
+    m_gridLines->Clear();
     for (int i = -half; i <= half; ++i) {
         if (i == 0) continue;                // the centre lines are the coloured axes below
         const float f = static_cast<float>(i);
         const bool  major = (i % 5) == 0;
         const glm::vec3 color = major ? majorColor : minorColor;
-        const float t = major ? thickT : thinT;
-        shader.SetVec3("uEmissive", color * (major ? 0.40f : 0.26f));
-        DrawGuideSegment(renderer, shader, cube, glm::vec3(f, 0.0f, -span), glm::vec3(f, 0.0f, span), t, color);
-        DrawGuideSegment(renderer, shader, cube, glm::vec3(-span, 0.0f, f), glm::vec3(span, 0.0f, f), t, color);
+        m_gridLines->AddLine(glm::vec3(f, 0.0f, -span), glm::vec3(f, 0.0f, span), color);
+        m_gridLines->AddLine(glm::vec3(-span, 0.0f, f), glm::vec3(span, 0.0f, f), color);
     }
+    m_gridLines->Draw(viewProj, 1.0f, false, true);
 
     // Coloured world axes through the origin: X red, Z blue, Y green (short, upward).
     const glm::vec3 xCol(0.86f, 0.30f, 0.30f);
     const glm::vec3 zCol(0.32f, 0.50f, 0.92f);
     const glm::vec3 yCol(0.34f, 0.80f, 0.40f);
-    shader.SetVec3("uEmissive", xCol * 0.55f);
-    DrawGuideSegment(renderer, shader, cube, glm::vec3(-span, 0.0f, 0.0f), glm::vec3(span, 0.0f, 0.0f), thickT, xCol);
-    shader.SetVec3("uEmissive", zCol * 0.55f);
-    DrawGuideSegment(renderer, shader, cube, glm::vec3(0.0f, 0.0f, -span), glm::vec3(0.0f, 0.0f, span), thickT, zCol);
-    shader.SetVec3("uEmissive", yCol * 0.55f);
-    DrawGuideSegment(renderer, shader, cube, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, span * 0.2f, 0.0f), thickT, yCol);
-
-    shader.SetVec3("uEmissive", glm::vec3(0.0f));   // reset for subsequent guides
+    m_gridLines->Clear();
+    m_gridLines->AddLine(glm::vec3(-span, 0.0f, 0.0f), glm::vec3(span, 0.0f, 0.0f), xCol);
+    m_gridLines->AddLine(glm::vec3(0.0f, 0.0f, -span), glm::vec3(0.0f, 0.0f, span), zCol);
+    m_gridLines->AddLine(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, span * 0.2f, 0.0f), yCol);
+    m_gridLines->Draw(viewProj, 2.0f, false, true);
 }
 
 void EditorViewport::DrawPhysicsColliderGuides(const EditorScene& scene,

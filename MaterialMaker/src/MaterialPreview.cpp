@@ -16,8 +16,10 @@
 #include <cmath>
 #include <exception>
 #include <filesystem>
+#include <functional>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 namespace material_maker {
 
@@ -192,6 +194,64 @@ int ChannelUniform(MaterialPreview::Channel ch) {
     }
 }
 
+template <typename T>
+void HashValue(std::size_t& seed, const T& value) {
+    seed ^= std::hash<T>{}(value) + 0x9e3779b9u + (seed << 6u) + (seed >> 2u);
+}
+
+void HashVec2(std::size_t& seed, const glm::vec2& value) {
+    HashValue(seed, value.x); HashValue(seed, value.y);
+}
+
+void HashVec3(std::size_t& seed, const glm::vec3& value) {
+    HashValue(seed, value.x); HashValue(seed, value.y); HashValue(seed, value.z);
+}
+
+std::uint64_t PreviewSignature(const PbrMaterial& material,
+                               const MaterialPreview::Settings& settings,
+                               std::uint64_t textureRevision) {
+    std::size_t seed = 0;
+    HashVec3(seed, material.albedo);
+    HashValue(seed, material.metallic); HashValue(seed, material.roughness);
+    HashValue(seed, material.ao); HashVec3(seed, material.emissive);
+    HashValue(seed, material.opacity); HashValue(seed, material.alphaCutoff);
+    HashValue(seed, static_cast<int>(material.blendMode));
+    HashVec2(seed, material.uvScale); HashVec2(seed, material.uvOffset);
+    HashValue(seed, material.uvRotation); HashValue(seed, material.worldSpaceUv);
+    HashValue(seed, material.normalStrength); HashValue(seed, material.heightScale);
+    HashValue(seed, material.clearcoat); HashValue(seed, material.clearcoatRoughness);
+    HashValue(seed, material.transmission); HashValue(seed, material.ior);
+    HashValue(seed, material.thickness); HashValue(seed, material.anisotropy);
+    HashValue(seed, material.anisotropyRotation); HashVec3(seed, material.sheenColor);
+    HashValue(seed, material.sheenRoughness); HashValue(seed, material.specularLevel);
+    HashValue(seed, material.subsurface); HashVec3(seed, material.subsurfaceColor);
+
+    HashValue(seed, settings.size); HashValue(seed, settings.yawDeg);
+    HashValue(seed, settings.pitchDeg); HashValue(seed, settings.distance);
+    HashValue(seed, static_cast<int>(settings.shape));
+    HashValue(seed, static_cast<int>(settings.channel));
+    HashValue(seed, settings.envTime); HashValue(seed, settings.envYawDeg);
+    HashValue(seed, settings.lightIntensity); HashValue(seed, settings.groundPlane);
+    HashVec3(seed, settings.background); HashValue(seed, settings.hdriPath);
+    HashValue(seed, settings.albedoMapPath); HashValue(seed, settings.normalMapPath);
+    HashValue(seed, settings.metalRoughMapPath); HashValue(seed, settings.heightMapPath);
+    HashValue(seed, settings.shaderPath);
+
+    // Sort map keys so the cache remains stable even if unordered-map bucket order changes.
+    std::vector<std::string> keys;
+    keys.reserve(settings.shaderParameters.size());
+    for (const auto& entry : settings.shaderParameters) keys.push_back(entry.first);
+    std::sort(keys.begin(), keys.end());
+    for (const std::string& key : keys) {
+        HashValue(seed, key);
+        HashValue(seed, settings.shaderParameters.at(key));
+        const auto type = settings.shaderParameterTypes.find(key);
+        HashValue(seed, type == settings.shaderParameterTypes.end() ? -1 : type->second);
+    }
+    HashValue(seed, textureRevision);
+    return static_cast<std::uint64_t>(seed);
+}
+
 } // namespace
 
 void MaterialPreview::EnsureInitialized() {
@@ -295,13 +355,19 @@ MaterialPreview::MapInfo MaterialPreview::AcquireMap(const std::string& path) {
     if (path.empty()) {
         return MapInfo{};
     }
+    const auto now = std::chrono::steady_clock::now();
+    auto it = m_textures.find(path);
+    // File metadata queries are surprisingly costly on networked or indexed project
+    // folders. Poll at a human-scale interval instead of once per UI frame.
+    if (it != m_textures.end() && now < it->second->nextFileCheck)
+        return it->second->info;
+
     std::error_code ec;
     const bool exists = std::filesystem::is_regular_file(path, ec);
     const auto writeTime = exists ? std::filesystem::last_write_time(path, ec)
                                   : std::filesystem::file_time_type{};
     ec.clear();
     const std::uintmax_t fileSize = exists ? std::filesystem::file_size(path, ec) : 0;
-    auto it = m_textures.find(path);
     const bool stale = it == m_textures.end() || it->second->exists != exists ||
                        it->second->writeTime != writeTime || it->second->fileSize != fileSize;
     if (stale) {
@@ -309,6 +375,7 @@ MaterialPreview::MapInfo MaterialPreview::AcquireMap(const std::string& path) {
         cached->exists = exists;
         cached->writeTime = writeTime;
         cached->fileSize = fileSize;
+        cached->nextFileCheck = now + std::chrono::milliseconds(500);
         try {
             if (!exists) throw std::runtime_error("Texture file does not exist: " + path);
             std::string extension = std::filesystem::path(path).extension().string();
@@ -321,9 +388,7 @@ MaterialPreview::MapInfo MaterialPreview::AcquireMap(const std::string& path) {
                 std::string loadError;
                 if (!engine::LoadTextureAsset(path, &asset, &loadError))
                     throw std::runtime_error(loadError);
-                cached->texture.emplace(
-                    asset.rgba.data(), static_cast<int>(asset.width),
-                    static_cast<int>(asset.height), asset.smooth);
+                cached->texture.emplace(asset);
             } else {
                 cached->texture.emplace(path, /*smooth=*/true);
             }
@@ -337,6 +402,9 @@ MaterialPreview::MapInfo MaterialPreview::AcquireMap(const std::string& path) {
         }
         if (it == m_textures.end()) it = m_textures.emplace(path, std::move(cached)).first;
         else it->second = std::move(cached);
+        ++m_textureRevision;
+    } else {
+        it->second->nextFileCheck = now + std::chrono::milliseconds(500);
     }
     return it->second->info;
 }
@@ -386,11 +454,19 @@ void MaterialPreview::RenderChannel(const PbrMaterial& material, const Settings&
 }
 
 unsigned int MaterialPreview::Render(const PbrMaterial& material, const Settings& settings) {
-    GLStateGuard state;
     if (m_failed) return 0;
+    const std::uint64_t requestedSignature =
+        PreviewSignature(material, settings, m_textureRevision);
+    if (m_ready && m_hasRenderedFrame && requestedSignature == m_lastRenderSignature
+        && m_fbo) {
+        return m_fbo->ColorTexture();
+    }
+    GLStateGuard state;
     try {
         const unsigned int result = RenderUnchecked(material, settings);
         m_error.clear();
+        m_lastRenderSignature = PreviewSignature(material, settings, m_textureRevision);
+        m_hasRenderedFrame = result != 0;
         return result;
     } catch (const std::exception& e) {
         m_error = e.what();
@@ -524,8 +600,9 @@ void MaterialPreview::Retry() {
     m_groundMesh.reset(); m_plane.reset(); m_cube.reset(); m_sphere.reset();
     m_reg = engine::ecs::Registry{};
     m_object = m_sun = m_ground = engine::ecs::kNull;
-    m_ready = false; m_failed = false; m_error.clear();
+    m_ready = false; m_failed = false; m_error.clear(); m_hasRenderedFrame = false;
     m_envTime = -1.0f; m_envYaw = -1.0e9f; m_bakedHdri = "\x01"; m_size = 0;
+    m_textureRevision = 0; m_lastRenderSignature = 0;
 }
 
 } // namespace material_maker

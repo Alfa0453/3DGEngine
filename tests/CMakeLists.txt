@@ -213,3 +213,13 @@ else()
     target_compile_options(skeletal_asset_tests PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 add_test(NAME skeletal_asset_regression COMMAND skeletal_asset_tests)
+
+add_executable(forge_material_importer_tests
+    forge_material_importer_tests.cpp)
+target_link_libraries(forge_material_importer_tests PRIVATE engine)
+if(MSVC)
+    target_compile_options(forge_material_importer_tests PRIVATE /W4)
+else()
+    target_compile_options(forge_material_importer_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME forge_material_importer_regression COMMAND forge_material_importer_tests)

@@ -51,12 +51,14 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <random>
 #include <system_error>
 #include <unordered_set>
+#include <utility>
 
 using engine::ecs::Entity;
 using engine::ecs::MeshRenderer;
@@ -71,6 +73,120 @@ engine::WindowProps MakeEditorWindowProps(const engine::Config& config) {
     props.height = config.GetInt("window.height", 900);
     props.vsync = config.GetBool("window.vsync", true);
     return props;
+}
+
+struct MaterialForgeDeploySignal {
+    std::string token;
+    std::string operation;
+    std::string editorAction = "refresh";
+    std::string materialId;
+    std::string materialPath;
+};
+
+bool ReadMaterialForgeDeploySignal(
+    const std::filesystem::path& path,
+    MaterialForgeDeploySignal* signal) {
+    std::ifstream input(path, std::ios::binary);
+    std::string magic;
+    unsigned version = 0;
+    if (!(input >> magic >> version)
+        || magic != "3DG_MATERIAL_FORGE_DEPLOY"
+        || version < 1 || version > 2) {
+        return false;
+    }
+    input.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+    MaterialForgeDeploySignal parsed;
+    if (!std::getline(input, parsed.token)
+        || !std::getline(input, parsed.operation)) {
+        return false;
+    }
+    if (version == 1) {
+        if (!std::getline(input, parsed.materialPath)) return false;
+    } else if (!std::getline(input, parsed.editorAction)
+        || !std::getline(input, parsed.materialId)
+        || !std::getline(input, parsed.materialPath)) {
+        return false;
+    }
+    if (parsed.token.empty() || parsed.materialPath.empty()
+        || (parsed.operation != "created" && parsed.operation != "updated")
+        || (parsed.editorAction != "refresh"
+            && parsed.editorAction != "apply_selected")) {
+        return false;
+    }
+    *signal = std::move(parsed);
+    return true;
+}
+
+std::string MaterialForgeSingleLine(std::string value) {
+    std::replace(value.begin(), value.end(), '\r', ' ');
+    std::replace(value.begin(), value.end(), '\n', ' ');
+    return value;
+}
+
+bool WriteMaterialForgeAcknowledgement(
+    const std::filesystem::path& signalPath,
+    const MaterialForgeDeploySignal& signal,
+    const std::string& status,
+    int appliedCount,
+    const std::string& message,
+    std::string* error) {
+    const std::filesystem::path acknowledgementPath =
+        signalPath.parent_path() / "deploy.ack";
+    const std::filesystem::path temporary =
+        acknowledgementPath.string() + ".tmp";
+    {
+        std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+        if (!output) {
+            *error = "Could not write Material Forge editor acknowledgement";
+            return false;
+        }
+        output << "3DG_MATERIAL_FORGE_ACK 1\n"
+               << MaterialForgeSingleLine(signal.token) << '\n'
+               << MaterialForgeSingleLine(status) << '\n'
+               << std::max(0, appliedCount) << '\n'
+               << MaterialForgeSingleLine(message) << '\n'
+               << MaterialForgeSingleLine(signal.materialPath) << '\n';
+        output.close();
+        if (!output) {
+            std::error_code ignored;
+            std::filesystem::remove(temporary, ignored);
+            *error = "Could not complete Material Forge editor acknowledgement";
+            return false;
+        }
+    }
+    std::error_code ec;
+    std::filesystem::remove(acknowledgementPath, ec);
+    ec.clear();
+    std::filesystem::rename(temporary, acknowledgementPath, ec);
+    if (ec) {
+        const std::string messageText = ec.message();
+        std::filesystem::remove(temporary, ec);
+        *error = "Could not commit Material Forge editor acknowledgement: "
+            + messageText;
+        return false;
+    }
+    return true;
+}
+
+bool IsSafeMaterialForgeApplyPath(const std::filesystem::path& path,
+                                  const std::filesystem::path& content) {
+    std::error_code ec;
+    const std::filesystem::path canonicalContent =
+        std::filesystem::weakly_canonical(content, ec);
+    if (ec) return false;
+    ec.clear();
+    const std::filesystem::path canonicalMaterial =
+        std::filesystem::weakly_canonical(path, ec);
+    if (ec || canonicalMaterial.extension() != ".3dgmat"
+        || !std::filesystem::is_regular_file(canonicalMaterial, ec)) {
+        return false;
+    }
+    ec.clear();
+    const std::filesystem::path relative =
+        std::filesystem::relative(canonicalMaterial, canonicalContent, ec);
+    if (ec || relative.empty() || relative.is_absolute()) return false;
+    return std::none_of(relative.begin(), relative.end(),
+        [](const std::filesystem::path& part) { return part == ".."; });
 }
 
 glm::vec3 SelectedColor(bool selected, const glm::vec3& base) {
@@ -564,6 +680,7 @@ void EditorApp::OnInit()
             m_project.Load(m_config);
         }
     }
+    LoadPackagingSettings();
     SetScenePathDraft(m_project.ScenePath());
     m_content.Refresh(m_assets, m_project, m_log);
     LoadProjectAssetRegistry();
@@ -633,7 +750,9 @@ void EditorApp::OnInit()
 
 void EditorApp::OnUpdate(float dt)
 {
+    UpdatePackageBuild();
     UpdateScriptAutoReload(dt);
+    UpdateMaterialForgeDeployments(dt);
     if (m_mode == EditorMode::Play) {
         m_playPhysics.SetDebugTracing(m_showGameplayTraces);
         m_playPhysics.ClearDebugTraces();
@@ -821,6 +940,111 @@ void EditorApp::OnUpdate(float dt)
         m_gizmo,
         m_mode == EditorMode::Edit && !keyboardCaptured && !m_cameraController.MouseLookActive() && !controlDown,
         dt);
+}
+
+void EditorApp::UpdateMaterialForgeDeployments(float dt) {
+    m_materialForgeDeployPoll -= dt;
+    if (m_materialForgeDeployPoll > 0.0f) return;
+    m_materialForgeDeployPoll = 0.35f;
+
+    std::error_code ec;
+    const std::filesystem::path content =
+        std::filesystem::absolute(m_project.AssetRoot(), ec).lexically_normal();
+    if (ec) return;
+    const std::filesystem::path signalPath =
+        content.parent_path() / "Intermediate" / "MaterialForge" / "deploy.signal";
+    const std::string signalPathString = signalPath.generic_string();
+    MaterialForgeDeploySignal signal;
+
+    if (signalPathString != m_materialForgeDeploySignalPath) {
+        m_materialForgeDeploySignalPath = signalPathString;
+        m_materialForgeDeployToken.clear();
+        if (ReadMaterialForgeDeploySignal(signalPath, &signal))
+            m_materialForgeDeployToken = signal.token;
+        return;
+    }
+    if (!ReadMaterialForgeDeploySignal(signalPath, &signal)
+        || signal.token == m_materialForgeDeployToken) {
+        return;
+    }
+    m_materialForgeDeployToken = signal.token;
+
+    LoadProjectAssetRegistry();
+    m_content.Refresh(m_assets, m_project, m_log);
+    m_editAssets.Clear();
+    ClearEditParticlePreviews();
+    m_editTextureLoadErrors.clear();
+    m_editModelLoadErrors.clear();
+    m_terrainMaterialSurfaces.clear();
+
+    if (m_mode == EditorMode::Play && m_playAssets && m_playRegistry) {
+        m_playAssets->Clear();
+        const engine::RuntimeAssetManager::ResolveReport report =
+            m_playAssets->ResolveRegistryAssets(*m_playRegistry);
+        for (const std::string& reloadError : report.errors)
+            m_log.Warning("Material Forge live refresh: " + reloadError);
+    }
+
+    std::string acknowledgementStatus = "refreshed";
+    std::string acknowledgementMessage =
+        "3DGEditor refreshed Content and runtime material caches";
+    int appliedCount = 0;
+    if (signal.editorAction == "apply_selected") {
+        engine::AssetHandle materialId;
+        bool validMaterial =
+            engine::AssetHandle::Parse(signal.materialId, &materialId)
+            && IsSafeMaterialForgeApplyPath(signal.materialPath, content);
+        if (validMaterial) {
+            ec.clear();
+            const std::filesystem::path relativeMaterial =
+                std::filesystem::relative(signal.materialPath, content, ec);
+            const engine::AssetRegistryEntry* registered =
+                ec ? nullptr : m_assetRegistry.Find(materialId);
+            const std::string expectedVirtualPath = ec ? std::string{}
+                : engine::AssetRegistry::NormalizeVirtualPath(
+                    relativeMaterial.generic_string());
+            validMaterial = registered
+                && registered->type == engine::AssetType::Material
+                && registered->virtualPath == expectedVirtualPath;
+        }
+        if (!validMaterial) {
+            acknowledgementStatus = "rejected";
+            acknowledgementMessage =
+                "3DGEditor rejected an invalid or unregistered material apply request";
+            m_log.Warning("Material Forge apply request was invalid and was ignored");
+        } else if ((appliedCount = m_scene.SetSelectedMaterialAssetToSelection(
+                        signal.materialPath, materialId)) > 0) {
+            acknowledgementStatus =
+                m_mode == EditorMode::Play ? "deferred" : "applied";
+            const std::string objectText = std::to_string(appliedCount)
+                + (appliedCount == 1 ? " selected object" : " selected objects");
+            acknowledgementMessage = m_mode == EditorMode::Play
+                ? "Applied to " + objectText
+                  + " in the edit scene; visible after exiting Play"
+                : "Applied to " + objectText;
+            m_log.Info(m_mode == EditorMode::Play
+                ? "Material Forge applied the material to " + objectText
+                  + " in the edit scene; it will appear after exiting Play"
+                : "Material Forge applied the material to " + objectText);
+        } else {
+            acknowledgementStatus = "no_selection";
+            acknowledgementMessage = "No unlocked object was selected in 3DGEditor";
+            m_log.Warning(
+                "Material Forge deployed the material, but no unlocked object was selected");
+        }
+    }
+
+    std::string acknowledgementError;
+    if (!WriteMaterialForgeAcknowledgement(
+            signalPath, signal, acknowledgementStatus, appliedCount,
+            acknowledgementMessage, &acknowledgementError)) {
+        m_log.Warning(acknowledgementError);
+    }
+
+    m_log.Info(
+        std::string("Material Forge ")
+        + (signal.operation == "updated" ? "updated: " : "deployed: ")
+        + signal.materialPath);
 }
 
 void EditorApp::OnRender()
@@ -1564,11 +1788,14 @@ void EditorApp::DrawEditorOverlay()
     dockspaceContext.showAiDebug = &m_showAiDebug;
     dockspaceContext.useNavMesh = &m_useNavMesh;
     dockspaceContext.vsync = GetWindow().IsVSync();
-    dockspaceContext.terrainSculpt = &m_terrainSculpt;
-    dockspaceContext.terrainSculptMode = &m_terrainSculptMode;
-    dockspaceContext.terrainPaintLayer = &m_terrainPaintLayer;
-    dockspaceContext.terrainBrushRadius = &m_terrainBrushRadius;
-    dockspaceContext.terrainBrushStrength = &m_terrainBrushStrength;
+    // Terrain sculpting and painting are owned by Terrain Creator rather than
+    // the selected scene object's Inspector.
+    m_terrainSculpt = false;
+    dockspaceContext.terrainSculpt = nullptr;
+    dockspaceContext.terrainSculptMode = nullptr;
+    dockspaceContext.terrainPaintLayer = nullptr;
+    dockspaceContext.terrainBrushRadius = nullptr;
+    dockspaceContext.terrainBrushStrength = nullptr;
     dockspaceContext.foliagePaint = &m_foliagePaint;
     dockspaceContext.foliageErase = &m_foliageErase;
     // Auto-lock the Hierarchy's selection while the user is working in the viewport: a
@@ -1602,6 +1829,14 @@ void EditorApp::DrawEditorOverlay()
     dockspaceContext.projectLocationBufferSize = m_projectLocationDraft.size();
     dockspaceContext.openProjectBuffer = m_openProjectDraft.data();
     dockspaceContext.openProjectBufferSize = m_openProjectDraft.size();
+    dockspaceContext.packageOutputBuffer = m_packageOutputDraft.data();
+    dockspaceContext.packageOutputBufferSize = m_packageOutputDraft.size();
+    dockspaceContext.packageConfiguration = &m_packageConfiguration;
+    dockspaceContext.packageStaticRuntime = &m_packageStaticRuntime;
+    dockspaceContext.packageCleanOutput = &m_packageCleanOutput;
+    dockspaceContext.packageCreateZip = &m_packageCreateZip;
+    dockspaceContext.packageBuildRunning = m_packageBuildRunning;
+    dockspaceContext.packageBuildStatus = &m_packageBuildStatus;
     dockspaceContext.fps = m_fps;
     if (m_particleRenderer) {
         const engine::ParticleRenderer::Stats& stats = m_particleRenderer->GetStats();
@@ -1770,6 +2005,7 @@ void EditorApp::DrawEditorOverlay()
     DrawClipEditorPanel();
     DrawGraphEditorPanel();
     DrawMeshEditorPanel();
+    DrawTerrainCreatorPanel();
     DrawModularPlacementPanel();
     DrawPrefabPalettePanel();
     DrawRoomBuilderPanel();
@@ -1880,6 +2116,18 @@ void EditorApp::DrawEditorOverlay()
     }
     if (dockspaceContext.openProjectRequested) {
         OpenProjectFromPath(m_openProjectDraft.data());
+    }
+    if (dockspaceContext.browsePackageOutputRequested) {
+        const std::string dir = editor::PickFolderDialog("Choose package output folder");
+        if (!dir.empty()) {
+            std::memset(m_packageOutputDraft.data(), 0, m_packageOutputDraft.size());
+            std::snprintf(m_packageOutputDraft.data(), m_packageOutputDraft.size(),
+                "%s", dir.c_str());
+            PersistPackagingSettings();
+        }
+    }
+    if (dockspaceContext.packageSettingsChanged) {
+        PersistPackagingSettings();
     }
     if (dockspaceContext.saveSceneRequested) {
         SaveScene();
@@ -2012,6 +2260,11 @@ void EditorApp::DrawEditorOverlay()
             }
             break;
         }
+        case EditorAssets::Type::Terrain:
+            m_panels.SetOpen(EditorPanels::Panel::TerrainCreator, true);
+            m_terrainCreator.QueueOpen(path);
+            m_log.Info("Opening terrain: " + path);
+            break;
         case EditorAssets::Type::Texture:
             m_log.Info("Texture selected; drag it to a material texture slot to use it");
             break;
@@ -2027,6 +2280,9 @@ void EditorApp::DrawEditorOverlay()
     }
     if (dockspaceContext.cookProjectRequested) {
         CookProject();
+    }
+    if (dockspaceContext.packageProjectRequested) {
+        PackageProject();
     }
     if (dockspaceContext.validateRuntimeRequested) {
         ValidateRuntimeScene();
@@ -2086,9 +2342,6 @@ void EditorApp::DrawEditorOverlay()
     }
     if (dockspaceContext.addStaticFloorRequested) {
         AddStaticFloor();
-    }
-    if (dockspaceContext.addTerrainRequested) {
-        AddTerrain();
     }
     if (dockspaceContext.addFoliageRequested && m_cube) {
         m_scene.AddFoliage(*m_cube);
@@ -2480,6 +2733,105 @@ void EditorApp::DrawMeshEditorPanel() {
         if (!error.empty()) m_log.Warning("Mesh reload: " + error);
         error.clear();
         if (!m_assets.Refresh(m_project.AssetRoot(), &error)) m_log.Warning(error);
+    }
+    if (!message.empty()) m_log.Info(message);
+}
+
+void EditorApp::DrawTerrainCreatorPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::TerrainCreator)) return;
+    bool open = true;
+    bool assetSaved = false;
+    std::string message;
+    m_terrainCreator.Draw(m_project.AssetRoot(), m_assets, &open,
+                          &assetSaved, &message, m_dt);
+    m_panels.SetOpen(EditorPanels::Panel::TerrainCreator, open);
+    if (assetSaved) {
+        std::string error;
+        if (!m_assets.Refresh(m_project.AssetRoot(), &error)) m_log.Warning(error);
+    }
+
+    engine::TerrainAssetData asset;
+    std::string sourcePath;
+    if (m_terrainCreator.ConsumeAddToLevel(&asset, &sourcePath)) {
+        if (!m_plane) {
+            m_log.Error("Terrain placement failed: plane mesh is not ready");
+        } else {
+            m_scene.AddPlane(*m_plane);
+            m_scene.SetSelectedName(asset.name);
+            m_scene.SetSelectedTerrain(true, asset.resolution, asset.size,
+                                       asset.maxHeight, static_cast<int>(asset.seed),
+                                       asset.octaves, asset.frequency);
+            m_scene.SetSelectedTerrainHeights(asset.heights);
+            m_scene.SetSelectedTerrainPaint(asset.paint);
+            for (int layer = 1; layer <= 5; ++layer)
+                m_scene.SetSelectedTerrainLayerMaterial(layer,
+                                                        asset.layerMaterials[layer]);
+            m_scene.SetSelectedTerrainGrass(asset.grassEnabled, asset.grassDensity,
+                asset.grassHeight, asset.grassWindStrength, asset.grassWindSpeed,
+                asset.grassBaseColor, asset.grassTipColor,
+                asset.grassRandomizeHeight, asset.grassMinHeightScale,
+                asset.grassMaxHeightScale);
+            if (const auto* placedTransform = m_scene.SelectedTransform()) {
+                engine::ecs::Transform centeredTransform = *placedTransform;
+                const float halfSize = std::max(asset.size, 0.01f) * 0.5f;
+                centeredTransform.position.x = -halfSize;
+                centeredTransform.position.z = -halfSize;
+                m_scene.SetSelectedTransform(centeredTransform);
+            }
+            m_log.Info("Added terrain asset to level: " + sourcePath);
+        }
+    }
+    if (m_terrainCreator.ConsumeApplyToSelected(&asset, &sourcePath)) {
+        const EditorScene::Object* selected = m_scene.SelectedObject();
+        const engine::ecs::Transform* selectedTransform = m_scene.SelectedTransform();
+        if (!selected || !selected->isTerrain) {
+            m_log.Warning("Apply terrain failed: select a landscape in the level first");
+        } else if (selected->locked || !selectedTransform) {
+            m_log.Warning("Apply terrain failed: the selected landscape is locked or unavailable");
+        } else {
+            const Entity terrainEntity = selected->entity;
+            const float oldHalfSize = std::max(selected->terrainSize, 0.01f) * 0.5f;
+            const glm::vec3 centerWorld = glm::vec3(selectedTransform->Model()
+                * glm::vec4(oldHalfSize, 0.0f, oldHalfSize, 1.0f));
+
+            bool applied = m_scene.SetSelectedTerrain(
+                true, asset.resolution, asset.size, asset.maxHeight,
+                static_cast<int>(asset.seed), asset.octaves, asset.frequency);
+            applied = m_scene.SetSelectedTerrainHeights(asset.heights) && applied;
+            applied = m_scene.SetSelectedTerrainPaint(asset.paint) && applied;
+            for (int layer = 1; layer <= 5; ++layer)
+                applied = m_scene.SetSelectedTerrainLayerMaterial(
+                    layer, asset.layerMaterials[layer]) && applied;
+            applied = m_scene.SetSelectedTerrainGrass(
+                asset.grassEnabled, asset.grassDensity, asset.grassHeight,
+                asset.grassWindStrength, asset.grassWindSpeed,
+                asset.grassBaseColor, asset.grassTipColor,
+                asset.grassRandomizeHeight, asset.grassMinHeightScale,
+                asset.grassMaxHeightScale) && applied;
+            m_scene.SetSelectedTerrainGrassStyle({});
+
+            if (engine::ecs::Transform* updated = m_scene.SelectedTransform()) {
+                engine::ecs::Transform centered = *updated;
+                const float newHalfSize = std::max(asset.size, 0.01f) * 0.5f;
+                const glm::vec3 localCenter(newHalfSize, 0.0f, newHalfSize);
+                centered.position = centerWorld
+                    - centered.rotation * (centered.scale * localCenter);
+                // No transform change is also a successful outcome when the
+                // landscape size and center stayed the same.
+                m_scene.SetSelectedTransform(centered);
+            }
+
+            // Force regeneration even when dimensions did not change; the
+            // sculpted height and paint arrays may still be completely new.
+            m_terrains.erase(terrainEntity);
+            m_grass.erase(terrainEntity);
+            if (applied) {
+                m_log.Info("Applied Terrain Creator changes to selected landscape"
+                    + (sourcePath.empty() ? std::string{} : ": " + sourcePath));
+            } else {
+                m_log.Warning("Terrain was only partially applied to the selected landscape");
+            }
+        }
     }
     if (!message.empty()) m_log.Info(message);
 }
@@ -4429,6 +4781,8 @@ EditorDockspace::AnimationPreviewState EditorApp::BuildAnimationPreviewState() {
         addMovementDefinition("VerticalSpeed", EditorScene::AnimationParameter::Type::Float, 0.0f);
         addMovementDefinition("IsGrounded", EditorScene::AnimationParameter::Type::Bool, 1.0f);
         addMovementDefinition("IsFalling", EditorScene::AnimationParameter::Type::Bool, 0.0f);
+        addMovementDefinition("IsCrouching", EditorScene::AnimationParameter::Type::Bool, 0.0f);
+        addMovementDefinition("IsSwimming", EditorScene::AnimationParameter::Type::Bool, 0.0f);
         addMovementDefinition("IsFlying", EditorScene::AnimationParameter::Type::Bool, 0.0f);
     }
     state.transitions = selected->animationTransitions;
@@ -5415,8 +5769,8 @@ void EditorApp::DrawEditScene(const glm::mat4 & viewProj)
     }
     DrawEditModeModels(viewProj);
     DrawEditParticlePreviews();
-    if (m_showGrid && m_shader && m_cube) {
-        m_viewport.DrawWorldGrid(m_renderer, *m_shader, *m_cube, viewProj);
+    if (m_showGrid) {
+        m_viewport.DrawWorldGrid(viewProj);
     }
     if (m_showNavigationPreview && m_shader && m_cube) {
         m_viewport.DrawEditorNavMeshOverlay(m_renderer, *m_shader, *m_cube, m_editorNavMesh, viewProj);
@@ -6043,15 +6397,15 @@ engine::TerrainLayerSurface EditorApp::TerrainLayerMaterialSurface(const std::st
     engine::TerrainLayerSurface surface;
     surface.albedo = glm::vec3(0.6f);
     std::string error;
-    if (const engine::RuntimeMaterialAsset* mat = m_editAssets.LoadMaterial(materialPath, &error)) {
+    const std::filesystem::path materialFile = std::filesystem::path(materialPath).is_absolute()
+        ? std::filesystem::path(materialPath)
+        : std::filesystem::path(m_assets.RootPath()) / materialPath;
+    if (const engine::RuntimeMaterialAsset* mat =
+            m_editAssets.LoadMaterial(materialFile.string(), &error)) {
         surface.albedo = mat->material.albedo;
         surface.ao = mat->material.ao;
         surface.roughness = mat->material.roughness;
         surface.metallic = mat->material.metallic;
-        glm::vec3 avg;
-        if (!mat->albedoMapPath.empty() && AverageImageColor(mat->albedoMapPath, avg)) {
-            surface.albedo *= avg;   // preserve the texture's representative colour
-        }
     }
     surface.albedo = glm::clamp(surface.albedo, glm::vec3(0.0f), glm::vec3(1.0f));
     surface.ao = glm::clamp(surface.ao, 0.0f, 1.0f);
@@ -6061,8 +6415,88 @@ engine::TerrainLayerSurface EditorApp::TerrainLayerMaterialSurface(const std::st
     return surface;
 }
 
+engine::TerrainLayerTexture EditorApp::TerrainLayerMaterialTexture(
+    const std::string& materialPath) {
+    const auto cached = m_terrainMaterialTextures.find(materialPath);
+    if (cached != m_terrainMaterialTextures.end()) return cached->second;
+
+    engine::TerrainLayerTexture result;
+    const std::filesystem::path materialFile = std::filesystem::path(materialPath).is_absolute()
+        ? std::filesystem::path(materialPath)
+        : std::filesystem::path(m_assets.RootPath()) / materialPath;
+    std::string error;
+    const engine::RuntimeMaterialAsset* material =
+        m_editAssets.LoadMaterial(materialFile.string(), &error);
+    if (!material) {
+        m_terrainMaterialTextures[materialPath] = result;
+        return result;
+    }
+    result.tiling = glm::max(material->material.uvScale * 8.0f, glm::vec2(0.001f));
+
+    auto readPixels = [this](const std::string& path, std::vector<std::uint8_t>* pixels,
+                             int* width, int* height) {
+        if (path.empty() || !pixels || !width || !height) return false;
+        const std::filesystem::path file = std::filesystem::path(path).is_absolute()
+            ? std::filesystem::path(path)
+            : std::filesystem::path(m_assets.RootPath()) / path;
+        std::string extension = file.extension().string();
+        std::transform(extension.begin(), extension.end(), extension.begin(),
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (extension == ".3dgtex") {
+            engine::TextureAssetData texture;
+            std::string loadError;
+            if (!engine::LoadTextureAsset(file.string(), &texture, &loadError)) return false;
+            *width = static_cast<int>(texture.width);
+            *height = static_cast<int>(texture.height);
+            *pixels = std::move(texture.rgba);
+            return !pixels->empty();
+        }
+        try {
+            engine::image::Image image;
+            if (extension == ".png") image = engine::image::DecodePNG(file.string());
+            else if (extension == ".jpg" || extension == ".jpeg")
+                image = engine::image::DecodeJPEG(file.string());
+            else return false;
+            *width = image.width;
+            *height = image.height;
+            *pixels = std::move(image.rgba);
+            return !pixels->empty();
+        } catch (...) {
+            return false;
+        }
+    };
+    readPixels(material->albedoMapPath, &result.albedoRgba,
+               &result.albedoWidth, &result.albedoHeight);
+    readPixels(material->metalRoughMapPath, &result.ormRgba,
+               &result.ormWidth, &result.ormHeight);
+    m_terrainMaterialTextures[materialPath] = result;
+    return result;
+}
+
 void EditorApp::AddTerrainMeshes(engine::ecs::Registry& pbrRegistry)
 {
+    // Terrain and grass are generated render caches rather than scene objects.
+    // Remove entries whose owning landscape no longer exists before drawing;
+    // otherwise deleting a landscape leaves its last grass field visible.
+    std::unordered_set<Entity> liveTerrains;
+    std::unordered_set<Entity> liveGrassFields;
+    for (const EditorScene::Object& object : m_scene.Objects()) {
+        if (!object.isTerrain) continue;
+        liveTerrains.insert(object.entity);
+        if (object.visible && object.grassEnabled)
+            liveGrassFields.insert(object.entity);
+    }
+    for (auto it = m_terrains.begin(); it != m_terrains.end();) {
+        if (liveTerrains.find(it->first) == liveTerrains.end())
+            it = m_terrains.erase(it);
+        else ++it;
+    }
+    for (auto it = m_grass.begin(); it != m_grass.end();) {
+        if (liveGrassFields.find(it->first) == liveGrassFields.end())
+            it = m_grass.erase(it);
+        else ++it;
+    }
+
     for (const EditorScene::Object& object : m_scene.Objects()) {
         if (!object.isTerrain || !object.visible) {
             continue;
@@ -6106,14 +6540,17 @@ void EditorApp::AddTerrainMeshes(engine::ecs::Registry& pbrRegistry)
         // Paint-layer palette: default colours, overridden by any assigned material's
         // representative colour. SetLayerColors only rebuilds the albedo when it changes.
         engine::TerrainLayerSurface layerSurfaces[6];
+        engine::TerrainLayerTexture layerTextures[6];
         engine::DefaultTerrainLayerSurfaces(layerSurfaces);
         for (int layer = 1; layer <= 5; ++layer) {
             const std::string& matPath = object.terrainLayerMaterials[static_cast<std::size_t>(layer - 1)];
             if (!matPath.empty()) {
                 layerSurfaces[layer] = TerrainLayerMaterialSurface(matPath);
+                layerTextures[layer] = TerrainLayerMaterialTexture(matPath);
             }
         }
         tc.terrain.SetLayerSurfaces(layerSurfaces);
+        tc.terrain.SetLayerTextures(layerTextures);
 
         // Grass: instanced blades on the painted grass layer. Rebuild the scatter only
         // when the terrain/paint/density/position change (cheap signature).
@@ -8033,7 +8470,19 @@ void EditorApp::DuplicateSelected()
 
 void EditorApp::DeleteSelected()
 {
+    std::vector<Entity> deletedTerrainEntities;
+    for (int index : m_scene.SelectedIndices()) {
+        if (index < 0 || index >= static_cast<int>(m_scene.Objects().size())) continue;
+        const EditorScene::Object& object =
+            m_scene.Objects()[static_cast<std::size_t>(index)];
+        if (object.isTerrain && !object.locked)
+            deletedTerrainEntities.push_back(object.entity);
+    }
     if (m_scene.DeleteSelected()) {
+        for (Entity entity : deletedTerrainEntities) {
+            m_grass.erase(entity);
+            m_terrains.erase(entity);
+        }
         m_log.Info("Deleted selected object");
     } else {
         m_log.Warning("Delete failed: no selected object");
@@ -8428,6 +8877,7 @@ void EditorApp::NewProject(const std::string& location, const std::string& name)
     m_hasProjectFile = true;
     m_config.Set("editor.current_project", m_project.ProjectFilePath());
     m_config.Save();
+    LoadPackagingSettings();
 
     m_materialMaker.SetOutputDirectory(m_project.AssetRoot());
     m_behaviorGraph.SetOutputDirectory(m_project.AssetRoot());
@@ -8482,6 +8932,7 @@ void EditorApp::OpenProjectFromPath(const std::string& projectFile) {
     m_hasProjectFile = true;
     m_config.Set("editor.current_project", m_project.ProjectFilePath());
     m_config.Save();
+    LoadPackagingSettings();
 
     m_materialMaker.SetOutputDirectory(m_project.AssetRoot());
     m_behaviorGraph.SetOutputDirectory(m_project.AssetRoot());
@@ -8734,6 +9185,130 @@ void EditorApp::CookProject()
     }
 
     m_runtime.CookProject(m_scene, m_project, m_assetRegistry, m_log);
+}
+
+void EditorApp::LoadPackagingSettings()
+{
+    std::error_code ec;
+    const std::filesystem::path projectRoot = m_project.HasProjectFile()
+        ? std::filesystem::path(m_project.ProjectFilePath()).parent_path()
+        : std::filesystem::absolute(m_project.AssetRoot(), ec).parent_path();
+    engine::Config& config = m_hasProjectFile ? m_projectConfig : m_config;
+    const std::string defaultOutput =
+        (projectRoot / "Build" / "Packages").lexically_normal().string();
+    const std::string output = config.GetString("package.output", defaultOutput);
+    std::memset(m_packageOutputDraft.data(), 0, m_packageOutputDraft.size());
+    std::snprintf(m_packageOutputDraft.data(), m_packageOutputDraft.size(),
+        "%s", output.c_str());
+    m_packageConfiguration = std::clamp(
+        config.GetInt("package.configuration", 0), 0, 2);
+    m_packageStaticRuntime = config.GetBool("package.static_runtime", true);
+    m_packageCleanOutput = config.GetBool("package.clean_output", true);
+    m_packageCreateZip = config.GetBool("package.create_zip", true);
+    m_packageBuildStatus = "Ready to package";
+}
+
+void EditorApp::PersistPackagingSettings()
+{
+    engine::Config& config = m_hasProjectFile ? m_projectConfig : m_config;
+    config.Set("package.output", std::string(m_packageOutputDraft.data()));
+    config.Set("package.configuration", m_packageConfiguration);
+    config.Set("package.static_runtime", m_packageStaticRuntime);
+    config.Set("package.clean_output", m_packageCleanOutput);
+    config.Set("package.create_zip", m_packageCreateZip);
+    if (m_hasProjectFile) m_project.Save(config);
+    config.Save();
+}
+
+void EditorApp::PackageProject()
+{
+    if (m_packageBuildRunning) {
+        m_log.Warning("A package build is already running");
+        return;
+    }
+    if (m_mode == EditorMode::Play) {
+        m_log.Warning("Stop Play mode before packaging");
+        return;
+    }
+    if (m_packageOutputDraft[0] == '\0') {
+        m_log.Warning("Choose a package output folder first");
+        return;
+    }
+
+    if (m_scene.IsDirty()) {
+        SaveScene();
+        if (m_scene.IsDirty()) {
+            m_log.Error("Package cancelled because the current scene could not be saved");
+            return;
+        }
+    }
+
+    m_content.Refresh(m_assets, m_project, m_log);
+    if (!m_runtime.CookProject(m_scene, m_project, m_assetRegistry, m_log)) {
+        m_packageBuildStatus = "Packaging stopped: project cook failed";
+        return;
+    }
+
+    PersistPackagingSettings();
+    std::error_code ec;
+    const std::filesystem::path projectRoot = m_project.HasProjectFile()
+        ? std::filesystem::path(m_project.ProjectFilePath()).parent_path()
+        : std::filesystem::absolute(m_project.AssetRoot(), ec).parent_path();
+    std::string folderName = m_project.ProjectName();
+    for (char& c : folderName) {
+        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '-' && c != '_') c = '_';
+    }
+    if (folderName.empty()) folderName = "Game";
+    const std::filesystem::path cookedRoot =
+        projectRoot / "Build" / "Cooked" / folderName;
+    std::filesystem::path outputRoot(m_packageOutputDraft.data());
+    if (outputRoot.is_relative()) outputRoot = projectRoot / outputRoot;
+
+    static const char* configurations[] = {"Release", "RelWithDebInfo", "Debug"};
+    const std::string configuration =
+        configurations[std::clamp(m_packageConfiguration, 0, 2)];
+    const bool staticRuntime = m_packageStaticRuntime;
+    const bool cleanOutput = m_packageCleanOutput;
+    const bool createZip = m_packageCreateZip;
+    const std::string projectName = m_project.ProjectName();
+
+    m_packageBuildRunning = true;
+    m_packageBuildStatus = "Cook complete. Building " + configuration
+        + " player in the background...";
+    m_log.Info(m_packageBuildStatus);
+    m_packageBuildFuture = std::async(std::launch::async,
+        [projectRoot, cookedRoot, outputRoot, projectName, configuration,
+         staticRuntime, cleanOutput, createZip]() {
+            PackageBuildResult result;
+            result.success = EditorScriptTools::PackageProject(
+                projectRoot, cookedRoot, outputRoot, projectName, configuration,
+                staticRuntime, cleanOutput, createZip, &result.artifact,
+                &result.error);
+            return result;
+        });
+}
+
+void EditorApp::UpdatePackageBuild()
+{
+    if (!m_packageBuildRunning || !m_packageBuildFuture.valid()) return;
+    if (m_packageBuildFuture.wait_for(std::chrono::seconds(0))
+        != std::future_status::ready) return;
+
+    try {
+        PackageBuildResult result = m_packageBuildFuture.get();
+        m_packageBuildRunning = false;
+        if (result.success) {
+            m_packageBuildStatus = "Package complete: " + result.artifact.string();
+            m_log.Info(m_packageBuildStatus);
+        } else {
+            m_packageBuildStatus = "Package failed: " + result.error;
+            m_log.Error(m_packageBuildStatus);
+        }
+    } catch (const std::exception& exception) {
+        m_packageBuildRunning = false;
+        m_packageBuildStatus = std::string("Package failed: ") + exception.what();
+        m_log.Error(m_packageBuildStatus);
+    }
 }
 
 void EditorApp::ValidateRuntimeScene()
@@ -10000,6 +10575,10 @@ void EditorApp::ConfigurePlayPlayerController(const std::unordered_map<std::stri
         controller.walkSpeed = settings.walkSpeed;
         controller.runSpeed = settings.runSpeed;
         controller.jumpSpeed = settings.jumpSpeed;
+        controller.crouchSpeed = settings.crouchSpeed;
+        controller.crouchedHeight = settings.crouchedHeight;
+        controller.swimSpeed = settings.swimSpeed;
+        controller.swimVerticalSpeed = settings.swimVerticalSpeed;
         controller.lookSensitivity = settings.lookSensitivity;
         controller.eyeHeight = settings.eyeHeight;
         controller.camDistance = settings.cameraDistance;
@@ -10434,6 +11013,9 @@ void EditorApp::UpdatePlayPlayerController(float dt, bool inputEnabled)
         if (window.IsKeyPressed(GLFW_KEY_A)) input.moveRight -= 1.0f;
         input.jump = window.IsKeyPressed(GLFW_KEY_SPACE);
         input.sprint = window.IsKeyPressed(GLFW_KEY_LEFT_SHIFT) || window.IsKeyPressed(GLFW_KEY_RIGHT_SHIFT);
+        input.crouch = window.IsKeyPressed(GLFW_KEY_LEFT_CONTROL)
+            || window.IsKeyPressed(GLFW_KEY_RIGHT_CONTROL)
+            || window.IsKeyPressed(GLFW_KEY_C);
         input.toggleShoulder = window.IsKeyPressed(GLFW_KEY_Q);
 
         // With the cursor captured in play mode, mouse movement always drives the
@@ -10450,13 +11032,20 @@ void EditorApp::UpdatePlayPlayerController(float dt, bool inputEnabled)
 
     UpdatePlayLockOn(inputEnabled);
 
+    bool overWater = false;
+    const float waterY = WaterSurfaceY(
+        m_playPlayerController->body.position.x,
+        m_playPlayerController->body.position.z, overWater);
+    m_playPlayerController->SetWaterSurface(overWater, waterY);
+
     engine::AnimatedModel* animated =
         m_playRegistry->TryGet<engine::AnimatedModel>(m_playPlayerEntity);
     const bool movementLocked = animated && animated->BlocksMovement();
     if (animated) {
         const float moveMagnitude = std::min(glm::length(glm::vec2(input.moveForward, input.moveRight)), 1.0f);
         const bool sprinting = input.sprint
-            && m_playPlayerController->body.grounded && !input.jump;
+            && m_playPlayerController->body.grounded && !input.jump
+            && !input.crouch && !m_playPlayerController->Swimming();
         const float speed = movementLocked
             ? 0.0f
             : moveMagnitude * (sprinting
@@ -10480,13 +11069,35 @@ void EditorApp::UpdatePlayPlayerController(float dt, bool inputEnabled)
 
     m_playPlayerController->Update(*m_playRegistry, input, dt, !movementLocked);
 
+    if (animated) {
+        const float moveMagnitude = std::min(
+            glm::length(glm::vec2(input.moveForward, input.moveRight)), 1.0f);
+        const bool sprinting = input.sprint && m_playPlayerController->Grounded()
+            && !input.jump && !m_playPlayerController->Crouching()
+            && !m_playPlayerController->Swimming();
+        const float movementSpeed = movementLocked ? 0.0f : moveMagnitude
+            * (m_playPlayerController->Swimming() ? m_playPlayerController->swimSpeed
+             : m_playPlayerController->Crouching() ? m_playPlayerController->crouchSpeed
+             : sprinting ? m_playPlayerController->runSpeed
+                         : m_playPlayerController->walkSpeed);
+        animated->controller.SetParameter("Speed", movementSpeed);
+        animated->controller.SetBoolParameter("IsMoving", movementSpeed > 0.05f);
+        animated->controller.SetParameter("VerticalSpeed", m_playPlayerController->body.velocity.y);
+        animated->controller.SetBoolParameter("IsGrounded", m_playPlayerController->Grounded());
+        animated->controller.SetBoolParameter("IsFalling", !m_playPlayerController->Grounded()
+            && !m_playPlayerController->Swimming()
+            && m_playPlayerController->body.velocity.y < 0.0f);
+        animated->controller.SetBoolParameter("IsCrouching", m_playPlayerController->Crouching());
+        animated->controller.SetBoolParameter("IsSwimming", m_playPlayerController->Swimming());
+    }
+
     // Terrain floor: terrain is a mesh (no physics collider), so after the controller's
     // collider sweep, stand the capsule on the terrain surface when it's over one.
     {
         engine::CharacterController& body = m_playPlayerController->body;
         bool overTerrain = false;
         const float surfaceY = TerrainSurfaceY(body.position.x, body.position.z, overTerrain);
-        if (overTerrain) {
+        if (overTerrain && !m_playPlayerController->Swimming()) {
             const float feet = body.position.y - body.height * 0.5f;
             if (feet <= surfaceY + 0.02f) {            // at/below the surface -> stand on it
                 body.position.y = surfaceY + body.height * 0.5f;
@@ -10496,25 +11107,16 @@ void EditorApp::UpdatePlayPlayerController(float dt, bool inputEnabled)
         }
     }
 
-    // Water buoyancy: float the capsule on the wave surface, bobbing with the waves.
-    // Runs after terrain so the player stands on whichever is higher (land vs water).
-    {
-        engine::CharacterController& body = m_playPlayerController->body;
-        bool overWater = false;
-        const float waterY = WaterSurfaceY(body.position.x, body.position.z, overWater);
-        if (overWater) {
-            const float feet = body.position.y - body.height * 0.5f;
-            if (feet <= waterY) {                      // submerged -> buoy up to the surface
-                body.position.y = waterY + body.height * 0.5f;
-                if (body.velocity.y < 0.0f) body.velocity.y = 0.0f;
-                body.grounded = true;
-            }
-        }
-    }
-
     if (Transform* transform = m_playRegistry->TryGet<Transform>(m_playPlayerEntity)) {
         transform->position = m_playPlayerController->CapsulePosition();
         transform->rotation = m_playPlayerController->CapsuleRotation();
+    }
+    if (engine::ecs::Collider* proxy =
+            m_playRegistry->TryGet<engine::ecs::Collider>(m_playPlayerEntity)) {
+        proxy->shape = engine::ecs::ColliderShape::Capsule;
+        proxy->radius = std::max(m_playPlayerController->body.radius, 0.01f);
+        proxy->halfHeight = std::max(
+            m_playPlayerController->body.height * 0.5f - proxy->radius, 0.0f);
     }
 
     m_camera.SetPosition(m_playPlayerController->CameraPosition());

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <fstream>
 #include <cstdint>
+#include <cctype>
 #include <sstream>
 #include <utility>
 
@@ -215,6 +216,147 @@ bool BuildTarget(const std::filesystem::path& projectRoot,
 #else
     (void)projectRoot; (void)configuration; (void)target;
     if (error) *error = "Building targets is not implemented on this platform.";
+    return false;
+#endif
+}
+
+bool PackageProject(const std::filesystem::path& projectRoot,
+                    const std::filesystem::path& cookedRoot,
+                    const std::filesystem::path& outputRoot,
+                    const std::string& projectName,
+                    const std::string& configuration,
+                    bool staticRuntime,
+                    bool cleanOutput,
+                    bool createZip,
+                    std::filesystem::path* outputArtifact,
+                    std::string* error) {
+#if defined(_WIN32)
+    const std::filesystem::path sourceDir = EngineSourceDirectory();
+    if (sourceDir.empty()) {
+        if (error) *error = "Engine source location is unavailable.";
+        return false;
+    }
+
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(cookedRoot / "CookManifest.3dgmanifest", ec)
+        || !std::filesystem::is_regular_file(cookedRoot / "player.cfg", ec)
+        || !std::filesystem::is_regular_file(
+            cookedRoot / "Content" / "AssetRegistry.3dgdb", ec)) {
+        if (error) *error = "Cooked project is incomplete: " + cookedRoot.string();
+        return false;
+    }
+
+    std::string safeName = projectName;
+    for (char& c : safeName) {
+        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '-' && c != '_') c = '_';
+    }
+    if (safeName.empty()) safeName = "Game";
+
+    const std::filesystem::path absoluteOutput =
+        std::filesystem::absolute(outputRoot, ec).lexically_normal();
+    if (ec) {
+        if (error) *error = "Could not resolve package output directory.";
+        return false;
+    }
+    const std::filesystem::path buildDir =
+        projectRoot / "Intermediate" / "Packaging" / "Build";
+    const std::filesystem::path stageDir = absoluteOutput / safeName;
+    const std::filesystem::path zipPath =
+        absoluteOutput / (safeName + "-" + configuration + ".zip");
+    const std::filesystem::path logPath =
+        projectRoot / "Intermediate" / "Packaging" / "package.log";
+
+    std::filesystem::create_directories(absoluteOutput, ec);
+    if (ec) {
+        if (error) *error = "Could not create package output directory: " + ec.message();
+        return false;
+    }
+    if (cleanOutput) {
+        // Both targets are direct children of the user-selected output root.
+        // Never recurse on a computed path outside that verified parent.
+        const std::filesystem::path stageParent = stageDir.parent_path().lexically_normal();
+        const std::filesystem::path zipParent = zipPath.parent_path().lexically_normal();
+        if (stageParent != absoluteOutput || zipParent != absoluteOutput) {
+            if (error) *error = "Refusing to clean a package path outside the output directory.";
+            return false;
+        }
+        std::filesystem::remove_all(stageDir, ec);
+        if (ec) {
+            if (error) *error = "Could not clean staged package: " + ec.message();
+            return false;
+        }
+        std::filesystem::remove(zipPath, ec);
+        ec.clear();
+    }
+
+    std::wstring configure = L"cmake -S " + Quote(sourceDir)
+        + L" -B " + Quote(buildDir)
+        + L" -DTHREEDG_ACTIVE_PROJECT_ROOT=" + Quote(projectRoot)
+        + L" -DPLAYER_COOKED_DIR=" + Quote(cookedRoot)
+        + L" -DPLAYER_GAME_DIR="
+        + L" -DBUILD_TESTING=OFF"
+        + std::wstring(staticRuntime
+            ? L" -DGAMEENGINE_STATIC_RUNTIME=ON"
+            : L" -DGAMEENGINE_STATIC_RUNTIME=OFF");
+    DWORD exitCode = 1;
+    if (!RunCommand(std::move(configure), sourceDir, logPath, false,
+                    &exitCode, error) || exitCode != 0) {
+        if (error && error->empty())
+            *error = "Package configuration failed; see " + logPath.string();
+        return false;
+    }
+
+    std::wstring build = L"cmake --build " + Quote(buildDir)
+        + L" --config \"" + std::wstring(configuration.begin(), configuration.end())
+        + L"\" --target player --parallel";
+    if (!RunCommand(std::move(build), projectRoot, logPath, true,
+                    &exitCode, error) || exitCode != 0) {
+        if (error && error->empty())
+            *error = "Release player build failed; see " + logPath.string();
+        return false;
+    }
+
+    // The project script module is produced by the player dependency build.
+    // Refresh the cooked copy before install so the package always contains the
+    // same scripts that were just compiled.
+    const std::filesystem::path scriptModule = ProjectScriptBinary(projectRoot);
+    if (std::filesystem::is_regular_file(scriptModule, ec)) {
+        std::filesystem::copy_file(scriptModule, cookedRoot / scriptModule.filename(),
+            std::filesystem::copy_options::overwrite_existing, ec);
+        if (ec) {
+            if (error) *error = "Could not stage project script module: " + ec.message();
+            return false;
+        }
+    }
+
+    std::wstring install = L"cmake --install " + Quote(buildDir)
+        + L" --config \"" + std::wstring(configuration.begin(), configuration.end())
+        + L"\" --prefix " + Quote(stageDir) + L" --component player";
+    if (!RunCommand(std::move(install), projectRoot, logPath, true,
+                    &exitCode, error) || exitCode != 0) {
+        if (error && error->empty())
+            *error = "Package staging failed; see " + logPath.string();
+        return false;
+    }
+
+    if (createZip) {
+        std::wstring archive = L"cmake -E tar cf " + Quote(zipPath)
+            + L" --format=zip .";
+        if (!RunCommand(std::move(archive), stageDir, logPath, true,
+                        &exitCode, error) || exitCode != 0) {
+            if (error && error->empty())
+                *error = "Package archive creation failed; see " + logPath.string();
+            return false;
+        }
+    }
+
+    if (outputArtifact) *outputArtifact = createZip ? zipPath : stageDir;
+    return true;
+#else
+    (void)projectRoot; (void)cookedRoot; (void)outputRoot; (void)projectName;
+    (void)configuration; (void)staticRuntime; (void)cleanOutput; (void)createZip;
+    (void)outputArtifact;
+    if (error) *error = "Project packaging is not implemented on this platform.";
     return false;
 #endif
 }

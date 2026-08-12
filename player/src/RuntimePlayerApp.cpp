@@ -20,6 +20,8 @@
 #include <engine/animation/AnimatedModel.h>
 #include <engine/assets/ShaderAsset.h>
 #include <engine/assets/ShaderGraphCompiler.h>
+#include <engine/assets/TextureAsset.h>
+#include <engine/graphics/ImageDecode.h>
 #include <engine/core/Paths.h>
 
 #include <glad/glad.h>
@@ -872,6 +874,10 @@ void RuntimePlayerApp::SetupPlayer() {
         controller.walkSpeed          = pc.walkSpeed;
         controller.runSpeed           = pc.runSpeed;
         controller.jumpSpeed          = pc.jumpSpeed;
+        controller.crouchSpeed        = pc.crouchSpeed;
+        controller.crouchedHeight     = pc.crouchedHeight;
+        controller.swimSpeed          = pc.swimSpeed;
+        controller.swimVerticalSpeed  = pc.swimVerticalSpeed;
         controller.lookSensitivity    = pc.lookSensitivity;
         controller.eyeHeight          = pc.eyeHeight;
         controller.camDistance        = pc.cameraDistance;
@@ -960,6 +966,7 @@ void RuntimePlayerApp::BuildTerrains() {
             runtime.terrain.SetPaint(desc.paint);
 
         engine::TerrainLayerSurface layerSurfaces[6];
+        engine::TerrainLayerTexture layerTextures[6];
         engine::DefaultTerrainLayerSurfaces(layerSurfaces);
         for (int layer = 1; layer <= 5; ++layer) {
             const std::string& path = desc.layerMaterials[static_cast<std::size_t>(layer - 1)];
@@ -971,12 +978,57 @@ void RuntimePlayerApp::BuildTerrains() {
                 layerSurfaces[layer].ao = loaded->material.ao;
                 layerSurfaces[layer].roughness = loaded->material.roughness;
                 layerSurfaces[layer].metallic = loaded->material.metallic;
+                layerTextures[layer].tiling = glm::max(
+                    loaded->material.uvScale * 8.0f, glm::vec2(0.001f));
+                auto resolveTexture = [this](const std::string& texturePath) {
+                    std::filesystem::path file(texturePath);
+                    if (file.is_absolute() || std::filesystem::exists(file)) return file;
+                    file = std::filesystem::path(m_sceneDir).parent_path() / texturePath;
+                    if (std::filesystem::exists(file)) return file;
+                    return std::filesystem::path(texturePath);
+                };
+                auto readPixels = [&resolveTexture](
+                    const std::string& texturePath, std::vector<std::uint8_t>* pixels,
+                    int* width, int* height) {
+                    if (texturePath.empty()) return;
+                    const std::filesystem::path file = resolveTexture(texturePath);
+                    std::string extension = file.extension().string();
+                    std::transform(extension.begin(), extension.end(), extension.begin(),
+                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                    if (extension == ".3dgtex") {
+                        engine::TextureAssetData texture;
+                        std::string ignored;
+                        if (engine::LoadTextureAsset(file.string(), &texture, &ignored)) {
+                            *width = static_cast<int>(texture.width);
+                            *height = static_cast<int>(texture.height);
+                            *pixels = std::move(texture.rgba);
+                        }
+                        return;
+                    }
+                    try {
+                        engine::image::Image image;
+                        if (extension == ".png") image = engine::image::DecodePNG(file.string());
+                        else if (extension == ".jpg" || extension == ".jpeg")
+                            image = engine::image::DecodeJPEG(file.string());
+                        else return;
+                        *width = image.width;
+                        *height = image.height;
+                        *pixels = std::move(image.rgba);
+                    } catch (...) {}
+                };
+                readPixels(loaded->albedoMapPath, &layerTextures[layer].albedoRgba,
+                           &layerTextures[layer].albedoWidth,
+                           &layerTextures[layer].albedoHeight);
+                readPixels(loaded->metalRoughMapPath, &layerTextures[layer].ormRgba,
+                           &layerTextures[layer].ormWidth,
+                           &layerTextures[layer].ormHeight);
             } else if (!materialError.empty()) {
                 m_runtimeWarnings.push_back(
                     "Terrain material '" + path + "': " + materialError);
             }
         }
         runtime.terrain.SetLayerSurfaces(layerSurfaces);
+        runtime.terrain.SetLayerTextures(layerTextures);
 
         engine::ecs::PbrMaterial material;
         material.albedo = glm::vec3(1.0f);
@@ -1849,6 +1901,9 @@ void RuntimePlayerApp::GatherPlayerInput() {
     if (w.IsKeyPressed(GLFW_KEY_A)) in.moveRight -= 1.0f;
     in.jump   = w.IsKeyPressed(GLFW_KEY_SPACE);
     in.sprint = w.IsKeyPressed(GLFW_KEY_LEFT_SHIFT) || w.IsKeyPressed(GLFW_KEY_RIGHT_SHIFT);
+    in.crouch = w.IsKeyPressed(GLFW_KEY_LEFT_CONTROL)
+        || w.IsKeyPressed(GLFW_KEY_RIGHT_CONTROL)
+        || w.IsKeyPressed(GLFW_KEY_C);
     // Mouse-look only while the cursor is captured (i.e. playing, not paused).
     if (!m_paused) {
         in.lookYaw   = w.MouseDeltaX();
@@ -2278,11 +2333,17 @@ void RuntimePlayerApp::OnFixedUpdate(float h) {
         engine::AnimatedModel* animated =
             m_registry.TryGet<engine::AnimatedModel>(m_playerEntity);
         const bool movementLocked = animated && animated->BlocksMovement();
+        bool overWater = false;
+        const float waterSurface = WaterSurfaceY(
+            m_playerController->body.position.x,
+            m_playerController->body.position.z, overWater);
+        m_playerController->SetWaterSurface(overWater, waterSurface);
         if (animated) {
             const float moveMagnitude = std::min(
                 glm::length(glm::vec2(in.moveForward, in.moveRight)), 1.0f);
             const bool sprinting = in.sprint
-                && m_playerController->body.grounded && !in.jump;
+                && m_playerController->body.grounded && !in.jump
+                && !in.crouch && !m_playerController->Swimming();
             const float movementSpeed = movementLocked ? 0.0f : moveMagnitude *
                 (sprinting ? m_playerController->runSpeed : m_playerController->walkSpeed);
             const float previousSpeed = animated->controller.Parameter("Speed", 0.0f);
@@ -2305,29 +2366,37 @@ void RuntimePlayerApp::OnFixedUpdate(float h) {
         }
         m_playerController->Update(
             m_registry, in, gameStep, !movementLocked);
+        if (animated) {
+            const float moveMagnitude = std::min(
+                glm::length(glm::vec2(in.moveForward, in.moveRight)), 1.0f);
+            const bool sprinting = in.sprint && m_playerController->Grounded()
+                && !in.jump && !m_playerController->Crouching()
+                && !m_playerController->Swimming();
+            const float movementSpeed = movementLocked ? 0.0f : moveMagnitude
+                * (m_playerController->Swimming() ? m_playerController->swimSpeed
+                 : m_playerController->Crouching() ? m_playerController->crouchSpeed
+                 : sprinting ? m_playerController->runSpeed
+                             : m_playerController->walkSpeed);
+            animated->controller.SetParameter("Speed", movementSpeed);
+            animated->controller.SetBoolParameter("IsMoving", movementSpeed > 0.05f);
+            animated->controller.SetParameter("VerticalSpeed", m_playerController->body.velocity.y);
+            animated->controller.SetBoolParameter("IsGrounded", m_playerController->Grounded());
+            animated->controller.SetBoolParameter("IsFalling", !m_playerController->Grounded()
+                && !m_playerController->Swimming()
+                && m_playerController->body.velocity.y < 0.0f);
+            animated->controller.SetBoolParameter("IsCrouching", m_playerController->Crouching());
+            animated->controller.SetBoolParameter("IsSwimming", m_playerController->Swimming());
+        }
         if (Transform* t = m_registry.TryGet<Transform>(m_playerEntity)) {
             bool overTerrain = false;
             const float surfaceY = TerrainSurfaceY(
                 m_playerController->body.position.x,
                 m_playerController->body.position.z, overTerrain);
-            if (overTerrain) {
+            if (overTerrain && !m_playerController->Swimming()) {
                 engine::CharacterController& body = m_playerController->body;
                 const float feet = body.position.y - body.height * 0.5f;
                 if (feet <= surfaceY + 0.02f) {
                     body.position.y = surfaceY + body.height * 0.5f;
-                    if (body.velocity.y < 0.0f) body.velocity.y = 0.0f;
-                    body.grounded = true;
-                }
-            }
-            bool overWater = false;
-            const float waterSurface = WaterSurfaceY(
-                m_playerController->body.position.x,
-                m_playerController->body.position.z, overWater);
-            if (overWater) {
-                engine::CharacterController& body = m_playerController->body;
-                const float feet = body.position.y - body.height * 0.5f;
-                if (feet <= waterSurface) {
-                    body.position.y = waterSurface + body.height * 0.5f;
                     if (body.velocity.y < 0.0f) body.velocity.y = 0.0f;
                     body.grounded = true;
                 }

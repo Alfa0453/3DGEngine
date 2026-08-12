@@ -33,6 +33,22 @@ bool BuildTarget(const std::filesystem::path& projectRoot,
                  const std::string& target,
                  std::string* error = nullptr);
 
+// Builds and stages a standalone player around an already cooked project. The
+// package uses its own project-local CMake build folder, so changing Release or
+// static-runtime settings never reconfigures the editor's active build tree.
+// When createZip is true, outputArtifact receives the zip path; otherwise it
+// receives the staged runnable folder.
+bool PackageProject(const std::filesystem::path& projectRoot,
+                    const std::filesystem::path& cookedRoot,
+                    const std::filesystem::path& outputRoot,
+                    const std::string& projectName,
+                    const std::string& configuration,
+                    bool staticRuntime,
+                    bool cleanOutput,
+                    bool createZip,
+                    std::filesystem::path* outputArtifact = nullptr,
+                    std::string* error = nullptr);
+
 // Directory of the running editor executable (where game_scripts.dll is emitted).
 std::filesystem::path ExecutableDirectory();
 std::filesystem::path EngineSourceDirectory();

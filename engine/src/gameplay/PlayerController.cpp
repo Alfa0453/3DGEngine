@@ -27,7 +27,7 @@ glm::vec3 PlayerController::LookDirection() const {
 }
 
 glm::vec3 PlayerController::EyePosition() const {
-    return CapsulePosition() + glm::vec3(0.0f, eyeHeight, 0.0f);
+    return CapsulePosition() + glm::vec3(0.0f, eyeHeight - StanceCameraOffset(), 0.0f);
 }
 
 glm::vec3 PlayerController::CameraTarget() const {
@@ -66,6 +66,25 @@ void PlayerController::Update(ecs::Registry& reg, const PlayerInput& in, float d
     m_prevShoulderToggle = in.toggleShoulder;
 
     const float safeDt = std::max(dt, 0.0f);
+
+    // Water volumes are supplied by the host before each fixed step. Enter once
+    // the capsule's feet cross the surface and remain in swim mode until leaving
+    // the water footprint. Swimming uses crouch as descend and Space as ascend.
+    const float feetY = body.position.y - body.height * 0.5f;
+    const float swimExitHeight = m_waterSurfaceY + body.radius * 0.5f;
+    m_swimming = m_overWater && feetY <= (m_swimming
+        ? swimExitHeight : m_waterSurfaceY + 0.05f);
+    if (m_swimming) {
+        if (body.height < m_standingHeight) body.TrySetHeight(reg, m_standingHeight);
+        m_crouching = false;
+    } else if (in.crouch) {
+        const float target = glm::clamp(crouchedHeight,
+            body.radius * 2.0f, m_standingHeight);
+        body.TrySetHeight(reg, target);
+        m_crouching = body.height < m_standingHeight - 0.001f;
+    } else if (m_crouching) {
+        if (body.TrySetHeight(reg, m_standingHeight)) m_crouching = false;
+    }
     const float desiredShoulder = shoulderCamera
         ? (rightShoulder ? 1.0f : -1.0f) * std::max(shoulderOffset, 0.0f)
         : 0.0f;
@@ -113,8 +132,9 @@ void PlayerController::Update(ecs::Registry& reg, const PlayerInput& in, float d
     m_pitch = std::clamp(m_pitch, lo, hi);
     if (m_yaw > 360.0f) m_yaw -= 360.0f; else if (m_yaw < -360.0f) m_yaw += 360.0f;
 
-    // 3) Camera-relative movement on the ground plane.
-    const glm::vec3 fwd  = YawForward(m_yaw);
+    // 3) Camera-relative movement. Ground movement stays horizontal; swimming
+    // follows the look pitch and supports explicit ascend/descend controls.
+    const glm::vec3 fwd  = m_swimming ? LookDirection() : YawForward(m_yaw);
     const glm::vec3 right = glm::normalize(glm::cross(fwd, kWorldUp));
     glm::vec3 wish(0.0f);
     if (movementEnabled) {
@@ -128,9 +148,19 @@ void PlayerController::Update(ecs::Registry& reg, const PlayerInput& in, float d
     if (wl > 1.0f) wish /= wl;
     // Sprint is a grounded movement mode. Air control remains available at walk
     // speed, but holding Shift during a jump/fall cannot accelerate the capsule.
-    const bool sprinting = in.sprint && body.grounded && !in.jump;
-    const float speed = sprinting ? runSpeed : walkSpeed;                     // no faster on diagonals
-    const glm::vec3 wishVel = wish * speed;
+    const bool sprinting = in.sprint && body.grounded && !in.jump
+        && !m_crouching && !m_swimming;
+    const float speed = m_swimming ? swimSpeed
+                      : m_crouching ? crouchSpeed
+                      : sprinting ? runSpeed : walkSpeed;
+    glm::vec3 wishVel = wish * speed;
+    if (m_swimming && movementEnabled) {
+        float vertical = (in.jump ? 1.0f : 0.0f) - (in.crouch ? 1.0f : 0.0f);
+        wishVel.y += vertical * swimVerticalSpeed;
+        const float maxSpeed = std::max(swimSpeed, swimVerticalSpeed);
+        const float length = glm::length(wishVel);
+        if (length > maxSpeed && length > 0.0001f) wishVel *= maxSpeed / length;
+    }
 
     // Body facing. CameraRelative: the mesh tracks the camera yaw (strafe style).
     // MovementDirection: the mesh turns toward its travel direction while the camera
@@ -157,7 +187,7 @@ void PlayerController::Update(ecs::Registry& reg, const PlayerInput& in, float d
     }
 
     // 4) Jump before the sweep so the upward velocity is integrated this step.
-    if (movementEnabled && in.jump) body.Jump(jumpSpeed);
+    if (movementEnabled && in.jump && !m_swimming && !m_crouching) body.Jump(jumpSpeed);
 
     // 5) Move the physical capsule (gravity + collide-and-slide handled inside).
     // Step-up has to place the collision capsule immediately on the higher tread,
@@ -166,7 +196,19 @@ void PlayerController::Update(ecs::Registry& reg, const PlayerInput& in, float d
     // inheriting a one-frame vertical pop.
     const glm::vec3 preMovePosition = body.position;
     const bool preMoveGrounded = body.grounded;
-    body.Move(reg, wishVel, dt);
+    if (m_swimming) {
+        body.MoveFree(reg, wishVel, dt);
+        // Keep the character close enough to the surface to remain visibly in
+        // the water without allowing repeated Space input to fly above it.
+        const float maxCentre = m_waterSurfaceY
+            + body.height * 0.5f - body.radius * 0.35f;
+        if (body.position.y > maxCentre) {
+            body.position.y = maxCentre;
+            body.velocity.y = std::min(body.velocity.y, 0.0f);
+        }
+    } else {
+        body.Move(reg, wishVel, dt);
+    }
     const float stepRise = body.position.y - preMovePosition.y;
     if (preMoveGrounded && body.grounded
         && stepRise > 0.01f
@@ -236,6 +278,11 @@ glm::vec3 PlayerController::ThirdPersonOffset(float distance) const {
 }
 
 glm::vec3 PlayerController::ThirdPersonAnchor() const {
-    return CapsulePosition() + glm::vec3(0.0f, camTargetHeight, 0.0f);
+    return CapsulePosition() + glm::vec3(0.0f,
+        camTargetHeight - StanceCameraOffset(), 0.0f);
+}
+
+float PlayerController::StanceCameraOffset() const {
+    return std::max(m_standingHeight - body.height, 0.0f);
 }
 }

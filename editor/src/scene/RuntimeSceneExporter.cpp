@@ -100,7 +100,7 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         return engine::MakeAssetReference(
             &assetRegistry, contentRoot, assetPath, type).id;
     };
-    out << "3DGRuntimeScene 89 " << sceneId.ToString() << '\n';
+    out << "3DGRuntimeScene 90 " << sceneId.ToString() << '\n';
     out << "# Runtime export from 3DGEditor. Editor-only flags are omitted.\n";
     const EditorScene::Environment& environment = scene.GetEnvironment();
     out << "environment "
@@ -747,7 +747,9 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
             << cameraMode << ' '
             << s.isometricYaw << ' ' << s.isometricPitch << ' '
             << s.isometricDistance << ' '
-            << s.platformerYaw << '\n';   // runtime scene version 80+
+            << s.platformerYaw << ' '
+            << s.crouchSpeed << ' ' << s.crouchedHeight << ' '
+            << s.swimSpeed << ' ' << s.swimVerticalSpeed << '\n';
     }
 
     for (const EditorScene::Object& object : scene.Objects()) {

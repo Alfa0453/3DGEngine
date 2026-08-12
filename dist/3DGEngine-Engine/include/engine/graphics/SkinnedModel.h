@@ -1,0 +1,87 @@
+#pragma once
+
+#include "engine/graphics/Model.h"            // SubMesh, Material, Texture
+#include "engine/animation/Skeleton.h"        // Skeleton, Animation
+
+#include <glm/glm.hpp>
+
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace engine {
+
+// A rigged, animated model loaded via Assimp. Unlike the static Model, vertices
+// are kept in bind (mesh) space -- the bones move them at draw time -- and each
+// vertex carries up to four bone indices + weights. The vertex format is
+// position3 / normal3 / uv2 / boneIds4 (as floats) / weights4  (VertexLayout
+// {3,3,2,4,4}); bone ids are packed as floats and cast back in the shader, so no
+// integer vertex attributes are needed. Move-only (owns GPU resources).
+class SkinnedModel {
+public:
+    static constexpr int kMaxBones = 128;     // GPU bone-matrix uniform array cap
+
+    // Load any rigged format Assimp understands (glTF 2.0, FBX, COLLADA, ...).
+    // Throws std::runtime_error on failure.
+    SkinnedModel() = default;
+
+    // Load any rigged format Assimp understands (glTF 2.0, FBX, COLLADA, ...).
+    // Throws std::runtime_error on failure.
+    static SkinnedModel FromFile(const std::string& path);
+    
+    // Load animation clip(s) from a SEPARATE file (e.g. a UE4 / Mixamo per-clip
+    // FBX that shares this model's skeleton) and attach them to this model's
+    // skeleton, matching channels to bones by name. Returns the number of clips
+    // added (their indices are the previous AnimationCount() onward).
+    //   stripRootMotion  freezes the root bone's translation, keeping a locomotion
+    //                    clip in place so gameplay drives the position instead.
+    //   nameOverride     renames the clip when the file contains exactly one.
+    // Throws std::runtime_error if the file can't be read.
+    std::size_t AddAnimationsFromFile(const std::string& path,
+                                      bool stripRootMotion = false,
+                                      const std::string& nameOverride = "",
+                                      const std::string& sourceClipName = "");
+
+    SkinnedModel(const SkinnedModel&)            = delete;
+    SkinnedModel& operator=(const SkinnedModel&) = delete;
+    SkinnedModel(SkinnedModel&&) noexcept            = default;
+    SkinnedModel& operator=(SkinnedModel&&) noexcept = default;
+
+    const std::vector<SubMesh>&  SubMeshes() const { return m_subMeshes; }
+    const std::vector<Material>& Materials() const { return m_materials; }
+    const std::vector<std::unique_ptr<Texture>>& Textures() const { return m_textures; }
+
+    const Skeleton&               GetSkeleton() const { return m_skeleton; }
+    const std::vector<Animation>& Animations()  const { return m_animations; }
+    std::size_t AnimationCount() const { return m_animations.size(); }
+    std::size_t BoneCount()      const { return m_skeleton.bones.size(); }
+    std::size_t SubMeshCount()   const { return m_subMeshes.size(); }
+    std::size_t VertexCount() const {
+        std::size_t count = 0;
+        for (const SubMesh& subMesh : m_subMeshes)
+            count += subMesh.mesh.VertexCount();
+        return count;
+    }
+    std::size_t TriangleCount() const {
+        std::size_t count = 0;
+        for (const SubMesh& subMesh : m_subMeshes)
+            count += subMesh.mesh.TriangleCount();
+        return count;
+    }
+
+    const glm::vec3& Min() const { return m_min; }
+    const glm::vec3& Max() const { return m_max; }
+    glm::vec3 Center() const { return (m_min + m_max) * 0.5f; }
+    float BoundingRadius() const { return glm::length(m_max - m_min) * 0.5f; }
+
+private:
+    std::vector<SubMesh>                   m_subMeshes;
+    std::vector<Material>                  m_materials;
+    std::vector<std::unique_ptr<Texture>>  m_textures;
+    Skeleton                               m_skeleton;
+    std::vector<Animation>                 m_animations;
+    glm::vec3 m_min{0.0f};
+    glm::vec3 m_max{0.0f};
+};
+
+} // namespace engine

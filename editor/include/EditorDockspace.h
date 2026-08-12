@@ -255,6 +255,20 @@ public:
         std::size_t projectLocationBufferSize = 0;
         char* openProjectBuffer = nullptr;
         std::size_t openProjectBufferSize = 0;
+        // Project packaging. Settings are project-owned and the actual build
+        // runs asynchronously in EditorApp after the current scene is cooked.
+        bool packageSettingsRequested = false;
+        bool packageSettingsChanged = false;
+        bool browsePackageOutputRequested = false;
+        bool packageProjectRequested = false;
+        char* packageOutputBuffer = nullptr;
+        std::size_t packageOutputBufferSize = 0;
+        int* packageConfiguration = nullptr; // 0 Release, 1 RelWithDebInfo, 2 Debug
+        bool* packageStaticRuntime = nullptr;
+        bool* packageCleanOutput = nullptr;
+        bool* packageCreateZip = nullptr;
+        bool packageBuildRunning = false;
+        const std::string* packageBuildStatus = nullptr;
         float fps = 0.0f;
         int particleDrawCalls = 0;
         int particleCulledEmitters = 0;
@@ -347,7 +361,6 @@ public:
         engine::ecs::Collider configuredPrimitiveCollider;
         bool addDynamicCubeRequested = false;
         bool addStaticFloorRequested = false;
-        bool addTerrainRequested = false;
         bool addFoliageRequested = false;
         bool addWaterRequested = false;
         int  addWaterPreset = 0;            // 0 generic, 1 lake, 2 ocean, 3 river

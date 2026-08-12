@@ -45,7 +45,7 @@ struct CharacterAttachment {
 };
 
 struct CharacterAsset {
-    int version = 25;
+    int version = 26;
     engine::AssetHandle assetId;
     std::string name = "Character";
     std::string modelAssetPath;

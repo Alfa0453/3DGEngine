@@ -45,6 +45,7 @@ private:
     std::vector<glm::vec4> m_colors;
     std::vector<glm::vec4> m_viewPositions;
     std::vector<int> m_tileIndices;
+    bool m_hasUploadedLights = false;
 };
 
 } // namespace engine

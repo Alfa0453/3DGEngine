@@ -237,4 +237,47 @@ void CharacterController::Move(ecs::Registry& reg, const glm::vec3& wishVel, flo
     if (grounded && velocity.y < 0.0f) velocity.y = 0.0f;
 }
 
+void CharacterController::MoveFree(ecs::Registry& reg, const glm::vec3& wishVel, float dt) {
+    const float safeDt = std::max(dt, 0.0f);
+    velocity = wishVel;
+    grounded = false;
+    groundNormal = glm::vec3(0.0f, 1.0f, 0.0f);
+    position += wishVel * safeDt;
+    ResolvePenetrations(reg);
+    // Contact with a floor while swimming must not turn the controller into a
+    // grounded walker; the water movement mode remains authoritative.
+    grounded = false;
+}
+
+bool CharacterController::TrySetHeight(ecs::Registry& reg, float newHeight) {
+    newHeight = std::max(newHeight, radius * 2.0f);
+    if (std::abs(newHeight - height) <= 0.00001f) return true;
+
+    const float oldHeight = height;
+    const glm::vec3 oldPosition = position;
+    const float feetY = position.y - oldHeight * 0.5f;
+    height = newHeight;
+    position.y = feetY + newHeight * 0.5f;
+
+    if (newHeight < oldHeight) return true;
+
+    const float halfSeg = std::max(0.0f, height * 0.5f - radius);
+    const glm::vec3 p0 = position - glm::vec3(0.0f, halfSeg, 0.0f);
+    const glm::vec3 p1 = position + glm::vec3(0.0f, halfSeg, 0.0f);
+    bool blocked = false;
+    reg.view<Transform, Collider>().each([&](Entity, Transform& t, Collider& c) {
+        if (blocked || c.isTrigger || (c.layer & collisionMask) == 0u) return;
+        const Pen penetration = CapsuleVsCollider(p0, p1, radius, t, c);
+        // Ignore tiny contact noise at the feet, but reject actual overlap in the
+        // additional standing volume.
+        if (penetration.hit && penetration.depth > 0.001f) blocked = true;
+    });
+    if (blocked) {
+        height = oldHeight;
+        position = oldPosition;
+        return false;
+    }
+    return true;
+}
+
 } // namespace engine

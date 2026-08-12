@@ -241,19 +241,58 @@ void AccumulateSurface(TerrainLayerSurface& dst, float& total,
     dst.metallic += source.metallic * weight;
     total += weight;
 }
+
+glm::vec4 SampleRepeated(const std::vector<std::uint8_t>& pixels, int width,
+                         int height, float u, float v, const glm::vec4& fallback) {
+    if (width <= 0 || height <= 0
+        || pixels.size() != static_cast<std::size_t>(width) * height * 4)
+        return fallback;
+    u -= std::floor(u);
+    v -= std::floor(v);
+    const int x = std::clamp(static_cast<int>(u * width), 0, width - 1);
+    const int y = std::clamp(static_cast<int>(v * height), 0, height - 1);
+    const std::size_t offset = (static_cast<std::size_t>(y) * width + x) * 4;
+    return glm::vec4(pixels[offset], pixels[offset + 1], pixels[offset + 2],
+                     pixels[offset + 3]) / 255.0f;
+}
+
+TerrainLayerSurface TexturedSurface(const TerrainLayerSurface& base,
+                                    const TerrainLayerTexture* texture,
+                                    float u, float v) {
+    if (!texture) return base;
+    TerrainLayerSurface result = base;
+    const float tiledU = u * std::max(texture->tiling.x, 0.001f);
+    const float tiledV = v * std::max(texture->tiling.y, 0.001f);
+    const glm::vec4 color = SampleRepeated(texture->albedoRgba,
+        texture->albedoWidth, texture->albedoHeight,
+        tiledU, tiledV, glm::vec4(1.0f));
+    result.albedo *= glm::vec3(color);
+    const glm::vec4 packed = SampleRepeated(texture->ormRgba,
+        texture->ormWidth, texture->ormHeight, tiledU, tiledV,
+        glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
+    if (!texture->ormRgba.empty()) {
+        result.ao *= packed.r;
+        result.roughness *= packed.g;
+        result.metallic *= packed.b;
+    }
+    return result;
+}
 } // namespace
 
 void BuildTerrainSurfaceMaps(const Heightmap& hm,
                              const std::vector<std::uint8_t>& paint,
                              const TerrainLayerSurface layers[6],
                              std::vector<unsigned char>& albedo,
-                             std::vector<unsigned char>& orm, int texRes) {
+                             std::vector<unsigned char>& orm, int texRes,
+                             const TerrainLayerTexture* textures) {
     texRes = std::max(texRes, 1);
     albedo.assign(static_cast<std::size_t>(texRes) * texRes * 4, 255);
     orm.assign(static_cast<std::size_t>(texRes) * texRes * 4, 255);
     const int res = hm.res;
     const bool havePaint = res > 1 && paint.size() == static_cast<std::size_t>(res) * res;
     const float texDenom = static_cast<float>(std::max(1, texRes - 1));
+    TerrainLayerSurface automatic[6];
+    DefaultTerrainLayerSurfaces(automatic);
 
     for (int ty = 0; ty < texRes; ++ty) {
         for (int tx = 0; tx < texRes; ++tx) {
@@ -268,9 +307,9 @@ void BuildTerrainSurfaceMaps(const Heightmap& hm,
             const float slope = 1.0f - hm.NormalAt(ic, jc).y;
 
             TerrainLayerSurface surface = MixSurface(
-                layers[1], layers[4], glm::smoothstep(0.55f, 0.85f, hf));
-            surface = MixSurface(surface, layers[5], glm::smoothstep(0.10f, 0.02f, hf));
-            surface = MixSurface(surface, layers[2], glm::smoothstep(0.35f, 0.60f, slope));
+                automatic[1], automatic[4], glm::smoothstep(0.55f, 0.85f, hf));
+            surface = MixSurface(surface, automatic[5], glm::smoothstep(0.10f, 0.02f, hf));
+            surface = MixSurface(surface, automatic[2], glm::smoothstep(0.35f, 0.60f, slope));
 
             if (havePaint) {
                 TerrainLayerSurface painted{};
@@ -285,8 +324,14 @@ void BuildTerrainSurfaceMaps(const Heightmap& hm,
                     const int i = std::clamp(is[corner], 0, res - 1);
                     const int j = std::clamp(js[corner], 0, res - 1);
                     const std::uint8_t layer = paint[static_cast<std::size_t>(j) * res + i];
-                    if (layer >= 1 && layer <= 5)
-                        AccumulateSurface(painted, paintedWeight, layers[layer], ws[corner]);
+                    if (layer >= 1 && layer <= 5) {
+                        const TerrainLayerTexture* texture = textures ? &textures[layer] : nullptr;
+                        const TerrainLayerSurface sample = TexturedSurface(
+                            layers[layer], texture,
+                            static_cast<float>(tx) / texDenom,
+                            static_cast<float>(ty) / texDenom);
+                        AccumulateSurface(painted, paintedWeight, sample, ws[corner]);
+                    }
                 }
                 if (paintedWeight > 0.0001f) {
                     painted.albedo /= paintedWeight;
@@ -316,7 +361,7 @@ std::vector<unsigned char> BuildTerrainAlbedo(const Heightmap& hm,
     DefaultTerrainLayerSurfaces(layers);
     for (int i = 0; i < 6; ++i) layers[i].albedo = layerColors[i];
     std::vector<unsigned char> albedo, orm;
-    BuildTerrainSurfaceMaps(hm, paint, layers, albedo, orm, texRes);
+    BuildTerrainSurfaceMaps(hm, paint, layers, albedo, orm, texRes, nullptr);
     return albedo;
 }
 
@@ -425,10 +470,27 @@ void Terrain::SetLayerSurfaces(const TerrainLayerSurface surfaces[6]) {
     }
 }
 
+void Terrain::SetLayerTextures(const TerrainLayerTexture textures[6]) {
+    bool changed = false;
+    for (int i = 0; i < 6; ++i) {
+        const TerrainLayerTexture& a = m_layerTextures[i];
+        const TerrainLayerTexture& b = textures[i];
+        if (a.albedoWidth != b.albedoWidth || a.albedoHeight != b.albedoHeight
+            || a.ormWidth != b.ormWidth || a.ormHeight != b.ormHeight
+            || a.tiling != b.tiling
+            || a.albedoRgba != b.albedoRgba || a.ormRgba != b.ormRgba) {
+            m_layerTextures[i] = b;
+            changed = true;
+        }
+    }
+    if (changed && m_albedo.has_value()) RebuildAlbedo();
+}
+
 void Terrain::RebuildAlbedo() {
     const int texRes = 256;
     std::vector<unsigned char> px, orm;
-    BuildTerrainSurfaceMaps(m_hm, m_paint, m_layerSurfaces, px, orm, texRes);
+    BuildTerrainSurfaceMaps(m_hm, m_paint, m_layerSurfaces, px, orm, texRes,
+                            m_layerTextures);
     if (m_albedo.has_value() && m_albedo->Width() == texRes && m_albedo->Height() == texRes) {
         m_albedo->Update(px.data(), texRes, texRes);   // in place, no new GL texture
     } else {

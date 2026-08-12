@@ -40,6 +40,7 @@ public:
         Script,
         World,
         Foliage,
+        Terrain,
         Other
     };
 

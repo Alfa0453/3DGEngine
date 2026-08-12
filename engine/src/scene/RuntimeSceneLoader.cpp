@@ -133,11 +133,11 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             return false;
         }
     }
-    if (magic != "3DGRuntimeScene" || version < 1 || version > 89) {
+    if (magic != "3DGRuntimeScene" || version < 1 || version > 90) {
         if (error) {
             *error = "Runtime scene file has an unknown format: "
                 + magic + " " + std::to_string(version)
-                + " (expected 3DGRuntimeScene 1..89).";
+                + " (expected 3DGRuntimeScene 1..90).";
         }
         return false;
     }
@@ -667,6 +667,10 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                        >> pc.isometricYaw >> pc.isometricPitch
                        >> pc.isometricDistance;
                 if (version >= 80) record >> pc.platformerYaw;   // side-view camera axis
+                if (version >= 90) {
+                    record >> pc.crouchSpeed >> pc.crouchedHeight
+                           >> pc.swimSpeed >> pc.swimVerticalSpeed;
+                }
             } else {
                 pc.cameraMode = firstPerson != 0 ? 1 : 0;
             }

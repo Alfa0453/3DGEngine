@@ -294,7 +294,7 @@ bool CharacterAsset::Apply(EditorScene& scene) const {
 
 bool CharacterAsset::Save(const std::string& path, std::string* error) {
     if (!assetId.Valid()) assetId = engine::AssetHandle::Generate();
-    version = 25;
+    version = 26;
     const std::string contentRoot = engine::FindContentRootForAsset(path);
     engine::AssetRegistry registry;
     bool haveRegistry = false;
@@ -350,7 +350,7 @@ bool CharacterAsset::Save(const std::string& path, std::string* error) {
     if (!out) { if (error) *error = "Could not write character asset: " + path; return false; }
     const CharacterScript legacy{scriptEnabled, scriptClassName, scriptPath};
     const CharacterScript* primary = !scripts.empty() ? &scripts.front() : &legacy;
-    out << "3DG_CHARACTER 25 " << assetId.ToString() << '\n'
+    out << "3DG_CHARACTER 26 " << assetId.ToString() << '\n'
         << std::quoted(name) << '\n' << std::quoted(modelAssetPath) << '\n' << std::quoted(materialAssetPath) << '\n'
         << colliderEnabled << ' ' << static_cast<int>(collider.shape) << ' '
         << collider.halfExtents.x << ' ' << collider.halfExtents.y << ' ' << collider.halfExtents.z << ' '
@@ -359,7 +359,9 @@ bool CharacterAsset::Save(const std::string& path, std::string* error) {
         << playerController.walkSpeed << ' ' << playerController.runSpeed << ' ' << playerController.jumpSpeed << ' '
         << playerController.lookSensitivity << ' ' << playerController.capsuleRadius << ' ' << playerController.capsuleHeight << ' '
         << playerController.eyeHeight << ' ' << playerController.cameraDistance << ' ' << playerController.cameraTargetHeight << ' '
-        << playerController.maxSlopeDegrees << ' ' << playerController.stepHeight << '\n'
+        << playerController.maxSlopeDegrees << ' ' << playerController.stepHeight << ' '
+        << playerController.crouchSpeed << ' ' << playerController.crouchedHeight << ' '
+        << playerController.swimSpeed << ' ' << playerController.swimVerticalSpeed << '\n'
         << skeletalModel << ' ' << animationClipIndex << ' ' << std::quoted(animationClipName) << ' '
         << animationAutoplay << ' ' << animationLoop << ' ' << animationSpeed << '\n'
         << locomotionEnabled << ' ' << idleClipIndex << ' ' << std::quoted(idleClipName) << ' '
@@ -564,8 +566,12 @@ bool CharacterAsset::Load(const std::string& path, std::string* error) {
        >> colliderEnabled >> shape >> collider.halfExtents.x >> collider.halfExtents.y >> collider.halfExtents.z >> collider.radius >> collider.halfHeight
        >> playerControllerEnabled >> playerController.firstPerson >> playerController.walkSpeed >> playerController.runSpeed >> playerController.jumpSpeed
        >> playerController.lookSensitivity >> playerController.capsuleRadius >> playerController.capsuleHeight >> playerController.eyeHeight
-       >> playerController.cameraDistance >> playerController.cameraTargetHeight >> playerController.maxSlopeDegrees >> playerController.stepHeight
-       >> skeletalModel >> animationClipIndex >> std::quoted(animationClipName) >> animationAutoplay >> animationLoop >> animationSpeed
+       >> playerController.cameraDistance >> playerController.cameraTargetHeight >> playerController.maxSlopeDegrees >> playerController.stepHeight;
+    if (loadedVersion >= 26) {
+        in >> playerController.crouchSpeed >> playerController.crouchedHeight
+           >> playerController.swimSpeed >> playerController.swimVerticalSpeed;
+    }
+    in >> skeletalModel >> animationClipIndex >> std::quoted(animationClipName) >> animationAutoplay >> animationLoop >> animationSpeed
        >> locomotionEnabled >> idleClipIndex >> std::quoted(idleClipName) >> walkClipIndex >> std::quoted(walkClipName)
        >> runClipIndex >> std::quoted(runClipName) >> walkAt >> runAt
        >> healthEnabled >> health.hp >> health.maxHp >> health.alive
@@ -578,7 +584,7 @@ bool CharacterAsset::Load(const std::string& path, std::string* error) {
     if (!in) { if (error) *error = "Character asset is incomplete: " + path; return false; }
     collider.shape = static_cast<engine::ecs::ColliderShape>(shape);
     navMovementMode = static_cast<engine::ai::AiMovementMode>(movementMode);
-    version = 25; // Upgrade legacy assets when they are next saved.
+    version = 26; // Upgrade legacy assets when they are next saved.
     modelAssetId = {};
     materialAssetId = {};
     animationGraphAssetId = {};

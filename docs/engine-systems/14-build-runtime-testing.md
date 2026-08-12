@@ -52,6 +52,26 @@ Cooking:
 The player must not depend on source files outside the project after cooking.
 Use engine asset identity or project-relative content paths.
 
+## Packaging from the editor
+
+Use **Project > Package Project...** to turn the active project into a
+standalone build without leaving the editor. Packaging settings are stored in
+the project's `Project.3dgproject` file and include:
+
+- output folder;
+- Release, RelWithDebInfo, or Debug configuration;
+- optional static C/C++ runtime linking;
+- cleaning of the previous staged package;
+- optional ZIP creation.
+
+The editor saves the active scene, refreshes the asset registry, cooks the
+dependency closure, then starts a background build. The build uses
+`Intermediate/Packaging/Build`, so package-specific CMake settings do not
+reconfigure the editor's active build directory. The staged runnable folder and
+optional ZIP are written beneath the selected output folder. Detailed command
+output is recorded in `Intermediate/Packaging/package.log`, while completion or
+failure is reported in the editor Console.
+
 ## Validation
 
 Validate before export to catch:

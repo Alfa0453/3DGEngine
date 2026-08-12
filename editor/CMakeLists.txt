@@ -50,6 +50,7 @@ add_executable(3DGEditor
     src/panels/ClipEditorPanel.cpp
     src/panels/AnimationGraphEditorPanel.cpp
     src/panels/MeshEditorPanel.cpp
+    src/panels/TerrainCreatorPanel.cpp
     src/panels/ModularPlacementPanel.cpp
     src/panels/PrefabPalettePanel.cpp
     src/panels/RoomBuilderPanel.cpp
@@ -73,6 +74,9 @@ add_executable(3DGEditor
     # platform integration
     src/platform/NativeDialog.cpp
 )
+
+# Precompiled headers for faster builds
+target_precompile_headers(3DGEditor PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../engine/include/engine_pch.h")
 
 target_include_directories(3DGEditor PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -106,6 +110,18 @@ if(MSVC)
     target_compile_options(3DGScriptCompiler PRIVATE /W4)
 else()
     target_compile_options(3DGScriptCompiler PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+# Headless bridge used by 3DG Material Forge's one-click deployment workflow.
+add_executable(3DGMaterialCooker src/assets/MaterialCookerMain.cpp)
+add_dependencies(3DGEditor 3DGMaterialCooker)
+target_link_libraries(3DGMaterialCooker PRIVATE engine)
+set_target_properties(3DGMaterialCooker PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/editor")
+if(MSVC)
+    target_compile_options(3DGMaterialCooker PRIVATE /W4)
+else()
+    target_compile_options(3DGMaterialCooker PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
 # Project launcher. Kept beside the editor executable so it can start the

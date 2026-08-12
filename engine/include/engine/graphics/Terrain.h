@@ -21,6 +21,19 @@ struct TerrainLayerSurface {
     float metallic = 0.0f;
 };
 
+// CPU texture data baked into the terrain's generated surface maps. This lets
+// terrain paint use engine-owned material textures while keeping terrain a
+// single renderer submission instead of one draw per painted layer.
+struct TerrainLayerTexture {
+    int albedoWidth = 0;
+    int albedoHeight = 0;
+    int ormWidth = 0;
+    int ormHeight = 0;
+    std::vector<std::uint8_t> albedoRgba;
+    std::vector<std::uint8_t> ormRgba;
+    glm::vec2 tiling{8.0f};
+};
+
 // A square grid of heights over a world-space area. Pure data: generation and the
 // HeightAt query are CPU-only (no GL), so they're unit-testable.
 struct Heightmap {
@@ -68,7 +81,8 @@ void BuildTerrainSurfaceMaps(const Heightmap& hm,
                              const TerrainLayerSurface layers[6],
                              std::vector<unsigned char>& outAlbedo,
                              std::vector<unsigned char>& outOrm,
-                             int texRes = 256);
+                             int texRes = 256,
+                             const TerrainLayerTexture* textures = nullptr);
 
 // The default paint-layer palette (index 0 unused; 1 grass, 2 rock, 3 dirt, 4 snow,
 // 5 sand). Used when a layer has no material assigned.
@@ -120,6 +134,7 @@ public:
     // albedo only if the colours actually changed.
     void SetLayerColors(const glm::vec3 colors[6]);
     void SetLayerSurfaces(const TerrainLayerSurface surfaces[6]);
+    void SetLayerTextures(const TerrainLayerTexture textures[6]);
 
     float HeightAt(float x, float z) const { return m_hm.HeightAt(x, z); }
     const Heightmap& Map() const { return m_hm; }
@@ -149,6 +164,7 @@ private:
         {{0.90f, 0.92f, 0.95f}, 1.0f, 0.72f, 0.0f},
         {{0.80f, 0.72f, 0.50f}, 1.0f, 0.94f, 0.0f},
     };
+    TerrainLayerTexture      m_layerTextures[6];
 };
 
 } // namespace engine

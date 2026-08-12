@@ -122,7 +122,40 @@ bool Validate(const TextureAssetData& asset, std::string* error) {
         SetError(error, "Texture asset dimensions, identity, or payload are invalid.");
         return false;
     }
+    if (asset.mipmaps.size() > 31u) {
+        SetError(error, "Texture asset has too many mip levels.");
+        return false;
+    }
+    std::uint64_t totalBytes = expected;
+    std::uint32_t previousWidth = asset.width;
+    std::uint32_t previousHeight = asset.height;
+    for (const TextureMipData& mip : asset.mipmaps) {
+        if (previousWidth == 1u && previousHeight == 1u
+            || mip.width != std::max(1u, previousWidth / 2u)
+            || mip.height != std::max(1u, previousHeight / 2u)) {
+            SetError(error, "Texture asset mip dimensions are invalid.");
+            return false;
+        }
+        const std::uint64_t mipBytes =
+            static_cast<std::uint64_t>(mip.width) * mip.height * 4u;
+        if (mipBytes > kMaximumTextureBytes
+            || mip.rgba.size() != mipBytes
+            || totalBytes > kMaximumTextureBytes - mipBytes) {
+            SetError(error, "Texture asset mip payload is invalid or too large.");
+            return false;
+        }
+        totalBytes += mipBytes;
+        previousWidth = mip.width;
+        previousHeight = mip.height;
+    }
     return true;
+}
+
+std::uint64_t PayloadSize(const TextureAssetData& asset) {
+    std::uint64_t size = 16u + asset.rgba.size();
+    for (const TextureMipData& mip : asset.mipmaps)
+        size += 8u + mip.rgba.size();
+    return size;
 }
 
 } // namespace
@@ -131,7 +164,7 @@ bool SaveTextureAsset(const std::string& path, TextureAssetData asset,
                       std::string* error) {
     asset.header.type = AssetType::Texture;
     asset.header.assetVersion = kTextureAssetVersion;
-    asset.header.payloadSize = 12u + asset.rgba.size();
+    asset.header.payloadSize = PayloadSize(asset);
     if (!Validate(asset, error)) return false;
     const std::filesystem::path destination(path);
     std::error_code ec;
@@ -148,7 +181,9 @@ bool SaveTextureAsset(const std::string& path, TextureAssetData asset,
         || !WriteNativeAssetHeader(output, asset.header, error)
         || !WriteUnsigned(output, asset.width)
         || !WriteUnsigned(output, asset.height)
-        || !WriteUnsigned(output, flags)) {
+        || !WriteUnsigned(output, flags)
+        || !WriteUnsigned(
+            output, static_cast<std::uint32_t>(asset.mipmaps.size()))) {
         output.close();
         std::filesystem::remove(temporary, ec);
         if (error && error->empty()) *error = "Could not write texture asset.";
@@ -156,6 +191,12 @@ bool SaveTextureAsset(const std::string& path, TextureAssetData asset,
     }
     output.write(reinterpret_cast<const char*>(asset.rgba.data()),
                  static_cast<std::streamsize>(asset.rgba.size()));
+    for (const TextureMipData& mip : asset.mipmaps) {
+        if (!WriteUnsigned(output, mip.width)
+            || !WriteUnsigned(output, mip.height)) break;
+        output.write(reinterpret_cast<const char*>(mip.rgba.data()),
+                     static_cast<std::streamsize>(mip.rgba.size()));
+    }
     output.close();
     if (!output) {
         std::filesystem::remove(temporary, ec);
@@ -183,19 +224,24 @@ bool LoadTextureAsset(const std::string& path, TextureAssetData* asset,
     std::ifstream input(path, std::ios::binary);
     TextureAssetData loaded;
     std::uint32_t flags = 0;
+    std::uint32_t mipCount = 0;
     if (!input || !ReadNativeAssetHeader(input, &loaded.header, error)
         || loaded.header.type != AssetType::Texture
-        || loaded.header.assetVersion != kTextureAssetVersion
+        || (loaded.header.assetVersion != kTextureAssetVersion
+            && loaded.header.assetVersion != kLegacyTextureAssetVersion)
         || !ReadUnsigned(input, &loaded.width)
         || !ReadUnsigned(input, &loaded.height)
-        || !ReadUnsigned(input, &flags)) {
+        || !ReadUnsigned(input, &flags)
+        || (loaded.header.assetVersion == kTextureAssetVersion
+            && !ReadUnsigned(input, &mipCount))) {
         if (error && error->empty()) *error = "Texture asset header is invalid.";
         return false;
     }
     const std::uint64_t bytes =
         static_cast<std::uint64_t>(loaded.width) * loaded.height * 4u;
-    if (bytes > kMaximumTextureBytes
-        || loaded.header.payloadSize != 12u + bytes) {
+    if (bytes > kMaximumTextureBytes || mipCount > 31u
+        || loaded.header.payloadSize <
+            (loaded.header.assetVersion == kTextureAssetVersion ? 16u : 12u) + bytes) {
         SetError(error, "Texture asset payload size is invalid.");
         return false;
     }
@@ -204,6 +250,41 @@ bool LoadTextureAsset(const std::string& path, TextureAssetData* asset,
     loaded.rgba.resize(static_cast<std::size_t>(bytes));
     input.read(reinterpret_cast<char*>(loaded.rgba.data()),
                static_cast<std::streamsize>(loaded.rgba.size()));
+    std::uint64_t payloadSize =
+        (loaded.header.assetVersion == kTextureAssetVersion ? 16u : 12u) + bytes;
+    std::uint64_t totalPixelBytes = bytes;
+    std::uint32_t previousWidth = loaded.width;
+    std::uint32_t previousHeight = loaded.height;
+    for (std::uint32_t level = 0; input && level < mipCount; ++level) {
+        TextureMipData mip;
+        if (!ReadUnsigned(input, &mip.width)
+            || !ReadUnsigned(input, &mip.height)
+            || (previousWidth == 1u && previousHeight == 1u)
+            || mip.width != std::max(1u, previousWidth / 2u)
+            || mip.height != std::max(1u, previousHeight / 2u)) {
+            SetError(error, "Texture asset mip table is invalid or truncated.");
+            return false;
+        }
+        const std::uint64_t mipBytes =
+            static_cast<std::uint64_t>(mip.width) * mip.height * 4u;
+        if (mipBytes > kMaximumTextureBytes
+            || totalPixelBytes > kMaximumTextureBytes - mipBytes) {
+            SetError(error, "Texture asset mip payload is too large.");
+            return false;
+        }
+        totalPixelBytes += mipBytes;
+        payloadSize += 8u + mipBytes;
+        mip.rgba.resize(static_cast<std::size_t>(mipBytes));
+        input.read(reinterpret_cast<char*>(mip.rgba.data()),
+                   static_cast<std::streamsize>(mip.rgba.size()));
+        loaded.mipmaps.push_back(std::move(mip));
+        previousWidth = loaded.mipmaps.back().width;
+        previousHeight = loaded.mipmaps.back().height;
+    }
+    if (payloadSize != loaded.header.payloadSize) {
+        SetError(error, "Texture asset payload size is invalid.");
+        return false;
+    }
     if (!input || !Validate(loaded, error)) return false;
     *asset = std::move(loaded);
     SetError(error, {});

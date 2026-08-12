@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Scripting Guide — Creating, Setting Up &amp; Implementing Scripts (3DGEngine)</title>
+<title>3DGEngine Scripting Guide - Native C++, Lua, Character Movement and Gameplay APIs</title>
 <style>
   :root{ --ink:#1c2230; --muted:#5a6478; --accent:#1f7a4d; --accent2:#2f6df6; --line:#d9dee8; --bg-soft:#f2f7f4; --warn:#b8860b; --tip:#0e7a63; }
   @page { size: A4; margin: 17mm 16mm; }
@@ -42,38 +42,38 @@
     <div class="kicker">3DGEngine · Developer Guide</div>
     <h1>Scripting</h1>
     <div class="rule"></div>
-    <p class="sub">Create, register, compile, attach and implement gameplay scripts. Scripts are small C++
-    classes that give objects custom behavior — the same code runs in the editor's Play mode and in the
-    packaged game.</p>
+    <p class="sub">Create, attach and implement gameplay scripts in native C++ or Lua. The same gameplay
+    behavior runs in the editor's Play mode and in packaged games, with access to animation, timers,
+    character movement states, particles, audio, UI and world systems.</p>
     <div style="margin-top:14px;">
       <span class="pill">engine::Script</span><span class="pill">Lifecycle</span>
       <span class="pill">Register in game module</span><span class="pill">Compile &amp; Restart</span>
       <span class="pill">Attach + fields</span><span class="pill">The API</span>
-      <span class="pill">Worked examples</span>
+      <span class="pill">Crouch + swim states</span><span class="pill">Worked examples</span>
     </div>
   </div>
 
   <!-- OVERVIEW -->
   <section>
     <h2>How scripting works</h2>
-    <p class="lead">A script is a C++ class that derives from <code>engine::Script</code>. You override lifecycle
-    methods, attach the script to an object by class name in the editor, and expose tunable <b>fields</b>. Scripts
-    are compiled into the shared <code>game</code> library that both the editor and the standalone player link, so
-    a script behaves identically in Play mode and in the shipped build.</p>
+    <p class="lead">A native script is a C++ class derived from <code>engine::Script</code>; a Lua script is a
+    <code>.lua</code> file with the same lifecycle callbacks. Both attach through the Script component, support
+    tunable fields and run in editor Play and packaged games. Native scripts compile into the shared
+    <code>game</code> library; Lua scripts reload when Play starts and require no compilation.</p>
     <div class="box">
       <b>The lifecycle</b>
       <table>
         <tr><th>Method</th><th>When it runs</th></tr>
         <tr><td><code>OnCreate()</code></td><td>Once, when the script starts (entering Play / scene load)</td></tr>
-        <tr><td><code>OnUpdate(float dt)</code></td><td>Once per rendered frame (variable <code>dt</code>) — most logic goes here</td></tr>
-        <tr><td><code>OnFixedUpdate(float dt)</code></td><td>Once per physics step (fixed <code>dt</code>) — physics-coupled logic</td></tr>
+        <tr><td><code>OnUpdate(float dt)</code></td><td>Once per rendered frame (variable <code>dt</code>) - most logic goes here</td></tr>
+        <tr><td><code>OnFixedUpdate(float dt)</code></td><td>Once per physics step (fixed <code>dt</code>) - physics-coupled logic</td></tr>
         <tr><td><code>OnDestroy()</code></td><td>Once, before the entity/script is destroyed</td></tr>
       </table>
     </div>
     <div class="box tip"><span class="tag tip">Two ways to author</span>
-    You can write scripts <b>in code</b> (a header under <code>game/</code>, registered in the game module — full
-    control), or use the editor's built-in <b>Script templates</b> and <b>Compile &amp; Restart</b> for a
-    no-leave-the-app loop. This guide covers the code path in depth and the editor path at the end.</p>
+    You can write native scripts <b>in code</b> (a header under <code>game/</code>, registered in the game module),
+    or create either C++ or Lua from the editor's built-in <b>Script templates</b>. Use <b>Compile &amp; Restart</b>
+    for C++; save Lua and restart Play to reload it.</p>
   </section>
 
   <!-- STEP 1 -->
@@ -129,12 +129,15 @@ void RegisterGameModule() {
     <p>Because scripts are C++, changes take effect after a rebuild of the <code>game</code> library. From the
     editor you don't have to leave the app:</p>
     <div class="path"><b>Editor ▸ Compile &amp; Restart</b> (script tools)</div>
-    <p>This runs the bundled <code>3DGScriptCompiler</code>, rebuilds the game module, and relaunches — the build
+    <p>This runs the bundled <code>3DGScriptCompiler</code>, rebuilds the game module, and relaunches - the build
     log and status are written under <code>build/script_compile.log</code> / <code>.status</code> and surfaced in
     the editor. Alternatively rebuild the whole project from your normal CMake build. Either way, the compiled
     script now runs in <b>Play mode and the packaged player</b> identically.</p>
     <div class="box tip"><span class="tag tip">Iteration loop</span>
     Edit the script → Compile &amp; Restart → Play. Keep scripts small so each compile is quick.</div>
+    <div class="box tip"><span class="tag tip">Lua workflow</span>
+    Choose <b>Lua</b> in the Script component, create the script, save it under <code>Content/Scripts</code>, then
+    restart Play. Lua scripts do not use <code>GameModule.cpp</code> and do not require compilation.</div>
   </section>
 
   <!-- STEP 4 -->
@@ -143,7 +146,7 @@ void RegisterGameModule() {
     <ol>
       <li>Select an object, open the <b>Inspector</b>, and <b>Add Component ▸ Script</b>.</li>
       <li>Set <b>Class Name</b> to the registered name (e.g. <code>Spinner</code>).</li>
-      <li>Enable the script. Press <span style="font-family:monospace">P</span> to Play — the behavior runs.</li>
+      <li>Enable the script. Press <span style="font-family:monospace">P</span> to Play - the behavior runs.</li>
     </ol>
     <p>The object stores the class name (and any fields) in the scene, so it's restored on load and carried into
     the packaged build.</p>
@@ -153,7 +156,7 @@ void RegisterGameModule() {
   <section class="step">
     <h2>5 · Expose tunable fields</h2>
     <p>Hard-coding values (speeds, ranges, targets) is limiting. Declare <b>fields</b> on the object's Script
-    component in the Inspector — each has a name, a type (Float / Int / Bool / String) and a value — and read them
+    component in the Inspector - each has a name, a type (Float / Int / Bool / String) and a value - and read them
     in the script:</p>
     <pre>void OnUpdate(float dt) override {
     float speed  = GetFieldFloat("spinSpeed", 1.5f);   // reads the "spinSpeed" field
@@ -169,7 +172,7 @@ void RegisterGameModule() {
       <tr><td><code>GetFieldBool(name, fallback)</code></td><td>Bool</td></tr>
       <tr><td><code>GetFieldString(name, fallback)</code></td><td>String</td></tr>
     </table>
-    <p>Now the same script drives many objects with different values, tuned per-object in the editor — no recompile
+    <p>Now the same script drives many objects with different values, tuned per-object in the editor - no recompile
     to change a number.</p>
   </section>
 
@@ -205,6 +208,7 @@ void RegisterGameModule() {
     <h3>Animation</h3>
     <table>
       <tr><td><code>SetAnimationParameter(name,v)</code>, <code>SetAnimationBool</code>, <code>SetAnimationTrigger</code></td><td>drive the animation graph (e.g. push <code>Speed</code>)</td></tr>
+      <tr><td><code>GetAnimationParameter(name,fallback)</code>, <code>GetAnimationBool(name,fallback)</code></td><td>read graph values and controller-driven movement flags from C++</td></tr>
       <tr><td><code>PlayAnimationAction(clip)</code>, <code>PlayMaskedAnimationAction(clip,rootBone)</code>, <code>PlayAnimationProfile(name)</code></td><td>one-shot / layered actions (attacks, hits)</td></tr>
       <tr><td><code>WasAnimationEvent(name)</code>, <code>IsAnimationActionPlaying()</code>, <code>IsAnimationMovementLocked()</code></td><td>react to notifies / action state</td></tr>
     </table>
@@ -224,11 +228,57 @@ void RegisterGameModule() {
     </table>
   </section>
 
-  <!-- STEP 7 -->
+  <!-- CHARACTER MOVEMENT STATES -->
   <section class="step">
-    <h2>7 · Worked examples</h2>
+    <h2>7 · Character crouching and swimming</h2>
+    <p>The Player Controller owns crouching and swimming. Configure these values on the character in the
+    <b>Character Editor ▸ Movement + Camera</b>, or on a player object in
+    <b>Inspector ▸ Player Controller</b>.</p>
+    <table>
+      <tr><th>Setting</th><th>Purpose</th></tr>
+      <tr><td>Crouch Speed</td><td>Horizontal speed while the crouched capsule is active.</td></tr>
+      <tr><td>Crouched Height</td><td>Total crouched collision-capsule height, clamped between twice the radius and standing height.</td></tr>
+      <tr><td>Swim Speed</td><td>Forward and lateral swimming speed inside a Water object.</td></tr>
+      <tr><td>Vertical Swim Speed</td><td>Rise and descend speed.</td></tr>
+    </table>
+    <div class="box">
+      <b>Default controls</b>
+      <ul>
+        <li>Hold <code>Ctrl</code> or <code>C</code> to crouch. Releasing it stands only when head room is clear.</li>
+        <li>Inside water, use <code>WASD</code> to swim, <code>Space</code> to rise, and <code>Ctrl</code>/<code>C</code> to descend.</li>
+        <li>Sprint and ground jump are disabled while crouching or swimming.</li>
+      </ul>
+    </div>
+    <h3>Animation graph parameters</h3>
+    <p>The controller updates these parameters automatically every fixed movement step. Do not duplicate this
+    movement logic or resize its trigger proxy in a player script. Swimming activates only over a visible Water object.</p>
+    <table>
+      <tr><th>Parameter</th><th>Type</th><th>Use</th></tr>
+      <tr><td><code>Speed</code></td><td>Float</td><td>Walk, run, crouch or swim movement speed.</td></tr>
+      <tr><td><code>VerticalSpeed</code></td><td>Float</td><td>Jump/fall velocity or vertical swimming velocity.</td></tr>
+      <tr><td><code>IsGrounded</code>, <code>IsFalling</code></td><td>Bool</td><td>Ground locomotion and airborne transitions.</td></tr>
+      <tr><td><code>IsCrouching</code></td><td>Bool</td><td>Enter or leave crouch locomotion.</td></tr>
+      <tr><td><code>IsSwimming</code></td><td>Bool</td><td>Switch to the swimming state machine or blend space.</td></tr>
+    </table>
+    <h3>Reacting from a native C++ script</h3>
+    <pre>void OnFixedUpdate(float) override {
+    const bool crouching = GetAnimationBool("IsCrouching", false);
+    const bool swimming  = GetAnimationBool("IsSwimming", false);
 
-    <h3>Pickup — collect on touch</h3>
+    if (swimming &amp;&amp; WasKeyPressed(GLFW_KEY_E)) {
+        PlayAudioCue("Content/Audio/swim_interact.wav", false);
+    }
+    if (crouching) {
+        // Quiet footsteps, stealth checks, or crouch-only interactions.
+    }
+}</pre>
+  </section>
+
+  <!-- STEP 8 -->
+  <section class="step">
+    <h2>8 · Worked examples</h2>
+
+    <h3>Pickup - collect on touch</h3>
     <pre>class Pickup : public engine::Script {
 public:
     void OnUpdate(float) override {
@@ -241,7 +291,7 @@ public:
     }
 };</pre>
 
-    <h3>Door — open when triggered</h3>
+    <h3>Door - open when triggered</h3>
     <pre>class Door : public engine::Script {
     bool m_open = false;
 public:
@@ -266,11 +316,11 @@ public:
     Class Name on the object.</p>
   </section>
 
-  <!-- STEP 8 -->
+  <!-- STEP 9 -->
   <section class="step">
-    <h2>8 · The editor template path</h2>
+    <h2>9 · The editor template path</h2>
     <p>For a faster loop, the editor's Script component can generate a starting script from a <b>template</b>, let
-    you edit the source in-app, and <b>Compile &amp; Restart</b> — no manual file editing. Built-in templates:</p>
+    you edit the source in-app, and <b>Compile &amp; Restart</b> - no manual file editing. Built-in templates:</p>
     <table>
       <tr><th>Template</th><th>Starting point for…</th></tr>
       <tr><td>Empty</td><td>a blank script (just the lifecycle stubs)</td></tr>
@@ -279,9 +329,11 @@ public:
       <tr><td>Pickup</td><td>collect-on-touch + destroy</td></tr>
       <tr><td>Damage Zone</td><td>apply damage on contact</td></tr>
     </table>
-    <p>Generated scripts are written into the game module (<code>EditorGeneratedScripts.h</code>) and registered
-    automatically, so they behave exactly like hand-written ones. Use templates to prototype, then hand-edit as the
-    logic grows.</p>
+    <p>Set <b>Language</b> to <b>Native C++</b> or <b>Lua</b> before creating. Both languages appear in the
+    saved-script dropdowns. C++ uses <b>Compile &amp; Restart</b>; Lua reloads the next time Play starts.</p>
+    <p>Generated C++ scripts are registered through the game module. Generated Lua scripts are saved under
+    <code>Content/Scripts</code> and load directly when Play starts. Use templates to prototype, then hand-edit as
+    the logic grows.</p>
   </section>
 
   <!-- GOTCHAS -->
@@ -290,10 +342,11 @@ public:
     <table>
       <tr><th>Pitfall</th><th>Fix</th></tr>
       <tr><td>Object has no behavior in Play</td><td>Class Name must exactly match the <code>Register("...")</code> name, and the script must be enabled.</td></tr>
-      <tr><td>Changes don't take effect</td><td>Scripts are C++ — <b>Compile &amp; Restart</b> (or rebuild) after every edit.</td></tr>
+      <tr><td>Changes don't take effect</td><td>For C++, use <b>Compile &amp; Restart</b>. For Lua, save and restart Play.</td></tr>
+      <tr><td>Crouch/swim animation never changes</td><td>Add <code>IsCrouching</code> and <code>IsSwimming</code> Bool parameters and transitions to the animation graph.</td></tr>
       <tr><td>Physics feels frame-rate dependent</td><td>Put physics-coupled logic in <code>OnFixedUpdate(dt)</code>, not <code>OnUpdate</code>.</td></tr>
-      <tr><td>Crash when loading a scene from a callback</td><td>Use <code>RequestSceneLoad(...)</code> — it's deferred to a safe point.</td></tr>
-      <tr><td>Field change requires recompile</td><td>It doesn't — expose it as a <b>field</b> and read via <code>GetFieldFloat/Int/Bool/String</code>.</td></tr>
+      <tr><td>Crash when loading a scene from a callback</td><td>Use <code>RequestSceneLoad(...)</code> - it is deferred to a safe point.</td></tr>
+      <tr><td>Field change requires recompile</td><td>It does not - expose it as a <b>field</b> and read via <code>GetFieldFloat/Int/Bool/String</code>.</td></tr>
     </table>
     <h3>Add-a-script checklist</h3>
     <ol>

@@ -22,7 +22,7 @@ public:
     void AddLine(const glm::vec3& a, const glm::vec3& b,
                  const glm::vec3& color);
     void Draw(const glm::mat4& viewProjection, float width = 1.5f,
-              bool showOccluded = true);
+              bool showOccluded = true, bool depthTest = true);
 
 private:
     bool EnsureGpuResources();

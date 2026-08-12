@@ -8,11 +8,18 @@
 namespace engine {
 
 ClusteredLights::ClusteredLights() {
+    m_posRadius.assign(kMaxLights, glm::vec4(0.0f));
+    m_colors.assign(kMaxLights, glm::vec4(0.0f));
+    m_tileIndices.assign(static_cast<std::size_t>(kTilesX * kTilesY * kTileStride), 0);
+
     // Light UBO: vec4 posRadius[kMaxLights] then vec4 color[kMaxLights] (std140).
     glGenBuffers(1, &m_ubo);
     glBindBuffer(GL_UNIFORM_BUFFER, m_ubo);
     glBufferData(GL_UNIFORM_BUFFER, kMaxLights * 2 * static_cast<GLsizeiptr>(sizeof(glm::vec4)),
                  nullptr, GL_DYNAMIC_DRAW);
+    const GLsizeiptr half = kMaxLights * static_cast<GLsizeiptr>(sizeof(glm::vec4));
+    glBufferSubData(GL_UNIFORM_BUFFER, 0, half, m_posRadius.data());
+    glBufferSubData(GL_UNIFORM_BUFFER, half, half, m_colors.data());
     glBindBuffer(GL_UNIFORM_BUFFER, 0);
 
     // Tile buffer: int per slot, exposed to the shader as an isamplerBuffer.
@@ -20,7 +27,7 @@ ClusteredLights::ClusteredLights() {
     glBindBuffer(GL_TEXTURE_BUFFER, m_tileBuf);
     glBufferData(GL_TEXTURE_BUFFER,
                  static_cast<GLsizeiptr>(kTilesX * kTilesY * kTileStride * sizeof(int)),
-                 nullptr, GL_DYNAMIC_DRAW);
+                 m_tileIndices.data(), GL_DYNAMIC_DRAW);
     glGenTextures(1, &m_tileTex);
     glBindTexture(GL_TEXTURE_BUFFER, m_tileTex);
     glTexBuffer(GL_TEXTURE_BUFFER, GL_R32I, m_tileBuf);
@@ -35,10 +42,20 @@ ClusteredLights::~ClusteredLights() {
 
 void ClusteredLights::Build(const Camera& camera, float aspect, int screenWidth, int screenHeight,
                             const std::vector<PointLight>& lights) {
-    // PbrRenderer uploads the visible point-light count separately. With no point
-    // lights the shader performs no clustered lookup, so retain the existing empty
-    // buffers and avoid all CPU projection/tile work for this frame.
-    if (lights.empty()) return;
+    // Clear stale tile counts when the final point light disappears. The fragment
+    // shader also receives an explicit light count, but keeping the GPU tile buffer
+    // valid prevents old light lists from leaking into other/debug shader paths.
+    if (lights.empty()) {
+        if (!m_hasUploadedLights) return;
+        std::fill(m_tileIndices.begin(), m_tileIndices.end(), 0);
+        glBindBuffer(GL_TEXTURE_BUFFER, m_tileBuf);
+        glBufferSubData(GL_TEXTURE_BUFFER, 0,
+                        static_cast<GLsizeiptr>(m_tileIndices.size() * sizeof(int)),
+                        m_tileIndices.data());
+        glBindBuffer(GL_TEXTURE_BUFFER, 0);
+        m_hasUploadedLights = false;
+        return;
+    }
     const glm::mat4 view = camera.ViewMatrix();
     const glm::mat4 proj = camera.ProjectionMatrix(aspect);
     const int count = std::min(static_cast<int>(lights.size()), kMaxLights);
@@ -100,6 +117,7 @@ void ClusteredLights::Build(const Camera& camera, float aspect, int screenWidth,
     glBufferSubData(GL_TEXTURE_BUFFER, 0,
                     static_cast<GLsizeiptr>(tiles.size() * sizeof(int)), tiles.data());
     glBindBuffer(GL_TEXTURE_BUFFER, 0);
+    m_hasUploadedLights = true;
 }
 
 void ClusteredLights::BindLightUBO(unsigned int bindingPoint) const {

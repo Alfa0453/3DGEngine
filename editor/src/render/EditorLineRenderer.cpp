@@ -66,7 +66,7 @@ void main() {
 }
 
 void EditorLineRenderer::Draw(const glm::mat4& viewProjection, float width,
-                              bool showOccluded)
+                              bool showOccluded, bool depthTest)
 {
     if (m_vertices.empty() || !EnsureGpuResources()) return;
 
@@ -106,15 +106,21 @@ void EditorLineRenderer::Draw(const glm::mat4& viewProjection, float width,
     const GLsizei vertexCount =
         static_cast<GLsizei>(m_vertices.size() / 6);
 
-    if (showOccluded) {
+    if (!depthTest) {
+        glDisable(GL_DEPTH_TEST);
+        m_shader->SetFloat("uOpacity", 1.0f);
+        glDrawArrays(GL_LINES, 0, vertexCount);
+    } else if (showOccluded) {
         glDisable(GL_DEPTH_TEST);
         m_shader->SetFloat("uOpacity", 0.18f);
         glDrawArrays(GL_LINES, 0, vertexCount);
     }
 
-    glEnable(GL_DEPTH_TEST);
-    m_shader->SetFloat("uOpacity", 1.0f);
-    glDrawArrays(GL_LINES, 0, vertexCount);
+    if (depthTest) {
+        glEnable(GL_DEPTH_TEST);
+        m_shader->SetFloat("uOpacity", 1.0f);
+        glDrawArrays(GL_LINES, 0, vertexCount);
+    }
 
     glDepthMask(depthWrite);
     glLineWidth(oldWidth);

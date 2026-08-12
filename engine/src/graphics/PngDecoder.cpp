@@ -3,8 +3,10 @@
 // in the same spirit as the engine's TGA loader and bitmap font.
 #include "engine/graphics/ImageDecode.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <fstream>
+#include <limits>
 #include <stdexcept>
 
 namespace engine::image {
@@ -68,7 +70,10 @@ struct Huffman {
     }
 };
 
-std::vector<unsigned char> Inflate(const unsigned char* data, std::size_t len) {
+std::vector<unsigned char> Inflate(
+    const unsigned char* data, std::size_t len,
+    std::size_t maximumOutput = std::numeric_limits<std::size_t>::max(),
+    std::size_t* consumedBytes = nullptr) {
     static const int lbase[] = {3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,115,131,163,195,227,258};
     static const int lext[]  = {0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0};
     static const int dbase[] = {1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,193,257,385,513,769,1025,1537,2049,3073,4097,6145,8193,12289,16385,24577};
@@ -84,7 +89,12 @@ std::vector<unsigned char> Inflate(const unsigned char* data, std::size_t len) {
             br.align();
             if (br.pos + 4 > br.n) throw std::runtime_error("PNG: stored block truncated");
             const int blen = br.d[br.pos] | (br.d[br.pos + 1] << 8);
+            const int nlen = br.d[br.pos + 2] | (br.d[br.pos + 3] << 8);
+            if ((blen ^ 0xffff) != nlen)
+                throw std::runtime_error("PNG: stored block length check failed");
             br.pos += 4;                                    // skip LEN + NLEN
+            if (static_cast<std::size_t>(blen) > maximumOutput - out.size())
+                throw std::runtime_error("DEFLATE: output exceeds its declared size");
             for (int i = 0; i < blen; ++i) {
                 if (br.pos >= br.n) throw std::runtime_error("PNG: stored block underrun");
                 out.push_back(br.d[br.pos++]);
@@ -123,6 +133,8 @@ std::vector<unsigned char> Inflate(const unsigned char* data, std::size_t len) {
                 } else {
                     for (int r = br.getbits(7) + 11; r > 0; --r) lengths.push_back(0);
                 }
+                if (static_cast<int>(lengths.size()) > hlit + hdist)
+                    throw std::runtime_error("PNG: bad code-length repeat");
             }
             lit.build(std::vector<int>(lengths.begin(), lengths.begin() + hlit));
             dist.build(std::vector<int>(lengths.begin() + hlit, lengths.end()));
@@ -133,20 +145,27 @@ std::vector<unsigned char> Inflate(const unsigned char* data, std::size_t len) {
             const int sym = lit.decode(br);
             if (sym == 256) break;
             if (sym < 256) {
+                if (out.size() == maximumOutput)
+                    throw std::runtime_error("DEFLATE: output exceeds its declared size");
                 out.push_back(static_cast<unsigned char>(sym));
             } else {
                 const int s = sym - 257;
                 if (s >= 29) throw std::runtime_error("PNG: bad length symbol");
                 const int length   = lbase[s] + static_cast<int>(br.getbits(lext[s]));
                 const int ds       = dist.decode(br);
+                if (ds < 0 || ds >= 30)
+                    throw std::runtime_error("PNG: bad distance symbol");
                 const int distance = dbase[ds] + static_cast<int>(br.getbits(dext[ds]));
                 if (static_cast<std::size_t>(distance) > out.size())
                     throw std::runtime_error("PNG: distnace too far back");
+                if (static_cast<std::size_t>(length) > maximumOutput - out.size())
+                    throw std::runtime_error("DEFLATE: output exceeds its declared size");
                 const std::size_t start = out.size() - static_cast<std::size_t>(distance);
                 for (int i = 0; i < length; ++i) out.push_back(out[start + i]);
             }
         }
     }
+    if (consumedBytes) *consumedBytes = br.pos;
     return out;
 }
 
@@ -165,6 +184,46 @@ int Paeth(int a, int b, int c) {
 }
 
 } // namespace
+
+std::vector<unsigned char> InflateZlib(const unsigned char* data,
+                                       std::size_t size,
+                                       std::size_t expectedSize) {
+    if (!data || size < 6)
+        throw std::runtime_error("Zlib stream is truncated.");
+    const unsigned cmf = data[0];
+    const unsigned flg = data[1];
+    if ((cmf & 0x0fu) != 8u || (cmf >> 4u) > 7u
+        || ((cmf << 8u) + flg) % 31u != 0u || (flg & 0x20u) != 0u)
+        throw std::runtime_error("Zlib stream header is invalid or unsupported.");
+    std::size_t consumed = 0;
+    std::vector<unsigned char> output =
+        Inflate(data + 2u, size - 6u, expectedSize, &consumed);
+    if (consumed != size - 6u)
+        throw std::runtime_error("Zlib stream contains trailing compressed data.");
+    if (output.size() != expectedSize)
+        throw std::runtime_error("Zlib stream decoded to the wrong size.");
+    std::uint32_t first = 1;
+    std::uint32_t second = 0;
+    std::size_t position = 0;
+    while (position < output.size()) {
+        const std::size_t end = std::min(output.size(), position + 5552u);
+        for (; position < end; ++position) {
+            first += output[position];
+            second += first;
+        }
+        first %= 65521u;
+        second %= 65521u;
+    }
+    const std::uint32_t expectedAdler = (second << 16u) | first;
+    const std::uint32_t storedAdler =
+        (static_cast<std::uint32_t>(data[size - 4u]) << 24u)
+        | (static_cast<std::uint32_t>(data[size - 3u]) << 16u)
+        | (static_cast<std::uint32_t>(data[size - 2u]) << 8u)
+        | static_cast<std::uint32_t>(data[size - 1u]);
+    if (storedAdler != expectedAdler)
+        throw std::runtime_error("Zlib stream checksum failed.");
+    return output;
+}
 
 Image DecodePNGFromMemeory(const unsigned char* data, std::size_t size) {
     const std::vector<unsigned char> buf(data, data + size);

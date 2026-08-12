@@ -75,10 +75,15 @@ void NormalizeControllerValues(EditorScene::PlayerControllerSettings& settings) 
     settings.runSpeed = FiniteClamp(settings.runSpeed, 7.0f, 0.0f, 1000.0f);
     settings.runSpeed = std::max(settings.runSpeed, settings.walkSpeed);
     settings.jumpSpeed = FiniteClamp(settings.jumpSpeed, 5.0f, 0.0f, 1000.0f);
+    settings.crouchSpeed = FiniteClamp(settings.crouchSpeed, 2.0f, 0.0f, 1000.0f);
+    settings.swimSpeed = FiniteClamp(settings.swimSpeed, 3.5f, 0.0f, 1000.0f);
+    settings.swimVerticalSpeed = FiniteClamp(settings.swimVerticalSpeed, 2.5f, 0.0f, 1000.0f);
     settings.lookSensitivity = FiniteClamp(settings.lookSensitivity, 0.1f, 0.001f, 10.0f);
     settings.capsuleRadius = FiniteClamp(settings.capsuleRadius, 0.4f, 0.01f, 100.0f);
     settings.capsuleHeight = FiniteClamp(settings.capsuleHeight, 1.8f,
         settings.capsuleRadius * 2.0f, 200.0f);
+    settings.crouchedHeight = FiniteClamp(settings.crouchedHeight, 1.1f,
+        settings.capsuleRadius * 2.0f, settings.capsuleHeight);
     settings.eyeHeight = FiniteClamp(settings.eyeHeight, 0.6f, 0.0f, settings.capsuleHeight);
     settings.cameraDistance = FiniteClamp(settings.cameraDistance, 5.0f, 0.0f, 10000.0f);
     settings.cameraTargetHeight = FiniteClamp(settings.cameraTargetHeight, 1.0f,
@@ -270,39 +275,18 @@ std::string StoredPath(const std::string& path) {
 
 } // namespace
 
-void EditorScene::BuildDefault(const engine::Mesh & cube, const engine::Mesh & plane, const engine::Mesh & sphere,
+void EditorScene::BuildDefault(const engine::Mesh &, const engine::Mesh & plane, const engine::Mesh &,
                                const engine::Mesh &, const engine::Mesh &, const engine::Mesh &,
                                const engine::Mesh &, const engine::Mesh &, const engine::Mesh &)
 {
     Clear();
 
     Transform ground;
-    ground.position = glm::vec3(0.0f, -0.5f, 0.0f);
+    ground.position = glm::vec3(0.0f);
     ground.scale = glm::vec3(8.0f, 1.0f, 8.0f);
     CreateObject("Ground", Primitive::Plane, plane, ground, glm::vec3(0.34f, 0.37f, 0.41f));
 
-    const glm::vec3 positions[] = {
-        {-2.0f, 0.25f, 0.0f},
-        {0.0f, 0.25f, 0.0f},
-        {2.0f, 0.25f, 0.0f}
-    };
-    const glm::vec3 colors[] = {
-        {0.83f, 0.20f, 0.24f},
-        {0.20f, 0.55f, 0.92f},
-        {0.32f, 0.73f, 0.45f}
-    };
-
-    for (int i = 0; i < 3; ++i) {
-        Transform cubeTransform;
-        cubeTransform.position = positions[i];
-        cubeTransform.scale = glm::vec3(0.9f);
-        CreateObject("Cube_" + std::to_string(i + 1), Primitive::Cube, cube, cubeTransform, colors[i]);
-    }
-
-    AddDirectionalLight(sphere);
-    AddPointLight(sphere);
-
-    m_selectedIndex = 1;
+    m_selectedIndex = 0;
     m_dirty = false;
     ClearHistory();
 }
@@ -476,7 +460,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         return false;
     }
 
-    out << "3DGEditorScene 126 " << m_assetId.ToString() << '\n';
+    out << "3DGEditorScene 127 " << m_assetId.ToString() << '\n';
     out << "environment "
         << m_environment.timeOfDay << ' '
         << m_environment.skyLightIntensity << ' '
@@ -851,6 +835,10 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
             << object.playerController.isometricYaw << ' '
             << object.playerController.isometricPitch << ' '
             << object.playerController.isometricDistance << ' '
+            << object.playerController.crouchSpeed << ' '
+            << object.playerController.crouchedHeight << ' '
+            << object.playerController.swimSpeed << ' '
+            << object.playerController.swimVerticalSpeed << ' '
             << StoredPath(object.triggerCameraSequenceName) << ' '
             << static_cast<int>(object.triggerEnterCameraAction) << ' '
             << static_cast<int>(object.triggerExitCameraAction) << ' '
@@ -1329,7 +1317,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             return false;
         }
     }
-    if (magic != "3DGEditorScene" ||(version < 1 || version > 126)) {
+    if (magic != "3DGEditorScene" ||(version < 1 || version > 127)) {
         if (error) *error = "Scene file has an unknown format.";
         return false;
     }
@@ -2718,6 +2706,12 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                    >> playerController.isometricDistance;
             } else {
                 playerController.cameraMode = playerFirstPerson != 0 ? 1 : 0;
+            }
+            if (version >= 127) {
+                in >> playerController.crouchSpeed
+                   >> playerController.crouchedHeight
+                   >> playerController.swimSpeed
+                   >> playerController.swimVerticalSpeed;
             }
             if (version >= 69) {
                 in >> std::quoted(triggerCameraSequenceName)
@@ -4313,6 +4307,30 @@ bool EditorScene::SetSelectedMaterialAsset(
     selected.materialParameterOverrides.clear();
     m_dirty = true;
     return true;
+}
+
+int EditorScene::SetSelectedMaterialAssetToSelection(
+    const std::string& path, engine::AssetHandle id)
+{
+    EnsureSelectionValid();
+    int assignable = 0;
+    for (int index : m_selectedIndices) {
+        if (index < 0 || index >= static_cast<int>(m_objects.size())) continue;
+        if (!m_objects[static_cast<std::size_t>(index)].locked) ++assignable;
+    }
+    if (assignable == 0) return 0;
+
+    PushUndoSnapshot();
+    for (int index : m_selectedIndices) {
+        if (index < 0 || index >= static_cast<int>(m_objects.size())) continue;
+        Object& object = m_objects[static_cast<std::size_t>(index)];
+        if (object.locked) continue;
+        object.materialAssetPath = path;
+        object.materialAssetId = id;
+        object.materialParameterOverrides.clear();
+    }
+    m_dirty = true;
+    return assignable;
 }
 
 bool EditorScene::SetSelectedMaterialParameterOverride(

@@ -38,6 +38,16 @@ public:
     // and object channels excluded by collisionMask are ignored.
     void Move(ecs::Registry& registry, const glm::vec3& wishVel, float dt);
 
+    // Move freely in three dimensions without gravity, stepping, or a ground
+    // probe. This is used by swimming/flying movement modes while retaining the
+    // same capsule collision and slide behaviour as grounded movement.
+    void MoveFree(ecs::Registry& registry, const glm::vec3& wishVel, float dt);
+
+    // Resize the capsule while keeping its feet at the same world height. A
+    // smaller height is always accepted; growing back to standing height is
+    // rejected when a blocking collider occupies the added head room.
+    bool TrySetHeight(ecs::Registry& registry, float newHeight);
+
     // Jump helper: sets upward velocity if grounded.
     void Jump(float speed) { if (grounded) { velocity.y = speed; grounded = false; } }
 

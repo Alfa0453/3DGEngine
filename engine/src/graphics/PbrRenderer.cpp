@@ -191,6 +191,7 @@ uniform float uShadowSoftness;
 uniform int   uSunShadow;   // 0 disables the directional (sun) shadow
 uniform samplerCube uPointCube[4];
 uniform int uNumPointShadows;
+uniform int uNumPointLights;
 uniform int uApplyTonemap;
 uniform int uUseIBL;
 uniform samplerCube uIrradiance;
@@ -465,9 +466,11 @@ void main() {
     ivec2 tile = ivec2(gl_FragCoord.xy / (uScreenSize / vec2(TILE_COUNT)));
     tile = clamp(tile, ivec2(0), TILE_COUNT - ivec2(1));
     int tbase = (tile.y * TILE_COUNT.x + tile.x) * TILE_STRIDE;
-    int nLights = texelFetch(uTileLights, tbase).r;
+    int nLights = clamp(texelFetch(uTileLights, tbase).r, 0,
+                        min(uNumPointLights, TILE_STRIDE - 1));
     for (int k = 0; k < nLights && k < TILE_STRIDE - 1; ++k) {
         int li = texelFetch(uTileLights, tbase + 1 + k).r;
+        if (li < 0 || li >= uNumPointLights) continue;
         vec3 lp = uLightPosRadius[li].xyz;
         float lr = uLightPosRadius[li].w;
         vec3 d = lp - vWorldPos;
@@ -680,6 +683,8 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
     }
     m_pointShadow.BindCubes(9);
     m_pbr->SetInt("uNumPointShadows", numPointShadows);
+    m_pbr->SetInt("uNumPointLights", std::min(
+        static_cast<int>(clusterLights.size()), ClusteredLights::kMaxLights));
     m_pbr->SetInt("uPointCube[0]", 9);
     m_pbr->SetInt("uPointCube[1]", 10);
     m_pbr->SetInt("uPointCube[2]", 11);

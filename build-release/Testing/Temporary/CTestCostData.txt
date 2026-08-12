@@ -1,0 +1,8 @@
+shader_asset_regression 2 0.142775
+material_shader_regression 3 0.0106025
+forge_material_importer_regression 8 0.00403031
+image_decode_regression 2 0.00472755
+asset_registry_regression 2 0.0083637
+editor_assets_regression 4 0.0228024
+camera_manager_regression 2 0.0082241
+---

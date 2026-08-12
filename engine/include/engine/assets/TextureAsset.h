@@ -10,8 +10,16 @@ namespace engine {
 
 class AssetRegistry;
 
-inline constexpr std::uint32_t kTextureAssetVersion = 1;
+inline constexpr std::uint32_t kTextureAssetVersion = 2;
+inline constexpr std::uint32_t kLegacyTextureAssetVersion = 1;
 inline constexpr std::uint32_t kTextureImporterVersion = 1;
+
+struct TextureMipData {
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    // Tightly packed RGBA8, bottom row first for direct OpenGL upload.
+    std::vector<std::uint8_t> rgba;
+};
 
 struct TextureAssetData {
     NativeAssetHeader header;
@@ -21,6 +29,9 @@ struct TextureAssetData {
     bool srgb = true;
     // Tightly packed RGBA8, bottom row first for direct OpenGL upload.
     std::vector<std::uint8_t> rgba;
+    // Optional ordered levels after the base image. Version 2 assets preserve
+    // map-aware authoring mips; version 1 assets load with this list empty.
+    std::vector<TextureMipData> mipmaps;
 };
 
 struct TextureImportResult {

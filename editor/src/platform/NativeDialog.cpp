@@ -118,13 +118,14 @@ std::string OpenAssetImportDialog(const std::string& title) {
     };
     addFilter(L"Supported Assets",
               L"*.fbx;*.obj;*.gltf;*.glb;*.dae;*.ply;*.stl;"
-              L"*.png;*.jpg;*.jpeg;*.tga;"
+              L"*.png;*.jpg;*.jpeg;*.tga;*.3dgtexpack;"
               L"*.wav;*.ogg;*.mp3;*.flac;"
               L"*.3dgmesh;*.3dgskmesh;*.3dgskel;*.3dganim;*.3dgtex;"
               L"*.3dgmat;*.3dgshader;*.particle;*.particlefx;*.hud;"
               L"*.3dgcharacter;*.3dgclip;*.3dggraph;*.btgraph");
     addFilter(L"3D Models", L"*.fbx;*.obj;*.gltf;*.glb;*.dae;*.ply;*.stl");
     addFilter(L"Images", L"*.png;*.jpg;*.jpeg;*.tga");
+    addFilter(L"3DG Material Forge", L"*.3dgtexpack");
     addFilter(L"Audio", L"*.wav;*.ogg;*.mp3;*.flac");
     addFilter(L"All Files", L"*.*");
     filter.push_back(L'\0');

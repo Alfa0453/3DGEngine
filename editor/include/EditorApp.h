@@ -52,6 +52,7 @@
 #include "CharacterEditorPanel.h"
 #include "ClipEditorPanel.h"
 #include "MeshEditorPanel.h"
+#include "TerrainCreatorPanel.h"
 #include "ModularPlacementPanel.h"
 #include "PrefabPalettePanel.h"
 #include "RoomBuilderPanel.h"
@@ -203,6 +204,7 @@ private:
     void DrawClipEditorPanel();
     void DrawGraphEditorPanel();
     void DrawMeshEditorPanel();
+    void DrawTerrainCreatorPanel();
     void DrawModularPlacementPanel();
     void DrawPrefabPalettePanel();
     void DrawRoomBuilderPanel();
@@ -244,6 +246,7 @@ private:
     void HotReloadScripts();        // rebuild + reload game_scripts.dll without restart (dev)
     bool LoadProjectScriptModule(bool reportMissing = false);
     void UpdateScriptAutoReload(float dt);
+    void UpdateMaterialForgeDeployments(float dt);
     void StartScriptAutoBuild();
     void ResetScriptAutoReloadWatcher();
     void DrawWorldEditorPanel();    // compose a streamed world (.3dgworld) from level scenes
@@ -295,9 +298,9 @@ private:
     void HandleTerrainSculpt();
     void HandleFoliagePaint();
     void AddTerrainMeshes(engine::ecs::Registry& pbrRegistry);   // shared edit + play terrain draw
-    // PBR surface represented by a painted-layer material. Albedo textures contribute
-    // their average colour while scalar AO/roughness/metallic remain fully effective.
+    // PBR surface and CPU texture data baked for a painted terrain layer.
     engine::TerrainLayerSurface TerrainLayerMaterialSurface(const std::string& materialPath);
+    engine::TerrainLayerTexture TerrainLayerMaterialTexture(const std::string& materialPath);
     bool AverageImageColor(const std::string& relativePath, glm::vec3& outColor);
     float TerrainSurfaceY(float worldX, float worldZ, bool& over);  // walkable height query
     std::string TerrainNameAt(float worldX, float worldZ);          // terrain object under a point
@@ -375,6 +378,10 @@ private:
     void LoadSceneFromPath(const std::string& path);
     void ExportRuntimeScene();
     void CookProject();
+    void PackageProject();
+    void LoadPackagingSettings();
+    void PersistPackagingSettings();
+    void UpdatePackageBuild();
     void ValidateRuntimeScene();
     void TriggerAnimationPreviewAction();
     void UpdateEditParticlePreviews(float dt);
@@ -533,6 +540,7 @@ private:
         std::pair<std::filesystem::file_time_type, std::string>> m_waterShaderCache;
     std::unordered_map<engine::ecs::Entity, std::unique_ptr<engine::GrassField>> m_grass;   // one grass field per terrain
     std::unordered_map<std::string, engine::TerrainLayerSurface> m_terrainMaterialSurfaces;
+    std::unordered_map<std::string, engine::TerrainLayerTexture> m_terrainMaterialTextures;
     engine::TerrainCameraConstraint m_terrainCameraConstraint;
     bool  m_terrainSculpt = false;        // sculpt mode active (paints the selected terrain)
     int   m_terrainSculptMode = 0;        // 0 raise, 1 lower, 2 smooth, 3 flatten, 4 paint
@@ -573,6 +581,7 @@ private:
     ClipEditorPanel                      m_clipEditor;
     AnimationGraphEditorPanel            m_graphEditor;
     MeshEditorPanel                      m_meshEditor;
+    TerrainCreatorPanel                 m_terrainCreator;
     ModularPlacementPanel                m_modularPlacement;
     PrefabPalettePanel                   m_prefabPalette;
     RoomBuilderPanel                     m_roomBuilder;
@@ -617,6 +626,22 @@ private:
     float                                m_scriptWatchPoll = 0.0f;
     float                                m_scriptBuildDebounce = 0.0f;
     std::string                          m_scriptBuildStatus = "Watching Content/Scripts";
+    float                                m_materialForgeDeployPoll = 0.0f;
+    std::string                          m_materialForgeDeploySignalPath;
+    std::string                          m_materialForgeDeployToken;
+    struct PackageBuildResult {
+        bool success = false;
+        std::string error;
+        std::filesystem::path artifact;
+    };
+    std::future<PackageBuildResult>       m_packageBuildFuture;
+    bool                                  m_packageBuildRunning = false;
+    std::string                           m_packageBuildStatus = "Ready to package";
+    std::array<char, 512>                 m_packageOutputDraft{};
+    int                                   m_packageConfiguration = 0;
+    bool                                  m_packageStaticRuntime = true;
+    bool                                  m_packageCleanOutput = true;
+    bool                                  m_packageCreateZip = true;
     engine::HudDocument                  m_hud;              // active HUD document (in memory)
     std::string                          m_hudPath;          // last saved/loaded .hud path
     std::unordered_map<std::string, float>       m_hudFloats;   // named numeric HUD values

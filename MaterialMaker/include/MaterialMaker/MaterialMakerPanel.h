@@ -48,6 +48,7 @@ private:
     void DrawPreview();          // live GL preview (falls back to the drawn one)
     void DrawApproxPreview();    // hand-drawn 2D approximation (fallback)
     void DrawSurfaceControls();
+    void DrawTilingControls();
     void DrawAdvancedControls();
     void DrawTextureControls();
     void DrawShaderControls();
@@ -87,6 +88,7 @@ private:
     float m_previewLight   = 1.0f;    // key-light intensity multiplier
     float m_previewZoom    = 1.0f;    // mouse-wheel zoom (higher = closer)
     bool  m_previewGround  = false;   // ground plane + contact shadow
+    bool  m_linkTilingAxes = true;    // edit U and V as one uniform tiling value
     float m_previewBg[3]   = {0.05f, 0.06f, 0.08f};
     std::string m_hdriPath;           // equirectangular environment image (optional)
 

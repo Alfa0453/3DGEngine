@@ -4,6 +4,8 @@
 
 namespace engine {
 
+struct TextureAssetData;
+
 // Owns a 2D texture on the GPU. Loads PNG, JPEG, or uncompressed 24/32-bit TGA,
 // uploads it, and generates mipmaps. Move-only, because it owns a GL resource
 // (same ownership rules as Mesh and Shader).
@@ -11,6 +13,10 @@ class Texture {
 public:
     // Load a supported image. `smooth` picks linear+mipmaps (true) vs nearest (false).
     explicit Texture(const std::string& path, bool smooth = true);
+
+    // Build from a validated native texture asset, including any authored mip
+    // chain stored in version 2 .3dgtex files.
+    explicit Texture(const TextureAssetData& asset);
 
     // Build from tightly-packed RGBA pixels (width*height*4 bytes). With
     // smooth=false you get crisp nearest-neighbour sampling (good for a pixel
@@ -40,7 +46,8 @@ public:
 
 private:
     // Create the GL texture object from RGBA pixels.
-    void Create(const unsigned char* rgba, int width, int height, bool smooth);
+    void Create(const unsigned char* rgba, int width, int height, bool smooth,
+                const TextureAssetData* asset = nullptr);
     void Release();
 
     unsigned int m_id = 0;

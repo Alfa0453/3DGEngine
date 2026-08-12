@@ -155,6 +155,38 @@ int main() {
               "camera director exposes timeline events");
     }
 
+    {
+        EditorScene materialScene;
+        engine::Mesh placeholder;
+        materialScene.AddEmpty(placeholder);
+        materialScene.AddEmpty(placeholder);
+        materialScene.AddEmpty(placeholder);
+        Check(materialScene.ToggleSelectedLocked(),
+              "lock one object before multi-material assignment");
+        materialScene.SelectIndex(0);
+        materialScene.ToggleSelection(1);
+        materialScene.ToggleSelection(2);
+        const engine::AssetHandle materialId = engine::AssetHandle::Generate();
+        const std::string materialPath =
+            "Content/Materials/ForgeSelection.3dgmat";
+        Check(materialScene.SetSelectedMaterialAssetToSelection(
+                  materialPath, materialId) == 2,
+              "multi-material assignment skips locked selected objects");
+        Check(materialScene.Objects()[0].materialAssetPath == materialPath
+              && materialScene.Objects()[0].materialAssetId == materialId
+              && materialScene.Objects()[1].materialAssetPath == materialPath
+              && materialScene.Objects()[1].materialAssetId == materialId
+              && materialScene.Objects()[2].materialAssetPath.empty(),
+              "multi-material assignment updates every unlocked selection member");
+        Check(materialScene.Undo(
+                  placeholder, placeholder, placeholder, placeholder, placeholder,
+                  placeholder, placeholder, placeholder, placeholder)
+              && materialScene.Objects()[0].materialAssetPath.empty()
+              && materialScene.Objects()[1].materialAssetPath.empty()
+              && materialScene.Objects()[2].materialAssetPath.empty(),
+              "multi-material assignment is restored by one undo step");
+    }
+
     EditorScene scene;
     engine::Mesh emptyPlaceholder;
     scene.AddEmpty(emptyPlaceholder);

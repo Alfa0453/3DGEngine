@@ -154,6 +154,7 @@ const char* NativeAssetExtension(AssetType type) {
         case AssetType::Skeleton: return ".3dgskel";
         case AssetType::Animation: return ".3dganim";
         case AssetType::Texture: return ".3dgtex";
+        case AssetType::Terrain: return ".3dgterrain";
         case AssetType::World: return ".3dgworld";
         case AssetType::Foliage: return ".3dgfoliage";
         default: return "";
@@ -167,6 +168,7 @@ AssetType NativeAssetTypeFromExtension(const std::string& extension) {
     if (lower == ".3dgskel") return AssetType::Skeleton;
     if (lower == ".3dganim") return AssetType::Animation;
     if (lower == ".3dgtex") return AssetType::Texture;
+    if (lower == ".3dgterrain") return AssetType::Terrain;
     if (lower == ".3dgworld") return AssetType::World;
     if (lower == ".3dgfoliage") return AssetType::Foliage;
     return AssetType::Unknown;

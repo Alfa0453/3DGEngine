@@ -33,6 +33,9 @@ if(GAMEENGINE_STATIC_RUNTIME)
     endif()
 endif()
 
+# Option: build optional demo/sample targets (disabled by default for releases).
+option(BUILD_DEMOS "Build demo and sample targets (viewer, demos, etc.)" OFF)
+
 # Collect every executable/DLL in one folder so assets are easy to locate.
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
@@ -127,7 +130,7 @@ set(ASSIMP_BUILD_ASSIMP_TOOLS               OFF CACHE BOOL "" FORCE)
 set(ASSIMP_BUILD_SAMPLES                    OFF CACHE BOOL "" FORCE)
 set(ASSIMP_INSTALL                          OFF CACHE BOOL "" FORCE)
 set(ASSIMP_NO_EXPORT                        ON  CACHE BOOL "" FORCE)
-set(ASSIMP_BUILD_ZLIB                       ON  CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_ZLIB                       OFF CACHE BOOL "" FORCE)
 set(ASSIMP_WARNINGS_AS_ERRORS               OFF CACHE BOOL "" FORCE)
 set(ASSIMP_BUILD_ALL_IMPORTERS_BY_DEFAULT   OFF CACHE BOOL "" FORCE)
 set(ASSIMP_BUILD_ALL_EXPORTERS_BY_DEFAULT   OFF CACHE BOOL "" FORCE)
@@ -137,6 +140,8 @@ set(ASSIMP_BUILD_GLTF_IMPORTER    ON CACHE BOOL "" FORCE)
 set(ASSIMP_BUILD_COLLADA_IMPORTER ON CACHE BOOL "" FORCE)
 set(ASSIMP_BUILD_PLY_IMPORTER     ON CACHE BOOL "" FORCE)
 set(ASSIMP_BUILD_STL_IMPORTER     ON CACHE BOOL "" FORCE)
+# Enable Assimp's bundled zlib so the dependency builds even without a system zlib install.
+set(ASSIMP_BUILD_ZLIB                       ON CACHE BOOL "" FORCE)
 FetchContent_Declare(
     assimp
     GIT_REPOSITORY https://github.com/assimp/assimp.git
@@ -190,8 +195,25 @@ target_compile_definitions(imgui PUBLIC
 # --- Our libraries and executables -----------------------------------------
 add_subdirectory(engine)   # the reusable engine (static library)
 add_subdirectory(game)     # shared game module: your scripts, linked by editor + player
-#add_subdirectory(viewer)   # a model-viewer tool (loads + renders OBJ models)
-#add_subdirectory(scene)    # a PBR lighting + ECS scene demo (shadows, skybox)
+
+# Optional demo/sample targets. Keep these off for a trimmed release.
+if(BUILD_DEMOS)
+    add_subdirectory(viewer)   # a model-viewer tool (loads + renders OBJ models)
+    add_subdirectory(scene)    # a PBR lighting + ECS scene demo (shadows, skybox)
+    add_subdirectory(marble)
+    add_subdirectory(character)
+    add_subdirectory(aidemo)
+    add_subdirectory(playerdemo)
+    add_subdirectory(wizardscene)
+    add_subdirectory(particledemo)
+    add_subdirectory(navdemo)
+    add_subdirectory(gennavdemo)
+    add_subdirectory(terraindemo)
+    add_subdirectory(uidemo)
+    add_subdirectory(prefabdemo)
+    add_subdirectory(ecsgame)
+endif()
+
 add_subdirectory(editor)
 #add_subdirectory(physics)  # moved to standalone GameEngine project
 #add_subDirectory(marble)

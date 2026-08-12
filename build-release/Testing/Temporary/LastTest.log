@@ -1,0 +1,51 @@
+Start testing: Aug 12 14:57 E. Africa Standard Time
+----------------------------------------------------------
+5/20 Testing: camera_manager_regression
+5/20 Test: camera_manager_regression
+Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/camera_manager_tests.exe"
+Directory: D:/C++_Projects/3DGEngine/build-release/tests
+"camera_manager_regression" start time: Aug 12 14:57 E. Africa Standard Time
+Output:
+----------------------------------------------------------
+camera manager tests passed
+<end of output>
+Test time =   0.02 sec
+----------------------------------------------------------
+Test Passed.
+"camera_manager_regression" end time: Aug 12 14:57 E. Africa Standard Time
+"camera_manager_regression" time elapsed: 00:00:00
+----------------------------------------------------------
+
+13/20 Testing: editor_assets_regression
+13/20 Test: editor_assets_regression
+Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/editor_assets_tests.exe"
+Directory: D:/C++_Projects/3DGEngine/build-release/tests
+"editor_assets_regression" start time: Aug 12 14:57 E. Africa Standard Time
+Output:
+----------------------------------------------------------
+editor assets tests passed
+<end of output>
+Test time =   0.09 sec
+----------------------------------------------------------
+Test Passed.
+"editor_assets_regression" end time: Aug 12 14:57 E. Africa Standard Time
+"editor_assets_regression" time elapsed: 00:00:00
+----------------------------------------------------------
+
+20/20 Testing: forge_material_importer_regression
+20/20 Test: forge_material_importer_regression
+Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/forge_material_importer_tests.exe"
+Directory: D:/C++_Projects/3DGEngine/build-release/tests
+"forge_material_importer_regression" start time: Aug 12 14:57 E. Africa Standard Time
+Output:
+----------------------------------------------------------
+forge material importer tests passed
+<end of output>
+Test time =   0.03 sec
+----------------------------------------------------------
+Test Passed.
+"forge_material_importer_regression" end time: Aug 12 14:57 E. Africa Standard Time
+"forge_material_importer_regression" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Aug 12 14:57 E. Africa Standard Time
