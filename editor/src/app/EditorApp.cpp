@@ -26,6 +26,7 @@
 #include <engine/assets/MaterialAssetLoader.h>
 #include <engine/assets/ShaderAsset.h>
 #include <engine/assets/ShaderGraphCompiler.h>
+#include <engine/assets/FoliageAsset.h>
 
 #include "GameBtScripts.h"
 #include "EditorBranding.h"
@@ -40,6 +41,7 @@
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
+#include <glm/gtx/matrix_decompose.hpp>
 #include <imgui.h>
 
 #include <algorithm>
@@ -65,6 +67,43 @@ using engine::ecs::MeshRenderer;
 using engine::ecs::Transform;
 
 namespace {
+
+EditorAssets::Type EditorAssetTypeFor(engine::AssetType type) {
+    using A = engine::AssetType;
+    using E = EditorAssets::Type;
+    switch (type) {
+    case A::StaticMesh: return E::Model;
+    case A::SkeletalMesh: return E::SkeletalModel;
+    case A::Skeleton: return E::Skeleton;
+    case A::Animation: return E::Animation;
+    case A::Material: return E::Material;
+    case A::Texture: return E::Texture;
+    case A::Audio: return E::Audio;
+    case A::Shader: return E::Shader;
+    case A::Particle: return E::Particle;
+    case A::ParticleEffect: return E::ParticleEffect;
+    case A::Hud: return E::Hud;
+    case A::Character: return E::Character;
+    case A::AnimationClip: return E::AnimationClip;
+    case A::AnimationGraph: return E::AnimationGraph;
+    case A::BehaviorTree: return E::BehaviorGraph;
+    case A::Scene: return E::Scene;
+    case A::Script: return E::Script;
+    case A::Terrain: return E::Terrain;
+    case A::World: return E::World;
+    case A::Foliage: return E::Foliage;
+    case A::Ragdoll: return E::Ragdoll;
+    case A::AnimationRetarget: return E::AnimationRetarget;
+    case A::Ability: return E::Ability;
+    case A::Prefab: return E::Prefab;
+    case A::Weather: return E::Weather;
+    case A::Building: return E::Building;
+    case A::Road: return E::Road;
+    case A::Font:
+    case A::Unknown: return E::Other;
+    }
+    return E::Other;
+}
 
 engine::WindowProps MakeEditorWindowProps(const engine::Config& config) {
     engine::WindowProps props;
@@ -1747,6 +1786,17 @@ void EditorApp::DrawEditorOverlay()
     dockspaceContext.config = &m_config;
     dockspaceContext.scene = &m_scene;
     dockspaceContext.assets = &m_assets;
+    if (!m_dependencyAssetOpenPath.empty()) {
+        if (m_dependencyAssetOpenType == EditorAssets::Type::Scene)
+            dockspaceContext.sceneAssetOpenRequested = m_dependencyAssetOpenPath;
+        else if (m_dependencyAssetOpenType == EditorAssets::Type::BehaviorGraph)
+            dockspaceContext.behaviorGraphAssetOpenRequested = m_dependencyAssetOpenPath;
+        else {
+            dockspaceContext.editorAssetOpenRequested = m_dependencyAssetOpenPath;
+            dockspaceContext.editorAssetOpenType = m_dependencyAssetOpenType;
+        }
+        m_dependencyAssetOpenPath.clear();
+    }
     dockspaceContext.dragDrop = &m_dragDrop;
     dockspaceContext.project = &m_project;
     dockspaceContext.log = &m_log;
@@ -2005,6 +2055,7 @@ void EditorApp::DrawEditorOverlay()
     DrawClipEditorPanel();
     DrawGraphEditorPanel();
     DrawMeshEditorPanel();
+    DrawDecalPlacementPanel();
     DrawTerrainCreatorPanel();
     DrawModularPlacementPanel();
     DrawPrefabPalettePanel();
@@ -2013,6 +2064,18 @@ void EditorApp::DrawEditorOverlay()
     DrawArrayToolPanel();
     DrawMeasurementPanel();
     DrawLevelValidationPanel();
+    DrawOptimizationAuditorPanel();
+    DrawRagdollPhysicsPanel();
+    DrawAnimationRetargetingPanel();
+    DrawAbilityEditorPanel();
+    DrawRuntimePropertyInspectorPanel();
+    DrawAssetDependencyViewerPanel();
+    DrawWeatherEditorPanel();
+    DrawProceduralBuildingPanel();
+    DrawRoadGeneratorPanel();
+    DrawLevelInstancePanel();
+    DrawWorldPartitionPanel();
+    DrawProceduralScatterGraphPanel();
     DrawLevelVariantPanel();
     DrawLevelLayersPanel();
     DrawViewportBookmarksPanel();
@@ -2260,10 +2323,45 @@ void EditorApp::DrawEditorOverlay()
             }
             break;
         }
+        case EditorAssets::Type::ScatterGraph:
+            m_panels.SetOpen(EditorPanels::Panel::ProceduralScatterGraph, true);
+            m_proceduralScatterGraph.QueueOpen(path);
+            m_log.Info("Opening procedural scatter graph: " + path);
+            break;
         case EditorAssets::Type::Terrain:
             m_panels.SetOpen(EditorPanels::Panel::TerrainCreator, true);
             m_terrainCreator.QueueOpen(path);
             m_log.Info("Opening terrain: " + path);
+            break;
+        case EditorAssets::Type::Ragdoll:
+            m_panels.SetOpen(EditorPanels::Panel::RagdollPhysics, true);
+            m_ragdollPhysics.QueueOpen(path);
+            m_log.Info("Opening ragdoll physics asset: " + path);
+            break;
+        case EditorAssets::Type::AnimationRetarget:
+            m_panels.SetOpen(EditorPanels::Panel::AnimationRetargeting, true);
+            m_animationRetargeting.QueueOpen(path);
+            m_log.Info("Opening animation retarget profile: " + path);
+            break;
+        case EditorAssets::Type::Ability:
+            m_panels.SetOpen(EditorPanels::Panel::AbilityEditor, true);
+            m_abilityEditor.QueueOpen(path);
+            m_log.Info("Opening ability: " + path);
+            break;
+        case EditorAssets::Type::Weather:
+            m_panels.SetOpen(EditorPanels::Panel::WeatherEditor, true);
+            m_weatherEditor.QueueOpen(path);
+            m_log.Info("Opening weather: " + path);
+            break;
+        case EditorAssets::Type::Building:
+            m_panels.SetOpen(EditorPanels::Panel::ProceduralBuilding, true);
+            m_proceduralBuilding.QueueOpen(path);
+            m_log.Info("Opening procedural building: " + path);
+            break;
+        case EditorAssets::Type::Road:
+            m_panels.SetOpen(EditorPanels::Panel::RoadGenerator, true);
+            m_roadGenerator.QueueOpen(path);
+            m_log.Info("Opening road: " + path);
             break;
         case EditorAssets::Type::Texture:
             m_log.Info("Texture selected; drag it to a material texture slot to use it");
@@ -2737,6 +2835,18 @@ void EditorApp::DrawMeshEditorPanel() {
     if (!message.empty()) m_log.Info(message);
 }
 
+void EditorApp::DrawDecalPlacementPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::DecalPlacement)) return;
+    bool open = true;
+    std::string selectedPath;
+    if (const EditorAssets::Asset* selected = m_assets.SelectedAsset())
+        selectedPath = selected->relativePath;
+    m_decalPlacement.Draw(&open,
+        m_assets.ContentAssetPaths(EditorAssets::Type::Material),
+        m_assets.ContentAssetPaths(EditorAssets::Type::Texture), selectedPath);
+    m_panels.SetOpen(EditorPanels::Panel::DecalPlacement, open);
+}
+
 void EditorApp::DrawTerrainCreatorPanel() {
     if (!m_panels.IsOpen(EditorPanels::Panel::TerrainCreator)) return;
     bool open = true;
@@ -3147,6 +3257,389 @@ void EditorApp::DrawRoomBuilderPanel() {
     if (result.generateRequested) GenerateRoom();
 }
 
+void EditorApp::DrawProceduralBuildingPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::ProceduralBuilding)) return;
+    bool open = true;
+    const ProceduralBuildingPanel::Result result =
+        m_proceduralBuilding.Draw(m_project.AssetRoot(), &open);
+    m_panels.SetOpen(EditorPanels::Panel::ProceduralBuilding, open);
+    if (result.assetListChanged) {
+        std::string error;
+        if (!m_assets.Refresh(m_project.AssetRoot(), &error)) m_log.Warning(error);
+    }
+    if (result.deleteExistingRequested) {
+        const int removed = DeleteGeneratedProceduralBuilding(
+            m_proceduralBuilding.BuildingName());
+        m_log.Info("Procedural Building removed " + std::to_string(removed) + " piece(s)");
+    }
+    if (result.generateRequested) GenerateProceduralBuilding();
+}
+
+void EditorApp::DrawRoadGeneratorPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::RoadGenerator)) return;
+    bool open = true;
+    const RoadGeneratorPanel::Result result =
+        m_roadGenerator.Draw(m_scene, m_project.AssetRoot(), &open);
+    m_panels.SetOpen(EditorPanels::Panel::RoadGenerator, open);
+    if (result.assetsChanged) {
+        std::string error;
+        if (!m_assets.Refresh(m_project.AssetRoot(), &error)) m_log.Warning(error);
+    }
+    if (result.remove) {
+        const int removed = DeleteGeneratedRoad(m_roadGenerator.Name());
+        m_log.Info("Road Generator removed " + std::to_string(removed) + " piece(s)");
+    }
+    if (result.generate) GenerateRoad();
+}
+
+void EditorApp::DrawLevelInstancePanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::LevelInstances)) return;
+    bool open = true;
+    const auto result = m_levelInstances.Draw(
+        m_worldAuthoring, m_project.AssetRoot(), m_project.ScenePath(),
+        static_cast<int>(m_scene.SelectedIndices().size()), &open);
+    m_panels.SetOpen(EditorPanels::Panel::LevelInstances, open);
+
+    if (m_worldAuthoringPath.empty())
+        m_worldAuthoringPath = (std::filesystem::path(m_project.AssetRoot())
+            / "GameAssets" / "Worlds" / "World.3dgworld").string();
+    if (m_worldAuthoring.persistentScenePath.empty())
+        m_worldAuthoring.persistentScenePath = m_project.ScenePath();
+    if (!m_worldAuthoring.id.Valid()) m_worldAuthoring.id = engine::AssetHandle::Generate();
+
+    if (result.createFromSelection) {
+        const std::vector<int> selected = m_scene.SelectedIndices();
+        const EditorScene::Snapshot source = m_scene.CreateSnapshot();
+        EditorScene::Snapshot isolated;
+        isolated.environment = source.environment;
+        isolated.gameMode = source.gameMode;
+        glm::vec3 pivot(0.0f); int valid = 0;
+        for (int index : selected) if (index >= 0 && index < static_cast<int>(source.objects.size())) {
+            pivot += source.objects[static_cast<std::size_t>(index)].transform.position; ++valid;
+        }
+        if (valid > 0) pivot /= static_cast<float>(valid);
+        std::unordered_set<std::string> names;
+        for (int index : selected) if (index >= 0 && index < static_cast<int>(source.objects.size())) {
+            auto item = source.objects[static_cast<std::size_t>(index)];
+            names.insert(item.object.name); item.transform.position -= pivot;
+            isolated.objects.push_back(std::move(item));
+        }
+        for (const auto& joint : source.joints)
+            if (names.count(joint.objectA) && (joint.worldAnchor || names.count(joint.objectB)))
+                isolated.joints.push_back(joint);
+        isolated.selectedIndex = isolated.objects.empty() ? -1 : 0;
+        std::error_code ec;
+        std::filesystem::create_directories(
+            std::filesystem::path(result.selectionScenePath).parent_path(), ec);
+        std::string error;
+        EditorScene level;
+        if (ec || isolated.objects.empty()) {
+            m_log.Warning(ec ? "Level Instance: could not create the level folder"
+                             : "Level Instance: select at least one object");
+        } else {
+            level.RestoreFromSnapshot(isolated, *m_cube, *m_plane, *m_sphere, *m_capsule,
+                *m_cylinder, *m_cone, *m_pyramid, *m_torus, *m_staircase);
+            if (!level.Save(result.selectionScenePath, &error)) {
+                m_log.Error("Level Instance export failed: " + error);
+            } else {
+                engine::LevelRef instance; instance.scenePath = result.selectionScenePath;
+                instance.worldTransform = glm::translate(glm::mat4(1.0f), pivot);
+                m_worldAuthoring.levels.push_back(instance);
+                if (result.removeSelection) { m_scene.SelectIndices(selected); m_scene.DeleteSelected(); }
+                std::string refreshError;
+                if (!m_assets.Refresh(m_project.AssetRoot(), &refreshError)) m_log.Warning(refreshError);
+                m_log.Info("Created linked level instance: " + result.selectionScenePath);
+            }
+        }
+    }
+
+    if (result.openSource >= 0 && result.openSource < static_cast<int>(m_worldAuthoring.levels.size()))
+        RequestLoadSceneFromPath(m_worldAuthoring.levels[static_cast<std::size_t>(result.openSource)].scenePath);
+
+    if (result.breakInstance >= 0 && result.breakInstance < static_cast<int>(m_worldAuthoring.levels.size())) {
+        const engine::LevelRef instance = m_worldAuthoring.levels[static_cast<std::size_t>(result.breakInstance)];
+        EditorScene linked; std::string error;
+        if (!linked.Load(instance.scenePath, *m_cube, *m_plane, *m_sphere, *m_capsule,
+                         *m_cylinder, *m_cone, *m_pyramid, *m_torus, *m_staircase, &error)) {
+            m_log.Error("Break level instance failed: " + error);
+        } else {
+            EditorScene::Snapshot destination = m_scene.CreateSnapshot();
+            EditorScene::Snapshot addition = linked.CreateSnapshot();
+            std::unordered_set<std::string> names;
+            for (const auto& item : destination.objects) names.insert(item.object.name);
+            std::unordered_map<std::string, std::string> renamed;
+            for (auto& item : addition.objects) {
+                const std::string oldName=item.object.name; std::string unique=oldName; int suffix=2;
+                while(names.count(unique))unique=oldName+"_"+std::to_string(suffix++);
+                names.insert(unique);renamed[oldName]=unique;item.object.name=unique;
+                const glm::mat4 placed=instance.worldTransform*item.transform.Model();
+                glm::vec3 skew,translation,scale;glm::vec4 perspective;glm::quat rotation;
+                if(glm::decompose(placed,scale,rotation,translation,skew,perspective)){
+                    item.transform.position=translation;item.transform.rotation=glm::normalize(rotation);item.transform.scale=scale;
+                }
+                destination.objects.push_back(std::move(item));
+            }
+            for(auto joint:addition.joints){if(renamed.count(joint.objectA))joint.objectA=renamed[joint.objectA];if(renamed.count(joint.objectB))joint.objectB=renamed[joint.objectB];destination.joints.push_back(std::move(joint));}
+            m_scene.ApplySnapshotUndoable(destination,*m_cube,*m_plane,*m_sphere,*m_capsule,*m_cylinder,*m_cone,*m_pyramid,*m_torus,*m_staircase);
+            m_worldAuthoring.levels.erase(m_worldAuthoring.levels.begin()+result.breakInstance);
+            m_log.Info("Broke level instance into editable scene objects");
+        }
+    }
+
+    if (result.saveWorld) {
+        std::error_code ec; std::filesystem::create_directories(std::filesystem::path(m_worldAuthoringPath).parent_path(),ec);
+        std::string error;
+        if(!ec&&engine::SaveWorldManifest(m_worldAuthoringPath,m_worldAuthoring,&error)){
+            m_log.Info("Saved world instances: "+m_worldAuthoringPath);
+            std::string refreshError;if(!m_assets.Refresh(m_project.AssetRoot(),&refreshError))m_log.Warning(refreshError);
+        } else m_log.Error("World save failed: "+(ec?ec.message():error));
+    }
+}
+
+bool EditorApp::CreatePartitionCellFromSelection(const std::string& path, int cellX, int cellZ) {
+    const std::vector<int> selected = m_scene.SelectedIndices();
+    const EditorScene::Snapshot source = m_scene.CreateSnapshot();
+    EditorScene::Snapshot isolated;
+    isolated.environment = source.environment;
+    isolated.gameMode = source.gameMode;
+    glm::vec3 pivot(0.0f); int valid = 0;
+    for (int index : selected) if (index >= 0 && index < static_cast<int>(source.objects.size())) {
+        pivot += source.objects[static_cast<std::size_t>(index)].transform.position; ++valid;
+    }
+    if (valid == 0) { m_log.Warning("World Partition: select one or more loose actors"); return false; }
+    pivot /= static_cast<float>(valid);
+    std::unordered_set<std::string> names;
+    for (int index : selected) if (index >= 0 && index < static_cast<int>(source.objects.size())) {
+        auto item = source.objects[static_cast<std::size_t>(index)];
+        names.insert(item.object.name); item.transform.position -= pivot;
+        isolated.objects.push_back(std::move(item));
+    }
+    for (const auto& joint : source.joints)
+        if (names.count(joint.objectA) && (joint.worldAnchor || names.count(joint.objectB)))
+            isolated.joints.push_back(joint);
+    isolated.selectedIndex = 0;
+    std::error_code ec; std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
+    if (ec) { m_log.Error("World Partition could not create the cell folder: " + ec.message()); return false; }
+    EditorScene cellScene;
+    cellScene.RestoreFromSnapshot(isolated,*m_cube,*m_plane,*m_sphere,*m_capsule,
+        *m_cylinder,*m_cone,*m_pyramid,*m_torus,*m_staircase);
+    std::string error;
+    if (!cellScene.Save(path,&error)) { m_log.Error("World Partition cell export failed: "+error); return false; }
+    engine::LevelRef level; level.scenePath=path;level.worldTransform=glm::translate(glm::mat4(1),pivot);
+    level.partitionX=cellX;level.partitionZ=cellZ;level.loadRadius=m_worldAuthoring.partition.defaultLoadRadius;
+    level.unloadRadius=m_worldAuthoring.partition.defaultUnloadRadius;
+    m_worldAuthoring.levels.push_back(level);
+    m_scene.SelectIndices(selected);m_scene.DeleteSelected();
+    std::string refreshError;if(!m_assets.Refresh(m_project.AssetRoot(),&refreshError))m_log.Warning(refreshError);
+    m_log.Info("Created partition cell level: "+path);return true;
+}
+
+void EditorApp::DrawWorldPartitionPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::WorldPartition)) return;
+    bool open=true;
+    const auto result=m_worldPartition.Draw(m_worldAuthoring,m_project.AssetRoot(),
+        static_cast<int>(m_scene.SelectedIndices().size()),&open);
+    m_panels.SetOpen(EditorPanels::Panel::WorldPartition,open);
+    if(m_worldAuthoringPath.empty())m_worldAuthoringPath=(std::filesystem::path(m_project.AssetRoot())/"GameAssets"/"Worlds"/"World.3dgworld").string();
+    if(m_worldAuthoring.persistentScenePath.empty())m_worldAuthoring.persistentScenePath=m_project.ScenePath();
+    if(!m_worldAuthoring.id.Valid())m_worldAuthoring.id=engine::AssetHandle::Generate();
+    if(result.createCellFromSelection)CreatePartitionCellFromSelection(result.cellScenePath,result.cellX,result.cellZ);
+    if(result.saveWorld){std::error_code ec;std::filesystem::create_directories(std::filesystem::path(m_worldAuthoringPath).parent_path(),ec);std::string error;
+        if(!ec&&engine::SaveWorldManifest(m_worldAuthoringPath,m_worldAuthoring,&error)){m_log.Info("Saved partitioned world: "+m_worldAuthoringPath);std::string refreshError;if(!m_assets.Refresh(m_project.AssetRoot(),&refreshError))m_log.Warning(refreshError);}
+        else m_log.Error("World partition save failed: "+(ec?ec.message():error));}
+}
+
+void EditorApp::DrawProceduralScatterGraphPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::ProceduralScatterGraph)) return;
+    bool open = true;
+    auto result = m_proceduralScatterGraph.Draw(m_project.AssetRoot(), &open);
+    m_panels.SetOpen(EditorPanels::Panel::ProceduralScatterGraph, open);
+    if (result.refreshAssets) {
+        std::string error;
+        if (!m_assets.Refresh(m_project.AssetRoot(), &error)) m_log.Warning(error);
+        else m_log.Info("Saved scatter graph: " + m_proceduralScatterGraph.Path());
+    }
+    if (!result.bakeRequested || !m_cube) return;
+
+    const auto surface = [this](float x, float z) {
+        engine::ScatterSurfaceSample sample;
+        bool center = false, left = false, right = false, back = false, front = false;
+        sample.height = TerrainSurfaceY(x, z, center);
+        if (!center) { sample.height = 0.0f; sample.normal = {0, 1, 0}; return sample; }
+        const float step = 0.25f;
+        const float yl = TerrainSurfaceY(x-step,z,left), yr = TerrainSurfaceY(x+step,z,right);
+        const float yb = TerrainSurfaceY(x,z-step,back), yf = TerrainSurfaceY(x,z+step,front);
+        if(left&&right&&back&&front)
+            sample.normal=glm::normalize(glm::vec3(yl-yr,2.0f*step,yb-yf));
+        return sample;
+    };
+    const std::vector<engine::ScatterPlacement> placements =
+        engine::EvaluateScatterGraph(m_proceduralScatterGraph.Graph(), surface);
+    if (placements.empty()) { m_log.Warning("Scatter graph produced no placements."); return; }
+
+    if (result.bakeTarget == ProceduralScatterGraphPanel::BakeTarget::EditableObjects) {
+        bool first = true; int placed = 0;
+        for (const auto& placement : placements) {
+            engine::ecs::Transform transform;
+            transform.position = placement.position;
+            transform.rotation = placement.rotation;
+            transform.scale = placement.scale;
+            m_scene.SuppressUndo(!first);
+            if (m_scene.AddModel(placement.meshPath, *m_cube, transform)) {
+                first = false; ++placed;
+            }
+        }
+        m_scene.SuppressUndo(false);
+        m_log.Info("Scatter graph baked " + std::to_string(placed)
+            + " editable object(s).");
+        return;
+    }
+
+    engine::FoliageAssetData palette;
+    // SaveFoliageAsset receives the asset by value, so generate the identity here
+    // as well. The scene actor must retain the exact ID written to the palette.
+    palette.header.id = engine::AssetHandle::Generate();
+    palette.name = m_proceduralScatterGraph.Graph().name + " Baked Foliage";
+    std::unordered_map<std::string, std::uint32_t> typeByPath;
+    for (const auto& placement : placements) {
+        if (typeByPath.count(placement.meshPath)) continue;
+        const std::uint32_t index = static_cast<std::uint32_t>(palette.types.size());
+        typeByPath[placement.meshPath] = index;
+        engine::FoliageTypeAsset type;
+        type.name = std::filesystem::path(placement.meshPath).stem().string();
+        type.meshPath = placement.meshPath; type.meshId = placement.meshId;
+        palette.types.push_back(std::move(type));
+    }
+    std::filesystem::path palettePath(m_proceduralScatterGraph.Path());
+    palettePath.replace_extension(".3dgfoliage");
+    std::string error;
+    if (!engine::SaveFoliageAsset(palettePath.string(), palette, &error)) {
+        m_log.Error("Scatter foliage palette save failed: " + error); return;
+    }
+    m_scene.AddFoliage(*m_cube);
+    m_scene.SetSelectedFoliageAsset(palettePath.string(), palette.header.id);
+    int placed = 0;
+    for (const auto& placement : placements) {
+        const glm::vec3 degrees = glm::degrees(glm::eulerAngles(placement.rotation));
+        if (m_scene.AddSelectedFoliageInstance(placement.position, degrees,
+                placement.scale, typeByPath[placement.meshPath])) ++placed;
+    }
+    m_editAssets.ResolveRegistryAssets(m_scene.Registry());
+    if (!m_assets.Refresh(m_project.AssetRoot(), &error)) m_log.Warning(error);
+    m_log.Info("Scatter graph baked " + std::to_string(placed)
+        + " foliage instance(s) in one batched actor.");
+}
+
+int EditorApp::DeleteGeneratedRoad(const std::string& roadName) {
+    if (roadName.empty()) return 0;
+    const std::string prefix = "Road_" + roadName + "_";
+    std::vector<int> indices;
+    for (int i = 0; i < static_cast<int>(m_scene.Objects().size()); ++i)
+        if (m_scene.Objects()[static_cast<std::size_t>(i)].name.rfind(prefix, 0) == 0)
+            indices.push_back(i);
+    if (indices.empty()) return 0;
+    m_scene.SelectIndices(indices);
+    return m_scene.DeleteSelected() ? static_cast<int>(indices.size()) : 0;
+}
+
+void EditorApp::GenerateRoad() {
+    if (!m_cube) return;
+    const EditorScene::Object* splineObject = nullptr;
+    for (const EditorScene::Object& object : m_scene.Objects())
+        if (object.isSpline && object.name == m_roadGenerator.SplineName()
+            && object.splinePoints.size() >= 2) { splineObject = &object; break; }
+    if (!splineObject) { m_log.Warning("Road Generator: selected spline is unavailable"); return; }
+    const std::string roadName = m_roadGenerator.Name();
+    if (roadName.empty()) return;
+    std::vector<RoadGeneratorPanel::Part> parts =
+        m_roadGenerator.GenerateParts(splineObject->splinePoints, splineObject->splineClosed);
+    if (parts.empty()) { m_log.Warning("Road Generator produced no geometry"); return; }
+    if (m_roadGenerator.ReplaceExisting()) DeleteGeneratedRoad(roadName);
+
+    const engine::Spline curve(splineObject->splinePoints, splineObject->splineClosed);
+    engine::ecs::Collider box = engine::ecs::Collider::MakeBox(glm::vec3(.5f));
+    box.layer = engine::ecs::CollisionLayer::WorldStatic;
+    box.mask = engine::ecs::CollisionLayer::All;
+    bool first = true;
+    int created = 0;
+    for (RoadGeneratorPanel::Part& part : parts) {
+        if (m_roadGenerator.ConformTerrain()) {
+            const glm::vec3 curvePoint = curve.ClosestPoint(part.position);
+            bool overTerrain = false;
+            const float terrainY = TerrainSurfaceY(part.position.x, part.position.z, overTerrain);
+            if (overTerrain) part.position.y += terrainY + m_roadGenerator.TerrainOffset() - curvePoint.y;
+        }
+        m_scene.SuppressUndo(!first);
+        engine::ecs::Transform transform;
+        transform.position = part.position;
+        transform.scale = part.scale;
+        transform.rotation = part.rotation;
+        const bool collidable = m_roadGenerator.CreateColliders()
+            && part.surface != RoadGeneratorPanel::Surface::Marking;
+        m_scene.AddConfiguredPrimitive(EditorScene::Primitive::Cube, *m_cube,
+            transform, collidable ? &box : nullptr,
+            "Road_" + roadName + "_" + part.suffix);
+        if (first) { first = false; m_scene.SuppressUndo(true); }
+        const std::string& material = m_roadGenerator.MaterialFor(part.surface);
+        if (!material.empty()) m_scene.SetSelectedMaterialAsset(material);
+        ++created;
+    }
+    m_scene.SuppressUndo(false);
+    m_log.Info("Road Generator created " + roadName + " ("
+        + std::to_string(created) + " editable pieces)");
+}
+
+int EditorApp::DeleteGeneratedProceduralBuilding(const std::string& buildingName) {
+    if (buildingName.empty()) return 0;
+    const std::string prefix = "Building_" + buildingName + "_";
+    std::vector<int> indices;
+    for (int i = 0; i < static_cast<int>(m_scene.Objects().size()); ++i) {
+        if (m_scene.Objects()[static_cast<std::size_t>(i)].name.rfind(prefix, 0) == 0)
+            indices.push_back(i);
+    }
+    if (indices.empty()) return 0;
+    m_scene.SelectIndex(indices.front());
+    for (std::size_t i = 1; i < indices.size(); ++i) m_scene.ToggleSelection(indices[i]);
+    return m_scene.DeleteSelected() ? static_cast<int>(indices.size()) : 0;
+}
+
+void EditorApp::GenerateProceduralBuilding() {
+    if (!m_cube) return;
+    const std::string buildingName = m_proceduralBuilding.BuildingName();
+    if (buildingName.empty()) return;
+    const std::vector<ProceduralBuildingPanel::Part> parts =
+        m_proceduralBuilding.GenerateParts();
+    if (parts.empty()) {
+        m_log.Warning("Procedural Building has an invalid or empty footprint");
+        return;
+    }
+    if (m_proceduralBuilding.ReplaceExisting())
+        DeleteGeneratedProceduralBuilding(buildingName);
+
+    engine::ecs::Collider collider = engine::ecs::Collider::MakeBox(glm::vec3(0.5f));
+    collider.layer = engine::ecs::CollisionLayer::WorldStatic;
+    collider.mask = engine::ecs::CollisionLayer::All;
+    const engine::ecs::Collider* colliderPtr = m_proceduralBuilding.CreateColliders()
+        ? &collider : nullptr;
+    bool first = true;
+    int created = 0;
+    for (const ProceduralBuildingPanel::Part& part : parts) {
+        m_scene.SuppressUndo(!first);
+        engine::ecs::Transform transform;
+        transform.position = part.position;
+        transform.scale = part.scale;
+        transform.rotation = glm::angleAxis(part.yawRadians, glm::vec3(0.0f, 1.0f, 0.0f));
+        m_scene.AddConfiguredPrimitive(EditorScene::Primitive::Cube, *m_cube,
+            transform, colliderPtr, "Building_" + buildingName + "_" + part.suffix);
+        if (first) { first = false; m_scene.SuppressUndo(true); }
+        if (!part.materialPath.empty()) m_scene.SetSelectedMaterialAsset(part.materialPath);
+        ++created;
+    }
+    m_scene.SuppressUndo(false);
+    m_log.Info("Procedural Building generated " + buildingName + " ("
+        + std::to_string(created) + " editable pieces)");
+}
+
 int EditorApp::DeleteGeneratedRoom(const std::string& roomName) {
     if (roomName.empty()) return 0;
     const std::string prefix = roomName + "_";
@@ -3436,6 +3929,121 @@ void EditorApp::DrawLevelValidationPanel() {
     bool open = true;
     m_levelValidation.Draw(m_scene, m_project.AssetRoot(), &open);
     m_panels.SetOpen(EditorPanels::Panel::LevelValidation, open);
+}
+
+void EditorApp::DrawOptimizationAuditorPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::OptimizationAuditor)) return;
+    bool open = true;
+    m_optimizationAuditor.Draw(
+        m_scene, m_editAssets, m_project.AssetRoot(), &open);
+    m_panels.SetOpen(EditorPanels::Panel::OptimizationAuditor, open);
+    if (m_optimizationAuditor.ConsumeFrameRequest() >= 0) FrameSelected();
+}
+
+void EditorApp::DrawRagdollPhysicsPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::RagdollPhysics)) return;
+    bool open = true;
+    bool saved = false;
+    std::string message;
+    m_ragdollPhysics.Draw(m_scene, m_editAssets, m_project.AssetRoot(),
+                          &open, &saved, &message);
+    m_panels.SetOpen(EditorPanels::Panel::RagdollPhysics, open);
+    if (saved) {
+        std::string error;
+        if (!m_assets.Refresh(m_project.AssetRoot(), &error)) m_log.Warning(error);
+    }
+    if (!message.empty()) m_log.Info(message);
+}
+
+void EditorApp::DrawAnimationRetargetingPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::AnimationRetargeting)) return;
+    bool open = true;
+    bool changed = false;
+    std::string message;
+    m_animationRetargeting.Draw(m_assets, m_project.AssetRoot(), &open,
+                                &changed, &message);
+    m_panels.SetOpen(EditorPanels::Panel::AnimationRetargeting, open);
+    if (changed) {
+        std::string error;
+        if (!m_assets.Refresh(m_project.AssetRoot(), &error)) m_log.Warning(error);
+    }
+    if (!message.empty()) m_log.Info(message);
+}
+
+void EditorApp::DrawAbilityEditorPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::AbilityEditor)) return;
+    bool open = true;
+    bool changed = false;
+    std::string message;
+    m_abilityEditor.Draw(m_assets, m_project.AssetRoot(), &open, &changed, &message);
+    m_panels.SetOpen(EditorPanels::Panel::AbilityEditor, open);
+    if (changed) {
+        std::string error;
+        if (!m_assets.Refresh(m_project.AssetRoot(), &error)) m_log.Warning(error);
+    }
+    if (!message.empty()) m_log.Info(message);
+}
+
+void EditorApp::DrawRuntimePropertyInspectorPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::RuntimePropertyInspector)) return;
+    bool open = true;
+    const bool wasPaused = m_physicsPaused;
+    m_runtimePropertyInspector.Draw(
+        (m_mode == EditorMode::Play && m_playRegistry) ? &*m_playRegistry : nullptr,
+        m_playEntityNames, m_physicsPaused, m_physicsStepRequested, &open);
+    if (m_mode == EditorMode::Play && wasPaused != m_physicsPaused) {
+        if (m_physicsPaused) engine::GameMode::Instance().Pause();
+        else engine::GameMode::Instance().Resume();
+    }
+    m_panels.SetOpen(EditorPanels::Panel::RuntimePropertyInspector, open);
+}
+
+void EditorApp::DrawAssetDependencyViewerPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::AssetDependencyViewer)) return;
+    bool open = true;
+    const AssetDependencyViewerPanel::Result result = m_assetDependencyViewer.Draw(
+        m_assetRegistry, m_project.AssetRoot(), &open);
+    m_panels.SetOpen(EditorPanels::Panel::AssetDependencyViewer, open);
+    if (result.synchronizeRegistry) {
+        LoadProjectAssetRegistry();
+        m_assetDependencyViewer.Invalidate();
+    }
+    if (!result.revealRelativePath.empty()) {
+        std::string error;
+        if (m_assets.RevealAsset(result.revealRelativePath, &error))
+            m_panels.SetOpen(EditorPanels::Panel::Assets, true);
+        else if (!error.empty()) m_log.Warning("Asset reveal: " + error);
+    }
+    if (!result.openRelativePath.empty()) {
+        const EditorAssets::Type type = EditorAssetTypeFor(result.openType);
+        if (type == EditorAssets::Type::Script || type == EditorAssets::Type::Other) {
+            std::string error;
+            if (m_assets.RevealAsset(result.openRelativePath, &error))
+                m_panels.SetOpen(EditorPanels::Panel::Assets, true);
+            else if (!error.empty()) m_log.Warning("Asset open: " + error);
+        } else {
+            m_dependencyAssetOpenType = type;
+            m_dependencyAssetOpenPath =
+                (std::filesystem::path(m_project.AssetRoot()) /
+                 std::filesystem::path(result.openRelativePath)).lexically_normal().string();
+        }
+    }
+    if (!result.message.empty()) m_log.Info(result.message);
+}
+
+void EditorApp::DrawWeatherEditorPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::WeatherEditor)) return;
+    bool open = true;
+    const WeatherEditorPanel::Result result = m_weatherEditor.Draw(
+        m_scene, m_assets, m_project.AssetRoot(), &open);
+    m_panels.SetOpen(EditorPanels::Panel::WeatherEditor, open);
+    if (result.saved) {
+        std::string error;
+        if (!m_assets.Refresh(m_project.AssetRoot(), &error)) m_log.Warning(error);
+        LoadProjectAssetRegistry();
+        m_assetDependencyViewer.Invalidate();
+    }
+    if (!result.message.empty()) m_log.Info(result.message);
 }
 
 void EditorApp::DrawLevelVariantPanel() {
@@ -5733,6 +6341,11 @@ void EditorApp::DrawEditScene(const glm::mat4 & viewProj)
                     material.emissive = object.lightData.color * LightEmissiveScale(m_scene, object);
                 }
             }
+            if (object.decal) {
+                material.blendMode = engine::ecs::PbrMaterial::BlendMode::Transparent;
+                material.opacity *= object.decalOpacity;
+                material.roughness = std::max(material.roughness, 0.35f);
+            }
 
             const Entity entity = pbrRegistry.Create();
             pbrRegistry.Add<Transform>(entity, *transform);
@@ -5824,6 +6437,11 @@ void EditorApp::DrawEditScene(const glm::mat4 & viewProj)
             m_roomBuilder.FirstCorner(), m_roomBuilder.PreviewCorner(),
             m_roomBuilder.WallHeight(), viewProj);
     }
+    if (m_panels.IsOpen(EditorPanels::Panel::ProceduralBuilding)) {
+        m_viewport.DrawBuildingFootprintGuide(
+            m_proceduralBuilding.Footprint(), m_proceduralBuilding.BaseHeight(),
+            m_proceduralBuilding.TotalHeight(), viewProj);
+    }
     if (m_panels.IsOpen(EditorPanels::Panel::Blockout)) {
         glm::vec3 base = m_blockoutPanel.ManualPosition();
         if (m_blockoutPanel.PlacementMode() == BlockoutPanel::Placement::ViewportCursor)
@@ -5859,6 +6477,24 @@ void EditorApp::DrawEditScene(const glm::mat4 & viewProj)
         if (!points.empty()) {
             std::vector<glm::vec3> rest(points.begin() + 1, points.end());
             m_viewport.DrawArrayPreview(points.front(), rest, viewProj);
+        }
+    }
+    if (m_panels.IsOpen(EditorPanels::Panel::RoadGenerator)) {
+        for (const EditorScene::Object& object : m_scene.Objects()) {
+            if (!object.isSpline || object.name != m_roadGenerator.SplineName()
+                || object.splinePoints.size() < 2) continue;
+            const std::vector<RoadGeneratorPanel::Part> preview =
+                m_roadGenerator.GenerateParts(object.splinePoints, object.splineClosed);
+            std::vector<glm::vec3> centers;
+            for (const RoadGeneratorPanel::Part& part : preview)
+                if (part.surface == RoadGeneratorPanel::Surface::Road
+                    && part.suffix.rfind("Surface_", 0) == 0)
+                    centers.push_back(part.position);
+            if (centers.size() > 1) {
+                std::vector<glm::vec3> rest(centers.begin() + 1, centers.end());
+                m_viewport.DrawArrayPreview(centers.front(), rest, viewProj);
+            }
+            break;
         }
     }
     if (m_panels.IsOpen(EditorPanels::Panel::Measurement)) {
@@ -6175,6 +6811,24 @@ void EditorApp::HandleMouseViewportSelection()
         }
         m_measurementPanel.SetHoverPoint(hitPosition);
         if (left.pressed) m_measurementPanel.CapturePoint(hitPosition);
+        return;
+    }
+
+    if (m_panels.IsOpen(EditorPanels::Panel::DecalPlacement)
+        && m_decalPlacement.PlacementActive()) {
+        glm::vec3 hitPosition(0.0f), hitNormal(0.0f, 1.0f, 0.0f);
+        const int hit = m_viewport.PickSceneObject(
+            m_scene, m_editAssets, px, py, viewProj, window.Width(), window.Height(),
+            &hitPosition, &hitNormal, "Decal_");
+        const bool valid = hit >= 0;
+        m_decalPlacement.SetHover(hitPosition, hitNormal, valid);
+        if (left.pressed && valid && m_plane) {
+            const auto& decal = m_decalPlacement.Current();
+            m_scene.AddDecal(*m_plane, hitPosition, hitNormal, decal.size,
+                             decal.rotationDegrees, decal.surfaceOffset,
+                             decal.opacity, decal.materialPath);
+            m_log.Info("Placed decal: " + decal.materialPath);
+        }
         return;
     }
 
@@ -9476,6 +10130,9 @@ void EditorApp::EnterPlayMode()
         : PhysicsRuntimeStats{};
 
     m_mode = EditorMode::Play;
+    if (m_playRegistry) {
+        m_runtimePropertyInspector.BeginPlay(*m_playRegistry, m_playEntityNames);
+    }
     if (const EditorScene::CameraPreset* preset = m_scene.PrimaryCameraPreset();
         preset && preset->useInPlay) {
         BeginCameraBlend(*preset);
@@ -9526,6 +10183,7 @@ void EditorApp::EnterPlayMode()
 void EditorApp::ExitPlayMode()
 {
     engine::SetScriptExecutionPaused(false);
+    m_runtimePropertyInspector.EndPlay();
     if (m_playRegistry) engine::ShutdownScripts(*m_playRegistry);
     m_runtimeAudio.Stop();
     m_audio.StopAllSounds();
@@ -11211,6 +11869,7 @@ void EditorApp::StepPlayPhysics(float dt, bool inputEnabled)
         engine::ecs::UpdateRuntimeMotion(*m_playRegistry, step);
         m_playAnimationEvents.clear();
         UpdateAI(step);
+        engine::UpdateAbilities(*m_playRegistry, step);
         engine::UpdateProjectilesInPlace(*m_playRegistry, step);
         engine::UpdateHealth(*m_playRegistry);
         engine::UpdateRagdollsBeforePhysics(*m_playRegistry, m_playPhysics);
@@ -11218,7 +11877,7 @@ void EditorApp::StepPlayPhysics(float dt, bool inputEnabled)
         engine::UpdateAnimations(*m_playRegistry, step);
         ApplyWaterBuoyancy(step);
         m_playPhysics.Step(*m_playRegistry, step);
-        engine::UpdateRagdollsAfterPhysics(*m_playRegistry);
+        engine::UpdateRagdollsAfterPhysics(*m_playRegistry, m_playPhysics, step);
         CapturePlayPhysicsEvents();
         engine::GameMode::Instance().Update(
             *m_playRegistry, m_playPlayerEntity, step);
@@ -11248,6 +11907,7 @@ void EditorApp::StepPlayPhysics(float dt, bool inputEnabled)
         engine::ecs::UpdateGameplay(*m_playRegistry, step);
         engine::ecs::UpdateRuntimeMotion(*m_playRegistry, step);
         UpdateAI(step);
+        engine::UpdateAbilities(*m_playRegistry, step);
         engine::UpdateProjectilesInPlace(*m_playRegistry, step);
         engine::UpdateHealth(*m_playRegistry);
         engine::UpdateRagdollsBeforePhysics(*m_playRegistry, m_playPhysics);
@@ -11255,7 +11915,7 @@ void EditorApp::StepPlayPhysics(float dt, bool inputEnabled)
         engine::UpdateAnimations(*m_playRegistry, step);
         ApplyWaterBuoyancy(step);
         m_playPhysics.Step(*m_playRegistry, step);
-        engine::UpdateRagdollsAfterPhysics(*m_playRegistry);
+        engine::UpdateRagdollsAfterPhysics(*m_playRegistry, m_playPhysics, step);
         CapturePlayPhysicsEvents();
         engine::GameMode::Instance().Update(
             *m_playRegistry, m_playPlayerEntity, step);

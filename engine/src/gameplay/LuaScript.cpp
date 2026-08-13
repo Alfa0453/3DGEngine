@@ -477,13 +477,26 @@ void LuaScript::RegisterEngineApi() {
         {"IsSplineClosed", ApiIsSplineClosed},
         {"SplinePositionAt", ApiSplinePositionAt},
         {"SplineTangentAt", ApiSplineTangentAt},
+        {"SplineLength", ApiSplineLength},
+        {"SplineClosestPoint", ApiSplineClosestPoint},
+        {"SplineClosestDistance", ApiSplineClosestDistance},
         {"Destroy", ApiDestroy},
         {"DestroySelf", ApiDestroySelf},
         {"SpawnEmpty", ApiSpawnEmpty},
         {"SpawnFromObject", ApiSpawnFromObject},
+        {"GenerateScatterGraph", ApiGenerateScatterGraph},
         {"ConfigureProjectile", ApiConfigureProjectile},
         {"SocketPosition", ApiSocketPosition},
         {"TraceLine", ApiTraceLine},
+        {"ActivateRagdoll", ApiActivateRagdoll},
+        {"RecoverFromRagdoll", ApiRecoverFromRagdoll},
+        {"GrantAbility", ApiGrantAbility},
+        {"ActivateAbility", ApiActivateAbility},
+        {"CancelAbility", ApiCancelAbility},
+        {"IsAbilityActive", ApiIsAbilityActive},
+        {"AbilityCooldown", ApiAbilityCooldown},
+        {"SetAbilityResources", ApiSetAbilityResources},
+        {"WasAbilityEvent", ApiWasAbilityEvent},
         {"TraceSphere", ApiTraceSphere},
         {"TraceOverlapSphere", ApiTraceOverlapSphere},
         {"IsKeyDown", ApiKeyDown},
@@ -683,6 +696,49 @@ int LuaScript::ApiTraceLine(lua_State* state) {
     return 6;
 }
 
+int LuaScript::ApiActivateRagdoll(lua_State* state) {
+    lua_pushboolean(state, Current(state)->ActivateRagdoll());
+    return 1;
+}
+
+int LuaScript::ApiRecoverFromRagdoll(lua_State* state) {
+    lua_pushboolean(state, Current(state)->RecoverFromRagdoll());
+    return 1;
+}
+
+int LuaScript::ApiGrantAbility(lua_State* state) {
+    lua_pushboolean(state, Current(state)->GrantAbility(luaL_checkstring(state, 1)));
+    return 1;
+}
+int LuaScript::ApiActivateAbility(lua_State* state) {
+    const char* name = luaL_checkstring(state, 1);
+    const ecs::Entity target = lua_gettop(state) >= 2
+        ? static_cast<ecs::Entity>(luaL_checkinteger(state, 2)) : ecs::kNull;
+    lua_pushboolean(state, Current(state)->ActivateAbility(name, target));
+    return 1;
+}
+int LuaScript::ApiCancelAbility(lua_State* state) {
+    lua_pushboolean(state, Current(state)->CancelAbility()); return 1;
+}
+int LuaScript::ApiIsAbilityActive(lua_State* state) {
+    const char* name = lua_gettop(state) >= 1 ? luaL_checkstring(state, 1) : "";
+    lua_pushboolean(state, Current(state)->IsAbilityActive(name)); return 1;
+}
+int LuaScript::ApiAbilityCooldown(lua_State* state) {
+    lua_pushnumber(state, Current(state)->AbilityCooldown(luaL_checkstring(state, 1)));
+    return 1;
+}
+int LuaScript::ApiSetAbilityResources(lua_State* state) {
+    lua_pushboolean(state, Current(state)->SetAbilityResources(
+        static_cast<float>(luaL_checknumber(state, 1)),
+        static_cast<float>(luaL_checknumber(state, 2))));
+    return 1;
+}
+int LuaScript::ApiWasAbilityEvent(lua_State* state) {
+    lua_pushboolean(state, Current(state)->WasAbilityEvent(luaL_checkstring(state, 1)));
+    return 1;
+}
+
 int LuaScript::ApiTraceSphere(lua_State* state) {
     LuaScript* script = Current(state);
     const glm::vec3 start(
@@ -845,6 +901,30 @@ int LuaScript::ApiSplineTangentAt(lua_State* state) {
     return 3;
 }
 
+int LuaScript::ApiSplineLength(lua_State* state) {
+    lua_pushnumber(state, Current(state)->SplineLength(
+        static_cast<ecs::Entity>(luaL_checkinteger(state, 1))));
+    return 1;
+}
+
+int LuaScript::ApiSplineClosestPoint(lua_State* state) {
+    PushVec3(state, Current(state)->SplineClosestPoint(
+        static_cast<ecs::Entity>(luaL_checkinteger(state, 1)),
+        glm::vec3(static_cast<float>(luaL_checknumber(state, 2)),
+                  static_cast<float>(luaL_checknumber(state, 3)),
+                  static_cast<float>(luaL_checknumber(state, 4)))));
+    return 3;
+}
+
+int LuaScript::ApiSplineClosestDistance(lua_State* state) {
+    lua_pushnumber(state, Current(state)->SplineClosestDistance(
+        static_cast<ecs::Entity>(luaL_checkinteger(state, 1)),
+        glm::vec3(static_cast<float>(luaL_checknumber(state, 2)),
+                  static_cast<float>(luaL_checknumber(state, 3)),
+                  static_cast<float>(luaL_checknumber(state, 4)))));
+    return 1;
+}
+
 int LuaScript::ApiDestroy(lua_State* state) {
     Current(state)->Destroy(static_cast<ecs::Entity>(luaL_checkinteger(state, 1)));
     return 0;
@@ -876,6 +956,18 @@ int LuaScript::ApiSpawnFromObject(lua_State* state) {
         Current(state)->SpawnFromObject(prototype, position);
     if (entity == ecs::kNull) lua_pushnil(state);
     else lua_pushinteger(state, static_cast<lua_Integer>(entity));
+    return 1;
+}
+
+int LuaScript::ApiGenerateScatterGraph(lua_State* state) {
+    const char* path = luaL_checkstring(state, 1);
+    const glm::vec3 offset(
+        static_cast<float>(luaL_optnumber(state, 2, 0.0)),
+        static_cast<float>(luaL_optnumber(state, 3, 0.0)),
+        static_cast<float>(luaL_optnumber(state, 4, 0.0)));
+    const std::uint32_t seed = static_cast<std::uint32_t>(
+        std::max<lua_Integer>(0, luaL_optinteger(state, 5, 0)));
+    lua_pushinteger(state, Current(state)->GenerateScatterGraph(path, offset, seed));
     return 1;
 }
 

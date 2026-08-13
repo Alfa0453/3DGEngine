@@ -3,12 +3,14 @@
 #include <initializer_list>
 #include <vector>
 #include <cstddef>
+#include <limits>
 
 namespace engine {
 // Describes one vertex attribute. For simplicity every attribute is a run of
 // 32-bit floats, which covers everything we need: position, colour, normal, UV.
 struct VertexAttribute {
     unsigned int componentCount;    // number of floats, e.g. 3 for a vec3
+    unsigned int location = std::numeric_limits<unsigned int>::max();
 };
 
 // Describes the in-memory layout of a single vertex as an ordered list of

@@ -50,6 +50,23 @@ add_executable(3DGEditor
     src/panels/ClipEditorPanel.cpp
     src/panels/AnimationGraphEditorPanel.cpp
     src/panels/MeshEditorPanel.cpp
+    src/panels/MeshGeometryOperations.cpp
+    src/panels/DecalPlacementPanel.cpp
+    src/panels/OptimizationAuditReport.cpp
+    src/panels/OptimizationAuditorPanel.cpp
+    src/panels/RagdollPhysicsPanel.cpp
+    src/panels/AnimationRetargetingPanel.cpp
+    src/panels/AbilityEditorPanel.cpp
+    src/panels/RuntimePropertySnapshot.cpp
+    src/panels/RuntimePropertyInspectorPanel.cpp
+    src/panels/AssetDependencyGraph.cpp
+    src/panels/AssetDependencyViewerPanel.cpp
+    src/panels/WeatherEditorPanel.cpp
+    src/panels/ProceduralBuildingPanel.cpp
+    src/panels/RoadGeneratorPanel.cpp
+    src/panels/LevelInstancePanel.cpp
+    src/panels/WorldPartitionPanel.cpp
+    src/panels/ProceduralScatterGraphPanel.cpp
     src/panels/TerrainCreatorPanel.cpp
     src/panels/ModularPlacementPanel.cpp
     src/panels/PrefabPalettePanel.cpp

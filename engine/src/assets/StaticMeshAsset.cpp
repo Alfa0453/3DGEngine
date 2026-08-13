@@ -122,11 +122,13 @@ bool PayloadSize(const StaticMeshAssetData& asset, std::uint64_t* size) {
             return false;
     }
     for (const StaticMeshSubMeshData& subMesh : asset.subMeshes) {
-        if (!AddSize(&total, sizeof(std::int32_t) + 2u * sizeof(std::uint64_t))
+        if (!AddSize(&total, sizeof(std::int32_t) + 3u * sizeof(std::uint64_t))
             || !AddSize(&total, static_cast<std::uint64_t>(subMesh.vertices.size())
                                     * sizeof(float))
             || !AddSize(&total, static_cast<std::uint64_t>(subMesh.indices.size())
-                                    * sizeof(std::uint32_t)))
+                                    * sizeof(std::uint32_t))
+            || !AddSize(&total, static_cast<std::uint64_t>(subMesh.vertexColors.size())
+                                    * sizeof(float)))
             return false;
     }
     *size = total;
@@ -174,11 +176,16 @@ bool WritePayload(std::ostream& output, const StaticMeshAssetData& asset) {
             return false;
         for (std::uint32_t value : subMesh.indices)
             if (!WriteUnsigned(output, value)) return false;
+        if (!WriteUnsigned(output, static_cast<std::uint64_t>(subMesh.vertexColors.size())))
+            return false;
+        for (float value : subMesh.vertexColors)
+            if (!WriteFloat(output, value)) return false;
     }
     return true;
 }
 
-bool ReadPayload(std::istream& input, StaticMeshAssetData* asset) {
+bool ReadPayload(std::istream& input, StaticMeshAssetData* asset,
+                 std::uint32_t assetVersion) {
     for (float& value : asset->minimum) if (!ReadFloat(input, &value)) return false;
     for (float& value : asset->maximum) if (!ReadFloat(input, &value)) return false;
     std::uint32_t materialCount = 0;
@@ -243,6 +250,17 @@ bool ReadPayload(std::istream& input, StaticMeshAssetData* asset) {
         subMesh.indices.resize(static_cast<std::size_t>(indexCount));
         for (std::uint32_t& value : subMesh.indices)
             if (!ReadUnsigned(input, &value)) return false;
+        if (assetVersion >= 2u) {
+            std::uint64_t colorFloatCount = 0;
+            if (!ReadUnsigned(input, &colorFloatCount)
+                || colorFloatCount > kMaximumElementCount
+                || colorFloatCount > static_cast<std::uint64_t>(
+                    std::numeric_limits<std::size_t>::max()))
+                return false;
+            subMesh.vertexColors.resize(static_cast<std::size_t>(colorFloatCount));
+            for (float& value : subMesh.vertexColors)
+                if (!ReadFloat(input, &value)) return false;
+        }
     }
     return true;
 }
@@ -444,9 +462,19 @@ bool ValidateStaticMeshAsset(const StaticMeshAssetData& asset, std::string* erro
         }
         const std::size_t vertexCount =
             subMesh.vertices.size() / kStaticMeshVertexStride;
+        if (!subMesh.vertexColors.empty()
+            && subMesh.vertexColors.size() != vertexCount * 4u) {
+            SetError(error, "Static mesh vertex paint count does not match its geometry.");
+            return false;
+        }
         for (float value : subMesh.vertices)
             if (!std::isfinite(value)) {
                 SetError(error, "Static mesh contains a non-finite vertex value.");
+                return false;
+            }
+        for (float value : subMesh.vertexColors)
+            if (!std::isfinite(value) || value < 0.0f || value > 1.0f) {
+                SetError(error, "Static mesh contains an invalid vertex paint value.");
                 return false;
             }
         for (std::uint32_t index : subMesh.indices)
@@ -530,12 +558,13 @@ bool LoadStaticMeshAsset(const std::string& path, StaticMeshAssetData* asset,
     StaticMeshAssetData loaded;
     if (!ReadNativeAssetHeader(input, &loaded.header, error)) return false;
     if (loaded.header.type != AssetType::StaticMesh
-        || loaded.header.assetVersion != kStaticMeshAssetVersion) {
+        || loaded.header.assetVersion < 1u
+        || loaded.header.assetVersion > kStaticMeshAssetVersion) {
         SetError(error, "Native asset is not a supported static mesh.");
         return false;
     }
     const std::streampos payloadStart = input.tellg();
-    if (!ReadPayload(input, &loaded)) {
+    if (!ReadPayload(input, &loaded, loaded.header.assetVersion)) {
         SetError(error, "Static mesh payload is invalid or truncated.");
         return false;
     }
@@ -546,6 +575,9 @@ bool LoadStaticMeshAsset(const std::string& path, StaticMeshAssetData* asset,
         SetError(error, "Static mesh payload size does not match its header.");
         return false;
     }
+    // Version 1 had the same geometry payload but no vertex-paint array.
+    // Upgrade it in memory; the next explicit save writes the version-2 form.
+    loaded.header.assetVersion = kStaticMeshAssetVersion;
     if (!ValidateStaticMeshAsset(loaded, error)) return false;
     *asset = std::move(loaded);
     SetError(error, {});

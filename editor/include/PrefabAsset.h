@@ -15,7 +15,7 @@
 // and packaged pipeline stay unchanged because a prefab bakes its values onto ordinary
 // scene objects, exactly like a character does.
 struct PrefabAsset {
-    int version = 2;
+    int version = 3;
     engine::AssetHandle assetId;
     std::string name = "Prefab";
 
@@ -47,7 +47,8 @@ struct PrefabAsset {
     // left untouched. Returns false if nothing is selected or it is locked.
     bool Apply(EditorScene& scene) const;
 
-    // Persisted as `3DG_PREFAB <version>` + the curated component block.
-    bool Save(const std::string& path, std::string* error = nullptr) const;
+    // Version 3 persists a stable asset ID and dependency metadata so prefabs
+    // participate in the project asset registry and dependency viewer.
+    bool Save(const std::string& path, std::string* error = nullptr);
     bool Load(const std::string& path, std::string* error = nullptr);
 };

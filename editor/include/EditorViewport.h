@@ -266,6 +266,11 @@ public:
                               float wallHeight,
                               const glm::mat4& viewProj) const;
 
+    void DrawBuildingFootprintGuide(const std::vector<glm::vec2>& footprint,
+                                    float baseHeight,
+                                    float totalHeight,
+                                    const glm::mat4& viewProj) const;
+
     void DrawBlockoutPreview(const glm::vec3& base,
                              const glm::vec3& dimensions,
                              float yawDegrees,

@@ -17,6 +17,7 @@ inline const char* ForPanel(EditorPanels::Panel panel) {
     case P::MaterialMaker: return Palette;
     case P::PhysicsStatus: return Settings;
     case P::GameplayDebug: return Settings;
+    case P::OptimizationAuditor: return Settings;
     case P::AnimationPreview: return Play;
     case P::Gizmo: return Edit;
     case P::CameraManager: return Screen;
@@ -30,6 +31,7 @@ inline const char* ForPanel(EditorPanels::Panel panel) {
     case P::ClipEditor: return Video;
     case P::GraphEditor: return Layers;
     case P::MeshEditor: return Layers;
+    case P::DecalPlacement: return Palette;
     case P::ModularPlacement: return Layers;
     case P::PrefabPalette: return Archive;
     case P::RoomBuilder: return World;
@@ -49,6 +51,17 @@ inline const char* ForPanel(EditorPanels::Panel panel) {
     case P::ScriptDebug: return Code;
     case P::WorldEditor: return World;
     case P::TerrainCreator: return World;
+    case P::RagdollPhysics: return Settings;
+    case P::AnimationRetargeting: return Link;
+    case P::AbilityEditor: return Star;
+    case P::RuntimePropertyInspector: return Settings;
+    case P::AssetDependencyViewer: return Link;
+    case P::WeatherEditor: return World;
+    case P::ProceduralBuilding: return World;
+    case P::RoadGenerator: return Link;
+    case P::LevelInstances: return Layers;
+    case P::WorldPartition: return World;
+    case P::ProceduralScatterGraph: return Leaf;
     case P::Count: break;
     }
     return Document;

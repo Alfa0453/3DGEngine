@@ -41,6 +41,13 @@ public:
         World,
         Foliage,
         Terrain,
+        Ragdoll,
+        AnimationRetarget,
+        Ability,
+        Weather,
+        Building,
+        Road,
+        ScatterGraph,
         Other
     };
 
@@ -81,6 +88,7 @@ public:
     bool ReimportSelectedSkeletalAssets(std::string* error);
     bool ReimportSelectedTexture(std::string* error);
     void SetAssetRegistry(engine::AssetRegistry* registry) { m_assetRegistry = registry; }
+    engine::AssetHandle AssetIdForPath(const std::string& relativePath) const;
     engine::StaticMeshImportOptions& StaticMeshImportSettings() {
         return m_staticMeshImportOptions;
     }
@@ -124,6 +132,7 @@ public:
     void SelectPrevious();
     void SelectFolderIndex(int index);
     void SelectIndex(int index);
+    bool RevealAsset(const std::string& relativePath, std::string* error);
 
     static const char* TypeName(Type type);
 

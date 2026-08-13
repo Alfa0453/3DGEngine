@@ -746,6 +746,26 @@ void EditorViewport::DrawRoomBuilderGuide(const glm::vec3& first,
     m_roomLines->Draw(viewProj, 2.0f, true);
 }
 
+void EditorViewport::DrawBuildingFootprintGuide(
+    const std::vector<glm::vec2>& footprint, float baseHeight,
+    float totalHeight, const glm::mat4& viewProj) const {
+    if (!m_roomLines || footprint.size() < 3) return;
+    m_roomLines->Clear();
+    const glm::vec3 baseColor(0.1f, 0.78f, 1.0f);
+    const float bottomY = baseHeight + 0.015f;
+    const float topY = bottomY + std::max(totalHeight, 0.05f);
+    for (std::size_t i = 0; i < footprint.size(); ++i) {
+        const glm::vec2& p = footprint[i];
+        const glm::vec2& q = footprint[(i + 1) % footprint.size()];
+        const glm::vec3 bottomA(p.x, bottomY, p.y), bottomB(q.x, bottomY, q.y);
+        const glm::vec3 topA(p.x, topY, p.y), topB(q.x, topY, q.y);
+        m_roomLines->AddLine(bottomA, bottomB, baseColor);
+        m_roomLines->AddLine(topA, topB, baseColor * 0.75f);
+        m_roomLines->AddLine(bottomA, topA, baseColor * 0.65f);
+    }
+    m_roomLines->Draw(viewProj, 2.25f, true);
+}
+
 void EditorViewport::DrawBlockoutPreview(const glm::vec3& base,
                                          const glm::vec3& dimensions,
                                          float yawDegrees,

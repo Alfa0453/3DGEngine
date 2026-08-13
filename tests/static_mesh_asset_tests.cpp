@@ -92,6 +92,11 @@ int main() {
               && sourceResult.triangleCount == 1,
           "OBJ conversion preserves geometry, materials, textures and statistics");
 
+    imported.subMeshes[0].vertexColors = {
+        1.0f, 0.0f, 0.0f, 1.0f,
+        0.0f, 1.0f, 0.0f, 0.5f,
+        0.0f, 0.0f, 1.0f, 0.0f};
+
     Check(engine::SaveStaticMeshAsset(destination.string(), imported, &error),
           "save versioned native static mesh");
     engine::StaticMeshAssetData loaded;
@@ -100,10 +105,18 @@ int main() {
               && loaded.header.payloadSize > 0
               && loaded.subMeshes[0].vertices == imported.subMeshes[0].vertices
               && loaded.subMeshes[0].indices == imported.subMeshes[0].indices
+              && loaded.subMeshes[0].vertexColors == imported.subMeshes[0].vertexColors
               && loaded.materials[0].diffuse == imported.materials[0].diffuse
               && loaded.textures.size() == 1
               && loaded.textures[0].rgba == imported.textures[0].rgba,
-          "native static mesh round-trips identity, geometry, materials and textures");
+          "native static mesh round-trips identity, geometry, materials, textures and vertex paint");
+
+    engine::StaticMeshAssetData invalidPaint = imported;
+    invalidPaint.subMeshes[0].vertexColors.pop_back();
+    Check(!engine::SaveStaticMeshAsset(
+              (contentRoot / "Meshes" / "InvalidPaint.3dgmesh").string(),
+              invalidPaint, &error),
+          "static mesh rejects vertex paint whose count does not match the mesh");
 
     engine::AssetRegistry registry;
     fs::remove(destination, ec);

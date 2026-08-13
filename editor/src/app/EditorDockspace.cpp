@@ -6462,6 +6462,18 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
         }
     }
 
+    if (selected->decal && ImGui::CollapsingHeader(
+            "Decal", ImGuiTreeNodeFlags_DefaultOpen)) {
+        float opacity = selected->decalOpacity;
+        float offset = selected->decalSurfaceOffset;
+        bool changed = false;
+        changed |= ImGui::SliderFloat("Opacity##Decal", &opacity, 0.0f, 1.0f, "%.2f");
+        changed |= ImGui::SliderFloat("Surface Offset##Decal", &offset,
+                                      0.001f, 0.08f, "%.3f m");
+        if (changed) context.scene->SetSelectedDecalSettings(opacity, offset);
+        ImGui::TextDisabled("Use W/E/R to position, rotate and resize this decal.");
+    }
+
     // Landscape authoring belongs to the dedicated Terrain Creator. Keep the
     // former scene-object controls dormant so selecting a placed landscape in
     // the level only exposes ordinary object controls in the Inspector.
@@ -7228,6 +7240,19 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
 
         const int selectedPoint = context.selectedSplinePoint ? *context.selectedSplinePoint : -1;
         if (selectedPoint >= 0 && selectedPoint < static_cast<int>(selected->splinePoints.size())) {
+            if (ImGui::SmallButton("Previous Point")) {
+                int previous = selectedPoint - 1;
+                if (previous < 0) previous = closed
+                    ? static_cast<int>(selected->splinePoints.size()) - 1 : 0;
+                if (context.selectedSplinePoint) *context.selectedSplinePoint = previous;
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Next Point")) {
+                int next = selectedPoint + 1;
+                if (next >= static_cast<int>(selected->splinePoints.size()))
+                    next = closed ? 0 : static_cast<int>(selected->splinePoints.size()) - 1;
+                if (context.selectedSplinePoint) *context.selectedSplinePoint = next;
+            }
             glm::vec3 pointRotation(0.0f);
             if (static_cast<std::size_t>(selectedPoint) < selected->splinePointRotations.size()) {
                 pointRotation = selected->splinePointRotations[static_cast<std::size_t>(selectedPoint)];
@@ -7282,6 +7307,99 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                 std::vector<glm::vec3> even;
                 authoredSpline.SampleUniform(static_cast<int>(selected->splinePoints.size()), even);
                 context.scene->SetSelectedSplinePoints(even);
+            }
+
+            ImGui::SeparatorText("Batch Point Tools");
+            static float splineSnapSize = 1.0f;
+            static float splineSimplifyTolerance = 0.15f;
+            ImGui::DragFloat("Grid Size##Spline", &splineSnapSize, 0.05f,
+                             0.01f, 100.0f, "%.2f m");
+            if (ImGui::Button("Snap All to Grid")) {
+                const float grid = std::max(splineSnapSize, 0.01f);
+                std::vector<glm::vec3> snapped = selected->splinePoints;
+                for (glm::vec3& point : snapped) point = glm::round(point / grid) * grid;
+                context.scene->SetSelectedSplinePoints(snapped);
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Align Heights")) {
+                const int anchor = context.selectedSplinePoint
+                    ? *context.selectedSplinePoint : -1;
+                float height = 0.0f;
+                if (anchor >= 0 && anchor < static_cast<int>(selected->splinePoints.size()))
+                    height = selected->splinePoints[static_cast<std::size_t>(anchor)].y;
+                else {
+                    for (const glm::vec3& point : selected->splinePoints) height += point.y;
+                    height /= static_cast<float>(selected->splinePoints.size());
+                }
+                std::vector<glm::vec3> aligned = selected->splinePoints;
+                for (glm::vec3& point : aligned) point.y = height;
+                context.scene->SetSelectedSplinePoints(aligned);
+            }
+
+            if (ImGui::Button("Subdivide Segments")) {
+                const auto& points = selected->splinePoints;
+                const auto& rotations = selected->splinePointRotations;
+                std::vector<glm::vec3> subdivided;
+                std::vector<glm::vec3> subdividedRotations;
+                const std::size_t segments = closed ? points.size() : points.size() - 1;
+                subdivided.reserve(points.size() + segments);
+                subdividedRotations.reserve(points.size() + segments);
+                for (std::size_t i = 0; i < points.size(); ++i) {
+                    const glm::vec3 rotation = i < rotations.size()
+                        ? rotations[i] : glm::vec3(0.0f);
+                    subdivided.push_back(points[i]);
+                    subdividedRotations.push_back(rotation);
+                    if (i < segments) {
+                        const std::size_t next = (i + 1) % points.size();
+                        const glm::vec3 nextRotation = next < rotations.size()
+                            ? rotations[next] : glm::vec3(0.0f);
+                        subdivided.push_back(glm::mix(points[i], points[next], 0.5f));
+                        subdividedRotations.push_back(glm::mix(rotation, nextRotation, 0.5f));
+                    }
+                }
+                context.scene->SetSelectedSplinePoints(subdivided);
+                context.scene->SetSelectedSplinePointRotations(subdividedRotations);
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Reset All Rotations")) {
+                context.scene->SetSelectedSplinePointRotations(
+                    std::vector<glm::vec3>(selected->splinePoints.size(), glm::vec3(0.0f)));
+            }
+
+            ImGui::DragFloat("Simplify Tolerance", &splineSimplifyTolerance,
+                             0.01f, 0.001f, 10.0f, "%.3f m");
+            if (ImGui::Button("Simplify Curve")) {
+                const auto& points = selected->splinePoints;
+                const auto& rotations = selected->splinePointRotations;
+                std::vector<glm::vec3> simplified;
+                std::vector<glm::vec3> simplifiedRotations;
+                const float toleranceSq = splineSimplifyTolerance * splineSimplifyTolerance;
+                for (std::size_t i = 0; i < points.size(); ++i) {
+                    const bool endpoint = !closed && (i == 0 || i + 1 == points.size());
+                    bool keep = endpoint || points.size() <= (closed ? 3u : 2u);
+                    if (!keep) {
+                        const glm::vec3 a = points[(i + points.size() - 1) % points.size()];
+                        const glm::vec3 b = points[(i + 1) % points.size()];
+                        const glm::vec3 ab = b - a;
+                        const float lengthSq = glm::dot(ab, ab);
+                        const float t = lengthSq > 1.0e-8f
+                            ? std::clamp(glm::dot(points[i] - a, ab) / lengthSq,
+                                         0.0f, 1.0f) : 0.0f;
+                        const glm::vec3 delta = points[i] - (a + ab * t);
+                        keep = glm::dot(delta, delta) > toleranceSq;
+                    }
+                    if (keep) {
+                        simplified.push_back(points[i]);
+                        simplifiedRotations.push_back(i < rotations.size()
+                            ? rotations[i] : glm::vec3(0.0f));
+                    }
+                }
+                const std::size_t minimum = closed ? 3u : 2u;
+                if (simplified.size() >= minimum && simplified.size() < points.size()) {
+                    context.scene->SetSelectedSplinePoints(simplified);
+                    context.scene->SetSelectedSplinePointRotations(simplifiedRotations);
+                    if (context.selectedSplinePoint) *context.selectedSplinePoint = -1;
+                }
             }
         }
         if (selected->splineType == 1) {
@@ -8424,6 +8542,9 @@ void DrawScriptApiBrowser(EditorDockspace::Context& /*context*/, bool* open) {
         {"Spline", "bool SetSplineClosed(entity, closed)", "Toggle open or closed-loop mode."},
         {"Spline", "vec3 SplinePositionAt(entity, 0..1)", "Sample an arc-length position."},
         {"Spline", "vec3 SplineTangentAt(entity, 0..1)", "Sample the normalized path direction."},
+        {"Spline", "float SplineLength(entity)", "Get the spline's world-space arc length."},
+        {"Spline", "vec3 SplineClosestPoint(entity, world)", "Find the nearest point on the curve."},
+        {"Spline", "float SplineClosestDistance(entity, world)", "Arc distance from the start to the nearest point."},
 
         {"Input", "bool Input().KeyDown(key)", "Key currently held."},
         {"Input", "bool Input().KeyPressed(key)", "Key pressed this frame."},
@@ -10390,8 +10511,28 @@ bool EditorDockspace::Draw(Context& context) {
             break; // drawn by EditorApp (owns the clip preview renderer)
         case EditorPanels::Panel::GraphEditor:
             break; // drawn by EditorApp (owns the graph preview renderer)
+        case EditorPanels::Panel::RuntimePropertyInspector:
+            break; // drawn by EditorApp (requires the isolated Play registry)
+        case EditorPanels::Panel::AssetDependencyViewer:
+            break; // drawn by EditorApp (owns the project asset registry)
+        case EditorPanels::Panel::WeatherEditor:
+            break; // drawn by EditorApp (owns weather authoring and scene application)
+        case EditorPanels::Panel::ProceduralBuilding:
+            break; // drawn by EditorApp (owns procedural building generation)
+        case EditorPanels::Panel::RoadGenerator:
+            break; // drawn by EditorApp (owns spline road generation)
+        case EditorPanels::Panel::LevelInstances:
+            break; // drawn by EditorApp (owns linked streamed-level instances)
+        case EditorPanels::Panel::WorldPartition:
+            break; // drawn by EditorApp (owns world partition authoring)
+        case EditorPanels::Panel::ProceduralScatterGraph:
+            break; // drawn by EditorApp (owns deterministic scatter authoring and baking)
         case EditorPanels::Panel::MeshEditor:
             break; // drawn by EditorApp (owns native mesh editing state)
+        case EditorPanels::Panel::DecalPlacement:
+            break; // drawn by EditorApp (owns surface picking and placement)
+        case EditorPanels::Panel::OptimizationAuditor:
+            break; // drawn by EditorApp (owns on-demand scene analysis)
         case EditorPanels::Panel::ModularPlacement:
             break; // drawn by EditorApp (owns viewport placement interaction)
         case EditorPanels::Panel::PrefabPalette:
@@ -10428,6 +10569,12 @@ bool EditorDockspace::Draw(Context& context) {
             break; // drawn by EditorApp::DrawWorldEditorPanel (owns the world authoring state)
         case EditorPanels::Panel::TerrainCreator:
             break; // drawn by EditorApp (owns reusable terrain authoring state)
+        case EditorPanels::Panel::RagdollPhysics:
+            break; // drawn by EditorApp (owns ragdoll asset authoring state)
+        case EditorPanels::Panel::AnimationRetargeting:
+            break; // drawn by EditorApp (owns retarget profile authoring state)
+        case EditorPanels::Panel::AbilityEditor:
+            break; // drawn by EditorApp (owns ability asset authoring state)
         case EditorPanels::Panel::PhysicsStatus:
             DrawPhysicsStatus(context, &open);
             break;

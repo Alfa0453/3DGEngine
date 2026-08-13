@@ -17,10 +17,19 @@
       <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\editor\Release\3DGLauncher.exe</FullPath>
     </ProjectOutput>
     <ProjectOutput>
+      <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\ability_system_tests.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
       <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\animation_movement_tests.exe</FullPath>
     </ProjectOutput>
     <ProjectOutput>
+      <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\animation_retarget_tests.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
       <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\asset_cooker_tests.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\asset_dependency_graph_tests.exe</FullPath>
     </ProjectOutput>
     <ProjectOutput>
       <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\asset_registry_tests.exe</FullPath>
@@ -47,7 +56,16 @@
       <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\image_decode_tests.exe</FullPath>
     </ProjectOutput>
     <ProjectOutput>
+      <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\level_instance_tests.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
       <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\material_shader_tests.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\mesh_geometry_operations_tests.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\optimization_auditor_tests.exe</FullPath>
     </ProjectOutput>
     <ProjectOutput>
       <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\particle_tests.exe</FullPath>
@@ -56,10 +74,25 @@
       <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\player.exe</FullPath>
     </ProjectOutput>
     <ProjectOutput>
+      <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\procedural_building_tests.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
       <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\project_script_tools_tests.exe</FullPath>
     </ProjectOutput>
     <ProjectOutput>
+      <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\ragdoll_asset_tests.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\road_generator_tests.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
       <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\runtime_ai_tests.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\runtime_property_snapshot_tests.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\scatter_graph_tests.exe</FullPath>
     </ProjectOutput>
     <ProjectOutput>
       <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\script_system_tests.exe</FullPath>
@@ -78,6 +111,12 @@
     </ProjectOutput>
     <ProjectOutput>
       <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\terrain_tests.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\weather_asset_tests.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\world_partition_tests.exe</FullPath>
     </ProjectOutput>
     <ProjectOutput>
       <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\world_streaming_tests.exe</FullPath>

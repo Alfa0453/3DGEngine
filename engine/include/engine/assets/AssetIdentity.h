@@ -57,7 +57,15 @@ enum class AssetType : std::uint32_t {
     Terrain,
     Font,
     World,  // a streamed world manifest referencing Scene levels (.3dgworld)
-    Foliage // instanced static-mesh foliage palette (.3dgfoliage)
+    Foliage, // instanced static-mesh foliage palette (.3dgfoliage)
+    Ragdoll,  // authored per-bone physics asset (.3dgragdoll)
+    AnimationRetarget, // skeleton mapping profile (.3dgretarget)
+    Ability, // data-driven gameplay ability (.3dgability)
+    Prefab, // reusable editor/runtime object template (.3dgprefab)
+    Weather, // reusable environment and precipitation preset (.3dgweather)
+    Building, // editable procedural building definition (.3dgbuilding)
+    Road, // editable spline road definition (.3dgroad)
+    ScatterGraph // deterministic procedural placement graph (.3dgscatter)
 };
 
 const char* AssetTypeName(AssetType type);

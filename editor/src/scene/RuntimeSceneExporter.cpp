@@ -100,7 +100,7 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         return engine::MakeAssetReference(
             &assetRegistry, contentRoot, assetPath, type).id;
     };
-    out << "3DGRuntimeScene 90 " << sceneId.ToString() << '\n';
+    out << "3DGRuntimeScene 91 " << sceneId.ToString() << '\n';
     out << "# Runtime export from 3DGEditor. Editor-only flags are omitted.\n";
     const EditorScene::Environment& environment = scene.GetEnvironment();
     out << "environment "
@@ -713,12 +713,26 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
     }
 
     for (const EditorScene::Object& object : scene.Objects()) {
-        if (object.materialParameterOverrides.empty()) continue;
+        if (object.materialParameterOverrides.empty() && !object.decal) continue;
+        const bool hasAuthoredOpacity =
+            object.materialParameterOverrides.find("Opacity") !=
+            object.materialParameterOverrides.end();
+        const std::size_t overrideCount = object.materialParameterOverrides.size()
+            + ((object.decal && !hasAuthoredOpacity) ? 1u : 0u);
         out << "material_overrides " << std::quoted(object.name) << ' '
-            << object.materialParameterOverrides.size();
-        for (const auto& overrideValue : object.materialParameterOverrides)
+            << overrideCount;
+        for (const auto& overrideValue : object.materialParameterOverrides) {
+            if (object.decal && overrideValue.first == "Opacity") {
+                out << ' ' << std::quoted(overrideValue.first)
+                    << ' ' << std::quoted(std::to_string(object.decalOpacity));
+                continue;
+            }
             out << ' ' << std::quoted(overrideValue.first)
                 << ' ' << std::quoted(overrideValue.second);
+        }
+        if (object.decal && !hasAuthoredOpacity)
+            out << ' ' << std::quoted(std::string("Opacity"))
+                << ' ' << std::quoted(std::to_string(object.decalOpacity));
         out << '\n';
     }
 
@@ -874,6 +888,8 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
             object.navAgentBrainAsset, object.navAgentBrainAssetId,
             engine::AssetType::BehaviorTree));
         addDependency(assetIdFor(
+            object.ragdoll.assetPath, {}, engine::AssetType::Ragdoll));
+        addDependency(assetIdFor(
             object.particleAssetPath, object.particleAssetId,
             engine::AssetType::Particle));
         addDependency(assetIdFor(
@@ -915,7 +931,8 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
             << object.ragdoll.linearDamping << ' '
             << object.ragdoll.angularDamping << ' '
             << object.ragdoll.deathImpulse << ' '
-            << object.ragdoll.maxBodies << '\n';
+            << object.ragdoll.maxBodies << ' '
+            << StoredPath(object.ragdoll.assetPath) << '\n';
     }
     for (const EditorScene::Environment::PostProcessEffect& effect :
          environment.postProcessEffects)

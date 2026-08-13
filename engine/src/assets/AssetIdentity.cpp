@@ -139,12 +139,20 @@ const char* AssetTypeName(AssetType type) {
         case AssetType::Font: return "Font";
         case AssetType::World: return "World";
         case AssetType::Foliage: return "Foliage";
+        case AssetType::Ragdoll: return "Ragdoll Physics";
+        case AssetType::AnimationRetarget: return "Animation Retarget Profile";
+        case AssetType::Ability: return "Ability";
+        case AssetType::Prefab: return "Prefab";
+        case AssetType::Weather: return "Weather";
+        case AssetType::Building: return "Procedural Building";
+        case AssetType::Road: return "Road";
+        case AssetType::ScatterGraph: return "Procedural Scatter Graph";
     }
     return "Unknown";
 }
 
 bool IsKnownAssetType(AssetType type) {
-    return type > AssetType::Unknown && type <= AssetType::Foliage;
+    return type > AssetType::Unknown && type <= AssetType::ScatterGraph;
 }
 
 const char* NativeAssetExtension(AssetType type) {
@@ -157,6 +165,7 @@ const char* NativeAssetExtension(AssetType type) {
         case AssetType::Terrain: return ".3dgterrain";
         case AssetType::World: return ".3dgworld";
         case AssetType::Foliage: return ".3dgfoliage";
+        case AssetType::ScatterGraph: return ".3dgscatter";
         default: return "";
     }
 }
@@ -171,6 +180,7 @@ AssetType NativeAssetTypeFromExtension(const std::string& extension) {
     if (lower == ".3dgterrain") return AssetType::Terrain;
     if (lower == ".3dgworld") return AssetType::World;
     if (lower == ".3dgfoliage") return AssetType::Foliage;
+    if (lower == ".3dgscatter") return AssetType::ScatterGraph;
     return AssetType::Unknown;
 }
 

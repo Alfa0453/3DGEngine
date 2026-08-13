@@ -41,6 +41,11 @@ struct LevelRef {
     glm::vec3       boundsMax{0.0f};
     float           loadRadius   = 60.0f;      // Distance rule: enter to load
     float           unloadRadius = 80.0f;      // Distance rule: exceed to unload (hysteresis)
+    bool            enabled = true;            // disabled placements stay authored but never load
+    std::string     dataLayer = "Default";     // editor/runtime grouping metadata
+    int             partitionX = 0;
+    int             partitionZ = 0;
+    int             streamingPriority = 0;
 
     // World-space centre of the placed bounds (for distance tests).
     glm::vec3 WorldBoundsCenter() const {
@@ -49,24 +54,35 @@ struct LevelRef {
     }
 };
 
+struct WorldPartitionSettings {
+    bool enabled = false;
+    float cellSize = 128.0f;
+    glm::vec2 origin{0.0f};
+    float defaultLoadRadius = 192.0f;
+    float defaultUnloadRadius = 256.0f;
+    std::vector<std::string> activeDataLayers;
+};
+
 // The authored/cooked world: a persistent level loaded once at boot, plus the
 // streamed levels the manager drives.
 struct WorldManifest {
     AssetHandle           id;
     std::string           persistentScenePath;  // cooked runtime scene loaded once at boot
     std::vector<LevelRef> levels;
+    WorldPartitionSettings partition;
 
     bool IsValid() const { return !persistentScenePath.empty(); }
 };
 
 // ---------------------------- text serialization -----------------------------
 //
-// Format (whitespace separated), version 1:
-//   3DGWorld 1 <assetId|->
+// Format (whitespace separated), version 3 (versions 1 and 2 remain readable):
+//   3DGWorld 3 <assetId|->
 //   persistent <quoted path|->
 //   levels <count>
 //   <quoted scenePath|-> <sceneId|-> <ruleInt> <16 transform floats>
 //       <boundsMin xyz> <boundsMax xyz> <loadRadius> <unloadRadius>
+//       <enabled> <quoted dataLayer>
 //   ... (one line per level)
 
 inline bool SaveWorldManifest(const std::string& path, const WorldManifest& manifest,
@@ -78,8 +94,16 @@ inline bool SaveWorldManifest(const std::string& path, const WorldManifest& mani
     }
     const auto id = [](const AssetHandle& h) { return h.Valid() ? h.ToString() : std::string("-"); };
     const auto tok = [](const std::string& s) { return s.empty() ? std::string("-") : s; };
-    out << "3DGWorld 1 " << id(manifest.id) << '\n';
+    out << "3DGWorld 3 " << id(manifest.id) << '\n';
     out << "persistent " << std::quoted(tok(manifest.persistentScenePath)) << '\n';
+    out << "partition " << manifest.partition.enabled << ' ' << manifest.partition.cellSize
+        << ' ' << manifest.partition.origin.x << ' ' << manifest.partition.origin.y
+        << ' ' << manifest.partition.defaultLoadRadius
+        << ' ' << manifest.partition.defaultUnloadRadius
+        << ' ' << manifest.partition.activeDataLayers.size();
+    for (const std::string& layer : manifest.partition.activeDataLayers)
+        out << ' ' << std::quoted(tok(layer));
+    out << '\n';
     out << "levels " << manifest.levels.size() << '\n';
     for (const LevelRef& level : manifest.levels) {
         out << std::quoted(tok(level.scenePath)) << ' ' << id(level.sceneId) << ' '
@@ -88,7 +112,10 @@ inline bool SaveWorldManifest(const std::string& path, const WorldManifest& mani
             for (int r = 0; r < 4; ++r) out << ' ' << level.worldTransform[c][r];
         out << ' ' << level.boundsMin.x << ' ' << level.boundsMin.y << ' ' << level.boundsMin.z
             << ' ' << level.boundsMax.x << ' ' << level.boundsMax.y << ' ' << level.boundsMax.z
-            << ' ' << level.loadRadius << ' ' << level.unloadRadius << '\n';
+            << ' ' << level.loadRadius << ' ' << level.unloadRadius
+            << ' ' << level.enabled << ' ' << std::quoted(tok(level.dataLayer))
+            << ' ' << level.partitionX << ' ' << level.partitionZ
+            << ' ' << level.streamingPriority << '\n';
     }
     if (!out) { if (error) *error = "write failed for '" + path + "'."; return false; }
     return true;
@@ -105,7 +132,7 @@ inline bool LoadWorldManifest(const std::string& path, WorldManifest* outManifes
     std::string magic, idText;
     int version = 0;
     in >> magic >> version >> idText;
-    if (magic != "3DGWorld" || version < 1 || version > 1) {
+    if (magic != "3DGWorld" || version < 1 || version > 3) {
         if (error) *error = "not a recognised .3dgworld file.";
         return false;
     }
@@ -121,6 +148,22 @@ inline bool LoadWorldManifest(const std::string& path, WorldManifest* outManifes
         return false;
     }
     manifest.persistentScenePath = (persistent == "-") ? std::string() : persistent;
+
+    if (version >= 3) {
+        std::size_t layerCount = 0;
+        if (!(in >> key >> manifest.partition.enabled >> manifest.partition.cellSize
+              >> manifest.partition.origin.x >> manifest.partition.origin.y
+              >> manifest.partition.defaultLoadRadius
+              >> manifest.partition.defaultUnloadRadius >> layerCount)
+            || key != "partition" || layerCount > 256) {
+            if (error) *error = "world manifest partition settings are invalid.";
+            return false;
+        }
+        for (std::size_t i = 0; i < layerCount; ++i) {
+            std::string layer; in >> std::quoted(layer);
+            manifest.partition.activeDataLayers.push_back(layer == "-" ? "Default" : layer);
+        }
+    }
 
     std::size_t count = 0;
     if (!(in >> key >> count) || key != "levels" || count > 4096) {
@@ -145,6 +188,13 @@ inline bool LoadWorldManifest(const std::string& path, WorldManifest* outManifes
         in >> level.boundsMin.x >> level.boundsMin.y >> level.boundsMin.z
            >> level.boundsMax.x >> level.boundsMax.y >> level.boundsMax.z
            >> level.loadRadius >> level.unloadRadius;
+        if (version >= 2) {
+            std::string layer;
+            in >> level.enabled >> std::quoted(layer);
+            level.dataLayer = layer == "-" ? "Default" : layer;
+        }
+        if (version >= 3)
+            in >> level.partitionX >> level.partitionZ >> level.streamingPriority;
         manifest.levels.push_back(level);
     }
     if (!in || manifest.persistentScenePath.empty()) {

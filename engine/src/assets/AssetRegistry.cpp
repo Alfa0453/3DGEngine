@@ -43,6 +43,13 @@ AssetType AuthoredAssetType(const std::filesystem::path& path) {
     if (extension == ".3dgaudio" || extension == ".3dgmixer"
         || extension == ".3dgmusic") return AssetType::Audio;
     if (extension == ".scene") return AssetType::Scene;
+    if (extension == ".3dgragdoll") return AssetType::Ragdoll;
+    if (extension == ".3dgretarget") return AssetType::AnimationRetarget;
+    if (extension == ".3dgability") return AssetType::Ability;
+    if (extension == ".3dgprefab") return AssetType::Prefab;
+    if (extension == ".3dgweather") return AssetType::Weather;
+    if (extension == ".3dgbuilding") return AssetType::Building;
+    if (extension == ".3dgroad") return AssetType::Road;
     return AssetType::Unknown;
 }
 
@@ -75,7 +82,14 @@ bool ReadAuthoredMetadata(const std::filesystem::path& path,
                 || magic == "3DGAUDIO_MIXER"
                 || magic == "3DGAUDIO_MUSIC"))
         || (type == AssetType::Scene
-            && (magic == "3DGEditorScene" || magic == "3DGRuntimeScene"));
+            && (magic == "3DGEditorScene" || magic == "3DGRuntimeScene"))
+        || (type == AssetType::Ragdoll && magic == "3DG_RAGDOLL")
+        || (type == AssetType::AnimationRetarget && magic == "3DG_RETARGET")
+        || (type == AssetType::Ability && magic == "3DG_ABILITY")
+        || (type == AssetType::Prefab && magic == "3DG_PREFAB")
+        || (type == AssetType::Weather && magic == "3DG_WEATHER")
+        || (type == AssetType::Building && magic == "3DG_BUILDING")
+        || (type == AssetType::Road && magic == "3DG_ROAD");
     if (!validMagic || version < 1) {
         SetError(error, "Authored asset metadata is invalid.");
         return false;

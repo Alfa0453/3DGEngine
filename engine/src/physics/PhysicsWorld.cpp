@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <limits>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -878,6 +879,24 @@ void SolveBall(ecs::Registry& reg, const Joint& j) {
     JointEnds e = ResolveEnds(reg, j);
     if (!e.ok) return;
     SolvePointConstraint(e);
+    if (!j.angularLimit || !e.tb) return;
+    glm::quat delta = glm::normalize(glm::inverse(j.referenceRelative)
+        * (glm::inverse(e.ta->rotation) * e.tb->rotation));
+    if (delta.w < 0.0f) delta = -delta;
+    const float angle = 2.0f * std::acos(glm::clamp(delta.w, -1.0f, 1.0f));
+    if (angle <= j.maxAngle || angle < 0.0001f) return;
+    const glm::vec3 localAxis = glm::normalize(glm::vec3(delta.x, delta.y, delta.z));
+    const glm::vec3 worldAxis = glm::normalize(glm::mat3_cast(e.ta->rotation) * localAxis);
+    const glm::mat3 IA = JointInvI(*e.ta, e.ra);
+    const glm::mat3 IB = JointInvI(*e.tb, e.rb);
+    const float k = glm::dot(worldAxis, (IA + IB) * worldAxis);
+    if (k <= 1.0e-9f) return;
+    const glm::vec3 wA = e.ra ? e.ra->angularVelocity : glm::vec3(0.0f);
+    const glm::vec3 wB = e.rb ? e.rb->angularVelocity : glm::vec3(0.0f);
+    const float speed = glm::dot(wB - wA, worldAxis);
+    const glm::vec3 impulse = (-(speed + (angle - j.maxAngle) * 0.2f) / k) * worldAxis;
+    if (e.ra) e.ra->angularVelocity -= IA * impulse;
+    if (e.rb) e.rb->angularVelocity += IB * impulse;
 }
 
 // Hinge joint: point constraint + keep the two hinge axes aligned (removing the
@@ -908,6 +927,28 @@ void SolveHinge(ecs::Registry& reg, const Joint& j) {
         const glm::vec3 L = (-(vn + 0.2f * Ct) / k) * t;
         if (e.ra) e.ra->angularVelocity -= IA * L;
         if (e.rb) e.rb->angularVelocity += IB * L;
+    }
+    if (j.angularLimit && e.tb) {
+        const glm::quat relative = glm::inverse(e.ta->rotation) * e.tb->rotation;
+        const glm::quat delta = glm::normalize(glm::inverse(j.referenceRelative) * relative);
+        const glm::vec3 axis = glm::normalize(j.axisA);
+        float angle = 2.0f * std::atan2(glm::dot(glm::vec3(delta.x, delta.y, delta.z), axis), delta.w);
+        while (angle > glm::pi<float>()) angle -= glm::two_pi<float>();
+        while (angle < -glm::pi<float>()) angle += glm::two_pi<float>();
+        const float target = glm::clamp(angle, j.minAngle, j.maxAngle);
+        const float error = angle - target;
+        if (std::fabs(error) > 0.001f) {
+            const glm::vec3 worldAxis = glm::normalize(glm::mat3_cast(e.ta->rotation) * axis);
+            const float k = glm::dot(worldAxis, Isum * worldAxis);
+            if (k > 1.0e-9f) {
+                const glm::vec3 wA = e.ra ? e.ra->angularVelocity : glm::vec3(0.0f);
+                const glm::vec3 wB = e.rb ? e.rb->angularVelocity : glm::vec3(0.0f);
+                const float speed = glm::dot(wB - wA, worldAxis);
+                const glm::vec3 impulse = (-(speed + error * 0.2f) / k) * worldAxis;
+                if (e.ra) e.ra->angularVelocity -= IA * impulse;
+                if (e.rb) e.rb->angularVelocity += IB * impulse;
+            }
+        }
     }
 }
 
@@ -1143,10 +1184,15 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
     if (m_touchingNow.bucket_count() < m_pairs.size())
         m_touchingNow.reserve(m_pairs.size());
     SolverBody* base = m_bodies.data();
+    std::unordered_set<std::uint64_t> noCollisionJoints;
+    for (const Joint& joint : m_joints)
+        if (!joint.collideConnected && joint.a != ecs::kNull && joint.b != ecs::kNull)
+            noCollisionJoints.insert(PairKey(joint.a, joint.b));
     for (const auto& pr : m_pairs) {
         SolverBody* A = &m_bodies[pr.first];
         SolverBody* B = &m_bodies[pr.second];
         if (priority(A->c->shape) > priority(B->c->shape)) std::swap(A, B);
+        if (noCollisionJoints.find(PairKey(A->e, B->e)) != noCollisionJoints.end()) continue;
         if (!LayersCollide(*A->c, *B->c)) continue;    // collision layer/mask filter
         // Trigger volumes are often moved directly by gameplay systems (for example
         // the character-controller proxy) and therefore do not need a RigidBody.

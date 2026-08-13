@@ -16,6 +16,7 @@
 #include <cctype>
 #include <cmath>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace engine {
@@ -50,6 +51,36 @@ glm::quat RotationFromUp(const glm::vec3& direction) {
         std::acos(cosine), glm::normalize(glm::cross(up, direction))));
 }
 
+glm::mat4 BlendTransform(const glm::mat4& a, const glm::mat4& b, float alpha) {
+    const glm::vec3 ta(a[3]), tb(b[3]);
+    const glm::vec3 sa(glm::length(glm::vec3(a[0])), glm::length(glm::vec3(a[1])),
+                       glm::length(glm::vec3(a[2])));
+    const glm::vec3 sb(glm::length(glm::vec3(b[0])), glm::length(glm::vec3(b[1])),
+                       glm::length(glm::vec3(b[2])));
+    return glm::translate(glm::mat4(1.0f), glm::mix(ta, tb, alpha))
+        * glm::mat4_cast(glm::slerp(RotationOf(a), RotationOf(b), alpha))
+        * glm::scale(glm::mat4(1.0f), glm::mix(sa, sb, alpha));
+}
+
+void CleanupRagdoll(ecs::Registry& registry, PhysicsWorld& physics,
+                    ecs::Entity owner, Ragdoll& ragdoll) {
+    for (const Ragdoll::Part& part : ragdoll.parts) {
+        physics.RemoveJointsFor(part.entity);
+        if (registry.Valid(part.entity)) registry.Destroy(part.entity);
+    }
+    if (ecs::Collider* root = registry.TryGet<ecs::Collider>(owner)) {
+        root->isTrigger = ragdoll.rootColliderWasTrigger;
+        root->mask = ragdoll.rootColliderMask;
+    }
+    ragdoll.parts.clear();
+    ragdoll.boneDrivers.clear();
+    ragdoll.boneFromBody.clear();
+    ragdoll.transitionPose.clear();
+    ragdoll.recovering = false;
+    ragdoll.pendingCleanup = false;
+    ragdoll.blendAlpha = 0.0f;
+}
+
 bool ImportantBone(const std::string& source) {
     std::string name = source;
     std::transform(name.begin(), name.end(), name.begin(),
@@ -64,6 +95,147 @@ bool ImportantBone(const std::string& source) {
     return false;
 }
 
+int FindBone(const Skeleton& skeleton, const std::string& name) {
+    for (std::size_t i = 0; i < skeleton.bones.size(); ++i)
+        if (skeleton.bones[i].name == name) return static_cast<int>(i);
+    return -1;
+}
+
+bool ActivateAuthored(ecs::Registry& registry, PhysicsWorld& physics,
+                      Ragdoll& ragdoll,
+                      const Skeleton& skeleton,
+                      const std::vector<glm::mat4>& boneWorld,
+                      const glm::vec3& inheritedVelocity) {
+    if (ragdoll.bodies.empty()) return false;
+
+    ragdoll.parts.clear();
+    std::vector<glm::mat4> bodyWorld;
+    std::vector<int> partForBone(skeleton.bones.size(), -1);
+    std::unordered_map<std::string, int> partForName;
+    float totalWeight = 0.0f;
+    for (const auto& body : ragdoll.bodies)
+        if (body.enabled && FindBone(skeleton, body.boneName) >= 0)
+            totalWeight += std::max(body.massWeight, 0.01f);
+    if (totalWeight <= 0.0f) return false;
+
+    for (const auto& definition : ragdoll.bodies) {
+        if (!definition.enabled) continue;
+        const int bone = FindBone(skeleton, definition.boneName);
+        if (bone < 0) continue;
+        const glm::quat offsetRotation = glm::quat(
+            glm::radians(definition.localRotationDegrees));
+        const glm::mat4 world = boneWorld[static_cast<std::size_t>(bone)]
+            * glm::translate(glm::mat4(1.0f), definition.localPosition)
+            * glm::mat4_cast(offsetRotation);
+        ecs::Transform transform;
+        transform.position = glm::vec3(world[3]);
+        transform.rotation = RotationOf(world);
+        transform.scale = glm::vec3(1.0f);
+        const ecs::Entity partEntity = registry.Create();
+        registry.Add<ecs::Transform>(partEntity, transform);
+
+        ecs::Collider collider;
+        switch (definition.shape) {
+        case RagdollBodyShape::Sphere:
+            collider = ecs::Collider::MakeSphere(std::max(definition.radius, 0.01f));
+            break;
+        case RagdollBodyShape::Box:
+            collider = ecs::Collider::MakeBox(glm::max(
+                definition.halfExtents, glm::vec3(0.01f)));
+            break;
+        case RagdollBodyShape::Capsule:
+            collider = ecs::Collider::MakeCapsule(
+                std::max(definition.radius, 0.01f),
+                std::max(definition.halfHeight, 0.0f));
+            break;
+        }
+        collider.layer = ecs::CollisionLayer::WorldDynamic;
+        collider.mask = ecs::CollisionLayer::Default
+            | ecs::CollisionLayer::WorldStatic
+            | ecs::CollisionLayer::CameraBlocker;
+        collider.friction = 0.72f;
+        collider.restitution = 0.05f;
+        registry.Add<ecs::Collider>(partEntity, collider);
+
+        const float mass = std::max(ragdoll.totalMass, 1.0f)
+            * std::max(definition.massWeight, 0.01f) / totalWeight;
+        ecs::RigidBody rigidBody = ecs::RigidBody::Dynamic(mass);
+        rigidBody.velocity = inheritedVelocity;
+        rigidBody.linearDamping = std::max(ragdoll.linearDamping, 0.0f);
+        rigidBody.angularDamping = std::max(ragdoll.angularDamping, 0.0f);
+        registry.Add<ecs::RigidBody>(partEntity, rigidBody);
+
+        const int part = static_cast<int>(ragdoll.parts.size());
+        ragdoll.parts.push_back({partEntity, bone, -1});
+        partForBone[static_cast<std::size_t>(bone)] = part;
+        partForName[definition.boneName] = part;
+        bodyWorld.push_back(world);
+    }
+    if (ragdoll.parts.size() < 2) {
+        for (const auto& part : ragdoll.parts) registry.Destroy(part.entity);
+        ragdoll.parts.clear();
+        return false;
+    }
+
+    for (const auto& definition : ragdoll.constraints) {
+        const auto parentIt = partForName.find(definition.parentBoneName);
+        const auto childIt = partForName.find(definition.childBoneName);
+        if (parentIt == partForName.end() || childIt == partForName.end()
+            || parentIt->second == childIt->second)
+            continue;
+        const int parentPart = parentIt->second;
+        const int childPart = childIt->second;
+        ragdoll.parts[static_cast<std::size_t>(childPart)].parentPart = parentPart;
+        const int childBone = ragdoll.parts[static_cast<std::size_t>(childPart)].bone;
+        const glm::vec3 joint = glm::vec3(
+            boneWorld[static_cast<std::size_t>(childBone)][3]);
+        const glm::vec3 localParent = glm::vec3(
+            glm::inverse(bodyWorld[static_cast<std::size_t>(parentPart)])
+            * glm::vec4(joint, 1.0f));
+        const glm::vec3 localChild = glm::vec3(
+            glm::inverse(bodyWorld[static_cast<std::size_t>(childPart)])
+            * glm::vec4(joint, 1.0f));
+        if (definition.type == RagdollJointType::Hinge) {
+            const glm::vec3 axis = glm::dot(definition.axis, definition.axis) > 1.0e-6f
+                ? glm::normalize(definition.axis) : glm::vec3(1.0f, 0.0f, 0.0f);
+            physics.AddHingeJoint(
+                ragdoll.parts[static_cast<std::size_t>(parentPart)].entity,
+                ragdoll.parts[static_cast<std::size_t>(childPart)].entity,
+                localParent, localChild, axis, axis,
+                definition.collideConnected, true,
+                glm::radians(definition.twistMinDegrees),
+                glm::radians(definition.twistMaxDegrees),
+                glm::inverse(RotationOf(bodyWorld[static_cast<std::size_t>(parentPart)]))
+                    * RotationOf(bodyWorld[static_cast<std::size_t>(childPart)]));
+        } else {
+            physics.AddBallJoint(
+                ragdoll.parts[static_cast<std::size_t>(parentPart)].entity,
+                ragdoll.parts[static_cast<std::size_t>(childPart)].entity,
+                localParent, localChild, definition.collideConnected, true,
+                glm::radians(definition.swingLimitDegrees),
+                glm::inverse(RotationOf(bodyWorld[static_cast<std::size_t>(parentPart)]))
+                    * RotationOf(bodyWorld[static_cast<std::size_t>(childPart)]));
+        }
+    }
+
+    ragdoll.boneDrivers.assign(skeleton.bones.size(), -1);
+    ragdoll.boneFromBody.assign(skeleton.bones.size(), glm::mat4(1.0f));
+    for (std::size_t bone = 0; bone < skeleton.bones.size(); ++bone) {
+        int cursor = static_cast<int>(bone);
+        int driver = -1;
+        while (cursor >= 0) {
+            driver = partForBone[static_cast<std::size_t>(cursor)];
+            if (driver >= 0) break;
+            cursor = skeleton.bones[static_cast<std::size_t>(cursor)].parent;
+        }
+        if (driver < 0) driver = 0;
+        ragdoll.boneDrivers[bone] = driver;
+        ragdoll.boneFromBody[bone] =
+            glm::inverse(bodyWorld[static_cast<std::size_t>(driver)]) * boneWorld[bone];
+    }
+    return true;
+}
+
 void ActivateFallback(ecs::Registry& registry, ecs::Entity entity,
                       Ragdoll& ragdoll) {
     ecs::RigidBody body = ecs::RigidBody::Dynamic(
@@ -76,8 +248,8 @@ void ActivateFallback(ecs::Registry& registry, ecs::Entity entity,
     ragdoll.active = true;
 }
 
-void Activate(ecs::Registry& registry, PhysicsWorld& physics,
-              ecs::Entity owner, Ragdoll& ragdoll) {
+void ActivateInternal(ecs::Registry& registry, PhysicsWorld& physics,
+                      ecs::Entity owner, Ragdoll& ragdoll) {
     ecs::Transform* character = registry.TryGet<ecs::Transform>(owner);
     AnimatedModel* animated = registry.TryGet<AnimatedModel>(owner);
     if (!character || !animated || !animated->model
@@ -93,6 +265,10 @@ void Activate(ecs::Registry& registry, PhysicsWorld& physics,
         ActivateFallback(registry, owner, ragdoll);
         return;
     }
+    ragdoll.transitionPose = animated->pose;
+    ragdoll.blendAlpha = 0.0f;
+    ragdoll.recovering = false;
+    ragdoll.pendingCleanup = false;
 
     const glm::mat4 characterWorld =
         character->Model() * animated->renderOffset;
@@ -100,6 +276,24 @@ void Activate(ecs::Registry& registry, PhysicsWorld& physics,
     for (std::size_t i = 0; i < skeleton.bones.size(); ++i)
         boneWorld[i] = BoneWorld(
             characterWorld, *animated, static_cast<int>(i));
+
+    glm::vec3 inheritedVelocity(0.0f);
+    if (const ecs::RigidBody* source = registry.TryGet<ecs::RigidBody>(owner))
+        inheritedVelocity = source->velocity;
+    if (!ragdoll.bodies.empty()) {
+        if (ActivateAuthored(registry, physics, ragdoll, skeleton,
+                             boneWorld, inheritedVelocity)) {
+            if (ecs::Collider* rootCollider = registry.TryGet<ecs::Collider>(owner)) {
+                ragdoll.rootColliderWasTrigger = rootCollider->isTrigger;
+                ragdoll.rootColliderMask = rootCollider->mask;
+                rootCollider->isTrigger = true;
+                rootCollider->mask = 0;
+            }
+            if (registry.Has<ecs::RigidBody>(owner)) registry.Remove<ecs::RigidBody>(owner);
+            ragdoll.active = true;
+            return;
+        }
+    }
 
     struct Candidate {
         int bone = -1;
@@ -135,10 +329,6 @@ void Activate(ecs::Registry& registry, PhysicsWorld& physics,
         return;
     }
 
-    glm::vec3 inheritedVelocity(0.0f);
-    if (const ecs::RigidBody* source =
-            registry.TryGet<ecs::RigidBody>(owner))
-        inheritedVelocity = source->velocity;
     if (ecs::Collider* rootCollider =
             registry.TryGet<ecs::Collider>(owner)) {
         ragdoll.rootColliderWasTrigger = rootCollider->isTrigger;
@@ -227,7 +417,7 @@ void Activate(ecs::Registry& registry, PhysicsWorld& physics,
                 * glm::vec4(joint, 1.0f));
         physics.AddBallJoint(
             ragdoll.parts[static_cast<std::size_t>(parentPart)].entity,
-            ragdoll.parts[i].entity, localParent, localChild);
+            ragdoll.parts[i].entity, localParent, localChild, false);
     }
 
     ragdoll.boneDrivers.assign(skeleton.bones.size(), -1);
@@ -260,15 +450,43 @@ void UpdateRagdollsBeforePhysics(
     ecs::Registry& registry, PhysicsWorld& physics) {
     registry.view<Health, Ragdoll>().each(
         [&](ecs::Entity entity, Health& health, Ragdoll& ragdoll) {
-            if (!ragdoll.enabled || ragdoll.active
-                || !ragdoll.activateOnDeath)
+            if (ragdoll.pendingCleanup) CleanupRagdoll(registry, physics, entity, ragdoll);
+            if (!ragdoll.enabled || !ragdoll.activateOnDeath)
                 return;
+            if (ragdoll.active) {
+                if (ragdoll.recoverWhenRevived && health.alive && !ragdoll.recovering) {
+                    if (AnimatedModel* animated = registry.TryGet<AnimatedModel>(entity))
+                        ragdoll.transitionPose = animated->pose;
+                    ragdoll.blendAlpha = 0.0f;
+                    ragdoll.recovering = true;
+                }
+                return;
+            }
             if (health.justDied || !health.alive || health.hp <= 0.0f)
-                Activate(registry, physics, entity, ragdoll);
+                ActivateInternal(registry, physics, entity, ragdoll);
         });
 }
 
-void UpdateRagdollsAfterPhysics(ecs::Registry& registry) {
+bool ActivateRagdoll(ecs::Registry& registry, PhysicsWorld& physics,
+                     ecs::Entity entity) {
+    Ragdoll* ragdoll = registry.TryGet<Ragdoll>(entity);
+    if (!ragdoll || !ragdoll->enabled || ragdoll->active) return false;
+    ActivateInternal(registry, physics, entity, *ragdoll);
+    return ragdoll->active;
+}
+
+bool RequestRagdollRecovery(ecs::Registry& registry, ecs::Entity entity) {
+    Ragdoll* ragdoll = registry.TryGet<Ragdoll>(entity);
+    if (!ragdoll || !ragdoll->active || ragdoll->recovering) return false;
+    if (AnimatedModel* animated = registry.TryGet<AnimatedModel>(entity))
+        ragdoll->transitionPose = animated->pose;
+    ragdoll->blendAlpha = 0.0f;
+    ragdoll->recovering = true;
+    return true;
+}
+
+void UpdateRagdollsAfterPhysics(ecs::Registry& registry, PhysicsWorld&,
+                                float deltaTime) {
     registry.view<ecs::Transform, AnimatedModel, Ragdoll>().each(
         [&](ecs::Entity, ecs::Transform& character,
             AnimatedModel& animated, Ragdoll& ragdoll) {
@@ -280,9 +498,11 @@ void UpdateRagdollsAfterPhysics(ecs::Registry& registry) {
             if (ragdoll.boneDrivers.size() != skeleton.bones.size()
                 || ragdoll.boneFromBody.size() != skeleton.bones.size())
                 return;
+            const std::vector<glm::mat4> animationTarget = animated.pose;
             const glm::mat4 inverseCharacter = glm::inverse(
                 character.Model() * animated.renderOffset);
-            animated.pose.resize(skeleton.bones.size());
+            std::vector<glm::mat4> ragdollPose = animated.pose;
+            ragdollPose.resize(skeleton.bones.size());
             for (std::size_t bone = 0;
                  bone < skeleton.bones.size(); ++bone) {
                 const int driver = ragdoll.boneDrivers[bone];
@@ -295,8 +515,30 @@ void UpdateRagdollsAfterPhysics(ecs::Registry& registry) {
                 if (!body) continue;
                 const glm::mat4 boneWorld =
                     body->Model() * ragdoll.boneFromBody[bone];
-                animated.pose[bone] = inverseCharacter * boneWorld
+                ragdollPose[bone] = inverseCharacter * boneWorld
                     * skeleton.bones[bone].offset;
+            }
+            const float duration = ragdoll.recovering
+                ? std::max(ragdoll.blendOutDuration, 0.0f)
+                : std::max(ragdoll.blendInDuration, 0.0f);
+            ragdoll.blendAlpha = duration <= 0.0001f ? 1.0f
+                : std::min(ragdoll.blendAlpha
+                    + std::max(deltaTime, 0.0f) / duration, 1.0f);
+            const std::vector<glm::mat4>& target = ragdoll.recovering
+                ? animationTarget : ragdollPose;
+            if (ragdoll.transitionPose.size() == skeleton.bones.size()
+                && target.size() == skeleton.bones.size()) {
+                animated.pose.resize(skeleton.bones.size());
+                for (std::size_t bone = 0; bone < skeleton.bones.size(); ++bone)
+                    animated.pose[bone] = BlendTransform(
+                        ragdoll.transitionPose[bone], target[bone], ragdoll.blendAlpha);
+            } else animated.pose = target;
+            if (ragdoll.blendAlpha >= 1.0f) {
+                ragdoll.transitionPose.clear();
+                if (ragdoll.recovering) {
+                    ragdoll.active = false;
+                    ragdoll.pendingCleanup = true;
+                }
             }
         });
 }

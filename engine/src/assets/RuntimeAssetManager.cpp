@@ -661,6 +661,23 @@ RuntimeAssetManager::ResolveReport RuntimeAssetManager::ResolveRegistryAssets(ec
             ++report.texturesAssigned;
         }
 
+        // Standard surface overrides are useful even without a custom shader.
+        // Decal actors use this path so their authored opacity survives runtime
+        // scene export instead of being limited to the editor preview.
+        if (const auto opacity = asset.parameterOverrides.find("Opacity");
+            opacity != asset.parameterOverrides.end()) {
+            try {
+                loaded.material.opacity =
+                    std::clamp(std::stof(opacity->second), 0.0f, 1.0f);
+                if (loaded.material.opacity < 0.999f)
+                    loaded.material.blendMode =
+                        ecs::PbrMaterial::BlendMode::Transparent;
+            } catch (const std::exception&) {
+                report.errors.push_back(
+                    "Invalid material Opacity override: " + opacity->second);
+            }
+        }
+
         loaded.material.albedoMap = loaded.albedoMap;
         loaded.material.normalMap = loaded.normalMap;
         loaded.material.metalRoughMap = loaded.metalRoughMap;

@@ -177,6 +177,8 @@ int main() {
     const engine::AssetHandle hudId = engine::AssetHandle::Generate();
     const engine::AssetHandle behaviorId = engine::AssetHandle::Generate();
     const engine::AssetHandle audioId = engine::AssetHandle::Generate();
+    const engine::AssetHandle prefabId = engine::AssetHandle::Generate();
+    const engine::AssetHandle weatherId = engine::AssetHandle::Generate();
     {
         std::ofstream(root / "Gameplay.hud")
             << "3DG_HUD 3 " << hudId.ToString()
@@ -187,6 +189,12 @@ int main() {
         std::ofstream(root / "Fire.3dgaudio")
             << "3DGAUDIO_CUE 2 " << audioId.ToString()
             << "\nASSET_DEPS 0\n";
+        std::ofstream(root / "Wizard.3dgprefab")
+            << "3DG_PREFAB 3 " << prefabId.ToString()
+            << "\n\"Wizard\"\nASSET_DEPS 1 " << referencedMesh.id.ToString() << '\n';
+        std::ofstream(root / "Rain.3dgweather")
+            << "3DG_WEATHER 1 " << weatherId.ToString()
+            << "\n\"Rain\"\nASSET_DEPS 0\n";
     }
     const fs::path corruptNativePath =
         root / "Assets" / "Meshes" / "Broken.3dgmesh";
@@ -211,8 +219,15 @@ int main() {
                   == engine::AssetType::BehaviorTree
           && references.Find(audioId)
               && references.Find(audioId)->type
-                  == engine::AssetType::Audio,
-          "Content synchronization registers HUD, behavior, and audio assets");
+                  == engine::AssetType::Audio
+          && references.Find(prefabId)
+              && references.Find(prefabId)->type == engine::AssetType::Prefab
+          && references.Find(prefabId)->dependencies.size() == 1
+          && references.Find(prefabId)->dependencies[0] == referencedMesh.id,
+          "Content synchronization registers HUD, behavior, audio, and prefab assets");
+    Check(references.Find(weatherId)
+              && references.Find(weatherId)->type == engine::AssetType::Weather,
+          "Content synchronization registers weather assets");
 
     fs::remove_all(root, ec);
     std::cout << "asset registry tests passed\n";

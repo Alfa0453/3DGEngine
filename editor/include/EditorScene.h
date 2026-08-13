@@ -193,6 +193,9 @@ public:
         Primitive primitive = Primitive::Cube;
         bool light = false;
         bool navMeshBoundsVolume = false;
+        bool decal = false;
+        float decalOpacity = 1.0f;
+        float decalSurfaceOffset = 0.012f;
         engine::ecs::Light lightData;
         bool visible = true;
         bool locked = false;
@@ -695,6 +698,10 @@ public:
     void AddFoliage(const engine::Mesh& placeholderMesh);
     void AddCube(const engine::Mesh& cube);
     void AddPlane(const engine::Mesh& plane);
+    void AddDecal(const engine::Mesh& plane, const glm::vec3& position,
+                  const glm::vec3& surfaceNormal, const glm::vec2& size,
+                  float rotationDegrees, float surfaceOffset, float opacity,
+                  const std::string& materialPath);
     void AddSphere(const engine::Mesh& sphere);
     void AddCapsule(const engine::Mesh& capsule);
     void AddCylinder(const engine::Mesh& cylinder);
@@ -733,6 +740,7 @@ public:
         const std::string& path, engine::AssetHandle id = {});
     bool SetSelectedMaterialParameterOverride(const std::string& name,
                                               const std::string& value);
+    bool SetSelectedDecalSettings(float opacity, float surfaceOffset);
     bool SetSelectedAnimationSettings(bool skeletalModel,
                                       int clipIndex,
                                       const std::string& clipName,

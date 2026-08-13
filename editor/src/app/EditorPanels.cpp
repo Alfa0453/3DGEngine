@@ -48,6 +48,7 @@ const char* PlainPanelName(EditorPanels::Panel panel)
     case Panel::MaterialMaker: return "Material Maker";
     case Panel::PhysicsStatus: return "Physics Status";
     case Panel::GameplayDebug: return "Gameplay Debug";
+    case Panel::OptimizationAuditor: return "Optimization Auditor";
     case Panel::AnimationPreview: return "Animation Preview";
     case Panel::Gizmo: return "Gizmo";
     case Panel::CameraManager: return "Camera Manager";
@@ -61,6 +62,7 @@ const char* PlainPanelName(EditorPanels::Panel panel)
     case Panel::ClipEditor: return "Clip Editor";
     case Panel::GraphEditor: return "Graph Editor";
     case Panel::MeshEditor: return "Mesh Editor";
+    case Panel::DecalPlacement: return "Decal Placement";
     case Panel::ModularPlacement: return "Modular Placement";
     case Panel::PrefabPalette: return "Prefab Palette";
     case Panel::RoomBuilder: return "Room Builder";
@@ -80,6 +82,17 @@ const char* PlainPanelName(EditorPanels::Panel panel)
     case Panel::ScriptDebug: return "Script Debug";
     case Panel::WorldEditor: return "World Editor";
     case Panel::TerrainCreator: return "Terrain Creator";
+    case Panel::RagdollPhysics: return "Ragdoll Physics Editor";
+    case Panel::AnimationRetargeting: return "Animation Retargeting";
+    case Panel::AbilityEditor: return "Ability Editor";
+    case Panel::RuntimePropertyInspector: return "Runtime Property Inspector";
+    case Panel::AssetDependencyViewer: return "Asset Dependency Viewer";
+    case Panel::WeatherEditor: return "Weather Editor";
+    case Panel::ProceduralBuilding: return "Procedural Building Tool";
+    case Panel::RoadGenerator: return "Road Generator";
+    case Panel::LevelInstances: return "Level Instance Tool";
+    case Panel::WorldPartition: return "World Partition Tool";
+    case Panel::ProceduralScatterGraph: return "Procedural Scatter Graph";
     case Panel::Count:     break;
     }
     return "Panel";
@@ -141,6 +154,7 @@ EditorPanels::Group EditorPanels::GroupOf(Panel panel)
     case Panel::CameraManager:
     case Panel::Hud:
     case Panel::WorldEditor:
+    case Panel::WeatherEditor:
         return Group::WorldGameplay;
 
     case Panel::MaterialMaker:
@@ -154,6 +168,9 @@ EditorPanels::Group EditorPanels::GroupOf(Panel panel)
     case Panel::CharacterEditor:
     case Panel::ClipEditor:
     case Panel::GraphEditor:
+    case Panel::RagdollPhysics:
+    case Panel::AnimationRetargeting:
+    case Panel::AbilityEditor:
         return Group::Animation;
 
     case Panel::AudioEditor:
@@ -167,6 +184,7 @@ EditorPanels::Group EditorPanels::GroupOf(Panel panel)
         return Group::AiScripting;
 
     case Panel::ModularPlacement:
+    case Panel::DecalPlacement:
     case Panel::PrefabPalette:
     case Panel::RoomBuilder:
     case Panel::ScatterPaint:
@@ -179,10 +197,18 @@ EditorPanels::Group EditorPanels::GroupOf(Panel panel)
     case Panel::Blockout:
     case Panel::Alignment:
     case Panel::SplineBuilder:
+    case Panel::ProceduralBuilding:
+    case Panel::RoadGenerator:
+    case Panel::LevelInstances:
+    case Panel::WorldPartition:
+    case Panel::ProceduralScatterGraph:
         return Group::LevelDesign;
 
     case Panel::PhysicsStatus:
     case Panel::GameplayDebug:
+    case Panel::OptimizationAuditor:
+    case Panel::RuntimePropertyInspector:
+    case Panel::AssetDependencyViewer:
         return Group::Debug;
 
     case Panel::Count:

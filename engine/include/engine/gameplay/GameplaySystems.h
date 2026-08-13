@@ -30,6 +30,9 @@ void UpdateHealth(ecs::Registry& registry);
 std::vector<ProjectileHit> UpdateProjectiles(ecs::Registry& registry, float dt);
 void UpdateProjectilesInPlace(ecs::Registry& registry, float dt);
 
+// Advance data-driven ability phases, cooldowns, charges, and effects.
+void UpdateAbilities(ecs::Registry& registry, float dt);
+
 // Drive every Attachment: set the child's Transform from its parent's Transform,
 // or from a parent bone when boneIndex >= 0 (needs the parent's AnimatedModel).
 void UpdateAttachments(ecs::Registry& registry);

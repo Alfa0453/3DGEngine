@@ -305,6 +305,16 @@ protected:
     ecs::Transform* FindTransform(const std::string& name);
     bool SocketTransform(const std::string& name, glm::mat4* world) const;
     bool SocketPosition(const std::string& name, glm::vec3* position) const;
+    bool ActivateRagdoll();
+    bool RecoverFromRagdoll();
+    bool GrantAbility(const std::string& assetPath);
+    bool ActivateAbility(const std::string& abilityName,
+                         ecs::Entity target = ecs::kNull);
+    bool CancelAbility();
+    bool IsAbilityActive(const std::string& abilityName = {}) const;
+    float AbilityCooldown(const std::string& abilityName) const;
+    bool SetAbilityResources(float mana, float stamina);
+    bool WasAbilityEvent(const std::string& eventName);
     int SplinePointCount(ecs::Entity spline) const;
     bool IsSplineClosed(ecs::Entity spline) const;
     bool SetSplineClosed(ecs::Entity spline, bool closed);
@@ -321,15 +331,26 @@ protected:
                            const glm::vec3& rotationDegrees = glm::vec3(0.0f));
     bool RemoveSplinePoint(ecs::Entity spline, int index);
     bool TranslateSpline(ecs::Entity spline, const glm::vec3& delta);
+    float SplineLength(ecs::Entity spline) const;
     glm::vec3 SplinePositionAt(ecs::Entity spline, float normalizedDistance,
                                const glm::vec3& fallback = glm::vec3(0.0f)) const;
     glm::vec3 SplineTangentAt(ecs::Entity spline, float normalizedDistance,
                               const glm::vec3& fallback = glm::vec3(0.0f, 0.0f, 1.0f)) const;
+    glm::vec3 SplineClosestPoint(ecs::Entity spline, const glm::vec3& world,
+                                 const glm::vec3& fallback = glm::vec3(0.0f)) const;
+    float SplineClosestDistance(ecs::Entity spline, const glm::vec3& world,
+                                float fallback = 0.0f) const;
     void DestroySelf();
     void Destroy(ecs::Entity entity);
     ecs::Entity SpawnEmpty(const std::string& name, const glm::vec3& position = glm::vec3(0.0f));
     ecs::Entity SpawnFromObject(const std::string& prototypeName,
                                 const glm::vec3& position);
+    // Evaluates an engine-owned .3dgscatter asset on a flat runtime plane and
+    // creates model entities. Returns the number generated. Terrain-aware
+    // authored results should be baked in the editor.
+    int GenerateScatterGraph(const std::string& assetPath,
+                             const glm::vec3& worldOffset = glm::vec3(0.0f),
+                             std::uint32_t seedOverride = 0);
     void RequestSceneLoad(const std::string& runtimeScenePath);
     // Manual level-streaming requests. The identifier may be the level's
     // manifest path, file name, or file stem.

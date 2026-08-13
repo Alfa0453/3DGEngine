@@ -10,6 +10,8 @@
 #include <glm/gtc/quaternion.hpp>
 
 #include <functional>
+#include <limits>
+#include <unordered_set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -62,6 +64,13 @@ public:
             level.ref = ref;
             m_levels.push_back(std::move(level));
         }
+        SetActiveDataLayers(manifest.partition.enabled
+            ? manifest.partition.activeDataLayers : std::vector<std::string>{});
+    }
+
+    void SetActiveDataLayers(const std::vector<std::string>& layers) {
+        m_activeDataLayers.clear();
+        m_activeDataLayers.insert(layers.begin(), layers.end());
     }
 
     void SetActivateHook(ActivateHook hook) { m_onActivate = std::move(hook); }
@@ -81,13 +90,17 @@ public:
                 return;
             }
         }
+        std::size_t candidate = m_levels.size();
+        int bestPriority = std::numeric_limits<int>::min();
         for (std::size_t i = 0; i < m_levels.size(); ++i) {
             StreamedLevel& level = m_levels[i];
-            if (level.state == State::Unloaded && ShouldLoad(level, viewerPos)) {
-                Activate(i, level, registry, assets, meshes);
-                return;
+            if (level.state == State::Unloaded && ShouldLoad(level, viewerPos)
+                && level.ref.streamingPriority > bestPriority) {
+                candidate = i; bestPriority = level.ref.streamingPriority;
             }
         }
+        if (candidate < m_levels.size())
+            Activate(candidate, m_levels[candidate], registry, assets, meshes);
     }
 
     // Explicit control for Manual-rule levels, doors, and script transitions.
@@ -95,6 +108,7 @@ public:
                    const RuntimeSceneLoader::PrimitiveMeshes& meshes) {
         if (index >= m_levels.size()) return false;
         StreamedLevel& level = m_levels[index];
+        if (!level.ref.enabled) return false;
         if (level.state == State::Active) return true;
         return Activate(index, level, registry, assets, meshes);
     }
@@ -125,6 +139,7 @@ public:
     // Manual levels keep their current state until LoadLevel/UnloadLevel is called.
     static bool WantsResident(const LevelRef& ref, bool currentlyActive,
                               const glm::vec3& viewer) {
+        if (!ref.enabled) return false;
         switch (ref.rule) {
             case LevelStreamRule::AlwaysLoaded:
                 return true;
@@ -142,10 +157,14 @@ public:
 
 private:
     bool ShouldLoad(const StreamedLevel& level, const glm::vec3& viewer) const {
-        return WantsResident(level.ref, false, viewer);
+        return LayerEnabled(level.ref) && WantsResident(level.ref, false, viewer);
     }
     bool ShouldUnload(const StreamedLevel& level, const glm::vec3& viewer) const {
-        return !WantsResident(level.ref, true, viewer);
+        return !LayerEnabled(level.ref) || !WantsResident(level.ref, true, viewer);
+    }
+    bool LayerEnabled(const LevelRef& ref) const {
+        return m_activeDataLayers.empty() || ref.dataLayer.empty()
+            || m_activeDataLayers.count(ref.dataLayer) != 0;
     }
 
     struct Placement {
@@ -316,6 +335,7 @@ private:
     std::vector<StreamedLevel> m_levels;
     std::string                m_worldDir;
     std::string                m_lastError;
+    std::unordered_set<std::string> m_activeDataLayers;
     ActivateHook               m_onActivate;
     BeforeDeactivateHook       m_beforeDeactivate;
     DeactivateHook             m_onDeactivate;

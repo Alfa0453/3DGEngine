@@ -79,11 +79,33 @@ Model Model::FromFile(const std::string& path) {
                 source.rgba.data(), static_cast<int>(source.width),
                 static_cast<int>(source.height)));
         }
-        const VertexLayout layout{{3}, {3}, {2}, {3}};
+        // Vertex paint lives at location 10, outside the PBR renderer's
+        // instance attribute range (3..9).
+        const VertexLayout layout{{3}, {3}, {2}, {3}, {4, 10}};
         model.m_subMeshes.reserve(asset.subMeshes.size());
         for (const StaticMeshSubMeshData& source : asset.subMeshes) {
+            const std::size_t vertexCount =
+                source.vertices.size() / kStaticMeshVertexStride;
+            std::vector<float> paintedVertices;
+            paintedVertices.reserve(vertexCount * (kStaticMeshVertexStride + 4u));
+            for (std::size_t vertex = 0; vertex < vertexCount; ++vertex) {
+                const std::size_t offset = vertex * kStaticMeshVertexStride;
+                paintedVertices.insert(paintedVertices.end(),
+                    source.vertices.begin() + static_cast<std::ptrdiff_t>(offset),
+                    source.vertices.begin() + static_cast<std::ptrdiff_t>(
+                        offset + kStaticMeshVertexStride));
+                if (source.vertexColors.size() == vertexCount * 4u) {
+                    const std::size_t color = vertex * 4u;
+                    paintedVertices.insert(paintedVertices.end(),
+                        source.vertexColors.begin() + static_cast<std::ptrdiff_t>(color),
+                        source.vertexColors.begin() + static_cast<std::ptrdiff_t>(color + 4u));
+                } else {
+                    paintedVertices.insert(paintedVertices.end(),
+                        {1.0f, 1.0f, 1.0f, 1.0f});
+                }
+            }
             model.m_subMeshes.push_back(
-                SubMesh{Mesh(source.vertices, source.indices, layout), source.material});
+                SubMesh{Mesh(paintedVertices, source.indices, layout), source.material});
         }
         model.m_min = {
             asset.minimum[0], asset.minimum[1], asset.minimum[2]};

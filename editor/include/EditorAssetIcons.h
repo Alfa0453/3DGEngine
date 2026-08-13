@@ -50,6 +50,7 @@ inline AssetStyle ForAsset(EditorAssets::Type type) {
     case EditorAssets::Type::Script:
         return {Code, {0.67f, 0.52f, 1.0f, 1.0f}};
     case EditorAssets::Type::Foliage:
+    case EditorAssets::Type::ScatterGraph:
         return {Leaf, {0.31f, 0.84f, 0.38f, 1.0f}};
     case EditorAssets::Type::Terrain:
         return {World, {0.48f, 0.78f, 0.34f, 1.0f}};

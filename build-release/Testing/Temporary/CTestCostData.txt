@@ -2,7 +2,18 @@ shader_asset_regression 2 0.142775
 material_shader_regression 3 0.0106025
 forge_material_importer_regression 8 0.00403031
 image_decode_regression 2 0.00472755
-asset_registry_regression 2 0.0083637
+asset_registry_regression 6 0.00206515
 editor_assets_regression 4 0.0228024
 camera_manager_regression 2 0.0082241
+optimization_auditor_regression 0 0
+procedural_building_regression 2 0.0043977
+road_generator_regression 1 0.0093496
+level_instance_regression 4 0.0017186
+world_streaming_regression 2 0.003483
+world_partition_regression 2 0.00395165
+static_mesh_asset_regression 2 0.0205982
+mesh_geometry_operations_regression 2 0.00475315
+script_system_regression 2 0.00398715
+foliage_asset_regression 2 0.0038748
+scatter_graph_regression 2 0.0035608
 ---

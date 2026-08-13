@@ -62,6 +62,19 @@ endif()
 
 add_test(NAME camera_manager_regression COMMAND camera_manager_tests)
 
+add_executable(optimization_auditor_tests
+    optimization_auditor_tests.cpp
+    ${CMAKE_SOURCE_DIR}/editor/src/panels/OptimizationAuditReport.cpp)
+target_include_directories(optimization_auditor_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/editor/include)
+target_link_libraries(optimization_auditor_tests PRIVATE engine)
+if(MSVC)
+    target_compile_options(optimization_auditor_tests PRIVATE /W4)
+else()
+    target_compile_options(optimization_auditor_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME optimization_auditor_regression COMMAND optimization_auditor_tests)
+
 add_executable(audio_system_tests
     audio_system_tests.cpp)
 target_link_libraries(audio_system_tests PRIVATE engine)
@@ -202,6 +215,121 @@ else()
 endif()
 add_test(NAME foliage_asset_regression COMMAND foliage_asset_tests)
 
+add_executable(ragdoll_asset_tests ragdoll_asset_tests.cpp)
+target_link_libraries(ragdoll_asset_tests PRIVATE engine)
+if(MSVC)
+    target_compile_options(ragdoll_asset_tests PRIVATE /W4)
+else()
+    target_compile_options(ragdoll_asset_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME ragdoll_asset_regression COMMAND ragdoll_asset_tests)
+
+add_executable(animation_retarget_tests animation_retarget_tests.cpp)
+target_link_libraries(animation_retarget_tests PRIVATE engine)
+if(MSVC)
+    target_compile_options(animation_retarget_tests PRIVATE /W4)
+else()
+    target_compile_options(animation_retarget_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME animation_retarget_regression COMMAND animation_retarget_tests)
+
+add_executable(ability_system_tests ability_system_tests.cpp)
+target_link_libraries(ability_system_tests PRIVATE engine)
+if(MSVC)
+    target_compile_options(ability_system_tests PRIVATE /W4)
+else()
+    target_compile_options(ability_system_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME ability_system_regression COMMAND ability_system_tests)
+
+add_executable(runtime_property_snapshot_tests
+    runtime_property_snapshot_tests.cpp
+    ${CMAKE_SOURCE_DIR}/editor/src/panels/RuntimePropertySnapshot.cpp)
+target_include_directories(runtime_property_snapshot_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/editor/include)
+target_link_libraries(runtime_property_snapshot_tests PRIVATE engine)
+if(MSVC)
+    target_compile_options(runtime_property_snapshot_tests PRIVATE /W4)
+else()
+    target_compile_options(runtime_property_snapshot_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME runtime_property_snapshot_regression COMMAND runtime_property_snapshot_tests)
+
+add_executable(asset_dependency_graph_tests
+    asset_dependency_graph_tests.cpp
+    ${CMAKE_SOURCE_DIR}/editor/src/panels/AssetDependencyGraph.cpp)
+target_include_directories(asset_dependency_graph_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/editor/include)
+target_link_libraries(asset_dependency_graph_tests PRIVATE engine)
+if(MSVC)
+    target_compile_options(asset_dependency_graph_tests PRIVATE /W4)
+else()
+    target_compile_options(asset_dependency_graph_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME asset_dependency_graph_regression COMMAND asset_dependency_graph_tests)
+
+add_executable(weather_asset_tests weather_asset_tests.cpp)
+target_link_libraries(weather_asset_tests PRIVATE engine)
+if(MSVC)
+    target_compile_options(weather_asset_tests PRIVATE /W4)
+else()
+    target_compile_options(weather_asset_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME weather_asset_regression COMMAND weather_asset_tests)
+
+add_executable(procedural_building_tests
+    procedural_building_tests.cpp
+    ${CMAKE_SOURCE_DIR}/editor/src/panels/ProceduralBuildingPanel.cpp
+    ${CMAKE_SOURCE_DIR}/editor/src/app/EditorPanels.cpp)
+target_include_directories(procedural_building_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/editor/include)
+target_link_libraries(procedural_building_tests PRIVATE engine)
+if(MSVC)
+    target_compile_options(procedural_building_tests PRIVATE /W4)
+else()
+    target_compile_options(procedural_building_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME procedural_building_regression COMMAND procedural_building_tests)
+
+add_executable(road_generator_tests
+    road_generator_tests.cpp
+    ${CMAKE_SOURCE_DIR}/editor/src/panels/RoadGeneratorPanel.cpp
+    ${CMAKE_SOURCE_DIR}/editor/src/app/EditorPanels.cpp)
+target_include_directories(road_generator_tests PRIVATE ${CMAKE_SOURCE_DIR}/editor/include)
+target_link_libraries(road_generator_tests PRIVATE engine)
+if(MSVC)
+    target_compile_options(road_generator_tests PRIVATE /W4)
+else()
+    target_compile_options(road_generator_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME road_generator_regression COMMAND road_generator_tests)
+
+add_executable(level_instance_tests
+    level_instance_tests.cpp
+    ${CMAKE_SOURCE_DIR}/editor/src/panels/LevelInstancePanel.cpp
+    ${CMAKE_SOURCE_DIR}/editor/src/app/EditorPanels.cpp)
+target_include_directories(level_instance_tests PRIVATE ${CMAKE_SOURCE_DIR}/editor/include)
+target_link_libraries(level_instance_tests PRIVATE engine)
+if(MSVC)
+    target_compile_options(level_instance_tests PRIVATE /W4)
+else()
+    target_compile_options(level_instance_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME level_instance_regression COMMAND level_instance_tests)
+
+add_executable(world_partition_tests
+    world_partition_tests.cpp
+    ${CMAKE_SOURCE_DIR}/editor/src/panels/WorldPartitionPanel.cpp
+    ${CMAKE_SOURCE_DIR}/editor/src/app/EditorPanels.cpp)
+target_include_directories(world_partition_tests PRIVATE ${CMAKE_SOURCE_DIR}/editor/include)
+target_link_libraries(world_partition_tests PRIVATE engine)
+if(MSVC)
+    target_compile_options(world_partition_tests PRIVATE /W4)
+else()
+    target_compile_options(world_partition_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME world_partition_regression COMMAND world_partition_tests)
+
 add_executable(skeletal_asset_tests
     skeletal_asset_tests.cpp)
 target_link_libraries(skeletal_asset_tests PRIVATE engine)
@@ -223,3 +351,25 @@ else()
     target_compile_options(forge_material_importer_tests PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 add_test(NAME forge_material_importer_regression COMMAND forge_material_importer_tests)
+
+add_executable(mesh_geometry_operations_tests
+    mesh_geometry_operations_tests.cpp
+    ${CMAKE_SOURCE_DIR}/editor/src/panels/MeshGeometryOperations.cpp)
+target_include_directories(mesh_geometry_operations_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/editor/include)
+target_link_libraries(mesh_geometry_operations_tests PRIVATE engine)
+if(MSVC)
+    target_compile_options(mesh_geometry_operations_tests PRIVATE /W4)
+else()
+    target_compile_options(mesh_geometry_operations_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME mesh_geometry_operations_regression COMMAND mesh_geometry_operations_tests)
+
+add_executable(scatter_graph_tests scatter_graph_tests.cpp)
+target_link_libraries(scatter_graph_tests PRIVATE engine)
+if(MSVC)
+    target_compile_options(scatter_graph_tests PRIVATE /W4)
+else()
+    target_compile_options(scatter_graph_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME scatter_graph_regression COMMAND scatter_graph_tests)

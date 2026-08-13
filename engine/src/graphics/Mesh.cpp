@@ -20,6 +20,9 @@ Mesh::Mesh(const std::vector<float> &vertices, const std::vector<std::uint32_t> 
 
     glGenVertexArrays(1, &m_vao);
     glBindVertexArray(m_vao);
+    // Optional vertex-paint shaders read location 10. Meshes without that
+    // stream receive neutral white instead of OpenGL's black generic value.
+    glVertexAttrib4f(10, 1.0f, 1.0f, 1.0f, 1.0f);
 
     glGenBuffers(1, &m_vbo);
     glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
@@ -36,14 +39,16 @@ Mesh::Mesh(const std::vector<float> &vertices, const std::vector<std::uint32_t> 
     // doubles as the shader location (matching layout(location = N) in GLSL).
     const GLsizei stride = static_cast<GLsizei>(layout.Stride());
     std::size_t   offset = 0;
-    unsigned int location = 0;
+    unsigned int orderedLocation = 0;
     for (const VertexAttribute& attr : layout.Attributes()) {
+        const unsigned int location = attr.location == std::numeric_limits<unsigned int>::max()
+            ? orderedLocation : attr.location;
         glEnableVertexAttribArray(location);
         glVertexAttribPointer(location, static_cast<GLint>(attr.componentCount),
                               GL_FLOAT, GL_FALSE, stride,
                               reinterpret_cast<const void*>(offset));
         offset += attr.componentCount * sizeof(float);
-        ++location;
+        ++orderedLocation;
     }
 
     glBindVertexArray(0);  // leave no VAO bound
@@ -163,6 +168,7 @@ void Mesh::DrawLod(int level) const
 void Mesh::BindLod(int level) const
 {
     glBindVertexArray(m_vao);
+    glVertexAttrib4f(10, 1.0f, 1.0f, 1.0f, 1.0f);
     if (level > 0 && !m_lodEbos.empty()) {
         const int clamped = std::clamp(
             level - 1, 0, static_cast<int>(m_lodEbos.size()) - 1);
@@ -193,14 +199,16 @@ void Mesh::Upload(const std::vector<float>& vertices,
 
     const GLsizei stride = static_cast<GLsizei>(layout.Stride());
     std::size_t   offset = 0;
-    unsigned int  location = 0;
+    unsigned int  orderedLocation = 0;
     for (const VertexAttribute& attr : layout.Attributes()) {
+        const unsigned int location = attr.location == std::numeric_limits<unsigned int>::max()
+            ? orderedLocation : attr.location;
         glEnableVertexAttribArray(location);
         glVertexAttribPointer(location, static_cast<GLint>(attr.componentCount),
                               GL_FLOAT, GL_FALSE, stride,
                               reinterpret_cast<const void*>(offset));
         offset += attr.componentCount * sizeof(float);
-        ++location;
+        ++orderedLocation;
     }
 
     const std::size_t floatsPerVertex =

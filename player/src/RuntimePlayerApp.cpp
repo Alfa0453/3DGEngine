@@ -2316,7 +2316,7 @@ void RuntimePlayerApp::OnFixedUpdate(float h) {
     if (!engine::GameMode::Instance().IsPlaying()) {
         engine::UpdateRagdollsBeforePhysics(m_registry, m_physics);
         m_physics.Step(m_registry, gameStep);
-        engine::UpdateRagdollsAfterPhysics(m_registry);
+        engine::UpdateRagdollsAfterPhysics(m_registry, m_physics, gameStep);
         return;
     }
     const bool inputEnabled =
@@ -2427,6 +2427,7 @@ void RuntimePlayerApp::OnFixedUpdate(float h) {
         &m_cameraShake, &m_cameraDirector, &engine::GameMode::Instance(),
         &m_physics);
     UpdateAI(gameStep);
+    engine::UpdateAbilities(m_registry, gameStep);
     engine::UpdateProjectilesInPlace(m_registry, gameStep);
     engine::ecs::UpdateGameplay(
         m_registry, gameStep);                         // rotators + movers
@@ -2455,7 +2456,7 @@ void RuntimePlayerApp::OnFixedUpdate(float h) {
     engine::UpdateAnimations(m_registry, gameStep);
     ApplyWaterBuoyancy(gameStep);
     m_physics.Step(m_registry, gameStep);
-    engine::UpdateRagdollsAfterPhysics(m_registry);
+    engine::UpdateRagdollsAfterPhysics(m_registry, m_physics, gameStep);
     ProcessLevelPhysicsEvents();
     m_runtimeAudio.ProcessCollisionEvents(m_registry, m_physics.Events());
     engine::ProcessParticleCollisionEvents(m_registry, m_physics.Events());

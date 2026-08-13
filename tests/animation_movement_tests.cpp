@@ -500,6 +500,23 @@ void TestDisabledRagdollDoesNotActivate() {
           "disabled ragdoll does not add a physics body");
 }
 
+void TestRagdollRecoveryCanBeRequested() {
+    engine::ecs::Registry registry;
+    const engine::ecs::Entity character = registry.Create();
+    registry.Add<engine::ecs::Transform>(character, {});
+    registry.Add<engine::ecs::Collider>(
+        character, engine::ecs::Collider::MakeCapsule(0.4f, 0.5f));
+    registry.Add<engine::Ragdoll>(character, {});
+
+    engine::PhysicsWorld physics;
+    Check(engine::ActivateRagdoll(registry, physics, character),
+          "scripts can explicitly activate a ragdoll");
+    Check(engine::RequestRagdollRecovery(registry, character),
+          "scripts can request recovery from an active ragdoll");
+    Check(registry.Get<engine::Ragdoll>(character).recovering,
+          "recovery request starts animation blending");
+}
+
 } // namespace
 
 int main() {
@@ -523,6 +540,7 @@ int main() {
     TestGameplayCannotToggleCameraMode();
     TestRagdollActivatesOnDeathWithoutSkeleton();
     TestDisabledRagdollDoesNotActivate();
+    TestRagdollRecoveryCanBeRequested();
 
     if (g_failures != 0) {
         std::cerr << g_failures << " animation movement test(s) failed\n";

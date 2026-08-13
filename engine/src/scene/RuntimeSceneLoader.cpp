@@ -2,6 +2,7 @@
 #include "engine/assets/ParticleAsset.h"
 #include "engine/assets/AssetReference.h"
 #include "engine/assets/AssetRegistry.h"
+#include "engine/assets/RagdollAsset.h"
 
 #include "engine/ecs/Components.h"
 #include "engine/ecs/Registry.h"
@@ -133,11 +134,11 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             return false;
         }
     }
-    if (magic != "3DGRuntimeScene" || version < 1 || version > 90) {
+    if (magic != "3DGRuntimeScene" || version < 1 || version > 91) {
         if (error) {
             *error = "Runtime scene file has an unknown format: "
                 + magic + " " + std::to_string(version)
-                + " (expected 3DGRuntimeScene 1..90).";
+                + " (expected 3DGRuntimeScene 1..91).";
         }
         return false;
     }
@@ -161,6 +162,18 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                    >> ragdoll.totalMass >> ragdoll.bodyRadiusScale
                    >> ragdoll.linearDamping >> ragdoll.angularDamping
                    >> ragdoll.deathImpulse >> ragdoll.maxBodies;
+            if (version >= 91) {
+                record >> std::quoted(ragdoll.assetPath);
+                if (ragdoll.assetPath == "-") ragdoll.assetPath.clear();
+                if (!ragdoll.assetPath.empty()) {
+                    std::filesystem::path ragdollPath(ragdoll.assetPath);
+                    if (!ragdollPath.is_absolute() && !contentRoot.empty())
+                        ragdollPath = std::filesystem::path(contentRoot) / ragdollPath;
+                    RagdollAssetData asset;
+                    if (LoadRagdollAsset(ragdollPath.string(), &asset, nullptr))
+                        ApplyRagdollAsset(asset, &ragdoll);
+                }
+            }
             auto found = std::find_if(
                 loaded.entities.begin(), loaded.entities.end(),
                 [&](const EntityDesc& entity) { return entity.name == objectName; });

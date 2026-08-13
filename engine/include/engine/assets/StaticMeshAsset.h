@@ -11,7 +11,7 @@ namespace engine {
 
 class AssetRegistry;
 
-inline constexpr std::uint32_t kStaticMeshAssetVersion = 1;
+inline constexpr std::uint32_t kStaticMeshAssetVersion = 2;
 inline constexpr std::uint32_t kStaticMeshImporterVersion = 1;
 inline constexpr std::uint32_t kStaticMeshVertexStride = 11;
 
@@ -42,6 +42,9 @@ struct StaticMeshSubMeshData {
     // Interleaved position3 / normal3 / uv2 / tangent3.
     std::vector<float> vertices;
     std::vector<std::uint32_t> indices;
+    // Optional normalized RGBA paint, four floats per vertex. Empty means
+    // unpainted white and keeps newly imported assets compact.
+    std::vector<float> vertexColors;
 };
 
 struct StaticMeshAssetData {

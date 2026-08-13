@@ -481,6 +481,12 @@ std::vector<std::string> EditorAssets::ContentAssetPaths(Type type) const {
     return paths;
 }
 
+engine::AssetHandle EditorAssets::AssetIdForPath(const std::string& relativePath) const {
+    if (!m_assetRegistry) return {};
+    const engine::AssetRegistryEntry* entry = m_assetRegistry->FindByPath(relativePath);
+    return entry ? entry->id : engine::AssetHandle{};
+}
+
 bool EditorAssets::ReimportSelectedStaticMesh(std::string* error) {
     m_lastImportMessage.clear();
     const Asset* selected = SelectedAsset();
@@ -1120,6 +1126,36 @@ void EditorAssets::SelectIndex(int index)
     m_selectedIndex = index;
 }
 
+bool EditorAssets::RevealAsset(const std::string& relativePath, std::string* error)
+{
+    std::string normalized = NormalizeSlashes(relativePath);
+    if (normalized.rfind("/Game/", 0) == 0) normalized.erase(0, 6);
+    if (normalized.rfind("Content/", 0) == 0) normalized.erase(0, 8);
+    const fs::path target = fs::path(normalized).lexically_normal();
+    if (target.is_absolute()) {
+        if (error) *error = "Content reveal requires a project-relative asset path.";
+        return false;
+    }
+    for (const fs::path& part : target) {
+        if (part == "..") {
+            if (error) *error = "Content reveal cannot leave the project Content folder.";
+            return false;
+        }
+    }
+    const fs::path parent = target.parent_path();
+    m_currentFolder = parent == "." ? std::string() : NormalizeSlashes(parent.string());
+    if (!Refresh(m_rootPath, error)) return false;
+    const std::string wanted = NormalizeSlashes(target.string());
+    for (int i = 0; i < static_cast<int>(m_assets.size()); ++i) {
+        if (NormalizeSlashes(m_assets[static_cast<std::size_t>(i)].relativePath) == wanted) {
+            SelectIndex(i);
+            return true;
+        }
+    }
+    if (error) *error = "Asset is registered but was not found in Content: " + wanted;
+    return false;
+}
+
 const char *EditorAssets::TypeName(Type type)
 {
     switch (type) {
@@ -1144,6 +1180,13 @@ const char *EditorAssets::TypeName(Type type)
         case Type::World: return "World";
         case Type::Foliage: return "Foliage";
         case Type::Terrain: return "Terrain";
+        case Type::Ragdoll: return "Ragdoll Physics";
+        case Type::AnimationRetarget: return "Animation Retarget Profile";
+        case Type::Ability: return "Ability";
+        case Type::Weather: return "Weather";
+        case Type::Building: return "Building";
+        case Type::Road: return "Road";
+        case Type::ScatterGraph: return "Scatter Graph";
         case Type::Other: return "Other";
     }
     return "Other";
@@ -1220,6 +1263,27 @@ EditorAssets::Type EditorAssets::ClassifyExtension(const std::string &extension)
     }
     if (extension == ".3dgterrain") {
         return Type::Terrain;
+    }
+    if (extension == ".3dgragdoll") {
+        return Type::Ragdoll;
+    }
+    if (extension == ".3dgretarget") {
+        return Type::AnimationRetarget;
+    }
+    if (extension == ".3dgability") {
+        return Type::Ability;
+    }
+    if (extension == ".3dgweather") {
+        return Type::Weather;
+    }
+    if (extension == ".3dgbuilding") {
+        return Type::Building;
+    }
+    if (extension == ".3dgroad") {
+        return Type::Road;
+    }
+    if (extension == ".3dgscatter") {
+        return Type::ScatterGraph;
     }
     if (extension == ".h" || extension == ".hpp" || extension == ".lua"
         || extension == ".cpp" || extension == ".cc") {

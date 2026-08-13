@@ -187,6 +187,48 @@ int main() {
               "multi-material assignment is restored by one undo step");
     }
 
+    {
+        EditorScene decalScene;
+        engine::Mesh placeholder;
+        decalScene.AddDecal(
+            placeholder, glm::vec3(2.0f, 0.0f, -1.0f),
+            glm::vec3(0.0f, 1.0f, 0.0f), glm::vec2(3.0f, 1.5f),
+            35.0f, 0.02f, 0.45f, "Content/Materials/Scorch.3dgmat");
+        const std::filesystem::path decalPath =
+            std::filesystem::temp_directory_path() / "3dg_decal_test.scene";
+        std::string decalError;
+        Check(decalScene.Save(decalPath.string(), &decalError),
+              "save surface decal metadata");
+        EditorScene loadedDecals;
+        Check(loadedDecals.Load(
+                  decalPath.string(), placeholder, placeholder, placeholder,
+                  placeholder, placeholder, placeholder, placeholder,
+                  placeholder, placeholder, &decalError),
+              "load surface decal metadata");
+        Check(loadedDecals.Objects().size() == 1
+                  && loadedDecals.Objects()[0].decal
+                  && Near(loadedDecals.Objects()[0].decalOpacity, 0.45f)
+                  && Near(loadedDecals.Objects()[0].decalSurfaceOffset, 0.02f),
+              "decal opacity and surface offset survive scene round trip");
+
+        const std::filesystem::path runtimeDecalPath =
+            std::filesystem::temp_directory_path() / "3dg_decal_test.3dgscene";
+        Check(RuntimeSceneExporter::Export(
+                  decalScene, runtimeDecalPath.string(), &decalError),
+              "export decal actor to runtime scene");
+        engine::RuntimeSceneLoader::Scene runtimeDecals;
+        Check(engine::RuntimeSceneLoader::Load(
+                  runtimeDecalPath.string(), &runtimeDecals, &decalError),
+              "load runtime decal actor");
+        Check(runtimeDecals.entities.size() == 1
+                  && runtimeDecals.entities[0].primitive == "Plane"
+                  && runtimeDecals.entities[0].materialParameterOverrides.at("Opacity")
+                      == "0.450000",
+              "runtime decal keeps its plane, material and opacity override");
+        std::filesystem::remove(decalPath);
+        std::filesystem::remove(runtimeDecalPath);
+    }
+
     EditorScene scene;
     engine::Mesh emptyPlaceholder;
     scene.AddEmpty(emptyPlaceholder);

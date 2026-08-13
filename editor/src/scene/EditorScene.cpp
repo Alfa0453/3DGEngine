@@ -1,6 +1,7 @@
 #include "EditorScene.h"
 
 #include <engine/assets/AssetReference.h>
+#include <engine/assets/RagdollAsset.h>
 #include <engine/assets/AssetRegistry.h>
 #include <engine/graphics/Mesh.h>
 
@@ -12,6 +13,7 @@
 #include <filesystem>
 #include <cmath>
 #include <glm/gtc/quaternion.hpp>
+#include <glm/gtx/quaternion.hpp>
 
 using engine::ecs::Entity;
 using engine::ecs::Light;
@@ -460,7 +462,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         return false;
     }
 
-    out << "3DGEditorScene 127 " << m_assetId.ToString() << '\n';
+    out << "3DGEditorScene 129 " << m_assetId.ToString() << '\n';
     out << "environment "
         << m_environment.timeOfDay << ' '
         << m_environment.skyLightIntensity << ' '
@@ -1220,7 +1222,15 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
             << object.ragdoll.linearDamping << ' '
             << object.ragdoll.angularDamping << ' '
             << object.ragdoll.deathImpulse << ' '
-            << object.ragdoll.maxBodies << '\n';
+            << object.ragdoll.maxBodies << ' '
+            << std::quoted(object.ragdoll.assetPath.empty()
+                ? std::string("-") : object.ragdoll.assetPath) << '\n';
+    }
+
+    for (const Object& object : m_objects) {
+        if (!object.decal) continue;
+        out << "decal " << std::quoted(object.name) << ' '
+            << object.decalOpacity << ' ' << object.decalSurfaceOffset << '\n';
     }
 
     // Editor layer membership is kept on separate keyed records so the runtime object
@@ -1245,6 +1255,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         addDependency(object.modelAssetId);
         addDependency(object.materialAssetId);
         addDependency(object.characterAssetId);
+        addDependency(object.prefabAssetId);
         addDependency(object.particleAssetId);
         addDependency(object.particleConfig.textureAssetId);
         addDependency(object.particleConfig.meshAssetId);
@@ -1317,7 +1328,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             return false;
         }
     }
-    if (magic != "3DGEditorScene" ||(version < 1 || version > 127)) {
+    if (magic != "3DGEditorScene" ||(version < 1 || version > 129)) {
         if (error) *error = "Scene file has an unknown format.";
         return false;
     }
@@ -2089,6 +2100,19 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                >> ragdoll.totalMass >> ragdoll.bodyRadiusScale
                >> ragdoll.linearDamping >> ragdoll.angularDamping
                >> ragdoll.deathImpulse >> ragdoll.maxBodies;
+            if (version >= 129) {
+                in >> std::quoted(ragdoll.assetPath);
+                if (ragdoll.assetPath == "-") ragdoll.assetPath.clear();
+                if (!ragdoll.assetPath.empty()) {
+                    const std::string root = engine::FindContentRootForAsset(path);
+                    std::filesystem::path assetPath(ragdoll.assetPath);
+                    if (!assetPath.is_absolute() && !root.empty())
+                        assetPath = std::filesystem::path(root) / assetPath;
+                    engine::RagdollAssetData asset;
+                    if (engine::LoadRagdollAsset(assetPath.string(), &asset, nullptr))
+                        engine::ApplyRagdollAsset(asset, &ragdoll);
+                }
+            }
             auto found = std::find_if(
                 m_objects.begin(), m_objects.end(),
                 [&](const Object& object) { return object.name == objectName; });
@@ -2100,6 +2124,27 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                 if (error) *error = "Scene contains invalid ragdoll settings.";
                 Clear();
                 return false;
+            }
+            continue;
+        }
+        if (recordType == "decal" && version >= 128) {
+            std::string name;
+            float opacity = 1.0f;
+            float surfaceOffset = 0.012f;
+            in >> std::quoted(name) >> opacity >> surfaceOffset;
+            if (!in) {
+                if (error) *error = "Scene contains an invalid decal record.";
+                Clear();
+                return false;
+            }
+            auto found = std::find_if(
+                m_objects.begin(), m_objects.end(),
+                [&](const Object& object) { return object.name == name; });
+            if (found != m_objects.end()) {
+                found->decal = true;
+                found->decalOpacity = std::clamp(opacity, 0.0f, 1.0f);
+                found->decalSurfaceOffset =
+                    std::clamp(surfaceOffset, 0.001f, 0.08f);
             }
             continue;
         }
@@ -3627,6 +3672,7 @@ void EditorScene::ScaleSelectedAxis(const glm::vec3 &axis, float factor)
         if (axis.z != 0.0f) {
             transform->scale.z *= factor;
         }
+
         NormalizeTransformValues(*transform);
         m_dirty = true;
     }
@@ -4307,6 +4353,50 @@ bool EditorScene::SetSelectedMaterialAsset(
     selected.materialParameterOverrides.clear();
     m_dirty = true;
     return true;
+}
+
+bool EditorScene::SetSelectedDecalSettings(float opacity, float surfaceOffset) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size()))
+        return false;
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (!selected.decal || selected.locked) return false;
+    Transform* transform = SelectedTransform();
+    if (!transform) return false;
+    PushUndoSnapshot();
+    selected.decalOpacity = std::clamp(opacity, 0.0f, 1.0f);
+    const float clampedOffset = std::clamp(surfaceOffset, 0.001f, 0.08f);
+    const float offsetDelta = clampedOffset - selected.decalSurfaceOffset;
+    transform->position +=
+        (transform->rotation * glm::vec3(0.0f, 1.0f, 0.0f)) * offsetDelta;
+    selected.decalSurfaceOffset = clampedOffset;
+    m_dirty = true;
+    return true;
+}
+
+void EditorScene::AddDecal(const engine::Mesh& plane, const glm::vec3& position,
+                           const glm::vec3& surfaceNormal, const glm::vec2& size,
+                           float rotationDegrees, float surfaceOffset, float opacity,
+                           const std::string& materialPath) {
+    PushUndoSnapshot();
+    const glm::vec3 normal = glm::length(surfaceNormal) > 0.0001f
+        ? glm::normalize(surfaceNormal) : glm::vec3(0, 1, 0);
+    Transform transform;
+    transform.position = position + normal * std::clamp(surfaceOffset, 0.001f, 0.08f);
+    transform.scale = glm::vec3(std::clamp(size.x, 0.05f, 100.0f), 1.0f,
+                                std::clamp(size.y, 0.05f, 100.0f));
+    const glm::quat align = glm::rotation(glm::vec3(0, 1, 0), normal);
+    const glm::quat spin = glm::angleAxis(glm::radians(rotationDegrees), normal);
+    transform.rotation = glm::normalize(spin * align);
+    const std::string name = "Decal_" + std::to_string(m_nextCubeNumber++);
+    CreateObject(name, Primitive::Plane, plane, transform, glm::vec3(1.0f));
+    Object& object = m_objects.back();
+    object.decal = true;
+    object.decalOpacity = std::clamp(opacity, 0.0f, 1.0f);
+    object.decalSurfaceOffset = std::clamp(surfaceOffset, 0.001f, 0.08f);
+    object.materialAssetPath = materialPath;
+    object.editorLayer = "Decals";
+    m_selectedIndex = static_cast<int>(m_objects.size()) - 1;
+    m_dirty = true;
 }
 
 int EditorScene::SetSelectedMaterialAssetToSelection(
@@ -6412,6 +6502,9 @@ bool EditorScene::DuplicateSelected(const engine::Mesh & cube, const engine::Mes
     CreateObject(selectedCopy.name + "_Copy", selectedCopy.primitive, mesh, duplicateTransform, duplicateColor);
     m_objects.back().modelAssetPath = selectedCopy.modelAssetPath;
     m_objects.back().materialAssetPath = selectedCopy.materialAssetPath;
+    m_objects.back().decal = selectedCopy.decal;
+    m_objects.back().decalOpacity = selectedCopy.decalOpacity;
+    m_objects.back().decalSurfaceOffset = selectedCopy.decalSurfaceOffset;
     m_objects.back().materialParameterOverrides =
         selectedCopy.materialParameterOverrides;
     m_objects.back().skeletalModel = selectedCopy.skeletalModel;

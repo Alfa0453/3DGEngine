@@ -4,6 +4,8 @@
 #include "engine/gameplay/CameraDirector.h"
 #include "engine/gameplay/GameMode.h"
 #include "engine/gameplay/GameplayComponents.h"
+#include "engine/gameplay/RagdollSystem.h"
+#include "engine/gameplay/AbilitySystem.h"
 
 #include "engine/animation/AnimatedModel.h"
 #include "engine/animation/Animator.h"
@@ -12,6 +14,7 @@
 #include "engine/graphics/SkinnedModel.h"
 #include "engine/graphics/RuntimeParticleSystem.h"
 #include "engine/math/Spline.h"
+#include "engine/assets/ScatterGraphAsset.h"
 
 #include <algorithm>
 #include <chrono>
@@ -379,6 +382,55 @@ bool Script::SocketPosition(const std::string& name, glm::vec3* position) const 
     glm::mat4 world(1.0f);
     if (!SocketTransform(name, &world)) return false;
     *position = glm::vec3(world[3]);
+    return true;
+}
+
+bool Script::ActivateRagdoll() {
+    return m_context.registry && m_context.physics
+        && engine::ActivateRagdoll(*m_context.registry, *m_context.physics,
+                                   m_context.entity);
+}
+
+bool Script::RecoverFromRagdoll() {
+    return m_context.registry
+        && engine::RequestRagdollRecovery(*m_context.registry,
+                                          m_context.entity);
+}
+
+bool Script::GrantAbility(const std::string& assetPath) {
+    return m_context.registry && engine::GrantAbility(
+        *m_context.registry, m_context.entity, assetPath, nullptr);
+}
+bool Script::ActivateAbility(const std::string& name, ecs::Entity target) {
+    return m_context.registry && engine::ActivateAbility(
+        *m_context.registry, m_context.entity, name, target);
+}
+bool Script::CancelAbility() {
+    return m_context.registry && engine::CancelAbility(*m_context.registry, m_context.entity);
+}
+bool Script::IsAbilityActive(const std::string& name) const {
+    return m_context.registry && engine::IsAbilityActive(*m_context.registry, m_context.entity, name);
+}
+float Script::AbilityCooldown(const std::string& name) const {
+    return m_context.registry ? engine::AbilityCooldownRemaining(
+        *m_context.registry, m_context.entity, name) : 0.0f;
+}
+bool Script::SetAbilityResources(float mana, float stamina) {
+    if (!m_context.registry) return false;
+    AbilityResource* resource = m_context.registry->TryGet<AbilityResource>(m_context.entity);
+    if (!resource) resource = &m_context.registry->Add<AbilityResource>(m_context.entity, {});
+    resource->mana = std::clamp(mana, 0.0f, resource->maxMana);
+    resource->stamina = std::clamp(stamina, 0.0f, resource->maxStamina);
+    return true;
+}
+bool Script::WasAbilityEvent(const std::string& eventName) {
+    if (!m_context.registry || eventName.empty()) return false;
+    AbilityComponent* abilities = m_context.registry->TryGet<AbilityComponent>(m_context.entity);
+    if (!abilities) return false;
+    const auto it = std::find_if(abilities->events.begin(), abilities->events.end(),
+        [&](const AbilityRuntimeEvent& event) { return event.name == eventName; });
+    if (it == abilities->events.end()) return false;
+    abilities->events.erase(it);
     return true;
 }
 
@@ -838,6 +890,38 @@ bool Script::TranslateSpline(ecs::Entity spline, const glm::vec3& delta) {
     return true;
 }
 
+float Script::SplineLength(ecs::Entity spline) const {
+    const ecs::SplineComponent* component = TryGet<ecs::SplineComponent>(spline);
+    if (!component || component->points.size() < 2) return 0.0f;
+    return Spline(component->points, component->closed).Length();
+}
+
+int Script::GenerateScatterGraph(const std::string& assetPath,
+                                 const glm::vec3& worldOffset,
+                                 std::uint32_t seedOverride) {
+    if (!m_context.registry || assetPath.empty()) return 0;
+    ScatterGraphAssetData graph;
+    std::string error;
+    if (!LoadScatterGraphAsset(assetPath, &graph, &error)) return 0;
+    const std::vector<ScatterPlacement> placements =
+        EvaluateScatterGraph(graph, {}, worldOffset, seedOverride);
+    int generated = 0;
+    for (const ScatterPlacement& placement : placements) {
+        const ecs::Entity entity = m_context.registry->Create();
+        ecs::Transform transform;
+        transform.position = placement.position;
+        transform.rotation = placement.rotation;
+        transform.scale = placement.scale;
+        m_context.registry->Add<ecs::Transform>(entity, transform);
+        m_context.registry->Add<ecs::ModelAsset>(entity,
+            ecs::ModelAsset{placement.meshPath});
+        m_context.registry->Add<ecs::RuntimeName>(entity,
+            ecs::RuntimeName{"Scatter_" + std::to_string(generated + 1)});
+        ++generated;
+    }
+    return generated;
+}
+
 glm::vec3 Script::SplinePositionAt(ecs::Entity spline, float normalizedDistance,
                                    const glm::vec3& fallback) const {
     const ecs::SplineComponent* component = TryGet<ecs::SplineComponent>(spline);
@@ -852,6 +936,22 @@ glm::vec3 Script::SplineTangentAt(ecs::Entity spline, float normalizedDistance,
     if (!component || component->points.size() < 2) return fallback;
     const Spline curve(component->points, component->closed);
     return curve.TangentAtDistance(curve.Length() * std::clamp(normalizedDistance, 0.0f, 1.0f));
+}
+
+glm::vec3 Script::SplineClosestPoint(ecs::Entity spline, const glm::vec3& world,
+                                     const glm::vec3& fallback) const {
+    const ecs::SplineComponent* component = TryGet<ecs::SplineComponent>(spline);
+    if (!component || component->points.size() < 2) return fallback;
+    return Spline(component->points, component->closed).ClosestPoint(world);
+}
+
+float Script::SplineClosestDistance(ecs::Entity spline, const glm::vec3& world,
+                                    float fallback) const {
+    const ecs::SplineComponent* component = TryGet<ecs::SplineComponent>(spline);
+    if (!component || component->points.size() < 2) return fallback;
+    float distance = fallback;
+    Spline(component->points, component->closed).ClosestPoint(world, &distance);
+    return distance;
 }
 
 void Script::RequestLevelLoad(const std::string& level) {

@@ -1,5 +1,6 @@
 #include "PrefabAsset.h"
 
+#include <algorithm>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
@@ -68,15 +69,17 @@ bool PrefabAsset::Apply(EditorScene& scene) const {
     return true;
 }
 
-bool PrefabAsset::Save(const std::string& path, std::string* error) const {
+bool PrefabAsset::Save(const std::string& path, std::string* error) {
     std::ofstream out(path, std::ios::trunc);
     if (!out) {
         if (error) *error = "Could not open prefab for writing: " + path;
         return false;
     }
 
+    if (!assetId.Valid()) assetId = engine::AssetHandle::Generate();
+    version = 3;
     const EditorScene::Object& o = object;
-    out << "3DG_PREFAB " << version << '\n';
+    out << "3DG_PREFAB " << version << ' ' << assetId.ToString() << '\n';
     out << std::quoted(name) << '\n';
     out << static_cast<int>(o.primitive) << '\n';
     out << std::quoted(OrDash(o.modelAssetPath)) << ' '
@@ -123,6 +126,20 @@ bool PrefabAsset::Save(const std::string& path, std::string* error) const {
         out << ' ' << std::quoted(OrDash(dependency));
     out << '\n';
 
+    std::vector<engine::AssetHandle> dependencies;
+    const auto addDependency = [&dependencies](engine::AssetHandle id) {
+        if (id.Valid() && std::find(dependencies.begin(), dependencies.end(), id)
+                == dependencies.end()) dependencies.push_back(id);
+    };
+    addDependency(o.modelAssetId);
+    addDependency(o.materialAssetId);
+    addDependency(o.characterAssetId);
+    addDependency(o.audioAssetId);
+    addDependency(o.particleAssetId);
+    out << "ASSET_DEPS " << dependencies.size();
+    for (const engine::AssetHandle id : dependencies) out << ' ' << id.ToString();
+    out << '\n';
+
     return static_cast<bool>(out);
 }
 
@@ -148,6 +165,15 @@ bool PrefabAsset::Load(const std::string& path, std::string* error) {
 
     *this = PrefabAsset{};   // reset to defaults, then overlay persisted fields
     version = loadedVersion;
+
+    if (loadedVersion >= 3) {
+        std::string idText;
+        in >> idText;
+        if (!engine::AssetHandle::Parse(idText, &assetId)) {
+            if (error) *error = "Prefab has an invalid asset ID: " + path;
+            return false;
+        }
+    }
 
     EditorScene::Object& o = object;
     in >> std::quoted(name);

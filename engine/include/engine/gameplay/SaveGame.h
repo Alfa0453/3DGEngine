@@ -23,6 +23,7 @@
 #include "engine/ecs/Registry.h"
 #include "engine/ecs/Components.h"
 #include "engine/gameplay/GameplayComponents.h"
+#include "engine/gameplay/AbilitySystem.h"
 #include "engine/gameplay/Script.h"
 
 #include <glm/glm.hpp>
@@ -64,10 +65,22 @@ struct EntitySaveState {
     bool      hasAngularVelocity = false;
     glm::vec3 angularAxis{0.0f, 1.0f, 0.0f};
     float     angularRadians = 0.0f;
+
+    bool hasAbilityResource = false;
+    float mana = 0.0f, maxMana = 0.0f;
+    float stamina = 0.0f, maxStamina = 0.0f;
+    struct AbilityState {
+        std::string path;
+        std::string name;
+        float cooldown = 0.0f;
+        float recharge = 0.0f;
+        int charges = 0;
+    };
+    std::vector<AbilityState> abilities;
 };
 
 struct SaveGame {
-    static constexpr int kVersion = 1;
+    static constexpr int kVersion = 2;
 
     int          version = kVersion;
     std::string  displayName;                 // shown in the load menu
@@ -106,7 +119,16 @@ struct SaveGame {
                 << e.linearVelocity.x << ' ' << e.linearVelocity.y << ' ' << e.linearVelocity.z << ' '
                 << (e.hasAngularVelocity ? 1 : 0) << ' '
                 << e.angularAxis.x << ' ' << e.angularAxis.y << ' ' << e.angularAxis.z << ' '
-                << e.angularRadians << '\n';
+                << e.angularRadians << ' '
+                << (e.hasAbilityResource ? 1 : 0) << ' '
+                << e.mana << ' ' << e.maxMana << ' '
+                << e.stamina << ' ' << e.maxStamina << ' '
+                << e.abilities.size();
+            for (const EntitySaveState::AbilityState& ability : e.abilities)
+                out << ' ' << std::quoted(ability.path) << ' '
+                    << std::quoted(ability.name) << ' ' << ability.cooldown << ' '
+                    << ability.recharge << ' ' << ability.charges;
+            out << '\n';
         }
         return static_cast<bool>(out);
     }
@@ -160,6 +182,19 @@ struct SaveGame {
             e.alive = alive != 0;
             e.hasLinearVelocity = hasLV != 0;
             e.hasAngularVelocity = hasAV != 0;
+            if (fileVersion >= 2) {
+                int hasResource = 0;
+                std::size_t abilityCount = 0;
+                in >> hasResource >> e.mana >> e.maxMana >> e.stamina >> e.maxStamina
+                   >> abilityCount;
+                if (!in || abilityCount > 256) break;
+                e.hasAbilityResource = hasResource != 0;
+                e.abilities.resize(abilityCount);
+                for (EntitySaveState::AbilityState& ability : e.abilities)
+                    in >> std::quoted(ability.path) >> std::quoted(ability.name)
+                       >> ability.cooldown >> ability.recharge >> ability.charges;
+                if (!in) break;
+            }
             out.entities.push_back(std::move(e));
         }
         return true;
@@ -210,6 +245,16 @@ inline SaveGame CaptureSaveGame(ecs::Registry& registry, const std::string& scen
             if (const ecs::AngularVelocity* av = registry.TryGet<ecs::AngularVelocity>(entity)) {
                 e.hasAngularVelocity = true; e.angularAxis = av->axis; e.angularRadians = av->radiansPerSecond;
             }
+            if (const AbilityResource* resource = registry.TryGet<AbilityResource>(entity)) {
+                e.hasAbilityResource = true;
+                e.mana = resource->mana; e.maxMana = resource->maxMana;
+                e.stamina = resource->stamina; e.maxStamina = resource->maxStamina;
+            }
+            if (const AbilityComponent* abilities = registry.TryGet<AbilityComponent>(entity)) {
+                for (const AbilitySlot& slot : abilities->abilities)
+                    e.abilities.push_back({slot.assetPath, slot.asset.name,
+                        slot.cooldownRemaining, slot.rechargeRemaining, slot.charges});
+            }
             save.entities.push_back(std::move(e));
         });
     return save;
@@ -247,6 +292,29 @@ inline void ApplySaveGame(ecs::Registry& registry, const SaveGame& save) {
             if (e.hasAngularVelocity) {
                 if (ecs::AngularVelocity* av = registry.TryGet<ecs::AngularVelocity>(entity)) {
                     av->axis = e.angularAxis; av->radiansPerSecond = e.angularRadians;
+                }
+            }
+            if (e.hasAbilityResource) {
+                AbilityResource* resource = registry.TryGet<AbilityResource>(entity);
+                if (!resource) resource = &registry.Add<AbilityResource>(entity, {});
+                resource->mana = e.mana; resource->maxMana = e.maxMana;
+                resource->stamina = e.stamina; resource->maxStamina = e.maxStamina;
+            }
+            for (const EntitySaveState::AbilityState& savedAbility : e.abilities) {
+                AbilityComponent* component = registry.TryGet<AbilityComponent>(entity);
+                AbilitySlot* slot = nullptr;
+                if (component) for (AbilitySlot& candidate : component->abilities)
+                    if (candidate.asset.name == savedAbility.name) { slot = &candidate; break; }
+                if (!slot && !savedAbility.path.empty()
+                    && GrantAbility(registry, entity, savedAbility.path)) {
+                    component = registry.TryGet<AbilityComponent>(entity);
+                    if (component) for (AbilitySlot& candidate : component->abilities)
+                        if (candidate.asset.name == savedAbility.name) { slot = &candidate; break; }
+                }
+                if (slot) {
+                    slot->cooldownRemaining = savedAbility.cooldown;
+                    slot->rechargeRemaining = savedAbility.recharge;
+                    slot->charges = savedAbility.charges;
                 }
             }
         });

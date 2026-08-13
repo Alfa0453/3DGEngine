@@ -4,6 +4,7 @@
 #include "AnimationClipAsset.h"
 
 #include <engine/assets/AssetReference.h>
+#include <engine/assets/RagdollAsset.h>
 #include <engine/assets/AssetRegistry.h>
 
 #include <algorithm>
@@ -350,7 +351,7 @@ bool CharacterAsset::Save(const std::string& path, std::string* error) {
     if (!out) { if (error) *error = "Could not write character asset: " + path; return false; }
     const CharacterScript legacy{scriptEnabled, scriptClassName, scriptPath};
     const CharacterScript* primary = !scripts.empty() ? &scripts.front() : &legacy;
-    out << "3DG_CHARACTER 26 " << assetId.ToString() << '\n'
+    out << "3DG_CHARACTER 27 " << assetId.ToString() << '\n'
         << std::quoted(name) << '\n' << std::quoted(modelAssetPath) << '\n' << std::quoted(materialAssetPath) << '\n'
         << colliderEnabled << ' ' << static_cast<int>(collider.shape) << ' '
         << collider.halfExtents.x << ' ' << collider.halfExtents.y << ' ' << collider.halfExtents.z << ' '
@@ -487,7 +488,8 @@ bool CharacterAsset::Save(const std::string& path, std::string* error) {
         << ragdoll.enabled << ' ' << ragdoll.activateOnDeath << ' '
         << ragdoll.totalMass << ' ' << ragdoll.bodyRadiusScale << ' '
         << ragdoll.linearDamping << ' ' << ragdoll.angularDamping << ' '
-        << ragdoll.deathImpulse << ' ' << ragdoll.maxBodies << '\n'
+        << ragdoll.deathImpulse << ' ' << ragdoll.maxBodies << ' '
+        << std::quoted(ragdoll.assetPath.empty() ? std::string("-") : ragdoll.assetPath) << '\n'
         << "ASSET_REFS "
         << (modelAssetId.Valid() ? modelAssetId.ToString() : std::string("-"))
         << ' ' << (animationGraphAssetId.Valid()
@@ -879,6 +881,20 @@ bool CharacterAsset::Load(const std::string& path, std::string* error) {
            >> ragdoll.totalMass >> ragdoll.bodyRadiusScale
            >> ragdoll.linearDamping >> ragdoll.angularDamping
            >> ragdoll.deathImpulse >> ragdoll.maxBodies;
+        if (loadedVersion >= 27) {
+            in >> std::quoted(ragdoll.assetPath);
+            if (ragdoll.assetPath == "-") ragdoll.assetPath.clear();
+            if (!ragdoll.assetPath.empty()) {
+                const std::string root = engine::FindContentRootForAsset(path);
+                std::filesystem::path ragdollPath(ragdoll.assetPath);
+                if (!ragdollPath.is_absolute() && !root.empty())
+                    ragdollPath = std::filesystem::path(root) / ragdollPath;
+                engine::RagdollAssetData ragdollAsset;
+                if (engine::LoadRagdollAsset(
+                        ragdollPath.string(), &ragdollAsset, nullptr))
+                    engine::ApplyRagdollAsset(ragdollAsset, &ragdoll);
+            }
+        }
         if (!in || tag != "RAGDOLL") {
             if (error) *error = "Character ragdoll data is invalid: " + path;
             return false;

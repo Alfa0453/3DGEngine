@@ -55,6 +55,7 @@ add_library(engine STATIC
     src/assets/AssetRegistry.cpp
     src/assets/StaticMeshAsset.cpp
     src/assets/FoliageAsset.cpp
+    src/assets/ScatterGraphAsset.cpp
     src/assets/TerrainAsset.cpp
     src/assets/TextureAsset.cpp
     src/assets/ForgeMaterialImporter.cpp
@@ -63,6 +64,10 @@ add_library(engine STATIC
     src/assets/ParticleAsset.cpp
     src/assets/ShaderAsset.cpp
     src/assets/ShaderGraphCompiler.cpp
+    src/assets/RagdollAsset.cpp
+    src/assets/AnimationRetargetAsset.cpp
+    src/assets/AbilityAsset.cpp
+    src/assets/WeatherAsset.cpp
     src/assets/RuntimeShaderManager.cpp
     src/ui/ImGuiLayer.cpp
     src/ui/UI.cpp
@@ -93,6 +98,7 @@ add_library(engine STATIC
     src/gameplay/CameraDirector.cpp
     src/gameplay/GameplaySystems.cpp
     src/gameplay/RagdollSystem.cpp
+    src/gameplay/AbilitySystem.cpp
     src/gameplay/GameMode.cpp
     src/gameplay/Script.cpp
     src/gameplay/LuaScript.cpp

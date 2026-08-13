@@ -4,6 +4,7 @@
 
 #include "engine/ecs/Entity.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <unordered_map>
 #include <vector>
@@ -127,6 +128,11 @@ struct Joint {
     float       damping   = 1.0f;      // Spring only
     glm::vec3   axisA{0.0f, 1.0f, 0.0f};   // Hinge: rotation axis in A's local frame
     glm::vec3   axisB{0.0f, 1.0f, 0.0f};   // Hinge: rotation axis in B's local frame
+    bool        collideConnected = true;
+    bool        angularLimit = false;
+    float       minAngle = -3.14159265f;
+    float       maxAngle = 3.14159265f;
+    glm::quat   referenceRelative{1.0f, 0.0f, 0.0f, 0.0f};
 };
 
 // The physics solver. Step() integrates every RigidBody under gravity, detects
@@ -216,13 +222,25 @@ public:
         j.stiffness = stiffness; j.damping = damping; m_joints.push_back(j);
     }
     void ClearJoints() { m_joints.clear(); }
+    void RemoveJointsFor(ecs::Entity entity) {
+        m_joints.erase(std::remove_if(m_joints.begin(), m_joints.end(),
+            [&](const Joint& joint) { return joint.a == entity || joint.b == entity; }),
+            m_joints.end());
+    }
 
     // Ball (point-to-point) joint: pins a point on A to a point on B (localA/localB
     // are offsets from each body's centre), leaving all 3 rotational DOF free.
     void AddBallJoint(ecs::Entity a, ecs::Entity b,
                       const glm::vec3& localA = glm::vec3(0.0f),
-                      const glm::vec3& localB = glm::vec3(0.0f)) {
+                      const glm::vec3& localB = glm::vec3(0.0f),
+                      bool collideConnected = true,
+                      bool angularLimit = false,
+                      float maxAngle = 3.14159265f,
+                      const glm::quat& referenceRelative = glm::quat(1.0f,0.0f,0.0f,0.0f)) {
         Joint j; j.type = Joint::Type::Ball; j.a = a; j.b = b; j.localA = localA; j.localB = localB;
+        j.collideConnected = collideConnected;
+        j.angularLimit = angularLimit; j.maxAngle = maxAngle;
+        j.referenceRelative = referenceRelative;
         m_joints.push_back(j);
     }
     void AddBallJointToWorld(ecs::Entity a, const glm::vec3& worldPoint,
@@ -235,9 +253,17 @@ public:
     // leaving one rotational DOF -- rotation about the hinge axis (a door, a lid).
     void AddHingeJoint(ecs::Entity a, ecs::Entity b,
                        const glm::vec3& localA, const glm::vec3& localB,
-                       const glm::vec3& axisA, const glm::vec3& axisB) {
+                       const glm::vec3& axisA, const glm::vec3& axisB,
+                       bool collideConnected = true,
+                       bool angularLimit = false,
+                       float minAngle = -3.14159265f,
+                       float maxAngle = 3.14159265f,
+                       const glm::quat& referenceRelative = glm::quat(1.0f,0.0f,0.0f,0.0f)) {
         Joint j; j.type = Joint::Type::Hinge; j.a = a; j.b = b;
         j.localA = localA; j.localB = localB; j.axisA = axisA; j.axisB = axisB;
+        j.collideConnected = collideConnected; j.angularLimit = angularLimit;
+        j.minAngle = minAngle; j.maxAngle = maxAngle;
+        j.referenceRelative = referenceRelative;
         m_joints.push_back(j);
     }
     void AddHingeJointToWorld(ecs::Entity a, const glm::vec3& worldPoint,

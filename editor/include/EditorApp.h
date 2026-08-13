@@ -52,6 +52,19 @@
 #include "CharacterEditorPanel.h"
 #include "ClipEditorPanel.h"
 #include "MeshEditorPanel.h"
+#include "DecalPlacementPanel.h"
+#include "OptimizationAuditorPanel.h"
+#include "RagdollPhysicsPanel.h"
+#include "AnimationRetargetingPanel.h"
+#include "AbilityEditorPanel.h"
+#include "RuntimePropertyInspectorPanel.h"
+#include "AssetDependencyViewerPanel.h"
+#include "WeatherEditorPanel.h"
+#include "ProceduralBuildingPanel.h"
+#include "RoadGeneratorPanel.h"
+#include "LevelInstancePanel.h"
+#include "WorldPartitionPanel.h"
+#include "ProceduralScatterGraphPanel.h"
 #include "TerrainCreatorPanel.h"
 #include "ModularPlacementPanel.h"
 #include "PrefabPalettePanel.h"
@@ -204,6 +217,7 @@ private:
     void DrawClipEditorPanel();
     void DrawGraphEditorPanel();
     void DrawMeshEditorPanel();
+    void DrawDecalPlacementPanel();
     void DrawTerrainCreatorPanel();
     void DrawModularPlacementPanel();
     void DrawPrefabPalettePanel();
@@ -212,6 +226,19 @@ private:
     void DrawArrayToolPanel();
     void DrawMeasurementPanel();
     void DrawLevelValidationPanel();
+    void DrawOptimizationAuditorPanel();
+    void DrawRagdollPhysicsPanel();
+    void DrawAnimationRetargetingPanel();
+    void DrawAbilityEditorPanel();
+    void DrawRuntimePropertyInspectorPanel();
+    void DrawAssetDependencyViewerPanel();
+    void DrawWeatherEditorPanel();
+    void DrawProceduralBuildingPanel();
+    void DrawRoadGeneratorPanel();
+    void DrawLevelInstancePanel();
+    void DrawWorldPartitionPanel();
+    void DrawProceduralScatterGraphPanel();
+    bool CreatePartitionCellFromSelection(const std::string& path, int cellX, int cellZ);
     void DrawLevelVariantPanel();
     void DrawLevelLayersPanel();
     void DrawViewportBookmarksPanel();
@@ -224,6 +251,10 @@ private:
     int DeleteGeneratedBlockout(const std::string& groupName);
     void GenerateRoom();
     int DeleteGeneratedRoom(const std::string& roomName);
+    void GenerateProceduralBuilding();
+    int DeleteGeneratedProceduralBuilding(const std::string& buildingName);
+    void GenerateRoad();
+    int DeleteGeneratedRoad(const std::string& roadName);
     void PaintScatterStamp(const glm::vec3& center, const glm::vec3& normal,
                            bool projectToTerrain);
     int EraseScatterAt(const glm::vec3& center, float radius);
@@ -446,6 +477,8 @@ private:
     std::optional<engine::CameraPose> m_cameraBeforeShake;
     EditorAssets          m_assets;
     engine::AssetRegistry m_assetRegistry;
+    std::string m_dependencyAssetOpenPath;
+    EditorAssets::Type m_dependencyAssetOpenType = EditorAssets::Type::Other;
     EditorDockspace       m_dockspace;
     EditorDragDrop        m_dragDrop;
     EditorGizmo           m_gizmo;
@@ -581,6 +614,7 @@ private:
     ClipEditorPanel                      m_clipEditor;
     AnimationGraphEditorPanel            m_graphEditor;
     MeshEditorPanel                      m_meshEditor;
+    DecalPlacementPanel                  m_decalPlacement;
     TerrainCreatorPanel                 m_terrainCreator;
     ModularPlacementPanel                m_modularPlacement;
     PrefabPalettePanel                   m_prefabPalette;
@@ -589,6 +623,18 @@ private:
     ArrayToolPanel                       m_arrayTool;
     MeasurementPanel                     m_measurementPanel;
     LevelValidationPanel                 m_levelValidation;
+    OptimizationAuditorPanel             m_optimizationAuditor;
+    RagdollPhysicsPanel                   m_ragdollPhysics;
+    AnimationRetargetingPanel             m_animationRetargeting;
+    AbilityEditorPanel                    m_abilityEditor;
+    RuntimePropertyInspectorPanel         m_runtimePropertyInspector;
+    AssetDependencyViewerPanel            m_assetDependencyViewer;
+    WeatherEditorPanel                    m_weatherEditor;
+    ProceduralBuildingPanel               m_proceduralBuilding;
+    RoadGeneratorPanel                    m_roadGenerator;
+    LevelInstancePanel                    m_levelInstances;
+    WorldPartitionPanel                   m_worldPartition;
+    ProceduralScatterGraphPanel           m_proceduralScatterGraph;
     LevelVariantPanel                    m_levelVariants;
     LevelLayersPanel                     m_levelLayers;
     ViewportBookmarksPanel               m_viewportBookmarks;

@@ -257,6 +257,7 @@ GeneratedShaderSource GenerateShaderSource(const ShaderAsset& asset, bool skinne
         if (skinned)
             vertex << "layout(location=3) in ivec4 aBoneIds;\nlayout(location=4) in vec4 aBoneWeights;\n"
                 "uniform mat4 uBones[128];\n";
+        if (!skinned) vertex << "layout(location=10) in vec4 aVertexColor;\n";
         vertex << "uniform mat4 uModel;\nuniform mat4 uViewProjection;\n"
             "uniform float uTime;\nuniform float uDeltaTime;\n";
         for (const auto& parameter : asset.parameters)
@@ -264,7 +265,7 @@ GeneratedShaderSource GenerateShaderSource(const ShaderAsset& asset, bool skinne
                 vertex << "uniform " << UniformType(parameter.type) << ' '
                     << ShaderParameterUniformName(parameter.name) << ";\n";
         vertex << "out vec3 vNormal;\nout vec3 vWorldPosition;"
-            "\nout vec3 vLocalPosition;\nout vec2 vUV;\n"
+            "\nout vec3 vLocalPosition;\nout vec2 vUV;\nout vec4 vVertexColor;\n"
             "void main(){";
         if (skinned)
             vertex << "mat4 skin=aBoneWeights.x*uBones[aBoneIds.x]+aBoneWeights.y*uBones[aBoneIds.y]+"
@@ -272,7 +273,8 @@ GeneratedShaderSource GenerateShaderSource(const ShaderAsset& asset, bool skinne
                 "vec4 local=skin*vec4(aPosition,1.0);vec3 localNormal=mat3(skin)*aNormal;";
         else
             vertex << "vec4 local=vec4(aPosition,1.0);vec3 localNormal=aNormal;";
-        vertex << "local.xyz+=normalize(localNormal)*(" << displacement << ");"
+        vertex << (skinned ? "vVertexColor=vec4(1.0);" : "vVertexColor=aVertexColor;")
+            << "local.xyz+=normalize(localNormal)*(" << displacement << ");"
             "vec4 w=uModel*local;vWorldPosition=w.xyz;vLocalPosition=local.xyz;"
             "vNormal=mat3(transpose(inverse(uModel)))*localNormal;vUV=aUV;"
             "gl_Position=uViewProjection*w;}\n";
@@ -291,7 +293,7 @@ GeneratedShaderSource GenerateShaderSource(const ShaderAsset& asset, bool skinne
             ? "in vec2 vUV; in vec4 vParticleColor; in vec3 vParticleVelocity;"
               " in float vParticleSize; in float vParticleRotation;"
               " in float vParticleFrame; in float vParticleAge;"
-            : "in vec3 vNormal; in vec3 vWorldPosition; in vec3 vLocalPosition; in vec2 vUV;");
+            : "in vec3 vNormal; in vec3 vWorldPosition; in vec3 vLocalPosition; in vec2 vUV; in vec4 vVertexColor;");
     if (!water) emit("out vec4 FragColor;");
     if (water) {
         // Small self-contained helper so a Water graph can compute an analytic wave
@@ -451,7 +453,9 @@ GeneratedShaderSource GenerateShaderSource(const ShaderAsset& asset, bool skinne
         else if (node.type == "ObjectColor")
             value = (!postProcess && !particle && !unlit)
                 ? "uObjectColor" : "vec4(1.0)";
-        else if (node.type == "VertexColor") value = "vec4(1.0)";
+        else if (node.type == "VertexColor") value =
+            (!postProcess && !particle && !unlit && !water)
+                ? "vVertexColor" : "vec4(1.0)";
         else if (node.type == "Time") value =
             (postProcess || (!particle && !unlit)) ? "uTime" : "0.0";
         else if (node.type == "DeltaTime") value =
