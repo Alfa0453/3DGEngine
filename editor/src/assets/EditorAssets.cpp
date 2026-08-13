@@ -1187,6 +1187,9 @@ const char *EditorAssets::TypeName(Type type)
         case Type::Building: return "Building";
         case Type::Road: return "Road";
         case Type::ScatterGraph: return "Scatter Graph";
+        case Type::Biome: return "Biome";
+        case Type::DayNightTimeline: return "Day/Night Timeline";
+        case Type::Cave: return "Cave";
         case Type::Other: return "Other";
     }
     return "Other";
@@ -1284,6 +1287,15 @@ EditorAssets::Type EditorAssets::ClassifyExtension(const std::string &extension)
     }
     if (extension == ".3dgscatter") {
         return Type::ScatterGraph;
+    }
+    if (extension == ".3dgbiome") {
+        return Type::Biome;
+    }
+    if (extension == ".3dgdaynight") {
+        return Type::DayNightTimeline;
+    }
+    if (extension == ".3dgcave") {
+        return Type::Cave;
     }
     if (extension == ".h" || extension == ".hpp" || extension == ".lua"
         || extension == ".cpp" || extension == ".cc") {

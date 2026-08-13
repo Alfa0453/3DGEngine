@@ -15,6 +15,9 @@
 #include "engine/graphics/RuntimeParticleSystem.h"
 #include "engine/math/Spline.h"
 #include "engine/assets/ScatterGraphAsset.h"
+#include "engine/assets/BiomeAsset.h"
+#include "engine/assets/DayNightTimelineAsset.h"
+#include "engine/assets/CaveAsset.h"
 
 #include <algorithm>
 #include <chrono>
@@ -920,6 +923,69 @@ int Script::GenerateScatterGraph(const std::string& assetPath,
         ++generated;
     }
     return generated;
+}
+
+int Script::GenerateBiome(const std::string& assetPath,
+                          const glm::vec3& worldOffset,
+                          std::uint32_t seedOverride) {
+    if (!m_context.registry || assetPath.empty()) return 0;
+    BiomeAssetData biome; std::string error;
+    if (!LoadBiomeAsset(assetPath, &biome, &error)) return 0;
+    const auto surface = [&biome](float, float) {
+        BiomeSurfaceSample sample;
+        sample.moisture = biome.moisture;
+        sample.temperature = biome.temperature;
+        sample.normalizedHeight = 0.5f;
+        return sample;
+    };
+    const auto placements = EvaluateBiome(biome, surface, worldOffset, seedOverride);
+    int generated = 0;
+    for (const BiomePlacement& placement : placements) {
+        const ecs::Entity entity = m_context.registry->Create();
+        ecs::Transform transform;
+        transform.position = placement.position;
+        transform.rotation = placement.rotation;
+        transform.scale = placement.scale;
+        m_context.registry->Add<ecs::Transform>(entity, transform);
+        m_context.registry->Add<ecs::ModelAsset>(entity, ecs::ModelAsset{placement.meshPath});
+        m_context.registry->Add<ecs::RuntimeName>(entity,
+            ecs::RuntimeName{"Biome_" + std::to_string(generated + 1)});
+        ++generated;
+    }
+    return generated;
+}
+
+ecs::Entity Script::SpawnCave(const std::string& assetPath, const glm::vec3& worldOffset) {
+    if (!m_context.registry || assetPath.empty()) return ecs::kNull;
+    CaveAssetData cave; std::string error;
+    if (!LoadCaveAsset(assetPath, &cave, &error) || cave.bakedMeshPath.empty())
+        return ecs::kNull;
+    const ecs::Entity entity = m_context.registry->Create();
+    ecs::Transform transform; transform.position = worldOffset;
+    m_context.registry->Add<ecs::Transform>(entity, transform);
+    m_context.registry->Add<ecs::ModelAsset>(entity, ecs::ModelAsset{cave.bakedMeshPath});
+    m_context.registry->Add<ecs::RuntimeName>(entity,
+        ecs::RuntimeName{"Cave_" + cave.name + "_Runtime"});
+    return entity;
+}
+
+bool Script::LoadDayNightTimeline(const std::string& assetPath, bool play) {
+    auto& runtime = DayNightTimelineRuntime::Instance(); std::string error;
+    if (!runtime.Load(assetPath, &error)) return false;
+    if (play) runtime.Play(); else runtime.Pause(); return true;
+}
+void Script::PlayDayNightTimeline() { DayNightTimelineRuntime::Instance().Play(); }
+void Script::PauseDayNightTimeline() { DayNightTimelineRuntime::Instance().Pause(); }
+void Script::StopDayNightTimeline() { DayNightTimelineRuntime::Instance().Stop(); }
+void Script::SetDayNightTime(float time) { DayNightTimelineRuntime::Instance().SetTime(time); }
+float Script::DayNightTime() const { return DayNightTimelineRuntime::Instance().Time(); }
+void Script::SetDayNightPlaybackRate(float rate) { DayNightTimelineRuntime::Instance().SetPlaybackRate(rate); }
+bool Script::WasDayNightEvent(const std::string& name) {
+    static std::vector<std::string> frameEvents;
+    auto fresh = DayNightTimelineRuntime::Instance().TakeEvents();
+    frameEvents.insert(frameEvents.end(), fresh.begin(), fresh.end());
+    const auto it = std::find(frameEvents.begin(), frameEvents.end(), name);
+    if (it == frameEvents.end()) return false; frameEvents.erase(it); return true;
 }
 
 glm::vec3 Script::SplinePositionAt(ecs::Entity spline, float normalizedDistance,

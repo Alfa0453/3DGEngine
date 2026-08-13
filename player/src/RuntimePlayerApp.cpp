@@ -21,6 +21,7 @@
 #include <engine/assets/ShaderAsset.h>
 #include <engine/assets/ShaderGraphCompiler.h>
 #include <engine/assets/TextureAsset.h>
+#include <engine/assets/DayNightTimelineAsset.h>
 #include <engine/graphics/ImageDecode.h>
 #include <engine/core/Paths.h>
 
@@ -515,6 +516,17 @@ void RuntimePlayerApp::LoadScene() {
     }
     m_entityCount = created.size();
     m_sample = engine::DayNightCycle::At(m_scene.environment.timeOfDay);
+    if (!m_scene.environment.dayNightTimelinePath.empty()) {
+        std::filesystem::path timelinePath(m_scene.environment.dayNightTimelinePath);
+        if (!timelinePath.is_absolute() && !std::filesystem::exists(timelinePath))
+            timelinePath = std::filesystem::path(bootScenePath).parent_path() / timelinePath;
+        std::string timelineError;
+        auto& timeline = engine::DayNightTimelineRuntime::Instance();
+        if (!timeline.Load(timelinePath.lexically_normal().string(), &timelineError))
+            m_runtimeWarnings.push_back("Day/night timeline: " + timelineError);
+        else if (m_scene.environment.dayNightTimelineAutoplay) timeline.Play();
+        else timeline.Pause();
+    }
 
     // Resolve authored asset references (materials/models/skinned) into loaded GPU
     // assets: MaterialAsset -> LoadedMaterialAsset, etc. Asset paths resolve against
@@ -2211,6 +2223,29 @@ void RuntimePlayerApp::OnUpdate(float dt) {
         engine::UpdateScripts(
             m_registry, gameDt, &input, &m_runtimeAudio,
             &m_cameraShake, &m_cameraDirector, &gameMode, &m_physics);
+        auto& dayNight = engine::DayNightTimelineRuntime::Instance();
+        dayNight.Tick(gameDt);
+        if (dayNight.Loaded()) {
+            const auto key = dayNight.Sample(); auto& environment = m_scene.environment;
+            environment.timeOfDay=dayNight.Time();environment.skyIntensity=key.skyIntensity;
+            environment.skyLightIntensity=key.skyLightIntensity;environment.sunIntensity=key.sunIntensity;
+            environment.cloudCoverage=key.cloudCoverage;environment.cloudDensity=key.cloudDensity;
+            environment.cloudWindSpeed=key.cloudWindSpeed;environment.cloudWindDirection=key.cloudWindDirection;
+            environment.cloudColor=key.cloudColor;environment.fogDensity=key.fogDensity;
+            environment.fogHeight=key.fogHeight;environment.fogHeightFalloff=key.fogHeightFalloff;
+            m_sample=engine::DayNightCycle::At(environment.timeOfDay);
+            if (key.ambientAudioPath != m_dayNightAmbientPath) {
+                if (m_dayNightAmbientSource != engine::AudioEngine::InvalidSource)
+                    m_audio.DestroySource(m_dayNightAmbientSource);
+                m_dayNightAmbientSource = engine::AudioEngine::InvalidSource;
+                m_dayNightAmbientPath = key.ambientAudioPath;
+                if (!m_dayNightAmbientPath.empty()) {
+                    m_dayNightAmbientSource = m_audio.CreateSource(
+                        m_dayNightAmbientPath, false, true, true, engine::AudioBus::Ambient);
+                    m_audio.PlaySource(m_dayNightAmbientSource, true);
+                }
+            }
+        }
         if (std::string requestedScene = engine::ConsumeScriptSceneLoadRequest();
             !requestedScene.empty()) {
             (void)engine::ConsumeScriptLevelStreamRequests();
@@ -2681,6 +2716,8 @@ void RuntimePlayerApp::OnShutdown() {
     m_audio.StopAllSounds();
     m_audio.StopMusic();
     m_audio.DestroyAllSources();
+    m_dayNightAmbientSource = engine::AudioEngine::InvalidSource;
+    m_dayNightAmbientPath.clear();
     m_config.Set("window.vsync", GetWindow().IsVSync());
     m_config.Save();
 }

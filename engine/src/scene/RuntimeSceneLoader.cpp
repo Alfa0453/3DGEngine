@@ -778,6 +778,13 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             loaded.environment.physicsAllowSleeping = physicsAllowSleeping != 0;
             continue;
         }
+        if (recordType == "day_night_timeline") {
+            record >> std::quoted(loaded.environment.dayNightTimelinePath)
+                   >> loaded.environment.dayNightTimelineAutoplay;
+            if (loaded.environment.dayNightTimelinePath == "-")
+                loaded.environment.dayNightTimelinePath.clear();
+            continue;
+        }
 
         if (recordType == "light") {
             if (version < 4) {

@@ -373,3 +373,38 @@ else()
     target_compile_options(scatter_graph_tests PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 add_test(NAME scatter_graph_regression COMMAND scatter_graph_tests)
+
+add_executable(lighting_analysis_tests
+    lighting_analysis_tests.cpp
+    ${CMAKE_SOURCE_DIR}/editor/src/panels/LightingAnalysis.cpp)
+target_include_directories(lighting_analysis_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/editor/include)
+target_link_libraries(lighting_analysis_tests PRIVATE engine)
+if(MSVC)
+    target_compile_options(lighting_analysis_tests PRIVATE /W4)
+else()
+    target_compile_options(lighting_analysis_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME lighting_analysis_regression COMMAND lighting_analysis_tests)
+
+add_executable(biome_asset_tests biome_asset_tests.cpp)
+target_link_libraries(biome_asset_tests PRIVATE engine)
+if(MSVC)
+    target_compile_options(biome_asset_tests PRIVATE /W4)
+else()
+    target_compile_options(biome_asset_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME biome_asset_regression COMMAND biome_asset_tests)
+
+add_executable(day_night_timeline_tests day_night_timeline_tests.cpp)
+target_link_libraries(day_night_timeline_tests PRIVATE engine)
+add_test(NAME day_night_timeline_regression COMMAND day_night_timeline_tests)
+
+add_executable(cave_asset_tests cave_asset_tests.cpp)
+target_link_libraries(cave_asset_tests PRIVATE engine)
+if(MSVC)
+    target_compile_options(cave_asset_tests PRIVATE /W4)
+else()
+    target_compile_options(cave_asset_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME cave_asset_regression COMMAND cave_asset_tests)

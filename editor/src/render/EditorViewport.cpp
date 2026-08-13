@@ -1094,6 +1094,57 @@ void EditorViewport::DrawWorldGrid(const glm::mat4& viewProj) const {
     m_gridLines->Draw(viewProj, 2.0f, false, true);
 }
 
+void EditorViewport::DrawLightingAnalysisOverlay(
+    const std::vector<LightingAnalysisGuide>& guides,
+    int mode, float cellSize, const glm::mat4& viewProj) const {
+    if (!m_gridLines || guides.empty() || mode <= 0) return;
+    m_gridLines->Clear();
+    const float half = std::clamp(cellSize * 0.42f, 0.04f, 8.0f);
+    const std::size_t count = std::min<std::size_t>(guides.size(), 4096);
+    for (std::size_t i = 0; i < count; ++i) {
+        const LightingAnalysisGuide& guide = guides[i];
+        const float value = std::clamp(guide.value, 0.0f, 1.5f);
+        glm::vec3 color(0.2f, 0.85f, 0.35f);
+        switch (mode) {
+        case 1: // light complexity: cool -> warm -> critical
+            color = value < 0.5f
+                ? glm::mix(glm::vec3(0.1f, 0.75f, 0.35f),
+                           glm::vec3(1.0f, 0.75f, 0.1f), value * 2.0f)
+                : glm::mix(glm::vec3(1.0f, 0.75f, 0.1f),
+                           glm::vec3(1.0f, 0.12f, 0.08f),
+                           std::min(1.0f, (value - 0.5f) * 2.0f));
+            break;
+        case 2: color = glm::mix(glm::vec3(0.12f, 0.65f, 1.0f),
+                                 glm::vec3(0.95f, 0.15f, 0.85f),
+                                 std::min(value, 1.0f)); break;
+        case 3: color = glm::mix(glm::vec3(0.08f, 0.28f, 1.0f),
+                                 glm::vec3(1.0f, 0.22f, 0.05f),
+                                 std::min(value, 1.0f)); break;
+        case 4: color = guide.warning ? glm::vec3(1.0f, 0.08f, 0.05f)
+                                      : glm::vec3(0.18f, 0.6f, 0.28f); break;
+        case 5: color = guide.warning ? glm::vec3(1.0f, 0.12f, 0.75f)
+                                      : glm::vec3(0.7f, 0.35f, 1.0f); break;
+        default: break;
+        }
+        const glm::vec3 p = guide.position + glm::vec3(0.0f, 0.025f, 0.0f);
+        m_gridLines->AddLine(p + glm::vec3(-half, 0, -half),
+                             p + glm::vec3(half, 0, -half), color);
+        m_gridLines->AddLine(p + glm::vec3(half, 0, -half),
+                             p + glm::vec3(half, 0, half), color);
+        m_gridLines->AddLine(p + glm::vec3(half, 0, half),
+                             p + glm::vec3(-half, 0, half), color);
+        m_gridLines->AddLine(p + glm::vec3(-half, 0, half),
+                             p + glm::vec3(-half, 0, -half), color);
+        if (guide.warning || mode == 5) {
+            m_gridLines->AddLine(p + glm::vec3(-half, 0, -half),
+                                 p + glm::vec3(half, 0, half), color);
+            m_gridLines->AddLine(p + glm::vec3(-half, 0, half),
+                                 p + glm::vec3(half, 0, -half), color);
+        }
+    }
+    m_gridLines->Draw(viewProj, 2.0f, true);
+}
+
 void EditorViewport::DrawPhysicsColliderGuides(const EditorScene& scene,
                                                const glm::mat4& viewProj,
                                                bool selectedOnly) const {

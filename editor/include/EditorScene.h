@@ -543,6 +543,9 @@ public:
         float skyRotation = 0.0f;
         float skyIntensity = 1.0f;
         float timeOfDay = 0.46f;
+        std::string dayNightTimelinePath;
+        engine::AssetHandle dayNightTimelineId;
+        bool dayNightTimelineAutoplay = true;
         float skyLightIntensity = 1.0f;
         bool skylightOcclusion = true;
         float skylightOcclusionStrength = 0.90f;

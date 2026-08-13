@@ -485,6 +485,16 @@ void LuaScript::RegisterEngineApi() {
         {"SpawnEmpty", ApiSpawnEmpty},
         {"SpawnFromObject", ApiSpawnFromObject},
         {"GenerateScatterGraph", ApiGenerateScatterGraph},
+        {"GenerateBiome", ApiGenerateBiome},
+        {"SpawnCave", ApiSpawnCave},
+        {"LoadDayNightTimeline", ApiLoadDayNightTimeline},
+        {"PlayDayNightTimeline", ApiPlayDayNightTimeline},
+        {"PauseDayNightTimeline", ApiPauseDayNightTimeline},
+        {"StopDayNightTimeline", ApiStopDayNightTimeline},
+        {"SetDayNightTime", ApiSetDayNightTime},
+        {"GetDayNightTime", ApiGetDayNightTime},
+        {"SetDayNightPlaybackRate", ApiSetDayNightPlaybackRate},
+        {"WasDayNightEvent", ApiWasDayNightEvent},
         {"ConfigureProjectile", ApiConfigureProjectile},
         {"SocketPosition", ApiSocketPosition},
         {"TraceLine", ApiTraceLine},
@@ -970,6 +980,40 @@ int LuaScript::ApiGenerateScatterGraph(lua_State* state) {
     lua_pushinteger(state, Current(state)->GenerateScatterGraph(path, offset, seed));
     return 1;
 }
+
+int LuaScript::ApiGenerateBiome(lua_State* state) {
+    const char* path = luaL_checkstring(state, 1);
+    const glm::vec3 offset(
+        static_cast<float>(luaL_optnumber(state, 2, 0.0)),
+        static_cast<float>(luaL_optnumber(state, 3, 0.0)),
+        static_cast<float>(luaL_optnumber(state, 4, 0.0)));
+    const std::uint32_t seed = static_cast<std::uint32_t>(
+        std::max<lua_Integer>(0, luaL_optinteger(state, 5, 0)));
+    lua_pushinteger(state, Current(state)->GenerateBiome(path, offset, seed));
+    return 1;
+}
+
+int LuaScript::ApiSpawnCave(lua_State* state) {
+    const char* path = luaL_checkstring(state, 1);
+    const glm::vec3 offset(
+        static_cast<float>(luaL_optnumber(state, 2, 0.0)),
+        static_cast<float>(luaL_optnumber(state, 3, 0.0)),
+        static_cast<float>(luaL_optnumber(state, 4, 0.0)));
+    lua_pushinteger(state, static_cast<lua_Integer>(Current(state)->SpawnCave(path, offset)));
+    return 1;
+}
+
+int LuaScript::ApiLoadDayNightTimeline(lua_State* state) {
+    const char* path=luaL_checkstring(state,1);const bool play=lua_gettop(state)<2||lua_toboolean(state,2)!=0;
+    lua_pushboolean(state,Current(state)->LoadDayNightTimeline(path,play));return 1;
+}
+int LuaScript::ApiPlayDayNightTimeline(lua_State* state){Current(state)->PlayDayNightTimeline();return 0;}
+int LuaScript::ApiPauseDayNightTimeline(lua_State* state){Current(state)->PauseDayNightTimeline();return 0;}
+int LuaScript::ApiStopDayNightTimeline(lua_State* state){Current(state)->StopDayNightTimeline();return 0;}
+int LuaScript::ApiSetDayNightTime(lua_State* state){Current(state)->SetDayNightTime(static_cast<float>(luaL_checknumber(state,1)));return 0;}
+int LuaScript::ApiGetDayNightTime(lua_State* state){lua_pushnumber(state,Current(state)->DayNightTime());return 1;}
+int LuaScript::ApiSetDayNightPlaybackRate(lua_State* state){Current(state)->SetDayNightPlaybackRate(static_cast<float>(luaL_checknumber(state,1)));return 0;}
+int LuaScript::ApiWasDayNightEvent(lua_State* state){lua_pushboolean(state,Current(state)->WasDayNightEvent(luaL_checkstring(state,1)));return 1;}
 
 int LuaScript::ApiConfigureProjectile(lua_State* state) {
     LuaScript* script = Current(state);

@@ -27,6 +27,7 @@ public:
         PhysicsStatus,
         GameplayDebug,
         OptimizationAuditor,
+        LightingAnalysis,
         AnimationPreview,
         Gizmo,
         CameraManager,
@@ -71,6 +72,9 @@ public:
         LevelInstances,
         WorldPartition,
         ProceduralScatterGraph,
+        BiomeEditor,
+        DayNightTimeline,
+        CaveTunnel,
         Count
     };
 
@@ -88,7 +92,7 @@ public:
 private:
     static constexpr int kPanelCount = static_cast<int>(Panel::Count);
     static constexpr std::array<bool, kPanelCount> kDefaultOpen{{
-        true, true, false, false, true, true, false, false, false, false, false, true, true, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, true, false, false, false, false, false, false, false, false, false, false, false, false, false, false
+        true, true, false, false, true, true, false, false, false, false, false, false, true, true, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, true, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false
     }};
     std::array<bool, kPanelCount> m_open{kDefaultOpen};      
 };

@@ -49,6 +49,7 @@ const char* PlainPanelName(EditorPanels::Panel panel)
     case Panel::PhysicsStatus: return "Physics Status";
     case Panel::GameplayDebug: return "Gameplay Debug";
     case Panel::OptimizationAuditor: return "Optimization Auditor";
+    case Panel::LightingAnalysis: return "Lighting Analysis";
     case Panel::AnimationPreview: return "Animation Preview";
     case Panel::Gizmo: return "Gizmo";
     case Panel::CameraManager: return "Camera Manager";
@@ -93,6 +94,9 @@ const char* PlainPanelName(EditorPanels::Panel panel)
     case Panel::LevelInstances: return "Level Instance Tool";
     case Panel::WorldPartition: return "World Partition Tool";
     case Panel::ProceduralScatterGraph: return "Procedural Scatter Graph";
+    case Panel::BiomeEditor: return "Biome Editor";
+    case Panel::DayNightTimeline: return "Day/Night Timeline";
+    case Panel::CaveTunnel: return "Cave and Tunnel Tool";
     case Panel::Count:     break;
     }
     return "Panel";
@@ -155,6 +159,7 @@ EditorPanels::Group EditorPanels::GroupOf(Panel panel)
     case Panel::Hud:
     case Panel::WorldEditor:
     case Panel::WeatherEditor:
+    case Panel::DayNightTimeline:
         return Group::WorldGameplay;
 
     case Panel::MaterialMaker:
@@ -202,11 +207,14 @@ EditorPanels::Group EditorPanels::GroupOf(Panel panel)
     case Panel::LevelInstances:
     case Panel::WorldPartition:
     case Panel::ProceduralScatterGraph:
+    case Panel::BiomeEditor:
+    case Panel::CaveTunnel:
         return Group::LevelDesign;
 
     case Panel::PhysicsStatus:
     case Panel::GameplayDebug:
     case Panel::OptimizationAuditor:
+    case Panel::LightingAnalysis:
     case Panel::RuntimePropertyInspector:
     case Panel::AssetDependencyViewer:
         return Group::Debug;

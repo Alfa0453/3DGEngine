@@ -48,6 +48,9 @@ public:
         Building,
         Road,
         ScatterGraph,
+        Biome,
+        DayNightTimeline,
+        Cave,
         Other
     };
 

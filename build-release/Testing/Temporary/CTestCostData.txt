@@ -2,7 +2,7 @@ shader_asset_regression 2 0.142775
 material_shader_regression 3 0.0106025
 forge_material_importer_regression 8 0.00403031
 image_decode_regression 2 0.00472755
-asset_registry_regression 6 0.00206515
+asset_registry_regression 7 0.00232891
 editor_assets_regression 4 0.0228024
 camera_manager_regression 2 0.0082241
 optimization_auditor_regression 0 0
@@ -15,5 +15,6 @@ static_mesh_asset_regression 2 0.0205982
 mesh_geometry_operations_regression 2 0.00475315
 script_system_regression 2 0.00398715
 foliage_asset_regression 2 0.0038748
-scatter_graph_regression 2 0.0035608
+scatter_graph_regression 3 0.00267233
+lighting_analysis_regression 2 0.0024304
 ---

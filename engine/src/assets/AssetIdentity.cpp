@@ -147,12 +147,15 @@ const char* AssetTypeName(AssetType type) {
         case AssetType::Building: return "Procedural Building";
         case AssetType::Road: return "Road";
         case AssetType::ScatterGraph: return "Procedural Scatter Graph";
+        case AssetType::Biome: return "Biome";
+        case AssetType::DayNightTimeline: return "Day/Night Timeline";
+        case AssetType::Cave: return "Cave / Tunnel";
     }
     return "Unknown";
 }
 
 bool IsKnownAssetType(AssetType type) {
-    return type > AssetType::Unknown && type <= AssetType::ScatterGraph;
+    return type > AssetType::Unknown && type <= AssetType::Cave;
 }
 
 const char* NativeAssetExtension(AssetType type) {
@@ -166,6 +169,9 @@ const char* NativeAssetExtension(AssetType type) {
         case AssetType::World: return ".3dgworld";
         case AssetType::Foliage: return ".3dgfoliage";
         case AssetType::ScatterGraph: return ".3dgscatter";
+        case AssetType::Biome: return ".3dgbiome";
+        case AssetType::DayNightTimeline: return ".3dgdaynight";
+        case AssetType::Cave: return ".3dgcave";
         default: return "";
     }
 }
@@ -181,6 +187,9 @@ AssetType NativeAssetTypeFromExtension(const std::string& extension) {
     if (lower == ".3dgworld") return AssetType::World;
     if (lower == ".3dgfoliage") return AssetType::Foliage;
     if (lower == ".3dgscatter") return AssetType::ScatterGraph;
+    if (lower == ".3dgbiome") return AssetType::Biome;
+    if (lower == ".3dgdaynight") return AssetType::DayNightTimeline;
+    if (lower == ".3dgcave") return AssetType::Cave;
     return AssetType::Unknown;
 }
 

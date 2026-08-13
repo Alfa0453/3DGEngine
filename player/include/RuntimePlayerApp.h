@@ -133,6 +133,8 @@ private:
 
     engine::AudioEngine        m_audio;
     engine::RuntimeAudioSystem m_runtimeAudio;
+    engine::AudioEngine::SourceHandle m_dayNightAmbientSource = engine::AudioEngine::InvalidSource;
+    std::string m_dayNightAmbientPath;
     engine::CameraShake        m_cameraShake;
     engine::CameraShakeSample  m_cameraShakeSample;
     engine::CameraSequencePlayer m_cameraSequence;

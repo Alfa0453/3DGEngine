@@ -54,6 +54,8 @@ add_executable(3DGEditor
     src/panels/DecalPlacementPanel.cpp
     src/panels/OptimizationAuditReport.cpp
     src/panels/OptimizationAuditorPanel.cpp
+    src/panels/LightingAnalysis.cpp
+    src/panels/LightingAnalysisPanel.cpp
     src/panels/RagdollPhysicsPanel.cpp
     src/panels/AnimationRetargetingPanel.cpp
     src/panels/AbilityEditorPanel.cpp
@@ -67,6 +69,9 @@ add_executable(3DGEditor
     src/panels/LevelInstancePanel.cpp
     src/panels/WorldPartitionPanel.cpp
     src/panels/ProceduralScatterGraphPanel.cpp
+    src/panels/BiomeEditorPanel.cpp
+    src/panels/DayNightTimelinePanel.cpp
+    src/panels/CaveTunnelPanel.cpp
     src/panels/TerrainCreatorPanel.cpp
     src/panels/ModularPlacementPanel.cpp
     src/panels/PrefabPalettePanel.cpp

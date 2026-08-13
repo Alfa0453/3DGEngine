@@ -56,6 +56,9 @@ add_library(engine STATIC
     src/assets/StaticMeshAsset.cpp
     src/assets/FoliageAsset.cpp
     src/assets/ScatterGraphAsset.cpp
+    src/assets/BiomeAsset.cpp
+    src/assets/DayNightTimelineAsset.cpp
+    src/assets/CaveAsset.cpp
     src/assets/TerrainAsset.cpp
     src/assets/TextureAsset.cpp
     src/assets/ForgeMaterialImporter.cpp

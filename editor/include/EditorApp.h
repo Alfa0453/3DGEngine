@@ -54,6 +54,7 @@
 #include "MeshEditorPanel.h"
 #include "DecalPlacementPanel.h"
 #include "OptimizationAuditorPanel.h"
+#include "LightingAnalysisPanel.h"
 #include "RagdollPhysicsPanel.h"
 #include "AnimationRetargetingPanel.h"
 #include "AbilityEditorPanel.h"
@@ -65,6 +66,9 @@
 #include "LevelInstancePanel.h"
 #include "WorldPartitionPanel.h"
 #include "ProceduralScatterGraphPanel.h"
+#include "BiomeEditorPanel.h"
+#include "DayNightTimelinePanel.h"
+#include "CaveTunnelPanel.h"
 #include "TerrainCreatorPanel.h"
 #include "ModularPlacementPanel.h"
 #include "PrefabPalettePanel.h"
@@ -227,6 +231,7 @@ private:
     void DrawMeasurementPanel();
     void DrawLevelValidationPanel();
     void DrawOptimizationAuditorPanel();
+    void DrawLightingAnalysisPanel();
     void DrawRagdollPhysicsPanel();
     void DrawAnimationRetargetingPanel();
     void DrawAbilityEditorPanel();
@@ -238,6 +243,11 @@ private:
     void DrawLevelInstancePanel();
     void DrawWorldPartitionPanel();
     void DrawProceduralScatterGraphPanel();
+    void DrawBiomeEditorPanel();
+    void DrawDayNightTimelinePanel();
+    void DrawCaveTunnelPanel();
+    void GenerateCaveTunnel();
+    int DeleteGeneratedCaveTunnel(const std::string& caveName);
     bool CreatePartitionCellFromSelection(const std::string& path, int cellX, int cellZ);
     void DrawLevelVariantPanel();
     void DrawLevelLayersPanel();
@@ -624,6 +634,7 @@ private:
     MeasurementPanel                     m_measurementPanel;
     LevelValidationPanel                 m_levelValidation;
     OptimizationAuditorPanel             m_optimizationAuditor;
+    LightingAnalysisPanel                m_lightingAnalysis;
     RagdollPhysicsPanel                   m_ragdollPhysics;
     AnimationRetargetingPanel             m_animationRetargeting;
     AbilityEditorPanel                    m_abilityEditor;
@@ -635,6 +646,9 @@ private:
     LevelInstancePanel                    m_levelInstances;
     WorldPartitionPanel                   m_worldPartition;
     ProceduralScatterGraphPanel           m_proceduralScatterGraph;
+    BiomeEditorPanel                       m_biomeEditor;
+    DayNightTimelinePanel                  m_dayNightTimeline;
+    CaveTunnelPanel                       m_caveTunnel;
     LevelVariantPanel                    m_levelVariants;
     LevelLayersPanel                     m_levelLayers;
     ViewportBookmarksPanel               m_viewportBookmarks;

@@ -18,6 +18,7 @@ inline const char* ForPanel(EditorPanels::Panel panel) {
     case P::PhysicsStatus: return Settings;
     case P::GameplayDebug: return Settings;
     case P::OptimizationAuditor: return Settings;
+    case P::LightingAnalysis: return Star;
     case P::AnimationPreview: return Play;
     case P::Gizmo: return Edit;
     case P::CameraManager: return Screen;
@@ -62,6 +63,9 @@ inline const char* ForPanel(EditorPanels::Panel panel) {
     case P::LevelInstances: return Layers;
     case P::WorldPartition: return World;
     case P::ProceduralScatterGraph: return Leaf;
+    case P::BiomeEditor: return Leaf;
+    case P::DayNightTimeline: return World;
+    case P::CaveTunnel: return Link;
     case P::Count: break;
     }
     return Document;

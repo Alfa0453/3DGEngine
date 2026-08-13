@@ -10527,12 +10527,20 @@ bool EditorDockspace::Draw(Context& context) {
             break; // drawn by EditorApp (owns world partition authoring)
         case EditorPanels::Panel::ProceduralScatterGraph:
             break; // drawn by EditorApp (owns deterministic scatter authoring and baking)
+        case EditorPanels::Panel::BiomeEditor:
+            break; // drawn by EditorApp (owns biome authoring and landscape application)
+        case EditorPanels::Panel::DayNightTimeline:
+            break; // drawn by EditorApp (owns environment timeline authoring and preview)
+        case EditorPanels::Panel::CaveTunnel:
+            break; // drawn by EditorApp (owns cave authoring and baked scene generation)
         case EditorPanels::Panel::MeshEditor:
             break; // drawn by EditorApp (owns native mesh editing state)
         case EditorPanels::Panel::DecalPlacement:
             break; // drawn by EditorApp (owns surface picking and placement)
         case EditorPanels::Panel::OptimizationAuditor:
             break; // drawn by EditorApp (owns on-demand scene analysis)
+        case EditorPanels::Panel::LightingAnalysis:
+            break; // drawn by EditorApp (owns lighting sampling and viewport overlays)
         case EditorPanels::Panel::ModularPlacement:
             break; // drawn by EditorApp (owns viewport placement interaction)
         case EditorPanels::Panel::PrefabPalette:

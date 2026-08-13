@@ -76,6 +76,16 @@ private:
     static int ApiSpawnEmpty(lua_State* state);
     static int ApiSpawnFromObject(lua_State* state);
     static int ApiGenerateScatterGraph(lua_State* state);
+    static int ApiGenerateBiome(lua_State* state);
+    static int ApiSpawnCave(lua_State* state);
+    static int ApiLoadDayNightTimeline(lua_State* state);
+    static int ApiPlayDayNightTimeline(lua_State* state);
+    static int ApiPauseDayNightTimeline(lua_State* state);
+    static int ApiStopDayNightTimeline(lua_State* state);
+    static int ApiSetDayNightTime(lua_State* state);
+    static int ApiGetDayNightTime(lua_State* state);
+    static int ApiSetDayNightPlaybackRate(lua_State* state);
+    static int ApiWasDayNightEvent(lua_State* state);
     static int ApiConfigureProjectile(lua_State* state);
     static int ApiSocketPosition(lua_State* state);
     static int ApiTraceLine(lua_State* state);

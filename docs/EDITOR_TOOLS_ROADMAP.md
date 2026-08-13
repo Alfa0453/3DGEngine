@@ -32,11 +32,11 @@ Status legend:
 | 13 | **COMPLETE** | World Partition Tool | Cell-based large-world organization, streaming preview, memory estimates, data layers, priorities, and load distances. |
 | 14 | **COMPLETE** | Geometry Editing Tool | Extrude, inset, bevel, bridge, weld, subdivision, face deletion, topology analysis, and mesh repair. |
 | 15 | **COMPLETE** | Procedural Scatter Graph | Engine-owned deterministic placement graphs with filters, exclusions, weighted outputs, preview, baking, and scripts. |
-| 16 | **NEXT** | Lighting Analysis Tool | Light complexity, shadow coverage, exposure, overlap, unlit-area, and overdraw views. |
-| 17 | PLANNED | Biome Editor | Reusable terrain, foliage, water, weather, lighting, particles, and ambient-audio presets. |
-| 18 | PLANNED | Day/Night Timeline | Authors sky, sun, moon, clouds, fog, lighting, and environmental audio over time. |
-| 19 | PLANNED | Cave and Tunnel Tool | Spline-generated cave/tunnel meshes, junctions, entrances, collision, and navigation. |
-| 20 | PLANNED | Fence and Wall Painter | Viewport drawing of connected fences and walls with corners, posts, gates, and snapping. |
+| 16 | **COMPLETE** | Lighting Analysis Tool | Light complexity, shadow coverage, exposure, overlap, unlit-area, and overdraw views. |
+| 17 | **COMPLETE** | Biome Editor | Reusable terrain, foliage, water, weather, lighting, particles, and ambient-audio presets. |
+| 18 | **COMPLETE** | Day/Night Timeline | Authors sky, sun, moon, clouds, fog, lighting, and environmental audio over time. |
+| 19 | **COMPLETE** | Cave and Tunnel Tool | Spline-generated cave/tunnel meshes, chambers, entrances, collision, and navigation floors. |
+| 20 | **NEXT** | Fence and Wall Painter | Viewport drawing of connected fences and walls with corners, posts, gates, and snapping. |
 | 21 | PLANNED | Destruction Authoring Tool | Fracture pieces, strength, debris, damaged states, sound, particles, and collision. |
 | 22 | PLANNED | Interactive Door and Lift Tool | Fast setup for doors, gates, elevators, platforms, switches, locks, and access conditions. |
 | 23 | PLANNED | Portal and Teleport Tool | Teleporters, destination previews, seamless doors, and level-transition portals. |
@@ -291,7 +291,7 @@ evaluation, and baking to editable objects or a batched foliage actor. Assets
 retain stable IDs and mesh dependencies, open by double-clicking in Content, and
 can be evaluated through C++ or Lua scripts.
 
-## Current Milestone: Lighting Analysis Tool
+## Completed Milestone: Lighting Analysis Tool
 
 Initial scope:
 
@@ -303,3 +303,91 @@ Initial scope:
 6. Provide per-object and whole-level analysis with actionable recommendations.
 7. Export a concise lighting-analysis report for optimization passes.
 8. Add focused analysis tests and verify Release editor and player builds.
+
+Delivered as the **Lighting Analysis** panel under Debug & Diagnostics. The tool
+samples the authored level on a configurable world-space grid and provides live
+viewport modes for light complexity, shadow coverage, exposure, unlit areas, and
+transparent-material cost. It reports local-light overlap, redundant shadow
+casters, oversized influence ranges, directional cascade pressure, unlit and
+overexposed coverage, transparency/transmission cost, and material overdraw risks.
+Findings include actionable recommendations, can frame their affected scene object,
+and export to `Content/Reports/LightingAnalysis.txt`. The calculation core is
+deterministic, clamps unsafe settings, and is covered by focused regression tests.
+
+## Completed Milestone: Biome Editor
+
+Initial scope:
+
+1. Author reusable biome assets that bundle terrain-layer rules and environment presets.
+2. Combine weighted foliage, rocks, decals, water, weather, particles, and ambient audio.
+3. Define height, slope, moisture, temperature, mask, spline, and exclusion rules.
+4. Preview biome coverage and transitions in a dedicated viewport and in the level.
+5. Blend multiple biomes without hard seams and support deterministic variation.
+6. Apply biomes non-destructively to selected landscapes or bake optimized instances.
+7. Save engine-owned Content assets and expose biome application to C++ and Lua.
+8. Add deterministic biome tests and verify Release editor and player builds.
+
+Delivered as the **Biome Editor** under Level Design and as engine-owned
+`.3dgbiome` assets. Biomes combine normalized terrain-layer ranges, deterministic
+weighted foliage rules, moisture and temperature controls, transition width,
+weather, water, particles, and ambient audio. The dedicated preview visualizes
+surface coverage and population before applying it to a selected landscape.
+Application updates landscape materials and environment settings and rebuilds
+named biome-generated foliage, water, particle, and audio actors so repeated
+applications remain predictable. Asset IDs and dependencies survive save/load;
+Content double-click opens the editor; C++ and Lua can generate deterministic
+biome population at runtime. Focused asset tests and Release editor/player builds
+pass.
+
+## Completed Milestone: Day/Night Timeline
+
+Initial scope:
+
+1. Author reusable environment timelines with a normalized 24-hour track.
+2. Keyframe sun, moon, sky, clouds, fog, exposure, wind, and ambient audio.
+3. Provide smooth interpolation, loop controls, time scale, pause, and time jumps.
+4. Preview and scrub timelines in a dedicated editor viewport and the level.
+5. Add event markers for sunrise, sunset, weather changes, and gameplay callbacks.
+6. Bind a timeline as the level default while allowing script overrides.
+7. Save engine-owned Content assets and expose complete C++ and Lua controls.
+8. Add timeline interpolation/serialization tests and verify Release builds.
+
+Delivered as the **Day/Night Timeline** panel under World & Gameplay and as
+engine-owned `.3dgdaynight` assets. The editor provides a normalized 24-hour
+track, smooth circular interpolation across midnight, key capture from the active
+level, a dedicated sky preview, level scrubbing, playback, loop/rate/day-length
+controls, environment audio selection, and named event markers. A saved timeline
+can be assigned as the level default and autoplays in packaged runtime scenes.
+Scripts can load, play, pause, stop, seek, change rate, query time, and consume
+timeline events in C++ and Lua. Focused serialization, interpolation, event, and
+runtime-control tests pass, as do Release editor and player builds.
+
+## Completed Milestone: Cave and Tunnel Tool
+
+Initial scope:
+
+1. Draw cave and tunnel centerlines with the existing spline editing workflow.
+2. Generate smooth enclosed meshes with editable width, height, wall thickness, and resolution.
+3. Support branches, junctions, chambers, entrances, dead ends, and vertical shafts.
+4. Assign floor, wall, ceiling, trim, wetness, and detail materials by engine asset.
+5. Conform entrances to terrain and optionally carve or hide intersecting landscape regions.
+6. Generate optimized collision, navigation surfaces, portals, and streaming sections.
+7. Save reusable engine-owned cave assets and expose spline/profile controls to scripts.
+8. Add mesh/topology tests and verify Release editor and player builds.
+
+Delivered as the **Cave and Tunnel Tool** under Level Design and as engine-owned
+`.3dgcave` assets. Existing scene splines provide the centerline, while adjustable
+elliptical profiles, smooth arc-length sampling, chambers, vertical paths, open or
+capped ends, and terrain-conformed entrances produce an inward-facing baked
+`.3dgmesh`. Hidden floor, ceiling, and side-wall collision strips keep the interior
+walkable; optional floor generation feeds the normal navigation build. Rebuilding
+reuses the baked mesh identity and replaces prior generated objects. Content
+double-click reopens cave assets, and C++/Lua can spawn their baked visual mesh at
+runtime. Larger branch networks can be assembled from intersecting authored cave
+splines while keeping each branch independently rebuildable.
+
+## Next Milestone: Fence and Wall Painter
+
+Planned scope: draw connected fence/wall runs directly in the viewport, choose
+repeatable panel/post meshes, handle corners and slopes, insert gates and openings,
+snap endpoints, generate collision, and save reusable engine-owned definitions.

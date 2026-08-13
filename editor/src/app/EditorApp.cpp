@@ -27,6 +27,7 @@
 #include <engine/assets/ShaderAsset.h>
 #include <engine/assets/ShaderGraphCompiler.h>
 #include <engine/assets/FoliageAsset.h>
+#include <engine/assets/CaveAsset.h>
 
 #include "GameBtScripts.h"
 #include "EditorBranding.h"
@@ -99,6 +100,10 @@ EditorAssets::Type EditorAssetTypeFor(engine::AssetType type) {
     case A::Weather: return E::Weather;
     case A::Building: return E::Building;
     case A::Road: return E::Road;
+    case A::ScatterGraph: return E::ScatterGraph;
+    case A::Biome: return E::Biome;
+    case A::DayNightTimeline: return E::DayNightTimeline;
+    case A::Cave: return E::Cave;
     case A::Font:
     case A::Unknown: return E::Other;
     }
@@ -857,6 +862,18 @@ void EditorApp::OnUpdate(float dt)
             *m_playRegistry, playDt, &scriptInput, &m_runtimeAudio,
             &m_cameraShake, &m_cameraDirector, &engine::GameMode::Instance(),
             &m_playPhysics);
+        auto& dayNight = engine::DayNightTimelineRuntime::Instance();
+        dayNight.Tick(playDt);
+        if (dayNight.Loaded()) {
+            const auto key=dayNight.Sample();auto environment=m_scene.GetEnvironment();
+            environment.timeOfDay=dayNight.Time();environment.skyIntensity=key.skyIntensity;
+            environment.skyLightIntensity=key.skyLightIntensity;environment.sunIntensity=key.sunIntensity;
+            environment.cloudCoverage=key.cloudCoverage;environment.cloudDensity=key.cloudDensity;
+            environment.cloudWindSpeed=key.cloudWindSpeed;environment.cloudWindDirection=key.cloudWindDirection;
+            environment.cloudColor=key.cloudColor;environment.fogDensity=key.fogDensity;
+            environment.fogHeight=key.fogHeight;environment.fogHeightFalloff=key.fogHeightFalloff;
+            environment.fogColor=key.fogColor;m_scene.SetEnvironment(environment);
+        }
         // Full game save/load requests. In the editor a load restores state onto the
         // current play scene (matching entities by name) rather than reloading a scene.
         for (const engine::ScriptSaveGameRequest& request
@@ -2065,6 +2082,7 @@ void EditorApp::DrawEditorOverlay()
     DrawMeasurementPanel();
     DrawLevelValidationPanel();
     DrawOptimizationAuditorPanel();
+    DrawLightingAnalysisPanel();
     DrawRagdollPhysicsPanel();
     DrawAnimationRetargetingPanel();
     DrawAbilityEditorPanel();
@@ -2076,6 +2094,9 @@ void EditorApp::DrawEditorOverlay()
     DrawLevelInstancePanel();
     DrawWorldPartitionPanel();
     DrawProceduralScatterGraphPanel();
+    DrawBiomeEditorPanel();
+    DrawDayNightTimelinePanel();
+    DrawCaveTunnelPanel();
     DrawLevelVariantPanel();
     DrawLevelLayersPanel();
     DrawViewportBookmarksPanel();
@@ -2327,6 +2348,21 @@ void EditorApp::DrawEditorOverlay()
             m_panels.SetOpen(EditorPanels::Panel::ProceduralScatterGraph, true);
             m_proceduralScatterGraph.QueueOpen(path);
             m_log.Info("Opening procedural scatter graph: " + path);
+            break;
+        case EditorAssets::Type::Biome:
+            m_panels.SetOpen(EditorPanels::Panel::BiomeEditor, true);
+            m_biomeEditor.QueueOpen(path);
+            m_log.Info("Opening biome: " + path);
+            break;
+        case EditorAssets::Type::DayNightTimeline:
+            m_panels.SetOpen(EditorPanels::Panel::DayNightTimeline, true);
+            m_dayNightTimeline.QueueOpen(path);
+            m_log.Info("Opening day/night timeline: " + path);
+            break;
+        case EditorAssets::Type::Cave:
+            m_panels.SetOpen(EditorPanels::Panel::CaveTunnel, true);
+            m_caveTunnel.QueueOpen(path);
+            m_log.Info("Opening cave asset: " + path);
             break;
         case EditorAssets::Type::Terrain:
             m_panels.SetOpen(EditorPanels::Panel::TerrainCreator, true);
@@ -3530,6 +3566,318 @@ void EditorApp::DrawProceduralScatterGraphPanel() {
         + " foliage instance(s) in one batched actor.");
 }
 
+void EditorApp::DrawBiomeEditorPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::BiomeEditor)) return;
+    bool open = true;
+    const BiomeEditorPanel::Result result = m_biomeEditor.Draw(
+        m_assets, m_project.AssetRoot(), &open);
+    m_panels.SetOpen(EditorPanels::Panel::BiomeEditor, open);
+    if (result.saved) {
+        std::string error;
+        if (!m_assets.Refresh(m_project.AssetRoot(), &error)) m_log.Warning(error);
+    }
+    if (!result.message.empty()) m_log.Info(result.message);
+    if (!result.applyRequested || !m_cube || !m_plane) return;
+
+    if (m_biomeEditor.Path().empty()) {
+        m_log.Warning("Save the biome asset before applying it to a landscape.");
+        return;
+    }
+
+    const EditorScene::Object* selected = m_scene.SelectedObject();
+    if (!selected || !selected->isTerrain) {
+        m_log.Warning("Biome application requires a selected landscape.");
+        return;
+    }
+    const engine::BiomeAssetData& biome = m_biomeEditor.Biome();
+    const std::string terrainName = selected->name;
+    const int terrainResolution = selected->terrainRes;
+    const float terrainSize = selected->terrainSize;
+    const float terrainMaxHeight = std::max(selected->terrainMaxHeight, 0.001f);
+    const engine::ecs::Transform terrainTransform = *m_scene.SelectedTransform();
+
+    for (int layer = 0; layer < 5; ++layer) {
+        const std::string material = layer < static_cast<int>(biome.layers.size())
+            ? biome.layers[static_cast<std::size_t>(layer)].materialPath : std::string{};
+        m_scene.SetSelectedTerrainLayerMaterial(layer + 1, material);
+    }
+
+    if (!biome.weatherPath.empty()) {
+        engine::WeatherAssetData weather;
+        std::string error;
+        if (engine::LoadWeatherAsset(biome.weatherPath, &weather, &error)) {
+            auto environment = m_scene.GetEnvironment();
+            environment.timeOfDay = weather.timeOfDay;
+            environment.skyLightIntensity = weather.skyLightIntensity;
+            environment.sunIntensity = weather.sunIntensity;
+            environment.clouds = weather.clouds;
+            environment.cloudCoverage = weather.cloudCoverage;
+            environment.cloudDensity = weather.cloudDensity;
+            environment.cloudScale = weather.cloudScale;
+            environment.cloudSoftness = weather.cloudSoftness;
+            environment.cloudWindSpeed = weather.cloudWindSpeed;
+            environment.cloudWindDirection = weather.cloudWindDirection;
+            environment.cloudColor = weather.cloudColor;
+            environment.cloudShadows = weather.cloudShadows;
+            environment.cloudShadowStrength = weather.cloudShadowStrength;
+            environment.fog = weather.fog;
+            environment.fogColor = weather.fogColor;
+            environment.fogDensity = weather.fogDensity;
+            environment.fogHeight = weather.fogHeight;
+            environment.fogHeightFalloff = weather.fogHeightFalloff;
+            m_scene.SetEnvironment(environment);
+        } else m_log.Warning("Biome weather could not be loaded: " + error);
+    }
+
+    const std::string prefix = "Biome_" + biome.name;
+    std::vector<int> oldGenerated;
+    for (int i = 0; i < static_cast<int>(m_scene.Objects().size()); ++i) {
+        const std::string& name = m_scene.Objects()[static_cast<std::size_t>(i)].name;
+        if (name == prefix + "_Foliage" || name == prefix + "_Water"
+            || name == prefix + "_Particles" || name == prefix + "_Audio")
+            oldGenerated.push_back(i);
+    }
+    if (!oldGenerated.empty()) { m_scene.SelectIndices(oldGenerated); m_scene.DeleteSelected(); }
+    for (int i = 0; i < static_cast<int>(m_scene.Objects().size()); ++i)
+        if (m_scene.Objects()[static_cast<std::size_t>(i)].name == terrainName) {
+            m_scene.SelectIndex(i); break;
+        }
+
+    const glm::vec3 center(terrainTransform.position.x + terrainSize * 0.5f,
+                           terrainTransform.position.y,
+                           terrainTransform.position.z + terrainSize * 0.5f);
+    const auto surface = [this, &biome, terrainTransform, terrainMaxHeight](float x, float z) {
+        engine::BiomeSurfaceSample sample;
+        bool centerHit = false, left = false, right = false, back = false, front = false;
+        const float worldHeight = TerrainSurfaceY(x, z, centerHit);
+        sample.height = worldHeight - terrainTransform.position.y;
+        const float step = 0.25f;
+        const float yl = TerrainSurfaceY(x-step,z,left), yr = TerrainSurfaceY(x+step,z,right);
+        const float yb = TerrainSurfaceY(x,z-step,back), yf = TerrainSurfaceY(x,z+step,front);
+        if (centerHit && left && right && back && front)
+            sample.normal = glm::normalize(glm::vec3(yl-yr, 2.0f*step, yb-yf));
+        sample.normalizedHeight = std::clamp(
+            (worldHeight - terrainTransform.position.y) / terrainMaxHeight, 0.0f, 1.0f);
+        const float moistureNoise = std::sin(x * 0.071f + z * 0.043f) * 0.15f;
+        const float temperatureNoise = std::cos(x * 0.037f - z * 0.061f) * 0.12f;
+        sample.moisture = std::clamp(biome.moisture + moistureNoise, 0.0f, 1.0f);
+        sample.temperature = std::clamp(biome.temperature + temperatureNoise, 0.0f, 1.0f);
+        return sample;
+    };
+    engine::BiomeAssetData evaluated = biome;
+    evaluated.previewWorldSize = terrainSize;
+    const auto placements = engine::EvaluateBiome(evaluated, surface, center);
+
+    if (!placements.empty()) {
+        engine::FoliageAssetData palette;
+        palette.header.id = engine::AssetHandle::Generate();
+        palette.name = biome.name + " Biome Foliage";
+        std::unordered_map<std::size_t, std::uint32_t> typeByRule;
+        for (const auto& placement : placements) {
+            if (typeByRule.count(placement.foliageRule)) continue;
+            const auto& rule = biome.foliage[placement.foliageRule];
+            const std::uint32_t typeIndex = static_cast<std::uint32_t>(palette.types.size());
+            typeByRule[placement.foliageRule] = typeIndex;
+            engine::FoliageTypeAsset type;
+            type.name = rule.name; type.meshPath = rule.meshPath; type.meshId = rule.meshId;
+            type.castShadows = rule.castShadows;
+            palette.types.push_back(std::move(type));
+        }
+        std::filesystem::path palettePath = m_biomeEditor.Path();
+        palettePath.replace_extension(".3dgfoliage");
+        std::string error;
+        if (engine::SaveFoliageAsset(palettePath.string(), palette, &error)) {
+            m_scene.AddFoliage(*m_cube);
+            m_scene.SetSelectedName(prefix + "_Foliage");
+            m_scene.SetSelectedFoliageAsset(palettePath.string(), palette.header.id);
+            m_scene.SetSelectedFoliageTerrainOwner(terrainName);
+            for (const auto& placement : placements)
+                m_scene.AddSelectedFoliageInstance(placement.position,
+                    glm::degrees(glm::eulerAngles(placement.rotation)), placement.scale,
+                    typeByRule[placement.foliageRule]);
+        } else m_log.Warning("Biome foliage save failed: " + error);
+    }
+
+    if (biome.waterEnabled) {
+        AddWater(1, false);
+        m_scene.SetSelectedName(prefix + "_Water");
+        engine::ecs::Transform waterTransform;
+        waterTransform.position = {center.x, terrainTransform.position.y + biome.waterLevel, center.z};
+        m_scene.SetSelectedTransform(waterTransform);
+        m_scene.SetSelectedWater(terrainSize, std::clamp(terrainResolution, 32, 256),
+            waterTransform.position.y, {0.13f,0.42f,0.38f}, {0.02f,0.12f,0.14f},
+            {0.52f,0.66f,0.70f}, 0.66f, 5.0f, 0.5f, 320.0f);
+        if (!biome.waterMaterialPath.empty())
+            m_scene.SetSelectedMaterialAsset(biome.waterMaterialPath, biome.waterMaterialId);
+    }
+    if (!biome.particlePath.empty()) {
+        engine::ParticleSystemComponent particles; std::string error;
+        if (particle_asset::Load(biome.particlePath, &particles, &error)) {
+            engine::ecs::Transform transform; transform.position = center;
+            m_scene.AddParticleSystem(*m_cube, transform, biome.particlePath, particles);
+            m_scene.SetSelectedName(prefix + "_Particles");
+        } else m_log.Warning("Biome particles could not be loaded: " + error);
+    }
+    if (!biome.ambientAudioPath.empty()) {
+        m_scene.AddEmpty(*m_cube); m_scene.SetSelectedName(prefix + "_Audio");
+        engine::ecs::Transform transform; transform.position = center;
+        m_scene.SetSelectedTransform(transform);
+        m_scene.SetSelectedAudioSource(true, biome.ambientAudioPath, 1.0f, 1.0f,
+            true, true, true, 2.0f, terrainSize, 1.0f, engine::AudioBus::Ambient);
+    }
+    m_editAssets.ResolveRegistryAssets(m_scene.Registry());
+    std::string refreshError;
+    if (!m_assets.Refresh(m_project.AssetRoot(), &refreshError)) m_log.Warning(refreshError);
+    m_log.Info("Applied biome '" + biome.name + "' to landscape '" + terrainName
+        + "' with " + std::to_string(placements.size()) + " foliage instances.");
+}
+
+void EditorApp::DrawDayNightTimelinePanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::DayNightTimeline)) return;
+    bool open = true;
+    const auto result = m_dayNightTimeline.Draw(
+        m_scene, m_assets, m_project.AssetRoot(), &open);
+    m_panels.SetOpen(EditorPanels::Panel::DayNightTimeline, open);
+    if (result.saved) {
+        std::string error;
+        if (!m_assets.Refresh(m_project.AssetRoot(), &error)) m_log.Warning(error);
+    }
+    if (!result.message.empty()) m_log.Info(result.message);
+}
+
+void EditorApp::DrawCaveTunnelPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::CaveTunnel)) return;
+    bool open = true;
+    const CaveTunnelPanel::Result result = m_caveTunnel.Draw(
+        m_scene, m_assets, m_project.AssetRoot(), &open);
+    m_panels.SetOpen(EditorPanels::Panel::CaveTunnel, open);
+    if (result.build) GenerateCaveTunnel();
+    if (result.remove) {
+        const int removed = DeleteGeneratedCaveTunnel(m_caveTunnel.Cave().name);
+        m_log.Info("Removed " + std::to_string(removed) + " generated cave objects");
+    }
+    if (result.saved) {
+        std::string error;
+        if (!m_assets.Refresh(m_project.AssetRoot(), &error)) m_log.Warning(error);
+    }
+    if (!result.message.empty()) m_log.Info(result.message);
+}
+
+int EditorApp::DeleteGeneratedCaveTunnel(const std::string& caveName) {
+    if (caveName.empty()) return 0;
+    const std::string prefix = "Cave_" + caveName + "_";
+    std::vector<int> indices;
+    for (int i = 0; i < static_cast<int>(m_scene.Objects().size()); ++i)
+        if (m_scene.Objects()[static_cast<std::size_t>(i)].name.rfind(prefix, 0) == 0)
+            indices.push_back(i);
+    if (indices.empty()) return 0;
+    m_scene.SelectIndices(indices);
+    return m_scene.DeleteSelected() ? static_cast<int>(indices.size()) : 0;
+}
+
+void EditorApp::GenerateCaveTunnel() {
+    if (!m_cube) return;
+    engine::CaveAssetData cave = m_caveTunnel.Cave();
+    std::string error;
+    if (cave.terrainEntrances && !cave.closed && cave.points.size() >= 2) {
+        bool overTerrain = false;
+        float y = TerrainSurfaceY(cave.points.front().x, cave.points.front().z, overTerrain);
+        if (overTerrain) cave.points.front().y = y - cave.height * 0.15f;
+        y = TerrainSurfaceY(cave.points.back().x, cave.points.back().z, overTerrain);
+        if (overTerrain) cave.points.back().y = y - cave.height * 0.15f;
+    }
+    engine::NormalizeCaveAsset(cave);
+    if (!engine::ValidateCaveAsset(cave, &error)) {
+        m_log.Warning("Cave build failed: " + error); return;
+    }
+    if (m_caveTunnel.Path().empty()) {
+        m_log.Warning("Save the cave asset before building it"); return;
+    }
+
+    engine::StaticMeshAssetData mesh;
+    engine::CaveGenerationStats stats;
+    if (!engine::BuildCaveStaticMesh(cave, &mesh, &stats, &error)) {
+        m_log.Warning("Cave build failed: " + error); return;
+    }
+    std::filesystem::path meshPath(m_caveTunnel.Path());
+    meshPath.replace_filename(meshPath.stem().string() + "_Baked.3dgmesh");
+    engine::StaticMeshAssetData existing;
+    if (engine::LoadStaticMeshAsset(meshPath.string(), &existing, nullptr)
+        && existing.header.id.Valid()) mesh.header.id = existing.header.id;
+    if (!engine::SaveStaticMeshAsset(meshPath.string(), mesh, &error)) {
+        m_log.Warning("Cave mesh save failed: " + error); return;
+    }
+    cave.bakedMeshPath = meshPath.string();
+    cave.bakedMeshId = mesh.header.id;
+    if (!engine::SaveCaveAsset(m_caveTunnel.Path(), cave, &error)) {
+        m_log.Warning("Cave asset update failed: " + error); return;
+    }
+
+    DeleteGeneratedCaveTunnel(cave.name);
+    engine::ecs::Transform identity;
+    if (!m_scene.AddModel(meshPath.string(), *m_cube, identity)) {
+        m_log.Warning("Could not add the baked cave mesh to the level"); return;
+    }
+    m_scene.SetSelectedName("Cave_" + cave.name + "_Interior");
+    if (!cave.wallMaterialPath.empty())
+        m_scene.SetSelectedMaterialAsset(cave.wallMaterialPath, cave.wallMaterialId);
+
+    const engine::Spline curve(cave.points, cave.closed);
+    const float length = curve.Length();
+    const int spans = std::max(1, static_cast<int>(std::ceil(
+        length / std::max(cave.sampleSpacing * 2.0f, 0.5f))));
+    engine::ecs::Collider box = engine::ecs::Collider::MakeBox(glm::vec3(0.5f));
+    box.layer = engine::ecs::CollisionLayer::WorldStatic;
+    box.mask = engine::ecs::CollisionLayer::All;
+    bool firstPiece = true;
+    int colliderCount = 0;
+    auto addCollider = [&](const std::string& suffix, const glm::vec3& position,
+                           const glm::vec3& scale, const glm::quat& rotation) {
+        m_scene.SuppressUndo(!firstPiece);
+        engine::ecs::Transform transform;
+        transform.position = position; transform.scale = scale; transform.rotation = rotation;
+        m_scene.AddConfiguredPrimitive(EditorScene::Primitive::Cube, *m_cube, transform,
+            &box, "Cave_" + cave.name + "_Collision_" + suffix);
+        m_scene.ToggleSelectVisible();
+        if (firstPiece) { firstPiece = false; m_scene.SuppressUndo(true); }
+        ++colliderCount;
+    };
+    for (int i = 0; i < spans; ++i) {
+        const float d0 = length * static_cast<float>(i) / spans;
+        const float d1 = length * static_cast<float>(i + 1) / spans;
+        const glm::vec3 a = curve.PositionAtDistance(d0);
+        const glm::vec3 b = curve.PositionAtDistance(d1);
+        const glm::vec3 center = (a + b) * 0.5f;
+        glm::vec3 forward = b - a;
+        const float spanLength = std::max(glm::length(forward), 0.05f);
+        forward /= spanLength;
+        glm::vec3 up(0.0f, 1.0f, 0.0f);
+        if (std::abs(glm::dot(up, forward)) > 0.98f) up = glm::vec3(1,0,0);
+        const glm::vec3 right = glm::normalize(glm::cross(up, forward));
+        up = glm::normalize(glm::cross(forward, right));
+        const glm::quat rotation = glm::quat_cast(glm::mat3(right, up, forward));
+        const float t = std::max(cave.wallThickness, 0.05f);
+        const std::string n = std::to_string(i);
+        if (cave.createNavigation || cave.createCollision)
+            addCollider(n + "_Floor", center - up * (cave.height * 0.5f),
+                {cave.width, t, spanLength + t}, rotation);
+        if (cave.createCollision) {
+            addCollider(n + "_Ceiling", center + up * (cave.height * 0.5f),
+                {cave.width, t, spanLength + t}, rotation);
+            addCollider(n + "_Left", center - right * (cave.width * 0.5f),
+                {t, cave.height, spanLength + t}, rotation);
+            addCollider(n + "_Right", center + right * (cave.width * 0.5f),
+                {t, cave.height, spanLength + t}, rotation);
+        }
+    }
+    m_scene.SuppressUndo(false);
+    m_editAssets.ResolveRegistryAssets(m_scene.Registry());
+    std::string refreshError;
+    if (!m_assets.Refresh(m_project.AssetRoot(), &refreshError)) m_log.Warning(refreshError);
+    m_log.Info("Built cave '" + cave.name + "': " + std::to_string(stats.triangles)
+        + " triangles, " + std::to_string(colliderCount) + " hidden collision pieces");
+}
+
 int EditorApp::DeleteGeneratedRoad(const std::string& roadName) {
     if (roadName.empty()) return 0;
     const std::string prefix = "Road_" + roadName + "_";
@@ -3938,6 +4286,19 @@ void EditorApp::DrawOptimizationAuditorPanel() {
         m_scene, m_editAssets, m_project.AssetRoot(), &open);
     m_panels.SetOpen(EditorPanels::Panel::OptimizationAuditor, open);
     if (m_optimizationAuditor.ConsumeFrameRequest() >= 0) FrameSelected();
+}
+
+void EditorApp::DrawLightingAnalysisPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::LightingAnalysis)) return;
+    bool open = true;
+    const LightingAnalysisPanel::Result result = m_lightingAnalysis.Draw(
+        m_scene, m_editAssets, m_project.AssetRoot(), &open);
+    m_panels.SetOpen(EditorPanels::Panel::LightingAnalysis, open);
+    if (result.frameObject >= 0
+        && result.frameObject < static_cast<int>(m_scene.Objects().size())) {
+        m_scene.SelectIndex(result.frameObject);
+        FrameSelected();
+    }
 }
 
 void EditorApp::DrawRagdollPhysicsPanel() {
@@ -6384,6 +6745,16 @@ void EditorApp::DrawEditScene(const glm::mat4 & viewProj)
     DrawEditParticlePreviews();
     if (m_showGrid) {
         m_viewport.DrawWorldGrid(viewProj);
+    }
+    if (m_panels.IsOpen(EditorPanels::Panel::LightingAnalysis)
+        && m_lightingAnalysis.OverlayEnabled()) {
+        std::vector<EditorViewport::LightingAnalysisGuide> guides;
+        guides.reserve(m_lightingAnalysis.OverlayCells().size());
+        for (const auto& cell : m_lightingAnalysis.OverlayCells())
+            guides.push_back({cell.position, cell.value, cell.warning});
+        m_viewport.DrawLightingAnalysisOverlay(guides,
+            static_cast<int>(m_lightingAnalysis.Mode()),
+            m_lightingAnalysis.CellSize(), viewProj);
     }
     if (m_showNavigationPreview && m_shader && m_cube) {
         m_viewport.DrawEditorNavMeshOverlay(m_renderer, *m_shader, *m_cube, m_editorNavMesh, viewProj);

@@ -351,6 +351,23 @@ protected:
     int GenerateScatterGraph(const std::string& assetPath,
                              const glm::vec3& worldOffset = glm::vec3(0.0f),
                              std::uint32_t seedOverride = 0);
+    // Evaluates an engine-owned .3dgbiome population on a flat runtime plane.
+    // Editor application is terrain-aware and also applies materials/environment.
+    int GenerateBiome(const std::string& assetPath,
+                      const glm::vec3& worldOffset = glm::vec3(0.0f),
+                      std::uint32_t seedOverride = 0);
+    // Spawns the baked interior mesh referenced by a native .3dgcave asset.
+    // Editor-authored collision/navigation pieces are normally saved with the level.
+    ecs::Entity SpawnCave(const std::string& assetPath,
+                          const glm::vec3& worldOffset = glm::vec3(0.0f));
+    bool LoadDayNightTimeline(const std::string& assetPath, bool play = true);
+    void PlayDayNightTimeline();
+    void PauseDayNightTimeline();
+    void StopDayNightTimeline();
+    void SetDayNightTime(float normalizedTime);
+    float DayNightTime() const;
+    void SetDayNightPlaybackRate(float rate);
+    bool WasDayNightEvent(const std::string& eventName);
     void RequestSceneLoad(const std::string& runtimeScenePath);
     // Manual level-streaming requests. The identifier may be the level's
     // manifest path, file name, or file stem.

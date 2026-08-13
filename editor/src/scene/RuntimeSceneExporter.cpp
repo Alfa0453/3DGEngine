@@ -166,6 +166,8 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         << StoredPath(environment.skyTexturePath) << ' '
         << environment.skyRotation << ' '
         << environment.skyIntensity << '\n';   // runtime scene version 88+
+    out << "day_night_timeline " << StoredPath(environment.dayNightTimelinePath)
+        << ' ' << environment.dayNightTimelineAutoplay << '\n';
     for (const EditorScene::Environment::PostProcessEffect& effect :
          environment.postProcessEffects) {
         out << "post_effect "

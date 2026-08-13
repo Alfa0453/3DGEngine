@@ -545,6 +545,10 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         << m_environment.skyIntensity << ' '
         << (m_environment.skyTextureId.Valid()
                 ? m_environment.skyTextureId.ToString() : std::string("-")) << '\n';
+    out << "day_night_timeline " << std::quoted(m_environment.dayNightTimelinePath) << ' '
+        << (m_environment.dayNightTimelineId.Valid()
+                ? m_environment.dayNightTimelineId.ToString() : std::string("-")) << ' '
+        << m_environment.dayNightTimelineAutoplay << '\n';
     for (const Environment::PostProcessEffect& effect :
          m_environment.postProcessEffects) {
         out << "post_effect "
@@ -1338,6 +1342,18 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
 
     std::string recordType;
     while (in >> recordType) {
+        if (recordType == "day_night_timeline") {
+            std::string id;
+            in >> std::quoted(m_environment.dayNightTimelinePath) >> id
+               >> m_environment.dayNightTimelineAutoplay;
+            if (m_environment.dayNightTimelinePath == "-")
+                m_environment.dayNightTimelinePath.clear();
+            if (id != "-" && !engine::AssetHandle::Parse(id, &m_environment.dayNightTimelineId)) {
+                if (error) *error = "Scene contains an invalid day/night timeline ID.";
+                Clear(); return false;
+            }
+            continue;
+        }
         if (recordType == "game_mode" && version >= 97) {
             in >> std::quoted(m_gameMode.playerObjectName)
                >> m_gameMode.playerInputEnabled
