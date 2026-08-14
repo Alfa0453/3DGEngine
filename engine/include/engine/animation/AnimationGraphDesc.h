@@ -79,6 +79,7 @@ struct AnimationGraphDesc {
         float       exitTime = 0.0f;
         int         priority = 0;
         bool        canInterrupt = false;
+        bool        useConditions = true;
         bool        requireAllConditions = true;
         std::vector<Condition> additionalConditions;
     };
@@ -151,6 +152,7 @@ inline void BuildAnimationController(
             transition.priority,
             transition.canInterrupt
         };
+        runtimeTransition.useConditions = transition.useConditions;
         runtimeTransition.requireAllConditions = transition.requireAllConditions;
         runtimeTransition.additionalConditions.reserve(
             transition.additionalConditions.size());

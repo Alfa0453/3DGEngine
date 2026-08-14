@@ -134,11 +134,11 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             return false;
         }
     }
-    if (magic != "3DGRuntimeScene" || version < 1 || version > 91) {
+    if (magic != "3DGRuntimeScene" || version < 1 || version > 92) {
         if (error) {
             *error = "Runtime scene file has an unknown format: "
                 + magic + " " + std::to_string(version)
-                + " (expected 3DGRuntimeScene 1..91).";
+                + " (expected 3DGRuntimeScene 1..92).";
         }
         return false;
     }
@@ -1035,6 +1035,11 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                 }
                 if (version >= 67) {
                     std::size_t conditionCount = 0;
+                    if (version >= 92) {
+                        record >> transition.useConditions;
+                    } else {
+                        transition.useConditions = true;
+                    }
                     record >> transition.requireAllConditions >> conditionCount;
                     for (std::size_t c = 0; c < conditionCount; ++c) {
                         AnimationTransitionDesc::Condition condition;
@@ -1880,6 +1885,7 @@ bool RuntimeSceneLoader::Instantiate(const Scene &scene, ecs::Registry &registry
                     transition.priority,
                     transition.canInterrupt
                 };
+                runtimeTransition.useConditions = transition.useConditions;
                 runtimeTransition.requireAllConditions = transition.requireAllConditions;
                 runtimeTransition.additionalConditions.reserve(
                     transition.additionalConditions.size());

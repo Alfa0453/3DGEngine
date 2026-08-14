@@ -499,6 +499,7 @@ RuntimeAssetManager::ResolveReport RuntimeAssetManager::ResolveRegistryAssets(ec
                     transitionDesc.exitTime     = transition.exitTime;
                     transitionDesc.priority     = transition.priority;
                     transitionDesc.canInterrupt = transition.canInterrupt;
+                    transitionDesc.useConditions = transition.useConditions;
                     transitionDesc.requireAllConditions = transition.requireAllConditions;
                     transitionDesc.additionalConditions.reserve(
                         transition.additionalConditions.size());

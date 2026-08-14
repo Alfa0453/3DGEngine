@@ -176,6 +176,8 @@ public:
 
         std::string fromState;
         std::string toState;
+
+        // Parameter-driven transition condition.
         std::string parameter = "Speed";
         Compare compare = Compare::GreaterOrEqual;
         float threshold = 0.0f;
@@ -183,6 +185,10 @@ public:
         float exitTime = 0.0f;
         int priority = 0;
         bool canInterrupt = false;
+
+        // false = ignore all conditions and use Exit Time only.
+        bool useConditions = true;
+        
         bool requireAllConditions = true;
         std::vector<Condition> additionalConditions;
     };

@@ -22,7 +22,7 @@ std::string ClipAlias(const AnimationClipAsset& clip, const std::string& path) {
 
 bool AnimationGraphAsset::Save(const std::string& path, std::string* error) {
     if (!assetId.Valid()) assetId = engine::AssetHandle::Generate();
-    version = 5;
+    version = 6;
     const std::string contentRoot = engine::FindContentRootForAsset(path);
     engine::AssetRegistry registry;
     if (!contentRoot.empty()) {
@@ -83,6 +83,7 @@ bool AnimationGraphAsset::Save(const std::string& path, std::string* error) {
             << std::quoted(transition.parameter) << ' ' << static_cast<int>(transition.compare) << ' '
             << transition.threshold << ' ' << transition.fade << ' ' << transition.exitTime << ' '
             << transition.priority << ' ' << transition.canInterrupt << ' '
+            << transition.useConditions << ' '
             << transition.requireAllConditions << ' ' << transition.additionalConditions.size();
         for (const auto& condition : transition.additionalConditions) {
             out << ' ' << std::quoted(condition.parameter) << ' '
@@ -217,6 +218,12 @@ bool AnimationGraphAsset::Load(const std::string& path, std::string* error) {
         transition.compare = static_cast<EditorScene::AnimationStateTransition::Compare>(compare);
         if (loadedVersion >= 3) {
             std::size_t conditionCount = 0;
+            if (loadedVersion >= 6) {
+                in >> transition.useConditions;
+            } else {
+                // Existing graphs always behave as condition-driven.
+                transition.useConditions = true;
+            }
             in >> transition.requireAllConditions >> conditionCount;
             for (std::size_t c = 0; c < conditionCount; ++c) {
                 EditorScene::AnimationStateTransition::Condition condition;
@@ -282,7 +289,7 @@ bool AnimationGraphAsset::Load(const std::string& path, std::string* error) {
             }
         }
     }
-    version = 5;
+    version = 6;
     const std::string contentRoot = engine::FindContentRootForAsset(path);
     engine::AssetRegistry registry;
     std::string ignored;

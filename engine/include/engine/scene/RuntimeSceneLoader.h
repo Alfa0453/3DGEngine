@@ -108,6 +108,7 @@ public:
         float exitTime = 0.0f;
         int priority = 0;
         bool canInterrupt = false;
+        bool useConditions = true;
         bool requireAllConditions = true;
         std::vector<Condition> additionalConditions;
     };

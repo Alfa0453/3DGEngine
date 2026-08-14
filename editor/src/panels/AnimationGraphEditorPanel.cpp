@@ -795,26 +795,30 @@ void AnimationGraphEditorPanel::Draw(const std::string& assetRoot, bool* open, b
         };
         stateCombo("From", t.fromState, true); stateCombo("To", t.toState, false);
         ImGui::SeparatorText("Conditions");
-        int conditionMode = t.requireAllConditions ? 0 : 1;
-        const char* conditionModes[] = { "All conditions (AND)", "Any condition (OR)" };
-        if (ImGui::Combo("Match", &conditionMode, conditionModes, 2)) {
-            t.requireAllConditions = conditionMode == 0;
+        if (ImGui::Checkbox("Use Conditions", &t.useConditions)) {
             m_controllerDirty = true;
         }
-        ImGui::TextDisabled("Condition 1");
-        if (ImGui::BeginCombo("Parameter", t.parameter.empty() ? "None" : t.parameter.c_str())) {
-            for (std::size_t parameterIndex = 0; parameterIndex < m_asset.parameters.size(); ++parameterIndex) {
-                const auto& parameter = m_asset.parameters[parameterIndex];
-                ImGui::PushID(static_cast<int>(parameterIndex));
-                if (ImGui::Selectable(parameter.name.c_str(), t.parameter == parameter.name)) {
-                    t.parameter = parameter.name;
-                    m_controllerDirty = true;
-                }
-                ImGui::PopID();
+        if (t.useConditions) {
+            int conditionMode = t.requireAllConditions ? 0 : 1;
+            const char* conditionModes[] = { "All conditions (AND)", "Any condition (OR)" };
+            if (ImGui::Combo("Match", &conditionMode, conditionModes, 2)) {
+                t.requireAllConditions = conditionMode == 0;
+                m_controllerDirty = true;
             }
-            ImGui::EndCombo();
-        }
-        EditorScene::AnimationParameter::Type paramType = EditorScene::AnimationParameter::Type::Float;
+            ImGui::TextDisabled("Condition 1");
+            if (ImGui::BeginCombo("Parameter", t.parameter.empty() ? "None" : t.parameter.c_str())) {
+                for (std::size_t parameterIndex = 0; parameterIndex < m_asset.parameters.size(); ++parameterIndex) {
+                    const auto& parameter = m_asset.parameters[parameterIndex];
+                    ImGui::PushID(static_cast<int>(parameterIndex));
+                    if (ImGui::Selectable(parameter.name.c_str(), t.parameter == parameter.name)) {
+                        t.parameter = parameter.name;
+                        m_controllerDirty = true;
+                    }
+                    ImGui::PopID();
+                }
+                ImGui::EndCombo();
+            }
+            EditorScene::AnimationParameter::Type paramType = EditorScene::AnimationParameter::Type::Float;
         for (const auto& p : m_asset.parameters) if (p.name == t.parameter) { paramType = p.type; break; }
         using Comp = EditorScene::AnimationStateTransition::Compare;
         if (paramType == EditorScene::AnimationParameter::Type::Bool || paramType == EditorScene::AnimationParameter::Type::Trigger) {
@@ -877,34 +881,45 @@ void AnimationGraphEditorPanel::Draw(const std::string& assetRoot, bool* open, b
                 }
                 if (ImGui::DragFloat("Threshold", &condition.threshold, .05f))
                     m_controllerDirty = true;
-            }
-            if (ImGui::SmallButton("Remove Condition"))
-                removeCondition = static_cast<int>(conditionIndex);
-            ImGui::PopID();
-        }
-        if (removeCondition >= 0) {
-            t.additionalConditions.erase(
-                t.additionalConditions.begin() + removeCondition);
-            m_controllerDirty = true;
-        }
-        if (ImGui::SmallButton("Add Condition")) {
-            EditorScene::AnimationStateTransition::Condition condition;
-            if (!m_asset.parameters.empty()) {
-                const auto& param = m_asset.parameters.front();
-                condition.parameter = param.name;
-                using PT = EditorScene::AnimationParameter::Type;
-                if (param.type == PT::Bool || param.type == PT::Trigger) {
-                    condition.compare = Comp::Equal; condition.threshold = 1.0f;
-                } else {
-                    condition.compare = Comp::Greater; condition.threshold = 0.1f;
                 }
+                if (ImGui::SmallButton("Remove Condition"))
+                    removeCondition = static_cast<int>(conditionIndex);
+                ImGui::PopID();
             }
-            t.additionalConditions.push_back(std::move(condition));
-            m_controllerDirty = true;
+            if (removeCondition >= 0) {
+                t.additionalConditions.erase(
+                    t.additionalConditions.begin() + removeCondition);
+                m_controllerDirty = true;
+            }
+            if (ImGui::SmallButton("Add Condition")) {
+                EditorScene::AnimationStateTransition::Condition condition;
+                if (!m_asset.parameters.empty()) {
+                    const auto& param = m_asset.parameters.front();
+                    condition.parameter = param.name;
+                    using PT = EditorScene::AnimationParameter::Type;
+                    if (param.type == PT::Bool || param.type == PT::Trigger) {
+                        condition.compare = Comp::Equal; condition.threshold = 1.0f;
+                    } else {
+                        condition.compare = Comp::Greater; condition.threshold = 0.1f;
+                    }
+                }
+                t.additionalConditions.push_back(std::move(condition));
+                m_controllerDirty = true;
+            }
+        }
+        else {
+            ImGui::TextDisabled("Transition is controlled by Exit Time only.");
         }
         ImGui::Separator();
         if (ImGui::DragFloat("Fade", &t.fade, .01f, 0.0f, 5.0f)) m_controllerDirty = true;
         if (ImGui::SliderFloat("Exit Time", &t.exitTime, 0.0f, 1.0f)) m_controllerDirty = true;
+        if (!t.useConditions && t.exitTime <= 0.0f) {
+            ImGui::TextColored(
+                ImVec4(1.0f, 0.65f, 0.2f, 1.0f),
+                "Warning: conditions are disabled and Exit Time is 0.\n"
+                "This transition can happen immediately."
+            );
+        }
         if (ImGui::Checkbox("Interrupt", &t.canInterrupt)) m_controllerDirty = true;
         if (ImGui::SmallButton("Remove Transition")) removeTransition = static_cast<int>(i);
         ImGui::Separator();

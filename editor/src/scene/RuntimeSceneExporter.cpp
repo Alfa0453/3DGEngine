@@ -100,7 +100,7 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         return engine::MakeAssetReference(
             &assetRegistry, contentRoot, assetPath, type).id;
     };
-    out << "3DGRuntimeScene 91 " << sceneId.ToString() << '\n';
+    out << "3DGRuntimeScene 92 " << sceneId.ToString() << '\n';
     out << "# Runtime export from 3DGEditor. Editor-only flags are omitted.\n";
     const EditorScene::Environment& environment = scene.GetEnvironment();
     out << "environment "
@@ -474,6 +474,7 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
                 << transition.exitTime << ' '
                 << transition.priority << ' '
                 << (transition.canInterrupt ? 1 : 0) << ' '
+                << (transition.useConditions ? 1 : 0) << ' '
                 << (transition.requireAllConditions ? 1 : 0) << ' '
                 << transition.additionalConditions.size() << ' ';
             for (const auto& condition : transition.additionalConditions) {

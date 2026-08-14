@@ -462,7 +462,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         return false;
     }
 
-    out << "3DGEditorScene 129 " << m_assetId.ToString() << '\n';
+    out << "3DGEditorScene 130 " << m_assetId.ToString() << '\n';
     out << "environment "
         << m_environment.timeOfDay << ' '
         << m_environment.skyLightIntensity << ' '
@@ -725,6 +725,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
                 << transition.exitTime << ' '
                 << transition.priority << ' '
                 << (transition.canInterrupt ? 1 : 0) << ' '
+                << (transition.useConditions ? 1 : 0) << ' '
                 << (transition.requireAllConditions ? 1 : 0) << ' '
                 << transition.additionalConditions.size() << ' ';
             for (const auto& condition : transition.additionalConditions) {
@@ -1332,7 +1333,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             return false;
         }
     }
-    if (magic != "3DGEditorScene" ||(version < 1 || version > 129)) {
+    if (magic != "3DGEditorScene" ||(version < 1 || version > 130)) {
         if (error) *error = "Scene file has an unknown format.";
         return false;
     }
@@ -2525,6 +2526,11 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                 }
                 if (version >= 95) {
                     std::size_t conditionCount = 0;
+                    if (version >= 130) {
+                        in >> transition.useConditions;
+                    } else {
+                        transition.useConditions = true;
+                    }
                     in >> transition.requireAllConditions >> conditionCount;
                     for (std::size_t c = 0; c < conditionCount; ++c) {
                         AnimationStateTransition::Condition condition;

@@ -82,6 +82,7 @@ inline void BuildAnimationController(
         d.exitTime     = t.exitTime;
         d.priority     = t.priority;
         d.canInterrupt = t.canInterrupt;
+        d.useConditions = t.useConditions;
         d.requireAllConditions = t.requireAllConditions;
         d.additionalConditions.reserve(t.additionalConditions.size());
         for (const auto& condition : t.additionalConditions) {

@@ -119,8 +119,15 @@ void AnimationController::Play(int stateIndex, bool immediate) {
 }
 
 bool AnimationController::TestTransition(const Transition& transition) const {
+    // Exit time always acts as a gate when it is greater than zero.
     if (!ExitTimeReached(transition)) {
         return false;
+    }
+
+    // No parameter conditions required.
+    // Exit time alone is enough to trigger this transition.
+    if (!transition.useConditions) {
+        return true;
     }
 
     const auto matches = [&](const std::string& parameter, Transition::Compare compare,

@@ -92,6 +92,7 @@ public:
         float exitTime = 0.0f; // normalized current-state time, 0 = no wait
         int priority = 0;      // higher values win when several transitions pass
         bool canInterrupt = false;
+        bool useConditions = true;
         bool requireAllConditions = true;
         std::vector<Condition> additionalConditions;
     };

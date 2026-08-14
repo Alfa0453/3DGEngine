@@ -295,7 +295,7 @@ bool CharacterAsset::Apply(EditorScene& scene) const {
 
 bool CharacterAsset::Save(const std::string& path, std::string* error) {
     if (!assetId.Valid()) assetId = engine::AssetHandle::Generate();
-    version = 26;
+    version = 28;
     const std::string contentRoot = engine::FindContentRootForAsset(path);
     engine::AssetRegistry registry;
     bool haveRegistry = false;
@@ -351,7 +351,7 @@ bool CharacterAsset::Save(const std::string& path, std::string* error) {
     if (!out) { if (error) *error = "Could not write character asset: " + path; return false; }
     const CharacterScript legacy{scriptEnabled, scriptClassName, scriptPath};
     const CharacterScript* primary = !scripts.empty() ? &scripts.front() : &legacy;
-    out << "3DG_CHARACTER 27 " << assetId.ToString() << '\n'
+    out << "3DG_CHARACTER 28 " << assetId.ToString() << '\n'
         << std::quoted(name) << '\n' << std::quoted(modelAssetPath) << '\n' << std::quoted(materialAssetPath) << '\n'
         << colliderEnabled << ' ' << static_cast<int>(collider.shape) << ' '
         << collider.halfExtents.x << ' ' << collider.halfExtents.y << ' ' << collider.halfExtents.z << ' '
@@ -403,7 +403,7 @@ bool CharacterAsset::Save(const std::string& path, std::string* error) {
         out << std::quoted(transition.fromState) << ' ' << std::quoted(transition.toState) << ' '
             << std::quoted(transition.parameter) << ' ' << static_cast<int>(transition.compare) << ' '
             << transition.threshold << ' ' << transition.fade << ' ' << transition.exitTime << ' '
-            << transition.priority << ' ' << transition.canInterrupt << ' '
+            << transition.priority << ' ' << transition.canInterrupt << ' ' << transition.useConditions << ' '
             << transition.requireAllConditions << ' ' << transition.additionalConditions.size();
         for (const auto& condition : transition.additionalConditions) {
             out << ' ' << std::quoted(condition.parameter) << ' '
@@ -664,6 +664,11 @@ bool CharacterAsset::Load(const std::string& path, std::string* error) {
             transition.compare = static_cast<EditorScene::AnimationStateTransition::Compare>(compare);
             if (loadedVersion >= 13) {
                 std::size_t conditionCount = 0;
+                if (loadedVersion >= 28) {
+                    in >> transition.useConditions;
+                } else {
+                    transition.useConditions = true;
+                }
                 in >> transition.requireAllConditions >> conditionCount;
                 for (std::size_t c = 0; c < conditionCount; ++c) {
                     EditorScene::AnimationStateTransition::Condition condition;
