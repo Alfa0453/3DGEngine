@@ -638,6 +638,7 @@ void CharacterEditorPanel::SyncBuffers() {
 
 void CharacterEditorPanel::RefreshAssetChoices(const std::string& assetRoot) {
     m_modelChoices.clear();
+    m_staticMeshChoices.clear();
     m_materialChoices.clear();
     m_clipChoices.clear();
     m_graphChoices.clear();
@@ -660,7 +661,11 @@ void CharacterEditorPanel::RefreshAssetChoices(const std::string& assetRoot) {
             AssetChoice choice{file.generic_string(), file.filename().string()};
             // Native engine-imported skeletal mesh (.3dgskmesh) as the character's base model.
             if (extension == ".3dgskmesh") {
+                // Base animated character mesh.
                 m_modelChoices.push_back(std::move(choice));
+            } else if (extension == ".3dgmesh") {
+                // Static weapon / shield / prop used by socket attachments.
+                m_staticMeshChoices.push_back(std::move(choice));
             } else if (extension == ".3dgmat") {
                 m_materialChoices.push_back(std::move(choice));
             } else if (extension == ".3dgclip") {
@@ -683,6 +688,7 @@ void CharacterEditorPanel::RefreshAssetChoices(const std::string& assetRoot) {
         return Lower(a.displayName) < Lower(b.displayName);
     };
     std::sort(m_modelChoices.begin(), m_modelChoices.end(), byName);
+    std::sort(m_staticMeshChoices.begin(), m_staticMeshChoices.end(), byName);
     std::sort(m_materialChoices.begin(), m_materialChoices.end(), byName);
     std::sort(m_clipChoices.begin(), m_clipChoices.end(), byName);
     std::sort(m_graphChoices.begin(), m_graphChoices.end(), byName);
@@ -1213,7 +1219,7 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
             }
             const bool pickedAttachment = drawPicker(
                 "Model", "##AttachModelSearch", m_animSearch,
-                m_modelChoices, att.modelPath);
+                m_staticMeshChoices, att.modelPath);
             changed |= pickedAttachment;
             if (pickedAttachment) att.modelAssetId = {};
             const bool pickedAttachmentMaterial = drawPicker(

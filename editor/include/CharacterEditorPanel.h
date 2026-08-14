@@ -70,7 +70,8 @@ private:
     std::array<char, 128> m_scriptClassBuffer{};
     std::array<char, 260> m_scriptPathBuffer{};
     std::array<char, 128> m_scriptSearch{};
-    std::vector<AssetChoice> m_modelChoices;
+    std::vector<AssetChoice> m_modelChoices;   // skeletal meshes
+    std::vector<AssetChoice> m_staticMeshChoices; // socket attachments
     std::vector<AssetChoice> m_materialChoices;
     std::vector<AssetChoice> m_clipChoices;   // saved .3dgclip animation-clip assets
     std::array<char, 128> m_clipSearch{};
