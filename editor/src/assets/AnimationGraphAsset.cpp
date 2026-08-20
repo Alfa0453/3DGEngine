@@ -8,6 +8,8 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <queue>
+#include <unordered_set>
 
 namespace {
 std::string OrDash(const std::string& s) { return s.empty() ? std::string("-") : s; }
@@ -20,9 +22,109 @@ std::string ClipAlias(const AnimationClipAsset& clip, const std::string& path) {
 }
 }  // namespace
 
+void AnimationGraphAsset::NormalizeGraphMetadata(bool generateLayout,
+                                                 bool migrateLegacyMotionSources) {
+    const auto uniqueId = [](const engine::AssetHandle& id,
+                             const std::vector<engine::AssetHandle>& used) {
+        return id.Valid() && std::find(used.begin(), used.end(), id) == used.end();
+    };
+    std::vector<engine::AssetHandle> stateIds;
+    stateIds.reserve(states.size());
+    for (auto& state : states) {
+        if (!uniqueId(state.graphId, stateIds)) state.graphId = engine::AssetHandle::Generate();
+        stateIds.push_back(state.graphId);
+        // Version <= 6 encoded the motion source implicitly in these fields.
+        if (migrateLegacyMotionSources
+            && state.motionSourceType == EditorScene::AnimationStateNode::MotionSourceType::Clip) {
+            if (state.blendSpace2D)
+                state.motionSourceType = EditorScene::AnimationStateNode::MotionSourceType::BlendSpace2D;
+            else if (!state.blendParameter.empty())
+                state.motionSourceType = EditorScene::AnimationStateNode::MotionSourceType::BlendSpace1D;
+        }
+    }
+    if (!entryStateId.Valid()
+        || std::find(stateIds.begin(), stateIds.end(), entryStateId) == stateIds.end())
+        entryStateId = states.empty() ? engine::AssetHandle{} : states.front().graphId;
+
+    const auto stateByName = [&](const std::string& name) -> const EditorScene::AnimationStateNode* {
+        for (const auto& state : states) if (state.name == name) return &state;
+        return nullptr;
+    };
+    const auto stateById = [&](engine::AssetHandle id) -> const EditorScene::AnimationStateNode* {
+        for (const auto& state : states) if (state.graphId == id) return &state;
+        return nullptr;
+    };
+    std::vector<engine::AssetHandle> transitionIds;
+    transitionIds.reserve(transitions.size());
+    for (auto& transition : transitions) {
+        if (!uniqueId(transition.graphId, transitionIds))
+            transition.graphId = engine::AssetHandle::Generate();
+        transitionIds.push_back(transition.graphId);
+        if (!transition.fromStateId.Valid() && !transition.fromState.empty()) {
+            if (const auto* state = stateByName(transition.fromState))
+                transition.fromStateId = state->graphId;
+        }
+        if (!transition.toStateId.Valid() && !transition.toState.empty()) {
+            if (const auto* state = stateByName(transition.toState))
+                transition.toStateId = state->graphId;
+        }
+        if (transition.fromStateId.Valid()) {
+            if (const auto* state = stateById(transition.fromStateId)) transition.fromState = state->name;
+        } else {
+            transition.fromState.clear(); // invalid source is the existing Any State representation
+        }
+        if (const auto* state = stateById(transition.toStateId)) transition.toState = state->name;
+    }
+
+    nodeLayouts.erase(std::remove_if(nodeLayouts.begin(), nodeLayouts.end(),
+        [&](const NodeLayout& layout) { return stateById(layout.stateId) == nullptr; }), nodeLayouts.end());
+    for (const auto& state : states) {
+        const auto found = std::find_if(nodeLayouts.begin(), nodeLayouts.end(),
+            [&](const NodeLayout& layout) { return layout.stateId == state.graphId; });
+        if (found == nodeLayouts.end()) nodeLayouts.push_back({state.graphId, {}, false});
+    }
+    if (!generateLayout || states.empty()) return;
+    bool needsLayout = true;
+    for (const auto& layout : nodeLayouts) {
+        if (layout.position.x != 0.0f || layout.position.y != 0.0f) { needsLayout = false; break; }
+    }
+    if (!needsLayout) return;
+
+    std::vector<int> depth(states.size(), -1);
+    int entryIndex = 0;
+    for (std::size_t i = 0; i < states.size(); ++i)
+        if (states[i].graphId == entryStateId) entryIndex = static_cast<int>(i);
+    depth[static_cast<std::size_t>(entryIndex)] = 0;
+    std::queue<int> pending;
+    pending.push(entryIndex);
+    while (!pending.empty()) {
+        const int from = pending.front(); pending.pop();
+        for (const auto& transition : transitions) {
+            if (transition.fromStateId != states[static_cast<std::size_t>(from)].graphId) continue;
+            for (std::size_t to = 0; to < states.size(); ++to) {
+                if (states[to].graphId == transition.toStateId && depth[to] < 0) {
+                    depth[to] = depth[static_cast<std::size_t>(from)] + 1;
+                    pending.push(static_cast<int>(to));
+                }
+            }
+        }
+    }
+    std::vector<int> rows(states.size() + 1, 0);
+    int orphanDepth = 1;
+    for (int value : depth) orphanDepth = std::max(orphanDepth, value + 1);
+    for (std::size_t i = 0; i < states.size(); ++i) {
+        if (depth[i] < 0) depth[i] = orphanDepth;
+        const int row = rows[static_cast<std::size_t>(depth[i])]++;
+        auto found = std::find_if(nodeLayouts.begin(), nodeLayouts.end(),
+            [&](const NodeLayout& layout) { return layout.stateId == states[i].graphId; });
+        found->position = glm::vec2(40.0f + depth[i] * 250.0f, 35.0f + row * 125.0f);
+    }
+}
+
 bool AnimationGraphAsset::Save(const std::string& path, std::string* error) {
     if (!assetId.Valid()) assetId = engine::AssetHandle::Generate();
-    version = 6;
+    version = 7;
+    NormalizeGraphMetadata(true, false);
     const std::string contentRoot = engine::FindContentRootForAsset(path);
     engine::AssetRegistry registry;
     if (!contentRoot.empty()) {
@@ -102,6 +204,26 @@ bool AnimationGraphAsset::Save(const std::string& path, std::string* error) {
         }
         out << '\n';
     }
+    out << "GRAPH_EDITOR "
+        << (entryStateId.Valid() ? entryStateId.ToString() : std::string("-")) << ' '
+        << entryNodePosition.x << ' ' << entryNodePosition.y << ' '
+        << anyStateNodePosition.x << ' ' << anyStateNodePosition.y << '\n';
+    out << "STATE_METADATA " << states.size() << '\n';
+    for (const auto& state : states) {
+        const auto layout = std::find_if(nodeLayouts.begin(), nodeLayouts.end(),
+            [&](const NodeLayout& item) { return item.stateId == state.graphId; });
+        const glm::vec2 position = layout == nodeLayouts.end() ? glm::vec2(0.0f) : layout->position;
+        const bool collapsed = layout != nodeLayouts.end() && layout->collapsed;
+        out << state.graphId.ToString() << ' '
+            << static_cast<int>(state.motionSourceType) << ' '
+            << position.x << ' ' << position.y << ' ' << collapsed << '\n';
+    }
+    out << "TRANSITION_IDS " << transitions.size() << '\n';
+    for (const auto& transition : transitions) {
+        out << transition.graphId.ToString() << ' '
+            << (transition.fromStateId.Valid() ? transition.fromStateId.ToString() : std::string("-")) << ' '
+            << (transition.toStateId.Valid() ? transition.toStateId.ToString() : std::string("-")) << '\n';
+    }
     std::vector<engine::AssetHandle> dependencies;
     const auto addDependency = [&](engine::AssetHandle id) {
         if (id.Valid()
@@ -138,6 +260,10 @@ bool AnimationGraphAsset::Load(const std::string& path, std::string* error) {
         }
     }
     clips.clear(); states.clear(); parameters.clear(); transitions.clear();
+    entryStateId = {};
+    entryNodePosition = {-260.0f, 20.0f};
+    anyStateNodePosition = {-260.0f, 170.0f};
+    nodeLayouts.clear();
     in >> std::quoted(name) >> std::quoted(previewModel);
     previewModelAssetId = {};
     if (loadedVersion >= 5) {
@@ -250,6 +376,54 @@ bool AnimationGraphAsset::Load(const std::string& path, std::string* error) {
             }
         }
     }
+    if (loadedVersion >= 7) {
+        std::string entryId;
+        if (!(in >> tag >> entryId >> entryNodePosition.x >> entryNodePosition.y
+              >> anyStateNodePosition.x >> anyStateNodePosition.y)
+            || tag != "GRAPH_EDITOR"
+            || (entryId != "-" && !engine::AssetHandle::Parse(entryId, &entryStateId))) {
+            if (error) *error = "Graph editor metadata is invalid: " + path;
+            return false;
+        }
+        std::size_t metadataCount = 0;
+        if (!(in >> tag >> metadataCount) || tag != "STATE_METADATA"
+            || metadataCount != states.size()) {
+            if (error) *error = "Graph state metadata is incomplete: " + path;
+            return false;
+        }
+        for (std::size_t i = 0; i < states.size(); ++i) {
+            std::string stateId;
+            int sourceType = 0;
+            NodeLayout layout;
+            if (!(in >> stateId >> sourceType >> layout.position.x >> layout.position.y
+                  >> layout.collapsed)
+                || !engine::AssetHandle::Parse(stateId, &states[i].graphId)) {
+                if (error) *error = "Graph contains invalid state metadata: " + path;
+                return false;
+            }
+            states[i].motionSourceType =
+                static_cast<EditorScene::AnimationStateNode::MotionSourceType>(
+                    std::clamp(sourceType, 0, 2));
+            layout.stateId = states[i].graphId;
+            nodeLayouts.push_back(layout);
+        }
+        std::size_t transitionIdCount = 0;
+        if (!(in >> tag >> transitionIdCount) || tag != "TRANSITION_IDS"
+            || transitionIdCount != transitions.size()) {
+            if (error) *error = "Graph transition metadata is incomplete: " + path;
+            return false;
+        }
+        for (std::size_t i = 0; i < transitions.size(); ++i) {
+            std::string transitionId, fromId, toId;
+            if (!(in >> transitionId >> fromId >> toId)
+                || !engine::AssetHandle::Parse(transitionId, &transitions[i].graphId)
+                || (fromId != "-" && !engine::AssetHandle::Parse(fromId, &transitions[i].fromStateId))
+                || (toId != "-" && !engine::AssetHandle::Parse(toId, &transitions[i].toStateId))) {
+                if (error) *error = "Graph contains invalid transition metadata: " + path;
+                return false;
+            }
+        }
+    }
     if (loadedVersion < 2) {
         // Finish upgrading old graphs whose separate FBX files all exposed the same
         // generic take name (commonly "Unreal Take"). Make aliases unique and repair
@@ -289,7 +463,15 @@ bool AnimationGraphAsset::Load(const std::string& path, std::string* error) {
             }
         }
     }
-    version = 6;
+    version = 7;
+    NormalizeGraphMetadata(true, loadedVersion < 7);
+    // Runtime controllers intentionally still begin in their first state. Keep the
+    // explicit entry state first in the authoring array when handing graph data to
+    // legacy scene/character paths that do not carry graph-level metadata.
+    const auto entry = std::find_if(states.begin(), states.end(),
+        [&](const auto& state) { return state.graphId == entryStateId; });
+    if (entry != states.end() && entry != states.begin())
+        std::rotate(states.begin(), entry, entry + 1);
     const std::string contentRoot = engine::FindContentRootForAsset(path);
     engine::AssetRegistry registry;
     std::string ignored;

@@ -30,6 +30,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <filesystem>
+#include <functional>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -60,6 +61,8 @@ ImGuiTextFilter g_hierarchyFilter;
 // keeps a viewport selection safe from a stray hierarchy click (and the delete that
 // might follow) while you work in the scene.
 bool g_hierarchyLockSelection = false;
+EditorScene::GroupId g_renameGroupId = EditorScene::kRootGroupId;
+std::array<char, 128> g_groupNameBuffer{};
 std::array<char, 96> g_componentSearch{};
 bool g_componentPopupOpenRequested = false;
 int g_cameraPresetSelection = -1;
@@ -458,6 +461,8 @@ int ColliderShapeIndex(engine::ecs::ColliderShape shape) {
     case engine::ecs::ColliderShape::Pyramid: return 6;
     case engine::ecs::ColliderShape::Torus: return 7;
     case engine::ecs::ColliderShape::Staircase: return 8;
+    case engine::ecs::ColliderShape::ConvexHull: return 9;
+    case engine::ecs::ColliderShape::TriangleMesh: return 10;
     }
     return 0;
 }
@@ -472,6 +477,8 @@ engine::ecs::ColliderShape ColliderShapeFromIndex(int index) {
     case 6: return engine::ecs::ColliderShape::Pyramid;
     case 7: return engine::ecs::ColliderShape::Torus;
     case 8: return engine::ecs::ColliderShape::Staircase;
+    case 9: return engine::ecs::ColliderShape::ConvexHull;
+    case 10: return engine::ecs::ColliderShape::TriangleMesh;
     default: return engine::ecs::ColliderShape::Sphere;
     }
 }
@@ -487,6 +494,8 @@ const char* ColliderShapeName(engine::ecs::ColliderShape shape) {
     case engine::ecs::ColliderShape::Pyramid: return "Pyramid";
     case engine::ecs::ColliderShape::Torus: return "Torus";
     case engine::ecs::ColliderShape::Staircase: return "Staircase";
+    case engine::ecs::ColliderShape::ConvexHull: return "Convex Hull";
+    case engine::ecs::ColliderShape::TriangleMesh: return "Triangle Mesh";
     }
     return "Unknown";
 }
@@ -1491,8 +1500,7 @@ engine::ecs::Collider DefaultColliderForObject(const EditorScene::Object& object
     constexpr float kDefaultRestitution = 0.1f;
 
     if (object.primitive == EditorScene::Primitive::Plane && object.modelAssetPath.empty()) {
-        const float planeOffset = transform ? transform->position.y : 0.0f;
-        engine::ecs::Collider collider = engine::ecs::Collider::MakePlane(glm::vec3(0.0f, 1.0f, 0.0f), planeOffset);
+        engine::ecs::Collider collider = engine::ecs::Collider::MakePlane(glm::vec3(0.0f, 1.0f, 0.0f), 0.0f);
         collider.restitution = kDefaultRestitution;
         return collider;
     }
@@ -1510,34 +1518,24 @@ engine::ecs::Collider DefaultColliderForObject(const EditorScene::Object& object
     }
 
     if (object.primitive == EditorScene::Primitive::Cylinder && object.modelAssetPath.empty()) {
-        const float radius = transform ? 0.5f * std::max(transform->scale.x, transform->scale.z) : 0.5f;
-        const float height = transform ? transform->scale.y : 1.0f;
-        engine::ecs::Collider collider = engine::ecs::Collider::MakeCylinder(radius, height);
+        engine::ecs::Collider collider = engine::ecs::Collider::MakeCylinder(0.5f, 1.0f);
         collider.restitution = kDefaultRestitution;
         return collider;
     }
 
     if (object.modelAssetPath.empty() && transform) {
         if (object.primitive == EditorScene::Primitive::Cone)
-            return engine::ecs::Collider::MakeCone(
-                0.5f * std::max(transform->scale.x, transform->scale.z), transform->scale.y);
+            return engine::ecs::Collider::MakeCone(0.5f, 1.0f);
         if (object.primitive == EditorScene::Primitive::Pyramid)
-            return engine::ecs::Collider::MakePyramid(transform->scale * 0.5f);
+            return engine::ecs::Collider::MakePyramid(glm::vec3(0.5f));
         if (object.primitive == EditorScene::Primitive::Torus) {
-            const float radialScale = std::max(transform->scale.x, transform->scale.z);
-            return engine::ecs::Collider::MakeTorus(0.35f * radialScale,
-                0.15f * std::max(radialScale, transform->scale.y));
+            return engine::ecs::Collider::MakeTorus(0.35f, 0.15f);
         }
         if (object.primitive == EditorScene::Primitive::Staircase)
-            return engine::ecs::Collider::MakeStaircase(transform->scale * 0.5f, 6);
+            return engine::ecs::Collider::MakeStaircase(glm::vec3(0.5f), 6);
     }
 
-    engine::ecs::Collider collider = transform
-        ? engine::ecs::Collider::MakeBox(glm::vec3(
-              std::max(transform->scale.x * 0.5f, 0.001f),
-              std::max(transform->scale.y * 0.5f, 0.001f),
-              std::max(transform->scale.z * 0.5f, 0.001f)))
-        : engine::ecs::Collider::MakeBox(glm::vec3(0.5f));
+    engine::ecs::Collider collider = engine::ecs::Collider::MakeBox(glm::vec3(0.5f));
     collider.restitution = kDefaultRestitution;
     return collider;
 }
@@ -2244,7 +2242,26 @@ void DrawWorldSettings(EditorScene& scene, EditorDockspace::Context& context, bo
         changed |= ImGui::SliderFloat("Indoor Occlusion Strength", &environment.skylightOcclusionStrength, 0.0f, 1.0f, "%.2f");
         changed |= ImGui::SliderFloat("Minimum Indoor Skylight", &environment.minimumSkylight, 0.0f, 1.0f, "%.2f");
         if (!environment.skylightOcclusion) ImGui::EndDisabled();
-        ImGui::TextDisabled("Uses dynamic sun-shadow visibility to block sky/IBL inside enclosed spaces.");
+        ImGui::TextDisabled("Uses rebuilt local sky visibility; old scenes fall back to dynamic AO/orientation clues.");
+        ImGui::SeparatorText("Local Lighting Build");
+        if (context.lightingBuildQuality) {
+            const char* qualities[] = {"Preview", "Medium", "High"};
+            changed |= ImGui::Combo("Build Quality", context.lightingBuildQuality, qualities, 3);
+            environment.lightingBuildQuality = *context.lightingBuildQuality;
+        }
+        changed |= ImGui::DragFloat("Probe Spacing", &environment.lightingProbeSpacing, 0.1f, 0.25f, 20.0f, "%.2f m");
+        changed |= ImGui::DragFloat("Sky Ray Distance", &environment.lightingRayDistance, 1.0f, 2.0f, 1000.0f, "%.1f m");
+        ImGui::BeginDisabled(context.lightingBuildRunning || context.playMode);
+        if (ImGui::Button("Build Lighting")) context.lightingBuildRequested = true;
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (context.lightingBuildRunning) {
+            ImGui::ProgressBar(context.lightingBuildProgress, ImVec2(130.0f, 0.0f));
+            ImGui::SameLine(); if (ImGui::SmallButton("Cancel")) context.lightingBuildCancelRequested = true;
+        } else if (context.lightingBuildDirty) {
+            ImGui::TextColored(ImVec4(1.0f,0.65f,0.12f,1.0f), "Needs rebuild");
+        } else ImGui::TextDisabled("Up to date");
+        if (context.lightingBuildStatus) ImGui::TextWrapped("%s", context.lightingBuildStatus->c_str());
         changed |= ImGui::Checkbox("Time Sun", &environment.driveSunLight);
         changed |= ImGui::DragFloat("Sun Intensity", &environment.sunIntensity, 0.02f, 0.0f, 8.0f);
     }
@@ -3399,7 +3416,7 @@ void DrawAnimationPreview(EditorDockspace::Context& context, bool* open) {
         }
     }
 
-    if (false /* legacy inline state-machine editor — now in the Graph Editor panel */) {
+    if (false /* legacy inline state-machine editor — now in the Animation Graph Editor panel */) {
         if (state.playMode || !context.scene) {
             ImGui::TextUnformatted("State graphs are edited in Edit mode.");
         } else if (state.clips.empty()) {
@@ -3679,7 +3696,7 @@ void DrawAnimationPreview(EditorDockspace::Context& context, bool* open) {
         }
     }
 
-    if (false /* legacy state-graph visualization — now in the Graph Editor panel */) {
+    if (false /* legacy state-graph visualization — now in the Animation Graph Editor panel */) {
         const ImVec2 origin = ImGui::GetCursorScreenPos();
         const float width = std::max(ImGui::GetContentRegionAvail().x, 240.0f);
         const float height = std::max(180.0f, 90.0f * std::ceil(static_cast<float>(std::max<std::size_t>(state.states.size(), 1)) / 3.0f));
@@ -4108,7 +4125,7 @@ void DrawHierarchy(EditorDockspace::Context& context, bool* open) {
             != selectionSnapshot.end();
     };
 
-    for (int i = 0; i < static_cast<int>(objects.size()); ++i) {
+    const auto drawObject = [&](int i) {
         const EditorScene::Object& object = objects[static_cast<std::size_t>(i)];
         char label[192];
         std::snprintf(label, sizeof(label), "%s%s%s %s",
@@ -4118,15 +4135,21 @@ void DrawHierarchy(EditorDockspace::Context& context, bool* open) {
             object.name.c_str());
 
         if (!g_hierarchyFilter.PassFilter(label)) {
-            continue;
+            return;
         }
 
+        ImGui::PushID(object.entity);
         if (ImGui::Selectable(label, isRowSelected(i)) && !selectionLocked) {
             // Shift+click toggles the row in/out of the multi-selection; a plain click
             // replaces the selection with just this object. Disabled while locked so the
             // viewport selection can't be changed (and accidentally deleted) from here.
             if (ImGui::GetIO().KeyShift) context.scene->ToggleSelection(i);
             else context.scene->SelectIndex(i);
+        }
+        if (ImGui::BeginDragDropSource()) {
+            ImGui::SetDragDropPayload("3DG_HIERARCHY_OBJECT", &i, sizeof(i));
+            ImGui::TextUnformatted(object.name.c_str());
+            ImGui::EndDragDropSource();
         }
         if (ImGui::BeginPopupContextItem()) {
             // Right-clicking an unselected row selects just it; right-clicking a row that
@@ -4152,12 +4175,121 @@ void DrawHierarchy(EditorDockspace::Context& context, bool* open) {
             if (ImGui::MenuItem("Frame Selected")) {
                 context.frameSelectedRequested = true;
             }
+            if (ImGui::BeginMenu("Move to Group")) {
+                if (ImGui::MenuItem("Scene Root", nullptr,
+                        object.editorGroupId == EditorScene::kRootGroupId))
+                    context.scene->MoveSelectedObjectsToGroup(EditorScene::kRootGroupId);
+                for (const EditorScene::SceneGroup& group : context.scene->Groups()) {
+                    if (ImGui::MenuItem(group.name.c_str(), nullptr,
+                            object.editorGroupId == group.id))
+                        context.scene->MoveSelectedObjectsToGroup(group.id);
+                }
+                ImGui::EndMenu();
+            }
+            if (ImGui::MenuItem("Create Group From Selection")) {
+                const std::vector<int> selectedObjects = context.scene->SelectedIndices();
+                const EditorScene::GroupId group = context.scene->CreateGroup("Group");
+                context.scene->SelectIndices(selectedObjects);
+                context.scene->MoveSelectedObjectsToGroup(group);
+                context.scene->SelectGroup(group);
+            }
             ImGui::Separator();
             if (ImGui::MenuItem("Deselect")) {
                 context.scene->Deselect();
             }
             ImGui::EndPopup();
         }
+        ImGui::PopID();
+    };
+
+    const auto groupHasFilterMatch = [&](auto&& self, EditorScene::GroupId id) -> bool {
+        for (const EditorScene::SceneGroup& group : context.scene->Groups())
+            if (group.parentId == id
+                && (g_hierarchyFilter.PassFilter(group.name.c_str()) || self(self, group.id))) return true;
+        for (const EditorScene::Object& object : objects)
+            if (object.editorGroupId == id && g_hierarchyFilter.PassFilter(object.name.c_str())) return true;
+        return false;
+    };
+
+    std::function<void(EditorScene::GroupId)> drawGroupChildren;
+    drawGroupChildren = [&](EditorScene::GroupId parentId) {
+        for (const EditorScene::SceneGroup& group : context.scene->Groups()) {
+            if (group.parentId != parentId) continue;
+            if (g_hierarchyFilter.IsActive()
+                && !g_hierarchyFilter.PassFilter(group.name.c_str())
+                && !groupHasFilterMatch(groupHasFilterMatch, group.id)) continue;
+            ImGui::PushID(static_cast<int>(group.id));
+            ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow
+                | ImGuiTreeNodeFlags_SpanAvailWidth;
+            if (context.scene->HierarchySelection() == EditorScene::HierarchySelectionType::Group
+                && context.scene->SelectedGroupId() == group.id) flags |= ImGuiTreeNodeFlags_Selected;
+            if (g_hierarchyFilter.IsActive()) flags |= ImGuiTreeNodeFlags_DefaultOpen;
+            const bool openNode = ImGui::TreeNodeEx("##Group", flags, "%s", group.name.c_str());
+            if (ImGui::IsItemClicked() && !selectionLocked) context.scene->SelectGroup(group.id);
+            if (ImGui::BeginDragDropSource()) {
+                const EditorScene::GroupId id = group.id;
+                ImGui::SetDragDropPayload("3DG_HIERARCHY_GROUP", &id, sizeof(id));
+                ImGui::TextUnformatted(group.name.c_str());
+                ImGui::EndDragDropSource();
+            }
+            if (ImGui::BeginDragDropTarget()) {
+                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("3DG_HIERARCHY_OBJECT"))
+                    context.scene->MoveObjectToGroup(*static_cast<const int*>(payload->Data), group.id);
+                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("3DG_HIERARCHY_GROUP"))
+                    context.scene->MoveGroupToGroup(*static_cast<const EditorScene::GroupId*>(payload->Data), group.id);
+                ImGui::EndDragDropTarget();
+            }
+            if (ImGui::BeginPopupContextItem()) {
+                if (!selectionLocked) context.scene->SelectGroup(group.id);
+                if (ImGui::MenuItem("Create Child Group")) context.scene->CreateGroup("Group", group.id);
+                if (ImGui::MenuItem("Rename Group")) {
+                    g_renameGroupId = group.id;
+                    std::snprintf(g_groupNameBuffer.data(), g_groupNameBuffer.size(), "%s", group.name.c_str());
+                    ImGui::OpenPopup("Rename Hierarchy Group");
+                }
+                if (ImGui::MenuItem("Delete Group")) context.scene->DeleteGroup(group.id);
+                ImGui::TextDisabled("Deleting moves contents to the parent.");
+                ImGui::EndPopup();
+            }
+            if (openNode) {
+                drawGroupChildren(group.id);
+                for (int i = 0; i < static_cast<int>(objects.size()); ++i)
+                    if (objects[static_cast<std::size_t>(i)].editorGroupId == group.id) drawObject(i);
+                ImGui::TreePop();
+            }
+            ImGui::PopID();
+        }
+    };
+
+    drawGroupChildren(EditorScene::kRootGroupId);
+    for (int i = 0; i < static_cast<int>(objects.size()); ++i)
+        if (objects[static_cast<std::size_t>(i)].editorGroupId == EditorScene::kRootGroupId) drawObject(i);
+
+    ImGui::Dummy(ImVec2(ImGui::GetContentRegionAvail().x, 24.0f));
+    if (ImGui::BeginDragDropTarget()) {
+        if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("3DG_HIERARCHY_OBJECT"))
+            context.scene->MoveObjectToGroup(*static_cast<const int*>(payload->Data), EditorScene::kRootGroupId);
+        if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("3DG_HIERARCHY_GROUP"))
+            context.scene->MoveGroupToGroup(*static_cast<const EditorScene::GroupId*>(payload->Data), EditorScene::kRootGroupId);
+        ImGui::EndDragDropTarget();
+    }
+    if (ImGui::BeginPopupContextWindow("HierarchyRootContext", ImGuiPopupFlags_MouseButtonRight)) {
+        if (ImGui::MenuItem("Create Group")) context.scene->CreateGroup("Group");
+        ImGui::EndPopup();
+    }
+    if (ImGui::BeginPopupModal("Rename Hierarchy Group", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::InputText("Name", g_groupNameBuffer.data(), g_groupNameBuffer.size());
+        const bool valid = context.scene->IsHierarchyNameAvailable(
+            g_groupNameBuffer.data(), engine::ecs::kNull, g_renameGroupId);
+        if (!valid) ImGui::TextColored(ImVec4(1, .45f, .3f, 1), "Name is empty or already in use.");
+        ImGui::BeginDisabled(!valid);
+        if (ImGui::Button("Rename")) {
+            context.scene->RenameGroup(g_renameGroupId, g_groupNameBuffer.data());
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndDisabled(); ImGui::SameLine();
+        if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
     }
 
     ImGui::End();
@@ -4171,6 +4303,29 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
 
     if (!context.scene) {
         ImGui::TextUnformatted("Scene unavailable.");
+        ImGui::End();
+        return;
+    }
+
+    if (const EditorScene::SceneGroup* group = context.scene->SelectedGroup()) {
+        ImGui::SeparatorText("Group");
+        ImGui::Text("Name: %s", group->name.c_str());
+        ImGui::Text("Direct objects: %zu", context.scene->GroupObjectCount(group->id));
+        ImGui::Text("All objects: %zu", context.scene->GroupObjectCount(group->id, true));
+        ImGui::Text("Child groups: %zu", context.scene->ChildGroupCount(group->id));
+        ImGui::TextDisabled("Groups organize the editor hierarchy only. Transform editing is disabled.");
+        if (ImGui::Button("Select All Objects")) {
+            std::vector<int> indices;
+            const auto collect = [&](auto&& self, EditorScene::GroupId id) -> void {
+                const auto& hierarchyObjects = context.scene->Objects();
+                for (int i = 0; i < static_cast<int>(hierarchyObjects.size()); ++i)
+                    if (hierarchyObjects[static_cast<std::size_t>(i)].editorGroupId == id) indices.push_back(i);
+                for (const auto& child : context.scene->Groups())
+                    if (child.parentId == id) self(self, child.id);
+            };
+            collect(collect, group->id);
+            context.scene->SelectIndices(indices);
+        }
         ImGui::End();
         return;
     }
@@ -5183,19 +5338,15 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
         }
             engine::ecs::Collider collider = selected->collider;
             int shapeIndex = ColliderShapeIndex(collider.shape);
-            const char* shapes[] = {"Sphere", "Box", "Plane", "Capsule", "Cylinder", "Cone", "Pyramid", "Torus", "Staircase"};
+            const char* shapes[] = {"Sphere", "Box", "Plane", "Capsule", "Cylinder", "Cone", "Pyramid", "Torus", "Staircase", "Convex Hull", "Triangle Mesh"};
             if (ImGui::Combo("Collider Shape", &shapeIndex, shapes, IM_ARRAYSIZE(shapes))) {
                 const engine::ecs::ColliderShape newShape = ColliderShapeFromIndex(shapeIndex);
                 if (newShape == engine::ecs::ColliderShape::Cylinder) {
                     // A shape switch should produce usable cylinder dimensions
                     // instead of inheriting arbitrary radius/height values from
                     // the previous collider type.
-                    const engine::ecs::Transform* transform =
-                        context.scene->TryGetTransform(selected->entity);
-                    const float radius = transform
-                        ? 0.5f * std::max(transform->scale.x, transform->scale.z)
-                        : 0.5f;
-                    const float height = transform ? transform->scale.y : 1.0f;
+                    const float radius = 0.5f;
+                    const float height = 1.0f;
 
                     const float restitution = collider.restitution;
                     const float friction = collider.friction;
@@ -5218,7 +5369,9 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                 if (ImGui::DragFloat("Radius", &collider.radius, 0.02f, 0.001f, 1000.0f)) {
                     context.scene->SetSelectedCollider(collider);
                 }
-            } else if (collider.shape == engine::ecs::ColliderShape::Box) {
+            } else if (collider.shape == engine::ecs::ColliderShape::Box
+                || collider.shape == engine::ecs::ColliderShape::ConvexHull
+                || collider.shape == engine::ecs::ColliderShape::TriangleMesh) {
                 if (ImGui::DragFloat3("Half Extents", &collider.halfExtents.x, 0.02f, 0.001f, 1000.0f)) {
                     context.scene->SetSelectedCollider(collider);
                 }
@@ -5275,6 +5428,28 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             }
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("Overlap events are generated, but this collider never blocks movement.");
+            }
+            ImGui::SeparatorText("Local Transform");
+            bool localChanged = false;
+            localChanged |= ImGui::DragFloat3("Local Position", &collider.localPosition.x, 0.01f);
+            glm::vec3 localEuler = glm::degrees(glm::eulerAngles(collider.localRotation));
+            if (ImGui::DragFloat3("Local Rotation", &localEuler.x, 0.5f, -360.0f, 360.0f)) {
+                collider.localRotation = glm::quat(glm::radians(localEuler)); localChanged = true;
+            }
+            localChanged |= ImGui::DragFloat3("Local Scale", &collider.localScale.x, 0.01f, 0.001f, 1000.0f);
+            localChanged |= ImGui::Checkbox("Inherit Object Scale", &collider.inheritTransformScale);
+            if (localChanged) context.scene->SetSelectedCollider(collider);
+            if (!collider.collisionAssetPath.empty()) {
+                ImGui::TextWrapped("Collision mesh: %s", collider.collisionAssetPath.c_str());
+                if (collider.collisionDirty)
+                    ImGui::TextColored({1.0f, 0.65f, 0.2f, 1.0f}, "Collision needs rebuild");
+            }
+            if (collider.shape == engine::ecs::ColliderShape::TriangleMesh
+                && selected->rigidBodyEnabled && selected->rigidBody.invMass > 0.0f
+                && !selected->rigidBody.kinematic) {
+                ImGui::TextColored({1.0f, 0.45f, 0.25f, 1.0f},
+                    "Dynamic Triangle Mesh is unsupported; runtime uses Bounds.");
+                ImGui::TextDisabled("Choose Convex Hull for a movable mesh.");
             }
 
             int presetIndex = CollisionPresetIndex(collider);
@@ -5885,6 +6060,7 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                 std::string error;
                 if (CreateScriptFiles(context, className, scriptTemplate, creatingLua,
                                       &scriptPath, &error)) {
+                    if (!creatingLua) context.nativeScriptSourceCreated = true;
                     if (!IsBehaviorTreeTemplate(scriptTemplate)) {
                         context.scene->SetSelectedScript(className, scriptPath, true);
                         context.scene->SetSelectedScriptFields(DefaultFieldsForTemplate(scriptTemplate));
@@ -8099,6 +8275,24 @@ void DrawAssets(EditorDockspace::Context& context, bool* open) {
 
     if (ImGui::BeginPopupContextWindow("ContentBrowserActions",
             ImGuiPopupFlags_MouseButtonRight | ImGuiPopupFlags_NoOpenOverItems)) {
+        if (ImGui::BeginMenu("Create Asset")) {
+            if (ImGui::MenuItem("Particle System")) {
+                std::filesystem::path directory = std::filesystem::path(context.assets->RootPath())
+                    / context.assets->CurrentFolder();
+                std::filesystem::path path = directory / "P_NewParticle.particle";
+                for (int suffix = 1; std::filesystem::exists(path); ++suffix)
+                    path = directory / ("P_NewParticle_" + std::to_string(suffix) + ".particle");
+                engine::ParticleSystemComponent defaults;
+                std::string error;
+                if (particle_asset::Save(path.string(), defaults, &error)) {
+                    context.assets->Refresh(context.assets->RootPath(), &error);
+                    context.editorAssetOpenRequested = path.string();
+                    context.editorAssetOpenType = EditorAssets::Type::Particle;
+                }
+                if (!error.empty() && context.log) context.log->Error(error);
+            }
+            ImGui::EndMenu();
+        }
         if (editor::icons::MenuItem(editor::icons::Add, "Create Folder..."))
             requestCreateFolderPopup = true;
         if (!context.assets->HasCopiedEntry()) ImGui::BeginDisabled();
@@ -9952,6 +10146,31 @@ void DrawGizmoToolbar(EditorDockspace::Context& context, bool* open) {
 
 } // namespace
 
+bool EditorDockspace::ScriptSourceDirty() { return g_scriptSourceLoaded && g_scriptSourceDirty; }
+const std::string& EditorDockspace::ScriptSourcePath() { return g_scriptSourcePath; }
+bool EditorDockspace::SaveScriptSource(std::string* error) {
+    if (!ScriptSourceDirty()) return true;
+    if (!WriteTextFile(g_scriptSourcePath, g_scriptSourceBuffer.data(), error)) return false;
+    g_scriptSourceDirty = false;
+    return true;
+}
+bool EditorDockspace::AudioDocumentDirty() { return g_audioEditor.dirty; }
+std::string EditorDockspace::AudioDocumentPath() { return g_audioEditor.outputPath.data(); }
+bool EditorDockspace::SaveAudioDocument(std::string* error) {
+    if (!g_audioEditor.dirty) return true;
+    if (g_audioEditor.outputPath[0] == '\0') {
+        if (error) *error = "Choose an output path in the Audio Editor before saving";
+        return false;
+    }
+    if (!engine::WriteAudioWav(g_audioEditor.outputPath.data(), g_audioEditor.buffer, error)) return false;
+    g_audioEditor.dirty = false;
+    return true;
+}
+PreferredCodeEditor EditorDockspace::PreferredEditor() {
+    return static_cast<PreferredCodeEditor>(std::clamp(g_preferredCodeEditor,0,4));
+}
+std::string EditorDockspace::CustomEditorExecutable() { return g_customCodeEditorPath.data(); }
+
 bool EditorDockspace::Draw(Context& context) {
     if (!context.panels) {
         return false;
@@ -10099,6 +10318,11 @@ bool EditorDockspace::Draw(Context& context) {
             if (editor::icons::MenuItem(editor::icons::Settings, "Validate Runtime")) {
                 context.validateRuntimeRequested = true;
             }
+            ImGui::SeparatorText("Native Scripting");
+            if (ImGui::MenuItem("Generate Script Solution"))
+                context.generateScriptSolutionRequested = true;
+            if (ImGui::MenuItem("Open Script Solution"))
+                context.openScriptSolutionRequested = true;
             if (context.project && !context.project->RecentScenes().empty()) {
                 ImGui::Separator();
                 if (ImGui::BeginMenu("Recent Scenes")) {
@@ -10111,6 +10335,8 @@ bool EditorDockspace::Draw(Context& context) {
                     ImGui::EndMenu();
                 }
             }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Exit")) context.exitEditorRequested = true;
             ImGui::EndMenu();
         }
 
@@ -10331,6 +10557,26 @@ bool EditorDockspace::Draw(Context& context) {
             ImGui::EndMenu();
         }
 
+        if (ImGui::BeginMenu("Build")) {
+            if (context.lightingBuildQuality) {
+                if (ImGui::MenuItem("Preview Lighting", nullptr, *context.lightingBuildQuality == 0)) *context.lightingBuildQuality = 0;
+                if (ImGui::MenuItem("Medium Lighting", nullptr, *context.lightingBuildQuality == 1)) *context.lightingBuildQuality = 1;
+                if (ImGui::MenuItem("High Lighting", nullptr, *context.lightingBuildQuality == 2)) *context.lightingBuildQuality = 2;
+                ImGui::Separator();
+            }
+            ImGui::BeginDisabled(context.lightingBuildRunning || context.playMode);
+            if (ImGui::MenuItem("Build Lighting")) context.lightingBuildRequested = true;
+            ImGui::EndDisabled();
+            if (context.lightingBuildRunning && ImGui::MenuItem("Cancel Lighting Build"))
+                context.lightingBuildCancelRequested = true;
+            ImGui::Separator();
+            if (context.lightingBuildRunning) ImGui::TextDisabled("Building... %.0f%%", context.lightingBuildProgress * 100.0f);
+            else if (context.lightingBuildDirty) ImGui::TextColored(ImVec4(1.0f,0.65f,0.12f,1.0f), "Lighting needs rebuild");
+            else ImGui::TextDisabled("Lighting up to date");
+            if (context.lightingBuildStatus) ImGui::TextDisabled("%s", context.lightingBuildStatus->c_str());
+            ImGui::EndMenu();
+        }
+
         if (ImGui::BeginMenu(editor::icons::Label(editor::icons::Settings, "Debug").c_str())) {
             if (ImGui::BeginMenu("Physics")) {
                 if (context.showPhysicsEventGuides) {
@@ -10533,6 +10779,8 @@ bool EditorDockspace::Draw(Context& context) {
             break; // drawn by EditorApp (owns environment timeline authoring and preview)
         case EditorPanels::Panel::CaveTunnel:
             break; // drawn by EditorApp (owns cave authoring and baked scene generation)
+        case EditorPanels::Panel::FenceWallPainter:
+            break; // drawn by EditorApp (owns connected fence/wall authoring)
         case EditorPanels::Panel::MeshEditor:
             break; // drawn by EditorApp (owns native mesh editing state)
         case EditorPanels::Panel::DecalPlacement:

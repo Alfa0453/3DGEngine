@@ -15,7 +15,7 @@
 // and packaged pipeline stay unchanged because a prefab bakes its values onto ordinary
 // scene objects, exactly like a character does.
 struct PrefabAsset {
-    int version = 3;
+    int version = 4;
     engine::AssetHandle assetId;
     std::string name = "Prefab";
 
@@ -47,8 +47,8 @@ struct PrefabAsset {
     // left untouched. Returns false if nothing is selected or it is locked.
     bool Apply(EditorScene& scene) const;
 
-    // Version 3 persists a stable asset ID and dependency metadata so prefabs
-    // participate in the project asset registry and dependency viewer.
+    // Version 4 also persists the collider's local transform, scale policy and
+    // mesh-collision source while remaining compatible with legacy prefabs.
     bool Save(const std::string& path, std::string* error = nullptr);
     bool Load(const std::string& path, std::string* error = nullptr);
 };

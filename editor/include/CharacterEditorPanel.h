@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CharacterAsset.h"
+#include "SceneApplyTarget.h"
 
 #include <engine/assets/RuntimeAssetManager.h>
 #include <engine/animation/AnimationController.h>
@@ -32,6 +33,12 @@ public:
     const CharacterAsset& Asset() const { return m_asset; }
     // Path of the .3dgcharacter being edited (links placed scene objects for live sync).
     const std::string& Path() const { return m_path; }
+    bool IsDirty() const { return m_dirty; }
+    bool SaveForShutdown(const std::string& assetRoot, std::string* error);
+    void InvalidateClipMetadata(const std::string&) {
+        m_previewClipMetadataInvalidated = true;
+        m_previewGraphDirty = true;
+    }
     // True once if the user asked to add the character to the scene as a new object.
     bool ConsumeAddToSceneRequest() {
         const bool requested = m_addToSceneRequested;
@@ -123,6 +130,9 @@ private:
     std::vector<EditorScene::AnimationParameter> m_previewGraphParamDefs;
     std::vector<EditorScene::AnimationStateTransition> m_previewGraphTransitions;
     std::vector<engine::RuntimeAssetManager::SkinnedAnimationSource> m_previewGraphSources;
+    std::vector<std::string> m_previewGraphClipAssets;
+    std::string m_previewClipMetadataSignature;
+    bool m_previewClipMetadataInvalidated = false;
     std::unique_ptr<engine::Shader> m_colliderGuideShader;
     std::unique_ptr<engine::Shader> m_attachmentShader;   // lit shader for socketed props
     std::optional<engine::Mesh> m_colliderGuideMesh;
@@ -130,4 +140,5 @@ private:
     bool m_colliderGuideDirty = true;
     bool m_showColliderGuide = true;
     bool m_addToSceneRequested = false;
+    SceneApplyTarget m_applyTarget;
 };

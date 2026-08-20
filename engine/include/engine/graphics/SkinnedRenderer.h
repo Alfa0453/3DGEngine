@@ -13,6 +13,7 @@ class Camera;
 class Texture;
 class CascadedShadow;
 class IBL;
+class LightingProbeGrid;
 namespace ecs { class Registry; }
 
 // Lighting context for the PBR skinned pass -- mirrors the subset of
@@ -28,6 +29,7 @@ struct SkinnedLighting {
     float shadowSoftness = 2.5f;
     bool skylightOcclusion = false;
     float skylightOcclusionStrength = 0.90f, minimumSkylight = 0.06f;
+    const LightingProbeGrid* lightingGrid = nullptr;
     bool cloudShadows = false;
     float cloudShadowStrength = 0.45f, cloudShadowScale = 0.035f;
     float cloudCoverage = 0.45f, cloudDensity = 0.75f, cloudSoftness = 0.18f;

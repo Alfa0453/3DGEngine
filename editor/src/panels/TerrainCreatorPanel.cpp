@@ -1,6 +1,7 @@
 #include "TerrainCreatorPanel.h"
 
 #include "EditorAssets.h"
+#include "EditorScene.h"
 #include "EditorPanels.h"
 
 #include <engine/graphics/Terrain.h>
@@ -934,7 +935,7 @@ void TerrainCreatorPanel::DrawViewport(const std::string& contentRoot, float dt)
     ImGui::SetItemTooltip("LMB sculpt/paint | RMB orbit | MMB pan | Wheel zoom");
 }
 
-void TerrainCreatorPanel::Draw(const std::string& contentRoot,
+void TerrainCreatorPanel::Draw(EditorScene& scene, const std::string& contentRoot,
                                const EditorAssets& assets, bool* open,
                                bool* assetSaved, std::string* message, float dt) {
     if (assetSaved) *assetSaved = false;
@@ -965,11 +966,33 @@ void TerrainCreatorPanel::Draw(const std::string& contentRoot,
     if (ImGui::Button("Add to Level")) m_addToLevel = true;
     if (m_path.empty()) ImGui::EndDisabled();
     ImGui::SameLine();
-    if (ImGui::Button("Apply to Selected Landscape"))
-        m_applyToSelected = true;
+    const EditorScene::Object* target = scene.FindObject(m_applyTarget);
+    const bool validTarget = target && target->isTerrain && !target->locked;
+    ImGui::BeginDisabled(!validTarget);
+    const std::string applyLabel = validTarget
+        ? "Apply to \"" + target->name + "\"" : "Apply (No Landscape Target)";
+    if (ImGui::Button(applyLabel.c_str())) m_applyToSelected = true;
+    ImGui::EndDisabled();
     ImGui::SameLine();
     ImGui::TextDisabled("%s%s", m_path.empty() ? "Unsaved" : m_path.c_str(),
                         m_dirty ? " *" : "");
+    ImGui::Separator();
+    ImGui::SeparatorText("Level Apply Target");
+    if (target) ImGui::Text("Target: %s", target->name.c_str());
+    else if (m_applyTarget != engine::ecs::kNull) {
+        ImGui::TextColored(ImVec4(1, .45f, .3f, 1), "Target landscape no longer exists.");
+        m_applyTarget = engine::ecs::kNull;
+    } else ImGui::TextDisabled("Target: None");
+    if (const EditorScene::Object* selected = scene.SelectedObject()) {
+        if (selected->entity != m_applyTarget) {
+            ImGui::BeginDisabled(!selected->isTerrain || selected->locked);
+            if (ImGui::Button(("Use \"" + selected->name + "\" As Target").c_str()))
+                m_applyTarget = selected->entity;
+            ImGui::EndDisabled();
+        }
+    }
+    if (target && scene.SelectedObject() && scene.SelectedObject()->entity != target->entity)
+        ImGui::TextColored(ImVec4(1, .7f, .2f, 1), "Current selection differs from the stable target.");
     ImGui::Separator();
 
     const float detailsWidth = std::min(350.0f, ImGui::GetContentRegionAvail().x * 0.34f);

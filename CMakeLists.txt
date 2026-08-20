@@ -35,6 +35,7 @@ endif()
 
 # Option: build optional demo/sample targets (disabled by default for releases).
 option(BUILD_DEMOS "Build demo and sample targets (viewer, demos, etc.)" OFF)
+option(THREEDG_SCRIPT_IDE_ONLY "Generate only engine and native game-script IDE targets" OFF)
 
 # Collect every executable/DLL in one folder so assets are easy to locate.
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
@@ -199,7 +200,7 @@ add_subdirectory(engine)   # the reusable engine (static library)
 add_subdirectory(game)     # shared game module: your scripts, linked by editor + player
 
 # Optional demo/sample targets. Keep these off for a trimmed release.
-if(BUILD_DEMOS)
+if(BUILD_DEMOS AND NOT THREEDG_SCRIPT_IDE_ONLY)
     add_subdirectory(viewer)   # a model-viewer tool (loads + renders OBJ models)
     add_subdirectory(scene)    # a PBR lighting + ECS scene demo (shadows, skybox)
     add_subdirectory(marble)
@@ -216,7 +217,9 @@ if(BUILD_DEMOS)
     add_subdirectory(ecsgame)
 endif()
 
+if(NOT THREEDG_SCRIPT_IDE_ONLY)
 add_subdirectory(editor)
+endif()
 #add_subdirectory(physics)  # moved to standalone GameEngine project
 #add_subDirectory(marble)
 #add_subdirectory(character)
@@ -230,9 +233,11 @@ add_subdirectory(editor)
 #add_subdirectory(uidemo)
 #add_subdirectory(prefabdemo)
 #add_subdirectory(ecsgame)
+if(NOT THREEDG_SCRIPT_IDE_ONLY)
 add_subdirectory(player)   # standalone runtime player (game mode) — see RUNTIME_ROADMAP.md
+endif()
 
-if(BUILD_TESTING)
+if(BUILD_TESTING AND NOT THREEDG_SCRIPT_IDE_ONLY)
     add_subdirectory(tests)
 endif()
 

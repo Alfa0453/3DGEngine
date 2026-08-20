@@ -87,6 +87,14 @@ Window::Window(const WindowProps& props) {
     // ---- Wire up callbacks ----------------------------------------------
     // Stash a pointer to m_data so static callbacks can read/write our state.
     glfwSetWindowUserPointer(m_window, &m_data);
+    glfwSetWindowCloseCallback(m_window, [](GLFWwindow* win) {
+        auto* data = static_cast<Data*>(glfwGetWindowUserPointer(win));
+        if (!data || !data->onCloseRequested) return;
+        // GLFW sets this before invoking the callback. Clear it so the main
+        // loop remains alive long enough to draw the editor's save prompt.
+        glfwSetWindowShouldClose(win, GLFW_FALSE);
+        data->onCloseRequested();
+    });
 
     // Keep the GL viewport matched to the framebuffer when the window resizes.
     // (Framebuffer size != window size on high-DPI displays, so we use the
@@ -194,6 +202,11 @@ void Window::SetDropCallback(std::function<void(const std::vector<std::string>&)
                 if (paths[i]) files.emplace_back(paths[i]);
             if (!files.empty()) data->onDrop(files);
         });
+}
+
+void Window::SetCloseRequestCallback(std::function<void()> callback)
+{
+    m_data.onCloseRequested = std::move(callback);
 }
 bool Window::IsKeyPressed(int key) const
 {

@@ -81,7 +81,7 @@ Mesh Plane(float size, float uvTiling) {
          h, 0.0f,  h,   0.0f,1.0f,0.0f,   t,    t,
         -h, 0.0f,  h,   0.0f,1.0f,0.0f,   0.0f, t,
     };
-    const std::vector<std::uint32_t> idx = { 0, 1, 2, 2, 3, 0 };
+    const std::vector<std::uint32_t> idx = { 0, 2, 1, 0, 3, 2 };
     Mesh mesh(v, idx, PNT());
     mesh.SetTwoSided(true);   // a flat plane is visible from both sides (no backface cull)
     return mesh;
@@ -142,8 +142,8 @@ Mesh Cone(int segments)
         const std::uint32_t sideNext = sideStart + static_cast<std::uint32_t>((i + 1) % segments);
         const std::uint32_t capCurrent = capStart + static_cast<std::uint32_t>(i);
         const std::uint32_t capNext = capStart + static_cast<std::uint32_t>((i + 1) % segments);
-        idx.insert(idx.end(), {tip, sideCurrent, sideNext});
-        idx.insert(idx.end(), {baseCenter, capNext, capCurrent});
+        idx.insert(idx.end(), {tip, sideNext, sideCurrent});
+        idx.insert(idx.end(), {baseCenter, capCurrent, capNext});
     }
 
     return Mesh(v, idx, PNT());
@@ -219,14 +219,14 @@ Mesh Cylinder(int segments)
         const std::uint32_t currentBottom = currentTop + 1;
         const std::uint32_t nextTop = sideStart + static_cast<std::uint32_t>(((i + 1) % segments) * 2);
         const std::uint32_t nextBottom = nextTop + 1;
-        idx.insert(idx.end(), {currentTop, currentBottom, nextBottom, nextBottom, nextTop, currentTop});
+        idx.insert(idx.end(), {currentTop, nextBottom, currentBottom, nextBottom, currentTop, nextTop});
 
         const std::uint32_t capTopCurrent = topStart + static_cast<std::uint32_t>(i);
         const std::uint32_t capTopNext = topStart + static_cast<std::uint32_t>((i + 1) % segments);
         const std::uint32_t capBottomCurrent = bottomStart + static_cast<std::uint32_t>(i);
         const std::uint32_t capBottomNext = bottomStart + static_cast<std::uint32_t>((i + 1) % segments);
-        idx.insert(idx.end(), {topCenter, capTopCurrent, capTopNext});
-        idx.insert(idx.end(), {bottomCenter, capBottomNext, capBottomCurrent});
+        idx.insert(idx.end(), {topCenter, capTopNext, capTopCurrent});
+        idx.insert(idx.end(), {bottomCenter, capBottomCurrent, capBottomNext});
     }
 
     return Mesh(v, idx, PNT());
@@ -265,8 +265,8 @@ Mesh Sphere(int segments)
             const std::uint32_t k1 = static_cast<std::uint32_t>(i) * cols + static_cast<std::uint32_t>(j);
             const std::uint32_t k2 = k1 + cols;
             // Skip the degenerate triangles at the two poles.
-            if (i != 0)             idx.insert(idx.end(), { k1, k2, k1 + 1});
-            if (i != stacks - 1)    idx.insert(idx.end(), { k1 + 1, k2, k2 + 1});
+            if (i != 0)             idx.insert(idx.end(), { k1, k1 + 1, k2});
+            if (i != stacks - 1)    idx.insert(idx.end(), { k1 + 1, k2 + 1, k2});
         }
     }
     return Mesh(v, idx, PNT());
@@ -324,7 +324,7 @@ Mesh Capsule(float radius, float height, int segments)
         for (int j = 0; j < sectors; ++j) {
             const std::uint32_t k1 = static_cast<std::uint32_t>(r) * cols + static_cast<std::uint32_t>(j);
             const std::uint32_t k2 = k1 + cols;
-            idx.insert(idx.end(), { k1, k2, k1 + 1, k1 + 1, k2, k2 + 1 });
+            idx.insert(idx.end(), { k1, k1 + 1, k2, k1 + 1, k2 + 1, k2 });
         }
     }
     return Mesh(v, idx, PNT());
@@ -387,7 +387,7 @@ Mesh Torus(float majorRadius, float minorRadius, int majorSegments, int minorSeg
         for (int j = 0; j < minorSegments; ++j) {
             const std::uint32_t a = static_cast<std::uint32_t>(i) * cols + static_cast<std::uint32_t>(j);
             const std::uint32_t b = a + cols;
-            idx.insert(idx.end(), {a, b, a + 1, a + 1, b, b + 1});
+            idx.insert(idx.end(), {a, a + 1, b, a + 1, b + 1, b});
         }
     }
     return Mesh(v, idx, PNT());

@@ -66,6 +66,7 @@ inline const char* ForPanel(EditorPanels::Panel panel) {
     case P::BiomeEditor: return Leaf;
     case P::DayNightTimeline: return World;
     case P::CaveTunnel: return Link;
+    case P::FenceWallPainter: return Edit;
     case P::Count: break;
     }
     return Document;

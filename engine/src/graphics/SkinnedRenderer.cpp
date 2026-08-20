@@ -6,6 +6,8 @@
 #include "engine/graphics/Camera.h"
 #include "engine/graphics/Texture.h"
 #include "engine/graphics/CascadedShadow.h"
+#include "engine/graphics/DirectionalShadowShader.h"
+#include "engine/graphics/LightingBuildData.h"
 #include "engine/graphics/IBL.h"
 #include "engine/animation/AnimatedModel.h"
 #include "engine/ecs/Registry.h"
@@ -123,6 +125,8 @@ uniform vec3  uAmbient;
 uniform sampler2DArray uCascadeMaps;
 uniform mat4  uCascadeVP[4];
 uniform float uCascadeSplits[4];
+uniform float uCascadeWorldTexelSize[4];
+uniform float uCascadeDepthRange[4];
 uniform mat4  uView;
 uniform float uShadowSoftness;
 uniform int   uHasShadow;
@@ -139,10 +143,19 @@ uniform float uFogHeight;
 uniform float uFogHeightFalloff;
 uniform int uSkylightOcclusion;
 uniform float uSkylightOcclusionStrength, uMinimumSkylight;
+uniform int uUseLightingGrid;
+uniform sampler3D uLightingGrid;
+uniform vec3 uLightingGridMin, uLightingGridMax;
 uniform int uCloudShadows;
 uniform float uCloudShadowStrength, uCloudShadowScale;
 uniform float uCloudCoverage, uCloudDensity, uCloudSoftness;
 uniform vec2 uCloudWindOffset;
+float LocalSkyVisibility(vec3 worldPos, vec3 normal, float sunVisibility) {
+    float hemisphere=mix(0.72,1.0,clamp(normal.y*0.5+0.5,0.0,1.0));
+    if(uUseLightingGrid==1){vec3 extent=max(uLightingGridMax-uLightingGridMin,vec3(0.0001));vec3 uvw=(worldPos-uLightingGridMin)/extent;
+        if(all(greaterThanEqual(uvw,vec3(0)))&&all(lessThanEqual(uvw,vec3(1))))return clamp(texture(uLightingGrid,uvw).a*hemisphere,0.0,1.0);}
+    return clamp(mix(0.82,1.0,sunVisibility)*hemisphere,0.0,1.0);
+}
 float CloudHash(vec2 p) { return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453123); }
 float CloudNoise(vec2 p) {
     vec2 i=floor(p), f=fract(p); f=f*f*(3.0-2.0*f);
@@ -175,54 +188,7 @@ vec3 FresnelSchlick(float c, vec3 F0) { return F0+(1.0-F0)*pow(clamp(1.0-c,0.0,1
 vec3 FresnelSchlickRough(float c, vec3 F0, float r) {
     return F0 + (max(vec3(1.0-r), F0) - F0) * pow(clamp(1.0-c,0.0,1.0),5.0);
 }
-float BilinearShadowCompare(vec2 uv, int layer, float receiverDepth) {
-    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) return 0.0;
-    ivec2 size = textureSize(uCascadeMaps, 0).xy;
-    vec2 texelPosition = uv * vec2(size) - vec2(0.5);
-    ivec2 base = ivec2(floor(texelPosition));
-    vec2 blend = fract(texelPosition);
-    ivec2 maxCoord = size - ivec2(1);
-    ivec2 p00 = clamp(base, ivec2(0), maxCoord);
-    ivec2 p10 = clamp(base + ivec2(1, 0), ivec2(0), maxCoord);
-    ivec2 p01 = clamp(base + ivec2(0, 1), ivec2(0), maxCoord);
-    ivec2 p11 = clamp(base + ivec2(1, 1), ivec2(0), maxCoord);
-    float s00 = receiverDepth > texelFetch(uCascadeMaps, ivec3(p00, layer), 0).r ? 1.0 : 0.0;
-    float s10 = receiverDepth > texelFetch(uCascadeMaps, ivec3(p10, layer), 0).r ? 1.0 : 0.0;
-    float s01 = receiverDepth > texelFetch(uCascadeMaps, ivec3(p01, layer), 0).r ? 1.0 : 0.0;
-    float s11 = receiverDepth > texelFetch(uCascadeMaps, ivec3(p11, layer), 0).r ? 1.0 : 0.0;
-    return mix(mix(s00, s10, blend.x), mix(s01, s11, blend.x), blend.y);
-}
-float ShadowFactor(float NdotL, vec3 N) {
-    float depth = abs((uView * vec4(vWorldPos, 1.0)).z);
-    int layer = 3;
-    for (int i = 0; i < 4; ++i) { if (depth < uCascadeSplits[i]) { layer = i; break; } }
-    // Normal-offset bias: sample the cascade from a point pushed along the surface
-    // normal toward the light. Without it the character self-shadows its own sun-facing
-    // surfaces, so the shadow that belongs on the floor smears across the mesh as a
-    // dark band. Grows on grazing surfaces (low NdotL) where acne is worst.
-    vec3 biasedPos = vWorldPos + N * mix(0.02, 0.08, 1.0 - NdotL);
-    vec4 lp = uCascadeVP[layer] * vec4(biasedPos, 1.0);
-    vec3 p = lp.xyz / lp.w * 0.5 + 0.5;
-    if (p.z <= 0.0 || p.z > 1.0 || any(lessThan(p.xy, vec2(0.0))) ||
-        any(greaterThan(p.xy, vec2(1.0)))) return 0.0;
-    float cur = p.z;
-    float bias = max(0.0025 * (1.0 - NdotL), 0.0008);
-    vec2 texel = 1.0 / vec2(textureSize(uCascadeMaps, 0).xy);
-    float blockerSum = 0.0; int blockers = 0;
-    for (int x = -2; x <= 2; ++x) for (int y = -2; y <= 2; ++y) {
-        float d = texture(uCascadeMaps, vec3(p.xy + vec2(x, y) * texel * uShadowSoftness, float(layer))).r;
-        if (d < cur - bias) { blockerSum += d; ++blockers; }
-    }
-    if (blockers == 0) return 0.0;
-    float avgBlocker = blockerSum / float(blockers);
-    float penumbra = (cur - avgBlocker) * uShadowSoftness * 300.0;
-    float radius = clamp(penumbra, 1.0, 16.0);
-    float s = 0.0;
-    for (int x = -2; x <= 2; ++x) for (int y = -2; y <= 2; ++y) {
-        s += BilinearShadowCompare(p.xy + vec2(x, y) * texel * radius, layer, cur - bias);
-    }
-    return clamp(s / 25.0, 0.0, 1.0);
-}
+//__DIRECTIONAL_SHADOW_IMPLEMENTATION__
 vec3 ACES(vec3 x) {
     const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
     return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
@@ -263,8 +229,8 @@ void main() {
         ambient = uAmbient*albedo*ao;
     }
     if (uSkylightOcclusion == 1) {
-        float skyOcclusion = smoothstep(0.35, 0.90, shadow);
-        float skyVisibility = max(1.0 - skyOcclusion, clamp(uMinimumSkylight, 0.0, 1.0));
+        float skyVisibility = max(LocalSkyVisibility(vWorldPos, N, 1.0-shadow),
+                                  clamp(uMinimumSkylight, 0.0, 1.0));
         ambient *= mix(1.0, skyVisibility, clamp(uSkylightOcclusionStrength, 0.0, 1.0));
     }
     vec3 color = ambient + Lo + uEmissive;
@@ -315,7 +281,7 @@ void UploadBones(Shader& sh, const std::vector<glm::mat4>& bones) {
 
 SkinnedRenderer::SkinnedRenderer()
     : m_shader(std::make_unique<Shader>(kVert, kFrag)),
-      m_pbr(std::make_unique<Shader>(kVert, kPbrFrag)),
+      m_pbr(std::make_unique<Shader>(kVert, ComposeDirectionalShadowShader(kPbrFrag))),
       m_depth(std::make_unique<Shader>(kDepthVert, kDepthFrag)) {}
 
 SkinnedRenderer::~SkinnedRenderer() = default;
@@ -401,9 +367,13 @@ void SkinnedRenderer::DrawScene(ecs::Registry& reg, const Camera& camera, float 
     m_pbr->SetInt("uHasShadow", 1);
     static constexpr const char* kCascadeVpNames[] = {"uCascadeVP[0]", "uCascadeVP[1]", "uCascadeVP[2]", "uCascadeVP[3]"};
     static constexpr const char* kCascadeSplitNames[] = {"uCascadeSplits[0]", "uCascadeSplits[1]", "uCascadeSplits[2]", "uCascadeSplits[3]"};
+    static constexpr const char* kCascadeTexelNames[] = {"uCascadeWorldTexelSize[0]", "uCascadeWorldTexelSize[1]", "uCascadeWorldTexelSize[2]", "uCascadeWorldTexelSize[3]"};
+    static constexpr const char* kCascadeDepthRangeNames[] = {"uCascadeDepthRange[0]", "uCascadeDepthRange[1]", "uCascadeDepthRange[2]", "uCascadeDepthRange[3]"};
     for (int i = 0; i < CascadedShadow::kCascades; ++i) {
         m_pbr->SetMat4(kCascadeVpNames[i], lit.cascade->CascadeVP(i));
         m_pbr->SetFloat(kCascadeSplitNames[i], lit.cascade->SplitDepth(i));
+        m_pbr->SetFloat(kCascadeTexelNames[i], lit.cascade->WorldTexelSize(i));
+        m_pbr->SetFloat(kCascadeDepthRangeNames[i], lit.cascade->DepthRange(i));
     }
     // Image-based ambient is optional. The ambient term remains available when
     // an editor environment deliberately disables IBL.
@@ -424,6 +394,12 @@ void SkinnedRenderer::DrawScene(ecs::Registry& reg, const Camera& camera, float 
     m_pbr->SetInt("uSkylightOcclusion", lit.skylightOcclusion ? 1 : 0);
     m_pbr->SetFloat("uSkylightOcclusionStrength", lit.skylightOcclusionStrength);
     m_pbr->SetFloat("uMinimumSkylight", lit.minimumSkylight);
+    m_pbr->SetInt("uUseLightingGrid", lit.lightingGrid && lit.lightingGrid->Valid() ? 1 : 0);
+    if (lit.lightingGrid && lit.lightingGrid->Valid()) {
+        lit.lightingGrid->Bind(17); m_pbr->SetInt("uLightingGrid",17);
+        m_pbr->SetVec3("uLightingGridMin",lit.lightingGrid->BoundsMin());
+        m_pbr->SetVec3("uLightingGridMax",lit.lightingGrid->BoundsMax());
+    }
     m_pbr->SetInt("uCloudShadows", lit.cloudShadows ? 1 : 0);
     m_pbr->SetFloat("uCloudShadowStrength", lit.cloudShadowStrength);
     m_pbr->SetFloat("uCloudShadowScale", lit.cloudShadowScale);

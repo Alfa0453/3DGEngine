@@ -37,6 +37,7 @@ public:
         std::string name;
         bool        stripRootMotion = false;
         std::string sourceName; // optional take name inside a multi-animation source
+        float       basePlaybackSpeed = 1.0f;
     };
 
     const Model* LoadModel(const std::string& path, std::string* error = nullptr);

@@ -32,6 +32,7 @@ public:
     const MaterialDocument& CurrentMaterial() const { return m_material; }
     const std::string& LastSavedPath() const { return m_lastSavedPath; }
     const std::string& StatusMessage() const { return m_status; }
+    bool IsDirty() const;
 
 private:
     struct ShaderParameterMetadata {

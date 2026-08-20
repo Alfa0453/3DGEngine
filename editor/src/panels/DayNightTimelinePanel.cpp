@@ -46,6 +46,13 @@ void DayNightTimelinePanel::CaptureKey(const EditorScene::Environment& e,
     k.fogHeightFalloff=e.fogHeightFalloff;k.fogColor=e.fogColor;
 }
 
+bool DayNightTimelinePanel::SaveForShutdown(const std::string& root, std::string* error) {
+    if (m_path.empty()) m_path=(std::filesystem::path(root)/"GameAssets"/"Timelines"/(Safe(m_timeline.name)+".3dgdaynight")).string();
+    if (!engine::SaveDayNightTimelineAsset(m_path,m_timeline,error)) return false;
+    m_dirty=false;
+    return true;
+}
+
 void DayNightTimelinePanel::ApplySample(EditorScene& scene) const {
     const auto k = engine::SampleDayNightTimeline(m_timeline,m_time); auto e=scene.GetEnvironment();
     e.timeOfDay=m_time;e.skyIntensity=k.skyIntensity;e.skyLightIntensity=k.skyLightIntensity;

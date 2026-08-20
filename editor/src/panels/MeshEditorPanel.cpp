@@ -1,6 +1,7 @@
 #include "MeshEditorPanel.h"
 #include "EditorPanels.h"
 #include "MeshGeometryOperations.h"
+#include <engine/physics/CollisionMesh.h>
 
 #include <imgui.h>
 #include <glm/gtc/matrix_transform.hpp>
@@ -42,6 +43,7 @@ bool MeshEditorPanel::Load(const std::string& path, std::string* error) {
         m_kind = Kind::Static;
         m_minimum = Vec3(m_staticAsset.minimum);
         m_maximum = Vec3(m_staticAsset.maximum);
+        m_collisionType = static_cast<int>(m_staticAsset.collisionType);
     } else if (extension == ".3dgskmesh") {
         engine::SkeletalMeshAssetData asset;
         if (!engine::LoadSkeletalMeshAsset(path, &asset, error)) return false;
@@ -66,6 +68,7 @@ bool MeshEditorPanel::Load(const std::string& path, std::string* error) {
     m_geometryOriginal = m_staticAsset;
     m_undoGeometry.clear(); m_redoGeometry.clear(); m_selectedFaces.clear();
     m_selectedVertices.clear(); m_geometryDirty = false;
+    m_collisionDirty = false;
     m_previewYaw = -0.55f;
     m_previewPitch = 0.30f;
     m_previewZoom = 1.0f;
@@ -83,6 +86,8 @@ void MeshEditorPanel::RefreshGeometryState() {
     MeshGeometryOperations::RecalculateBounds(m_staticAsset);
     m_minimum=Vec3(m_staticAsset.minimum);m_maximum=Vec3(m_staticAsset.maximum);
     m_selectedFaces.clear();m_selectedVertices.clear();m_geometryDirty=true;
+    m_collisionDirty = true;
+    engine::physics::InvalidateCollisionMesh(m_path);
     RebuildPreviewGeometry();
 }
 
@@ -90,7 +95,8 @@ bool MeshEditorPanel::SaveGeometry(std::string* error) {
     if(m_kind!=Kind::Static){if(error)*error="Geometry editing supports static meshes only";return false;}
     if(!MeshGeometryOperations::Validate(m_staticAsset,error))return false;
     if(!engine::SaveStaticMeshAsset(m_path,m_staticAsset,error))return false;
-    m_geometryOriginal=m_staticAsset;m_geometryDirty=false;return true;
+    engine::physics::InvalidateCollisionMesh(m_path);
+    m_geometryOriginal=m_staticAsset;m_geometryDirty=false;m_collisionDirty=true;return true;
 }
 
 void MeshEditorPanel::SelectConnectedFaces() {
@@ -214,6 +220,8 @@ bool MeshEditorPanel::BakePivot(std::string* error) {
         m_staticAsset.minimum = Array3(m_minimum - m_pivot);
         m_staticAsset.maximum = Array3(m_maximum - m_pivot);
         if (!engine::SaveStaticMeshAsset(m_path, m_staticAsset, error)) return false;
+        engine::physics::InvalidateCollisionMesh(m_path);
+        m_collisionDirty = true;
     } else {
         // Keep weights, bind poses and animation channels untouched. Applying the
         // offset after the skeleton's inverse-root transform moves every skinned
@@ -231,6 +239,24 @@ bool MeshEditorPanel::BakePivot(std::string* error) {
     m_pivot = glm::vec3(0.0f);
     m_dirty = false;
     RebuildPreviewGeometry();
+    return true;
+}
+
+bool MeshEditorPanel::SaveForShutdown(std::string* error) {
+    if (m_kind == Kind::None || m_path.empty()) {
+        if (error) *error = "No mesh asset is open";
+        return false;
+    }
+    if (m_dirty && !BakePivot(error)) return false;
+    if (m_kind == Kind::Static && (m_paintDirty || m_geometryDirty || m_collisionDirty)) {
+        if (!MeshGeometryOperations::Validate(m_staticAsset, error)) return false;
+        if (!engine::SaveStaticMeshAsset(m_path, m_staticAsset, error)) return false;
+        engine::physics::InvalidateCollisionMesh(m_path);
+        m_geometryOriginal = m_staticAsset;
+        m_paintDirty = false;
+        m_geometryDirty = false;
+        m_collisionDirty = false;
+    }
     return true;
 }
 
@@ -453,6 +479,10 @@ void MeshEditorPanel::Draw(bool* open, bool* assetSaved, std::string* message) {
     if (m_kind != Kind::Static) ImGui::BeginDisabled();
     if (ImGui::Button(m_editMode == 2 ? "Geometry *" : "Geometry")) m_editMode = 2;
     if (m_kind != Kind::Static) ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (m_kind != Kind::Static) ImGui::BeginDisabled();
+    if (ImGui::Button(m_editMode == 3 ? "Collision *" : "Collision")) m_editMode = 3;
+    if (m_kind != Kind::Static) ImGui::EndDisabled();
     ImGui::Separator();
 
     bool requestBakeConfirmation = false;
@@ -575,7 +605,7 @@ void MeshEditorPanel::Draw(bool* open, bool* assetSaved, std::string* message) {
             ImGui::TextWrapped("Shader use: add the Vertex Color node. RGB can tint the "
                                "surface; individual channels can blend dirt, snow, wetness, "
                                "damage or foliage density.");
-        } else {
+        } else if (m_editMode == 2) {
             ImGui::TextUnformatted("GEOMETRY EDITING");
             ImGui::TextWrapped("Edit the engine-owned static mesh. Changes stay in memory until Apply.");
             const char* modes[]={"Vertex","Edge","Face"};ImGui::Combo("Component",&m_componentMode,modes,IM_ARRAYSIZE(modes));
@@ -606,6 +636,65 @@ void MeshEditorPanel::Draw(bool* open, bool* assetSaved, std::string* message) {
             ImGui::SeparatorText("History");const bool noUndo=m_undoGeometry.empty();if(noUndo)ImGui::BeginDisabled();if(ImGui::Button("Undo Geometry")){m_redoGeometry.push_back(m_staticAsset);m_staticAsset=m_undoGeometry.back();m_undoGeometry.pop_back();RefreshGeometryState();}if(noUndo)ImGui::EndDisabled();ImGui::SameLine();const bool noRedo=m_redoGeometry.empty();if(noRedo)ImGui::BeginDisabled();if(ImGui::Button("Redo Geometry")){m_undoGeometry.push_back(m_staticAsset);m_staticAsset=m_redoGeometry.back();m_redoGeometry.pop_back();RefreshGeometryState();}if(noRedo)ImGui::EndDisabled();
             ImGui::Separator();if(!m_geometryDirty)ImGui::BeginDisabled();if(ImGui::Button("Apply Geometry To Asset",ImVec2(-1,0))){std::string error;if(SaveGeometry(&error)){if(assetSaved)*assetSaved=true;if(message)*message="Saved mesh geometry: "+m_path;}else if(message)*message="Geometry save failed: "+error;}if(ImGui::Button("Revert Geometry",ImVec2(-1,0))){m_staticAsset=m_geometryOriginal;m_undoGeometry.clear();m_redoGeometry.clear();RefreshGeometryState();m_geometryDirty=false;}if(!m_geometryDirty)ImGui::EndDisabled();
             ImGui::TextColored(m_geometryDirty?ImVec4(1,.72f,.25f,1):ImVec4(.35f,.85f,.45f,1),m_geometryDirty?"Unsaved geometry":"Geometry saved");
+        } else {
+            ImGui::TextUnformatted("COLLISION");
+            ImGui::TextWrapped("Collision geometry is cooked once from this engine-owned mesh and shared by every instance.");
+            const char* types[] = {"None", "Box", "Sphere", "Capsule",
+                                   "Convex Hull (dynamic-safe)", "Triangle Mesh (static only)"};
+            if (ImGui::Combo("Collision Type", &m_collisionType, types, IM_ARRAYSIZE(types))) {
+                m_collisionDirty = true;
+                m_staticAsset.collisionType = static_cast<engine::StaticMeshCollisionType>(m_collisionType);
+            }
+            ImGui::Checkbox("Show Collision", &m_showCollision);
+            ImGui::TextDisabled("Triangle Mesh is intended for static architecture. Dynamic objects use the convex option.");
+            ImGui::Separator();
+            if (m_collisionType == 0) {
+                ImGui::TextUnformatted("Collision disabled for newly authored instances.");
+            } else {
+                std::string cookError;
+                const bool meshCollision = m_collisionType == 4 || m_collisionType == 5;
+                const auto cooked = meshCollision
+                    ? engine::physics::AcquireCollisionMesh(m_path, &cookError) : nullptr;
+                if (cooked) {
+                    ImGui::Text("Source triangles: %zu", cooked->triangles.size());
+                    ImGui::Text("BVH nodes: %zu", cooked->nodes.size());
+                    ImGui::Text("Cooked memory: %.2f KiB", cooked->CookedBytes() / 1024.0f);
+                    ImGui::Text("Last cook: %.3f ms", cooked->cookMilliseconds);
+                    ImGui::TextColored(ImVec4(.35f,.85f,.45f,1), "Collision data ready (shared cache)");
+                } else if (meshCollision) {
+                    ImGui::TextColored(ImVec4(1,.35f,.25f,1), "%s", cookError.c_str());
+                } else {
+                    const glm::vec3 size = m_maximum - m_minimum;
+                    ImGui::Text("Bounds: %.3f x %.3f x %.3f", size.x, size.y, size.z);
+                }
+                if (ImGui::Button("Rebuild Collision", ImVec2(-1.0f, 0.0f))) {
+                    engine::physics::InvalidateCollisionMesh(m_path);
+                    std::string rebuildError;
+                    const bool rebuilt = !meshCollision
+                        || static_cast<bool>(engine::physics::AcquireCollisionMesh(m_path, &rebuildError));
+                    m_staticAsset.collisionType = static_cast<engine::StaticMeshCollisionType>(m_collisionType);
+                    if (rebuilt && engine::SaveStaticMeshAsset(m_path, m_staticAsset, &rebuildError)) {
+                        m_collisionDirty = false;
+                        if (message) *message = "Rebuilt mesh collision: " + m_path;
+                    } else if (message) {
+                        *message = "Collision rebuild failed: " + rebuildError;
+                    }
+                }
+            }
+            if (ImGui::Button("Clear Collision", ImVec2(-1.0f, 0.0f))) {
+                m_collisionType = 0;
+                m_staticAsset.collisionType = engine::StaticMeshCollisionType::None;
+                std::string clearError;
+                if (engine::SaveStaticMeshAsset(m_path, m_staticAsset, &clearError)) {
+                    engine::physics::InvalidateCollisionMesh(m_path);
+                    m_collisionDirty = false;
+                    if (message) *message = "Cleared mesh collision: " + m_path;
+                } else if (message) *message = "Clear collision failed: " + clearError;
+            }
+            ImGui::TextColored(m_collisionDirty ? ImVec4(1,.72f,.25f,1)
+                                                 : ImVec4(.35f,.85f,.45f,1),
+                               m_collisionDirty ? "Collision needs rebuild"
+                                                : "Collision is current");
         }
     }
     ImGui::EndChild();

@@ -1,5 +1,6 @@
 #include <engine/assets/AssetRegistry.h>
 #include <engine/assets/StaticMeshAsset.h>
+#include <engine/physics/CollisionMesh.h>
 
 #include <array>
 #include <cstdint>
@@ -96,6 +97,7 @@ int main() {
         1.0f, 0.0f, 0.0f, 1.0f,
         0.0f, 1.0f, 0.0f, 0.5f,
         0.0f, 0.0f, 1.0f, 0.0f};
+    imported.collisionType = engine::StaticMeshCollisionType::TriangleMesh;
 
     Check(engine::SaveStaticMeshAsset(destination.string(), imported, &error),
           "save versioned native static mesh");
@@ -106,10 +108,18 @@ int main() {
               && loaded.subMeshes[0].vertices == imported.subMeshes[0].vertices
               && loaded.subMeshes[0].indices == imported.subMeshes[0].indices
               && loaded.subMeshes[0].vertexColors == imported.subMeshes[0].vertexColors
+              && loaded.collisionType == engine::StaticMeshCollisionType::TriangleMesh
               && loaded.materials[0].diffuse == imported.materials[0].diffuse
               && loaded.textures.size() == 1
               && loaded.textures[0].rgba == imported.textures[0].rgba,
           "native static mesh round-trips identity, geometry, materials, textures and vertex paint");
+
+    const auto collisionA = engine::physics::AcquireCollisionMesh(destination.string(), &error);
+    const auto collisionB = engine::physics::AcquireCollisionMesh(destination.string(), &error);
+    Check(collisionA && collisionB && collisionA.get() == collisionB.get()
+              && collisionA->triangles.size() == 1,
+          "collision mesh cooking is cached and shared across instances");
+    engine::physics::InvalidateCollisionMesh(destination.string());
 
     engine::StaticMeshAssetData invalidPaint = imported;
     invalidPaint.subMeshes[0].vertexColors.pop_back();

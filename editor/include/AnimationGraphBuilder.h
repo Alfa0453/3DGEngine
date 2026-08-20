@@ -12,6 +12,7 @@
 // clip lookups are model-specific and passed through unchanged:
 //   resolveClip(fallbackIndex, clipName) -> clip index into the model's animations
 //   clipSeconds(clipIndex)               -> that clip's duration in seconds
+//   clipBaseSpeed(index, alias)          -> authoritative .3dgclip base rate
 // -----------------------------------------------------------------------------
 
 #include "EditorScene.h"
@@ -33,30 +34,55 @@ inline void BuildAnimationController(
     const std::vector<EditorScene::AnimationParameter>& parameters,
     const std::vector<EditorScene::AnimationStateTransition>& transitions,
     const std::function<int(int, const std::string&)>& resolveClip,
-    const std::function<float(int)>& clipSeconds) {
+    const std::function<float(int)>& clipSeconds,
+    engine::AssetHandle entryStateId = {},
+    const std::function<float(int, const std::string&)>& clipBaseSpeed = {}) {
 
     engine::AnimationGraphDesc desc;
 
+    std::vector<const EditorScene::AnimationStateNode*> orderedStates;
+    orderedStates.reserve(states.size());
+    if (entryStateId.Valid()) {
+        for (const auto& state : states)
+            if (state.graphId == entryStateId) orderedStates.push_back(&state);
+    }
+    for (const auto& state : states)
+        if (orderedStates.empty() || orderedStates.front() != &state)
+            orderedStates.push_back(&state);
+
     desc.states.reserve(states.size());
-    for (const EditorScene::AnimationStateNode& s : states) {
+    for (const EditorScene::AnimationStateNode* authored : orderedStates) {
+        const EditorScene::AnimationStateNode& s = *authored;
         engine::AnimationGraphDesc::StateDesc d;
         d.name                  = s.name;
         d.clipIndex             = s.clipIndex;
         d.clipName              = s.clipName;
         d.loop                  = s.loop;
         d.speed                 = s.speed;
+        d.clipBaseSpeed         = clipBaseSpeed
+            ? clipBaseSpeed(s.clipIndex, s.clipName) : 1.0f;
         d.blendClipIndex        = s.blendClipIndex;
         d.blendClipName         = s.blendClipName;
-        d.blendParameter        = s.blendParameter;
+        const bool clipSource = s.motionSourceType
+            == EditorScene::AnimationStateNode::MotionSourceType::Clip;
+        d.blendParameter        = clipSource ? std::string() : s.blendParameter;
         d.blendMin              = s.blendMin;
         d.blendMax              = s.blendMax;
         d.rootMotion            = s.rootMotion;
-        d.blendParameterY       = s.blendParameterY;
-        d.blendSpace2D          = s.blendSpace2D;
+        d.blendParameterY       = s.motionSourceType
+            == EditorScene::AnimationStateNode::MotionSourceType::BlendSpace2D
+            ? s.blendParameterY : std::string();
+        d.blendSpace2D          = s.motionSourceType
+            == EditorScene::AnimationStateNode::MotionSourceType::BlendSpace2D;
         d.synchronizeBlendSpace = s.synchronizeBlendSpace;
-        d.blendSamples.reserve(s.blendSamples.size());
-        for (const auto& bs : s.blendSamples) {
-            d.blendSamples.push_back({bs.clipIndex, bs.clipName, bs.value, bs.valueY});
+        if (!clipSource) {
+            d.blendSamples.reserve(s.blendSamples.size());
+            for (const auto& bs : s.blendSamples) {
+                const int resolved = resolveClip(bs.clipIndex, bs.clipName);
+                d.blendSamples.push_back({bs.clipIndex, bs.clipName, bs.value, bs.valueY,
+                    clipBaseSpeed ? clipBaseSpeed(bs.clipIndex, bs.clipName) : 1.0f,
+                    clipSeconds(resolved)});
+            }
         }
         desc.states.push_back(std::move(d));
     }

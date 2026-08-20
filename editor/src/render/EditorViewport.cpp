@@ -1,4 +1,6 @@
 #include "EditorViewport.h"
+#include <engine/physics/ColliderTransform.h>
+#include <engine/physics/CollisionMesh.h>
 #include "EditorLineRenderer.h"
 
 #include <engine/ai/NavGrid.h>
@@ -1170,46 +1172,72 @@ void EditorViewport::DrawPhysicsColliderGuides(const EditorScene& scene,
             continue;
         }
 
+        const engine::physics::WorldCollider world =
+            engine::physics::BuildWorldCollider(*transform, object.collider);
+        const engine::ecs::Transform& colliderTransform = world.transform;
+        const engine::ecs::Collider& collider = world.collider;
         const glm::vec3 baseColor = PhysicsGuideColor(object);
         const glm::vec3 color = selectedCollider
             ? baseColor
             : glm::mix(glm::vec3(0.30f), baseColor, 0.48f);
 
-        switch (object.collider.shape) {
+        switch (collider.shape) {
         case engine::ecs::ColliderShape::Sphere:
-            DrawSphereColliderGuide(*m_colliderLines, *transform, object.collider, color);
+            DrawSphereColliderGuide(*m_colliderLines, colliderTransform, collider, color);
             break;
         case engine::ecs::ColliderShape::Box:
-            DrawBoxColliderGuide(*m_colliderLines, *transform, object.collider, color);
+            DrawBoxColliderGuide(*m_colliderLines, colliderTransform, collider, color);
             break;
+        case engine::ecs::ColliderShape::ConvexHull:
+        case engine::ecs::ColliderShape::TriangleMesh: {
+            const auto mesh = engine::physics::AcquireCollisionMesh(
+                collider.collisionAssetPath);
+            if (!mesh) {
+                DrawBoxColliderGuide(*m_colliderLines, colliderTransform, collider, color);
+                break;
+            }
+            const auto worldPoint = [&](const glm::vec3& local) {
+                return colliderTransform.position + colliderTransform.rotation
+                    * (colliderTransform.scale * local);
+            };
+            for (const engine::physics::CollisionTriangle& triangle : mesh->triangles) {
+                const glm::vec3 a = worldPoint(triangle.a);
+                const glm::vec3 b = worldPoint(triangle.b);
+                const glm::vec3 c = worldPoint(triangle.c);
+                m_colliderLines->AddLine(a, b, color);
+                m_colliderLines->AddLine(b, c, color);
+                m_colliderLines->AddLine(c, a, color);
+            }
+            break;
+        }
         case engine::ecs::ColliderShape::Plane:
-            DrawPlaneColliderGuide(*m_colliderLines, object.collider, color);
+            DrawPlaneColliderGuide(*m_colliderLines, collider, color);
             break;
         case engine::ecs::ColliderShape::Capsule:
-            DrawCapsuleColliderGuide(*m_colliderLines, *transform, object.collider, color);
+            DrawCapsuleColliderGuide(*m_colliderLines, colliderTransform, collider, color);
             break;
         case engine::ecs::ColliderShape::Cylinder:
-            DrawCylinderColliderGuide(*m_colliderLines, *transform, object.collider, color);
+            DrawCylinderColliderGuide(*m_colliderLines, colliderTransform, collider, color);
             break;
         case engine::ecs::ColliderShape::Cone:
-            DrawConeColliderGuide(*m_colliderLines, *transform, object.collider, color);
+            DrawConeColliderGuide(*m_colliderLines, colliderTransform, collider, color);
             break;
         case engine::ecs::ColliderShape::Pyramid:
-            DrawPyramidColliderGuide(*m_colliderLines, *transform, object.collider, color);
+            DrawPyramidColliderGuide(*m_colliderLines, colliderTransform, collider, color);
             break;
         case engine::ecs::ColliderShape::Torus:
-            DrawTorusColliderGuide(*m_colliderLines, *transform, object.collider, color);
+            DrawTorusColliderGuide(*m_colliderLines, colliderTransform, collider, color);
             break;
         case engine::ecs::ColliderShape::Staircase: {
-            const int steps = glm::clamp(object.collider.steps, 1, 32);
-            const float slice = object.collider.halfExtents.z * 2.0f / steps;
+            const int steps = glm::clamp(collider.steps, 1, 32);
+            const float slice = collider.halfExtents.z * 2.0f / steps;
             for (int i = 0; i < steps; ++i) {
-                const float height = object.collider.halfExtents.y * 2.0f * static_cast<float>(i + 1) / steps;
-                const glm::vec3 ext(object.collider.halfExtents.x, height * 0.5f, slice * 0.5f);
-                engine::ecs::Transform piece = *transform;
-                piece.position += transform->rotation * glm::vec3(0.0f,
-                    -object.collider.halfExtents.y + ext.y,
-                    -object.collider.halfExtents.z + slice * (static_cast<float>(i) + 0.5f));
+                const float height = collider.halfExtents.y * 2.0f * static_cast<float>(i + 1) / steps;
+                const glm::vec3 ext(collider.halfExtents.x, height * 0.5f, slice * 0.5f);
+                engine::ecs::Transform piece = colliderTransform;
+                piece.position += colliderTransform.rotation * glm::vec3(0.0f,
+                    -collider.halfExtents.y + ext.y,
+                    -collider.halfExtents.z + slice * (static_cast<float>(i) + 0.5f));
                 piece.scale = glm::vec3(1.0f);
                 DrawBoxColliderGuide(*m_colliderLines, piece,
                     engine::ecs::Collider::MakeBox(ext), color);

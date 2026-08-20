@@ -25,6 +25,9 @@ public:
     void Draw(EditorAssets& assets, bool* open);
     void QueueOpen(const std::string& path);
     bool WantsKeyboard() const { return m_keyboardFocused; }
+    bool IsDirty() const { return m_dirty; }
+    const std::string& Path() const { return m_path; }
+    bool SaveForShutdown(EditorAssets& assets, std::string* error);
 
 private:
     enum class PreviewShape { Sphere, Cube, Plane, ImportedModel };

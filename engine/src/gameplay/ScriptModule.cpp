@@ -3,6 +3,9 @@
 #include "engine/gameplay/Script.h"   // ScriptRegistry (passed by reference to the DLL)
 #include "engine/ai/BtScript.h"
 
+#include <exception>
+#include <utility>
+
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -12,14 +15,15 @@
 namespace engine {
 
 ScriptModule::ScriptModule(ScriptModule&& other) noexcept
-    : m_handle(other.m_handle) {
+    : m_handle(other.m_handle), m_loadedPath(std::move(other.m_loadedPath)) {
     other.m_handle = nullptr;
 }
 
 ScriptModule& ScriptModule::operator=(ScriptModule&& other) noexcept {
     if (this != &other) {
-        Unload();
+        if (!Unload()) return *this;
         m_handle = other.m_handle;
+        m_loadedPath = std::move(other.m_loadedPath);
         other.m_handle = nullptr;
     }
     return *this;
@@ -33,7 +37,7 @@ bool ScriptModule::Load(const std::string& path, ScriptRegistry& registry,
                         ai::BtScriptRegistry& btRegistry, std::string* error) {
 #if defined(_WIN32)
     if (m_handle) {
-        Unload();
+        if (!Unload(error)) return false;
     }
     HMODULE handle = LoadLibraryA(path.c_str());
     if (!handle) {
@@ -50,8 +54,32 @@ bool ScriptModule::Load(const std::string& path, ScriptRegistry& registry,
         }
         return false;
     }
-    entry(registry, btRegistry);
+    auto version = reinterpret_cast<GetScriptModuleApiVersionFn>(
+        reinterpret_cast<void*>(GetProcAddress(handle, "Get3DGScriptApiVersion")));
+    if (!version || version() != kScriptModuleApiVersion) {
+        FreeLibrary(handle);
+        if (error) *error = "Script module '" + path
+            + "' uses an incompatible or missing 3DG scripting API version.";
+        return false;
+    }
+    try {
+        entry(registry, btRegistry);
+    } catch (const std::exception& exception) {
+        registry.Clear();
+        btRegistry.Clear();
+        FreeLibrary(handle);
+        if (error) *error = "Script module registration failed: "
+            + std::string(exception.what());
+        return false;
+    } catch (...) {
+        registry.Clear();
+        btRegistry.Clear();
+        FreeLibrary(handle);
+        if (error) *error = "Script module registration failed with an unknown exception.";
+        return false;
+    }
     m_handle = handle;
+    m_loadedPath = path;
     return true;
 #else
     (void)path;
@@ -62,19 +90,27 @@ bool ScriptModule::Load(const std::string& path, ScriptRegistry& registry,
 #endif
 }
 
-void ScriptModule::Unload() {
+bool ScriptModule::Unload(std::string* error) {
 #if defined(_WIN32)
     if (m_handle) {
-        FreeLibrary(static_cast<HMODULE>(m_handle));
+        if (!FreeLibrary(static_cast<HMODULE>(m_handle))) {
+            if (error) *error = "Could not unload script module '" + m_loadedPath + "'.";
+            return false;
+        }
         m_handle = nullptr;
+        m_loadedPath.clear();
     }
+#else
+    (void)error;
 #endif
+    return true;
 }
 
 void ScriptModule::Swap(ScriptModule& other) noexcept {
     void* handle = m_handle;
     m_handle = other.m_handle;
     other.m_handle = handle;
+    m_loadedPath.swap(other.m_loadedPath);
 }
 
 }  // namespace engine

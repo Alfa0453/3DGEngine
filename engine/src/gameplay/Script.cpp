@@ -19,6 +19,8 @@
 #include "engine/assets/DayNightTimelineAsset.h"
 #include "engine/assets/CaveAsset.h"
 
+#include <exception>
+
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
@@ -1663,9 +1665,38 @@ ScriptRegistry& ScriptRegistry::Instance() {
 
 void ScriptRegistry::Register(const std::string& className, Factory factory) {
     if (className.empty() || !factory) {
+        m_registrationErrors.push_back("Script registration has an empty name or factory");
         return;
     }
+    if (m_factories.find(className) != m_factories.end()) {
+        if (m_strictValidation) {
+            m_registrationErrors.push_back("Duplicate script registration: " + className);
+            return;
+        }
+    }
     m_factories[className] = std::move(factory);
+}
+
+bool ScriptRegistry::Valid(std::string* error) const {
+    if (!m_registrationErrors.empty()) {
+        if (error) *error = m_registrationErrors.front();
+        return false;
+    }
+    for (const auto& entry : m_factories) {
+        try {
+            if (!entry.second || !entry.second()) {
+                if (error) *error = "Script factory could not create: " + entry.first;
+                return false;
+            }
+        } catch (const std::exception& exception) {
+            if (error) *error = "Script factory '" + entry.first + "' failed: " + exception.what();
+            return false;
+        } catch (...) {
+            if (error) *error = "Script factory '" + entry.first + "' failed validation";
+            return false;
+        }
+    }
+    return true;
 }
 
 bool ScriptRegistry::Has(const std::string& className) const {
@@ -1689,11 +1720,23 @@ void ScriptRegistry::Remove(const std::string& className) {
     m_factories.erase(className);
 }
 
+ScriptRegistry ScriptRegistry::Extract(const std::vector<std::string>& classNames) {
+    ScriptRegistry result;
+    for (const std::string& name : classNames) {
+        const auto found = m_factories.find(name);
+        if (found == m_factories.end()) continue;
+        result.m_factories.emplace(name, std::move(found->second));
+        m_factories.erase(found);
+    }
+    return result;
+}
+
 void ScriptRegistry::MergeFrom(ScriptRegistry&& other) {
     for (auto& entry : other.m_factories) {
         m_factories[entry.first] = std::move(entry.second);
     }
     other.m_factories.clear();
+    other.m_registrationErrors.clear();
 }
 
 const char* ScriptCallbackKindName(ScriptCallbackKind callback) {
@@ -2255,6 +2298,51 @@ void UpdateScripts(ecs::Registry& registry, float dt, const ScriptInputState* in
     ScriptEventDispatcher::Dispatch(registry, destroyQueue, input, audio, cameraShake,
                                     cameraDirector, gameMode, physics);
     FlushDestroyQueue(registry, destroyQueue);
+}
+
+bool RecreateScriptsAfterHotReload(ecs::Registry& registry,
+                                   RuntimeAudioSystem* audio,
+                                   CameraShake* cameraShake,
+                                   CameraDirector* cameraDirector,
+                                   GameMode* gameMode,
+                                   PhysicsWorld* physics,
+                                   std::string* error) {
+    thread_local std::vector<ecs::Entity> destroyQueueStorage;
+    auto& destroyQueue = destroyQueueStorage;
+    destroyQueue.clear();
+    RuntimeScriptDebugger& debugger = ScriptDebugger();
+    const bool debuggingWasEnabled = debugger.enabled;
+    const bool executionWasPaused = debugger.paused;
+    debugger.enabled = false;
+    debugger.paused = false;
+    bool success = true;
+    const std::vector<OrderedScriptSlot> ordered = BuildScriptExecutionOrder(registry);
+    for (const OrderedScriptSlot& node : ordered) {
+        NativeScriptSlot& slot = *node.slot;
+        if (!slot.enabled || slot.className.empty() || IsLuaScriptPath(slot.sourcePath)) continue;
+        Script* instance = PrepareScript(registry, node.entity, slot, destroyQueue, nullptr,
+                                         audio, cameraShake, cameraDirector, gameMode, physics);
+        if (!instance || !slot.enabled || !slot.created) {
+            success = false;
+            if (error && error->empty()) {
+                *error = "Could not recreate attached script '" + slot.className + "'.";
+            }
+            continue;
+        }
+        if (!slot.active) {
+            RunGuarded(slot, [&] { instance->OnEnable(); });
+            slot.active = slot.enabled;
+            if (!slot.active) {
+                success = false;
+                if (error && error->empty()) {
+                    *error = "Script '" + slot.className + "' failed during OnEnable.";
+                }
+            }
+        }
+    }
+    debugger.enabled = debuggingWasEnabled;
+    debugger.paused = executionWasPaused;
+    return success;
 }
 
 void FixedUpdateScripts(ecs::Registry& registry, float dt, const ScriptInputState* input,

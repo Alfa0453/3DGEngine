@@ -105,6 +105,25 @@ else()
 endif()
 add_test(NAME material_shader_regression COMMAND material_shader_tests)
 
+add_executable(directional_shadow_shader_tests
+    directional_shadow_shader_tests.cpp)
+target_link_libraries(directional_shadow_shader_tests PRIVATE engine)
+if(MSVC)
+    target_compile_options(directional_shadow_shader_tests PRIVATE /W4)
+else()
+    target_compile_options(directional_shadow_shader_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME directional_shadow_shader_regression COMMAND directional_shadow_shader_tests)
+
+add_executable(lighting_build_tests lighting_build_tests.cpp)
+target_link_libraries(lighting_build_tests PRIVATE engine)
+if(MSVC)
+    target_compile_options(lighting_build_tests PRIVATE /W4)
+else()
+    target_compile_options(lighting_build_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME lighting_build_regression COMMAND lighting_build_tests)
+
 add_executable(script_system_tests
     script_system_tests.cpp)
 target_link_libraries(script_system_tests PRIVATE engine)
@@ -130,6 +149,22 @@ else()
     target_compile_options(project_script_tools_tests PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 add_test(NAME project_script_tools_regression COMMAND project_script_tools_tests)
+
+add_executable(script_reload_safety_tests
+    script_reload_safety_tests.cpp
+    ${CMAKE_SOURCE_DIR}/editor/src/scripting/EditorScriptTools.cpp)
+target_include_directories(script_reload_safety_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/editor/include)
+target_link_libraries(script_reload_safety_tests PRIVATE engine)
+if(WIN32)
+    target_link_libraries(script_reload_safety_tests PRIVATE shell32)
+endif()
+if(MSVC)
+    target_compile_options(script_reload_safety_tests PRIVATE /W4)
+else()
+    target_compile_options(script_reload_safety_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME script_reload_safety_regression COMMAND script_reload_safety_tests)
 
 add_executable(runtime_ai_tests
     runtime_ai_tests.cpp)
@@ -408,3 +443,34 @@ else()
     target_compile_options(cave_asset_tests PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 add_test(NAME cave_asset_regression COMMAND cave_asset_tests)
+
+add_executable(fence_wall_asset_tests fence_wall_asset_tests.cpp)
+target_link_libraries(fence_wall_asset_tests PRIVATE engine)
+if(MSVC)
+    target_compile_options(fence_wall_asset_tests PRIVATE /W4)
+else()
+    target_compile_options(fence_wall_asset_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME fence_wall_asset_regression COMMAND fence_wall_asset_tests)
+
+add_executable(editor_scene_hierarchy_tests
+    editor_scene_hierarchy_tests.cpp
+    ${CMAKE_SOURCE_DIR}/editor/src/scene/EditorScene.cpp)
+target_include_directories(editor_scene_hierarchy_tests PRIVATE
+    ${CMAKE_SOURCE_DIR}/editor/include)
+target_link_libraries(editor_scene_hierarchy_tests PRIVATE engine)
+if(MSVC)
+    target_compile_options(editor_scene_hierarchy_tests PRIVATE /W4)
+else()
+    target_compile_options(editor_scene_hierarchy_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME editor_scene_hierarchy_regression COMMAND editor_scene_hierarchy_tests)
+
+add_executable(editor_dirty_document_tests editor_dirty_document_tests.cpp)
+target_include_directories(editor_dirty_document_tests PRIVATE ${CMAKE_SOURCE_DIR}/editor/include)
+if(MSVC)
+    target_compile_options(editor_dirty_document_tests PRIVATE /W4)
+else()
+    target_compile_options(editor_dirty_document_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME editor_dirty_document_regression COMMAND editor_dirty_document_tests)

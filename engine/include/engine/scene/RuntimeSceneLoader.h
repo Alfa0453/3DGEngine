@@ -39,6 +39,7 @@ public:
         std::string clipName;
         bool        stripRootMotion = false;
         std::string sourceClipName;
+        float       basePlaybackSpeed = 1.0f;
     };
 
     struct AttachmentDesc {
@@ -416,6 +417,8 @@ public:
             bool skylightOcclusion = true;
             float skylightOcclusionStrength = 0.90f;
             float minimumSkylight = 0.06f;
+            std::string lightingBuildAsset;
+            std::uint64_t lightingBuildHash = 0;
             bool driveSunLight = true;
             float sunIntensity = 1.0f;
             bool clouds = true;

@@ -66,11 +66,16 @@ public:
     std::unique_ptr<BtScript> Create(const std::string& name) const;   // nullptr if unknown
     std::vector<std::string>  Names() const;                           // sorted, for the UI
     void Remove(const std::string& name);
+    BtScriptRegistry Extract(const std::vector<std::string>& names);
     void MergeFrom(BtScriptRegistry&& other);
-    void Clear() { m_factories.clear(); }   // project-module reload: discard DLL-owned factories
+    void Clear() { m_factories.clear(); m_registrationErrors.clear(); }
+    void SetStrictValidation(bool strict) { m_strictValidation = strict; }
+    bool Valid(std::string* error = nullptr) const;
 
 private:
     std::unordered_map<std::string, Factory> m_factories;
+    std::vector<std::string> m_registrationErrors;
+    bool m_strictValidation = false;
 };
 
 // Registers a few example BtScripts (StrafeTarget task, FaceTarget service,

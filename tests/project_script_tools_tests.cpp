@@ -76,6 +76,8 @@ int main(int argc, char** argv) {
           "behavior-tree factory is emitted");
     Check(module.find("engine::ai::BtScriptRegistry& bt") != std::string::npos,
           "module exports both host registries");
+    Check(module.find("Get3DGScriptApiVersion") != std::string::npos,
+          "module exports the scripting ABI handshake");
     Check(!std::filesystem::exists(root / "game" / "EditorGeneratedScripts.h"),
           "generation does not write into an engine/shared game folder");
 

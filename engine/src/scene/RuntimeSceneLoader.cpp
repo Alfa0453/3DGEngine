@@ -134,11 +134,11 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             return false;
         }
     }
-    if (magic != "3DGRuntimeScene" || version < 1 || version > 92) {
+    if (magic != "3DGRuntimeScene" || version < 1 || version > 95) {
         if (error) {
             *error = "Runtime scene file has an unknown format: "
                 + magic + " " + std::to_string(version)
-                + " (expected 3DGRuntimeScene 1..92).";
+                + " (expected 3DGRuntimeScene 1..95).";
         }
         return false;
     }
@@ -218,6 +218,12 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                 return false;
             }
             loaded.environment.skylightOcclusion = enabled != 0;
+            continue;
+        }
+        if (recordType == "lighting_build" && version >= 93) {
+            record >> std::quoted(loaded.environment.lightingBuildAsset)
+                   >> loaded.environment.lightingBuildHash;
+            if (!record) { if (error) *error = "Runtime scene contains invalid lighting build data."; return false; }
             continue;
         }
         if (recordType == "sky" && version >= 88) {
@@ -1080,10 +1086,12 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                 }
                 record >> std::quoted(source.clipName) >> strip;
                 if (version >= 66) record >> std::quoted(source.sourceClipName);
+                if (version >= 95) record >> source.basePlaybackSpeed;
                 if (source.path == "-") source.path.clear();
                 if (source.clipName == "-") source.clipName.clear();
                 if (source.sourceClipName == "-") source.sourceClipName.clear();
                 source.stripRootMotion = strip != 0;
+                source.basePlaybackSpeed = std::max(source.basePlaybackSpeed, 0.0f);
                 entity.animationSources.push_back(std::move(source));
             }
         }
@@ -1191,13 +1199,27 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             entity.colliderEnabled = colliderEnabled != 0;
             entity.collider.isTrigger = colliderTrigger != 0;
             if (colliderShape >= static_cast<int>(ecs::ColliderShape::Sphere)
-                && colliderShape <= static_cast<int>(ecs::ColliderShape::Staircase))
+                && colliderShape <= static_cast<int>(ecs::ColliderShape::TriangleMesh))
                 entity.collider.shape = static_cast<ecs::ColliderShape>(colliderShape);
             else
                 entity.collider.shape = ecs::ColliderShape::Sphere;
         }
         if (version >= 55) {
             record >> entity.collider.layer >> entity.collider.mask;
+            if (version >= 94) {
+                int inheritScale = 1, collisionDirty = 0;
+                record >> entity.collider.localPosition.x >> entity.collider.localPosition.y
+                       >> entity.collider.localPosition.z
+                       >> entity.collider.localRotation.w >> entity.collider.localRotation.x
+                       >> entity.collider.localRotation.y >> entity.collider.localRotation.z
+                       >> entity.collider.localScale.x >> entity.collider.localScale.y
+                       >> entity.collider.localScale.z >> inheritScale
+                       >> std::quoted(entity.collider.collisionAssetPath) >> collisionDirty;
+                entity.collider.inheritTransformScale = inheritScale != 0;
+                entity.collider.collisionDirty = collisionDirty != 0;
+            } else {
+                entity.collider.inheritTransformScale = false;
+            }
         }
         if (version >= 11) {
             int rotatorEnabled = 0;
@@ -1901,7 +1923,8 @@ bool RuntimeSceneLoader::Instantiate(const Scene &scene, ecs::Registry &registry
             for (const AnimationSourceDesc& source : desc.animationSources) {
                 if (source.path.empty()) continue;
                 animationSourceFiles.push_back(ecs::SkinnedModelAsset::AnimationSourceFile{
-                    source.path, source.clipName, source.stripRootMotion, source.sourceClipName});
+                    source.path, source.clipName, source.stripRootMotion,
+                    source.sourceClipName, source.basePlaybackSpeed});
             }
             std::vector<ecs::SkinnedModelAsset::Attachment> attachmentDescs;
             attachmentDescs.reserve(desc.attachments.size());

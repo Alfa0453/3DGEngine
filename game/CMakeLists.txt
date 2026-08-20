@@ -39,6 +39,19 @@ if(_3dg_project_module AND EXISTS "${_3dg_project_module}")
 else()
     add_library(game_scripts SHARED src/ScriptModuleExport.cpp)
 endif()
+if(THREEDG_ACTIVE_PROJECT_ROOT)
+    file(GLOB_RECURSE _3dg_project_script_browse_files CONFIGURE_DEPENDS
+        "${THREEDG_ACTIVE_PROJECT_ROOT}/Content/Scripts/*.h"
+        "${THREEDG_ACTIVE_PROJECT_ROOT}/Content/Scripts/*.hpp"
+        "${THREEDG_ACTIVE_PROJECT_ROOT}/Content/Scripts/*.cpp")
+    if(_3dg_project_script_browse_files)
+        set_source_files_properties(${_3dg_project_script_browse_files}
+            PROPERTIES HEADER_FILE_ONLY TRUE)
+        target_sources(game_scripts PRIVATE ${_3dg_project_script_browse_files})
+        source_group(TREE "${THREEDG_ACTIVE_PROJECT_ROOT}/Content/Scripts"
+            PREFIX "Game Scripts" FILES ${_3dg_project_script_browse_files})
+    endif()
+endif()
 target_include_directories(game_scripts
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
     PRIVATE ${CMAKE_SOURCE_DIR}/Content

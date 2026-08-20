@@ -100,7 +100,7 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         return engine::MakeAssetReference(
             &assetRegistry, contentRoot, assetPath, type).id;
     };
-    out << "3DGRuntimeScene 92 " << sceneId.ToString() << '\n';
+    out << "3DGRuntimeScene 95 " << sceneId.ToString() << '\n';
     out << "# Runtime export from 3DGEditor. Editor-only flags are omitted.\n";
     const EditorScene::Environment& environment = scene.GetEnvironment();
     out << "environment "
@@ -161,6 +161,8 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         << (environment.skylightOcclusion ? 1 : 0) << ' '
         << environment.skylightOcclusionStrength << ' '
         << environment.minimumSkylight << '\n';
+    out << "lighting_build " << std::quoted(StoredPath(environment.lightingBuildAsset))
+        << ' ' << environment.lightingBuildHash << '\n';
     out << "sky "
         << environment.skyMode << ' '
         << StoredPath(environment.skyTexturePath) << ' '
@@ -490,7 +492,8 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
                     ? source.assetId.ToString() : std::string("-")) << ' '
                 << StoredPath(source.clipName) << ' '
                 << (source.stripRootMotion ? 1 : 0) << ' '
-                << StoredPath(source.sourceClipName) << ' ';
+                << StoredPath(source.sourceClipName) << ' '
+                << source.basePlaybackSpeed << ' ';
         }
         out << object.modelAttachments.size() << ' ';
         for (const EditorScene::ModelAttachment& a : object.modelAttachments) {
@@ -544,6 +547,13 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
             << (object.collider.isTrigger ? 1 : 0) << ' '
             << object.collider.layer << ' '
             << object.collider.mask << ' '
+            << object.collider.localPosition.x << ' ' << object.collider.localPosition.y << ' ' << object.collider.localPosition.z << ' '
+            << object.collider.localRotation.w << ' ' << object.collider.localRotation.x << ' '
+            << object.collider.localRotation.y << ' ' << object.collider.localRotation.z << ' '
+            << object.collider.localScale.x << ' ' << object.collider.localScale.y << ' ' << object.collider.localScale.z << ' '
+            << (object.collider.inheritTransformScale ? 1 : 0) << ' '
+            << StoredPath(object.collider.collisionAssetPath) << ' '
+            << (object.collider.collisionDirty ? 1 : 0) << ' '
             << (object.rotatorEnabled ? 1 : 0) << ' '
             << object.rotator.axis.x << ' ' << object.rotator.axis.y << ' ' << object.rotator.axis.z << ' '
             << object.rotator.radiansPerSecond << ' '
@@ -883,6 +893,9 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
     };
     for (const EditorScene::Object& object : scene.Objects()) {
         addDependency(object.modelAssetId);
+        addDependency(assetIdFor(
+            object.collider.collisionAssetPath, {},
+            engine::AssetType::StaticMesh));
         addDependency(object.materialAssetId);
         addDependency(assetIdFor(
             object.audioAssetPath, object.audioAssetId,

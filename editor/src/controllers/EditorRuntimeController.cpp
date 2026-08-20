@@ -196,6 +196,7 @@ bool EditorRuntimeController::LoadScene(EditorScene& scene,
     std::string error;
     if (scene.Load(project.ScenePath(), cube, plane, sphere, capsule, cylinder, cone, pyramid, torus, staircase, &error)) {
         log.Info("Loaded " + project.ScenePath());
+        if (!error.empty()) log.Warning(error);
         return true;
     }
 

@@ -21,6 +21,8 @@ public:
     Result Draw(const std::string& contentRoot, bool* open);
     const engine::ScatterGraphAssetData& Graph() const { return m_graph; }
     const std::string& Path() const { return m_path; }
+    bool IsDirty() const { return m_dirty; }
+    bool SaveForShutdown(std::string* error) { return Save(error); }
 
 private:
     struct MeshChoice { std::string name, path, relative; engine::AssetHandle id; };

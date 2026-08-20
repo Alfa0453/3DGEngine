@@ -343,6 +343,23 @@ int main() {
     Check(scene.SetSelectedWaterEffects(
               0.42f, 2.25f, 1800.0f, {0.02f, 0.24f, 0.31f}, 0.21f, 0.009f, 4.5f),
           "set water caustics and underwater settings");
+    EditorScene::AnimationSource timedSource;
+    timedSource.file = "Content/Animations/Walk.3dganim";
+    timedSource.clipName = "Walk";
+    timedSource.sourceClipName = "Walk Take";
+    timedSource.basePlaybackSpeed = 1.5f;
+    scene.SetSelectedAnimationSettings(true, 0, "Walk", true, true, 1.0f);
+    Check(scene.SetSelectedAnimationSources({timedSource}),
+          "attach animation source timing metadata to scene object");
+    // Dedicated water actors are exported through the runtime water section.
+    // Also attach the timing metadata to a regular entity so the runtime entity
+    // serialization path is covered independently.
+    scene.AddEmpty(emptyPlaceholder);
+    Check(scene.SetSelectedAnimationSettings(
+              true, 0, "Walk", true, true, 1.0f),
+          "configure runtime animation timing test entity");
+    Check(scene.SetSelectedAnimationSources({timedSource}),
+          "attach animation timing metadata to runtime entity");
 
     const std::filesystem::path path =
         std::filesystem::temp_directory_path() / "3dg_camera_manager_test.scene";
@@ -401,7 +418,9 @@ int main() {
               && Near(loadedWater->waterUnderwaterTint.g, 0.24f)
               && Near(loadedWater->waterUnderwaterFogDensity, 0.21f)
               && Near(loadedWater->waterUnderwaterDistortion, 0.009f)
-              && Near(loadedWater->waterUnderwaterTransitionSpeed, 4.5f),
+              && Near(loadedWater->waterUnderwaterTransitionSpeed, 4.5f)
+              && loadedWater->animationSources.size() == 1
+              && Near(loadedWater->animationSources[0].basePlaybackSpeed, 1.5f),
           "water depth and optics settings survive scene round trip");
     std::filesystem::remove(path);
 
@@ -423,6 +442,12 @@ int main() {
               && Near(runtimeScene.waters[0].causticsStrength, 0.42f)
               && Near(runtimeScene.waters[0].underwaterFogDensity, 0.21f),
           "runtime export preserves complete water settings");
+    const auto timedRuntimeEntity = std::find_if(
+        runtimeScene.entities.begin(), runtimeScene.entities.end(),
+        [](const auto& entity) { return !entity.animationSources.empty(); });
+    Check(timedRuntimeEntity != runtimeScene.entities.end()
+          && Near(timedRuntimeEntity->animationSources[0].basePlaybackSpeed, 1.5f),
+          "runtime scene preserves baked clip base playback speed");
     Check(runtimeScene.cameraSequences[0].shots.size() == 2
           && runtimeScene.cameraSequences[0].shots[0].cameraName == "Gameplay Camera",
           "runtime export preserves sequence shot references");

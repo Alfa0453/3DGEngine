@@ -68,7 +68,8 @@ enum class AssetType : std::uint32_t {
     ScatterGraph, // deterministic procedural placement graph (.3dgscatter)
     Biome, // reusable terrain/environment population preset (.3dgbiome)
     DayNightTimeline, // environment timeline (.3dgdaynight)
-    Cave // spline cave/tunnel definition (.3dgcave)
+    Cave, // spline cave/tunnel definition (.3dgcave)
+    FenceWall // connected fence/wall run definition (.3dgfence)
 };
 
 const char* AssetTypeName(AssetType type);

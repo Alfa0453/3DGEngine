@@ -77,7 +77,7 @@ bool PrefabAsset::Save(const std::string& path, std::string* error) {
     }
 
     if (!assetId.Valid()) assetId = engine::AssetHandle::Generate();
-    version = 3;
+    version = 4;
     const EditorScene::Object& o = object;
     out << "3DG_PREFAB " << version << ' ' << assetId.ToString() << '\n';
     out << std::quoted(name) << '\n';
@@ -108,7 +108,14 @@ bool PrefabAsset::Save(const std::string& path, std::string* error) {
         << o.collider.majorRadius << ' ' << o.collider.minorRadius << ' '
         << o.collider.steps << ' ' << o.collider.restitution << ' '
         << o.collider.friction << ' ' << o.collider.isTrigger << ' '
-        << o.collider.layer << ' ' << o.collider.mask << '\n';
+        << o.collider.layer << ' ' << o.collider.mask << ' ';
+    WriteVec3(out, o.collider.localPosition) << ' '
+        << o.collider.localRotation.w << ' ' << o.collider.localRotation.x << ' '
+        << o.collider.localRotation.y << ' ' << o.collider.localRotation.z << ' ';
+    WriteVec3(out, o.collider.localScale) << ' '
+        << o.collider.inheritTransformScale << ' '
+        << std::quoted(OrDash(o.collider.collisionAssetPath)) << ' '
+        << o.collider.collisionDirty << '\n';
 
     out << o.rigidBodyEnabled << ' ' << o.rigidBody.invMass << ' '
         << o.rigidBody.useGravity << ' ' << o.rigidBody.kinematic << ' '
@@ -213,6 +220,20 @@ bool PrefabAsset::Load(const std::string& path, std::string* error) {
        >> o.collider.minorRadius >> o.collider.steps >> o.collider.restitution
        >> o.collider.friction >> o.collider.isTrigger >> o.collider.layer
        >> o.collider.mask;
+    if (loadedVersion >= 4) {
+        ReadVec3(in, o.collider.localPosition);
+        in >> o.collider.localRotation.w >> o.collider.localRotation.x
+           >> o.collider.localRotation.y >> o.collider.localRotation.z;
+        ReadVec3(in, o.collider.localScale);
+        in >> o.collider.inheritTransformScale
+           >> std::quoted(o.collider.collisionAssetPath)
+           >> o.collider.collisionDirty;
+        Undash(o.collider.collisionAssetPath);
+    } else {
+        // Legacy prefab dimensions were authored in world units and must not be
+        // multiplied by the instance scale a second time.
+        o.collider.inheritTransformScale = false;
+    }
 
     in >> o.rigidBodyEnabled >> o.rigidBody.invMass >> o.rigidBody.useGravity
        >> o.rigidBody.kinematic >> o.rigidBody.allowSleep >> o.rigidBody.linearDamping

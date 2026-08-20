@@ -12,6 +12,7 @@
 #include <glm/glm.hpp>
 
 #include <array>
+#include <cstdint>
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -22,6 +23,18 @@ class Mesh;
 
 class EditorScene {
 public:
+    using GroupId = std::uint64_t;
+    static constexpr GroupId kRootGroupId = 0;
+
+    enum class HierarchySelectionType { None, Object, Group };
+
+    struct SceneGroup {
+        GroupId id = kRootGroupId;
+        std::string name;
+        GroupId parentId = kRootGroupId;
+        bool expanded = true;
+    };
+
     enum class Primitive { Plane, Cube, Sphere, Capsule, Cylinder, Cone, Pyramid, Torus, Staircase, Empty };
 
     enum class TriggerActionMode {
@@ -103,6 +116,7 @@ public:
         std::string clipName;       // runtime alias used by states
         bool        stripRootMotion = false;
         std::string sourceClipName; // take inside the source file
+        float       basePlaybackSpeed = 1.0f; // baked from authoritative .3dgclip
     };
 
     // A static model socketed to a character bone (weapon, shield, hat...).
@@ -125,10 +139,15 @@ public:
         std::string maskRootBone;
         float fadeIn = 0.08f;
         float fadeOut = 0.15f;
-        float speed = 1.0f;
+        float speed = 1.0f; // graph-authored speed multiplier (serialized name retained)
     };
 
     struct AnimationStateNode {
+        enum class MotionSourceType {
+            Clip = 0,
+            BlendSpace1D = 1,
+            BlendSpace2D = 2
+        };
         struct BlendSample {
             int clipIndex = 0;
             std::string clipName;
@@ -150,6 +169,11 @@ public:
         std::string blendParameterY;
         bool blendSpace2D = false;
         bool synchronizeBlendSpace = true;
+
+        // Stable graph identity. Runtime scene serialization does not depend on this;
+        // it is used by .3dggraph authoring so renames cannot break transition links.
+        engine::AssetHandle graphId;
+        MotionSourceType motionSourceType = MotionSourceType::Clip;
     };
 
     struct AnimationParameter {
@@ -191,6 +215,12 @@ public:
         
         bool requireAllConditions = true;
         std::vector<Condition> additionalConditions;
+
+        // Stable authoring references used by Animation Graph assets. The legacy
+        // names above remain populated for runtime/scene compatibility.
+        engine::AssetHandle graphId;
+        engine::AssetHandle fromStateId; // invalid = Any State
+        engine::AssetHandle toStateId;
     };
 
     struct Object {
@@ -207,6 +237,7 @@ public:
         bool locked = false;
         // Editor-only organization. Kept in the scene file but ignored by runtime export.
         std::string editorLayer = "Default";
+        GroupId editorGroupId = kRootGroupId;
         std::string modelAssetPath;
         engine::AssetHandle modelAssetId;
         std::string materialAssetPath;
@@ -556,6 +587,11 @@ public:
         bool skylightOcclusion = true;
         float skylightOcclusionStrength = 0.90f;
         float minimumSkylight = 0.06f;
+        std::string lightingBuildAsset;
+        std::uint64_t lightingBuildHash = 0;
+        int lightingBuildQuality = 1;
+        float lightingProbeSpacing = 2.0f;
+        float lightingRayDistance = 80.0f;
         bool driveSunLight = true;
         float sunIntensity = 1.0f;
         bool clouds = true;
@@ -621,6 +657,7 @@ public:
 
     struct Snapshot {
         std::vector<ObjectSnapshot> objects;
+        std::vector<SceneGroup> groups;
         std::vector<PhysicsJoint> joints;
         std::vector<CameraPreset> cameraPresets;
         std::vector<CameraSequence> cameraSequences;
@@ -628,6 +665,9 @@ public:
         Environment environment;
         GameModeSettings gameMode;
         int selectedIndex = -1;
+        HierarchySelectionType hierarchySelection = HierarchySelectionType::None;
+        GroupId selectedGroupId = kRootGroupId;
+        GroupId nextGroupId = 1;
         int nextCubeNumber = 1;
     };
 
@@ -637,6 +677,7 @@ public:
 
     engine::ecs::Registry& Registry() { return m_registry; }
     const std::vector<Object>& Objects() const { return m_objects; }
+    const std::vector<SceneGroup>& Groups() const { return m_groups; }
     const std::vector<PhysicsJoint>& PhysicsJoints() const { return m_joints; }
     const std::vector<CameraPreset>& CameraPresets() const { return m_cameraPresets; }
     const std::vector<CameraSequence>& CameraSequences() const { return m_cameraSequences; }
@@ -648,6 +689,9 @@ public:
     void MarkDirty() { m_dirty = true; }
 
     int SelectedIndex() const { return m_selectedIndex; }
+    HierarchySelectionType HierarchySelection() const { return m_hierarchySelection; }
+    GroupId SelectedGroupId() const { return m_selectedGroupId; }
+    const SceneGroup* SelectedGroup() const;
     // While suppressed, edits do not push undo snapshots (used for live drag-sync from
     // the Character Editor, which would otherwise spam the undo stack every frame).
     void SuppressUndo(bool suppress) { m_undoSuppressed = suppress; }
@@ -666,11 +710,33 @@ public:
     void SelectNext();
     void SelectPrevious();
     void SelectIndex(int index);
+    void SelectGroup(GroupId id);
     // Shift+click: add the object to the multi-selection, or remove it if already in.
     // The primary selection (SelectedIndex, used by the inspector/gizmo) follows the
     // most-recently toggled object.
     void ToggleSelection(int index);
     void Deselect();
+    const Object* FindObject(engine::ecs::Entity entity) const;
+    Object* FindObject(engine::ecs::Entity entity);
+    int FindObjectIndex(engine::ecs::Entity entity) const;
+    bool SelectEntity(engine::ecs::Entity entity);
+
+    bool IsHierarchyNameAvailable(const std::string& name,
+                                  engine::ecs::Entity ignoreObject = engine::ecs::kNull,
+                                  GroupId ignoreGroup = kRootGroupId) const;
+    std::string MakeUniqueHierarchyName(const std::string& requested,
+                                        engine::ecs::Entity ignoreObject = engine::ecs::kNull,
+                                        GroupId ignoreGroup = kRootGroupId) const;
+    GroupId CreateGroup(const std::string& name = "Group",
+                        GroupId parentId = kRootGroupId);
+    bool RenameGroup(GroupId id, const std::string& name);
+    bool MoveObjectToGroup(int objectIndex, GroupId groupId);
+    bool MoveSelectedObjectsToGroup(GroupId groupId);
+    bool MoveGroupToGroup(GroupId id, GroupId parentId);
+    bool DeleteGroup(GroupId id);
+    bool GroupExists(GroupId id) const;
+    std::size_t GroupObjectCount(GroupId id, bool recursive = false) const;
+    std::size_t ChildGroupCount(GroupId id) const;
     // Every selected object (includes the primary). Single selection = one entry.
     // Self-heals against the many sites that set the primary directly (add/duplicate/undo).
     const std::vector<int>& SelectedIndices() const;
@@ -952,6 +1018,7 @@ private:
     engine::ecs::Registry m_registry;
     engine::AssetHandle m_assetId;
     std::vector<Object> m_objects;
+    std::vector<SceneGroup> m_groups;
     std::vector<PhysicsJoint> m_joints;
     std::vector<CameraPreset> m_cameraPresets;
     std::vector<CameraSequence> m_cameraSequences;
@@ -961,6 +1028,9 @@ private:
     Environment m_environment;
     GameModeSettings m_gameMode;
     int m_selectedIndex = -1;
+    HierarchySelectionType m_hierarchySelection = HierarchySelectionType::None;
+    GroupId m_selectedGroupId = kRootGroupId;
+    GroupId m_nextGroupId = 1;
     // Multi-selection; includes m_selectedIndex. Mutable so the const accessor can prune
     // out-of-range entries and collapse to single when a direct primary write desynced it.
     mutable std::vector<int> m_selectedIndices;

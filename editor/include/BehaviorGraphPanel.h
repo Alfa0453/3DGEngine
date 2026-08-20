@@ -22,6 +22,9 @@ public:
     const engine::ai::BehaviorGraph& Graph() const { return m_graph; }
     const std::string& LastSavedPath() const { return m_currentPath; }
     const std::string& StatusMessage() const { return m_status; }
+    bool IsDirty() const { return m_dirty; }
+    const std::string& Path() const { return m_currentPath; }
+    bool SaveForShutdown(std::string* error);
 
     void NewGraph();
     bool SaveToFile(const std::string& path);
@@ -73,6 +76,7 @@ private:
 
     // Live debugger snapshot (valid while m_debugActive).
     bool                     m_debugActive = false;
+    bool                     m_dirty = false;
     std::string              m_debugAgent;
     std::vector<int>         m_debugStatus;
     std::vector<std::pair<std::string, std::string>> m_debugBlackboard;

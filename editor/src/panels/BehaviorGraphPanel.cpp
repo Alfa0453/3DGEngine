@@ -18,6 +18,36 @@ using engine::ai::BtGraphNode;
 
 namespace {
 
+void HashCombine(std::size_t& seed, std::size_t value) {
+    seed ^= value + 0x9e3779b9u + (seed << 6u) + (seed >> 2u);
+}
+
+std::size_t GraphFingerprint(const engine::ai::BehaviorGraph& graph) {
+    std::size_t seed = std::hash<std::string>{}(graph.assetId.ToString());
+    const auto number = [&](auto value) { HashCombine(seed, std::hash<decltype(value)>{}(value)); };
+    number(graph.root);
+    for (const auto& node : graph.nodes) {
+        number(static_cast<int>(node.type)); number(node.param);
+        number(node.canvasPos.x); number(node.canvasPos.y);
+        for (const std::string* value : {&node.displayName,&node.script,&node.key})
+            HashCombine(seed, std::hash<std::string>{}(*value));
+        for (int child : node.children) number(child);
+        for (const auto* attachments : {&node.decorators,&node.services})
+            for (const auto& attachment : *attachments) {
+                number(static_cast<int>(attachment.type)); number(attachment.param);
+                HashCombine(seed, std::hash<std::string>{}(attachment.script));
+                HashCombine(seed, std::hash<std::string>{}(attachment.key));
+            }
+    }
+    for (const auto& entry : graph.blackboard) {
+        HashCombine(seed, std::hash<std::string>{}(entry.key));
+        number(static_cast<int>(entry.type)); number(entry.b); number(entry.i); number(entry.f);
+        number(entry.v.x); number(entry.v.y); number(entry.v.z);
+        HashCombine(seed, std::hash<std::string>{}(entry.s));
+    }
+    return seed;
+}
+
 constexpr float kNodeW   = 150.0f;
 constexpr float kNodeH   = 56.0f;   // title + param area
 constexpr float kAttachH = 16.0f;   // per attached decorator/service row
@@ -202,6 +232,15 @@ void BehaviorGraphPanel::NewGraph() {
     m_currentPath.clear();
     std::snprintf(m_nameBuffer, sizeof(m_nameBuffer), "%s", "behavior");
     m_status = "New graph.";
+    m_dirty = true;
+}
+
+bool BehaviorGraphPanel::SaveForShutdown(std::string* error) {
+    std::string path = m_currentPath;
+    if (path.empty()) path = m_outputDir.empty() ? std::string(m_nameBuffer)
+                                                 : m_outputDir + "/" + m_nameBuffer;
+    if (!SaveToFile(path)) { if (error) *error = m_status; return false; }
+    return true;
 }
 
 bool BehaviorGraphPanel::SaveToFile(const std::string& path) {
@@ -233,6 +272,7 @@ bool BehaviorGraphPanel::SaveToFile(const std::string& path) {
             + target.filename().string();
         if (removedDuplicate) m_status += " (removed duplicate extension)";
         RefreshSavedGraphs();
+        m_dirty = false;
         return true;
     }
     m_status = "Save failed: " + err;
@@ -251,6 +291,7 @@ bool BehaviorGraphPanel::LoadFromFile(const std::string& path) {
         m_selected = -1;
         m_linkSource = -1;
         m_status = "Loaded " + target.filename().string();
+        m_dirty = false;
         return true;
     }
     m_status = "Load failed: " + err;
@@ -306,12 +347,14 @@ void BehaviorGraphPanel::ClearDebug() {
 }
 
 bool BehaviorGraphPanel::DrawContent() {
+    const std::size_t before = GraphFingerprint(m_graph);
     bool savedThisFrame = false;
     DrawToolbar(&savedThisFrame);
     DrawBlackboard();
     ImGui::Separator();
     DrawCanvas();
     DrawInspector();
+    if (GraphFingerprint(m_graph) != before) m_dirty = true;
     return savedThisFrame;
 }
 

@@ -1,6 +1,8 @@
 #include "engine/physics/PhysicsWorld.h"
 
 #include "engine/physics/PhysicsComponents.h"
+#include "engine/physics/ColliderTransform.h"
+#include "engine/physics/CollisionMesh.h"
 #include "engine/ecs/Registry.h"
 #include "engine/ecs/Components.h"   // Transform
 
@@ -13,6 +15,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <iostream>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -77,6 +80,8 @@ float ColliderBoundRadius(const Collider& c) {
         case ColliderShape::Pyramid:
         case ColliderShape::Torus:
         case ColliderShape::Staircase:
+        case ColliderShape::ConvexHull:
+        case ColliderShape::TriangleMesh:
             return glm::length(c.halfExtents);
         case ColliderShape::Plane:    return std::numeric_limits<float>::infinity();
     }
@@ -102,7 +107,7 @@ glm::vec3 AngVelOf(const Body& b) {
 }
 glm::mat3 InvIWorld(const Body& b) {
     if (!b.rb || b.rb->sleeping || b.rb->kinematic) return glm::mat3(0.0f);
-    const glm::mat3 R = glm::mat3_cast(b.t->rotation);
+    const glm::mat3 R = glm::mat3_cast(b.owner ? b.owner->rotation : b.t->rotation);
     return R * b.rb->invInertiaLocal * glm::transpose(R);
 }
 
@@ -119,7 +124,9 @@ int priority(ColliderShape s) {
         case ColliderShape::Pyramid: return 5;
         case ColliderShape::Torus:   return 6;
         case ColliderShape::Staircase:return 7;
-        case ColliderShape::Plane:   return 8;
+        case ColliderShape::ConvexHull:return 8;
+        case ColliderShape::TriangleMesh:return 9;
+        case ColliderShape::Plane:   return 10;
     }
     return 0;
 }
@@ -545,6 +552,30 @@ Contact DetectComposite(const Body& A, const Body& B) {
 Contact Detect(const Body& A, const Body& B) {
     const auto sa = A.c->shape, sb = B.c->shape;
     if (CompositeShape(sa) || CompositeShape(sb)) return DetectComposite(A, B);
+    const bool meshB = sb == ColliderShape::TriangleMesh || sb == ColliderShape::ConvexHull;
+    if (meshB && !B.c->collisionAssetPath.empty()
+        && (sa == ColliderShape::Sphere || sa == ColliderShape::Capsule)) {
+        const auto mesh = physics::AcquireCollisionMesh(B.c->collisionAssetPath);
+        if (!mesh) return Contact{};
+        Contact result;
+        const auto probe = [&](const glm::vec3& center, float radius) {
+            glm::vec3 point, normal; float penetration = 0.0f;
+            if (!physics::CollideSphereCollisionMesh(*mesh, *B.t, center, radius,
+                                                     &point, &normal, &penetration)) return;
+            if (!result.hit || penetration > result.penetration) {
+                result.normal = normal; result.penetration = penetration;
+            }
+            if (result.count < 4) result.points[result.count++] = point;
+            result.hit = true;
+        };
+        if (sa == ColliderShape::Sphere) probe(A.t->position, A.c->radius);
+        else {
+            glm::vec3 a0, a1; CapsuleSegment(A, a0, a1);
+            probe(a0, A.c->radius); probe(a1, A.c->radius);
+            probe((a0 + a1) * 0.5f, A.c->radius);
+        }
+        return result;
+    }
     if (sa == ColliderShape::Sphere && sb == ColliderShape::Sphere)
         return SphereSphere(A.t->position, A.c->radius, B.t->position, B.c->radius);
     if (sa == ColliderShape::Sphere && sb == ColliderShape::Box)
@@ -602,7 +633,8 @@ void PrepareManifold(ContactManifold& m, Body& A, Body& B,
     m.invIA = InvIWorld(A);     m.invIB = InvIWorld(B);
     m.friction = std::sqrt(A.c->friction * B.c->friction);
 
-    const glm::vec3 cA = A.t->position, cB = B.t->position;
+    const glm::vec3 cA = A.owner ? A.owner->position : A.t->position;
+    const glm::vec3 cB = B.owner ? B.owner->position : B.t->position;
     const float e0 = std::min(A.c->restitution, B.c->restitution);
 
     const auto it = cache.find(m.key);
@@ -691,8 +723,14 @@ void CorrectPosition(Body& A, Body& B, const glm::vec3& n, float penetration) {
     if (imSum <= 0.0f) return;
     const float percent = 0.8f, slop = 0.001f;
     const glm::vec3 corr = (std::max(penetration - slop, 0.0f) / imSum) * percent * n;
-    if (A.rb) A.t->position -= corr * imA;
-    if (B.rb) B.t->position += corr * imB;
+    if (A.rb) {
+        A.t->position -= corr * imA;
+        if (A.owner && A.owner != A.t) A.owner->position -= corr * imA;
+    }
+    if (B.rb) {
+        B.t->position += corr * imB;
+        if (B.owner && B.owner != B.t) B.owner->position += corr * imB;
+    }
 }
 
 } // namespace
@@ -1124,8 +1162,29 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
 
     // 2) Gather colliders into the reused body list.
     m_bodies.clear();
-    colliderView.each([&](Entity e, Transform& t, Collider& c) {
-        m_bodies.push_back(SolverBody{e, &t, &c, reg.TryGet<RigidBody>(e)});
+    m_worldColliderTransforms.clear();
+    m_worldColliders.clear();
+    std::size_t colliderCount = 0;
+    colliderView.each([&](Entity, Transform&, Collider&) { ++colliderCount; });
+    m_bodies.reserve(colliderCount);
+    m_worldColliderTransforms.reserve(colliderCount);
+    m_worldColliders.reserve(colliderCount);
+    colliderView.each([&](Entity e, Transform& ownerTransform, Collider& localCollider) {
+        physics::WorldCollider world = physics::BuildWorldCollider(ownerTransform, localCollider);
+        RigidBody* rigidBody = reg.TryGet<RigidBody>(e);
+        if (world.collider.shape == ColliderShape::TriangleMesh && rigidBody
+            && rigidBody->invMass > 0.0f && !rigidBody->kinematic) {
+            static std::unordered_set<Entity> warned;
+            if (warned.insert(e).second)
+                std::cerr << "[Physics] Dynamic TriangleMesh collider on entity " << e
+                          << " is unsupported; using its bounds box. Use ConvexHull instead.\n";
+            world.collider.shape = ColliderShape::Box;
+            world.transform.scale = glm::vec3(1.0f);
+        }
+        m_worldColliderTransforms.push_back(world.transform);
+        m_worldColliders.push_back(world.collider);
+        m_bodies.push_back(SolverBody{e, &m_worldColliderTransforms.back(),
+            &m_worldColliders.back(), rigidBody, &ownerTransform});
     });
     const int N = static_cast<int>(m_bodies.size());
 
@@ -1473,7 +1532,10 @@ RaycastHit PhysicsWorld::Raycast(ecs::Registry& reg, const Ray& ray, float maxDi
 
     auto colliderView = reg.view<Transform, Collider>();
     if (colliderView.empty()) return finish(best);
-    colliderView.each([&](Entity e, Transform& t, Collider& c) {
+    colliderView.each([&](Entity e, Transform& ownerTransform, Collider& localCollider) {
+        physics::WorldCollider world = physics::BuildWorldCollider(ownerTransform, localCollider);
+        Transform& t = world.transform;
+        Collider& c = world.collider;
         if (e == ignored || c.isTrigger) return;
         if ((c.layer & layerMask) == 0u) return;    // filtered out by the query mask
         if (std::isfinite(maxDistance)) {
@@ -1484,7 +1546,16 @@ RaycastHit PhysicsWorld::Raycast(ecs::Registry& reg, const Ray& ray, float maxDi
         }
         glm::vec3 n(0.0f);
         float hitT = -1.0f;
-        if (c.shape == ColliderShape::Sphere) {
+        if ((c.shape == ColliderShape::TriangleMesh
+             || c.shape == ColliderShape::ConvexHull)
+            && !c.collisionAssetPath.empty()) {
+            if (const auto mesh = physics::AcquireCollisionMesh(c.collisionAssetPath)) {
+                float meshDistance = 0.0f;
+                if (physics::RaycastCollisionMesh(*mesh, t, ray.origin, d,
+                                                  best.distance, &meshDistance, &n))
+                    hitT = meshDistance;
+            }
+        } else if (c.shape == ColliderShape::Sphere) {
             hitT = RaySphere(ray.origin, d, t.position, c.radius, n);
         } else if (c.shape == ColliderShape::Plane) {
             hitT = RayPlane(ray.origin, d, c.planeNormal, c.planeOffset, n);
@@ -1572,7 +1643,10 @@ RaycastHit PhysicsWorld::SphereCast(ecs::Registry& reg,
 
     auto colliderView = reg.view<Transform, Collider>();
     if (colliderView.empty()) return finish(result);
-    colliderView.each([&](Entity entity, Transform& transform, Collider& collider) {
+    colliderView.each([&](Entity entity, Transform& ownerTransform, Collider& localCollider) {
+        physics::WorldCollider world = physics::BuildWorldCollider(ownerTransform, localCollider);
+        Transform& transform = world.transform;
+        Collider& collider = world.collider;
         if (entity == ignored || entity == alsoIgnored || collider.isTrigger) return;
         if ((collider.layer & layerMask) == 0u) return;    // filtered out by the query mask
         if (queryLayer != 0u && (collider.mask & queryLayer) == 0u) return;
@@ -1595,6 +1669,15 @@ RaycastHit PhysicsWorld::SphereCast(ecs::Registry& reg,
         } else if (collider.shape == ColliderShape::Sphere) {
             toi = SweptSphereSphere(start, end, sweepRadius,
                                     transform.position, collider.radius, normal);
+        } else if ((collider.shape == ColliderShape::TriangleMesh
+                    || collider.shape == ColliderShape::ConvexHull)
+                   && !collider.collisionAssetPath.empty()) {
+            if (const auto mesh = physics::AcquireCollisionMesh(collider.collisionAssetPath)) {
+                float meshToi = 1.0f;
+                if (physics::SweepSphereCollisionMesh(*mesh, transform, start, end,
+                                                      sweepRadius, &meshToi, &normal))
+                    toi = meshToi;
+            }
         } else if (CompositeShape(collider.shape)) {
             Body parent{entity, &transform, &collider, nullptr};
             ProxySet proxies;
@@ -1675,7 +1758,10 @@ std::vector<ecs::Entity> PhysicsWorld::OverlapSphere(ecs::Registry& reg,
     const float r = std::max(radius, 0.0f);
     auto colliderView = reg.view<Transform, Collider>();
     if (colliderView.empty()) return finish(std::move(hits));
-    colliderView.each([&](Entity e, Transform& t, Collider& c) {
+    colliderView.each([&](Entity e, Transform& ownerTransform, Collider& localCollider) {
+        physics::WorldCollider world = physics::BuildWorldCollider(ownerTransform, localCollider);
+        Transform& t = world.transform;
+        Collider& c = world.collider;
         if ((c.layer & layerMask) == 0u) return;
         const float bound = ColliderBoundRadius(c);
         if (std::isfinite(bound)) {
@@ -1696,6 +1782,12 @@ std::vector<ecs::Entity> PhysicsWorld::OverlapSphere(ecs::Registry& reg,
             const glm::vec3 cp = ClosestOnSeg(t.position - h, t.position + h, center);
             const glm::vec3 d = center - cp;
             overlap = glm::dot(d, d) <= (r + c.radius) * (r + c.radius);
+        } else if ((c.shape == ColliderShape::TriangleMesh
+                    || c.shape == ColliderShape::ConvexHull)
+                   && !c.collisionAssetPath.empty()) {
+            if (const auto mesh = physics::AcquireCollisionMesh(c.collisionAssetPath))
+                overlap = physics::CollideSphereCollisionMesh(
+                    *mesh, t, center, r, nullptr, nullptr, nullptr);
         } else if (c.shape == ColliderShape::Cylinder) {
             // Exact closest point from the query centre to a finite, oriented,
             // flat-ended cylinder.

@@ -61,7 +61,7 @@ const char* PlainPanelName(EditorPanels::Panel panel)
     case Panel::Hud: return "HUD Editor";
     case Panel::CharacterEditor: return "Character Editor";
     case Panel::ClipEditor: return "Clip Editor";
-    case Panel::GraphEditor: return "Graph Editor";
+    case Panel::GraphEditor: return "Animation Graph Editor";
     case Panel::MeshEditor: return "Mesh Editor";
     case Panel::DecalPlacement: return "Decal Placement";
     case Panel::ModularPlacement: return "Modular Placement";
@@ -97,6 +97,7 @@ const char* PlainPanelName(EditorPanels::Panel panel)
     case Panel::BiomeEditor: return "Biome Editor";
     case Panel::DayNightTimeline: return "Day/Night Timeline";
     case Panel::CaveTunnel: return "Cave and Tunnel Tool";
+    case Panel::FenceWallPainter: return "Fence and Wall Painter";
     case Panel::Count:     break;
     }
     return "Panel";
@@ -209,6 +210,7 @@ EditorPanels::Group EditorPanels::GroupOf(Panel panel)
     case Panel::ProceduralScatterGraph:
     case Panel::BiomeEditor:
     case Panel::CaveTunnel:
+    case Panel::FenceWallPainter:
         return Group::LevelDesign;
 
     case Panel::PhysicsStatus:

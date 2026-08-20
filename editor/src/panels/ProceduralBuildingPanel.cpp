@@ -1,5 +1,6 @@
 #include "ProceduralBuildingPanel.h"
 #include "EditorPanels.h"
+#include <engine/assets/AssetRegistry.h>
 
 #include <imgui.h>
 
@@ -45,6 +46,8 @@ void ProceduralBuildingPanel::NewAsset() {
     m_roofThickness = 0.25f;
     m_createFloors = m_createCeilings = m_createRoof = true;
     m_createColumns = false;
+    m_colliderMode = ColliderMode::MatchGeometry;
+    m_sources = {};
     m_dirty = true;
     m_status = "New editable building";
 }
@@ -75,17 +78,28 @@ void ProceduralBuildingPanel::ApplyPreset(int preset) {
 void ProceduralBuildingPanel::RefreshMaterials(const std::string& assetRoot) {
     m_materialRoot = assetRoot;
     m_materials.clear();
-    std::error_code ec;
-    for (std::filesystem::recursive_directory_iterator it(
-             assetRoot, std::filesystem::directory_options::skip_permission_denied, ec), end;
-         it != end; it.increment(ec)) {
-        if (ec || !it->is_regular_file(ec)
-            || Lower(it->path().extension().string()) != ".3dgmat") continue;
-        m_materials.push_back({it->path().string(), it->path().stem().string()});
+    m_staticMeshes.clear();
+    engine::AssetRegistry registry;
+    std::string registryError;
+    if (registry.Load(engine::AssetRegistry::DefaultRegistryPath(assetRoot), &registryError)) {
+        auto physicalPath = [&](const engine::AssetRegistryEntry& entry) {
+            std::string relative = entry.virtualPath;
+            if (relative.rfind("/Game/", 0) == 0) relative.erase(0, 6);
+            else if (relative.rfind("Game/", 0) == 0) relative.erase(0, 5);
+            return (std::filesystem::path(assetRoot) / relative).lexically_normal().string();
+        };
+        for (const engine::AssetRegistryEntry& entry : registry.Entries()) {
+            AssetChoice choice{physicalPath(entry),
+                std::filesystem::path(entry.virtualPath).stem().string(), entry.id};
+            if (entry.type == engine::AssetType::Material) m_materials.push_back(std::move(choice));
+            else if (entry.type == engine::AssetType::StaticMesh) m_staticMeshes.push_back(std::move(choice));
+        }
     }
-    std::sort(m_materials.begin(), m_materials.end(), [](const auto& a, const auto& b) {
+    auto sortChoices = [](auto& choices) { std::sort(choices.begin(), choices.end(), [](const auto& a, const auto& b) {
         return Lower(a.name) < Lower(b.name);
-    });
+    }); };
+    sortChoices(m_materials);
+    sortChoices(m_staticMeshes);
 }
 
 bool ProceduralBuildingPanel::ValidFootprint(std::string* error) const {
@@ -120,12 +134,20 @@ bool ProceduralBuildingPanel::Save(const std::string& assetRoot, std::string* er
     std::ofstream out(path, std::ios::trunc);
     if (!out) { if (error) *error = "Could not save building asset: " + path.string(); return false; }
     if (!m_assetId.Valid()) m_assetId = engine::AssetHandle::Generate();
-    out << "3DG_BUILDING 1 " << m_assetId.ToString() << "\n";
+    out << "3DG_BUILDING 2 " << m_assetId.ToString() << "\n";
     out << "name " << std::quoted(std::string(m_name.data())) << "\n";
     out << "settings " << m_storeys << ' ' << m_baseHeight << ' ' << m_storeyHeight << ' '
         << m_wallThickness << ' ' << m_floorThickness << ' ' << m_roofThickness << '\n';
     out << "flags " << m_createFloors << ' ' << m_createCeilings << ' ' << m_createRoof << ' '
-        << m_createColumns << ' ' << m_colliders << '\n';
+        << m_createColumns << ' ' << (m_colliderMode != ColliderMode::None) << '\n';
+    out << "collision " << static_cast<int>(m_colliderMode) << '\n';
+    for (std::size_t i = 0; i < m_sources.size(); ++i) {
+        const SourceSettings& source = m_sources[i];
+        out << "source " << i << ' ' << static_cast<int>(source.source) << ' '
+            << source.primitive << ' ' << static_cast<int>(source.fit) << ' '
+            << std::quoted(source.staticMeshPath) << ' '
+            << (source.staticMeshId.Valid() ? source.staticMeshId.ToString() : std::string("-")) << '\n';
+    }
     out << "materials " << std::quoted(m_wallMaterial) << ' ' << std::quoted(m_floorMaterial)
         << ' ' << std::quoted(m_roofMaterial) << '\n';
     out << "points " << m_footprint.size() << '\n';
@@ -135,6 +157,21 @@ bool ProceduralBuildingPanel::Save(const std::string& assetRoot, std::string* er
         out << static_cast<int>(opening.type) << ' ' << opening.segment << ' ' << opening.storey
             << ' ' << opening.offset << ' ' << opening.width << ' ' << opening.height << ' '
             << opening.sill << '\n';
+    std::vector<engine::AssetHandle> dependencies;
+    const auto addDependency = [&](engine::AssetHandle id) {
+        if (id.Valid() && std::find(dependencies.begin(), dependencies.end(), id)
+                == dependencies.end()) dependencies.push_back(id);
+    };
+    for (const SourceSettings& source : m_sources) addDependency(source.staticMeshId);
+    const auto addMaterial = [&](const std::string& materialPath) {
+        const auto found = std::find_if(m_materials.begin(), m_materials.end(),
+            [&](const AssetChoice& choice) { return choice.path == materialPath; });
+        if (found != m_materials.end()) addDependency(found->id);
+    };
+    addMaterial(m_wallMaterial); addMaterial(m_floorMaterial); addMaterial(m_roofMaterial);
+    out << "ASSET_DEPS " << dependencies.size();
+    for (engine::AssetHandle id : dependencies) out << ' ' << id.ToString();
+    out << '\n';
     if (!out.good()) { if (error) *error = "Failed while writing building asset."; return false; }
     m_path = path.string();
     m_dirty = false;
@@ -146,7 +183,7 @@ bool ProceduralBuildingPanel::Load(const std::string& path, std::string* error) 
     std::string magic;
     int version = 0;
     std::string idText;
-    if (!(in >> magic >> version >> idText) || magic != "3DG_BUILDING" || version != 1
+    if (!(in >> magic >> version >> idText) || magic != "3DG_BUILDING" || version < 1 || version > 2
         || !engine::AssetHandle::Parse(idText, &m_assetId)) {
         if (error) *error = "Not a supported 3DG building asset.";
         return false;
@@ -157,7 +194,27 @@ bool ProceduralBuildingPanel::Load(const std::string& path, std::string* error) 
     std::snprintf(m_name.data(), m_name.size(), "%s", name.c_str());
     in >> key >> m_storeys >> m_baseHeight >> m_storeyHeight >> m_wallThickness
        >> m_floorThickness >> m_roofThickness;
-    in >> key >> m_createFloors >> m_createCeilings >> m_createRoof >> m_createColumns >> m_colliders;
+    bool oldColliders = true;
+    in >> key >> m_createFloors >> m_createCeilings >> m_createRoof >> m_createColumns >> oldColliders;
+    m_colliderMode = oldColliders ? ColliderMode::MatchGeometry : ColliderMode::None;
+    m_sources = {};
+    if (version >= 2) {
+        int collisionMode = 0;
+        in >> key >> collisionMode;
+        m_colliderMode = static_cast<ColliderMode>(std::clamp(collisionMode, 0, 5));
+        for (std::size_t row = 0; row < m_sources.size(); ++row) {
+            std::size_t category = 0;
+            int source = 0, fit = 1;
+            std::string id;
+            in >> key >> category >> source >> m_sources[row].primitive >> fit
+               >> std::quoted(m_sources[row].staticMeshPath) >> id;
+            if (category >= m_sources.size() || key != "source") return false;
+            SourceSettings& settings = m_sources[category];
+            settings.source = static_cast<GeometrySource>(std::clamp(source, 0, 1));
+            settings.fit = static_cast<FitMode>(std::clamp(fit, 0, 2));
+            if (id != "-") engine::AssetHandle::Parse(id, &settings.staticMeshId);
+        }
+    }
     in >> key >> std::quoted(m_wallMaterial) >> std::quoted(m_floorMaterial) >> std::quoted(m_roofMaterial);
     std::size_t count = 0;
     in >> key >> count;
@@ -181,13 +238,53 @@ void ProceduralBuildingPanel::DrawMaterialCombo(const char* label, std::string& 
     const std::string current = value.empty() ? "Default" : std::filesystem::path(value).stem().string();
     if (!ImGui::BeginCombo(label, current.c_str())) return;
     if (ImGui::Selectable("Default", value.empty())) { value.clear(); m_dirty = true; }
-    for (const MaterialChoice& material : m_materials) {
+    for (const AssetChoice& material : m_materials) {
         if (ImGui::Selectable(material.name.c_str(), material.path == value)) {
             value = material.path;
             m_dirty = true;
         }
     }
     ImGui::EndCombo();
+}
+
+void ProceduralBuildingPanel::DrawSourceSettings(const char* label, SourceSettings& settings) {
+    if (!ImGui::TreeNode(label)) return;
+    ImGui::PushID(label);
+    int source = static_cast<int>(settings.source);
+    const char* sourceNames[] = {"Primitive", "Static Mesh"};
+    if (ImGui::Combo("Source", &source, sourceNames, 2)) {
+        settings.source = static_cast<GeometrySource>(source); m_dirty = true;
+    }
+    if (settings.source == GeometrySource::Primitive) {
+        static constexpr int values[] = {1, 4, 5, 6};
+        static constexpr const char* names[] = {"Cube", "Cylinder", "Cone", "Pyramid"};
+        int current = 0;
+        for (int i = 0; i < 4; ++i) if (settings.primitive == values[i]) current = i;
+        if (ImGui::Combo("Primitive", &current, names, 4)) {
+            settings.primitive = values[current];
+            m_dirty = true;
+        }
+    } else {
+        const std::string current = settings.staticMeshPath.empty() ? "Choose .3dgmesh..."
+            : std::filesystem::path(settings.staticMeshPath).stem().string();
+        if (ImGui::BeginCombo("Static Mesh", current.c_str())) {
+            for (const AssetChoice& mesh : m_staticMeshes) {
+                if (ImGui::Selectable(mesh.name.c_str(), mesh.path == settings.staticMeshPath)) {
+                    settings.staticMeshPath = mesh.path;
+                    settings.staticMeshId = mesh.id;
+                    m_dirty = true;
+                }
+            }
+            ImGui::EndCombo();
+        }
+        int fit = static_cast<int>(settings.fit);
+        const char* fitNames[] = {"Original Size", "Stretch To Part", "Preserve Aspect"};
+        if (ImGui::Combo("Fit", &fit, fitNames, 3)) {
+            settings.fit = static_cast<FitMode>(fit); m_dirty = true;
+        }
+    }
+    ImGui::PopID();
+    ImGui::TreePop();
 }
 
 void ProceduralBuildingPanel::DrawFootprintPreview() {
@@ -249,9 +346,11 @@ std::vector<ProceduralBuildingPanel::Part> ProceduralBuildingPanel::GeneratePart
     const glm::vec2 center = (minimum + maximum) * .5f;
     const glm::vec2 size = glm::max(maximum - minimum, glm::vec2(.1f));
     auto add = [&](std::string suffix, glm::vec3 position, glm::vec3 scale,
-                   float yaw, const std::string& material) {
+                   float yaw, PartCategory category, const std::string& material) {
         if (scale.x > .01f && scale.y > .01f && scale.z > .01f)
-            parts.push_back({std::move(suffix), position, scale, yaw, material});
+            parts.push_back({std::move(suffix), position, scale,
+                glm::angleAxis(yaw, glm::vec3(0.0f, 1.0f, 0.0f)), category,
+                m_sources[static_cast<std::size_t>(category)], m_colliderMode, material});
     };
     for (int storey = 0; storey < m_storeys; ++storey) {
         const float base = m_baseHeight + storey * m_storeyHeight;
@@ -276,22 +375,22 @@ std::vector<ProceduralBuildingPanel::Part> ProceduralBuildingPanel::GeneratePart
             const float farZ = std::clamp(holeCenter.y + holeHalf.y, minimum.y, maximum.y);
             add("S" + std::to_string(storey + 1) + "_FloorLeft",
                 {(minimum.x + left) * .5f, base - m_floorThickness * .5f, center.y},
-                {left - minimum.x, m_floorThickness, size.y}, 0, m_floorMaterial);
+                {left - minimum.x, m_floorThickness, size.y}, 0, PartCategory::Floor, m_floorMaterial);
             add("S" + std::to_string(storey + 1) + "_FloorRight",
                 {(right + maximum.x) * .5f, base - m_floorThickness * .5f, center.y},
-                {maximum.x - right, m_floorThickness, size.y}, 0, m_floorMaterial);
+                {maximum.x - right, m_floorThickness, size.y}, 0, PartCategory::Floor, m_floorMaterial);
             add("S" + std::to_string(storey + 1) + "_FloorNear",
                 {(left + right) * .5f, base - m_floorThickness * .5f, (minimum.y + nearZ) * .5f},
-                {right - left, m_floorThickness, nearZ - minimum.y}, 0, m_floorMaterial);
+                {right - left, m_floorThickness, nearZ - minimum.y}, 0, PartCategory::Floor, m_floorMaterial);
             add("S" + std::to_string(storey + 1) + "_FloorFar",
                 {(left + right) * .5f, base - m_floorThickness * .5f, (farZ + maximum.y) * .5f},
-                {right - left, m_floorThickness, maximum.y - farZ}, 0, m_floorMaterial);
+                {right - left, m_floorThickness, maximum.y - farZ}, 0, PartCategory::Floor, m_floorMaterial);
         } else if (m_createFloors) add("S" + std::to_string(storey + 1) + "_Floor",
             {center.x, base - m_floorThickness * .5f, center.y},
-            {size.x, m_floorThickness, size.y}, 0.0f, m_floorMaterial);
+            {size.x, m_floorThickness, size.y}, 0.0f, PartCategory::Floor, m_floorMaterial);
         if (m_createCeilings) add("S" + std::to_string(storey + 1) + "_Ceiling",
             {center.x, base + m_storeyHeight + m_floorThickness * .5f, center.y},
-            {size.x, m_floorThickness, size.y}, 0.0f, m_floorMaterial);
+            {size.x, m_floorThickness, size.y}, 0.0f, PartCategory::Ceiling, m_floorMaterial);
 
         for (int segment = 0; segment < static_cast<int>(m_footprint.size()); ++segment) {
             const glm::vec2 a = m_footprint[static_cast<std::size_t>(segment)];
@@ -315,7 +414,7 @@ std::vector<ProceduralBuildingPanel::Part> ProceduralBuildingPanel::GeneratePart
                 add("S" + std::to_string(storey + 1) + "_Wall" + std::to_string(segment + 1)
                         + "_" + label + std::to_string(piece++),
                     {p.x, base + bottom + height * .5f, p.y},
-                    {span, height, m_wallThickness}, -yaw, m_wallMaterial);
+                    {span, height, m_wallThickness}, -yaw, PartCategory::Wall, m_wallMaterial);
             };
             for (const Opening* opening : openings) {
                 const float width = std::clamp(opening->width, .2f, std::max(.2f, length - .2f));
@@ -339,12 +438,13 @@ std::vector<ProceduralBuildingPanel::Part> ProceduralBuildingPanel::GeneratePart
                 add("S" + std::to_string(storey + 1) + "_Column" + std::to_string(i + 1),
                     {m_footprint[i].x, base + m_storeyHeight * .5f, m_footprint[i].y},
                     {m_wallThickness * 1.5f, m_storeyHeight, m_wallThickness * 1.5f},
-                    0.0f, m_wallMaterial);
+                    0.0f, PartCategory::Column, m_wallMaterial);
         }
     }
     if (m_createRoof) add("Roof",
         {center.x, m_baseHeight + m_storeys * m_storeyHeight + m_roofThickness * .5f, center.y},
-        {size.x + m_wallThickness, m_roofThickness, size.y + m_wallThickness}, 0.0f, m_roofMaterial);
+        {size.x + m_wallThickness, m_roofThickness, size.y + m_wallThickness}, 0.0f,
+        PartCategory::Roof, m_roofMaterial);
     return parts;
 }
 
@@ -397,8 +497,20 @@ ProceduralBuildingPanel::Result ProceduralBuildingPanel::Draw(
         m_dirty |= ImGui::Checkbox("Ceilings", &m_createCeilings); ImGui::SameLine();
         m_dirty |= ImGui::Checkbox("Flat Roof", &m_createRoof); ImGui::SameLine();
         m_dirty |= ImGui::Checkbox("Columns", &m_createColumns);
-        m_dirty |= ImGui::Checkbox("Colliders", &m_colliders); ImGui::SameLine();
+        int colliderMode = static_cast<int>(m_colliderMode);
+        const char* colliderModes[] = {"None", "Match Geometry", "Bounds", "Convex Hull",
+                                       "Triangle Mesh", "From Mesh Asset"};
+        if (ImGui::Combo("Collider Mode", &colliderMode, colliderModes, 6)) {
+            m_colliderMode = static_cast<ColliderMode>(colliderMode); m_dirty = true;
+        }
         ImGui::Checkbox("Replace Existing", &m_replaceExisting);
+
+        ImGui::SeparatorText("Part Geometry");
+        DrawSourceSettings("Walls", m_sources[static_cast<std::size_t>(PartCategory::Wall)]);
+        DrawSourceSettings("Floors", m_sources[static_cast<std::size_t>(PartCategory::Floor)]);
+        DrawSourceSettings("Ceilings", m_sources[static_cast<std::size_t>(PartCategory::Ceiling)]);
+        DrawSourceSettings("Roof", m_sources[static_cast<std::size_t>(PartCategory::Roof)]);
+        DrawSourceSettings("Columns", m_sources[static_cast<std::size_t>(PartCategory::Column)]);
 
         ImGui::SeparatorText("Footprint Points");
         for (int i = 0; i < static_cast<int>(m_footprint.size()); ++i) {

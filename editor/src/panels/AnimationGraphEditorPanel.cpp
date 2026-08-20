@@ -20,6 +20,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <cmath>
 
 namespace {
 std::string Lower(std::string s) {
@@ -66,6 +67,22 @@ std::string UniqueClipAliasExcept(const std::vector<AnimationGraphClip>& clips,
     while (exists(desired)) desired = base + " " + std::to_string(suffix++);
     return desired;
 }
+const char* MotionSourceName(EditorScene::AnimationStateNode::MotionSourceType type) {
+    using Type = EditorScene::AnimationStateNode::MotionSourceType;
+    switch (type) {
+    case Type::Clip: return "Animation Clip";
+    case Type::BlendSpace1D: return "1D Blend Space";
+    case Type::BlendSpace2D: return "2D Blend Space";
+    }
+    return "Animation Clip";
+}
+float DistanceToSegment(ImVec2 p, ImVec2 a, ImVec2 b) {
+    const float dx = b.x - a.x, dy = b.y - a.y;
+    const float length2 = dx * dx + dy * dy;
+    if (length2 <= 0.0001f) return std::hypot(p.x - a.x, p.y - a.y);
+    const float t = std::clamp(((p.x - a.x) * dx + (p.y - a.y) * dy) / length2, 0.0f, 1.0f);
+    return std::hypot(p.x - (a.x + dx * t), p.y - (a.y + dy * t));
+}
 
 // A single authoring problem found in the graph. severity: 0=error, 1=warning, 2=info.
 struct GraphIssue { int severity = 2; std::string text; };
@@ -101,15 +118,41 @@ std::vector<GraphIssue> ValidateGraph(const AnimationGraphAsset& asset) {
         return n.empty() ? std::string("(unnamed)") : n;
     };
 
+    std::vector<engine::AssetHandle> ids;
+    std::vector<std::string> names;
+    for (const auto& state : asset.states) {
+        if (!state.graphId.Valid()) add(0, "State '" + stateLabel(state.name) + "' has no stable ID.");
+        else if (std::find(ids.begin(), ids.end(), state.graphId) != ids.end())
+            add(0, "Duplicate stable state ID on '" + stateLabel(state.name) + "'.");
+        ids.push_back(state.graphId);
+        if (state.name.empty()) add(0, "State names cannot be empty.");
+        else if (std::find(names.begin(), names.end(), state.name) != names.end())
+            add(0, "Duplicate state name '" + state.name + "'.");
+        names.push_back(state.name);
+    }
+    if (!asset.entryStateId.Valid()) add(0, "The graph has no Entry state.");
+    else if (std::find(ids.begin(), ids.end(), asset.entryStateId) == ids.end())
+        add(0, "The Entry connection references a missing state.");
+
+    std::vector<std::string> parameterNames;
+    for (const auto& parameter : asset.parameters) {
+        if (parameter.name.empty()) add(0, "Parameter names cannot be empty.");
+        else if (std::find(parameterNames.begin(), parameterNames.end(), parameter.name)
+                 != parameterNames.end())
+            add(0, "Duplicate parameter name '" + parameter.name + "'.");
+        parameterNames.push_back(parameter.name);
+    }
+
     // States: clip resolution + blend-space parameters.
     for (const EditorScene::AnimationStateNode& s : asset.states) {
         const std::string sn = stateLabel(s.name);
-        if (s.blendSamples.empty()) {
+        if (s.motionSourceType == EditorScene::AnimationStateNode::MotionSourceType::Clip) {
             if (!s.clipName.empty() && !isClip(s.clipName))
                 add(0, "State '" + sn + "': clip '" + s.clipName + "' is not in the clip list.");
             else if (s.clipName.empty())
                 add(1, "State '" + sn + "' has no clip assigned.");
         } else {
+            if (s.blendSamples.empty()) add(1, "State '" + sn + "' has a Blend Space with no samples.");
             for (const auto& sample : s.blendSamples)
                 if (!sample.clipName.empty() && !isClip(sample.clipName))
                     add(0, "State '" + sn + "': blend clip '" + sample.clipName
@@ -120,19 +163,31 @@ std::vector<GraphIssue> ValidateGraph(const AnimationGraphAsset& asset) {
             else if (!paramType(s.blendParameter, t))
                 add(1, "State '" + sn + "': blend parameter '" + s.blendParameter
                        + "' is not declared.");
-            if (s.blendSpace2D && !s.blendParameterY.empty() && !paramType(s.blendParameterY, t))
-                add(1, "State '" + sn + "': Y parameter '" + s.blendParameterY
-                       + "' is not declared.");
+            if (s.motionSourceType == EditorScene::AnimationStateNode::MotionSourceType::BlendSpace2D) {
+                if (s.blendParameterY.empty()) add(1, "State '" + sn + "' has no Y parameter.");
+                else if (!paramType(s.blendParameterY, t))
+                    add(1, "State '" + sn + "': Y parameter '" + s.blendParameterY + "' is not declared.");
+            }
         }
     }
 
     // Transitions: valid endpoints, declared parameters, and the always-true footgun.
-    bool hasAnyState = false;
-    for (const auto& tr : asset.transitions) if (tr.fromState.empty()) hasAnyState = true;
+    std::vector<engine::AssetHandle> transitionIds;
     for (const auto& tr : asset.transitions) {
         const std::string label = "Transition "
             + (tr.fromState.empty() ? std::string("Any") : tr.fromState) + " -> "
             + (tr.toState.empty() ? std::string("(none)") : tr.toState);
+        if (!tr.graphId.Valid()) add(0, label + " has no stable ID.");
+        else if (std::find(transitionIds.begin(), transitionIds.end(), tr.graphId)
+                 != transitionIds.end())
+            add(0, label + " has a duplicate stable transition ID.");
+        transitionIds.push_back(tr.graphId);
+        if (tr.fromStateId.Valid()
+            && std::find(ids.begin(), ids.end(), tr.fromStateId) == ids.end())
+            add(0, label + ": source ID references a missing state.");
+        if (!tr.toStateId.Valid()
+            || std::find(ids.begin(), ids.end(), tr.toStateId) == ids.end())
+            add(0, label + ": target ID references a missing state.");
         if (!tr.fromState.empty() && !isState(tr.fromState))
             add(0, label + ": 'from' state does not exist.");
         if (tr.toState.empty() || !isState(tr.toState))
@@ -143,11 +198,13 @@ std::vector<GraphIssue> ValidateGraph(const AnimationGraphAsset& asset) {
             if (!p.empty() && !paramType(p, t))
                 add(1, label + " uses undeclared parameter '" + p + "'.");
         };
-        checkParam(tr.parameter);
-        for (const auto& c : tr.additionalConditions) checkParam(c.parameter);
+        if (tr.useConditions) {
+            checkParam(tr.parameter);
+            for (const auto& c : tr.additionalConditions) checkParam(c.parameter);
+        }
 
         // Only flag "always true" when nothing else gates the transition.
-        if (tr.additionalConditions.empty()) {
+        if (tr.useConditions && tr.additionalConditions.empty()) {
             if (tr.parameter.empty()) {
                 add(1, label + " has no condition - it fires immediately.");
             } else {
@@ -161,20 +218,29 @@ std::vector<GraphIssue> ValidateGraph(const AnimationGraphAsset& asset) {
         }
     }
 
-    // Reachability + dead ends (only precise without an Any-state transition).
-    if (!hasAnyState) {
-        const std::string entry = asset.states.front().name;
-        for (const EditorScene::AnimationStateNode& s : asset.states) {
-            int incoming = 0, outgoing = 0;
-            for (const auto& tr : asset.transitions) {
-                if (tr.toState == s.name) ++incoming;
-                if (tr.fromState == s.name) ++outgoing;
+    // Reachability follows actual states only; Blend Space samples are pose inputs,
+    // never state-machine nodes. Any State edges make their targets reachable.
+    std::vector<engine::AssetHandle> reachable;
+    if (asset.entryStateId.Valid()) reachable.push_back(asset.entryStateId);
+    for (const auto& transition : asset.transitions)
+        if (!transition.fromStateId.Valid() && transition.toStateId.Valid())
+            reachable.push_back(transition.toStateId);
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (const auto& transition : asset.transitions) {
+            if (std::find(reachable.begin(), reachable.end(), transition.fromStateId) == reachable.end()) continue;
+            if (std::find(reachable.begin(), reachable.end(), transition.toStateId) == reachable.end()) {
+                reachable.push_back(transition.toStateId); changed = true;
             }
-            if (s.name != entry && incoming == 0)
-                add(2, "State '" + stateLabel(s.name) + "' is unreachable (nothing transitions to it).");
-            if (outgoing == 0)
-                add(2, "State '" + stateLabel(s.name) + "' has no outgoing transition (dead end).");
         }
+    }
+    for (const auto& state : asset.states) {
+        if (std::find(reachable.begin(), reachable.end(), state.graphId) == reachable.end())
+            add(2, "State '" + stateLabel(state.name) + "' is unreachable from Entry.");
+        const bool outgoing = std::any_of(asset.transitions.begin(), asset.transitions.end(),
+            [&](const auto& transition) { return transition.fromStateId == state.graphId; });
+        if (!outgoing) add(2, "State '" + stateLabel(state.name) + "' has no outgoing transition (dead end).");
     }
     return issues;
 }
@@ -199,6 +265,13 @@ AnimationGraphEditorPanel::~AnimationGraphEditorPanel() = default;
 
 void AnimationGraphEditorPanel::QueueOpen(const std::string& path) { m_pendingOpen = path; }
 void AnimationGraphEditorPanel::SyncBuffers() { Copy(m_nameBuffer, m_asset.name); }
+
+bool AnimationGraphEditorPanel::SaveForShutdown(std::string* error) {
+    m_asset.name = m_nameBuffer.data();
+    if (!m_asset.Save(m_path, error)) return false;
+    m_dirty = false;
+    return true;
+}
 
 void AnimationGraphEditorPanel::ResetPreview() {
     m_model = nullptr;
@@ -243,9 +316,21 @@ unsigned int AnimationGraphEditorPanel::RenderPreview(int width, int height, flo
 
     // Reload the preview rig with the graph's clips merged when either changes.
     std::string signature = m_asset.previewModel;
-    for (const AnimationGraphClip& c : m_asset.clips)
+    std::string metadataSignature;
+    for (const AnimationGraphClip& c : m_asset.clips) {
         signature += '|' + c.sourceFile + '#' + c.sourceClipName + "->" + c.clipName
             + (c.stripRootMotion ? "1" : "0");
+        // Dependency timestamp invalidates controller timing without making the
+        // graph itself dirty or forcing clips to be re-added.
+        std::error_code stampError;
+        const auto stamp = std::filesystem::last_write_time(c.clipAsset, stampError);
+        if (!stampError) metadataSignature += c.clipAsset + '@'
+            + std::to_string(stamp.time_since_epoch().count());
+    }
+    if (metadataSignature != m_clipMetadataSignature) {
+        m_clipMetadataSignature = std::move(metadataSignature);
+        m_controllerDirty = true;
+    }
     if (signature != m_loadedSignature) {
         ResetPreview();
         m_loadedSignature = signature;
@@ -263,6 +348,7 @@ unsigned int AnimationGraphEditorPanel::RenderPreview(int width, int height, flo
     }
 
     if (m_model && m_controllerDirty) {
+        m_controller = {};
         const auto& anims = m_model->Animations();
         auto resolveClip = [&](int fallback, const std::string& name) {
             int clip = fallback;
@@ -274,8 +360,21 @@ unsigned int AnimationGraphEditorPanel::RenderPreview(int width, int height, flo
         auto clipSeconds = [&](int clip) {
             return (clip >= 0 && clip < static_cast<int>(anims.size())) ? ClipSeconds(anims[static_cast<std::size_t>(clip)]) : 0.0f;
         };
+        auto clipBaseSpeed = [&](int fallback, const std::string& alias) {
+            const AnimationGraphClip* found = nullptr;
+            for (const AnimationGraphClip& candidate : m_asset.clips) {
+                if ((!alias.empty() && candidate.clipName == alias)
+                    || (alias.empty() && !found)) { found = &candidate; if (!alias.empty()) break; }
+            }
+            if (!found && fallback >= 0 && fallback < static_cast<int>(m_asset.clips.size()))
+                found = &m_asset.clips[static_cast<std::size_t>(fallback)];
+            AnimationClipAsset clip;
+            return found && clip.Load(found->clipAsset, nullptr)
+                ? std::max(clip.speed, 0.0f) : 1.0f;
+        };
         editor::BuildAnimationController(m_controller, m_asset.states, m_asset.parameters,
-                                        m_asset.transitions, resolveClip, clipSeconds);
+                                        m_asset.transitions, resolveClip, clipSeconds,
+                                        m_asset.entryStateId, clipBaseSpeed);
         m_controllerDirty = false;
     }
 
@@ -319,6 +418,8 @@ unsigned int AnimationGraphEditorPanel::RenderPreview(int width, int height, flo
                             const float len = ClipSeconds(a);
                             if (space.synchronized && refLen > 0.0001f && len > 0.0001f)
                                 t = (std::fmod(std::max(time, 0.0f), refLen) / refLen) * len;
+                            else if (!space.synchronized)
+                                t *= std::max(w.basePlaybackSpeed, 0.0f);
                             std::vector<engine::BoneLocal> pose;
                             engine::Animator::SampleLocal(m_model->GetSkeleton(), a, t, pose);
                             if (!sampled) { output = std::move(pose); accum = w.weight; sampled = true; }
@@ -389,7 +490,11 @@ void AnimationGraphEditorPanel::Draw(const std::string& assetRoot, bool* open, b
     if (m_scannedRoot != assetRoot) RefreshChoices(assetRoot);
     if (!m_pendingOpen.empty()) {
         std::string error;
-        if (m_asset.Load(m_pendingOpen, &error)) { m_path = m_pendingOpen; SyncBuffers(); ResetPreview(); }
+        if (m_asset.Load(m_pendingOpen, &error)) {
+            m_path = m_pendingOpen; SyncBuffers(); ResetPreview();
+            m_selectionType = SelectionType::None; m_selectedId = {}; m_linking = false;
+            m_dirty = false;
+        }
         else if (message) *message = error;
         m_pendingOpen.clear();
     }
@@ -400,11 +505,15 @@ void AnimationGraphEditorPanel::Draw(const std::string& assetRoot, bool* open, b
 
     if (!ImGui::Begin(EditorPanels::Name(EditorPanels::Panel::GraphEditor), open, ImGuiWindowFlags_MenuBar)) { ImGui::End(); return; }
     if (ImGui::BeginMenuBar()) {
-        if (ImGui::MenuItem("New")) { m_asset = {}; m_path.clear(); SyncBuffers(); ResetPreview(); }
+        if (ImGui::MenuItem("New")) {
+            m_asset = {}; m_path.clear(); SyncBuffers(); ResetPreview();
+            m_selectionType = SelectionType::None; m_selectedId = {}; m_linking = false;
+            m_dirty = true;
+        }
         if (ImGui::MenuItem("Save")) {
             m_asset.name = m_nameBuffer.data();
             std::string error;
-            if (m_asset.Save(m_path, &error)) { if (assetSaved) *assetSaved = true; if (message) *message = "Saved graph: " + m_path; }
+            if (m_asset.Save(m_path, &error)) { m_dirty = false; if (assetSaved) *assetSaved = true; if (message) *message = "Saved graph: " + m_path; }
             else if (message) *message = error;
         }
         ImGui::EndMenuBar();
@@ -412,7 +521,7 @@ void AnimationGraphEditorPanel::Draw(const std::string& assetRoot, bool* open, b
 
     std::array<char, 260> pathBuf{}; Copy(pathBuf, m_path);
     ImGui::SetNextItemWidth(-1.0f);
-    if (ImGui::InputText("##GraphPath", pathBuf.data(), pathBuf.size())) m_path = pathBuf.data();
+    if (ImGui::InputText("##GraphPath", pathBuf.data(), pathBuf.size())) { m_path = pathBuf.data(); m_dirty = true; }
     ImGui::Separator();
 
     const auto assetPicker = [&](const char* label, std::array<char, 128>& search,
@@ -444,6 +553,7 @@ void AnimationGraphEditorPanel::Draw(const std::string& assetRoot, bool* open, b
     const ImVec2 avail = ImGui::GetContentRegionAvail();
     const float pside = std::max(160.0f, std::min(avail.x, avail.y - 120.0f));
     const unsigned int texture = RenderPreview(static_cast<int>(pside), static_cast<int>(pside), deltaTime);
+    const bool controllerDirtyBeforeAuthoring = m_controllerDirty;
     ImGui::Image((ImTextureID)(std::intptr_t)texture, ImVec2(pside, pside), ImVec2(0, 1), ImVec2(1, 0));
     if (ImGui::IsItemHovered()) {
         if (ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
@@ -460,8 +570,10 @@ void AnimationGraphEditorPanel::Draw(const std::string& assetRoot, bool* open, b
     else ImGui::TextDisabled("State: %s", m_controller.CurrentStateName().c_str());
     if (assetPicker(
             "Preview Rig", m_modelSearch, m_modelChoices,
-            m_asset.previewModel))
+            m_asset.previewModel)) {
         m_asset.previewModelAssetId = {};
+        m_dirty = true;
+    }
     ImGui::TextDisabled("Drive parameters:");
     for (std::size_t parameterIndex = 0; parameterIndex < m_asset.parameters.size(); ++parameterIndex) {
         const auto& p = m_asset.parameters[parameterIndex];
@@ -478,7 +590,10 @@ void AnimationGraphEditorPanel::Draw(const std::string& assetRoot, bool* open, b
     // Authoring (right).
     ImGui::BeginChild("GraphAuthor", ImVec2(0, 0), true);
     ImGui::TextDisabled("GRAPH");
-    if (ImGui::InputText("Name", m_nameBuffer.data(), m_nameBuffer.size())) m_asset.name = m_nameBuffer.data();
+    if (ImGui::InputText("Name", m_nameBuffer.data(), m_nameBuffer.size())) {
+        m_asset.name = m_nameBuffer.data();
+        m_dirty = true;
+    }
 
     // Validation strip: surface authoring traps (unresolved clips, always-true transitions,
     // unreachable / dead-end states) so a broken graph explains itself.
@@ -635,318 +750,492 @@ void AnimationGraphEditorPanel::Draw(const std::string& assetRoot, bool* open, b
         }
     };
 
-    ImGui::SeparatorText("Parameters");
-    int removeParam = -1;
-    for (std::size_t i = 0; i < m_asset.parameters.size(); ++i) {
-        auto& p = m_asset.parameters[i];
-        ImGui::PushID(5000 + static_cast<int>(i));
-        std::array<char, 64> nb{}; Copy(nb, p.name);
-        ImGui::SetNextItemWidth(120);
-        if (ImGui::InputText("##pn", nb.data(), nb.size())) { p.name = nb.data(); m_controllerDirty = true; }
-        ImGui::SameLine(); ImGui::SetNextItemWidth(90);
-        int type = static_cast<int>(p.type);
-        const char* types[] = { "Float", "Bool", "Trigger" };
-        if (ImGui::Combo("##pt", &type, types, 3)) { p.type = static_cast<EditorScene::AnimationParameter::Type>(type); m_controllerDirty = true; }
-        ImGui::SameLine();
-        if (ImGui::SmallButton("X##RemoveParameter")) removeParam = static_cast<int>(i);
-        ImGui::PopID();
-    }
-    if (removeParam >= 0) { m_asset.parameters.erase(m_asset.parameters.begin() + removeParam); m_controllerDirty = true; }
-    if (ImGui::Button("Add Parameter")) { m_asset.parameters.push_back({ "Speed", EditorScene::AnimationParameter::Type::Float, 0.0f }); m_controllerDirty = true; }
-
-    ImGui::SeparatorText("States");
-    int removeState = -1;
-    for (std::size_t i = 0; i < m_asset.states.size(); ++i) {
-        auto& s = m_asset.states[i];
-        ImGui::PushID(6000 + static_cast<int>(i));
-        std::array<char, 64> nb{}; Copy(nb, s.name);
-        if (ImGui::InputText("State Name", nb.data(), nb.size())) { s.name = nb.data(); m_controllerDirty = true; }
-        clipNameCombo("Clip", s.clipName);
-        if (ImGui::Checkbox("Loop", &s.loop)) m_controllerDirty = true;
-        ImGui::SameLine(); ImGui::SetNextItemWidth(90);
-        if (ImGui::DragFloat("Speed", &s.speed, .02f, 0.0f, 8.0f)) m_controllerDirty = true;
-        int blendMode = s.blendParameter.empty() ? 0 : (s.blendSpace2D ? 2 : 1);
-        const char* blendModes[] = { "None", "1D Blend Space", "2D Blend Space" };
-        if (ImGui::Combo("Blend Space", &blendMode, blendModes, 3)) {
-            if (blendMode == 0) {
-                s.blendParameter.clear();
-                s.blendParameterY.clear();
-                s.blendSpace2D = false;
-            } else {
-                if (s.blendParameter.empty()) s.blendParameter = "Speed";
-                s.blendSpace2D = blendMode == 2;
-                if (s.blendSpace2D && s.blendParameterY.empty()) s.blendParameterY = "Direction";
-                if (!s.blendSpace2D) s.blendParameterY.clear();
-            }
-            m_controllerDirty = true;
-        }
-        if (blendMode != 0) {
-            std::array<char, 48> bp{}; Copy(bp, s.blendParameter);
-            ImGui::SetNextItemWidth(120);
-            if (ImGui::InputText("X Parameter", bp.data(), bp.size())) { s.blendParameter = bp.data(); m_controllerDirty = true; }
-            if (s.blendSpace2D) {
-                std::array<char, 48> bpy{}; Copy(bpy, s.blendParameterY);
-                ImGui::SetNextItemWidth(120);
-                if (ImGui::InputText("Y Parameter", bpy.data(), bpy.size())) {
-                    s.blendParameterY = bpy.data();
-                    m_controllerDirty = true;
-                }
-            }
-            if (ImGui::Checkbox("Synchronize Samples", &s.synchronizeBlendSpace))
-                m_controllerDirty = true;
-            int removeSample = -1;
-            for (std::size_t j = 0; j < s.blendSamples.size(); ++j) {
-                auto& sample = s.blendSamples[j];
-                ImGui::PushID(static_cast<int>(j));
-                clipNameCombo("##sc", sample.clipName);
-                ImGui::SameLine(); ImGui::SetNextItemWidth(90);
-                if (ImGui::DragFloat("X", &sample.value, .05f)) m_controllerDirty = true;
-                if (s.blendSpace2D) {
-                    ImGui::SameLine(); ImGui::SetNextItemWidth(90);
-                    if (ImGui::DragFloat("Y", &sample.valueY, .05f)) m_controllerDirty = true;
-                }
-                ImGui::SameLine();
-                if (ImGui::SmallButton("X##RemoveSample")) removeSample = static_cast<int>(j);
-                ImGui::PopID();
-            }
-            if (removeSample >= 0) { s.blendSamples.erase(s.blendSamples.begin() + removeSample); m_controllerDirty = true; }
-            if (ImGui::SmallButton("Add Sample")) { s.blendSamples.push_back({}); m_controllerDirty = true; }
-        }
-        if (ImGui::SmallButton("Remove State")) removeState = static_cast<int>(i);
-        ImGui::Separator();
-        ImGui::PopID();
-    }
-    if (removeState >= 0) { m_asset.states.erase(m_asset.states.begin() + removeState); m_controllerDirty = true; }
-    if (ImGui::Button("Add State")) { EditorScene::AnimationStateNode s; s.name = "State" + std::to_string(m_asset.states.size() + 1); m_asset.states.push_back(std::move(s)); m_controllerDirty = true; }
-    ImGui::SameLine();
-    if (ImGui::Button("Create 1D Locomotion")) {
-        // Build a single locomotion blend-space state from clips named Idle/Walk/Run.
-        EditorScene::AnimationStateNode loco;
-        loco.name = "Locomotion"; loco.blendParameter = "Speed"; loco.synchronizeBlendSpace = true;
-        auto has = [&](const char* n) { for (const auto& c : m_asset.clips) if (c.clipName == n) return true; return false; };
-        if (has("Idle")) loco.blendSamples.push_back({0, "Idle", 0.0f, 0.0f});
-        if (has("Walk")) loco.blendSamples.push_back({0, "Walk", 1.5f, 0.0f});
-        if (has("Run"))  loco.blendSamples.push_back({0, "Run", 4.0f, 0.0f});
-        if (has("Idle")) loco.clipName = "Idle";
-        m_asset.states.push_back(std::move(loco));
-        bool hasSpeed = false; for (const auto& p : m_asset.parameters) if (p.name == "Speed") hasSpeed = true;
-        if (!hasSpeed) m_asset.parameters.push_back({ "Speed", EditorScene::AnimationParameter::Type::Float, 0.0f });
-        m_controllerDirty = true;
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Create 2D Locomotion")) {
-        EditorScene::AnimationStateNode loco;
-        loco.name = "Locomotion";
-        loco.blendParameter = "Speed";
-        loco.blendParameterY = "Direction";
-        loco.blendSpace2D = true;
-        loco.synchronizeBlendSpace = true;
-        const auto find = [&](const std::initializer_list<const char*> words) -> std::string {
-            for (const AnimationGraphClip& c : m_asset.clips) {
-                const std::string name = Lower(c.clipName);
-                for (const char* word : words)
-                    if (name.find(Lower(word)) != std::string::npos) return c.clipName;
-            }
-            return {};
-        };
-        const std::string idle = find({"idle"});
-        const std::string forward = find({"forward", "walk"});
-        const std::string backward = find({"backward", "back"});
-        const std::string left = find({"left", "strafe left"});
-        const std::string right = find({"right", "strafe right"});
-        if (!idle.empty()) loco.blendSamples.push_back({0, idle, 0.0f, 0.0f});
-        if (!forward.empty()) loco.blendSamples.push_back({0, forward, 1.0f, 0.0f});
-        if (!backward.empty()) loco.blendSamples.push_back({0, backward, 1.0f, -180.0f});
-        if (!left.empty()) loco.blendSamples.push_back({0, left, 1.0f, -90.0f});
-        if (!right.empty()) loco.blendSamples.push_back({0, right, 1.0f, 90.0f});
-        loco.clipName = !idle.empty() ? idle : (!forward.empty() ? forward : std::string());
-        m_asset.states.push_back(std::move(loco));
-        const auto ensureFloat = [&](const char* name) {
-            const bool found = std::any_of(m_asset.parameters.begin(), m_asset.parameters.end(),
-                [&](const auto& p) { return p.name == name; });
-            if (!found) m_asset.parameters.push_back({
-                name, EditorScene::AnimationParameter::Type::Float, 0.0f});
-        };
-        ensureFloat("Speed");
-        ensureFloat("Direction");
-        m_controllerDirty = true;
-    }
-
-    ImGui::SeparatorText("Transitions");
-    const char* compares[] = { ">=", "<", "==", "!=", "<=", ">" };
-    int removeTransition = -1;
-    for (std::size_t i = 0; i < m_asset.transitions.size(); ++i) {
-        auto& t = m_asset.transitions[i];
-        ImGui::PushID(7000 + static_cast<int>(i));
-        const auto stateCombo = [&](const char* label, std::string& value, bool any) {
-            if (ImGui::BeginCombo(label, value.empty() ? (any ? "Any" : "None") : value.c_str())) {
-                if (any && ImGui::Selectable("Any", value.empty())) { value.clear(); m_controllerDirty = true; }
-                for (std::size_t stateIndex = 0; stateIndex < m_asset.states.size(); ++stateIndex) {
-                    const auto& state = m_asset.states[stateIndex];
-                    ImGui::PushID(static_cast<int>(stateIndex));
-                    if (ImGui::Selectable(state.name.c_str(), value == state.name)) {
-                        value = state.name;
-                        m_controllerDirty = true;
-                    }
-                    ImGui::PopID();
-                }
-                ImGui::EndCombo();
-            }
-        };
-        stateCombo("From", t.fromState, true); stateCombo("To", t.toState, false);
-        ImGui::SeparatorText("Conditions");
-        if (ImGui::Checkbox("Use Conditions", &t.useConditions)) {
-            m_controllerDirty = true;
-        }
-        if (t.useConditions) {
-            int conditionMode = t.requireAllConditions ? 0 : 1;
-            const char* conditionModes[] = { "All conditions (AND)", "Any condition (OR)" };
-            if (ImGui::Combo("Match", &conditionMode, conditionModes, 2)) {
-                t.requireAllConditions = conditionMode == 0;
-                m_controllerDirty = true;
-            }
-            ImGui::TextDisabled("Condition 1");
-            if (ImGui::BeginCombo("Parameter", t.parameter.empty() ? "None" : t.parameter.c_str())) {
-                for (std::size_t parameterIndex = 0; parameterIndex < m_asset.parameters.size(); ++parameterIndex) {
-                    const auto& parameter = m_asset.parameters[parameterIndex];
-                    ImGui::PushID(static_cast<int>(parameterIndex));
-                    if (ImGui::Selectable(parameter.name.c_str(), t.parameter == parameter.name)) {
-                        t.parameter = parameter.name;
-                        m_controllerDirty = true;
-                    }
-                    ImGui::PopID();
-                }
-                ImGui::EndCombo();
-            }
-            EditorScene::AnimationParameter::Type paramType = EditorScene::AnimationParameter::Type::Float;
-        for (const auto& p : m_asset.parameters) if (p.name == t.parameter) { paramType = p.type; break; }
-        using Comp = EditorScene::AnimationStateTransition::Compare;
-        if (paramType == EditorScene::AnimationParameter::Type::Bool || paramType == EditorScene::AnimationParameter::Type::Trigger) {
-            const char* conds[] = { "is false", "is true (or triggered)" };
-            int sel = (t.threshold >= 0.5f) ? 1 : 0;
-            ImGui::Combo("Condition", &sel, conds, 2);
-            const float want = sel ? 1.0f : 0.0f;
-            if (t.compare != Comp::Equal || t.threshold != want) { t.compare = Comp::Equal; t.threshold = want; m_controllerDirty = true; }
-        } else {
-            int compare = std::clamp(static_cast<int>(t.compare), 0, 5);
-            if (ImGui::Combo("Compare", &compare, compares, 6)) { t.compare = static_cast<Comp>(compare); m_controllerDirty = true; }
-            if (ImGui::DragFloat("Threshold", &t.threshold, .05f)) m_controllerDirty = true;
-        }
-        int removeCondition = -1;
-        for (std::size_t conditionIndex = 0;
-             conditionIndex < t.additionalConditions.size(); ++conditionIndex) {
-            auto& condition = t.additionalConditions[conditionIndex];
-            ImGui::PushID(8000 + static_cast<int>(conditionIndex));
-            ImGui::Separator();
-            ImGui::TextDisabled("Condition %d", static_cast<int>(conditionIndex) + 2);
-            if (ImGui::BeginCombo("Parameter",
-                    condition.parameter.empty() ? "None" : condition.parameter.c_str())) {
-                for (std::size_t parameterIndex = 0;
-                     parameterIndex < m_asset.parameters.size(); ++parameterIndex) {
-                    const auto& parameter = m_asset.parameters[parameterIndex];
-                    ImGui::PushID(static_cast<int>(parameterIndex));
-                    if (ImGui::Selectable(parameter.name.c_str(),
-                            condition.parameter == parameter.name)) {
-                        condition.parameter = parameter.name;
-                        m_controllerDirty = true;
-                    }
-                    ImGui::PopID();
-                }
-                ImGui::EndCombo();
-            }
-            EditorScene::AnimationParameter::Type conditionType =
-                EditorScene::AnimationParameter::Type::Float;
-            for (const auto& parameter : m_asset.parameters) {
-                if (parameter.name == condition.parameter) {
-                    conditionType = parameter.type;
-                    break;
-                }
-            }
-            if (conditionType == EditorScene::AnimationParameter::Type::Bool
-                || conditionType == EditorScene::AnimationParameter::Type::Trigger) {
-                const char* conditions[] = { "is false", "is true (or triggered)" };
-                int selected = condition.threshold >= 0.5f ? 1 : 0;
-                if (ImGui::Combo("Condition", &selected, conditions, 2)) {
-                    condition.compare =
-                        EditorScene::AnimationStateTransition::Compare::Equal;
-                    condition.threshold = selected ? 1.0f : 0.0f;
-                    m_controllerDirty = true;
-                }
-            } else {
-                int compare = std::clamp(static_cast<int>(condition.compare), 0, 5);
-                if (ImGui::Combo("Compare", &compare, compares, 6)) {
-                    condition.compare =
-                        static_cast<EditorScene::AnimationStateTransition::Compare>(compare);
-                    m_controllerDirty = true;
-                }
-                if (ImGui::DragFloat("Threshold", &condition.threshold, .05f))
-                    m_controllerDirty = true;
-                }
-                if (ImGui::SmallButton("Remove Condition"))
-                    removeCondition = static_cast<int>(conditionIndex);
-                ImGui::PopID();
-            }
-            if (removeCondition >= 0) {
-                t.additionalConditions.erase(
-                    t.additionalConditions.begin() + removeCondition);
-                m_controllerDirty = true;
-            }
-            if (ImGui::SmallButton("Add Condition")) {
-                EditorScene::AnimationStateTransition::Condition condition;
-                if (!m_asset.parameters.empty()) {
-                    const auto& param = m_asset.parameters.front();
-                    condition.parameter = param.name;
-                    using PT = EditorScene::AnimationParameter::Type;
-                    if (param.type == PT::Bool || param.type == PT::Trigger) {
-                        condition.compare = Comp::Equal; condition.threshold = 1.0f;
-                    } else {
-                        condition.compare = Comp::Greater; condition.threshold = 0.1f;
-                    }
-                }
-                t.additionalConditions.push_back(std::move(condition));
-                m_controllerDirty = true;
-            }
-        }
-        else {
-            ImGui::TextDisabled("Transition is controlled by Exit Time only.");
-        }
-        ImGui::Separator();
-        if (ImGui::DragFloat("Fade", &t.fade, .01f, 0.0f, 5.0f)) m_controllerDirty = true;
-        if (ImGui::SliderFloat("Exit Time", &t.exitTime, 0.0f, 1.0f)) m_controllerDirty = true;
-        if (!t.useConditions && t.exitTime <= 0.0f) {
-            ImGui::TextColored(
-                ImVec4(1.0f, 0.65f, 0.2f, 1.0f),
-                "Warning: conditions are disabled and Exit Time is 0.\n"
-                "This transition can happen immediately."
-            );
-        }
-        if (ImGui::Checkbox("Interrupt", &t.canInterrupt)) m_controllerDirty = true;
-        if (ImGui::SmallButton("Remove Transition")) removeTransition = static_cast<int>(i);
-        ImGui::Separator();
-        ImGui::PopID();
-    }
-    if (removeTransition >= 0) { m_asset.transitions.erase(m_asset.transitions.begin() + removeTransition); m_controllerDirty = true; }
-    if (ImGui::Button("Add Transition") && !m_asset.states.empty()) {
-        EditorScene::AnimationStateTransition t;
-        t.fromState = m_asset.states.front().name;
-        t.toState = m_asset.states.size() > 1 ? m_asset.states[1].name : m_asset.states.front().name;
+    m_asset.NormalizeGraphMetadata(false, false);
+    const auto stateById = [&](engine::AssetHandle id) -> EditorScene::AnimationStateNode* {
+        for (auto& state : m_asset.states) if (state.graphId == id) return &state;
+        return nullptr;
+    };
+    const auto layoutById = [&](engine::AssetHandle id) -> AnimationGraphAsset::NodeLayout* {
+        for (auto& layout : m_asset.nodeLayouts) if (layout.stateId == id) return &layout;
+        return nullptr;
+    };
+    const auto transitionById = [&](engine::AssetHandle id) -> EditorScene::AnimationStateTransition* {
+        for (auto& transition : m_asset.transitions) if (transition.graphId == id) return &transition;
+        return nullptr;
+    };
+    const auto addDefaultTransition = [&](engine::AssetHandle from, engine::AssetHandle to) {
+        if (!to.Valid() || from == to) return;
+        EditorScene::AnimationStateTransition transition;
+        transition.graphId = engine::AssetHandle::Generate();
+        transition.fromStateId = from;
+        transition.toStateId = to;
+        if (const auto* state = stateById(from)) transition.fromState = state->name;
+        if (const auto* state = stateById(to)) transition.toState = state->name;
         if (!m_asset.parameters.empty()) {
-            const auto& param = m_asset.parameters.front();
-            t.parameter = param.name;
-            // Avoid an always-true default: "Speed >= 0" fires on frame 1 and skips the
-            // state. Bools/triggers compare == true; numeric params fire only above a small
-            // threshold so a resting character stays put.
-            using PT = EditorScene::AnimationParameter::Type;
-            using Comp = EditorScene::AnimationStateTransition::Compare;
-            if (param.type == PT::Bool || param.type == PT::Trigger) {
-                t.compare = Comp::Equal; t.threshold = 1.0f;
+            const auto& parameter = m_asset.parameters.front();
+            transition.parameter = parameter.name;
+            using P = EditorScene::AnimationParameter::Type;
+            using C = EditorScene::AnimationStateTransition::Compare;
+            if (parameter.type == P::Bool || parameter.type == P::Trigger) {
+                transition.compare = C::Equal; transition.threshold = 1.0f;
             } else {
-                t.compare = Comp::Greater; t.threshold = 0.1f;
+                transition.compare = C::Greater; transition.threshold = 0.1f;
             }
         }
-        m_asset.transitions.push_back(std::move(t)); m_controllerDirty = true;
+        m_asset.transitions.push_back(std::move(transition));
+        m_selectionType = SelectionType::Transition;
+        m_selectedId = m_asset.transitions.back().graphId;
+        m_controllerDirty = true;
+    };
+
+    ImGui::SeparatorText("State Machine");
+    bool deleteSelection = false;
+    if (ImGui::Button("Add State")) {
+        EditorScene::AnimationStateNode state;
+        state.graphId = engine::AssetHandle::Generate();
+        state.name = "State " + std::to_string(m_asset.states.size() + 1);
+        m_asset.states.push_back(state);
+        m_asset.nodeLayouts.push_back({state.graphId, {80.0f, 80.0f}, false});
+        if (!m_asset.entryStateId.Valid()) m_asset.entryStateId = state.graphId;
+        m_selectionType = SelectionType::State; m_selectedId = state.graphId;
+        m_controllerDirty = true;
+    }
+    ImGui::SameLine();
+    const bool frameAllRequested = ImGui::Button("Frame All");
+    ImGui::SameLine();
+    ImGui::TextDisabled("Right-click empty space: Add State | drag output to input: transition");
+
+    const float detailsWidth = std::clamp(ImGui::GetContentRegionAvail().x * 0.27f, 260.0f, 390.0f);
+    const float parametersWidth = std::clamp(ImGui::GetContentRegionAvail().x * 0.18f, 170.0f, 250.0f);
+    ImGui::BeginChild("GraphParameters", ImVec2(parametersWidth, 0.0f), true);
+    ImGui::TextDisabled("PARAMETERS");
+    int removeParameter = -1;
+    for (std::size_t i = 0; i < m_asset.parameters.size(); ++i) {
+        auto& parameter = m_asset.parameters[i];
+        ImGui::PushID(5000 + static_cast<int>(i));
+        const std::string oldName = parameter.name;
+        std::array<char, 64> buffer{}; Copy(buffer, parameter.name);
+        ImGui::SetNextItemWidth(-52.0f);
+        if (ImGui::InputText("##Name", buffer.data(), buffer.size())) {
+            parameter.name = buffer.data();
+            if (!parameter.name.empty() && parameter.name != oldName) {
+                for (auto& state : m_asset.states) {
+                    if (state.blendParameter == oldName) state.blendParameter = parameter.name;
+                    if (state.blendParameterY == oldName) state.blendParameterY = parameter.name;
+                }
+                for (auto& transition : m_asset.transitions) {
+                    if (transition.parameter == oldName) transition.parameter = parameter.name;
+                    for (auto& condition : transition.additionalConditions)
+                        if (condition.parameter == oldName) condition.parameter = parameter.name;
+                }
+                const auto value = m_params.find(oldName);
+                if (value != m_params.end()) { m_params[parameter.name] = value->second; m_params.erase(value); }
+                m_controllerDirty = true;
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("X")) removeParameter = static_cast<int>(i);
+        int type = static_cast<int>(parameter.type);
+        const char* types[] = {"Float", "Bool", "Trigger"};
+        ImGui::SetNextItemWidth(-1.0f);
+        if (ImGui::Combo("##Type", &type, types, 3)) {
+            parameter.type = static_cast<EditorScene::AnimationParameter::Type>(type);
+            m_controllerDirty = true;
+        }
+        if (parameter.type != EditorScene::AnimationParameter::Type::Trigger)
+            if (ImGui::DragFloat("Default", &parameter.defaultValue, 0.02f)) m_controllerDirty = true;
+        ImGui::Separator();
+        ImGui::PopID();
+    }
+    if (removeParameter >= 0) {
+        const std::string removed = m_asset.parameters[static_cast<std::size_t>(removeParameter)].name;
+        m_asset.parameters.erase(m_asset.parameters.begin() + removeParameter);
+        for (auto& transition : m_asset.transitions) {
+            if (transition.parameter == removed) transition.parameter.clear();
+            transition.additionalConditions.erase(std::remove_if(transition.additionalConditions.begin(),
+                transition.additionalConditions.end(), [&](const auto& c) { return c.parameter == removed; }),
+                transition.additionalConditions.end());
+        }
+        m_controllerDirty = true;
+    }
+    if (ImGui::Button("+ Parameter", ImVec2(-1.0f, 0.0f))) {
+        std::string name = "Parameter"; int suffix = 2;
+        const auto exists = [&](const std::string& candidate) { return std::any_of(m_asset.parameters.begin(),
+            m_asset.parameters.end(), [&](const auto& p) { return p.name == candidate; }); };
+        while (exists(name)) name = "Parameter " + std::to_string(suffix++);
+        m_asset.parameters.push_back({name, EditorScene::AnimationParameter::Type::Float, 0.0f});
+        m_controllerDirty = true;
+    }
+    ImGui::EndChild();
+    ImGui::SameLine();
+
+    ImGui::BeginChild("GraphCanvas", ImVec2(-detailsWidth - ImGui::GetStyle().ItemSpacing.x, 0.0f), true,
+                      ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoScrollbar);
+    const ImVec2 canvasOrigin = ImGui::GetCursorScreenPos();
+    const ImVec2 canvasSize = ImGui::GetContentRegionAvail();
+    bool graphContextRequested = false;
+    ImGui::SetNextItemAllowOverlap();
+    ImGui::InvisibleButton("CanvasBackground", canvasSize,
+        ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonMiddle | ImGuiButtonFlags_MouseButtonRight);
+    const bool canvasHovered = ImGui::IsItemHovered();
+    if (frameAllRequested) {
+        glm::vec2 minimum = glm::min(m_asset.entryNodePosition, m_asset.anyStateNodePosition);
+        glm::vec2 maximum = glm::max(m_asset.entryNodePosition, m_asset.anyStateNodePosition)
+            + glm::vec2(190.0f, 70.0f);
+        for (const auto& layout : m_asset.nodeLayouts) {
+            minimum = glm::min(minimum, layout.position);
+            maximum = glm::max(maximum, layout.position + glm::vec2(190.0f, 70.0f));
+        }
+        const glm::vec2 extent = glm::max(maximum - minimum, glm::vec2(1.0f));
+        const float availableX = std::max(canvasSize.x - 48.0f, 1.0f);
+        const float availableY = std::max(canvasSize.y - 48.0f, 1.0f);
+        m_canvasZoom = std::clamp(std::min(availableX / extent.x, availableY / extent.y),
+                                  0.35f, 1.5f);
+        m_canvasPan = glm::vec2(24.0f) - minimum * m_canvasZoom
+            + glm::max((glm::vec2(canvasSize.x, canvasSize.y) - extent * m_canvasZoom
+                        - glm::vec2(48.0f)) * 0.5f,
+                       glm::vec2(0.0f));
+    }
+    if (canvasHovered && ImGui::GetIO().MouseWheel != 0.0f) {
+        const float oldZoom = m_canvasZoom;
+        m_canvasZoom = std::clamp(m_canvasZoom * std::pow(1.12f, ImGui::GetIO().MouseWheel), 0.35f, 2.2f);
+        const ImVec2 mouse = ImGui::GetMousePos();
+        m_canvasPan.x = mouse.x - canvasOrigin.x - (mouse.x - canvasOrigin.x - m_canvasPan.x) * (m_canvasZoom / oldZoom);
+        m_canvasPan.y = mouse.y - canvasOrigin.y - (mouse.y - canvasOrigin.y - m_canvasPan.y) * (m_canvasZoom / oldZoom);
+    }
+    if (canvasHovered && ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
+        m_canvasPan.x += ImGui::GetIO().MouseDelta.x;
+        m_canvasPan.y += ImGui::GetIO().MouseDelta.y;
+    }
+    if (canvasHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+        const ImVec2 click = ImGui::GetMousePos();
+        m_contextGraphPosition = {
+            (click.x - canvasOrigin.x - m_canvasPan.x) / m_canvasZoom,
+            (click.y - canvasOrigin.y - m_canvasPan.y) / m_canvasZoom};
+        graphContextRequested = true;
+    }
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    draw->AddRectFilled(canvasOrigin, {canvasOrigin.x + canvasSize.x, canvasOrigin.y + canvasSize.y}, IM_COL32(22, 25, 31, 255));
+    const float grid = 32.0f * m_canvasZoom;
+    if (grid >= 10.0f) {
+        for (float x = std::fmod(m_canvasPan.x, grid); x < canvasSize.x; x += grid)
+            draw->AddLine({canvasOrigin.x + x, canvasOrigin.y}, {canvasOrigin.x + x, canvasOrigin.y + canvasSize.y}, IM_COL32(48, 53, 63, 120));
+        for (float y = std::fmod(m_canvasPan.y, grid); y < canvasSize.y; y += grid)
+            draw->AddLine({canvasOrigin.x, canvasOrigin.y + y}, {canvasOrigin.x + canvasSize.x, canvasOrigin.y + y}, IM_COL32(48, 53, 63, 120));
+    }
+    const auto screen = [&](glm::vec2 p) { return ImVec2(canvasOrigin.x + m_canvasPan.x + p.x * m_canvasZoom,
+                                                           canvasOrigin.y + m_canvasPan.y + p.y * m_canvasZoom); };
+    const ImVec2 nodeSize(190.0f * m_canvasZoom, 70.0f * m_canvasZoom);
+    const auto nodeInput = [&](engine::AssetHandle id) { auto* l = layoutById(id); const ImVec2 p = screen(l ? l->position : glm::vec2(0)); return ImVec2(p.x, p.y + nodeSize.y * 0.5f); };
+    const auto nodeOutput = [&](engine::AssetHandle id) { auto* l = layoutById(id); const ImVec2 p = screen(l ? l->position : glm::vec2(0)); return ImVec2(p.x + nodeSize.x, p.y + nodeSize.y * 0.5f); };
+
+    // Links are editor projections of the existing transition array.
+    const ImVec2 mouse = ImGui::GetMousePos();
+    for (auto& transition : m_asset.transitions) {
+        if (!transition.toStateId.Valid() || !stateById(transition.toStateId)
+            || (transition.fromStateId.Valid() && !stateById(transition.fromStateId)))
+            continue;
+        const ImVec2 from = transition.fromStateId.Valid() ? nodeOutput(transition.fromStateId)
+            : ImVec2(screen(m_asset.anyStateNodePosition).x + nodeSize.x, screen(m_asset.anyStateNodePosition).y + nodeSize.y * 0.5f);
+        const ImVec2 to = nodeInput(transition.toStateId);
+        const bool selected = m_selectionType == SelectionType::Transition && m_selectedId == transition.graphId;
+        const bool hovered = DistanceToSegment(mouse, from, to) < 8.0f;
+        draw->AddBezierCubic(from, {from.x + 65.0f * m_canvasZoom, from.y},
+            {to.x - 65.0f * m_canvasZoom, to.y}, to,
+            selected ? IM_COL32(255, 186, 55, 255) : hovered ? IM_COL32(190, 215, 245, 255) : IM_COL32(135, 155, 182, 230),
+            selected ? 3.0f : 2.0f);
+        const ImVec2 direction(to.x - from.x, to.y - from.y);
+        const float len = std::max(std::hypot(direction.x, direction.y), 1.0f);
+        const ImVec2 unit(direction.x / len, direction.y / len);
+        draw->AddTriangleFilled(to, {to.x - unit.x * 12.0f - unit.y * 6.0f, to.y - unit.y * 12.0f + unit.x * 6.0f},
+            {to.x - unit.x * 12.0f + unit.y * 6.0f, to.y - unit.y * 12.0f - unit.x * 6.0f}, IM_COL32(160, 180, 205, 255));
+        if (canvasHovered && hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            m_selectionType = SelectionType::Transition; m_selectedId = transition.graphId;
+        }
+        if (canvasHovered && hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+            graphContextRequested = false;
+            m_selectionType = SelectionType::Transition; m_selectedId = transition.graphId;
+            ImGui::OpenPopup("TransitionContext");
+        }
+    }
+    if (ImGui::BeginPopup("TransitionContext")) {
+        if (ImGui::MenuItem("Delete Transition")) {
+            const engine::AssetHandle deleted = m_selectedId;
+            m_asset.transitions.erase(std::remove_if(
+                m_asset.transitions.begin(), m_asset.transitions.end(),
+                [&](const auto& transition) { return transition.graphId == deleted; }),
+                m_asset.transitions.end());
+            m_selectionType = SelectionType::None;
+            m_selectedId = {};
+            m_controllerDirty = true;
+        }
+        ImGui::EndPopup();
+    }
+    if (m_asset.entryStateId.Valid()) {
+        const ImVec2 from(screen(m_asset.entryNodePosition).x + nodeSize.x,
+                          screen(m_asset.entryNodePosition).y + nodeSize.y * 0.5f);
+        const ImVec2 to = nodeInput(m_asset.entryStateId);
+        draw->AddBezierCubic(from, {from.x + 55.0f * m_canvasZoom, from.y},
+            {to.x - 55.0f * m_canvasZoom, to.y}, to, IM_COL32(120, 220, 140, 255), 2.5f);
     }
 
+    const auto drawSpecialNode = [&](const char* label, glm::vec2& position, bool anyState) {
+        const ImVec2 p = screen(position);
+        ImGui::SetCursorScreenPos(p); ImGui::PushID(label);
+        ImGui::SetNextItemAllowOverlap();
+        ImGui::InvisibleButton("Body", nodeSize);
+        if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) graphContextRequested = false;
+        if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+            position += glm::vec2(ImGui::GetIO().MouseDelta.x, ImGui::GetIO().MouseDelta.y) / m_canvasZoom;
+        }
+        draw->AddRectFilled(p, {p.x + nodeSize.x, p.y + nodeSize.y}, anyState ? IM_COL32(86, 65, 112, 255) : IM_COL32(55, 100, 68, 255), 7.0f);
+        draw->AddRect(p, {p.x + nodeSize.x, p.y + nodeSize.y}, IM_COL32(180, 195, 215, 255), 7.0f, 0, 1.5f);
+        draw->AddText({p.x + 13.0f, p.y + 24.0f * m_canvasZoom}, IM_COL32_WHITE, label);
+        const ImVec2 out(p.x + nodeSize.x, p.y + nodeSize.y * 0.5f);
+        draw->AddCircleFilled(out, 7.0f, IM_COL32(225, 225, 235, 255));
+        ImGui::SetCursorScreenPos({out.x - 10.0f, out.y - 10.0f});
+        ImGui::InvisibleButton("Output", {20.0f, 20.0f});
+        if (ImGui::IsItemClicked()) { m_linking = true; m_linkingFromAny = anyState; m_linkSourceId = {}; }
+        ImGui::PopID();
+    };
+    drawSpecialNode("Entry", m_asset.entryNodePosition, false);
+    drawSpecialNode("Any State", m_asset.anyStateNodePosition, true);
+
+    for (auto& state : m_asset.states) {
+        auto* layout = layoutById(state.graphId); if (!layout) continue;
+        const ImVec2 p = screen(layout->position);
+        ImGui::SetCursorScreenPos(p); ImGui::PushID(state.graphId.ToString().c_str());
+        ImGui::SetNextItemAllowOverlap();
+        ImGui::InvisibleButton("Body", nodeSize);
+        if (ImGui::IsItemClicked()) { m_selectionType = SelectionType::State; m_selectedId = state.graphId; }
+        if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+            graphContextRequested = false;
+            m_selectionType = SelectionType::State;
+            m_selectedId = state.graphId;
+            ImGui::OpenPopup("StateContext");
+        }
+        if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+            layout->position += glm::vec2(ImGui::GetIO().MouseDelta.x, ImGui::GetIO().MouseDelta.y) / m_canvasZoom;
+            m_dirty = true;
+        }
+        const bool selected = m_selectionType == SelectionType::State && m_selectedId == state.graphId;
+        const bool active = m_controller.CurrentStateName() == state.name;
+        draw->AddRectFilled(p, {p.x + nodeSize.x, p.y + nodeSize.y}, IM_COL32(48, 60, 78, 255), 7.0f);
+        draw->AddRectFilled(p, {p.x + nodeSize.x, p.y + 25.0f * m_canvasZoom}, active ? IM_COL32(55, 135, 82, 255) : IM_COL32(58, 93, 132, 255), 7.0f, ImDrawFlags_RoundCornersTop);
+        draw->AddRect(p, {p.x + nodeSize.x, p.y + nodeSize.y}, selected ? IM_COL32(255, 184, 45, 255) : IM_COL32(105, 125, 150, 255), 7.0f, 0, selected ? 3.0f : 1.0f);
+        draw->AddText({p.x + 10.0f, p.y + 6.0f}, IM_COL32_WHITE, state.name.c_str());
+        draw->AddText({p.x + 10.0f, p.y + 37.0f * m_canvasZoom}, IM_COL32(190, 205, 222, 255), MotionSourceName(state.motionSourceType));
+        const ImVec2 input(p.x, p.y + nodeSize.y * 0.5f), output(p.x + nodeSize.x, p.y + nodeSize.y * 0.5f);
+        draw->AddCircleFilled(input, 7.0f, IM_COL32(220, 225, 235, 255));
+        draw->AddCircleFilled(output, 7.0f, IM_COL32(220, 225, 235, 255));
+        ImGui::SetCursorScreenPos({input.x - 10.0f, input.y - 10.0f}); ImGui::InvisibleButton("Input", {20.0f, 20.0f});
+        if (ImGui::IsItemClicked() && m_linking) {
+            if (m_linkingFromAny) addDefaultTransition({}, state.graphId);
+            else if (!m_linkSourceId.Valid()) { m_asset.entryStateId = state.graphId; m_controllerDirty = true; }
+            else addDefaultTransition(m_linkSourceId, state.graphId);
+            m_linking = false;
+        }
+        ImGui::SetCursorScreenPos({output.x - 10.0f, output.y - 10.0f}); ImGui::InvisibleButton("Output", {20.0f, 20.0f});
+        if (ImGui::IsItemClicked()) { m_linking = true; m_linkingFromAny = false; m_linkSourceId = state.graphId; }
+        if (ImGui::BeginPopup("StateContext")) {
+            if (ImGui::MenuItem("Set as Entry", nullptr,
+                                m_asset.entryStateId == state.graphId)) {
+                m_asset.entryStateId = state.graphId;
+                m_controllerDirty = true;
+            }
+            if (ImGui::MenuItem("Delete State")) {
+                m_selectionType = SelectionType::State;
+                m_selectedId = state.graphId;
+                deleteSelection = true;
+            }
+            ImGui::EndPopup();
+        }
+        ImGui::PopID();
+    }
+    if (graphContextRequested) ImGui::OpenPopup("GraphContext");
+    if (ImGui::BeginPopup("GraphContext")) {
+        if (ImGui::MenuItem("Add State")) {
+            EditorScene::AnimationStateNode state;
+            state.graphId = engine::AssetHandle::Generate();
+            state.name = "State " + std::to_string(m_asset.states.size() + 1);
+            m_asset.states.push_back(state);
+            m_asset.nodeLayouts.push_back(
+                {state.graphId, m_contextGraphPosition, false});
+            if (!m_asset.entryStateId.Valid()) m_asset.entryStateId = state.graphId;
+            m_selectionType = SelectionType::State;
+            m_selectedId = state.graphId;
+            m_controllerDirty = true;
+        }
+        ImGui::EndPopup();
+    }
+    if (m_linking) {
+        ImVec2 from;
+        if (m_linkingFromAny) { const ImVec2 p = screen(m_asset.anyStateNodePosition); from = {p.x + nodeSize.x, p.y + nodeSize.y * 0.5f}; }
+        else if (m_linkSourceId.Valid()) from = nodeOutput(m_linkSourceId);
+        else { const ImVec2 p = screen(m_asset.entryNodePosition); from = {p.x + nodeSize.x, p.y + nodeSize.y * 0.5f}; }
+        draw->AddBezierCubic(from, {from.x + 60.0f, from.y}, {mouse.x - 60.0f, mouse.y}, mouse, IM_COL32(255, 190, 60, 255), 2.5f);
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) m_linking = false;
+    }
+    ImGui::SetCursorScreenPos({canvasOrigin.x + 8.0f, canvasOrigin.y + canvasSize.y - 22.0f});
+    ImGui::TextDisabled("%.0f%%", m_canvasZoom * 100.0f);
+    ImGui::EndChild();
+    ImGui::SameLine();
+
+    ImGui::BeginChild("GraphDetails", ImVec2(0.0f, 0.0f), true);
+    ImGui::TextDisabled("DETAILS");
+    if (m_selectionType == SelectionType::State) {
+        if (auto* state = stateById(m_selectedId)) {
+            std::array<char, 96> name{}; Copy(name, state->name);
+            const std::string oldName = state->name;
+            if (ImGui::InputText("State Name", name.data(), name.size())) {
+                std::string candidate = name.data();
+                const bool duplicate = candidate.empty() || std::any_of(m_asset.states.begin(), m_asset.states.end(),
+                    [&](const auto& other) { return other.graphId != state->graphId && other.name == candidate; });
+                if (!duplicate) { state->name = candidate; m_asset.NormalizeGraphMetadata(false, false); m_controllerDirty = true; }
+            }
+            int source = static_cast<int>(state->motionSourceType);
+            const char* sources[] = {"Animation Clip", "Blend Space 1D", "Blend Space 2D"};
+            if (ImGui::Combo("Motion Source", &source, sources, 3)) {
+                state->motionSourceType = static_cast<EditorScene::AnimationStateNode::MotionSourceType>(source);
+                state->blendSpace2D = source == 2;
+                if (source != 0 && state->blendParameter.empty()) state->blendParameter = "Speed";
+                if (source == 2 && state->blendParameterY.empty()) state->blendParameterY = "Direction";
+                m_controllerDirty = true;
+            }
+            if (state->motionSourceType == EditorScene::AnimationStateNode::MotionSourceType::Clip) {
+                clipNameCombo("Clip", state->clipName);
+            } else {
+                const auto parameterCombo = [&](const char* label, std::string& value) {
+                    if (ImGui::BeginCombo(label, value.empty() ? "None" : value.c_str())) {
+                        for (const auto& parameter : m_asset.parameters) {
+                            if (parameter.type != EditorScene::AnimationParameter::Type::Float) continue;
+                            if (ImGui::Selectable(parameter.name.c_str(), value == parameter.name)) { value = parameter.name; m_controllerDirty = true; }
+                        }
+                        ImGui::EndCombo();
+                    }
+                };
+                parameterCombo("X Parameter", state->blendParameter);
+                if (state->motionSourceType == EditorScene::AnimationStateNode::MotionSourceType::BlendSpace2D)
+                    parameterCombo("Y Parameter", state->blendParameterY);
+                if (ImGui::Checkbox("Synchronize Samples", &state->synchronizeBlendSpace)) m_controllerDirty = true;
+                ImGui::SeparatorText("Samples");
+                int removeSample = -1;
+                for (std::size_t i = 0; i < state->blendSamples.size(); ++i) {
+                    auto& sample = state->blendSamples[i]; ImGui::PushID(static_cast<int>(i));
+                    clipNameCombo("Clip", sample.clipName);
+                    if (ImGui::DragFloat("X", &sample.value, 0.05f)) m_controllerDirty = true;
+                    if (state->motionSourceType == EditorScene::AnimationStateNode::MotionSourceType::BlendSpace2D)
+                        if (ImGui::DragFloat("Y", &sample.valueY, 0.05f)) m_controllerDirty = true;
+                    if (ImGui::SmallButton("Remove Sample")) removeSample = static_cast<int>(i);
+                    ImGui::Separator(); ImGui::PopID();
+                }
+                if (removeSample >= 0) { state->blendSamples.erase(state->blendSamples.begin() + removeSample); m_controllerDirty = true; }
+                if (ImGui::Button("Add Sample")) { state->blendSamples.push_back({}); m_controllerDirty = true; }
+            }
+            if (ImGui::Checkbox("Loop", &state->loop)) m_controllerDirty = true;
+            const auto baseSpeedFor = [&](int fallback, const std::string& alias) {
+                const AnimationGraphClip* found = nullptr;
+                for (const auto& candidate : m_asset.clips)
+                    if (candidate.clipName == alias) { found = &candidate; break; }
+                if (!found && fallback >= 0 && fallback < static_cast<int>(m_asset.clips.size()))
+                    found = &m_asset.clips[static_cast<std::size_t>(fallback)];
+                AnimationClipAsset clip;
+                return found && clip.Load(found->clipAsset, nullptr)
+                    ? std::max(clip.speed, 0.0f) : 1.0f;
+            };
+            if (state->motionSourceType == EditorScene::AnimationStateNode::MotionSourceType::Clip) {
+                const float base = baseSpeedFor(state->clipIndex, state->clipName);
+                ImGui::TextDisabled("Clip Base Speed: %.2fx", base);
+                ImGui::TextDisabled("Effective Speed: %.2fx", base * std::max(state->speed, 0.0f));
+            } else {
+                for (const auto& sample : state->blendSamples)
+                    ImGui::BulletText("%s  Base %.2fx", sample.clipName.c_str(),
+                        baseSpeedFor(sample.clipIndex, sample.clipName));
+            }
+            if (ImGui::DragFloat("Speed Multiplier", &state->speed, 0.02f, 0.0f, 8.0f)) m_controllerDirty = true;
+            if (ImGui::Checkbox("Root Motion", &state->rootMotion)) m_controllerDirty = true;
+            const bool isEntry = m_asset.entryStateId == state->graphId;
+            if (isEntry) ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.55f, 1.0f), "Entry State");
+            else if (ImGui::Button("Set as Entry")) { m_asset.entryStateId = state->graphId; m_controllerDirty = true; }
+            ImGui::Separator();
+            if (ImGui::Button("Delete State")) deleteSelection = true;
+        }
+    } else if (m_selectionType == SelectionType::Transition) {
+        if (auto* transition = transitionById(m_selectedId)) {
+            ImGui::Text("%s -> %s", transition->fromState.empty() ? "Any State" : transition->fromState.c_str(), transition->toState.c_str());
+            if (ImGui::Checkbox("Use Conditions", &transition->useConditions)) m_controllerDirty = true;
+            const char* compares[] = {">=", "<", "==", "!=", "<=", ">"};
+            const auto drawCondition = [&](const char* id, std::string& parameterName,
+                                           EditorScene::AnimationStateTransition::Compare& compareValue,
+                                           float& threshold) {
+                ImGui::PushID(id);
+                if (ImGui::BeginCombo("Parameter", parameterName.empty() ? "None" : parameterName.c_str())) {
+                    for (const auto& parameter : m_asset.parameters)
+                        if (ImGui::Selectable(parameter.name.c_str(), parameter.name == parameterName)) { parameterName = parameter.name; m_controllerDirty = true; }
+                    ImGui::EndCombo();
+                }
+                auto type = EditorScene::AnimationParameter::Type::Float;
+                for (const auto& parameter : m_asset.parameters) if (parameter.name == parameterName) type = parameter.type;
+                if (type == EditorScene::AnimationParameter::Type::Bool || type == EditorScene::AnimationParameter::Type::Trigger) {
+                    bool expected = threshold >= 0.5f;
+                    if (ImGui::Checkbox("Expected", &expected)) { compareValue = EditorScene::AnimationStateTransition::Compare::Equal; threshold = expected ? 1.0f : 0.0f; m_controllerDirty = true; }
+                } else {
+                    int compare = std::clamp(static_cast<int>(compareValue), 0, 5);
+                    if (ImGui::Combo("Compare", &compare, compares, 6)) { compareValue = static_cast<EditorScene::AnimationStateTransition::Compare>(compare); m_controllerDirty = true; }
+                    if (ImGui::DragFloat("Threshold", &threshold, 0.05f)) m_controllerDirty = true;
+                }
+                ImGui::PopID();
+            };
+            if (transition->useConditions) {
+                int mode = transition->requireAllConditions ? 0 : 1;
+                const char* modes[] = {"All (AND)", "Any (OR)"};
+                if (ImGui::Combo("Match", &mode, modes, 2)) { transition->requireAllConditions = mode == 0; m_controllerDirty = true; }
+                ImGui::SeparatorText("Condition 1");
+                drawCondition("Primary", transition->parameter, transition->compare, transition->threshold);
+                int removeCondition = -1;
+                for (std::size_t i = 0; i < transition->additionalConditions.size(); ++i) {
+                    ImGui::SeparatorText(("Condition " + std::to_string(i + 2)).c_str());
+                    auto& condition = transition->additionalConditions[i];
+                    drawCondition(("Extra" + std::to_string(i)).c_str(), condition.parameter, condition.compare, condition.threshold);
+                    ImGui::PushID(9000 + static_cast<int>(i));
+                    if (ImGui::SmallButton("Remove")) removeCondition = static_cast<int>(i);
+                    ImGui::PopID();
+                }
+                if (removeCondition >= 0) { transition->additionalConditions.erase(transition->additionalConditions.begin() + removeCondition); m_controllerDirty = true; }
+                if (ImGui::Button("Add Condition")) { transition->additionalConditions.push_back({}); m_controllerDirty = true; }
+            } else ImGui::TextDisabled("Exit Time only");
+            if (ImGui::DragFloat("Fade", &transition->fade, 0.01f, 0.0f, 5.0f)) m_controllerDirty = true;
+            if (ImGui::SliderFloat("Exit Time", &transition->exitTime, 0.0f, 1.0f)) m_controllerDirty = true;
+            if (ImGui::DragInt("Priority", &transition->priority, 1.0f)) m_controllerDirty = true;
+            if (ImGui::Checkbox("Can Interrupt", &transition->canInterrupt)) m_controllerDirty = true;
+            if (!transition->useConditions && transition->exitTime <= 0.0f)
+                ImGui::TextColored(ImVec4(1.0f, 0.65f, 0.2f, 1.0f), "Exit Time 0 triggers immediately.");
+            ImGui::Separator();
+            if (ImGui::Button("Delete Transition")) deleteSelection = true;
+        }
+    } else {
+        ImGui::TextWrapped("Select a state node to edit its Motion Source, or select a transition link to edit conditions and blending.");
+    }
+    if (!ImGui::GetIO().WantTextInput && ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)
+        && ImGui::IsKeyPressed(ImGuiKey_Delete)) deleteSelection = true;
+    if (deleteSelection && m_selectionType == SelectionType::Transition) {
+        m_asset.transitions.erase(std::remove_if(m_asset.transitions.begin(), m_asset.transitions.end(),
+            [&](const auto& transition) { return transition.graphId == m_selectedId; }), m_asset.transitions.end());
+        m_selectionType = SelectionType::None; m_selectedId = {}; m_controllerDirty = true;
+    } else if (deleteSelection && m_selectionType == SelectionType::State) {
+        const engine::AssetHandle deleted = m_selectedId;
+        m_asset.states.erase(std::remove_if(m_asset.states.begin(), m_asset.states.end(),
+            [&](const auto& state) { return state.graphId == deleted; }), m_asset.states.end());
+        m_asset.transitions.erase(std::remove_if(m_asset.transitions.begin(), m_asset.transitions.end(),
+            [&](const auto& transition) { return transition.fromStateId == deleted || transition.toStateId == deleted; }), m_asset.transitions.end());
+        m_asset.nodeLayouts.erase(std::remove_if(m_asset.nodeLayouts.begin(), m_asset.nodeLayouts.end(),
+            [&](const auto& layout) { return layout.stateId == deleted; }), m_asset.nodeLayouts.end());
+        if (m_asset.entryStateId == deleted) m_asset.entryStateId = m_asset.states.empty() ? engine::AssetHandle{} : m_asset.states.front().graphId;
+        m_selectionType = SelectionType::None; m_selectedId = {}; m_controllerDirty = true;
+    }
+    ImGui::EndChild();
+
+    if (m_controllerDirty && !controllerDirtyBeforeAuthoring) m_dirty = true;
     ImGui::EndChild();
     ImGui::End();
 }

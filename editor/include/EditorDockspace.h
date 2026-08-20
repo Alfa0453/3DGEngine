@@ -21,9 +21,18 @@
 namespace engine {
 class Camera;
 }
+enum class PreferredCodeEditor;
 
 class EditorDockspace {
 public:
+    static bool ScriptSourceDirty();
+    static const std::string& ScriptSourcePath();
+    static bool SaveScriptSource(std::string* error);
+    static bool AudioDocumentDirty();
+    static std::string AudioDocumentPath();
+    static bool SaveAudioDocument(std::string* error);
+    static PreferredCodeEditor PreferredEditor();
+    static std::string CustomEditorExecutable();
     struct PhysicsEventRow {
         std::string text;
         std::string objectA;
@@ -194,6 +203,9 @@ public:
         bool playMode = false;
         bool scriptCompileAndRestartRequested = false;
         bool scriptHotReloadRequested = false;
+        bool generateScriptSolutionRequested = false;
+        bool openScriptSolutionRequested = false;
+        bool nativeScriptSourceCreated = false;
         bool* autoCompileScripts = nullptr;
         bool scriptBuildRunning = false;
         const std::string* scriptBuildStatus = nullptr;
@@ -242,11 +254,19 @@ public:
         bool clearPhysicsEventGuidesRequested = false;
         bool vsync = false;                  // current window vsync (filled by the app)
         bool vsyncChangeRequested = false;   // set by the World Settings checkbox
+        bool lightingBuildRequested = false;
+        bool lightingBuildCancelRequested = false;
+        bool lightingBuildRunning = false;
+        bool lightingBuildDirty = false;
+        int* lightingBuildQuality = nullptr;
+        const std::string* lightingBuildStatus = nullptr;
+        float lightingBuildProgress = 0.0f;
         char* scenePathBuffer = nullptr;
         std::size_t scenePathBufferSize = 0;
         // Project management (New / Open Project).
         bool newProjectRequested = false;
         bool openProjectRequested = false;
+        bool exitEditorRequested = false;
         bool browseProjectLocationRequested = false;   // open native folder picker for the location
         bool browseOpenProjectRequested = false;        // open native file picker for a .3dgproject
         char* projectNameBuffer = nullptr;

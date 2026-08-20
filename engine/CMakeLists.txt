@@ -31,6 +31,8 @@ add_library(engine STATIC
     src/graphics/ShadowMap.cpp
     src/graphics/ShadowCasters.cpp
     src/graphics/CascadedShadow.cpp
+    src/graphics/DirectionalShadowShader.cpp
+    src/graphics/LightingBuildData.cpp
     src/graphics/ClusteredLights.cpp
     src/graphics/Skybox.cpp
     src/graphics/PbrRenderer.cpp
@@ -59,6 +61,7 @@ add_library(engine STATIC
     src/assets/BiomeAsset.cpp
     src/assets/DayNightTimelineAsset.cpp
     src/assets/CaveAsset.cpp
+    src/assets/FenceWallAsset.cpp
     src/assets/TerrainAsset.cpp
     src/assets/TextureAsset.cpp
     src/assets/ForgeMaterialImporter.cpp
@@ -83,6 +86,7 @@ add_library(engine STATIC
     src/audio/AudioEditing.cpp
     src/audio/miniaudio_impl.c
     src/physics/PhysicsWorld.cpp
+    src/physics/CollisionMesh.cpp
     src/physics/CharacterController.cpp
     src/animation/Animator.cpp
     src/animation/AnimationController.cpp
@@ -107,6 +111,15 @@ add_library(engine STATIC
     src/gameplay/LuaScript.cpp
     src/gameplay/ScriptModule.cpp
 )
+
+# Public headers are target sources for IDE browsing only. Consumers still
+# compile solely against engine/include through the PUBLIC usage requirement.
+file(GLOB_RECURSE THREEDG_ENGINE_PUBLIC_HEADERS CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/include/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include/*.hpp")
+target_sources(engine PRIVATE ${THREEDG_ENGINE_PUBLIC_HEADERS})
+source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}/include" PREFIX "Public Headers"
+             FILES ${THREEDG_ENGINE_PUBLIC_HEADERS})
 
 # Precompiled headers for faster builds (reduces template instantiation + std includes)
 # Apply the PCH only for C++ compilation units so C sources (e.g. miniaudio_impl.c)

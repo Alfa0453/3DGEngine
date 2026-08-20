@@ -199,6 +199,7 @@ void RagdollPhysicsPanel::Draw(EditorScene& scene,
     }
 
     const EditorScene::Object* selected = scene.SelectedObject();
+    const EditorScene::Object* target = scene.FindObject(m_applyTarget);
     const engine::SkinnedModel* model = nullptr;
     std::string loadError;
     if (selected && selected->skeletalModel && !selected->modelAssetPath.empty())
@@ -208,16 +209,25 @@ void RagdollPhysicsPanel::Draw(EditorScene& scene,
     if (ImGui::Button("Generate Bodies from Selected Character")) {
         if (!skeleton) m_status = loadError.empty() ? "Select a skeletal character in the level." : loadError;
         else {
+            m_applyTarget = selected->entity;
             m_asset.skeletonPath = selected->modelAssetPath;
             if (m_asset.name == "Ragdoll") m_asset.name = selected->name + "_Ragdoll";
             m_status = AutoGenerate(*skeleton) ? "Generated editable bodies and joints." : "No usable bones found.";
         }
     }
     ImGui::SameLine();
-    if (ImGui::Button("Apply to Selected Character")) {
-        if (!selected || !selected->skeletalModel) m_status = "Select a skeletal character first.";
+    const bool validTarget = target && target->skeletalModel && !target->locked;
+    ImGui::BeginDisabled(!validTarget);
+    const std::string applyLabel = validTarget
+        ? "Apply to \"" + target->name + "\"" : "Apply (No Character Target)";
+    if (ImGui::Button(applyLabel.c_str())) {
+        if (!target || !target->skeletalModel) m_status = "Choose a skeletal character target first.";
         else {
-            engine::Ragdoll ragdoll = selected->ragdoll;
+            const int oldIndex = scene.SelectedIndex();
+            const auto oldSelection = scene.HierarchySelection();
+            const auto oldGroup = scene.SelectedGroupId();
+            scene.SelectEntity(target->entity);
+            engine::Ragdoll ragdoll = target->ragdoll;
             engine::ApplyRagdollAsset(m_asset, &ragdoll);
             std::filesystem::path relative = m_path;
             std::error_code ec;
@@ -227,10 +237,19 @@ void RagdollPhysicsPanel::Draw(EditorScene& scene,
             }
             ragdoll.assetPath = m_path.empty() ? std::string{} : relative.generic_string();
             if (scene.SetSelectedRagdoll(ragdoll))
-                m_status = "Ragdoll asset applied. Play mode will use the authored bodies.";
+                m_status = "Ragdoll asset applied to " + target->name + ".";
             else m_status = "Could not apply: the selected object may be locked.";
+            if (oldSelection == EditorScene::HierarchySelectionType::Group) scene.SelectGroup(oldGroup);
+            else if (oldIndex >= 0) scene.SelectIndex(oldIndex); else scene.Deselect();
         }
     }
+    ImGui::EndDisabled();
+    if (selected && selected->skeletalModel && selected->entity != m_applyTarget) {
+        if (ImGui::Button(("Use \"" + selected->name + "\" As Apply Target").c_str()))
+            m_applyTarget = selected->entity;
+    }
+    if (target && selected && selected->entity != target->entity)
+        ImGui::TextColored(ImVec4(1, .7f, .2f, 1), "Current selection differs from apply target.");
 
     ImGui::DragFloat("Total Mass", &m_asset.totalMass, 0.5f, 1.0f, 500.0f, "%.1f kg");
     ImGui::DragFloat("Linear Damping", &m_asset.linearDamping, 0.01f, 0.0f, 10.0f);

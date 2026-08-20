@@ -19,6 +19,8 @@ public:
 
     const std::string& Path() const { return m_path; }
     bool IsSkeletal() const { return m_kind == Kind::Skeletal; }
+    bool IsDirty() const { return m_dirty || m_paintDirty || m_geometryDirty || m_collisionDirty; }
+    bool SaveForShutdown(std::string* error);
 
 private:
     enum class Kind { None, Static, Skeletal };
@@ -65,7 +67,7 @@ private:
     bool m_dirty = false;
     bool m_paintDirty = false;
     bool m_paintStroke = false;
-    int m_editMode = 0;       // 0 pivot, 1 vertex paint, 2 geometry
+    int m_editMode = 0;       // 0 pivot, 1 vertex paint, 2 geometry, 3 collision
     int m_paintTarget = 0;    // 0 RGBA, 1..4 individual mask channels
     float m_brushRadius = 42.0f;
     float m_brushStrength = 0.55f;
@@ -84,4 +86,7 @@ private:
     float m_insetAmount = 0.2f;
     float m_weldTolerance = 0.001f;
     bool m_geometryDirty = false;
+    int m_collisionType = 0;  // engine::StaticMeshCollisionType numeric value
+    bool m_collisionDirty = false;
+    bool m_showCollision = true;
 };

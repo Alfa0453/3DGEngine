@@ -28,6 +28,7 @@
 #include <engine/assets/ShaderGraphCompiler.h>
 #include <engine/assets/FoliageAsset.h>
 #include <engine/assets/CaveAsset.h>
+#include <engine/assets/StaticMeshAsset.h>
 
 #include "GameBtScripts.h"
 #include "EditorBranding.h"
@@ -452,6 +453,7 @@ EditorApp::~EditorApp() = default;
 
 void EditorApp::OnInit()
 {
+    GetWindow().SetCloseRequestCallback([this] { RequestCloseEditor(); });
     m_autoCompileScripts = m_config.GetBool("scripting.auto_compile_on_save", true);
     const editor::branding::WindowIcon& editorIcon = editor::branding::Icon();
     GetWindow().SetIcon(editorIcon.width, editorIcon.height, editorIcon.rgba.data());
@@ -747,7 +749,14 @@ void EditorApp::OnInit()
     engine::ai::RegisterExampleBtScripts();   // built-in example scripts (idempotent)
     RegisterGameBtScripts();                  // legacy: editor/src/GameBtScripts.cpp
     RegisterGameModule();                     // engine/manual scripts
-    LoadProjectScriptModule(false);           // active project's compiled native scripts
+    {
+        std::error_code ec;
+        const std::filesystem::path projectRoot =
+            std::filesystem::absolute(m_project.AssetRoot(), ec).parent_path();
+        if (ec || !RecoverInterruptedScriptLoad(projectRoot)) {
+            LoadProjectScriptModule(false);   // active project's compiled native scripts
+        }
+    }
     {
         std::error_code ec;
         const std::filesystem::path projectRoot =
@@ -1258,6 +1267,8 @@ void EditorApp::OnRender()
 
 void EditorApp::OnShutdown()
 {
+    DrainScriptBuild(true);
+    if (m_mode == EditorMode::Play) ExitPlayMode();
     engine::SetScriptErrorHandler(nullptr);   // drop the 'this'-capturing sink
     // Clear script factories before the loaded module (their DLL) unloads, so the static
     // ScriptRegistry singleton doesn't destroy DLL-owned callables after FreeLibrary.
@@ -1266,7 +1277,13 @@ void EditorApp::OnShutdown()
     m_scriptModule.Unload();
     m_projectScriptClasses.clear();
     m_projectBtScriptClasses.clear();
-    m_projectScriptStageSlot = -1;
+    m_activeScriptCandidate.clear();
+    if (!m_scriptModuleInstallInProgress) {
+        std::error_code ec;
+        const std::filesystem::path projectRoot =
+            std::filesystem::absolute(m_project.AssetRoot(), ec).parent_path();
+        if (!ec) EditorScriptTools::ClearScriptModuleLoadMarker(projectRoot, nullptr);
+    }
     ResetScriptAutoReloadWatcher();
     m_imgui.Shutdown();
     if (m_hasProjectFile) {
@@ -1393,10 +1410,18 @@ void EditorApp::DrawEditModeModels(const glm::mat4 & viewProj)
                     }
                     return AnimationClipSeconds(animations[static_cast<std::size_t>(clip)]);
                 };
+                auto clipBaseSpeed = [&](int fallback, const std::string& alias) {
+                    for (const auto& source : object.animationSources)
+                        if (source.clipName == alias)
+                            return std::max(source.basePlaybackSpeed, 0.0f);
+                    if (fallback >= 0 && fallback < static_cast<int>(object.animationSources.size()))
+                        return std::max(object.animationSources[static_cast<std::size_t>(fallback)].basePlaybackSpeed, 0.0f);
+                    return 1.0f;
+                };
                 if (!object.animationStates.empty()) {
                     editor::BuildAnimationController(animated.controller,
                         object.animationStates, object.animationParameters,
-                        object.animationTransitions, resolveClip, clipSeconds);
+                        object.animationTransitions, resolveClip, clipSeconds, {}, clipBaseSpeed);
                 } else if (object.animationLocomotionEnabled) {
                     animated.controller = engine::AnimationController::Locomotion(
                         resolveClip(object.animationIdleClipIndex, object.animationIdleClipName),
@@ -1494,6 +1519,10 @@ void EditorApp::DrawEditModeModels(const glm::mat4 & viewProj)
                     lighting.cascade = &m_pbrRenderer->Cascade();
                     lighting.ibl = environment.ibl && m_ibl ? &*m_ibl : nullptr;
                     lighting.shadowSoftness = environment.shadowSoftness;
+                    lighting.skylightOcclusion = environment.skylightOcclusion;
+                    lighting.skylightOcclusionStrength = environment.skylightOcclusionStrength;
+                    lighting.minimumSkylight = environment.minimumSkylight;
+                    lighting.lightingGrid = m_lightingProbeGrid.Valid() ? &m_lightingProbeGrid : nullptr;
                     lighting.tonemap = !m_renderingHdrPreview;
                     lighting.fog = environment.fog;
                     lighting.fogColor = sky.horizon;
@@ -1798,6 +1827,9 @@ void EditorApp::DrawEditorOverlay()
     }
 
     m_audio.SetListener(m_camera.Position(), m_camera.Front());
+    PollLightingBuild();
+    if (!m_lightingBuildRunning && !m_scene.GetEnvironment().lightingBuildAsset.empty())
+        m_lightingBuildDirty = m_scene.GetEnvironment().lightingBuildHash != ComputeLightingStateHash();
     EditorDockspace::Context dockspaceContext;
     dockspaceContext.panels = &m_panels;
     dockspaceContext.config = &m_config;
@@ -1855,6 +1887,12 @@ void EditorApp::DrawEditorOverlay()
     dockspaceContext.showAiDebug = &m_showAiDebug;
     dockspaceContext.useNavMesh = &m_useNavMesh;
     dockspaceContext.vsync = GetWindow().IsVSync();
+    dockspaceContext.lightingBuildRunning = m_lightingBuildRunning;
+    dockspaceContext.lightingBuildDirty = m_lightingBuildDirty;
+    dockspaceContext.lightingBuildQuality = &m_lightingBuildQuality;
+    dockspaceContext.lightingBuildStatus = &m_lightingBuildStatus;
+    if (m_lightingBuildProgressState && m_lightingBuildProgressState->total.load() > 0)
+        dockspaceContext.lightingBuildProgress = static_cast<float>(m_lightingBuildProgressState->completed.load()) / m_lightingBuildProgressState->total.load();
     // Terrain sculpting and painting are owned by Terrain Creator rather than
     // the selected scene object's Inspector.
     m_terrainSculpt = false;
@@ -1967,6 +2005,13 @@ void EditorApp::DrawEditorOverlay()
     }
     dockspaceContext.sceneDirty = m_scene.IsDirty();
     m_dockspace.Draw(dockspaceContext);
+    if (dockspaceContext.exitEditorRequested) RequestCloseEditor();
+    if (dockspaceContext.lightingBuildRequested) StartLightingBuild();
+    if (dockspaceContext.lightingBuildCancelRequested && m_lightingBuildProgressState)
+        m_lightingBuildProgressState->cancel = true;
+    if (dockspaceContext.nativeScriptSourceCreated) {
+        AcknowledgeCreatedScriptSource();
+    }
     DrawImportDialog();   // drag-and-drop Import Settings popup (when files were dropped)
     if (dockspaceContext.animationAssetRestartRequested)
         m_animationAssetPreviewRestartRequested = true;
@@ -1978,27 +2023,22 @@ void EditorApp::DrawEditorOverlay()
                                  m_animationAssetPreviewMeshPath);
         m_panels.SetOpen(EditorPanels::Panel::ClipEditor, true);
     }
-    if (dockspaceContext.scriptCompileAndRestartRequested) {
-        if (m_mode != EditorMode::Edit) {
-            m_log.Warning("Exit Play mode before compiling scripts");
-        } else {
-            if (m_scene.IsDirty()) SaveScene();
-            if (m_scene.IsDirty()) {
-                m_log.Error("Script compile cancelled because the scene could not be saved");
-            } else {
-                std::error_code ec;
-                const std::filesystem::path projectRoot =
-                    std::filesystem::absolute(m_project.AssetRoot(), ec).parent_path();
-                std::string error;
-                if (EditorScriptTools::LaunchCompileAndRestart(
-                        projectRoot, "Debug", &error)) {
-                    m_log.Info("Script compiler started; building the project-owned script module");
-                    GetWindow().SetShouldClose(true);
-                } else {
-                    m_log.Error("Script compiler: " + error);
-                }
-            }
-        }
+    if (dockspaceContext.scriptCompileAndRestartRequested) RequestScriptCompileRestart();
+    if (dockspaceContext.generateScriptSolutionRequested) {
+        std::error_code ec;
+        const std::filesystem::path root=std::filesystem::absolute(m_project.AssetRoot(),ec).parent_path();
+        std::filesystem::path solution; std::string error;
+        if (EditorScriptTools::GenerateScriptIdeProject(root,&solution,&error))
+            m_log.Info("Generated native script solution: " + solution.string());
+        else m_log.Error("Script solution: " + error);
+    }
+    if (dockspaceContext.openScriptSolutionRequested) {
+        std::error_code ec;
+        const std::filesystem::path root=std::filesystem::absolute(m_project.AssetRoot(),ec).parent_path();
+        std::string error;
+        if (!EditorScriptTools::OpenScriptIdeProject(EditorDockspace::PreferredEditor(),
+                EditorDockspace::CustomEditorExecutable(),root,&error))
+            m_log.Error("Script solution: " + error);
     }
     if (dockspaceContext.scriptHotReloadRequested) {
         HotReloadScripts();
@@ -2097,6 +2137,7 @@ void EditorApp::DrawEditorOverlay()
     DrawBiomeEditorPanel();
     DrawDayNightTimelinePanel();
     DrawCaveTunnelPanel();
+    DrawFenceWallPainterPanel();
     DrawLevelVariantPanel();
     DrawLevelLayersPanel();
     DrawViewportBookmarksPanel();
@@ -2187,7 +2228,7 @@ void EditorApp::DrawEditorOverlay()
             }
         }
         if (m_projectLocationDraft[0] != '\0') {
-            NewProject(m_projectLocationDraft.data(), m_projectNameDraft.data());
+            RequestNewProject(m_projectLocationDraft.data(), m_projectNameDraft.data());
         } else {
             m_log.Warning("New project cancelled: no location chosen");
         }
@@ -2195,11 +2236,11 @@ void EditorApp::DrawEditorOverlay()
     if (dockspaceContext.browseOpenProjectRequested) {
         const std::string file = editor::OpenFileDialog("Open project", "3DG Project", "3dgproject");
         if (!file.empty()) {
-            OpenProjectFromPath(file);
+            RequestOpenProjectFromPath(file);
         }
     }
     if (dockspaceContext.openProjectRequested) {
-        OpenProjectFromPath(m_openProjectDraft.data());
+        RequestOpenProjectFromPath(m_openProjectDraft.data());
     }
     if (dockspaceContext.browsePackageOutputRequested) {
         const std::string dir = editor::PickFolderDialog("Choose package output folder");
@@ -2291,7 +2332,7 @@ void EditorApp::DrawEditorOverlay()
         case EditorAssets::Type::AnimationGraph:
             m_panels.SetOpen(EditorPanels::Panel::GraphEditor, true);
             m_graphEditor.QueueOpen(path);
-            m_log.Info("Opening animation graph: " + path);
+            m_log.Info("Opening Animation Graph Editor: " + path);
             break;
         case EditorAssets::Type::Prefab: {
             std::string prefabError;
@@ -2363,6 +2404,11 @@ void EditorApp::DrawEditorOverlay()
             m_panels.SetOpen(EditorPanels::Panel::CaveTunnel, true);
             m_caveTunnel.QueueOpen(path);
             m_log.Info("Opening cave asset: " + path);
+            break;
+        case EditorAssets::Type::FenceWall:
+            m_panels.SetOpen(EditorPanels::Panel::FenceWallPainter, true);
+            m_fenceWallPainter.QueueOpen(path);
+            m_log.Info("Opening fence/wall asset: " + path);
             break;
         case EditorAssets::Type::Terrain:
             m_panels.SetOpen(EditorPanels::Panel::TerrainCreator, true);
@@ -2758,13 +2804,18 @@ void EditorApp::DrawHudEditorPanel() {
 
     bool open = true;
     const HudEditorPanel::Result r = m_hudPanel.Draw(
-        m_hud, &open, m_hudImageChoices, texLookup, &previewContext);
+        m_hud, m_project.AssetRoot(), &open, m_hudImageChoices, texLookup, &previewContext);
 
     if (r.refreshImagesRequested) ScanHudImages();
 
     if (r.newRequested) {
         m_hud.Clear();
+
+        const std::filesystem::path defaultHud = std::filesystem::path(m_project.AssetRoot()) / "UI" / "NewHUD.hud";
+
+        m_hudPanel.SetPath(defaultHud.string());
         m_hudPanel.SetSelected(-1);
+        m_hudPanel.MarkDirty();
         m_log.Info("HUD: new document");
     }
     if (r.saveRequested && !r.path.empty()) {
@@ -2776,7 +2827,7 @@ void EditorApp::DrawHudEditorPanel() {
             && std::filesystem::path(m_hudPath).lexically_normal()
                 != std::filesystem::path(r.path).lexically_normal())
             m_hud.assetId = {};
-        if (m_hud.Save(r.path, &err)) { m_hudPath = r.path; m_log.Info("HUD saved: " + r.path); }
+        if (m_hud.Save(r.path, &err)) { m_hudPath = r.path; m_hudPanel.MarkClean(); m_log.Info("HUD saved: " + r.path); }
         else m_log.Error("HUD save failed: " + err);
     }
     if (r.loadRequested && !r.path.empty()) {
@@ -2784,6 +2835,7 @@ void EditorApp::DrawHudEditorPanel() {
         if (m_hud.Load(r.path, &err)) {
             m_hudPath = r.path;
             m_hudPanel.SetSelected(-1);
+            m_hudPanel.MarkClean();
             m_log.Info("HUD loaded: " + r.path);
         } else {
             m_log.Error("HUD load failed: " + err);
@@ -2831,6 +2883,8 @@ void EditorApp::DrawClipEditorPanel() {
     if (assetSaved) {
         std::string error;
         if (!m_assets.Refresh(m_project.AssetRoot(), &error)) m_log.Warning(error);
+        m_graphEditor.InvalidateClipMetadata(m_clipEditor.Path());
+        m_characterEditor.InvalidateClipMetadata(m_clipEditor.Path());
     }
     if (!message.empty()) m_log.Info(message);
 }
@@ -2888,7 +2942,7 @@ void EditorApp::DrawTerrainCreatorPanel() {
     bool open = true;
     bool assetSaved = false;
     std::string message;
-    m_terrainCreator.Draw(m_project.AssetRoot(), m_assets, &open,
+    m_terrainCreator.Draw(m_scene, m_project.AssetRoot(), m_assets, &open,
                           &assetSaved, &message, m_dt);
     m_panels.SetOpen(EditorPanels::Panel::TerrainCreator, open);
     if (assetSaved) {
@@ -2928,10 +2982,14 @@ void EditorApp::DrawTerrainCreatorPanel() {
         }
     }
     if (m_terrainCreator.ConsumeApplyToSelected(&asset, &sourcePath)) {
+        const int oldIndex = m_scene.SelectedIndex();
+        const auto oldSelection = m_scene.HierarchySelection();
+        const auto oldGroup = m_scene.SelectedGroupId();
+        const bool targetAvailable = m_scene.SelectEntity(m_terrainCreator.ApplyTarget());
         const EditorScene::Object* selected = m_scene.SelectedObject();
         const engine::ecs::Transform* selectedTransform = m_scene.SelectedTransform();
-        if (!selected || !selected->isTerrain) {
-            m_log.Warning("Apply terrain failed: select a landscape in the level first");
+        if (!targetAvailable || !selected || !selected->isTerrain) {
+            m_log.Warning("Apply terrain failed: the chosen landscape target was deleted or is unavailable");
         } else if (selected->locked || !selectedTransform) {
             m_log.Warning("Apply terrain failed: the selected landscape is locked or unavailable");
         } else {
@@ -2978,6 +3036,9 @@ void EditorApp::DrawTerrainCreatorPanel() {
                 m_log.Warning("Terrain was only partially applied to the selected landscape");
             }
         }
+        if (oldSelection == EditorScene::HierarchySelectionType::Group) m_scene.SelectGroup(oldGroup);
+        else if (oldIndex >= 0) m_scene.SelectIndex(oldIndex);
+        else m_scene.Deselect();
     }
     if (!message.empty()) m_log.Info(message);
 }
@@ -3570,7 +3631,7 @@ void EditorApp::DrawBiomeEditorPanel() {
     if (!m_panels.IsOpen(EditorPanels::Panel::BiomeEditor)) return;
     bool open = true;
     const BiomeEditorPanel::Result result = m_biomeEditor.Draw(
-        m_assets, m_project.AssetRoot(), &open);
+        m_scene, m_assets, m_project.AssetRoot(), &open);
     m_panels.SetOpen(EditorPanels::Panel::BiomeEditor, open);
     if (result.saved) {
         std::string error;
@@ -3584,9 +3645,15 @@ void EditorApp::DrawBiomeEditorPanel() {
         return;
     }
 
+    const int oldIndex = m_scene.SelectedIndex();
+    const auto oldSelection = m_scene.HierarchySelection();
+    const auto oldGroup = m_scene.SelectedGroupId();
+    const bool targetAvailable = m_scene.SelectEntity(m_biomeEditor.ApplyTarget());
     const EditorScene::Object* selected = m_scene.SelectedObject();
-    if (!selected || !selected->isTerrain) {
-        m_log.Warning("Biome application requires a selected landscape.");
+    if (!targetAvailable || !selected || !selected->isTerrain) {
+        m_log.Warning("Biome application target was deleted or is no longer a landscape.");
+        if (oldSelection == EditorScene::HierarchySelectionType::Group) m_scene.SelectGroup(oldGroup);
+        else if (oldIndex >= 0) m_scene.SelectIndex(oldIndex); else m_scene.Deselect();
         return;
     }
     const engine::BiomeAssetData& biome = m_biomeEditor.Biome();
@@ -3730,6 +3797,8 @@ void EditorApp::DrawBiomeEditorPanel() {
     if (!m_assets.Refresh(m_project.AssetRoot(), &refreshError)) m_log.Warning(refreshError);
     m_log.Info("Applied biome '" + biome.name + "' to landscape '" + terrainName
         + "' with " + std::to_string(placements.size()) + " foliage instances.");
+    if (oldSelection == EditorScene::HierarchySelectionType::Group) m_scene.SelectGroup(oldGroup);
+    else if (oldIndex >= 0) m_scene.SelectIndex(oldIndex); else m_scene.Deselect();
 }
 
 void EditorApp::DrawDayNightTimelinePanel() {
@@ -3878,6 +3947,113 @@ void EditorApp::GenerateCaveTunnel() {
         + " triangles, " + std::to_string(colliderCount) + " hidden collision pieces");
 }
 
+void EditorApp::DrawFenceWallPainterPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::FenceWallPainter)) return;
+    bool open = true;
+    const FenceWallPainterPanel::Result result = m_fenceWallPainter.Draw(
+        m_scene, m_assets, m_project.AssetRoot(), &open);
+    m_panels.SetOpen(EditorPanels::Panel::FenceWallPainter, open);
+    if (result.createSpline) {
+        AddSpline(0);
+        const std::string pathName = m_fenceWallPainter.Asset().name + "_Path";
+        m_scene.SetSelectedName(pathName);
+        m_fenceWallPainter.SetSplineName(pathName);
+        m_log.Info("Created editable fence/wall drawing spline: " + pathName);
+    }
+    if (result.build) GenerateFenceWall();
+    if (result.remove) {
+        const int removed = DeleteGeneratedFenceWall(m_fenceWallPainter.Asset().name);
+        m_log.Info("Fence and Wall Painter removed " + std::to_string(removed)
+                   + " generated object(s)");
+    }
+    if (result.saved) {
+        std::string error;
+        if (!m_assets.Refresh(m_project.AssetRoot(), &error)) m_log.Warning(error);
+    }
+    if (!result.message.empty()) m_log.Info(result.message);
+}
+
+int EditorApp::DeleteGeneratedFenceWall(const std::string& name) {
+    if (name.empty()) return 0;
+    const std::string prefix = "FenceWall_" + name + "_";
+    std::vector<int> indices;
+    for (int i=0; i<static_cast<int>(m_scene.Objects().size()); ++i)
+        if (m_scene.Objects()[static_cast<std::size_t>(i)].name.rfind(prefix,0)==0)
+            indices.push_back(i);
+    if (indices.empty()) return 0;
+    m_scene.SelectIndices(indices);
+    return m_scene.DeleteSelected() ? static_cast<int>(indices.size()) : 0;
+}
+
+void EditorApp::GenerateFenceWall() {
+    if (!m_cube) return;
+    engine::FenceWallAssetData asset = m_fenceWallPainter.Asset();
+    const EditorScene::Object* source = nullptr;
+    for (const EditorScene::Object& object : m_scene.Objects())
+        if (object.isSpline && object.name == m_fenceWallPainter.SplineName()
+            && object.splinePoints.size() >= 2) { source=&object; break; }
+    // A live spline is preferred so rebuild immediately reflects viewport edits.
+    if (source) { asset.points=source->splinePoints; asset.closed=source->splineClosed; }
+    engine::FenceGenerationStats stats;
+    std::string error;
+    std::vector<engine::FencePlacement> placements =
+        engine::GenerateFenceWall(asset,&stats,&error);
+    if (!error.empty() || placements.empty()) {
+        m_log.Warning("Fence/wall build failed: "
+            + (error.empty()?std::string("no geometry was generated"):error));
+        return;
+    }
+    DeleteGeneratedFenceWall(asset.name);
+    engine::ecs::Collider collider = engine::ecs::Collider::MakeBox(glm::vec3(.5f));
+    collider.layer=engine::ecs::CollisionLayer::WorldStatic;
+    collider.mask=engine::ecs::CollisionLayer::All;
+    bool first=true;
+    int created=0;
+    for (const engine::FencePlacement& placement : placements) {
+        m_scene.SuppressUndo(!first);
+        engine::ecs::Transform transform;
+        transform.position=placement.position;
+        transform.scale=placement.scale;
+        transform.rotation=placement.rotation;
+        std::string meshPath, materialPath;
+        engine::AssetHandle materialId;
+        switch (placement.kind) {
+        case engine::FencePartKind::Panel:
+            meshPath=asset.panelMeshPath; materialPath=asset.panelMaterialPath;
+            materialId=asset.panelMaterialId; break;
+        case engine::FencePartKind::Post:
+            meshPath=asset.postMeshPath; materialPath=asset.postMaterialPath;
+            materialId=asset.postMaterialId; break;
+        case engine::FencePartKind::Gate:
+            meshPath=asset.gateMeshPath; materialPath=asset.gateMaterialPath;
+            materialId=asset.gateMaterialId; break;
+        }
+        const std::string objectName="FenceWall_"+asset.name+"_"+placement.suffix;
+        bool added=false;
+        if (!meshPath.empty()) {
+            added=m_scene.AddModel(meshPath,*m_cube,transform);
+            if (added) {
+                m_scene.SetSelectedName(objectName);
+                if (placement.collision) m_scene.SetSelectedCollider(collider);
+            }
+        } else {
+            m_scene.AddConfiguredPrimitive(EditorScene::Primitive::Cube,*m_cube,
+                transform,placement.collision?&collider:nullptr,objectName);
+            added=true;
+        }
+        if (added && !materialPath.empty())
+            m_scene.SetSelectedMaterialAsset(materialPath,materialId);
+        if (added) ++created;
+        if (first) { first=false; m_scene.SuppressUndo(true); }
+    }
+    m_scene.SuppressUndo(false);
+    m_editAssets.ResolveRegistryAssets(m_scene.Registry());
+    m_log.Info("Built '"+asset.name+"': "+std::to_string(stats.panels)
+        +" panels, "+std::to_string(stats.posts)+" posts, "
+        +std::to_string(stats.gates)+" gates ("+std::to_string(created)
+        +" editable objects)");
+}
+
 int EditorApp::DeleteGeneratedRoad(const std::string& roadName) {
     if (roadName.empty()) return 0;
     const std::string prefix = "Road_" + roadName + "_";
@@ -3964,21 +4140,104 @@ void EditorApp::GenerateProceduralBuilding() {
     if (m_proceduralBuilding.ReplaceExisting())
         DeleteGeneratedProceduralBuilding(buildingName);
 
-    engine::ecs::Collider collider = engine::ecs::Collider::MakeBox(glm::vec3(0.5f));
-    collider.layer = engine::ecs::CollisionLayer::WorldStatic;
-    collider.mask = engine::ecs::CollisionLayer::All;
-    const engine::ecs::Collider* colliderPtr = m_proceduralBuilding.CreateColliders()
-        ? &collider : nullptr;
     bool first = true;
     int created = 0;
+    const auto primitiveMesh = [&](EditorScene::Primitive primitive) -> const engine::Mesh* {
+        switch (primitive) {
+        case EditorScene::Primitive::Cube: return m_cube ? &*m_cube : nullptr;
+        case EditorScene::Primitive::Cylinder: return m_cylinder ? &*m_cylinder : nullptr;
+        case EditorScene::Primitive::Cone: return m_cone ? &*m_cone : nullptr;
+        case EditorScene::Primitive::Pyramid: return m_pyramid ? &*m_pyramid : nullptr;
+        default: return m_cube ? &*m_cube : nullptr;
+        }
+    };
     for (const ProceduralBuildingPanel::Part& part : parts) {
         m_scene.SuppressUndo(!first);
         engine::ecs::Transform transform;
         transform.position = part.position;
         transform.scale = part.scale;
-        transform.rotation = glm::angleAxis(part.yawRadians, glm::vec3(0.0f, 1.0f, 0.0f));
-        m_scene.AddConfiguredPrimitive(EditorScene::Primitive::Cube, *m_cube,
-            transform, colliderPtr, "Building_" + buildingName + "_" + part.suffix);
+        transform.rotation = part.rotation;
+
+        engine::ecs::Collider collider = engine::ecs::Collider::MakeBox(glm::vec3(0.5f));
+        collider.layer = engine::ecs::CollisionLayer::WorldStatic;
+        collider.mask = engine::ecs::CollisionLayer::All;
+        collider.inheritTransformScale = true;
+        bool addCollider = part.colliderMode != ProceduralBuildingPanel::ColliderMode::None;
+        bool added = false;
+
+        if (part.geometry.source == ProceduralBuildingPanel::GeometrySource::StaticMesh
+            && !part.geometry.staticMeshPath.empty()) {
+            engine::StaticMeshAssetData meshAsset;
+            std::string loadError;
+            if (!engine::LoadStaticMeshAsset(part.geometry.staticMeshPath, &meshAsset, &loadError)) {
+                m_log.Warning("Building mesh skipped (" + part.geometry.staticMeshPath + "): " + loadError);
+                continue;
+            }
+            const glm::vec3 minimum(meshAsset.minimum[0], meshAsset.minimum[1], meshAsset.minimum[2]);
+            const glm::vec3 maximum(meshAsset.maximum[0], meshAsset.maximum[1], meshAsset.maximum[2]);
+            const glm::vec3 meshSize = glm::max(maximum - minimum, glm::vec3(0.000001f));
+            const glm::vec3 meshCenter = (minimum + maximum) * 0.5f;
+            const glm::vec3 meshHalfExtents = meshSize * 0.5f;
+            if (part.geometry.fit == ProceduralBuildingPanel::FitMode::OriginalSize) {
+                transform.scale = glm::vec3(1.0f);
+            } else if (part.geometry.fit == ProceduralBuildingPanel::FitMode::StretchToPart) {
+                transform.scale = part.scale / meshSize;
+            } else {
+                const glm::vec3 ratios = part.scale / meshSize;
+                transform.scale = glm::vec3(std::min({ratios.x, ratios.y, ratios.z}));
+            }
+            engine::StaticMeshCollisionType authored = meshAsset.collisionType;
+            if (part.colliderMode == ProceduralBuildingPanel::ColliderMode::Bounds)
+                authored = engine::StaticMeshCollisionType::Box;
+            else if (part.colliderMode == ProceduralBuildingPanel::ColliderMode::ConvexHull)
+                authored = engine::StaticMeshCollisionType::ConvexHull;
+            else if (part.colliderMode == ProceduralBuildingPanel::ColliderMode::TriangleMesh)
+                authored = engine::StaticMeshCollisionType::TriangleMesh;
+            // A mesh without authored collision gets a cheap, pivot-aware bounds
+            // collider for MatchGeometry/FromMeshAsset.
+            if (authored == engine::StaticMeshCollisionType::None)
+                authored = engine::StaticMeshCollisionType::Box;
+            collider.localPosition = meshCenter;
+            collider.halfExtents = meshHalfExtents;
+            if (authored == engine::StaticMeshCollisionType::Sphere) {
+                collider.shape = engine::ecs::ColliderShape::Sphere;
+                collider.radius = std::max({meshHalfExtents.x, meshHalfExtents.y, meshHalfExtents.z});
+            } else if (authored == engine::StaticMeshCollisionType::Capsule) {
+                collider.shape = engine::ecs::ColliderShape::Capsule;
+                collider.radius = std::max(meshHalfExtents.x, meshHalfExtents.z);
+                collider.halfHeight = std::max(meshHalfExtents.y - collider.radius, 0.0f);
+            } else if (authored == engine::StaticMeshCollisionType::ConvexHull
+                       || authored == engine::StaticMeshCollisionType::TriangleMesh) {
+                collider.shape = authored == engine::StaticMeshCollisionType::ConvexHull
+                    ? engine::ecs::ColliderShape::ConvexHull
+                    : engine::ecs::ColliderShape::TriangleMesh;
+                collider.localPosition = glm::vec3(0.0f);
+                collider.collisionAssetPath = part.geometry.staticMeshPath;
+            }
+            if (m_scene.AddModel(part.geometry.staticMeshPath, *m_cube, transform)) {
+                m_scene.SetSelectedName("Building_" + buildingName + "_" + part.suffix);
+                if (addCollider) m_scene.SetSelectedCollider(collider);
+                added = true;
+            }
+        } else {
+            const auto primitive = static_cast<EditorScene::Primitive>(part.geometry.primitive);
+            const engine::Mesh* mesh = primitiveMesh(primitive);
+            if (!mesh) continue;
+            if (primitive == EditorScene::Primitive::Cylinder)
+                collider = engine::ecs::Collider::MakeCylinder(0.5f, 1.0f);
+            else if (primitive == EditorScene::Primitive::Cone)
+                collider = engine::ecs::Collider::MakeCone(0.5f, 1.0f);
+            else if (primitive == EditorScene::Primitive::Pyramid)
+                collider = engine::ecs::Collider::MakePyramid(glm::vec3(0.5f));
+            collider.layer = engine::ecs::CollisionLayer::WorldStatic;
+            collider.mask = engine::ecs::CollisionLayer::All;
+            collider.inheritTransformScale = true;
+            m_scene.AddConfiguredPrimitive(primitive, *mesh,
+                transform, addCollider ? &collider : nullptr,
+                "Building_" + buildingName + "_" + part.suffix);
+            added = true;
+        }
+        if (!added) continue;
         if (first) { first = false; m_scene.SuppressUndo(true); }
         if (!part.materialPath.empty()) m_scene.SetSelectedMaterialAsset(part.materialPath);
         ++created;
@@ -5238,33 +5497,130 @@ void EditorApp::DrawMaterialMakerTools(bool materialSaved) {
     }
 }
 
+std::vector<DirtyDocument> EditorApp::CollectDirtyDocuments() {
+    std::vector<DirtyDocument> documents;
+    auto nameOf = [](const std::string& path, const char* fallback) {
+        return path.empty() ? std::string(fallback) : std::filesystem::path(path).filename().string();
+    };
+    auto add = [&](DirtyDocumentType type, const std::string& path, const char* fallback,
+                   std::function<bool(std::string*)> save) {
+        documents.push_back({type, nameOf(path, fallback), path.empty() ? fallback : path,
+                             static_cast<bool>(save), std::move(save)});
+    };
+
+    if (m_materialMaker.IsDirty()) add(DirtyDocumentType::Asset,
+        m_materialMaker.LastSavedPath(), "New Material",
+        [this](std::string* error) { if (m_materialMaker.SaveCurrent()) return true;
+            if (error) *error=m_materialMaker.StatusMessage(); return false; });
+    if (m_particleEditor.IsDirty()) add(DirtyDocumentType::Asset, m_particleEditor.Path(),
+        "New Particle", [this](std::string* error) { return m_particleEditor.SaveForShutdown(m_scene,m_assets,error); });
+    if (m_shaderEditor.IsDirty()) add(DirtyDocumentType::Asset, m_shaderEditor.Path(),
+        "New Shader", [this](std::string* error) { return m_shaderEditor.SaveForShutdown(m_assets,error); });
+    if (m_characterEditor.IsDirty()) add(DirtyDocumentType::Asset, m_characterEditor.Path(),
+        "New Character", [this](std::string* error) { return m_characterEditor.SaveForShutdown(m_project.AssetRoot(),error); });
+    if (m_meshEditor.IsDirty()) add(DirtyDocumentType::Asset, m_meshEditor.Path(),
+        "Mesh", [this](std::string* error) { return m_meshEditor.SaveForShutdown(error); });
+    if (m_terrainCreator.IsDirty()) add(DirtyDocumentType::Asset, m_terrainCreator.Path(),
+        "New Landscape", [this](std::string* error) { return m_terrainCreator.SaveForShutdown(m_project.AssetRoot(),error); });
+    if (m_ragdollPhysics.IsDirty()) add(DirtyDocumentType::Asset, m_ragdollPhysics.Path(),
+        "New Ragdoll", [this](std::string* error) { return m_ragdollPhysics.SaveForShutdown(m_project.AssetRoot(),error); });
+    if (m_abilityEditor.IsDirty()) add(DirtyDocumentType::Asset, m_abilityEditor.Path(),
+        "New Ability", [this](std::string* error) { return m_abilityEditor.SaveForShutdown(m_assets,m_project.AssetRoot(),error); });
+    if (m_proceduralBuilding.IsDirty()) add(DirtyDocumentType::Asset, m_proceduralBuilding.AssetPath(),
+        "New Building", [this](std::string* error) { return m_proceduralBuilding.SaveForShutdown(m_project.AssetRoot(),error); });
+    if (m_roadGenerator.IsDirty()) add(DirtyDocumentType::Asset, m_roadGenerator.Path(),
+        "New Road", [this](std::string* error) { return m_roadGenerator.SaveForShutdown(m_project.AssetRoot(),error); });
+    if (m_proceduralScatterGraph.IsDirty()) add(DirtyDocumentType::Asset, m_proceduralScatterGraph.Path(),
+        "New Scatter Graph", [this](std::string* error) { return m_proceduralScatterGraph.SaveForShutdown(error); });
+    if (m_biomeEditor.IsDirty()) add(DirtyDocumentType::Asset, m_biomeEditor.Path(),
+        "New Biome", [this](std::string* error) { return m_biomeEditor.SaveForShutdown(m_project.AssetRoot(),error); });
+    if (m_dayNightTimeline.IsDirty()) add(DirtyDocumentType::Asset, m_dayNightTimeline.Path(),
+        "New Day/Night Timeline", [this](std::string* error) { return m_dayNightTimeline.SaveForShutdown(m_project.AssetRoot(),error); });
+    if (m_caveTunnel.IsDirty()) add(DirtyDocumentType::Asset, m_caveTunnel.Path(),
+        "New Cave", [this](std::string* error) { return m_caveTunnel.SaveForShutdown(m_project.AssetRoot(),error); });
+    if (m_fenceWallPainter.IsDirty()) add(DirtyDocumentType::Asset,
+        m_fenceWallPainter.Path(), "New Fence or Wall",
+        [this](std::string* error) {
+            return m_fenceWallPainter.SaveForShutdown(m_project.AssetRoot(),error);
+        });
+    if (m_weatherEditor.IsDirty()) add(DirtyDocumentType::Asset, m_weatherEditor.Path(),
+        "New Weather", [this](std::string* error) { return m_weatherEditor.SaveForShutdown(m_project.AssetRoot(),error); });
+    if (m_animationRetargeting.IsDirty()) add(DirtyDocumentType::Asset,
+        m_animationRetargeting.Path(), "New Animation Retarget Profile",
+        [this](std::string* error) {
+            return m_animationRetargeting.SaveForShutdown(m_project.AssetRoot(), error);
+        });
+    if (m_graphEditor.IsDirty()) add(DirtyDocumentType::Asset,
+        m_graphEditor.Path(), "New Animation Graph",
+        [this](std::string* error) { return m_graphEditor.SaveForShutdown(error); });
+    if (m_hudPanel.IsDirty()) add(DirtyDocumentType::Asset,
+        m_hudPanel.Path(), "New HUD",
+        [this](std::string* error) {
+            if (!m_hudPanel.SaveForShutdown(m_hud, error)) return false;
+            m_hudPath = m_hudPanel.Path();
+            return true;
+        });
+    if (m_behaviorGraph.IsDirty()) add(DirtyDocumentType::Asset,
+        m_behaviorGraph.Path(), "New Behavior Tree",
+        [this](std::string* error) { return m_behaviorGraph.SaveForShutdown(error); });
+    if (EditorDockspace::AudioDocumentDirty()) add(DirtyDocumentType::EditorDocument,
+        EditorDockspace::AudioDocumentPath(), "Audio Editor",
+        [](std::string* error) { return EditorDockspace::SaveAudioDocument(error); });
+    if (EditorDockspace::ScriptSourceDirty()) add(DirtyDocumentType::Script,
+        EditorDockspace::ScriptSourcePath(), "Script Source",
+        [](std::string* error) { return EditorDockspace::SaveScriptSource(error); });
+
+    // Scene is intentionally last: asset references are committed before the
+    // level containing those references.
+    if (m_scene.IsDirty()) add(DirtyDocumentType::Scene, m_project.ScenePath(),
+        "Untitled Scene", [this](std::string*) { SaveScene(); return !m_scene.IsDirty(); });
+    return documents;
+}
+
+bool EditorApp::SaveAllDirtyDocuments(std::string* error) {
+    std::string failed, detail;
+    if (SaveDirtyDocuments(m_pendingDirtyDocuments,&failed,&detail)) return true;
+    if (error) *error="Could not save " + failed
+        + (detail.empty()?std::string("."): ": " + detail);
+    return false;
+}
+
 void EditorApp::DrawDirtyScenePrompt() {
     if (m_pendingSceneAction == PendingSceneAction::None) {
         return;
     }
 
     if (m_dirtyScenePromptQueued) {
-        ImGui::OpenPopup("Unsaved Scene");
+        ImGui::OpenPopup("Unsaved Changes");
         m_dirtyScenePromptQueued = false;
     }
 
     const ImGuiWindowFlags flags = ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings;
-    if (ImGui::BeginPopupModal("Unsaved Scene", nullptr, flags)) {
-        ImGui::TextUnformatted("The current scene has unsaved changes.");
+    if (ImGui::BeginPopupModal("Unsaved Changes", nullptr, flags)) {
+        ImGui::TextUnformatted("The following items have unsaved changes:");
+        ImGui::BeginChild("##DirtyDocuments", ImVec2(520.0f, std::min(220.0f,
+            28.0f * static_cast<float>(std::max<std::size_t>(m_pendingDirtyDocuments.size(),1)))), true);
+        for (const DirtyDocument& document : m_pendingDirtyDocuments)
+            ImGui::BulletText("%s", document.displayName.c_str());
+        ImGui::EndChild();
         if (m_pendingSceneAction == PendingSceneAction::LoadScene && !m_pendingScenePath.empty()) {
             ImGui::Text("Next scene: %s", m_pendingScenePath.c_str());
         }
         ImGui::Separator();
 
-        if (ImGui::Button("Save", ImVec2(92.0f, 0.0f))) {
-            SaveScene();
-            if (!m_scene.IsDirty()) {
+        if (!m_dirtyDocumentSaveError.empty())
+            ImGui::TextColored(ImVec4(1.0f,.35f,.25f,1.0f), "%s", m_dirtyDocumentSaveError.c_str());
+
+        const bool restart = m_pendingSceneAction == PendingSceneAction::RestartScripts;
+        if (ImGui::Button(restart ? "Save All and Restart" : "Save All and Continue", ImVec2(170.0f, 0.0f))) {
+            std::string error;
+            if (SaveAllDirtyDocuments(&error)) {
                 ImGui::CloseCurrentPopup();
                 CompletePendingSceneAction();
-            }
+            } else m_dirtyDocumentSaveError = error;
         }
         ImGui::SameLine();
-        if (ImGui::Button("Discard", ImVec2(92.0f, 0.0f))) {
+        if (ImGui::Button(restart ? "Restart Without Saving" : "Discard and Continue", ImVec2(170.0f, 0.0f))) {
             ImGui::CloseCurrentPopup();
             CompletePendingSceneAction();
         }
@@ -6306,6 +6662,7 @@ void EditorApp::DrawPlayScene(const glm::mat4 & viewProj)
         lighting.skylightOcclusion = environment.skylightOcclusion;
         lighting.skylightOcclusionStrength = environment.skylightOcclusionStrength;
         lighting.minimumSkylight = environment.minimumSkylight;
+        lighting.lightingGrid = m_lightingProbeGrid.Valid() ? &m_lightingProbeGrid : nullptr;
         lighting.cloudShadows = environment.clouds && environment.cloudShadows;
         lighting.cloudShadowStrength = environment.cloudShadowStrength;
         lighting.cloudShadowScale = environment.cloudShadowScale;
@@ -7046,6 +7403,8 @@ void EditorApp::ConfigureEnvironmentPbrOptions(engine::ecs::Registry& registry,
     options.skylightOcclusion = environment.skylightOcclusion;
     options.skylightOcclusionStrength = environment.skylightOcclusionStrength;
     options.minimumSkylight = environment.minimumSkylight;
+    if (environment.lightingBuildAsset != m_loadedLightingAsset) LoadSceneLightingAsset();
+    options.lightingGrid = m_lightingProbeGrid.Valid() ? &m_lightingProbeGrid : nullptr;
     options.pointShadows = environment.pointShadows;
     options.spotShadows = environment.spotShadows;
     options.directionalShadows = environment.directionalShadows;
@@ -7083,6 +7442,111 @@ void EditorApp::ConfigureEnvironmentPbrOptions(engine::ecs::Registry& registry,
             registry, m_camera, window.AspectRatio(), m_renderW, m_renderH);
         options.ssao = environment.ssao ? &*m_ssao : nullptr;
     }
+}
+
+std::uint64_t EditorApp::ComputeLightingStateHash() const {
+    std::uint64_t hash = 1469598103934665603ull;
+    auto bytes = [&](const void* data, std::size_t size) {
+        const auto* p = static_cast<const unsigned char*>(data);
+        for (std::size_t i=0;i<size;++i){hash^=p[i];hash*=1099511628211ull;}
+    };
+    auto string = [&](const std::string& value){bytes(value.data(),value.size());};
+    for (const auto& object : m_scene.Objects()) {
+        if (!object.visible || object.light || object.navMeshBoundsVolume || object.isWater || object.isSpline) continue;
+        string(object.name); string(object.modelAssetPath); bytes(&object.primitive,sizeof(object.primitive));
+        if (const auto* transform=m_scene.TryGetTransform(object.entity)) {
+            bytes(&transform->position,sizeof(transform->position)); bytes(&transform->rotation,sizeof(transform->rotation)); bytes(&transform->scale,sizeof(transform->scale));
+        }
+        bytes(&object.modelOrientationEuler,sizeof(object.modelOrientationEuler));
+        bytes(&object.modelOffsetPosition,sizeof(object.modelOffsetPosition));
+        bytes(&object.modelOffsetScale,sizeof(object.modelOffsetScale));
+        bytes(&object.isTerrain,sizeof(object.isTerrain)); bytes(&object.terrainRes,sizeof(object.terrainRes));
+        bytes(&object.terrainSize,sizeof(object.terrainSize)); bytes(&object.terrainMaxHeight,sizeof(object.terrainMaxHeight));
+        if(!object.terrainHeights.empty())bytes(object.terrainHeights.data(),object.terrainHeights.size()*sizeof(float));
+    }
+    const auto& e=m_scene.GetEnvironment();
+    bytes(&e.skyMode,sizeof(e.skyMode)); string(e.skyTexturePath); bytes(&e.skyRotation,sizeof(e.skyRotation));
+    bytes(&e.skyIntensity,sizeof(e.skyIntensity)); bytes(&e.skyLightIntensity,sizeof(e.skyLightIntensity));
+    bytes(&e.skylightOcclusionStrength,sizeof(e.skylightOcclusionStrength)); bytes(&e.minimumSkylight,sizeof(e.minimumSkylight));
+    bytes(&e.lightingBuildQuality,sizeof(e.lightingBuildQuality)); bytes(&e.lightingProbeSpacing,sizeof(e.lightingProbeSpacing)); bytes(&e.lightingRayDistance,sizeof(e.lightingRayDistance));
+    return hash;
+}
+
+std::vector<engine::LightingTriangle> EditorApp::GatherLightingTriangles() const {
+    std::vector<engine::LightingTriangle> triangles;
+    for (const auto& object : m_scene.Objects()) {
+        if (!object.visible || object.light || object.skeletalModel || object.isWater || object.isSpline || object.navMeshBoundsVolume) continue;
+        const auto* transform=m_scene.TryGetTransform(object.entity);
+        auto appendMesh=[&](const engine::Mesh& source,const glm::mat4& model){
+            const auto vertices=source.ReadbackVertices();const auto indices=source.ReadbackIndices();const std::size_t stride=source.VertexStrideFloats();
+            if(stride<3||indices.size()<3)return;auto point=[&](std::uint32_t index){const std::size_t base=static_cast<std::size_t>(index)*stride;if(base+2>=vertices.size())return glm::vec3(0);return glm::vec3(model*glm::vec4(vertices[base],vertices[base+1],vertices[base+2],1.0f));};
+            triangles.reserve(triangles.size()+indices.size()/3);for(std::size_t i=0;i+2<indices.size();i+=3)triangles.push_back({point(indices[i]),point(indices[i+1]),point(indices[i+2])});
+        };
+        if(transform&&!object.modelAssetPath.empty()&&!object.skeletalModel){
+            if(const engine::Model* model=m_editAssets.FindModel(object.modelAssetPath)){
+                const glm::mat4 renderOffset=engine::MakeModelRenderOffset(object.modelOffsetPosition,object.modelOrientationEuler,object.modelOffsetScale,model->Center());
+                for(const auto& submesh:model->SubMeshes())appendMesh(submesh.mesh,transform->Model()*renderOffset);
+                continue;
+            }
+        }
+        const engine::Mesh* mesh=nullptr;
+        if(object.isTerrain){const auto found=m_terrains.find(object.entity);if(found!=m_terrains.end()&&found->second.terrain.HasMesh())mesh=&found->second.terrain.GetMesh();}
+        else if(const auto* renderer=m_scene.TryGetMeshRenderer(object.entity))mesh=renderer->mesh;
+        if(!transform||!mesh||!mesh->Valid())continue;
+        appendMesh(*mesh,transform->Model());
+    }
+    return triangles;
+}
+
+void EditorApp::StartLightingBuild() {
+    if(m_lightingBuildRunning)return;
+    auto triangles=GatherLightingTriangles();
+    if(triangles.empty()){m_lightingBuildStatus="Build failed: no static geometry";m_log.Error(m_lightingBuildStatus);return;}
+    auto authoredEnvironment=m_scene.GetEnvironment();
+    authoredEnvironment.lightingBuildQuality=std::clamp(m_lightingBuildQuality,0,2);
+    m_scene.SetEnvironment(authoredEnvironment);
+    const auto& environment=m_scene.GetEnvironment();
+    engine::LightingBuildSettings settings;
+    settings.quality=static_cast<engine::LightingBuildQuality>(std::clamp(m_lightingBuildQuality,0,2));
+    settings.probeSpacing=std::clamp(environment.lightingProbeSpacing,0.25f,20.0f);
+    settings.maxRayDistance=std::clamp(environment.lightingRayDistance,2.0f,1000.0f);
+    settings.raysPerProbe=settings.quality==engine::LightingBuildQuality::Preview?24u:(settings.quality==engine::LightingBuildQuality::High?192u:72u);
+    const std::uint64_t hash=ComputeLightingStateHash();
+    const std::filesystem::path path=std::filesystem::path(m_project.AssetRoot())/"Lighting"/(std::filesystem::path(m_project.ScenePath()).stem().string()+".3dglighting");
+    const glm::vec3 skyColor=engine::DayNightCycle::At(environment.timeOfDay).ambient*environment.skyLightIntensity;
+    m_lightingBuildProgressState=std::make_shared<engine::LightingBuildProgress>();
+    auto progress=m_lightingBuildProgressState;
+    const std::string scene=m_project.ScenePath(); const std::string output=path.string();
+    m_lightingBuildRunning=true;m_lightingBuildStatus="Building local sky visibility...";
+    m_lightingBuildFuture=std::async(std::launch::async,[triangles=std::move(triangles),settings,hash,skyColor,scene,output,progress]() mutable {
+        LightingBuildResult result;result.path=output;
+        result.success=engine::BuildLightingProbes(triangles,skyColor,hash,scene,settings,&result.data,progress.get(),&result.error)
+                    && engine::SaveLightingBuildData(output,result.data,&result.error);
+        return result;
+    });
+}
+
+void EditorApp::PollLightingBuild() {
+    if(!m_lightingBuildRunning||!m_lightingBuildFuture.valid())return;
+    if(m_lightingBuildFuture.wait_for(std::chrono::seconds(0))!=std::future_status::ready)return;
+    LightingBuildResult result=m_lightingBuildFuture.get();m_lightingBuildRunning=false;
+    if(!result.success){m_lightingBuildStatus=result.error.empty()?"Lighting build failed":result.error;m_log.Error(m_lightingBuildStatus);return;}
+    std::string error;
+    if(!m_lightingProbeGrid.Upload(result.data,&error)){m_lightingBuildStatus=error;m_log.Error(error);return;}
+    auto environment=m_scene.GetEnvironment(); environment.lightingBuildAsset=result.path; environment.lightingBuildHash=result.data.sourceHash; m_scene.SetEnvironment(environment);
+    m_loadedLightingAsset=result.path;m_lightingBuildDirty=false;m_lightingBuildStatus="Lighting built: "+std::to_string(result.data.probes.size())+" probes";m_log.Info(m_lightingBuildStatus);
+}
+
+void EditorApp::LoadSceneLightingAsset() {
+    const auto& environment=m_scene.GetEnvironment();
+    m_lightingBuildQuality=std::clamp(environment.lightingBuildQuality,0,2);
+    m_loadedLightingAsset=environment.lightingBuildAsset;m_lightingProbeGrid.Reset();
+    if(environment.lightingBuildAsset.empty()){m_lightingBuildStatus="No lighting data";return;}
+    engine::LightingBuildData data;std::string error;
+    if(!engine::LoadLightingBuildData(environment.lightingBuildAsset,&data,&error)){m_lightingBuildStatus=error;return;}
+    if(!m_lightingProbeGrid.Upload(data,&error)){m_lightingBuildStatus=error;return;}
+    m_lightingBuildDirty=data.sourceHash!=ComputeLightingStateHash();
+    m_lightingBuildStatus=m_lightingBuildDirty?"Lighting data is stale":"Lighting data loaded";
 }
 
 void EditorApp::TogglePanel(EditorPanels::Panel panel)
@@ -8492,10 +8956,7 @@ void EditorApp::AddDynamicCube() {
     engine::ecs::RigidBody rigidBody = engine::ecs::RigidBody::Dynamic(1.0f);
     m_scene.SetSelectedRigidBody(rigidBody);
 
-    const Transform* transform = m_scene.SelectedTransform();
-    engine::ecs::Collider collider = engine::ecs::Collider::MakeBox(transform
-        ? glm::max(transform->scale * 0.5f, glm::vec3(0.001f))
-        : glm::vec3(0.5f));
+    engine::ecs::Collider collider = engine::ecs::Collider::MakeBox(glm::vec3(0.5f));
     m_scene.SetSelectedCollider(collider);
     m_log.Info("Added dynamic cube");
 }
@@ -9241,7 +9702,7 @@ void EditorApp::AddGameplayDoor()
     m_scene.SetSelectedTransform(transform);
     m_scene.SetSelectedColor(glm::vec3(0.52f, 0.34f, 0.18f));
     m_scene.SetSelectedRigidBodyEnabled(false);
-    m_scene.SetSelectedCollider(engine::ecs::Collider::MakeBox(transform.scale * 0.5f));
+    m_scene.SetSelectedCollider(engine::ecs::Collider::MakeBox(glm::vec3(0.5f)));
     m_scene.SetSelectedScript("DoorOpener", "Game/Scripts/DoorOpener.cpp", true);
 
     std::vector<EditorScene::ScriptField> fields;
@@ -9267,7 +9728,7 @@ void EditorApp::AddGameplayPickup()
     m_scene.SetSelectedTransform(transform);
     m_scene.SetSelectedColor(glm::vec3(0.95f, 0.82f, 0.22f));
     m_scene.SetSelectedRigidBodyEnabled(false);
-    engine::ecs::Collider collider = engine::ecs::Collider::MakeBox(transform.scale * 0.5f);
+    engine::ecs::Collider collider = engine::ecs::Collider::MakeBox(glm::vec3(0.5f));
     collider.isTrigger = true;
     m_scene.SetSelectedCollider(collider);
     m_scene.SetSelectedScript("Pickup", "Game/Scripts/Pickup.cpp", true);
@@ -9293,7 +9754,7 @@ void EditorApp::AddGameplayDamageZone()
     m_scene.SetSelectedTransform(transform);
     m_scene.SetSelectedColor(glm::vec3(0.86f, 0.12f, 0.10f));
     m_scene.SetSelectedRigidBodyEnabled(false);
-    engine::ecs::Collider collider = engine::ecs::Collider::MakeBox(transform.scale * 0.5f);
+    engine::ecs::Collider collider = engine::ecs::Collider::MakeBox(glm::vec3(0.5f));
     collider.isTrigger = true;
     m_scene.SetSelectedCollider(collider);
     m_scene.SetSelectedScript("DamageZone", "Game/Scripts/DamageZone.cpp", true);
@@ -9320,7 +9781,7 @@ void EditorApp::AddGameplayMovingPlatform()
     m_scene.SetSelectedTransform(transform);
     m_scene.SetSelectedColor(glm::vec3(0.18f, 0.56f, 0.78f));
     m_scene.SetSelectedRigidBodyEnabled(false);
-    m_scene.SetSelectedCollider(engine::ecs::Collider::MakeBox(transform.scale * 0.5f));
+    m_scene.SetSelectedCollider(engine::ecs::Collider::MakeBox(glm::vec3(0.5f)));
 
     engine::ecs::Mover mover;
     mover.axis = glm::vec3(1.0f, 0.0f, 0.0f);
@@ -9366,7 +9827,7 @@ void EditorApp::AddGameplayTriggerMoverTest()
     m_scene.SetSelectedColor(glm::vec3(0.90f, 0.62f, 0.18f));
     m_scene.SetSelectedRigidBodyEnabled(false);
 
-    engine::ecs::Collider triggerCollider = engine::ecs::Collider::MakeBox(triggerTransform.scale * 0.5f);
+    engine::ecs::Collider triggerCollider = engine::ecs::Collider::MakeBox(glm::vec3(0.5f));
     triggerCollider.isTrigger = true;
     m_scene.SetSelectedCollider(triggerCollider);
     m_scene.SetSelectedTriggerAction("GameplayMoverTarget",
@@ -9388,7 +9849,7 @@ void EditorApp::AddGameplayTriggerMoverTest()
     activatorBody.useGravity = false;
     activatorBody.velocity = glm::vec3(2.0f, 0.0f, 0.0f);
     m_scene.SetSelectedRigidBody(activatorBody);
-    m_scene.SetSelectedCollider(engine::ecs::Collider::MakeBox(activatorTransform.scale * 0.5f));
+    m_scene.SetSelectedCollider(engine::ecs::Collider::MakeBox(glm::vec3(0.5f)));
 
     m_scene.SelectIndex(triggerIndex);
 
@@ -9891,6 +10352,9 @@ void EditorApp::NewProject(const std::string& location, const std::string& name)
     const std::string loc = location.empty() ? std::string(".") : location;
     const std::filesystem::path projectDir = std::filesystem::path(loc) / trimmedName;
 
+    DrainScriptBuild(false);
+    if (m_mode == EditorMode::Play) ExitPlayMode();
+
     std::string err;
     if (!m_project.CreateProject(projectDir.string(), trimmedName, &err)) {
         m_log.Error("New project failed: " + err);
@@ -9922,12 +10386,19 @@ void EditorApp::NewProject(const std::string& location, const std::string& name)
     m_scriptModule.Unload();
     m_projectScriptClasses.clear();
     m_projectBtScriptClasses.clear();
-    m_projectScriptStageSlot = -1;
+    m_activeScriptCandidate.clear();
+    m_projectScriptSafeMode = false;
+    m_projectScriptModuleState = ProjectScriptModuleState::Unloaded;
     ResetScriptAutoReloadWatcher();
     engine::ai::RegisterExampleBtScripts();
     RegisterGameBtScripts();
     RegisterGameModule();
-    LoadProjectScriptModule(false);
+    {
+        std::error_code ec;
+        const std::filesystem::path root =
+            std::filesystem::absolute(m_project.AssetRoot(), ec).parent_path();
+        if (ec || !RecoverInterruptedScriptLoad(root)) LoadProjectScriptModule(false);
+    }
 
     // Start the project from a clean default scene and save it into the project.
     m_scene.BuildDefault(*m_cube, *m_plane, *m_sphere, *m_capsule, *m_cylinder,
@@ -9948,6 +10419,9 @@ void EditorApp::OpenProjectFromPath(const std::string& projectFile) {
         m_log.Warning("Open project: path is empty");
         return;
     }
+
+    DrainScriptBuild(false);
+    if (m_mode == EditorMode::Play) ExitPlayMode();
 
     std::string err;
     if (!m_project.OpenProjectFile(projectFile, m_projectConfig, &err)) {
@@ -9977,12 +10451,19 @@ void EditorApp::OpenProjectFromPath(const std::string& projectFile) {
     m_scriptModule.Unload();
     m_projectScriptClasses.clear();
     m_projectBtScriptClasses.clear();
-    m_projectScriptStageSlot = -1;
+    m_activeScriptCandidate.clear();
+    m_projectScriptSafeMode = false;
+    m_projectScriptModuleState = ProjectScriptModuleState::Unloaded;
     ResetScriptAutoReloadWatcher();
     engine::ai::RegisterExampleBtScripts();
     RegisterGameBtScripts();
     RegisterGameModule();
-    LoadProjectScriptModule(false);
+    {
+        std::error_code loadEc;
+        const std::filesystem::path root =
+            std::filesystem::absolute(m_project.AssetRoot(), loadEc).parent_path();
+        if (loadEc || !RecoverInterruptedScriptLoad(root)) LoadProjectScriptModule(false);
+    }
 
     std::error_code ec;
     if (m_project.HasLastSavedScene()
@@ -10051,7 +10532,7 @@ void EditorApp::SyncHudFromScene() {
 }
 
 void EditorApp::RequestCloseEditor() {
-    if (m_scene.IsDirty()) {
+    if (!CollectDirtyDocuments().empty()) {
         QueueDirtySceneAction(PendingSceneAction::CloseEditor);
         return;
     }
@@ -10061,7 +10542,7 @@ void EditorApp::RequestCloseEditor() {
 
 void EditorApp::RequestNewScene()
 {
-    if (m_scene.IsDirty()) {
+    if (!CollectDirtyDocuments().empty()) {
         QueueDirtySceneAction(PendingSceneAction::NewScene);
         return;
     }
@@ -10070,12 +10551,55 @@ void EditorApp::RequestNewScene()
 }
 
 void EditorApp::RequestLoadSceneFromPath(const std::string& path) {
-    if (m_scene.IsDirty()) {
+    if (!CollectDirtyDocuments().empty()) {
         QueueDirtySceneAction(PendingSceneAction::LoadScene, path);
         return;
     }
 
     PerformLoadSceneFromPath(path);
+}
+
+void EditorApp::RequestOpenProjectFromPath(const std::string& projectFile) {
+    if (!CollectDirtyDocuments().empty()) {
+        QueueDirtySceneAction(PendingSceneAction::OpenProject, projectFile);
+        return;
+    }
+    OpenProjectFromPath(projectFile);
+}
+
+void EditorApp::RequestNewProject(const std::string& location, const std::string& name) {
+    if (!CollectDirtyDocuments().empty()) {
+        m_pendingActionArgument = name;
+        QueueDirtySceneAction(PendingSceneAction::NewProject, location);
+        return;
+    }
+    NewProject(location, name);
+}
+
+void EditorApp::RequestScriptCompileRestart() {
+    if (m_mode != EditorMode::Edit) {
+        m_log.Warning("Exit Play mode before compiling scripts");
+        return;
+    }
+    if (!CollectDirtyDocuments().empty()) {
+        QueueDirtySceneAction(PendingSceneAction::RestartScripts);
+        return;
+    }
+    PerformScriptCompileRestart();
+}
+
+bool EditorApp::PerformScriptCompileRestart() {
+    std::error_code ec;
+    const std::filesystem::path projectRoot =
+        std::filesystem::absolute(m_project.AssetRoot(), ec).parent_path();
+    std::string error;
+    if (!EditorScriptTools::LaunchCompileAndRestart(projectRoot, "Debug", &error)) {
+        m_log.Error("Script compiler: " + error);
+        return false;
+    }
+    m_log.Info("Script compiler started; building the project-owned script module");
+    GetWindow().SetShouldClose(true);
+    return true;
 }
 
 void EditorApp::PerformNewScene()
@@ -10132,12 +10656,15 @@ void EditorApp::PerformLoadSceneFromPath(const std::string& path) {
 void EditorApp::QueueDirtySceneAction(PendingSceneAction action, const std::string& path) {
     m_pendingSceneAction = action;
     m_pendingScenePath = path;
+    m_pendingDirtyDocuments = CollectDirtyDocuments();
+    m_dirtyDocumentSaveError.clear();
     m_dirtyScenePromptQueued = true;
 }
 
 void EditorApp::CompletePendingSceneAction() {
     const PendingSceneAction action = m_pendingSceneAction;
     const std::string path = m_pendingScenePath;
+    const std::string argument = m_pendingActionArgument;
     CancelPendingSceneAction();
 
     switch (action) {
@@ -10147,6 +10674,18 @@ void EditorApp::CompletePendingSceneAction() {
     case PendingSceneAction::LoadScene:
         PerformLoadSceneFromPath(path);
         break;
+    case PendingSceneAction::NewScene:
+        PerformNewScene();
+        break;
+    case PendingSceneAction::OpenProject:
+        OpenProjectFromPath(path);
+        break;
+    case PendingSceneAction::NewProject:
+        NewProject(path, argument);
+        break;
+    case PendingSceneAction::RestartScripts:
+        PerformScriptCompileRestart();
+        break;
     case PendingSceneAction::None:
         break;
     }
@@ -10155,7 +10694,11 @@ void EditorApp::CompletePendingSceneAction() {
 void EditorApp::CancelPendingSceneAction() {
     m_pendingSceneAction = PendingSceneAction::None;
     m_pendingScenePath.clear();
+    m_pendingActionArgument.clear();
+    m_pendingDirtyDocuments.clear();
+    m_dirtyDocumentSaveError.clear();
     m_dirtyScenePromptQueued = false;
+    GetWindow().SetShouldClose(false);
 }
 
 void EditorApp::LoadSceneFromPath(const std::string& path) {

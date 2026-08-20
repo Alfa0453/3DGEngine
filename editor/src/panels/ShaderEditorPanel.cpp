@@ -362,6 +362,13 @@ bool ShaderEditorPanel::SaveDocument(EditorAssets& assets, bool saveAs)
     return true;
 }
 
+bool ShaderEditorPanel::SaveForShutdown(EditorAssets& assets, std::string* error)
+{
+    if (SaveDocument(assets, false)) return true;
+    if (error) *error = m_error.empty() ? "Shader save failed" : m_error;
+    return false;
+}
+
 bool ShaderEditorPanel::DuplicateDocument(EditorAssets& assets)
 {
     const std::string oldName = m_asset.name;

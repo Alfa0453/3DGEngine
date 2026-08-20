@@ -42,6 +42,7 @@ void CharacterAsset::Capture(const EditorScene::Object& o) {
         captured.assetId = source.assetId;
         captured.clipName = source.clipName;
         captured.stripRootMotion = source.stripRootMotion;
+        captured.basePlaybackSpeed = source.basePlaybackSpeed;
         animationSources.push_back(std::move(captured));
     }
     // Rebuild named sockets and their optional visible attachments from the baked
@@ -149,12 +150,15 @@ bool CharacterAsset::Apply(EditorScene& scene) const {
         std::vector<EditorScene::AnimationSource> graphSources;
         graphSources.reserve(graph.clips.size());
         for (const AnimationGraphClip& c : graph.clips) {
+            AnimationClipAsset clip;
             EditorScene::AnimationSource source;
             source.file = c.sourceFile;
             source.assetId = c.sourceAssetId;
             source.clipName = c.clipName;
             source.stripRootMotion = c.stripRootMotion;
             source.sourceClipName = c.sourceClipName;
+            source.basePlaybackSpeed = clip.Load(c.clipAsset, nullptr)
+                ? std::max(clip.speed, 0.0f) : 1.0f;
             graphSources.push_back(std::move(source));
         }
         scene.SetSelectedAnimationSources(graphSources);
@@ -172,6 +176,7 @@ bool CharacterAsset::Apply(EditorScene& scene) const {
             baked.assetId = source.assetId;
             baked.clipName = source.clipName;
             baked.stripRootMotion = source.stripRootMotion;
+            baked.basePlaybackSpeed = source.basePlaybackSpeed;
             sceneSources.push_back(std::move(baked));
         }
         scene.SetSelectedAnimationSources(sceneSources);
@@ -251,6 +256,7 @@ bool CharacterAsset::Apply(EditorScene& scene) const {
         resolved.clipName = alias;
         resolved.stripRootMotion = actionClip.stripRootMotion;
         resolved.sourceClipName = actionClip.clipName;
+        resolved.basePlaybackSpeed = std::max(actionClip.speed, 0.0f);
         resolvedSources.push_back(std::move(resolved));
         resolvedActions.push_back(EditorScene::AnimationActionProfile{
             alias, 0, alias, actionClip.maskRootBone,

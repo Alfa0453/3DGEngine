@@ -72,6 +72,7 @@ add_executable(3DGEditor
     src/panels/BiomeEditorPanel.cpp
     src/panels/DayNightTimelinePanel.cpp
     src/panels/CaveTunnelPanel.cpp
+    src/panels/FenceWallPainterPanel.cpp
     src/panels/TerrainCreatorPanel.cpp
     src/panels/ModularPlacementPanel.cpp
     src/panels/PrefabPalettePanel.cpp

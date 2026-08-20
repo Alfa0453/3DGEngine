@@ -37,9 +37,11 @@
 #include <engine/graphics/Framebuffer.h>
 #include <engine/graphics/GpuProfiler.h>
 #include <engine/graphics/TextRenderer.h>
+#include <engine/graphics/LightingBuildData.h>
 #include <engine/gameplay/PlayerController.h>
 #include <engine/gameplay/CameraDirector.h>
 #include <engine/physics/PhysicsComponents.h>
+#include "EditorDirtyDocument.h"
 #include <engine/gameplay/Script.h>
 #include <engine/gameplay/ScriptModule.h>
 #include <engine/physics/PhysicsWorld.h>
@@ -69,6 +71,7 @@
 #include "BiomeEditorPanel.h"
 #include "DayNightTimelinePanel.h"
 #include "CaveTunnelPanel.h"
+#include "FenceWallPainterPanel.h"
 #include "TerrainCreatorPanel.h"
 #include "ModularPlacementPanel.h"
 #include "PrefabPalettePanel.h"
@@ -140,7 +143,10 @@ private:
         None,
         CloseEditor,
         NewScene,
-        LoadScene
+        LoadScene,
+        OpenProject,
+        NewProject,
+        RestartScripts
     };
 
     struct PlayTriggerAction {
@@ -248,6 +254,9 @@ private:
     void DrawCaveTunnelPanel();
     void GenerateCaveTunnel();
     int DeleteGeneratedCaveTunnel(const std::string& caveName);
+    void DrawFenceWallPainterPanel();
+    void GenerateFenceWall();
+    int DeleteGeneratedFenceWall(const std::string& name);
     bool CreatePartitionCellFromSelection(const std::string& path, int cellX, int cellZ);
     void DrawLevelVariantPanel();
     void DrawLevelLayersPanel();
@@ -286,6 +295,12 @@ private:
     void DrawScriptDebugPanel();    // live per-entity script field inspector (Play mode)
     void HotReloadScripts();        // rebuild + reload game_scripts.dll without restart (dev)
     bool LoadProjectScriptModule(bool reportMissing = false);
+    bool InstallProjectScriptCandidate(const std::filesystem::path& candidate,
+                                       std::uint64_t generation,
+                                       bool reportMissing = false);
+    bool RecoverInterruptedScriptLoad(const std::filesystem::path& projectRoot);
+    void DrainScriptBuild(bool shuttingDown);
+    void AcknowledgeCreatedScriptSource();
     void UpdateScriptAutoReload(float dt);
     void UpdateMaterialForgeDeployments(float dt);
     void StartScriptAutoBuild();
@@ -305,6 +320,8 @@ private:
     unsigned int HudTextureId(const std::string& relPath);  // resolve HUD image -> GL texture id
     void DrawMaterialMakerTools(bool materialSaved);
     void DrawDirtyScenePrompt();
+    std::vector<DirtyDocument> CollectDirtyDocuments();
+    bool SaveAllDirtyDocuments(std::string* error);
     EditorDockspace::GameplayDebugState BuildGameplayDebugState();
     EditorDockspace::AnimationPreviewState BuildAnimationPreviewState();
     EditorDockspace::AnimationPreviewState BuildAnimationAssetPreviewState();
@@ -332,6 +349,11 @@ private:
                                         engine::PbrRenderer::Options& options,
                                         const EditorScene::Environment& environment,
                                         const engine::DayNightCycle::Sample& sky);
+    std::uint64_t ComputeLightingStateHash() const;
+    std::vector<engine::LightingTriangle> GatherLightingTriangles() const;
+    void StartLightingBuild();
+    void PollLightingBuild();
+    void LoadSceneLightingAsset();
     void TogglePanel(EditorPanels::Panel panel);
     void HandleMouseAssetDrag();
     void HandleMouseViewportSelection();
@@ -405,6 +427,10 @@ private:
     void LoadProjectAssetRegistry();
     void NewProject(const std::string& location, const std::string& name);
     void OpenProjectFromPath(const std::string& projectFile);
+    void RequestOpenProjectFromPath(const std::string& projectFile);
+    void RequestNewProject(const std::string& location, const std::string& name);
+    void RequestScriptCompileRestart();
+    bool PerformScriptCompileRestart();
     void SetScenePathDraft(const std::string& path);
     void UpdateAutosave(float dt);
     void LoadScene();
@@ -546,6 +572,20 @@ private:
     std::optional<engine::Shader>        m_outlineShader;
     std::optional<engine::Shader>        m_skinnedOutlineShader;
     std::optional<engine::PbrRenderer>   m_pbrRenderer;
+    engine::LightingProbeGrid            m_lightingProbeGrid;
+    struct LightingBuildResult {
+        bool success = false;
+        engine::LightingBuildData data;
+        std::string path;
+        std::string error;
+    };
+    std::future<LightingBuildResult>      m_lightingBuildFuture;
+    std::shared_ptr<engine::LightingBuildProgress> m_lightingBuildProgressState;
+    bool                                 m_lightingBuildRunning = false;
+    bool                                 m_lightingBuildDirty = false;
+    int                                  m_lightingBuildQuality = 1;
+    std::string                          m_lightingBuildStatus = "No lighting data";
+    std::string                          m_loadedLightingAsset;
     std::optional<engine::FoliageRenderer> m_foliageRenderer;
     std::optional<engine::ParticleRenderer> m_particleRenderer;
     std::optional<engine::PostProcess>   m_postProcess;
@@ -649,6 +689,7 @@ private:
     BiomeEditorPanel                       m_biomeEditor;
     DayNightTimelinePanel                  m_dayNightTimeline;
     CaveTunnelPanel                       m_caveTunnel;
+    FenceWallPainterPanel                m_fenceWallPainter;
     LevelVariantPanel                    m_levelVariants;
     LevelLayersPanel                     m_levelLayers;
     ViewportBookmarksPanel               m_viewportBookmarks;
@@ -671,11 +712,24 @@ private:
     engine::ScriptModule                 m_scriptModule;     // loaded hot-reload script DLL (dev)
     std::vector<std::string>             m_projectScriptClasses;
     std::vector<std::string>             m_projectBtScriptClasses;
-    int                                  m_projectScriptStageSlot = -1;
+    enum class ProjectScriptModuleState {
+        Unloaded, Building, CandidateReady, Validating, Reloading, Ready,
+        BuildFailed, LoadFailed, Quarantined, SafeMode
+    };
+    ProjectScriptModuleState             m_projectScriptModuleState =
+        ProjectScriptModuleState::Unloaded;
+    bool                                 m_projectScriptSafeMode = false;
+    bool                                 m_scriptModuleInstallInProgress = false;
+    bool                                 m_scriptShuttingDown = false;
+    std::uint64_t                        m_scriptBuildGeneration = 0;
+    std::uint64_t                        m_activeScriptBuildGeneration = 0;
+    std::filesystem::path                m_activeScriptCandidate;
     struct ScriptBuildResult {
         bool success = false;
         std::string error;
         std::filesystem::path projectRoot;
+        std::filesystem::path candidateDll;
+        std::uint64_t generation = 0;
     };
     std::future<ScriptBuildResult>       m_scriptBuildFuture;
     std::unordered_map<std::string, std::uint64_t> m_scriptSourceSnapshot;
@@ -786,6 +840,9 @@ private:
     bool m_renderingHdrPreview = false;
     PendingSceneAction m_pendingSceneAction = PendingSceneAction::None;
     std::string m_pendingScenePath;
+    std::string m_pendingActionArgument;
+    std::vector<DirtyDocument> m_pendingDirtyDocuments;
+    std::string m_dirtyDocumentSaveError;
     bool m_dirtyScenePromptQueued = false;
     // A script's RequestSceneLoad during Play, deferred to the next frame's top.
     std::string m_playSceneLoadRequest;

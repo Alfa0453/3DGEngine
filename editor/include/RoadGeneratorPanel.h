@@ -33,6 +33,9 @@ public:
     bool CreateColliders() const { return m_colliders; }
     bool ConformTerrain() const { return m_conformTerrain; }
     float TerrainOffset() const { return m_terrainOffset; }
+    bool IsDirty() const { return m_dirty; }
+    const std::string& Path() const { return m_path; }
+    bool SaveForShutdown(const std::string& root, std::string* error) { return Save(root, error); }
 
     void SetWidth(float value) { m_width = value; }
     void SetLanes(int value) { m_lanes = value; }

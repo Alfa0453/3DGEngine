@@ -20,6 +20,7 @@ class Camera;
 class IBL;
 class SSAO;
 class Mesh;
+class LightingProbeGrid;
 namespace ecs { class Registry; struct Transform; struct MeshPBR; }
 
 // A drop-in physically-based scene renderer. Give it an ECS registry and a
@@ -54,6 +55,7 @@ public:
         bool        skylightOcclusion = false;
         float       skylightOcclusionStrength = 0.90f;
         float       minimumSkylight = 0.06f;
+        const LightingProbeGrid* lightingGrid = nullptr;
         bool        pointShadows = true;    // omnidirectional shadows for point lights
         bool        spotShadows  = true;  // perspective shadows for spotlights
         bool        directionalShadows = true; // cascaded shadows for the directional sun

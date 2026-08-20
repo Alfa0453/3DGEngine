@@ -3,6 +3,7 @@
 #include "engine/ai/BehaviorGraph.h"   // AgentContext
 
 #include <algorithm>
+#include <exception>
 
 namespace engine {
 namespace ai {
@@ -13,9 +14,23 @@ BtScriptRegistry& BtScriptRegistry::Instance() {
 }
 
 void BtScriptRegistry::Register(const std::string& name, Factory factory) {
-    if (!name.empty() && factory) {
-        m_factories[name] = std::move(factory);
+    if (name.empty() || !factory) { m_registrationErrors.push_back(
+        "BT script registration has an empty name or factory"); return; }
+    if (m_factories.find(name) != m_factories.end() && m_strictValidation) {
+        m_registrationErrors.push_back("Duplicate BT script registration: " + name);
+        return;
     }
+    m_factories[name] = std::move(factory);
+}
+
+bool BtScriptRegistry::Valid(std::string* error) const {
+    if (!m_registrationErrors.empty()) { if (error) *error=m_registrationErrors.front(); return false; }
+    for (const auto& entry : m_factories) {
+        try { if (!entry.second || !entry.second()) { if(error)*error="BT script factory could not create: "+entry.first; return false; } }
+        catch(const std::exception& exception){if(error)*error="BT script factory '"+entry.first+"' failed: "+exception.what();return false;}
+        catch(...){if(error)*error="BT script factory '"+entry.first+"' failed validation";return false;}
+    }
+    return true;
 }
 
 bool BtScriptRegistry::Has(const std::string& name) const {
@@ -39,11 +54,23 @@ void BtScriptRegistry::Remove(const std::string& name) {
     m_factories.erase(name);
 }
 
+BtScriptRegistry BtScriptRegistry::Extract(const std::vector<std::string>& names) {
+    BtScriptRegistry result;
+    for (const std::string& name : names) {
+        const auto found = m_factories.find(name);
+        if (found == m_factories.end()) continue;
+        result.m_factories.emplace(name, std::move(found->second));
+        m_factories.erase(found);
+    }
+    return result;
+}
+
 void BtScriptRegistry::MergeFrom(BtScriptRegistry&& other) {
     for (auto& entry : other.m_factories) {
         m_factories[entry.first] = std::move(entry.second);
     }
     other.m_factories.clear();
+    other.m_registrationErrors.clear();
 }
 
 // ------------------------------ example scripts -----------------------------

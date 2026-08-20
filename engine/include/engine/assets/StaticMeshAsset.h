@@ -11,7 +11,7 @@ namespace engine {
 
 class AssetRegistry;
 
-inline constexpr std::uint32_t kStaticMeshAssetVersion = 2;
+inline constexpr std::uint32_t kStaticMeshAssetVersion = 3;
 inline constexpr std::uint32_t kStaticMeshImporterVersion = 1;
 inline constexpr std::uint32_t kStaticMeshVertexStride = 11;
 
@@ -47,6 +47,10 @@ struct StaticMeshSubMeshData {
     std::vector<float> vertexColors;
 };
 
+enum class StaticMeshCollisionType : std::uint32_t {
+    None = 0, Box = 1, Sphere = 2, Capsule = 3, ConvexHull = 4, TriangleMesh = 5
+};
+
 struct StaticMeshAssetData {
     NativeAssetHeader header;
     std::array<float, 3> minimum{{0.0f, 0.0f, 0.0f}};
@@ -54,6 +58,7 @@ struct StaticMeshAssetData {
     std::vector<StaticMeshMaterialData> materials;
     std::vector<StaticMeshTextureData> textures;
     std::vector<StaticMeshSubMeshData> subMeshes;
+    StaticMeshCollisionType collisionType = StaticMeshCollisionType::None;
 };
 
 struct StaticMeshImportOptions {

@@ -125,9 +125,16 @@ MaterialMakerPanel::MaterialMakerPanel(std::string outputDirectory)
     : m_outputDirectory(std::move(outputDirectory)),
       m_preview(std::make_unique<MaterialPreview>()) {
     Reset();
+    // The initial starter material is a clean editor state. An explicit Reset
+    // later remains an authored, unsaved document.
+    m_hasSavedSnapshot = true;
 }
 
 MaterialMakerPanel::~MaterialMakerPanel() = default;
+
+bool MaterialMakerPanel::IsDirty() const {
+    return !m_hasSavedSnapshot || !SameMaterial(m_material, m_savedSnapshot);
+}
 
 bool MaterialMakerPanel::Draw() {
     return Draw(nullptr);

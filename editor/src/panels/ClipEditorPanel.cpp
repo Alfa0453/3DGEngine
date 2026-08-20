@@ -418,7 +418,7 @@ void ClipEditorPanel::Draw(const std::string& assetRoot, bool* open, bool* asset
     } else {
         ImGui::Checkbox("Loop", &m_asset.loop);
     }
-    ImGui::DragFloat("Speed", &m_asset.speed, 0.02f, 0.0f, 8.0f);
+    ImGui::DragFloat("Base Playback Speed", &m_asset.speed, 0.02f, 0.0f, 8.0f);
 
     ImGui::SeparatorText("Events / Notifies");
     ImGui::TextDisabled(

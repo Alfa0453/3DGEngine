@@ -14,6 +14,12 @@ std::string Safe(std::string value){for(char& c:value)if(!(std::isalnum(static_c
 float Hash(unsigned x){x^=x>>16;x*=0x7feb352du;x^=x>>15;x*=0x846ca68bu;x^=x>>16;return static_cast<float>(x&0xffffu)/65535.f;}
 }
 
+bool WeatherEditorPanel::SaveForShutdown(const std::string& root,std::string* error){
+    if(m_path.empty())m_path=(std::filesystem::path(root)/"Assets"/"Weather"/(Safe(m_weather.name)+".3dgweather")).string();
+    if(!engine::SaveWeatherAsset(m_path,m_weather,error))return false;
+    m_dirty=false;return true;
+}
+
 void WeatherEditorPanel::Capture(const EditorScene::Environment& e){m_weather.timeOfDay=e.timeOfDay;m_weather.skyLightIntensity=e.skyLightIntensity;m_weather.sunIntensity=e.sunIntensity;m_weather.clouds=e.clouds;m_weather.cloudCoverage=e.cloudCoverage;m_weather.cloudDensity=e.cloudDensity;m_weather.cloudScale=e.cloudScale;m_weather.cloudSoftness=e.cloudSoftness;m_weather.cloudWindSpeed=e.cloudWindSpeed;m_weather.cloudWindDirection=e.cloudWindDirection;m_weather.cloudColor=e.cloudColor;m_weather.cloudShadows=e.cloudShadows;m_weather.cloudShadowStrength=e.cloudShadowStrength;m_weather.fog=e.fog;m_weather.fogColor=e.fogColor;m_weather.fogDensity=e.fogDensity;m_weather.fogHeight=e.fogHeight;m_weather.fogHeightFalloff=e.fogHeightFalloff;engine::NormalizeWeather(m_weather);m_dirty=true;}
 void WeatherEditorPanel::Apply(EditorScene& scene)const{auto e=scene.GetEnvironment();e.timeOfDay=m_weather.timeOfDay;e.skyLightIntensity=m_weather.skyLightIntensity;e.sunIntensity=m_weather.sunIntensity;e.clouds=m_weather.clouds;e.cloudCoverage=m_weather.cloudCoverage;e.cloudDensity=m_weather.cloudDensity;e.cloudScale=m_weather.cloudScale;e.cloudSoftness=m_weather.cloudSoftness;e.cloudWindSpeed=m_weather.cloudWindSpeed;e.cloudWindDirection=m_weather.cloudWindDirection;e.cloudColor=m_weather.cloudColor;e.cloudShadows=m_weather.cloudShadows;e.cloudShadowStrength=m_weather.cloudShadowStrength;e.fog=m_weather.fog;e.fogColor=m_weather.fogColor;e.fogDensity=m_weather.fogDensity;e.fogHeight=m_weather.fogHeight;e.fogHeightFalloff=m_weather.fogHeightFalloff;scene.SetEnvironment(e);}
 

@@ -45,12 +45,14 @@ public:
         AnimationRetarget,
         Ability,
         Weather,
+        Lighting,
         Building,
         Road,
         ScatterGraph,
         Biome,
         DayNightTimeline,
         Cave,
+        FenceWall,
         Other
     };
 

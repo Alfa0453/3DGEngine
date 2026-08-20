@@ -81,6 +81,22 @@ constexpr CharacterCollisionPreset kCharacterPresets[] = {
 
 CharacterEditorPanel::~CharacterEditorPanel() = default;
 
+bool CharacterEditorPanel::SaveForShutdown(const std::string& assetRoot, std::string* error) {
+    if (m_path.empty()) {
+        std::string name = m_asset.name.empty() ? "NewCharacter" : m_asset.name;
+        for (char& c : name) {
+            if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_' && c != '-') c = '_';
+        }
+        m_path = (std::filesystem::path(assetRoot) / "GameAssets" / "Characters"
+            / (name + ".3dgcharacter")).string();
+    }
+    if (std::filesystem::path(m_path).extension() != ".3dgcharacter") m_path += ".3dgcharacter";
+    if (!m_asset.Save(m_path, error)) return false;
+    m_dirty = false;
+    SyncBuffers();
+    return true;
+}
+
 void CharacterEditorPanel::QueueOpen(const std::string& path) { m_pendingOpen = path; }
 
 void CharacterEditorPanel::ResetPreviewModel() {
@@ -155,8 +171,22 @@ void CharacterEditorPanel::RebuildPreviewGraph() {
         const auto& animation = clips[static_cast<std::size_t>(clip)];
         return animation.ticksPerSecond > 0.0f ? animation.duration / animation.ticksPerSecond : 0.0f;
     };
+    const auto baseSpeed = [&](int fallback, const std::string& name) {
+        if (m_previewUsingGraph) {
+            for (const auto& source : m_previewGraphSources)
+                if (source.name == name) return std::max(source.basePlaybackSpeed, 0.0f);
+            if (fallback >= 0 && fallback < static_cast<int>(m_previewGraphSources.size()))
+                return std::max(m_previewGraphSources[static_cast<std::size_t>(fallback)].basePlaybackSpeed, 0.0f);
+        } else {
+            for (const auto& source : m_asset.animationSources)
+                if (source.clipName == name) return std::max(source.basePlaybackSpeed, 0.0f);
+            if (fallback >= 0 && fallback < static_cast<int>(m_asset.animationSources.size()))
+                return std::max(m_asset.animationSources[static_cast<std::size_t>(fallback)].basePlaybackSpeed, 0.0f);
+        }
+        return 1.0f;
+    };
     editor::BuildAnimationController(m_previewController,
-        states, parameters, transitions, resolveClip, duration);
+        states, parameters, transitions, resolveClip, duration, {}, baseSpeed);
 
     // The preview UI keeps its own editable copy of each parameter's value.
     for (const auto& parameter : parameters) {
@@ -229,10 +259,14 @@ void main(){
     // A graph-driven character keeps its animation in a referenced .3dggraph; load it so the
     // preview shows the graph's clips + idle. Its own inline animationStates stay empty, so
     // without this the preview would fall back to a static bind pose.
-    if (m_previewGraphPath != m_asset.animationGraphPath) {
+    if (m_previewGraphPath != m_asset.animationGraphPath
+        || m_previewClipMetadataInvalidated) {
+        const bool graphPathChanged = m_previewGraphPath != m_asset.animationGraphPath;
+        m_previewClipMetadataInvalidated = false;
         m_previewGraphPath = m_asset.animationGraphPath;
         m_previewUsingGraph = false;
         m_previewGraphSources.clear();
+        m_previewGraphClipAssets.clear();
         m_previewGraphStates.clear();
         m_previewGraphParamDefs.clear();
         m_previewGraphTransitions.clear();
@@ -241,10 +275,15 @@ void main(){
             std::string graphError;
             if (graph.Load(m_asset.animationGraphPath, &graphError)) {
                 m_previewUsingGraph = true;
-                for (const AnimationGraphClip& c : graph.clips)
+                for (const AnimationGraphClip& c : graph.clips) {
+                    AnimationClipAsset clip;
+                    const float base = clip.Load(c.clipAsset, nullptr)
+                        ? std::max(clip.speed, 0.0f) : 1.0f;
                     if (!c.sourceFile.empty())
                         m_previewGraphSources.push_back(
-                            {c.sourceFile, c.clipName, c.stripRootMotion, c.sourceClipName});
+                            {c.sourceFile, c.clipName, c.stripRootMotion, c.sourceClipName, base});
+                    m_previewGraphClipAssets.push_back(c.clipAsset);
+                }
                 m_previewGraphStates = graph.states;
                 m_previewGraphParamDefs = graph.parameters;
                 m_previewGraphTransitions = graph.transitions;
@@ -252,7 +291,22 @@ void main(){
                 m_previewError = graphError;
             }
         }
-        m_previewAnimSignature.clear();   // force the model reload below to re-merge clips
+        if (graphPathChanged)
+            m_previewAnimSignature.clear(); // graph source layout changed
+    }
+
+    std::string clipMetadataSignature;
+    for (const std::string& path : m_previewGraphClipAssets) {
+        std::error_code ec;
+        const auto stamp = std::filesystem::last_write_time(path, ec);
+        if (!ec) clipMetadataSignature += path + '@' + std::to_string(stamp.time_since_epoch().count());
+    }
+    if (!clipMetadataSignature.empty()
+        && clipMetadataSignature != m_previewClipMetadataSignature) {
+        const bool first = m_previewClipMetadataSignature.empty();
+        m_previewClipMetadataSignature = std::move(clipMetadataSignature);
+        if (!first) m_previewClipMetadataInvalidated = true;
+        m_previewGraphDirty = true;
     }
 
     // Reload the preview model when the model OR its merged animation sources change. Use the
@@ -345,6 +399,8 @@ void main(){
                             const float sampleLength = clipSeconds(animation);
                             if (space.synchronized && referenceLength > 0.0001f && sampleLength > 0.0001f)
                                 sampleTime = (std::fmod(std::max(time, 0.0f), referenceLength) / referenceLength) * sampleLength;
+                            else if (!space.synchronized)
+                                sampleTime *= std::max(weighted.basePlaybackSpeed, 0.0f);
                             std::vector<engine::BoneLocal> pose;
                             engine::Animator::SampleLocal(m_previewModel->GetSkeleton(), animation, sampleTime, pose);
                             if (!sampled) { output=std::move(pose); accumulated=weighted.weight; sampled=true; }
@@ -725,14 +781,31 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
         }
         if (ImGui::MenuItem("Capture Selected", nullptr, false, scene.SelectedObject() != nullptr)) {
             m_asset.Capture(*scene.SelectedObject());
+            m_applyTarget.Set(scene.SelectedObject()->entity);
             m_dirty = true;
             m_selectedSocket = -1;
             m_selectedAttachment = -1;
             SyncBuffers();
             ResetPreviewModel();
         }
-        if (ImGui::MenuItem("Apply to Selected", nullptr, false, scene.SelectedObject() != nullptr)) {
-            if (m_asset.Apply(scene) && message) *message = "Applied character setup to selected object";
+        const EditorScene::Object* applyObject = m_applyTarget.Resolve(scene);
+        const bool validApplyTarget = applyObject
+            && (applyObject->skeletalModel || !applyObject->characterAssetPath.empty());
+        const std::string applyMenuLabel = validApplyTarget
+            ? "Apply Changes to \"" + applyObject->name + "\""
+            : "Apply Changes (No Valid Target)";
+        if (ImGui::MenuItem(applyMenuLabel.c_str(), nullptr, false, validApplyTarget)) {
+            const int oldIndex = scene.SelectedIndex();
+            const auto oldSelection = scene.HierarchySelection();
+            const auto oldGroup = scene.SelectedGroupId();
+            scene.SelectEntity(m_applyTarget.Entity());
+            const bool applied = m_asset.Apply(scene);
+            if (oldSelection == EditorScene::HierarchySelectionType::Group) scene.SelectGroup(oldGroup);
+            else if (oldIndex >= 0) scene.SelectIndex(oldIndex);
+            else scene.Deselect();
+            if (message) *message = applied
+                ? "Applied character setup to " + applyObject->name
+                : "Could not apply character setup to " + applyObject->name;
         }
         if (ImGui::MenuItem("Add to Scene")) {
             m_addToSceneRequested = true;   // the app instantiates it as a new object
@@ -748,6 +821,31 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
     }
 
     ImGui::SetNextItemWidth(-1.0f); ImGui::InputText("##CharacterPath", m_pathBuffer.data(), m_pathBuffer.size());
+    {
+        const EditorScene::Object* target = m_applyTarget.Resolve(scene);
+        const EditorScene::Object* current = scene.SelectedObject();
+        ImGui::SeparatorText("Scene Apply Target");
+        if (target) {
+            ImGui::Text("Target: %s", target->name.c_str());
+            ImGui::TextDisabled("Entity ID: %u", static_cast<unsigned>(target->entity));
+        } else if (m_applyTarget.IsSet()) {
+            ImGui::TextColored(ImVec4(1, .45f, .3f, 1), "Target object no longer exists.");
+            m_applyTarget.Clear();
+        } else ImGui::TextDisabled("Target: None");
+        if (current && current->entity != m_applyTarget.Entity()) {
+            ImGui::SameLine();
+            const bool compatible = current->skeletalModel || !current->characterAssetPath.empty();
+            ImGui::BeginDisabled(!compatible);
+            if (ImGui::Button(("Use \"" + current->name + "\" As Target").c_str()))
+                m_applyTarget.Set(current->entity);
+            ImGui::EndDisabled();
+            if (!compatible && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("The selected object is not character/skeletal-mesh compatible.");
+        }
+        if (target && current && current->entity != target->entity)
+            ImGui::TextColored(ImVec4(1, .7f, .2f, 1),
+                "Current selection differs from the stable apply target.");
+    }
     ImGui::Separator();
     const float leftWidth = 175.0f, rightWidth = 330.0f;
     ImGui::BeginChild("CharacterComponents", ImVec2(leftWidth, 0), true);
@@ -1475,11 +1573,11 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
             ImGui::TextDisabled("Body always faces the camera; rotating the camera turns the character.");
         }
     } else if (m_component == 4) {
-        // Animation is authored entirely in a .3dggraph asset (Graph Editor) and baked
+        // Animation is authored entirely in a .3dggraph asset (Animation Graph Editor) and baked
         // onto placed characters on Apply. The character just references one.
         ImGui::SeparatorText("Animation Graph");
         ImGui::TextWrapped("Author animation (clips, states, transitions, blend spaces, movement) "
-                           "in the Graph Editor, save a .3dggraph, and reference it here.");
+                           "in the Animation Graph Editor, save a .3dggraph, and reference it here.");
         const std::string graphPreview = m_asset.animationGraphPath.empty()
             ? std::string("None") : std::filesystem::path(m_asset.animationGraphPath).filename().string();
         ImGui::SetNextItemWidth(-1.0f);
@@ -1498,7 +1596,7 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
                 }
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", choice.path.c_str());
             }
-            if (m_graphChoices.empty()) ImGui::TextDisabled("No .3dggraph assets - make one in the Graph Editor.");
+            if (m_graphChoices.empty()) ImGui::TextDisabled("No .3dggraph assets - make one in the Animation Graph Editor.");
             ImGui::EndCombo();
         }
         if (ImGui::Button("Refresh")) RefreshAssetChoices(assetRoot);
@@ -1701,7 +1799,7 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
                     }
                 } else ImGui::TextDisabled("Load a skeletal model to choose clips.");
                 changed |= ImGui::Checkbox("Loop",&state.loop);
-                changed |= ImGui::DragFloat("Speed",&state.speed,.01f,0.0f,5.0f);
+                changed |= ImGui::DragFloat("Speed Multiplier",&state.speed,.01f,0.0f,5.0f);
                 bool blendSpaceEnabled = !state.blendSamples.empty();
                 if (ImGui::Checkbox("Use Blend Space 1D", &blendSpaceEnabled)) {
                     if (blendSpaceEnabled) {

@@ -104,6 +104,12 @@ public:
     // std::function to clear. Used by the editor to import dropped assets.
     void SetDropCallback(std::function<void(const std::vector<std::string>&)> callback);
 
+    // Intercepts ordinary OS close requests (title-bar X, Alt+F4, taskbar Close).
+    // When installed, GLFW's close flag is reset before this callback runs so
+    // the application can keep rendering a confirmation modal. Calling
+    // SetShouldClose(true) later performs the confirmed close.
+    void SetCloseRequestCallback(std::function<void()> callback);
+
 private:
     GLFWwindow* m_window = nullptr;
 
@@ -131,6 +137,7 @@ private:
 
         // OS file-drop delivery (absolute paths). Empty = no handler.
         std::function<void(const std::vector<std::string>&)> onDrop;
+        std::function<void()> onCloseRequested;
     } m_data;
 };
 

@@ -34,6 +34,8 @@ public:
     void BindArray(unsigned int unit) const;        // sampler2DArray
     const glm::mat4& CascadeVP(int i) const { return m_vp[i]; }
     float SplitDepth(int i) const { return m_splits[i]; }   // view-space far (positive)
+    float WorldTexelSize(int i) const { return m_worldTexelSize[i]; }
+    float DepthRange(int i) const { return m_depthRange[i]; }
     int   Count() const { return kCascades; }
 
 private:
@@ -41,6 +43,10 @@ private:
     unsigned int m_fbo = 0, m_texArray = 0;
     glm::mat4 m_vp[kCascades];
     float     m_splits[kCascades] = {0, 0, 0, 0};
+    // World units represented by one shadow texel and by the full normalized
+    // depth interval. These make PCSS softness independent of cascade coverage.
+    float     m_worldTexelSize[kCascades] = {1, 1, 1, 1};
+    float     m_depthRange[kCascades] = {1, 1, 1, 1};
     Shader    m_shader;
     ShadowCasterBatch m_batch;
 };

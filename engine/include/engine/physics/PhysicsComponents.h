@@ -1,9 +1,11 @@
 #pragma once
 
 #include <glm/glm.hpp>
+#include <glm/gtc/quaternion.hpp>
 
 #include <algorithm>
 #include <cstdint>
+#include <string>
 
 namespace engine {
 namespace ecs {
@@ -139,7 +141,10 @@ enum class ColliderShape {
     Cone,
     Pyramid,
     Torus,
-    Staircase
+    Staircase,
+    // Appended to preserve the numeric values stored by older scenes.
+    ConvexHull,
+    TriangleMesh
 };
 
 // The collision shape attached to an entity (positioned by its Transform). A
@@ -161,6 +166,19 @@ struct Collider {
     float         restitution = 0.4f;             // material: bounciness
     float         friction    = 0.5f;             // material: Coulomb coefficient
     bool          isTrigger   = false;            // overlap-only: detected but never resolved
+
+    // Shape-local transform. The owning entity transform is inherited first,
+    // then this offset/orientation/scale is applied. Collision dimensions stay
+    // in mesh-local units and are scaled exactly once when a world shape is built.
+    glm::vec3 localPosition{0.0f};
+    glm::quat localRotation{1.0f, 0.0f, 0.0f, 0.0f};
+    glm::vec3 localScale{1.0f};
+    bool inheritTransformScale = true;
+
+    // Shared mesh-collision reference. Geometry is owned by the collision cache,
+    // never copied into each Collider instance.
+    std::string collisionAssetPath;
+    bool collisionDirty = false;
 
     // Collision filtering: two colliders interact only if each one's mask
     // includes the other's layer bit -- (A.mask & B.layer) && (B.mask & A.layer).

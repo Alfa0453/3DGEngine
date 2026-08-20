@@ -10,6 +10,7 @@
 #include "game/scripts/Spinner.h"
 
 #include <engine/gameplay/Script.h>
+#include <engine/gameplay/ScriptModule.h>
 #include <engine/ai/BtScript.h>
 
 #include <memory>
@@ -25,4 +26,8 @@ SCRIPT_MODULE_EXPORT void RegisterScriptModule(
     scripts.Register("Spinner", [] { return std::make_unique<Spinner>(); });
     RegisterEditorGeneratedScripts(scripts);
     RegisterEditorGeneratedBtScripts(bt);
+}
+
+SCRIPT_MODULE_EXPORT std::uint32_t Get3DGScriptApiVersion() {
+    return engine::kScriptModuleApiVersion;
 }

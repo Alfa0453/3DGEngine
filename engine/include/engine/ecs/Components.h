@@ -295,6 +295,7 @@ struct SkinnedModelAsset {
         std::string clipName;
         bool        stripRootMotion = false;
         std::string sourceClipName;
+        float       basePlaybackSpeed = 1.0f;
     };
 
     // A static model socketed to a bone (weapon/shield). Resolved to an AnimatedModel

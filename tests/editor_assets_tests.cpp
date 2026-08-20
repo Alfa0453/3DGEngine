@@ -221,6 +221,42 @@ int main() {
     graphClip.sourceClipName = action.clipName;
     graphClip.clipName = action.name;
     graph.clips.push_back(graphClip);
+    EditorScene::AnimationStateNode idle;
+    idle.graphId = engine::AssetHandle::Generate();
+    idle.name = "Idle";
+    idle.clipName = action.name;
+    EditorScene::AnimationStateNode locomotion;
+    locomotion.graphId = engine::AssetHandle::Generate();
+    locomotion.name = "Locomotion";
+    locomotion.motionSourceType =
+        EditorScene::AnimationStateNode::MotionSourceType::BlendSpace1D;
+    locomotion.blendParameter = "Speed";
+    locomotion.blendSamples.push_back({0, action.name, 0.0f, 0.0f});
+    EditorScene::AnimationStateNode directional;
+    directional.graphId = engine::AssetHandle::Generate();
+    directional.name = "Directional";
+    directional.motionSourceType =
+        EditorScene::AnimationStateNode::MotionSourceType::BlendSpace2D;
+    directional.blendParameter = "Speed";
+    directional.blendParameterY = "Direction";
+    directional.blendSpace2D = true;
+    directional.blendSamples.push_back({0, action.name, 1.0f, 0.0f});
+    graph.states = {idle, locomotion, directional};
+    graph.parameters.push_back({"Speed", EditorScene::AnimationParameter::Type::Float, 0.0f});
+    graph.parameters.push_back({"Direction", EditorScene::AnimationParameter::Type::Float, 0.0f});
+    EditorScene::AnimationStateTransition transition;
+    transition.graphId = engine::AssetHandle::Generate();
+    transition.fromStateId = locomotion.graphId;
+    transition.toStateId = directional.graphId;
+    transition.fromState = locomotion.name;
+    transition.toState = directional.name;
+    transition.useConditions = false;
+    transition.exitTime = 0.9f;
+    graph.transitions.push_back(transition);
+    graph.entryStateId = locomotion.graphId;
+    graph.nodeLayouts = {{idle.graphId, {20.0f, 30.0f}, false},
+                         {locomotion.graphId, {260.0f, 40.0f}, false},
+                         {directional.graphId, {520.0f, 80.0f}, true}};
     const fs::path graphPath = root / "Wizard.3dggraph";
     Check(graph.Save(graphPath.string(), &error)
           && graph.assetId.Valid(),
@@ -230,12 +266,51 @@ int main() {
           && loadedGraph.assetId == graph.assetId
           && loadedGraph.previewModelAssetId == browserMeshId
           && loadedGraph.clips.size() == 1
-          && loadedGraph.clips[0].clipAssetId == action.assetId,
-          "animation graph identity and clip references round-trip");
+          && loadedGraph.clips[0].clipAssetId == action.assetId
+          && loadedGraph.version == 7
+          && loadedGraph.entryStateId == locomotion.graphId
+          && loadedGraph.states.size() == 3
+          && loadedGraph.states.front().graphId == locomotion.graphId
+          && loadedGraph.states[0].motionSourceType
+                 == EditorScene::AnimationStateNode::MotionSourceType::BlendSpace1D
+          && loadedGraph.states[2].motionSourceType
+                 == EditorScene::AnimationStateNode::MotionSourceType::BlendSpace2D
+          && loadedGraph.transitions.size() == 1
+          && loadedGraph.transitions[0].graphId == transition.graphId
+          && loadedGraph.transitions[0].fromStateId == locomotion.graphId
+          && loadedGraph.transitions[0].toStateId == directional.graphId
+          && !loadedGraph.transitions[0].useConditions
+          && loadedGraph.transitions[0].exitTime == 0.9f
+          && loadedGraph.nodeLayouts.size() == 3,
+          "animation graph v7 preserves IDs, entry, layout, motion sources and exit-time-only transitions");
     Check(assets.Refresh(root.string(), &error)
           && registry.Find(graph.assetId)
           && registry.Find(graph.assetId)->dependencies.size() == 2,
           "animation graph dependencies are recorded in the project registry");
+
+    const fs::path legacyGraphPath = root / "LegacyV6.3dggraph";
+    {
+        std::ofstream legacy(legacyGraphPath);
+        legacy << "3DG_GRAPH 6 " << engine::AssetHandle::Generate().ToString() << '\n'
+               << "\"Legacy\" \"-\" -\n"
+               << "CLIPS 0\n"
+               << "GRAPH 1 0 0\n"
+               << "\"Locomotion\" 0 \"\" 1 1 -1 \"\" \"Speed\" 0 1 0\n"
+               << "BLEND_SPACES 1\n"
+               << "1 \"Direction\" 1 1 0 \"Idle\" 0 0\n"
+               << "ASSET_DEPS 0\n";
+    }
+    AnimationGraphAsset migrated;
+    Check(migrated.Load(legacyGraphPath.string(), &error)
+          && migrated.version == 7
+          && migrated.states.size() == 1
+          && migrated.states[0].graphId.Valid()
+          && migrated.entryStateId == migrated.states[0].graphId
+          && migrated.states[0].motionSourceType
+                 == EditorScene::AnimationStateNode::MotionSourceType::BlendSpace2D
+          && migrated.states[0].blendSamples.size() == 1
+          && migrated.nodeLayouts.size() == 1,
+          "version 6 graph migrates legacy Blend Space data, stable IDs, entry and layout");
 
     fs::remove_all(root, ec);
     std::cout << "editor assets tests passed\n";

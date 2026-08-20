@@ -872,11 +872,16 @@ public:
     std::unique_ptr<Script> Create(const std::string& className) const;
     std::vector<std::string> Names() const;
     void Remove(const std::string& className);
+    ScriptRegistry Extract(const std::vector<std::string>& classNames);
     void MergeFrom(ScriptRegistry&& other);
-    void Clear() { m_factories.clear(); }   // hot-reload: drop factories before unloading their DLL
+    void Clear() { m_factories.clear(); m_registrationErrors.clear(); }
+    void SetStrictValidation(bool strict) { m_strictValidation = strict; }
+    bool Valid(std::string* error = nullptr) const;
 
 private:
     std::unordered_map<std::string, Factory> m_factories;
+    std::vector<std::string> m_registrationErrors;
+    bool m_strictValidation = false;
 };
 
 enum class ScriptCallbackKind {
@@ -953,6 +958,17 @@ void ShutdownScripts(ecs::Registry& registry, const std::vector<ecs::Entity>& en
 // native instance while preserving its authored fields. New instances consume the saved
 // state after OnCreate on their next UpdateScripts call.
 void PrepareScriptsForHotReload(ecs::Registry& registry);
+
+// Recreates prepared native instances and delivers OnCreate/OnEnable without running an
+// OnUpdate frame. Used by the editor while a candidate DLL is still protected by its
+// persistent load marker. Returns false if an enabled attachment cannot be recreated.
+bool RecreateScriptsAfterHotReload(ecs::Registry& registry,
+                                   RuntimeAudioSystem* audio = nullptr,
+                                   CameraShake* cameraShake = nullptr,
+                                   CameraDirector* cameraDirector = nullptr,
+                                   GameMode* gameMode = nullptr,
+                                   PhysicsWorld* physics = nullptr,
+                                   std::string* error = nullptr);
 
 // Optional sink for script errors (a script that threw and was disabled). The editor
 // wires this to its console so failures are visible instead of only hitting stderr.

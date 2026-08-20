@@ -6,9 +6,11 @@
 #include <engine/graphics/Mesh.h>
 
 #include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
+#include <utility>
 #include <cstddef>
 #include <filesystem>
 #include <cmath>
@@ -70,6 +72,14 @@ void NormalizeColliderValues(Collider& collider) {
     collider.steps = std::clamp(collider.steps, 1, 64);
     collider.restitution = FiniteClamp(collider.restitution, 0.4f, 0.0f, 1.0f);
     collider.friction = FiniteClamp(collider.friction, 0.5f, 0.0f, 2.0f);
+    collider.localPosition.x = FiniteClamp(collider.localPosition.x, 0.0f, -kMaxSceneCoordinate, kMaxSceneCoordinate);
+    collider.localPosition.y = FiniteClamp(collider.localPosition.y, 0.0f, -kMaxSceneCoordinate, kMaxSceneCoordinate);
+    collider.localPosition.z = FiniteClamp(collider.localPosition.z, 0.0f, -kMaxSceneCoordinate, kMaxSceneCoordinate);
+    const float localRotationLength = glm::length(collider.localRotation);
+    collider.localRotation = (!std::isfinite(localRotationLength) || localRotationLength < 0.000001f)
+        ? glm::quat(1.0f, 0.0f, 0.0f, 0.0f) : glm::normalize(collider.localRotation);
+    collider.localScale = glm::clamp(glm::abs(collider.localScale), glm::vec3(0.0001f),
+                                     glm::vec3(kMaxSceneScale));
 }
 
 void NormalizeControllerValues(EditorScene::PlayerControllerSettings& settings) {
@@ -275,6 +285,13 @@ std::string StoredPath(const std::string& path) {
     return out.str();
 }
 
+std::string TrimHierarchyName(std::string value) {
+    const auto notSpace = [](unsigned char c) { return !std::isspace(c); };
+    value.erase(value.begin(), std::find_if(value.begin(), value.end(), notSpace));
+    value.erase(std::find_if(value.rbegin(), value.rend(), notSpace).base(), value.end());
+    return value;
+}
+
 } // namespace
 
 void EditorScene::BuildDefault(const engine::Mesh &, const engine::Mesh & plane, const engine::Mesh &,
@@ -462,7 +479,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         return false;
     }
 
-    out << "3DGEditorScene 130 " << m_assetId.ToString() << '\n';
+    out << "3DGEditorScene 134 " << m_assetId.ToString() << '\n';
     out << "environment "
         << m_environment.timeOfDay << ' '
         << m_environment.skyLightIntensity << ' '
@@ -538,6 +555,9 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         << (m_environment.skylightOcclusion ? 1 : 0) << ' '
         << m_environment.skylightOcclusionStrength << ' '
         << m_environment.minimumSkylight << '\n';
+    out << "lighting_build " << std::quoted(m_environment.lightingBuildAsset) << ' '
+        << m_environment.lightingBuildHash << ' ' << m_environment.lightingBuildQuality << ' '
+        << m_environment.lightingProbeSpacing << ' ' << m_environment.lightingRayDistance << '\n';
     out << "sky "
         << m_environment.skyMode << ' '
         << StoredPath(m_environment.skyTexturePath) << ' '
@@ -741,7 +761,8 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
                     ? source.assetId.ToString() : std::string("-")) << ' '
                 << StoredPath(source.clipName) << ' '
                 << (source.stripRootMotion ? 1 : 0) << ' '
-                << StoredPath(source.sourceClipName) << ' ';
+                << StoredPath(source.sourceClipName) << ' '
+                << source.basePlaybackSpeed << ' ';
         }
         out << object.modelAttachments.size() << ' ';
         for (const ModelAttachment& a : object.modelAttachments) {
@@ -797,6 +818,13 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
             << (object.rigidBody.kinematic ? 1 : 0) << ' '
             << object.collider.layer << ' '
             << object.collider.mask << ' '
+            << object.collider.localPosition.x << ' ' << object.collider.localPosition.y << ' ' << object.collider.localPosition.z << ' '
+            << object.collider.localRotation.w << ' ' << object.collider.localRotation.x << ' '
+            << object.collider.localRotation.y << ' ' << object.collider.localRotation.z << ' '
+            << object.collider.localScale.x << ' ' << object.collider.localScale.y << ' ' << object.collider.localScale.z << ' '
+            << (object.collider.inheritTransformScale ? 1 : 0) << ' '
+            << StoredPath(object.collider.collisionAssetPath) << ' '
+            << (object.collider.collisionDirty ? 1 : 0) << ' '
             << (object.rotatorEnabled ? 1 : 0) << ' '
             << object.rotator.axis.x << ' ' << object.rotator.axis.y << ' ' << object.rotator.axis.z << ' '
             << object.rotator.radiansPerSecond << ' '
@@ -1046,6 +1074,17 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         // Platformer camera axis (scene version 112+).
         out << ' ' << object.playerController.platformerYaw;
         out << '\n';
+    }
+
+    // Editor-only hierarchy organization. Runtime export intentionally ignores these.
+    for (const SceneGroup& group : m_groups) {
+        out << "scene_group " << group.id << ' ' << group.parentId << ' '
+            << (group.expanded ? 1 : 0) << ' ' << StoredPath(group.name) << '\n';
+    }
+    for (const Object& object : m_objects) {
+        if (object.editorGroupId != kRootGroupId)
+            out << "object_group " << StoredPath(object.name) << ' '
+                << object.editorGroupId << '\n';
     }
 
     // AI movement authoring is stored separately so older object records remain
@@ -1333,7 +1372,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             return false;
         }
     }
-    if (magic != "3DGEditorScene" ||(version < 1 || version > 130)) {
+    if (magic != "3DGEditorScene" ||(version < 1 || version > 134)) {
         if (error) *error = "Scene file has an unknown format.";
         return false;
     }
@@ -1342,7 +1381,35 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
     m_assetId = loadedAssetId;
 
     std::string recordType;
+    bool resolvedDuplicateNames = false;
     while (in >> recordType) {
+        if (recordType == "scene_group" && version >= 133) {
+            SceneGroup group;
+            int expanded = 1;
+            in >> group.id >> group.parentId >> expanded >> std::quoted(group.name);
+            group.name = TrimHierarchyName(group.name == "-" ? std::string{} : group.name);
+            if (!in || group.id == kRootGroupId || group.name.empty()) {
+                if (error) *error = "Scene contains an invalid hierarchy group.";
+                Clear(); return false;
+            }
+            const std::string storedName = group.name;
+            group.name = MakeUniqueHierarchyName(group.name);
+            resolvedDuplicateNames |= group.name != storedName;
+            group.expanded = expanded != 0;
+            m_nextGroupId = std::max(m_nextGroupId, group.id + 1);
+            m_groups.push_back(std::move(group));
+            continue;
+        }
+        if (recordType == "object_group" && version >= 133) {
+            std::string objectName;
+            GroupId groupId = kRootGroupId;
+            in >> std::quoted(objectName) >> groupId;
+            if (!in) { if (error) *error = "Scene contains invalid object grouping."; Clear(); return false; }
+            for (Object& object : m_objects) {
+                if (object.name == objectName) { object.editorGroupId = groupId; break; }
+            }
+            continue;
+        }
         if (recordType == "day_night_timeline") {
             std::string id;
             in >> std::quoted(m_environment.dayNightTimelinePath) >> id
@@ -1385,6 +1452,15 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                 return false;
             }
             m_environment.skylightOcclusion = enabled != 0;
+            continue;
+        }
+        if (recordType == "lighting_build" && version >= 131) {
+            in >> std::quoted(m_environment.lightingBuildAsset)
+               >> m_environment.lightingBuildHash
+               >> m_environment.lightingBuildQuality
+               >> m_environment.lightingProbeSpacing
+               >> m_environment.lightingRayDistance;
+            if (!in) { if (error) *error = "Scene file contains invalid lighting build settings."; Clear(); return false; }
             continue;
         }
         if (recordType == "sky" && version >= 123) {
@@ -1762,6 +1838,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
 
             transform.scale = glm::vec3(0.22f);
             const glm::vec3 color = light.color * light.intensity;
+            resolvedDuplicateNames |= !IsHierarchyNameAvailable(name);
             CreateObject(name, Primitive::Cube, cube, transform, color);
             Object& object = m_objects.back();
             object.light = true;
@@ -2576,10 +2653,12 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                 }
                 in >> std::quoted(source.clipName) >> strip;
                 if (version >= 94) in >> std::quoted(source.sourceClipName);
+                if (version >= 134) in >> source.basePlaybackSpeed;
                 if (source.file == "-") source.file.clear();
                 if (source.clipName == "-") source.clipName.clear();
                 if (source.sourceClipName == "-") source.sourceClipName.clear();
                 source.stripRootMotion = strip != 0;
+                source.basePlaybackSpeed = std::max(source.basePlaybackSpeed, 0.0f);
                 animationSources.push_back(std::move(source));
             }
         }
@@ -2693,8 +2772,22 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                 in >> kinematic >> collider.layer >> collider.mask;
                 rigidBody.kinematic = kinematic != 0;
             }
+            if (version >= 132) {
+                int inheritScale = 1, collisionDirty = 0;
+                in >> collider.localPosition.x >> collider.localPosition.y >> collider.localPosition.z
+                   >> collider.localRotation.w >> collider.localRotation.x
+                   >> collider.localRotation.y >> collider.localRotation.z
+                   >> collider.localScale.x >> collider.localScale.y >> collider.localScale.z
+                   >> inheritScale >> std::quoted(collider.collisionAssetPath) >> collisionDirty;
+                collider.inheritTransformScale = inheritScale != 0;
+                collider.collisionDirty = collisionDirty != 0;
+            } else {
+                // Older scenes stored collider dimensions in world/object-authored
+                // units. Preserve their behavior instead of double-scaling them.
+                collider.inheritTransformScale = false;
+            }
             if (colliderShape >= static_cast<int>(engine::ecs::ColliderShape::Sphere)
-                && colliderShape <= static_cast<int>(engine::ecs::ColliderShape::Staircase))
+                && colliderShape <= static_cast<int>(engine::ecs::ColliderShape::TriangleMesh))
                 collider.shape = static_cast<engine::ecs::ColliderShape>(colliderShape);
             else
                 collider.shape = engine::ecs::ColliderShape::Sphere;
@@ -3187,6 +3280,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             return false;
         }
 
+        resolvedDuplicateNames |= !IsHierarchyNameAvailable(name);
         CreateObject(name, primitive, MeshFor(primitive, cube, plane, sphere, capsule, cylinder, cone, pyramid, torus, staircase), transform, color);
         m_objects.back().visible = visible != 0;
         m_objects.back().locked = locked != 0;
@@ -3483,18 +3577,69 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             break;
         }
     }
+    // Repair invalid memberships and parent links without rejecting older/corrupt
+    // editor organization data. Runtime object data remains untouched.
+    for (Object& object : m_objects)
+        if (!GroupExists(object.editorGroupId)) object.editorGroupId = kRootGroupId;
+    for (SceneGroup& group : m_groups) {
+        if (group.parentId == group.id || !GroupExists(group.parentId))
+            group.parentId = kRootGroupId;
+        GroupId cursor = group.parentId;
+        std::size_t guard = 0;
+        while (cursor != kRootGroupId && guard++ <= m_groups.size()) {
+            if (cursor == group.id) { group.parentId = kRootGroupId; break; }
+            const auto parent = std::find_if(m_groups.begin(), m_groups.end(),
+                [cursor](const SceneGroup& candidate) { return candidate.id == cursor; });
+            if (parent == m_groups.end()) break;
+            cursor = parent->parentId;
+        }
+    }
     m_selectedIndex = m_objects.empty() ? -1 : 0;
+    m_hierarchySelection = m_objects.empty()
+        ? HierarchySelectionType::None : HierarchySelectionType::Object;
     m_dirty = false;
     ClearHistory();
+    if (error) *error = resolvedDuplicateNames
+        ? "Resolved duplicate hierarchy names while loading scene." : std::string{};
     return true;
 }
 
 const EditorScene::Object * EditorScene::SelectedObject() const
 {
+    if (m_hierarchySelection == HierarchySelectionType::Group) return nullptr;
     if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
         return nullptr;
     }
     return &m_objects[static_cast<std::size_t>(m_selectedIndex)];
+}
+
+const EditorScene::SceneGroup* EditorScene::SelectedGroup() const {
+    if (m_hierarchySelection != HierarchySelectionType::Group) return nullptr;
+    for (const SceneGroup& group : m_groups)
+        if (group.id == m_selectedGroupId) return &group;
+    return nullptr;
+}
+
+const EditorScene::Object* EditorScene::FindObject(Entity entity) const {
+    for (const Object& object : m_objects) if (object.entity == entity) return &object;
+    return nullptr;
+}
+
+EditorScene::Object* EditorScene::FindObject(Entity entity) {
+    return const_cast<Object*>(std::as_const(*this).FindObject(entity));
+}
+
+int EditorScene::FindObjectIndex(Entity entity) const {
+    for (int i = 0; i < static_cast<int>(m_objects.size()); ++i)
+        if (m_objects[static_cast<std::size_t>(i)].entity == entity) return i;
+    return -1;
+}
+
+bool EditorScene::SelectEntity(Entity entity) {
+    const int index = FindObjectIndex(entity);
+    if (index < 0) return false;
+    SelectIndex(index);
+    return true;
 }
 
 engine::ecs::Transform * EditorScene::SelectedTransform()
@@ -3543,6 +3688,8 @@ void EditorScene::SelectNext()
     }
     m_selectedIndex = (m_selectedIndex + 1) % static_cast<int>(m_objects.size());
     m_selectedIndices.assign(1, m_selectedIndex);
+    m_hierarchySelection = HierarchySelectionType::Object;
+    m_selectedGroupId = kRootGroupId;
 }
 
 void EditorScene::SelectPrevious()
@@ -3556,6 +3703,8 @@ void EditorScene::SelectPrevious()
         ? static_cast<int>(m_objects.size()) - 1
         : m_selectedIndex - 1;
     m_selectedIndices.assign(1, m_selectedIndex);
+    m_hierarchySelection = HierarchySelectionType::Object;
+    m_selectedGroupId = kRootGroupId;
 }
 
 void EditorScene::SelectIndex(int index)
@@ -3565,6 +3714,8 @@ void EditorScene::SelectIndex(int index)
     }
     m_selectedIndex = index;
     m_selectedIndices.assign(1, index);   // single selection replaces the whole set
+    m_hierarchySelection = HierarchySelectionType::Object;
+    m_selectedGroupId = kRootGroupId;
     // River geometry is authored by its linked world-space spline. Keep the water
     // object's transform at the ribbon centre so its gizmo sits on the visible plane.
     Object& selected = m_objects[static_cast<std::size_t>(index)];
@@ -3585,12 +3736,22 @@ void EditorScene::SelectIndex(int index)
     }
 }
 
+void EditorScene::SelectGroup(GroupId id) {
+    if (!GroupExists(id)) return;
+    m_selectedIndex = -1;
+    m_selectedIndices.clear();
+    m_hierarchySelection = HierarchySelectionType::Group;
+    m_selectedGroupId = id;
+}
+
 void EditorScene::ToggleSelection(int index)
 {
     if (index < 0 || index >= static_cast<int>(m_objects.size())) {
         return;
     }
     EnsureSelectionValid();
+    m_hierarchySelection = HierarchySelectionType::Object;
+    m_selectedGroupId = kRootGroupId;
     const auto it = std::find(m_selectedIndices.begin(), m_selectedIndices.end(), index);
     if (it != m_selectedIndices.end()) {
         // Already selected -> remove it. Move the primary to another member (or none).
@@ -3607,6 +3768,127 @@ void EditorScene::Deselect()
 {
     m_selectedIndex = -1;
     m_selectedIndices.clear();
+    m_hierarchySelection = HierarchySelectionType::None;
+    m_selectedGroupId = kRootGroupId;
+}
+
+bool EditorScene::IsHierarchyNameAvailable(const std::string& requested,
+                                            Entity ignoreObject,
+                                            GroupId ignoreGroup) const {
+    const std::string name = TrimHierarchyName(requested);
+    if (name.empty()) return false;
+    for (const Object& object : m_objects)
+        if (object.entity != ignoreObject && object.name == name) return false;
+    for (const SceneGroup& group : m_groups)
+        if (group.id != ignoreGroup && group.name == name) return false;
+    return true;
+}
+
+std::string EditorScene::MakeUniqueHierarchyName(const std::string& requested,
+                                                  Entity ignoreObject,
+                                                  GroupId ignoreGroup) const {
+    std::string base = TrimHierarchyName(requested);
+    if (base.empty()) base = "Object";
+    if (IsHierarchyNameAvailable(base, ignoreObject, ignoreGroup)) return base;
+    for (std::uint64_t suffix = 1;; ++suffix) {
+        const std::string candidate = base + "_" + std::to_string(suffix);
+        if (IsHierarchyNameAvailable(candidate, ignoreObject, ignoreGroup)) return candidate;
+    }
+}
+
+bool EditorScene::GroupExists(GroupId id) const {
+    if (id == kRootGroupId) return true;
+    return std::any_of(m_groups.begin(), m_groups.end(),
+        [id](const SceneGroup& group) { return group.id == id; });
+}
+
+EditorScene::GroupId EditorScene::CreateGroup(const std::string& requested, GroupId parentId) {
+    if (!GroupExists(parentId)) parentId = kRootGroupId;
+    PushUndoSnapshot();
+    SceneGroup group;
+    group.id = m_nextGroupId++;
+    group.name = MakeUniqueHierarchyName(requested.empty() ? "Group" : requested);
+    group.parentId = parentId;
+    m_groups.push_back(group);
+    m_dirty = true;
+    SelectGroup(group.id);
+    return group.id;
+}
+
+bool EditorScene::RenameGroup(GroupId id, const std::string& requested) {
+    const std::string name = TrimHierarchyName(requested);
+    if (name.empty() || !IsHierarchyNameAvailable(name, engine::ecs::kNull, id)) return false;
+    for (SceneGroup& group : m_groups) {
+        if (group.id != id || group.name == name) continue;
+        PushUndoSnapshot(); group.name = name; m_dirty = true; return true;
+    }
+    return false;
+}
+
+bool EditorScene::MoveObjectToGroup(int objectIndex, GroupId groupId) {
+    if (objectIndex < 0 || objectIndex >= static_cast<int>(m_objects.size())
+        || !GroupExists(groupId)) return false;
+    Object& object = m_objects[static_cast<std::size_t>(objectIndex)];
+    if (object.editorGroupId == groupId) return false;
+    PushUndoSnapshot(); object.editorGroupId = groupId; m_dirty = true; return true;
+}
+
+bool EditorScene::MoveSelectedObjectsToGroup(GroupId groupId) {
+    if (!GroupExists(groupId)) return false;
+    EnsureSelectionValid();
+    bool changed = false;
+    for (int index : m_selectedIndices)
+        if (index >= 0 && index < static_cast<int>(m_objects.size())
+            && m_objects[static_cast<std::size_t>(index)].editorGroupId != groupId) changed = true;
+    if (!changed) return false;
+    PushUndoSnapshot();
+    for (int index : m_selectedIndices)
+        if (index >= 0 && index < static_cast<int>(m_objects.size()))
+            m_objects[static_cast<std::size_t>(index)].editorGroupId = groupId;
+    m_dirty = true; return true;
+}
+
+bool EditorScene::MoveGroupToGroup(GroupId id, GroupId parentId) {
+    if (id == kRootGroupId || id == parentId || !GroupExists(id) || !GroupExists(parentId)) return false;
+    for (GroupId cursor = parentId; cursor != kRootGroupId;) {
+        if (cursor == id) return false;
+        const auto it = std::find_if(m_groups.begin(), m_groups.end(),
+            [cursor](const SceneGroup& group) { return group.id == cursor; });
+        if (it == m_groups.end()) break;
+        cursor = it->parentId;
+    }
+    for (SceneGroup& group : m_groups) if (group.id == id) {
+        if (group.parentId == parentId) return false;
+        PushUndoSnapshot(); group.parentId = parentId; m_dirty = true; return true;
+    }
+    return false;
+}
+
+bool EditorScene::DeleteGroup(GroupId id) {
+    if (id == kRootGroupId) return false;
+    const auto it = std::find_if(m_groups.begin(), m_groups.end(),
+        [id](const SceneGroup& group) { return group.id == id; });
+    if (it == m_groups.end()) return false;
+    const GroupId parent = GroupExists(it->parentId) ? it->parentId : kRootGroupId;
+    PushUndoSnapshot();
+    for (Object& object : m_objects) if (object.editorGroupId == id) object.editorGroupId = parent;
+    for (SceneGroup& group : m_groups) if (group.parentId == id) group.parentId = parent;
+    m_groups.erase(it);
+    if (m_selectedGroupId == id) Deselect();
+    m_dirty = true; return true;
+}
+
+std::size_t EditorScene::GroupObjectCount(GroupId id, bool recursive) const {
+    std::size_t count = 0;
+    for (const Object& object : m_objects) if (object.editorGroupId == id) ++count;
+    if (recursive) for (const SceneGroup& group : m_groups)
+        if (group.parentId == id) count += GroupObjectCount(group.id, true);
+    return count;
+}
+
+std::size_t EditorScene::ChildGroupCount(GroupId id) const {
+    return static_cast<std::size_t>(std::count_if(m_groups.begin(), m_groups.end(),
+        [id](const SceneGroup& group) { return group.parentId == id; }));
 }
 
 const std::vector<int>& EditorScene::SelectedIndices() const
@@ -3870,6 +4152,9 @@ void EditorScene::SelectIndices(const std::vector<int>& indices)
             m_selectedIndices.push_back(index);
     }
     m_selectedIndex = m_selectedIndices.empty() ? -1 : m_selectedIndices.back();
+    m_hierarchySelection = m_selectedIndices.empty()
+        ? HierarchySelectionType::None : HierarchySelectionType::Object;
+    m_selectedGroupId = kRootGroupId;
 }
 
 bool EditorScene::AssignObjectsToLayer(const std::vector<int>& indices,
@@ -4237,12 +4522,14 @@ bool EditorScene::SetSelectedName(const std::string& name) {
     }
 
     Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
-    if (selected.locked || name.empty() || selected.name == name) {
+    const std::string trimmed = TrimHierarchyName(name);
+    if (selected.locked || trimmed.empty() || selected.name == trimmed
+        || !IsHierarchyNameAvailable(trimmed, selected.entity)) {
         return false;
     }
 
     PushUndoSnapshot();
-    selected.name = name;
+    selected.name = trimmed;
     m_dirty = true;
     return true;
 }
@@ -4827,34 +5114,23 @@ bool EditorScene::SetSelectedColliderEnabled(bool enabled)
     if (enabled) {
         const Transform* transform = m_registry.TryGet<Transform>(selected.entity);
         if (selected.primitive == Primitive::Plane && selected.modelAssetPath.empty()) {
-            selected.collider = Collider::MakePlane(glm::vec3(0.0f, 1.0f, 0.0f),
-                transform ? transform->position.y : 0.0f);
+            selected.collider = Collider::MakePlane(glm::vec3(0.0f, 1.0f, 0.0f), 0.0f);
         } else if (selected.primitive == Primitive::Sphere && selected.modelAssetPath.empty() && transform) {
-            selected.collider = Collider::MakeSphere(
-                std::max({transform->scale.x, transform->scale.y, transform->scale.z}) * 0.5f);
+            selected.collider = Collider::MakeSphere(0.5f);
         } else if (selected.primitive == Primitive::Capsule && selected.modelAssetPath.empty() && transform) {
-            const float radius = 0.4f * std::max(transform->scale.x, transform->scale.z);
-            selected.collider = Collider::MakeCapsuleFromHeight(radius,
-                std::max(1.8f * transform->scale.y, radius * 2.0f));
+            selected.collider = Collider::MakeCapsuleFromHeight(0.4f, 1.8f);
         } else if (selected.primitive == Primitive::Cylinder && selected.modelAssetPath.empty() && transform) {
-            const float radius = 0.5f * std::max(transform->scale.x, transform->scale.z);
-            selected.collider = Collider::MakeCylinder(radius, transform->scale.y);
+            selected.collider = Collider::MakeCylinder(0.5f, 1.0f);
         } else if (selected.primitive == Primitive::Cone && selected.modelAssetPath.empty() && transform) {
-            selected.collider = Collider::MakeCone(
-                0.5f * std::max(transform->scale.x, transform->scale.z), transform->scale.y);
+            selected.collider = Collider::MakeCone(0.5f, 1.0f);
         } else if (selected.primitive == Primitive::Pyramid && selected.modelAssetPath.empty() && transform) {
-            selected.collider = Collider::MakePyramid(transform->scale * 0.5f);
+            selected.collider = Collider::MakePyramid(glm::vec3(0.5f));
         } else if (selected.primitive == Primitive::Torus && selected.modelAssetPath.empty() && transform) {
-            const float radialScale = std::max(transform->scale.x, transform->scale.z);
-            selected.collider = Collider::MakeTorus(0.35f * radialScale,
-                0.15f * std::max(radialScale, transform->scale.y));
+            selected.collider = Collider::MakeTorus(0.35f, 0.15f);
         } else if (selected.primitive == Primitive::Staircase && selected.modelAssetPath.empty() && transform) {
-            selected.collider = Collider::MakeStaircase(transform->scale * 0.5f, 6);
+            selected.collider = Collider::MakeStaircase(glm::vec3(0.5f), 6);
         } else if (transform) {
-            selected.collider = Collider::MakeBox(glm::vec3(
-                std::max(transform->scale.x * 0.5f, 0.001f),
-                std::max(transform->scale.y * 0.5f, 0.001f),
-                std::max(transform->scale.z * 0.5f, 0.001f)));
+            selected.collider = Collider::MakeBox(glm::vec3(0.5f));
         }
         NormalizeColliderValues(selected.collider);
     }
@@ -5045,6 +5321,7 @@ bool EditorScene::SetSelectedPlayerControllerEnabled(bool enabled) {
         selected.collider = engine::ecs::Collider::MakeCapsuleFromHeight(
             selected.playerController.capsuleRadius,
             selected.playerController.capsuleHeight);
+        selected.collider.inheritTransformScale = false;
         selected.collider.isTrigger = true;
         selected.collider.layer = engine::ecs::CollisionLayer::Player;
         selected.collider.mask = engine::ecs::CollisionLayer::All;
@@ -5087,6 +5364,7 @@ bool EditorScene::SetSelectedPlayerController(const PlayerControllerSettings& se
     selected.playerController = safe;
     selected.colliderEnabled = true;
     selected.collider = engine::ecs::Collider::MakeCapsuleFromHeight(safe.capsuleRadius, safe.capsuleHeight);
+    selected.collider.inheritTransformScale = false;
     selected.collider.isTrigger = true;
     selected.collider.layer = engine::ecs::CollisionLayer::Player;
     selected.collider.mask = engine::ecs::CollisionLayer::All;
@@ -6521,7 +6799,8 @@ bool EditorScene::DuplicateSelected(const engine::Mesh & cube, const engine::Mes
     duplicateTransform.position += glm::vec3(0.8f, 0.0f, 0.8f);
 
     const engine::Mesh& mesh = MeshFor(selectedCopy.primitive, cube, plane, sphere, capsule, cylinder, cone, pyramid, torus, staircase);
-    CreateObject(selectedCopy.name + "_Copy", selectedCopy.primitive, mesh, duplicateTransform, duplicateColor);
+    CreateObject(selectedCopy.name, selectedCopy.primitive, mesh, duplicateTransform, duplicateColor);
+    m_objects.back().editorGroupId = selectedCopy.editorGroupId;
     m_objects.back().modelAssetPath = selectedCopy.modelAssetPath;
     m_objects.back().materialAssetPath = selectedCopy.materialAssetPath;
     m_objects.back().decal = selectedCopy.decal;
@@ -6763,7 +7042,7 @@ engine::ecs::Entity EditorScene::CreateObject(const std::string & name, Primitiv
     Entity entity = m_registry.Create();
     m_registry.Add<Transform>(entity, transform);
     m_registry.Add<MeshRenderer>(entity, MeshRenderer{&mesh, color});
-    m_objects.push_back({entity, name, primitive});
+    m_objects.push_back({entity, MakeUniqueHierarchyName(name), primitive});
     return entity;
 }
 
@@ -6771,6 +7050,10 @@ EditorScene::Snapshot EditorScene::CaptureSnapshot()
 {
     Snapshot snapshot;
     snapshot.selectedIndex = m_selectedIndex;
+    snapshot.hierarchySelection = m_hierarchySelection;
+    snapshot.selectedGroupId = m_selectedGroupId;
+    snapshot.groups = m_groups;
+    snapshot.nextGroupId = m_nextGroupId;
     snapshot.nextCubeNumber = m_nextCubeNumber;
     snapshot.joints = m_joints;
     snapshot.cameraPresets = m_cameraPresets;
@@ -6831,6 +7114,12 @@ void EditorScene::RestoreSnapshot(const Snapshot & snapshot, const engine::Mesh 
         m_selectedIndex = m_objects.empty() ? -1 : static_cast<int>(m_objects.size()) -1;
     }
     m_nextCubeNumber = snapshot.nextCubeNumber;
+    m_groups = snapshot.groups;
+    m_nextGroupId = snapshot.nextGroupId;
+    m_hierarchySelection = snapshot.hierarchySelection;
+    m_selectedGroupId = snapshot.selectedGroupId;
+    if (m_hierarchySelection == HierarchySelectionType::Group
+        && !GroupExists(m_selectedGroupId)) Deselect();
     m_joints = snapshot.joints;
     m_cameraPresets = snapshot.cameraPresets;
     m_cameraSequences = snapshot.cameraSequences;
@@ -6861,6 +7150,7 @@ void EditorScene::Clear()
     m_registry = engine::ecs::Registry{};
     m_assetId = {};
     m_objects.clear();
+    m_groups.clear();
     m_joints.clear();
     m_cameraPresets.clear();
     m_cameraSequences.clear();
@@ -6870,6 +7160,9 @@ void EditorScene::Clear()
     m_undoStack.clear();
     m_redoStack.clear();
     m_selectedIndex = -1;
+    m_hierarchySelection = HierarchySelectionType::None;
+    m_selectedGroupId = kRootGroupId;
+    m_nextGroupId = 1;
     m_nextCubeNumber = 1;
     m_dirty = false;
     m_transformEditOpen = false;

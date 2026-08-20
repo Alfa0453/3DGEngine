@@ -5,6 +5,8 @@
 #include <engine/graphics/ParticleSystem.h>
 #include <engine/graphics/PostProcess.h>
 #include <engine/assets/RuntimeAssetManager.h>
+#include <engine/ecs/Entity.h>
+#include "SceneApplyTarget.h"
 
 #include <memory>
 #include <optional>
@@ -24,9 +26,11 @@ class ParticleEditorPanel {
 public:
     void Draw(EditorScene& scene, EditorAssets& assets, bool* open, float dt);
     void RequestOpen(const std::string& path);
+    bool IsDirty() const { return m_assetDirty; }
+    const std::string& Path() const { return m_assetPath; }
+    bool SaveForShutdown(EditorScene& scene, EditorAssets& assets, std::string* error);
 
 private:
-    void SyncSelection(EditorScene& scene);
     void RestartPreview();
     void RestartEffectPreview();
     void UpdatePreview(float dt);
@@ -44,12 +48,12 @@ private:
     std::optional<engine::Framebuffer> m_bloomOutput;
     std::optional<engine::PostProcess> m_postProcess;
     std::unique_ptr<engine::ParticleRenderer> m_renderer;
-    int m_selectedIndex = -2;
+    SceneApplyTarget m_applyTarget;
     engine::ParticleModuleType m_selectedModule = engine::ParticleModuleType::Spawn;
     std::uint32_t m_selectedModuleId = 0;
     bool m_focusSelectedModuleSettings = false;
     std::array<char, 64> m_moduleSearch{};
-    bool m_hasSystem = false;
+    bool m_hasSystem = true;
     bool m_playing = true;
     float m_elapsed = 0.0f;
     float m_yaw = 35.0f;

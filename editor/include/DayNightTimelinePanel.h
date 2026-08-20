@@ -12,6 +12,9 @@ public:
     void QueueOpen(std::string path) { m_pendingOpen = std::move(path); }
     Result Draw(EditorScene& scene, EditorAssets& assets,
                 const std::string& contentRoot, bool* open);
+    bool IsDirty() const { return m_dirty; }
+    const std::string& Path() const { return m_path; }
+    bool SaveForShutdown(const std::string& root, std::string* error);
 private:
     void NewTimeline(const std::string& root);
     void ApplySample(EditorScene& scene) const;

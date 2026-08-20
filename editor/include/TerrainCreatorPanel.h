@@ -3,6 +3,7 @@
 #include <engine/assets/TerrainAsset.h>
 #include <engine/graphics/Framebuffer.h>
 #include <engine/graphics/Terrain.h>
+#include <engine/ecs/Entity.h>
 
 #include <glm/glm.hpp>
 
@@ -11,6 +12,7 @@
 #include <string>
 
 class EditorAssets;
+class EditorScene;
 
 namespace engine {
 class ProceduralSky;
@@ -25,13 +27,17 @@ public:
     ~TerrainCreatorPanel();
 
     void QueueOpen(const std::string& path);
-    void Draw(const std::string& contentRoot, const EditorAssets& assets,
+    void Draw(EditorScene& scene, const std::string& contentRoot, const EditorAssets& assets,
               bool* open, bool* assetSaved, std::string* message, float dt);
 
     bool ConsumeAddToLevel(engine::TerrainAssetData* asset,
                            std::string* sourcePath);
     bool ConsumeApplyToSelected(engine::TerrainAssetData* asset,
                                 std::string* sourcePath);
+    engine::ecs::Entity ApplyTarget() const { return m_applyTarget; }
+    bool IsDirty() const { return m_dirty; }
+    const std::string& Path() const { return m_path; }
+    bool SaveForShutdown(const std::string& root, std::string* error) { return Save(root, error); }
 
 private:
     void NewLandscape();
@@ -61,6 +67,7 @@ private:
     bool m_dirty = false;
     bool m_addToLevel = false;
     bool m_applyToSelected = false;
+    engine::ecs::Entity m_applyTarget = engine::ecs::kNull;
     std::string m_materialPreviewSignature = "<uninitialized>";
     glm::vec3 m_previewLayerColors[6]{};
     float m_viewYaw = -0.75f;

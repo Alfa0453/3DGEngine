@@ -35,6 +35,8 @@ struct AnimationGraphDesc {
         std::string clipName;
         float       value  = 0.0f;
         float       valueY = 0.0f;
+        float       clipBaseSpeed = 1.0f;
+        float       durationSeconds = 0.0f;
     };
 
     struct StateDesc {
@@ -42,7 +44,10 @@ struct AnimationGraphDesc {
         int         clipIndex = 0;
         std::string clipName;
         bool        loop  = true;
+        // `speed` is retained for graph-v7 serialization compatibility. It is
+        // the graph-authored state multiplier, never an absolute override.
         float       speed = 1.0f;
+        float       clipBaseSpeed = 1.0f;
         int         blendClipIndex = -1;
         std::string blendClipName;
         std::string blendParameter;
@@ -104,7 +109,7 @@ inline void BuildAnimationController(
             node.name.empty() ? std::string("State") : node.name,
             clip,
             node.loop,
-            std::max(node.speed, 0.0f),
+            std::max(node.clipBaseSpeed, 0.0f) * std::max(node.speed, 0.0f),
             -std::numeric_limits<float>::infinity(),
             std::numeric_limits<float>::infinity(),
             clipDuration(clip),
@@ -114,11 +119,19 @@ inline void BuildAnimationController(
             node.blendParameter,
             node.blendMin,
             node.blendMax,
-            node.rootMotion
+            node.rootMotion,
+            {},
+            {},
+            false,
+            true,
+            std::max(node.speed, 0.0f),
+            std::max(node.clipBaseSpeed, 0.0f)
         });
         for (const AnimationGraphDesc::BlendSample& sample : node.blendSamples) {
             out.AddBlendSample(index,
-                {resolveClip(sample.clipIndex, sample.clipName), sample.value, sample.valueY});
+                {resolveClip(sample.clipIndex, sample.clipName), sample.value, sample.valueY,
+                 std::max(sample.clipBaseSpeed, 0.0f),
+                 std::max(sample.durationSeconds, 0.0f)});
         }
         out.ConfigureBlendSpace(index, node.blendParameterY,
             node.blendSpace2D, node.synchronizeBlendSpace);

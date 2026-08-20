@@ -9,6 +9,7 @@
 
 #include <game/GameModule.h>
 #include <engine/ai/BtScript.h>
+#include <engine/gameplay/GameMode.h>
 
 #include <imgui.h>
 
@@ -20,6 +21,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <string>
+#include <stdexcept>
 #include <system_error>
 #include <unordered_map>
 #include <vector>
@@ -379,34 +381,13 @@ void EditorApp::DrawScriptDebugPanel() {
 
 void EditorApp::HotReloadScripts() {
     if (m_scriptBuildRunning) {
-        m_log.Warning("A script build is already running; hot reload will use its result.");
+        m_scriptBuildPending = true;
+        m_log.Warning("A script build is already running; one follow-up build was queued.");
         return;
     }
-    m_scriptBuildPending = false;
     m_scriptSourceSnapshot = ScanNativeScriptSources(m_project.AssetRoot());
     m_scriptSourceSnapshotInitialized = true;
-    std::error_code ec;
-    const std::filesystem::path projectRoot =
-        std::filesystem::absolute(m_project.AssetRoot(), ec).parent_path();
-    std::string buildError;
-    m_log.Info("Building game_scripts.dll for hot reload...");
-    if (!EditorScriptTools::BuildTarget(projectRoot, "Debug", "game_scripts", &buildError)) {
-        m_log.Error("Hot reload build failed: " + buildError);
-        return;
-    }
-
-    const std::filesystem::path builtDll =
-        EditorScriptTools::ProjectScriptBinary(projectRoot);
-    if (!std::filesystem::exists(builtDll, ec)) {
-        m_log.Error("Hot reload: project script DLL was not produced: " + builtDll.string());
-        return;
-    }
-
-    if (LoadProjectScriptModule(true)) {
-        m_log.Info(m_mode == EditorMode::Play
-            ? "Project scripts hot-reloaded; live instances and AI trees were recreated."
-            : "Project scripts hot-reloaded - Play to run the new code.");
-    }
+    StartScriptAutoBuild();
 }
 
 void EditorApp::ResetScriptAutoReloadWatcher() {
@@ -420,7 +401,8 @@ void EditorApp::ResetScriptAutoReloadWatcher() {
 }
 
 void EditorApp::StartScriptAutoBuild() {
-    if (m_scriptBuildRunning) {
+    if (m_scriptShuttingDown) return;
+    if (m_scriptBuildRunning || m_scriptModuleInstallInProgress) {
         m_scriptBuildPending = true;
         return;
     }
@@ -437,25 +419,48 @@ void EditorApp::StartScriptAutoBuild() {
 
     m_scriptBuildRunning = true;
     m_scriptBuildPending = false;
+    const std::uint64_t generation = ++m_scriptBuildGeneration;
+    m_activeScriptBuildGeneration = generation;
+    m_projectScriptModuleState = ProjectScriptModuleState::Building;
     m_scriptBuildStatus = "Building project scripts...";
     m_log.Info("Script change detected; compiling in the background...");
     try {
         m_scriptBuildFuture = std::async(std::launch::async,
-            [contentRoot, projectRoot]() {
+            [contentRoot, projectRoot, generation]() {
                 ScriptBuildResult result;
                 result.projectRoot = projectRoot;
+                result.generation = generation;
                 std::string error;
                 if (!EditorGeneratedScriptTools::RegenerateGeneratedScripts(
                         contentRoot, &error)) {
                     result.error = "Script registration generation failed: " + error;
                     return result;
                 }
-                result.success = EditorScriptTools::BuildTarget(
-                    projectRoot, "Debug", "game_scripts", &result.error);
+                if (!EditorScriptTools::BuildTarget(
+                        projectRoot, "Debug", "game_scripts", &result.error)) {
+                    return result;
+                }
+                const std::filesystem::path built =
+                    EditorScriptTools::ProjectScriptBinary(projectRoot);
+                result.candidateDll = EditorScriptTools::ProjectScriptCandidatePath(
+                    projectRoot, generation);
+                std::error_code copyError;
+                std::filesystem::create_directories(
+                    result.candidateDll.parent_path(), copyError);
+                copyError.clear();
+                std::filesystem::copy_file(built, result.candidateDll,
+                    std::filesystem::copy_options::overwrite_existing, copyError);
+                if (copyError) {
+                    result.error = "Could not prepare script candidate: " + copyError.message();
+                    result.candidateDll.clear();
+                    return result;
+                }
+                result.success = true;
                 return result;
             });
     } catch (const std::exception& e) {
         m_scriptBuildRunning = false;
+        m_projectScriptModuleState = ProjectScriptModuleState::BuildFailed;
         m_scriptBuildStatus = "Could not start background compilation";
         m_log.Error("Automatic script build could not start: " + std::string(e.what()));
     }
@@ -465,25 +470,46 @@ void EditorApp::UpdateScriptAutoReload(float dt) {
     if (m_scriptBuildRunning && m_scriptBuildFuture.valid()
         && m_scriptBuildFuture.wait_for(std::chrono::seconds(0))
             == std::future_status::ready) {
-        ScriptBuildResult result = m_scriptBuildFuture.get();
+        ScriptBuildResult result;
+        try {
+            result = m_scriptBuildFuture.get();
+        } catch (const std::exception& exception) {
+            result.error = "Background script build failed unexpectedly: "
+                + std::string(exception.what());
+            m_projectScriptModuleState = ProjectScriptModuleState::BuildFailed;
+            m_scriptBuildStatus = "Compilation failed - open Last Build Log";
+            m_log.Error(result.error);
+        } catch (...) {
+            result.error = "Background script build failed unexpectedly.";
+            m_projectScriptModuleState = ProjectScriptModuleState::BuildFailed;
+            m_scriptBuildStatus = "Compilation failed - open Last Build Log";
+            m_log.Error(result.error);
+        }
         m_scriptBuildRunning = false;
 
         std::error_code ec;
         const std::filesystem::path currentProjectRoot =
             std::filesystem::absolute(m_project.AssetRoot(), ec).parent_path();
-        if (!ec && result.projectRoot.lexically_normal()
-                == currentProjectRoot.lexically_normal()) {
+        const bool currentResult = !m_scriptShuttingDown && !ec
+            && result.generation == m_activeScriptBuildGeneration
+            && result.projectRoot.lexically_normal() == currentProjectRoot.lexically_normal();
+        if (currentResult) {
             if (result.success) {
-                if (LoadProjectScriptModule(true)) {
+                m_projectScriptModuleState = ProjectScriptModuleState::CandidateReady;
+                if (InstallProjectScriptCandidate(
+                        result.candidateDll, result.generation, true)) {
                     m_scriptBuildStatus = "Scripts compiled and reloaded";
                     m_log.Info("Automatic script compilation and hot reload completed.");
                 } else {
                     m_scriptBuildStatus = "Compiled, but reload failed";
                 }
             } else {
+                m_projectScriptModuleState = ProjectScriptModuleState::BuildFailed;
                 m_scriptBuildStatus = "Compilation failed - open Last Build Log";
                 m_log.Error("Automatic script compilation failed: " + result.error);
             }
+        } else if (!result.candidateDll.empty()) {
+            std::filesystem::remove(result.candidateDll, ec);
         }
     }
 
@@ -528,42 +554,110 @@ bool EditorApp::LoadProjectScriptModule(bool reportMissing) {
         }
         return false;
     }
-
-    const int candidateSlot = m_projectScriptStageSlot == 0 ? 1 : 0;
-    const std::filesystem::path staging =
-        EditorScriptTools::ProjectScriptStagingPath(projectRoot, candidateSlot);
-    std::filesystem::create_directories(staging.parent_path(), ec);
+    const std::uint64_t generation = ++m_scriptBuildGeneration;
+    const std::filesystem::path candidate =
+        EditorScriptTools::ProjectScriptCandidatePath(projectRoot, generation);
+    std::filesystem::create_directories(candidate.parent_path(), ec);
     ec.clear();
-    std::filesystem::copy_file(binary, staging,
+    std::filesystem::copy_file(binary, candidate,
         std::filesystem::copy_options::overwrite_existing, ec);
     if (ec) {
         m_log.Error("Could not stage the project script module: " + ec.message());
         return false;
     }
+    return InstallProjectScriptCandidate(candidate, generation, reportMissing);
+}
+
+bool EditorApp::InstallProjectScriptCandidate(
+    const std::filesystem::path& candidate, std::uint64_t generation,
+    bool reportMissing) {
+    std::error_code ec;
+    const std::filesystem::path projectRoot =
+        std::filesystem::absolute(m_project.AssetRoot(), ec).parent_path();
+    if (ec || projectRoot.empty() || !std::filesystem::is_regular_file(candidate, ec)) {
+        if (reportMissing) m_log.Error("Project script candidate is missing: " + candidate.string());
+        m_projectScriptModuleState = ProjectScriptModuleState::LoadFailed;
+        return false;
+    }
+
+    EditorScriptTools::ScriptModuleLoadMarker marker;
+    marker.candidateDll = candidate;
+    marker.buildProductDll = EditorScriptTools::ProjectScriptBinary(projectRoot);
+    marker.generation = generation;
+    std::string error;
+    if (!EditorScriptTools::WriteScriptModuleLoadMarker(projectRoot, marker, &error)) {
+        m_log.Error(error + " Candidate loading was cancelled so startup recovery remains reliable.");
+        m_projectScriptModuleState = ProjectScriptModuleState::LoadFailed;
+        return false;
+    }
+    m_scriptModuleInstallInProgress = true;
+    m_projectScriptModuleState = ProjectScriptModuleState::Validating;
 
     // Register into isolated registries first. The active factories and module remain
     // untouched until the candidate DLL has loaded and its export has run successfully.
     engine::ScriptRegistry candidateScripts;
     engine::ai::BtScriptRegistry candidateBtScripts;
+    candidateScripts.SetStrictValidation(true);
+    candidateBtScripts.SetStrictValidation(true);
     engine::ScriptModule candidateModule;
-    std::string error;
-    if (!candidateModule.Load(staging.string(), candidateScripts,
+    if (!candidateModule.Load(candidate.string(), candidateScripts,
             candidateBtScripts, &error)) {
         candidateScripts.Clear();
         candidateBtScripts.Clear();
         candidateModule.Unload();
+        std::string quarantineError;
+        EditorScriptTools::QuarantineScriptModule(
+            projectRoot, candidate, generation, nullptr, &quarantineError);
+        std::string productError;
+        EditorScriptTools::QuarantineScriptModule(projectRoot,
+            EditorScriptTools::ProjectScriptBinary(projectRoot), generation,
+            nullptr, &productError);
+        EditorScriptTools::ClearScriptModuleLoadMarker(projectRoot, nullptr);
+        m_scriptModuleInstallInProgress = false;
+        m_projectScriptModuleState = ProjectScriptModuleState::LoadFailed;
         m_log.Error("Could not load project scripts: " + error);
+        if (!quarantineError.empty()) m_log.Warning(quarantineError);
+        if (!productError.empty()) m_log.Warning(productError);
         return false;
     }
 
-    const std::vector<std::string> candidateScriptNames = candidateScripts.Names();
-    const std::vector<std::string> candidateBtNames = candidateBtScripts.Names();
+    if (!candidateScripts.Valid(&error) || !candidateBtScripts.Valid(&error)) {
+        candidateScripts.Clear();
+        candidateBtScripts.Clear();
+        candidateModule.Unload();
+        std::string quarantineError;
+        EditorScriptTools::QuarantineScriptModule(
+            projectRoot, candidate, generation, nullptr, &quarantineError);
+        std::string productError;
+        EditorScriptTools::QuarantineScriptModule(projectRoot,
+            EditorScriptTools::ProjectScriptBinary(projectRoot), generation,
+            nullptr, &productError);
+        EditorScriptTools::ClearScriptModuleLoadMarker(projectRoot, nullptr);
+        m_scriptModuleInstallInProgress = false;
+        m_projectScriptModuleState = ProjectScriptModuleState::LoadFailed;
+        m_log.Error("Project script candidate validation failed: " + error);
+        if (!quarantineError.empty()) m_log.Warning(quarantineError);
+        if (!productError.empty()) m_log.Warning(productError);
+        return false;
+    }
+
+    std::vector<std::string> candidateScriptNames = candidateScripts.Names();
+    std::vector<std::string> candidateBtNames = candidateBtScripts.Names();
+    const bool wasPaused = engine::GetScriptDebugState().paused;
+    engine::SetScriptExecutionPaused(true);
+    m_projectScriptModuleState = ProjectScriptModuleState::Reloading;
 
     // Preserve runtime values before destroying objects whose vtables live in the old DLL.
     // ScriptField values stay on each ECS component. Custom transient values can opt into
     // Script::OnBeforeHotReload/OnAfterHotReload. AI blackboards are restored by agent name.
     std::unordered_map<std::string, engine::ai::Blackboard> aiBlackboards;
     std::unordered_map<std::string, engine::ecs::Entity> playEntitiesByName;
+    struct SavedReloadState {
+        engine::ecs::Entity entity = engine::ecs::kNull;
+        int attachment = 0;
+        engine::Script::ReloadState state;
+    };
+    std::vector<SavedReloadState> savedReloadStates;
     if (m_mode == EditorMode::Play && m_playRegistry) {
         for (const PlayAgent& agent : m_playAgents) {
             if (agent.useGraph) aiBlackboards[agent.name] = agent.ctx.blackboard;
@@ -572,33 +666,191 @@ bool EditorApp::LoadProjectScriptModule(bool reportMissing) {
             playEntitiesByName[entry.second] = entry.first;
         }
         engine::PrepareScriptsForHotReload(*m_playRegistry);
+        m_playRegistry->view<engine::NativeScriptComponent>().each(
+            [&](engine::ecs::Entity entity, engine::NativeScriptComponent& component) {
+                if (component.restoreReloadState) {
+                    savedReloadStates.push_back({entity, 0, component.reloadState});
+                }
+                for (std::size_t index = 0; index < component.additional.size(); ++index) {
+                    const engine::NativeScriptSlot& slot = component.additional[index];
+                    if (slot.restoreReloadState) {
+                        savedReloadStates.push_back({entity,
+                            static_cast<int>(index) + 1, slot.reloadState});
+                    }
+                }
+            });
         m_playAgents.clear();
         m_playBtGraphCache.clear();
     }
 
     engine::ScriptRegistry& scripts = engine::ScriptRegistry::Instance();
     engine::ai::BtScriptRegistry& btScripts = engine::ai::BtScriptRegistry::Instance();
-    for (const std::string& name : m_projectScriptClasses) scripts.Remove(name);
-    for (const std::string& name : m_projectBtScriptClasses) btScripts.Remove(name);
-    scripts.MergeFrom(std::move(candidateScripts));
-    btScripts.MergeFrom(std::move(candidateBtScripts));
-
-    // The old module is only unloaded after all of its factories and runtime objects are gone.
-    m_scriptModule.Swap(candidateModule);
-    candidateModule.Unload();
-    m_projectScriptClasses = candidateScriptNames;
-    m_projectBtScriptClasses = candidateBtNames;
-    m_projectScriptStageSlot = candidateSlot;
-
-    if (m_mode == EditorMode::Play && m_playRegistry) {
-        BuildPlayAgents(playEntitiesByName);
-        for (PlayAgent& agent : m_playAgents) {
-            const auto saved = aiBlackboards.find(agent.name);
-            if (saved != aiBlackboards.end() && agent.useGraph) {
-                agent.ctx.blackboard = saved->second;
+    engine::ScriptRegistry oldScripts = scripts.Extract(m_projectScriptClasses);
+    engine::ai::BtScriptRegistry oldBtScripts = btScripts.Extract(m_projectBtScriptClasses);
+    bool committed = false;
+    try {
+        scripts.MergeFrom(std::move(candidateScripts));
+        btScripts.MergeFrom(std::move(candidateBtScripts));
+        if (m_mode == EditorMode::Play && m_playRegistry) {
+            BuildPlayAgents(playEntitiesByName);
+            for (PlayAgent& agent : m_playAgents) {
+                const auto saved = aiBlackboards.find(agent.name);
+                if (saved != aiBlackboards.end() && agent.useGraph) {
+                    agent.ctx.blackboard = saved->second;
+                }
+            }
+            if (!engine::RecreateScriptsAfterHotReload(
+                    *m_playRegistry, &m_runtimeAudio, &m_cameraShake,
+                    &m_cameraDirector, &engine::GameMode::Instance(),
+                    &m_playPhysics, &error)) {
+                throw std::runtime_error(error.empty()
+                    ? "live script reconstruction failed" : error);
             }
         }
+        // Destroy the old DLL-owned factories before unloading its image. The old module
+        // remains resident until candidate registration and runtime reconstruction finish.
+        m_activeScriptCandidate = candidate;
+        m_projectScriptClasses.swap(candidateScriptNames);
+        m_projectBtScriptClasses.swap(candidateBtNames);
+        oldScripts.Clear();
+        oldBtScripts.Clear();
+        m_scriptModule.Swap(candidateModule);
+        std::string unloadError;
+        if (!candidateModule.Unload(&unloadError)) m_log.Warning(unloadError);
+        committed = true;
+    } catch (const std::exception& exception) {
+        error = exception.what();
+    } catch (...) {
+        error = "unknown runtime reconstruction failure";
     }
-    m_log.Info("Loaded project scripts: " + binary.string());
+
+    if (!committed) {
+        if (m_mode == EditorMode::Play && m_playRegistry) {
+            engine::ShutdownScripts(*m_playRegistry);
+            for (const SavedReloadState& saved : savedReloadStates) {
+                engine::NativeScriptComponent* component =
+                    m_playRegistry->TryGet<engine::NativeScriptComponent>(saved.entity);
+                if (!component) continue;
+                engine::NativeScriptSlot* slot = saved.attachment == 0
+                    ? static_cast<engine::NativeScriptSlot*>(component)
+                    : (static_cast<std::size_t>(saved.attachment - 1)
+                            < component->additional.size()
+                        ? &component->additional[static_cast<std::size_t>(saved.attachment - 1)]
+                        : nullptr);
+                if (!slot) continue;
+                slot->reloadState = saved.state;
+                slot->restoreReloadState = true;
+                slot->missingFactory = false;
+            }
+        }
+        m_playAgents.clear();
+        m_playBtGraphCache.clear();
+        for (const std::string& name : candidateScriptNames) scripts.Remove(name);
+        for (const std::string& name : candidateBtNames) btScripts.Remove(name);
+        scripts.MergeFrom(std::move(oldScripts));
+        btScripts.MergeFrom(std::move(oldBtScripts));
+        candidateScripts.Clear();
+        candidateBtScripts.Clear();
+        candidateModule.Unload();
+        if (m_mode == EditorMode::Play && m_playRegistry) {
+            try {
+                BuildPlayAgents(playEntitiesByName);
+                std::string restoreError;
+                engine::RecreateScriptsAfterHotReload(
+                    *m_playRegistry, &m_runtimeAudio, &m_cameraShake,
+                    &m_cameraDirector, &engine::GameMode::Instance(),
+                    &m_playPhysics, &restoreError);
+            } catch (...) {}
+        }
+        engine::SetScriptExecutionPaused(wasPaused);
+        EditorScriptTools::ClearScriptModuleLoadMarker(projectRoot, nullptr);
+        m_scriptModuleInstallInProgress = false;
+        m_projectScriptModuleState = ProjectScriptModuleState::LoadFailed;
+        std::string quarantineError;
+        EditorScriptTools::QuarantineScriptModule(
+            projectRoot, candidate, generation, nullptr, &quarantineError);
+        if (!quarantineError.empty()) m_log.Warning(quarantineError);
+        m_log.Error("Project script install rolled back: " + error);
+        return false;
+    }
+
+    if (!EditorScriptTools::ClearScriptModuleLoadMarker(projectRoot, &error)) {
+        m_log.Warning(error);
+    }
+    m_scriptModuleInstallInProgress = false;
+    m_projectScriptSafeMode = false;
+    m_projectScriptModuleState = ProjectScriptModuleState::Ready;
+    engine::SetScriptExecutionPaused(wasPaused);
+    EditorScriptTools::CleanupScriptCandidates(projectRoot, m_activeScriptCandidate);
+    m_log.Info("Loaded project scripts from candidate generation "
+        + std::to_string(generation) + ": " + candidate.string());
     return true;
+}
+
+bool EditorApp::RecoverInterruptedScriptLoad(
+    const std::filesystem::path& projectRoot) {
+    const std::filesystem::path markerPath =
+        EditorScriptTools::ProjectScriptLoadMarkerPath(projectRoot);
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(markerPath, ec)) return false;
+
+    EditorScriptTools::ScriptModuleLoadMarker marker;
+    std::string markerError;
+    if (!EditorScriptTools::ReadScriptModuleLoadMarker(
+            projectRoot, &marker, &markerError)) {
+        m_log.Error(markerError + " Native project scripts are disabled for this launch.");
+    }
+    if (marker.buildProductDll.empty()) {
+        marker.buildProductDll = EditorScriptTools::ProjectScriptBinary(projectRoot);
+    }
+    std::string quarantineError;
+    std::filesystem::path quarantined;
+    if (!EditorScriptTools::QuarantineScriptModule(projectRoot, marker.candidateDll,
+            marker.generation, &quarantined, &quarantineError)) {
+        m_log.Warning(quarantineError);
+    }
+    // The build product produced the suspect candidate. Quarantine it too so the next
+    // startup cannot copy and load the exact same bytes again.
+    std::string productError;
+    if (!EditorScriptTools::QuarantineScriptModule(projectRoot, marker.buildProductDll,
+            marker.generation, nullptr, &productError)) {
+        m_log.Warning(productError);
+    }
+    EditorScriptTools::ClearScriptModuleLoadMarker(projectRoot, nullptr);
+    m_projectScriptSafeMode = true;
+    m_projectScriptModuleState = ProjectScriptModuleState::SafeMode;
+    m_scriptBuildStatus = "SAFE MODE - rebuild project scripts to recover";
+    m_log.Error("The previous project script module load did not complete. "
+        "3DGEngine opened the project in Script Safe Mode; the suspect module was quarantined.");
+    return true;
+}
+
+void EditorApp::DrainScriptBuild(bool shuttingDown) {
+    if (shuttingDown) m_scriptShuttingDown = true;
+    m_scriptBuildPending = false;
+    if (!m_scriptBuildFuture.valid()) {
+        m_scriptBuildRunning = false;
+        return;
+    }
+    try {
+        ScriptBuildResult result = m_scriptBuildFuture.get();
+        std::error_code ec;
+        if (!result.candidateDll.empty()) std::filesystem::remove(result.candidateDll, ec);
+    } catch (const std::exception& exception) {
+        m_log.Warning("Background script build ended during project close: "
+            + std::string(exception.what()));
+    } catch (...) {
+        m_log.Warning("Background script build ended unexpectedly during project close.");
+    }
+    m_scriptBuildRunning = false;
+}
+
+void EditorApp::AcknowledgeCreatedScriptSource() {
+    m_scriptSourceSnapshot = ScanNativeScriptSources(m_project.AssetRoot());
+    m_scriptSourceSnapshotInitialized = true;
+    m_scriptBuildPending = false;
+    m_scriptBuildDebounce = 0.0f;
+    m_scriptBuildStatus = m_projectScriptSafeMode
+        ? "SAFE MODE - edit and save, then rebuild project scripts"
+        : "Script created - waiting for the first source edit/save";
 }

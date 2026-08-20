@@ -50,8 +50,14 @@ float alpha=uOpacity*((uHasAlbedoMap==1)?texture(uAlbedoMap,uv).a:1.0); if(alpha
 // bounding sphere for a constant ortho extent and snaps the centre to whole shadow texels,
 // so shadow edges do not shimmer / crawl as the camera moves (stabilised CSM). mapSize is
 // the shadow map resolution (for the texel grid).
-glm::mat4 FitCascade(const glm::mat4& camView, const glm::mat4& subProj,
-                     const glm::vec3& lightDir, int mapSize) {
+struct CascadeFit {
+    glm::mat4 viewProjection{1.0f};
+    float worldTexelSize = 1.0f;
+    float depthRange = 1.0f;
+};
+
+CascadeFit FitCascade(const glm::mat4& camView, const glm::mat4& subProj,
+                      const glm::vec3& lightDir, int mapSize) {
     const glm::mat4 inv = glm::inverse(subProj * camView);
     std::array<glm::vec3, 8> corners;
     int n = 0;
@@ -90,7 +96,11 @@ glm::mat4 FitCascade(const glm::mat4& camView, const glm::mat4& subProj,
     const float zMult = 10.0f;
     const glm::mat4 lightProj = glm::ortho(-radius, radius, -radius, radius,
                                            -radius * zMult, radius * zMult);
-    return lightProj * lightView;
+    CascadeFit fit;
+    fit.viewProjection = lightProj * lightView;
+    fit.worldTexelSize = worldPerTexel;
+    fit.depthRange = 2.0f * radius * zMult;
+    return fit;
 }
 
 } // namespace
@@ -138,6 +148,7 @@ void CascadedShadow::Generate(ecs::Registry& reg, const Camera& camera, float as
     GLint prevFbo = 0;
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFbo);
     const GLboolean polygonOffsetWasEnabled = glIsEnabled(GL_POLYGON_OFFSET_FILL);
+    const GLboolean cullFaceWasEnabled = glIsEnabled(GL_CULL_FACE);
     GLfloat previousPolygonOffsetFactor = 0.0f;
     GLfloat previousPolygonOffsetUnits = 0.0f;
     glGetFloatv(GL_POLYGON_OFFSET_FACTOR, &previousPolygonOffsetFactor);
@@ -150,13 +161,20 @@ void CascadedShadow::Generate(ecs::Registry& reg, const Camera& camera, float as
     // expose the individual PCF levels as broad bands (shadow acne).
     glEnable(GL_POLYGON_OFFSET_FILL);
     glPolygonOffset(2.0f, 4.0f);
+    // Depth-only shadow casting is deliberately two-sided. Thin authored walls
+    // and ceilings must block the sun regardless of winding; normal material
+    // rendering keeps its existing back-face culling policy.
+    glDisable(GL_CULL_FACE);
     m_shader.Bind();
     m_batch.Build(reg);
 
     for (int i = 0; i < kCascades; ++i) {
         const float cn = (i == 0) ? near : splitFar[i - 1];
         const glm::mat4 subProj = glm::perspective(glm::radians(camera.fov), aspect, cn, splitFar[i]);
-        m_vp[i] = FitCascade(camView, subProj, lightDir, m_size);
+        const CascadeFit fit = FitCascade(camView, subProj, lightDir, m_size);
+        m_vp[i] = fit.viewProjection;
+        m_worldTexelSize[i] = fit.worldTexelSize;
+        m_depthRange[i] = fit.depthRange;
 
         glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, m_texArray, 0, i);
         glClear(GL_DEPTH_BUFFER_BIT);
@@ -167,6 +185,7 @@ void CascadedShadow::Generate(ecs::Registry& reg, const Camera& camera, float as
 
     glPolygonOffset(previousPolygonOffsetFactor, previousPolygonOffsetUnits);
     if (!polygonOffsetWasEnabled) glDisable(GL_POLYGON_OFFSET_FILL);
+    if (cullFaceWasEnabled) glEnable(GL_CULL_FACE); else glDisable(GL_CULL_FACE);
     glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prevFbo));
 }
 

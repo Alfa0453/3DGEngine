@@ -11,6 +11,9 @@ public:
     void Draw(EditorAssets& assets,const std::string& assetRoot,bool* open,
               bool* assetChanged=nullptr,std::string* message=nullptr);
     void QueueOpen(const std::string& path){m_queuedPath=path;}
+    bool IsDirty() const { return m_dirty; }
+    const std::string& Path() const { return m_path; }
+    bool SaveForShutdown(EditorAssets& assets,const std::string& root,std::string* error){return Save(assets,root,error);}
 private:
     bool Save(EditorAssets& assets,const std::string& root,std::string* error);
     bool Load(const std::string& path,std::string* error);

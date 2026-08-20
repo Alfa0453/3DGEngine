@@ -1,4 +1,5 @@
 #include "BiomeEditorPanel.h"
+#include "EditorScene.h"
 
 #include "EditorPanels.h"
 
@@ -100,7 +101,7 @@ void BiomeEditorPanel::DrawPreview() {
          + "  Temperature " + std::to_string(m_biome.temperature).substr(0, 4)).c_str());
 }
 
-BiomeEditorPanel::Result BiomeEditorPanel::Draw(EditorAssets& assets,
+BiomeEditorPanel::Result BiomeEditorPanel::Draw(EditorScene& scene, EditorAssets& assets,
     const std::string& root, bool* open) {
     Result result;
     if (!m_pendingOpen.empty()) { std::string error; m_status = Load(m_pendingOpen, &error) ? "Loaded biome" : error; m_pendingOpen.clear(); }
@@ -108,9 +109,28 @@ BiomeEditorPanel::Result BiomeEditorPanel::Draw(EditorAssets& assets,
     if (ImGui::Button("New")) NewBiome(); ImGui::SameLine();
     if (ImGui::Button("Save")) { std::string error; if (Save(root, &error)) { result.saved = true; result.message = "Saved biome: " + m_path; } else result.message = error; }
     ImGui::SameLine(); if (ImGui::Button("Refresh Preview")) RefreshPreview();
-    ImGui::SameLine(); if (ImGui::Button("Apply to Selected Landscape")) result.applyRequested = true;
+    ImGui::SameLine();
+    const EditorScene::Object* target = scene.FindObject(m_applyTarget);
+    const bool validTarget = target && target->isTerrain && !target->locked;
+    ImGui::BeginDisabled(!validTarget);
+    const std::string applyLabel = validTarget
+        ? "Apply to \"" + target->name + "\"" : "Apply (No Landscape Target)";
+    if (ImGui::Button(applyLabel.c_str())) result.applyRequested = true;
+    ImGui::EndDisabled();
     ImGui::SameLine(); ImGui::TextDisabled("%s", m_dirty ? "Unsaved" : "Saved");
     ImGui::TextWrapped("%s", m_path.empty() ? "New biome asset" : m_path.c_str());
+    if (target) ImGui::Text("Apply target: %s", target->name.c_str());
+    else if (m_applyTarget != engine::ecs::kNull) m_applyTarget = engine::ecs::kNull;
+    if (const EditorScene::Object* selected = scene.SelectedObject()) {
+        if (selected->entity != m_applyTarget) {
+            ImGui::BeginDisabled(!selected->isTerrain || selected->locked);
+            if (ImGui::Button(("Use \"" + selected->name + "\" As Apply Target").c_str()))
+                m_applyTarget = selected->entity;
+            ImGui::EndDisabled();
+        }
+    }
+    if (target && scene.SelectedObject() && scene.SelectedObject()->entity != target->entity)
+        ImGui::TextColored(ImVec4(1, .7f, .2f, 1), "Current selection differs from apply target.");
     ImGui::BeginChild("BiomeSettings", {430, 0}, true);
     bool changed = false;
     changed |= ImGui::InputText("Name", &m_biome.name);

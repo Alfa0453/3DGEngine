@@ -3,6 +3,8 @@
 #include <glm/glm.hpp>
 
 #include "engine/ecs/Entity.h"
+#include "engine/ecs/Components.h"
+#include "engine/physics/PhysicsComponents.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -19,6 +21,9 @@ struct SolverBody {
     ecs::Transform* t  = nullptr;
     ecs::Collider*  c  = nullptr;
     ecs::RigidBody* rb = nullptr;
+    // t/c describe the world collision shape. owner is the entity transform and
+    // remains the body centre used by integration and positional correction.
+    ecs::Transform* owner = nullptr;
 };
 
 // A contact detected once per step and cached: the velocity solver re-applies its
@@ -284,6 +289,8 @@ private:
 
     // Persistent scratch, reused (cleared, not reallocated) every step.
     std::vector<SolverBody>                 m_bodies;
+    std::vector<ecs::Transform>             m_worldColliderTransforms;
+    std::vector<ecs::Collider>              m_worldColliders;
     std::vector<ContactManifold>            m_manifolds;
     std::vector<std::pair<int, int>>        m_pairs;
     std::vector<int>                        m_planes, m_finite;

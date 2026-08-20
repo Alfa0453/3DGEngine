@@ -13,6 +13,11 @@ public:
     void Draw(EditorAssets& assets, const std::string& assetRoot, bool* open,
               bool* assetsChanged = nullptr, std::string* message = nullptr);
     void QueueOpen(const std::string& path) { m_queuedPath = path; }
+    bool IsDirty() const { return m_dirty; }
+    const std::string& Path() const { return m_profilePath; }
+    bool SaveForShutdown(const std::string& assetRoot, std::string* error) {
+        return SaveProfile(assetRoot, error);
+    }
 
 private:
     bool LoadInputs(const std::string& assetRoot, std::string* error);

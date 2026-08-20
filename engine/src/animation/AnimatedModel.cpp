@@ -233,7 +233,8 @@ void UpdateAnimations(ecs::Registry& reg, float dt) {
         }
 
         const int previousBaseClip = am.controller.CurrentClip();
-        const float previousBaseTime = am.controller.CurrentTime();
+        const float previousStateTime = am.controller.CurrentTime();
+        const float previousBaseTime = am.controller.CurrentSourceTime();
         const std::string previousState = am.controller.CurrentStateName();
         am.controller.Update(dt);
         const std::string& currentState = am.controller.CurrentStateName();
@@ -254,7 +255,7 @@ void UpdateAnimations(ecs::Registry& reg, float dt) {
         if (am.onEvent && currentBaseClip >= 0) {
             const Animation* eventClip = clipAt(currentBaseClip);
             const float clipLength = eventClip ? ClipSeconds(*eventClip) : 0.0f;
-            const float currentBaseTime = am.controller.CurrentTime();
+            const float currentBaseTime = am.controller.CurrentSourceTime();
             for (const AnimEvent& event : am.events) {
                 if (event.name.empty() || (event.clip >= 0 && event.clip != currentBaseClip)) {
                     continue;
@@ -263,8 +264,15 @@ void UpdateAnimations(ecs::Registry& reg, float dt) {
                 bool crossed = false;
                 if (!sameClip) {
                     crossed = event.time <= currentBaseTime;
-                } else if (clipLength > 0.0f && currentBaseTime < previousBaseTime) {
-                    crossed = event.time > previousBaseTime || event.time <= currentBaseTime;
+                } else if (clipLength > 0.0f) {
+                    const auto firstCycle = static_cast<long long>(std::floor(previousBaseTime / clipLength));
+                    const auto lastCycle = static_cast<long long>(std::floor(currentBaseTime / clipLength));
+                    const float previousLocal = std::fmod(std::max(previousBaseTime, 0.0f), clipLength);
+                    const float currentLocal = std::fmod(std::max(currentBaseTime, 0.0f), clipLength);
+                    crossed = lastCycle > firstCycle
+                        ? (event.time > previousLocal || event.time <= currentLocal
+                           || lastCycle > firstCycle + 1)
+                        : (event.time > previousLocal && event.time <= currentLocal);
                 } else {
                     crossed = event.time > previousBaseTime && event.time <= currentBaseTime;
                 }
@@ -309,16 +317,19 @@ void UpdateAnimations(ecs::Registry& reg, float dt) {
                 for (const auto& sample : rootSpace.samples) {
                     const Animation* animation = clipAt(sample.clip);
                     if (!animation || sample.weight <= 0.0f) continue;
-                    float beforeTime = previousBaseTime, afterTime = am.controller.CurrentTime();
+                    float beforeTime = previousStateTime, afterTime = am.controller.CurrentTime();
                     const float sampleLength = ClipSeconds(*animation);
                     if (rootSpace.synchronized && referenceLength > 0.0001f && sampleLength > 0.0001f) {
-                        beforeTime = previousBaseTime * sampleLength / referenceLength;
+                        beforeTime = previousStateTime * sampleLength / referenceLength;
                         afterTime = am.controller.CurrentTime() * sampleLength / referenceLength;
+                    } else if (!rootSpace.synchronized) {
+                        beforeTime *= std::max(sample.basePlaybackSpeed, 0.0f);
+                        afterTime *= std::max(sample.basePlaybackSpeed, 0.0f);
                     }
                     delta += rootDelta(*animation, beforeTime, afterTime) * sample.weight;
                 }
             } else {
-                delta = rootDelta(*cur, previousBaseTime, am.controller.CurrentTime());
+                delta = rootDelta(*cur, previousBaseTime, am.controller.CurrentSourceTime());
             }
             transform.position += transform.rotation * delta;
 
@@ -329,12 +340,12 @@ void UpdateAnimations(ecs::Registry& reg, float dt) {
             const float rotLen = ClipSeconds(*cur);
             const bool rotWrapped = rotLen > 0.0f
                 && std::floor(previousBaseTime / rotLen)
-                       != std::floor(am.controller.CurrentTime() / rotLen);
+                       != std::floor(am.controller.CurrentSourceTime() / rotLen);
             if (!rotWrapped) {
                 const glm::quat before =
                     Animator::SampleRootRotation(skel, *cur, previousBaseTime);
                 const glm::quat after =
-                    Animator::SampleRootRotation(skel, *cur, am.controller.CurrentTime());
+                    Animator::SampleRootRotation(skel, *cur, am.controller.CurrentSourceTime());
                 glm::quat d = glm::normalize(after * glm::inverse(before));
                 if (d.w < 0.0f) d = -d;                       // shortest arc
                 glm::quat yaw(d.w, 0.0f, d.y, 0.0f);          // swing-twist about local Y
@@ -347,7 +358,7 @@ void UpdateAnimations(ecs::Registry& reg, float dt) {
             }
         }
 
-        float curTime = am.controller.CurrentTime();
+        float curTime = am.controller.CurrentSourceTime();
         if (!am.controller.CurrentLoop()) {
             const float len = ClipSeconds(*cur);
             if (len > 0.0f) curTime = std::min(curTime, len - 1e-4f);
@@ -357,8 +368,10 @@ void UpdateAnimations(ecs::Registry& reg, float dt) {
                                const AnimationController::BlendSpaceResult& space,
                                std::vector<BoneLocal>& out) {
             const Animation* reference = clipAt(fallbackClip);
-            auto synchronizedTime = [&](const Animation* sample) {
-                if (!space.synchronized || !reference || !sample) return time;
+            auto sampleTime = [&](const Animation* sample, float basePlaybackSpeed) {
+                if (!space.synchronized)
+                    return time * std::max(basePlaybackSpeed, 0.0f);
+                if (!reference || !sample) return time;
                 const float referenceLength = ClipSeconds(*reference);
                 const float sampleLength = ClipSeconds(*sample);
                 if (referenceLength <= 0.0001f || sampleLength <= 0.0001f) return time;
@@ -372,7 +385,8 @@ void UpdateAnimations(ecs::Registry& reg, float dt) {
                     const Animation* clip = clipAt(weighted.clip);
                     if (!clip || weighted.weight <= 0.0f) continue;
                     std::vector<BoneLocal> pose;
-                    Animator::SampleLocal(skel, *clip, synchronizedTime(clip), pose);
+                    Animator::SampleLocal(skel, *clip,
+                        sampleTime(clip, weighted.basePlaybackSpeed), pose);
                     if (!sampled) {
                         out = std::move(pose);
                         accumulated = weighted.weight;

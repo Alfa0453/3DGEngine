@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 
 namespace engine {
@@ -12,6 +13,8 @@ namespace ai { class BtScriptRegistry; }
 //         engine::ScriptRegistry&, engine::ai::BtScriptRegistry&);
 // It registers every gameplay and behavior-tree script factory into the host registries.
 using RegisterScriptModuleFn = void (*)(ScriptRegistry&, ai::BtScriptRegistry&);
+using GetScriptModuleApiVersionFn = std::uint32_t (*)();
+inline constexpr std::uint32_t kScriptModuleApiVersion = 1;
 
 // Loads a shared library of compiled game scripts and registers their factories, enabling
 // hot-reload without restarting the host: Unload (after ShutdownScripts + clearing the
@@ -35,13 +38,15 @@ public:
 
     // Free the loaded library. See the lifetime rule above — clear the registry and shut
     // down scripts first.
-    void Unload();
+    bool Unload(std::string* error = nullptr);
 
     bool IsLoaded() const { return m_handle != nullptr; }
+    const std::string& LoadedPath() const { return m_loadedPath; }
     void Swap(ScriptModule& other) noexcept;
 
 private:
     void* m_handle = nullptr;   // HMODULE on Windows
+    std::string m_loadedPath;
 };
 
 }  // namespace engine

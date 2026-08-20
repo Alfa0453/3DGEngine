@@ -50,7 +50,19 @@
       <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\day_night_timeline_tests.exe</FullPath>
     </ProjectOutput>
     <ProjectOutput>
+      <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\directional_shadow_shader_tests.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
       <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\editor_assets_tests.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\editor_dirty_document_tests.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\editor_scene_hierarchy_tests.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\fence_wall_asset_tests.exe</FullPath>
     </ProjectOutput>
     <ProjectOutput>
       <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\foliage_asset_tests.exe</FullPath>
@@ -69,6 +81,9 @@
     </ProjectOutput>
     <ProjectOutput>
       <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\lighting_analysis_tests.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\lighting_build_tests.exe</FullPath>
     </ProjectOutput>
     <ProjectOutput>
       <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\material_shader_tests.exe</FullPath>
@@ -105,6 +120,9 @@
     </ProjectOutput>
     <ProjectOutput>
       <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\scatter_graph_tests.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\script_reload_safety_tests.exe</FullPath>
     </ProjectOutput>
     <ProjectOutput>
       <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\script_system_tests.exe</FullPath>

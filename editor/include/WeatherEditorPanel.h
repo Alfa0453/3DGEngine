@@ -11,6 +11,9 @@ public:
     struct Result { bool saved=false; bool applied=false; std::string message; };
     void QueueOpen(const std::string& path){m_pendingOpen=path;}
     Result Draw(EditorScene& scene,EditorAssets& assets,const std::string& contentRoot,bool* open);
+    bool IsDirty()const{return m_dirty;}
+    const std::string& Path()const{return m_path;}
+    bool SaveForShutdown(const std::string&root,std::string*error);
 private:
     void Capture(const EditorScene::Environment& environment);
     void Apply(EditorScene& scene)const;

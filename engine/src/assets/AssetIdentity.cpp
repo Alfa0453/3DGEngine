@@ -150,12 +150,13 @@ const char* AssetTypeName(AssetType type) {
         case AssetType::Biome: return "Biome";
         case AssetType::DayNightTimeline: return "Day/Night Timeline";
         case AssetType::Cave: return "Cave / Tunnel";
+        case AssetType::FenceWall: return "Fence / Wall";
     }
     return "Unknown";
 }
 
 bool IsKnownAssetType(AssetType type) {
-    return type > AssetType::Unknown && type <= AssetType::Cave;
+    return type > AssetType::Unknown && type <= AssetType::FenceWall;
 }
 
 const char* NativeAssetExtension(AssetType type) {

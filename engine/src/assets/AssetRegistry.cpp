@@ -50,6 +50,7 @@ AssetType AuthoredAssetType(const std::filesystem::path& path) {
     if (extension == ".3dgweather") return AssetType::Weather;
     if (extension == ".3dgbuilding") return AssetType::Building;
     if (extension == ".3dgroad") return AssetType::Road;
+    if (extension == ".3dgfence") return AssetType::FenceWall;
     return AssetType::Unknown;
 }
 
@@ -89,7 +90,8 @@ bool ReadAuthoredMetadata(const std::filesystem::path& path,
         || (type == AssetType::Prefab && magic == "3DG_PREFAB")
         || (type == AssetType::Weather && magic == "3DG_WEATHER")
         || (type == AssetType::Building && magic == "3DG_BUILDING")
-        || (type == AssetType::Road && magic == "3DG_ROAD");
+        || (type == AssetType::Road && magic == "3DG_ROAD")
+        || (type == AssetType::FenceWall && magic == "3DGFenceWall");
     if (!validMagic || version < 1) {
         SetError(error, "Authored asset metadata is invalid.");
         return false;

@@ -299,8 +299,8 @@ void AnimationController::Update(float dt) {
     }
 
     // Advance clip time(s).
-    m_curTime += dt * m_states[static_cast<std::size_t>(m_cur)].speed;
-    if (m_prev >= 0) m_prevTime += dt * m_states[static_cast<std::size_t>(m_prev)].speed;
+    m_curTime += dt * StateAdvanceRate(m_cur);
+    if (m_prev >= 0) m_prevTime += dt * StateAdvanceRate(m_prev);
 
     // Progress the cross-fade.
     if (m_prev >= 0 && m_blend < 1.0f) {
@@ -308,6 +308,49 @@ void AnimationController::Update(float dt) {
         if (m_blend >= 1.0f) { m_blend = 1.0f; m_prev = -1; }
     }
 }
+
+float AnimationController::StateAdvanceRate(int stateIndex) const {
+    if (stateIndex < 0 || stateIndex >= static_cast<int>(m_states.size())) return 0.0f;
+    const State& state = m_states[static_cast<std::size_t>(stateIndex)];
+    if (state.blendSamples.empty()) return std::max(state.speed, 0.0f);
+
+    // Unsynchronised samples derive their own source times from this shared
+    // multiplier clock. Their individual base rates are applied by the poser.
+    if (!state.synchronizeBlendSpace) return std::max(state.speedMultiplier, 0.0f);
+
+    // A synchronized Blend Space owns one normalized phase. Advance that phase
+    // by the weighted cycle rate of its active samples, preserving foot-phase
+    // alignment even when source durations and authored base rates differ.
+    const BlendSpaceResult blend = EvaluateBlendSpace(stateIndex);
+    const float referenceDuration = std::max(state.durationSeconds, 0.0f);
+    float normalizedRate = 0.0f;
+    float totalWeight = 0.0f;
+    for (const BlendSpaceResult::WeightedSample& weighted : blend.samples) {
+        const auto found = std::find_if(state.blendSamples.begin(), state.blendSamples.end(),
+            [&](const State::BlendSample& sample) { return sample.clip == weighted.clip; });
+        if (found == state.blendSamples.end() || found->durationSeconds <= 0.0001f) continue;
+        normalizedRate += weighted.weight * found->basePlaybackSpeed / found->durationSeconds;
+        totalWeight += weighted.weight;
+    }
+    if (totalWeight > 0.0001f && referenceDuration > 0.0001f)
+        return std::max(state.speedMultiplier, 0.0f)
+            * (normalizedRate / totalWeight) * referenceDuration;
+    return std::max(state.clipBaseSpeed, 0.0f) * std::max(state.speedMultiplier, 0.0f);
+}
+
+float AnimationController::SourceTime(int stateIndex, float stateTime) const {
+    if (stateIndex < 0 || stateIndex >= static_cast<int>(m_states.size())) return stateTime;
+    const State& state = m_states[static_cast<std::size_t>(stateIndex)];
+    if (state.synchronizeBlendSpace || state.blendSamples.empty()) return stateTime;
+    const auto found = std::find_if(state.blendSamples.begin(), state.blendSamples.end(),
+        [&](const State::BlendSample& sample) { return sample.clip == state.clip; });
+    return found == state.blendSamples.end()
+        ? stateTime * std::max(state.clipBaseSpeed, 0.0f)
+        : stateTime * std::max(found->basePlaybackSpeed, 0.0f);
+}
+
+float AnimationController::CurrentSourceTime() const { return SourceTime(m_cur, m_curTime); }
+float AnimationController::PrevSourceTime() const { return SourceTime(m_prev, m_prevTime); }
 
 const std::string& AnimationController::CurrentStateName() const {
     static const std::string kNone = "(none)";
@@ -384,7 +427,7 @@ AnimationController::BlendSpaceResult AnimationController::EvaluateBlendSpace(in
             if (distance <= 0.0001f) {
                 result.clipA = result.clipB = sample.clip;
                 result.active = true;
-                result.samples.push_back({sample.clip, 1.0f});
+                result.samples.push_back({sample.clip, 1.0f, sample.basePlaybackSpeed});
                 return result;
             }
             candidates.push_back({&sample, distance});
@@ -396,7 +439,8 @@ AnimationController::BlendSpaceResult AnimationController::EvaluateBlendSpace(in
         for (std::size_t i = 0; i < count; ++i) total += 1.0f / candidates[i].distance;
         for (std::size_t i = 0; i < count && total > 0.0f; ++i) {
             result.samples.push_back({candidates[i].sample->clip,
-                (1.0f / candidates[i].distance) / total});
+                (1.0f / candidates[i].distance) / total,
+                candidates[i].sample->basePlaybackSpeed});
         }
         if (!result.samples.empty()) {
             result.clipA = result.samples.front().clip;
@@ -422,8 +466,9 @@ AnimationController::BlendSpaceResult AnimationController::EvaluateBlendSpace(in
     const float span = upper->value - lower->value;
     result.alpha = std::abs(span) > 0.0001f
         ? std::clamp((value - lower->value) / span, 0.0f, 1.0f) : 0.0f;
-    result.samples.push_back({result.clipA, 1.0f - result.alpha});
-    if (result.clipB != result.clipA) result.samples.push_back({result.clipB, result.alpha});
+    result.samples.push_back({result.clipA, 1.0f - result.alpha, lower->basePlaybackSpeed});
+    if (result.clipB != result.clipA)
+        result.samples.push_back({result.clipB, result.alpha, upper->basePlaybackSpeed});
     return result;
 }
 

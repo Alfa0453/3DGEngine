@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cfloat>
+#include <filesystem>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -18,6 +19,33 @@ using engine::HudWidget;
 using engine::HudWidgetType;
 
 namespace {
+
+void HashCombine(std::size_t& seed, std::size_t value) {
+    seed ^= value + 0x9e3779b9u + (seed << 6u) + (seed >> 2u);
+}
+
+std::size_t HudFingerprint(const HudDocument& doc) {
+    std::size_t seed = std::hash<std::string>{}(doc.assetId.ToString());
+    const auto number = [&](auto value) { HashCombine(seed, std::hash<decltype(value)>{}(value)); };
+    number(doc.designSize.x); number(doc.designSize.y); number(doc.nextId);
+    for (const HudWidget& w : doc.widgets) {
+        number(w.id); number(w.parent); number(static_cast<int>(w.type));
+        number(static_cast<int>(w.anchor)); number(w.offset.x); number(w.offset.y);
+        number(w.size.x); number(w.size.y); number(w.textScale);
+        number(static_cast<int>(w.binding)); number(w.minValue); number(w.maxValue);
+        number(static_cast<int>(w.action)); number(w.visible);
+        for (float value : {w.color.x,w.color.y,w.color.z,w.color.w,w.bgColor.x,w.bgColor.y,
+                            w.bgColor.z,w.bgColor.w,w.fillColor.x,w.fillColor.y,
+                            w.fillColor.z,w.fillColor.w}) number(value);
+        for (const std::string* value : {&w.name,&w.text,&w.bindKey,&w.imageAsset,&w.shaderPath})
+            HashCombine(seed, std::hash<std::string>{}(*value));
+        for (const auto& pair : w.shaderParameters)
+            HashCombine(seed, std::hash<std::string>{}(pair.first) ^ std::hash<std::string>{}(pair.second));
+        for (const auto& pair : w.shaderParameterTypes)
+            HashCombine(seed, std::hash<std::string>{}(pair.first) ^ std::hash<int>{}(pair.second));
+    }
+    return seed;
+}
 
 ImU32 ToU32(const glm::vec4& c) {
     return IM_COL32(static_cast<int>(std::clamp(c.r, 0.0f, 1.0f) * 255.0f),
@@ -51,16 +79,38 @@ void HudEditorPanel::SetPath(const std::string& path) {
     std::snprintf(m_pathBuf, sizeof(m_pathBuf), "%s", path.c_str());
 }
 
-HudEditorPanel::Result HudEditorPanel::Draw(HudDocument& doc, bool* open,
+bool HudEditorPanel::SaveForShutdown(HudDocument& doc, std::string* error) {
+    if (m_pathBuf[0] == '\0') {
+        if (error) *error = "Choose a HUD asset path before saving.";
+        return false;
+    }
+    const std::filesystem::path path(m_pathBuf);
+    std::error_code ec;
+    if (path.has_parent_path()) std::filesystem::create_directories(path.parent_path(), ec);
+    if (ec) { if (error) *error = ec.message(); return false; }
+    if (!doc.Save(path.string(), error)) return false;
+    m_dirty = false;
+    return true;
+}
+
+HudEditorPanel::Result HudEditorPanel::Draw(HudDocument& doc,
+                                            const std::string& assetRoot, bool* open,
                                             const std::vector<std::string>& imageChoices,
                                             const std::function<unsigned int(const std::string&)>& texLookup,
                                             const engine::HudContext* previewContext) {
     Result result;
+    const std::size_t documentBefore = HudFingerprint(doc);
 
     ImGui::SetNextWindowSize(ImVec2(960.0f, 620.0f), ImGuiCond_FirstUseEver);
     if (!ImGui::Begin(EditorPanels::Name(EditorPanels::Panel::Hud), open)) {
         ImGui::End();
         return result;
+    }
+
+    if (m_pathBuf[0] == '\0' && !assetRoot.empty()) {
+        const std::filesystem::path defaultPath = std::filesystem::path(assetRoot) / "UI" / "HUD_Gameplay.hud";
+
+        std::snprintf(m_pathBuf, sizeof(m_pathBuf), "%s", defaultPath.string().c_str());
     }
 
     // ---- Toolbar: file + add widgets -------------------------------------
@@ -358,6 +408,7 @@ HudEditorPanel::Result HudEditorPanel::Draw(HudDocument& doc, bool* open,
     }
     ImGui::EndChild();
 
+    if (HudFingerprint(doc) != documentBefore) m_dirty = true;
     ImGui::End();
     return result;
 }

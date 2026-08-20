@@ -378,7 +378,8 @@ RuntimeAssetManager::ResolveReport RuntimeAssetManager::ResolveRegistryAssets(ec
             sources.reserve(asset.animationSources.size());
             for (const ecs::SkinnedModelAsset::AnimationSourceFile& s : asset.animationSources) {
                 sources.push_back(SkinnedAnimationSource{
-                    s.path, s.clipName, s.stripRootMotion, s.sourceClipName});
+                    s.path, s.clipName, s.stripRootMotion, s.sourceClipName,
+                    s.basePlaybackSpeed});
             }
             model = LoadSkinnedModel(asset.path, sources, &error);
         }
@@ -455,6 +456,15 @@ RuntimeAssetManager::ResolveReport RuntimeAssetManager::ResolveRegistryAssets(ec
                     stateDesc.clipName              = state.clipName;
                     stateDesc.loop                  = state.loop;
                     stateDesc.speed                 = state.speed;
+                    const auto baseSpeedFor = [&](int fallback, const std::string& alias) {
+                        for (const auto& source : asset.animationSources)
+                            if (source.clipName == alias)
+                                return std::max(source.basePlaybackSpeed, 0.0f);
+                        if (fallback >= 0 && fallback < static_cast<int>(asset.animationSources.size()))
+                            return std::max(asset.animationSources[static_cast<std::size_t>(fallback)].basePlaybackSpeed, 0.0f);
+                        return 1.0f;
+                    };
+                    stateDesc.clipBaseSpeed = baseSpeedFor(state.clipIndex, state.clipName);
                     stateDesc.blendClipIndex        = state.blendClipIndex;
                     stateDesc.blendClipName         = state.blendClipName;
                     stateDesc.blendParameter        = state.blendParameter;
@@ -466,8 +476,11 @@ RuntimeAssetManager::ResolveReport RuntimeAssetManager::ResolveRegistryAssets(ec
                     stateDesc.synchronizeBlendSpace = state.synchronizeBlendSpace;
                     stateDesc.blendSamples.reserve(state.blendSamples.size());
                     for (const auto& sample : state.blendSamples) {
+                        const int resolved = resolveClip(sample.clipIndex, sample.clipName);
                         stateDesc.blendSamples.push_back(
-                            {sample.clipIndex, sample.clipName, sample.value, sample.valueY});
+                            {sample.clipIndex, sample.clipName, sample.value, sample.valueY,
+                             baseSpeedFor(sample.clipIndex, sample.clipName),
+                             clipSeconds(resolved)});
                     }
                     desc.states.push_back(std::move(stateDesc));
                 }

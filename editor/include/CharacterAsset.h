@@ -14,6 +14,7 @@ struct CharacterAnimationSource {
     engine::AssetHandle assetId;
     std::string clipName;
     bool        stripRootMotion = false;
+    float       basePlaybackSpeed = 1.0f;
 };
 
 // A named mount point on the skeleton: a bone plus a render-only offset transform.

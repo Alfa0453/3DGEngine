@@ -108,7 +108,7 @@ bool AddStringSize(std::uint64_t* total, const std::string& text) {
 
 bool PayloadSize(const StaticMeshAssetData& asset, std::uint64_t* size) {
     if (!size) return false;
-    std::uint64_t total = 6u * sizeof(float) + 3u * sizeof(std::uint32_t);
+    std::uint64_t total = 6u * sizeof(float) + 4u * sizeof(std::uint32_t);
     for (const StaticMeshMaterialData& material : asset.materials) {
         if (!AddStringSize(&total, material.name)
             || !AddSize(&total, 10u * sizeof(float) + 4u * sizeof(std::int32_t)))
@@ -181,6 +181,7 @@ bool WritePayload(std::ostream& output, const StaticMeshAssetData& asset) {
         for (float value : subMesh.vertexColors)
             if (!WriteFloat(output, value)) return false;
     }
+    if (!WriteUnsigned(output, static_cast<std::uint32_t>(asset.collisionType))) return false;
     return true;
 }
 
@@ -261,6 +262,13 @@ bool ReadPayload(std::istream& input, StaticMeshAssetData* asset,
             for (float& value : subMesh.vertexColors)
                 if (!ReadFloat(input, &value)) return false;
         }
+    }
+    if (assetVersion >= 3u) {
+        std::uint32_t collisionType = 0;
+        if (!ReadUnsigned(input, &collisionType)
+            || collisionType > static_cast<std::uint32_t>(StaticMeshCollisionType::TriangleMesh))
+            return false;
+        asset->collisionType = static_cast<StaticMeshCollisionType>(collisionType);
     }
     return true;
 }

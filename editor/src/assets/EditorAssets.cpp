@@ -1184,12 +1184,14 @@ const char *EditorAssets::TypeName(Type type)
         case Type::AnimationRetarget: return "Animation Retarget Profile";
         case Type::Ability: return "Ability";
         case Type::Weather: return "Weather";
+        case Type::Lighting: return "Lighting";
         case Type::Building: return "Building";
         case Type::Road: return "Road";
         case Type::ScatterGraph: return "Scatter Graph";
         case Type::Biome: return "Biome";
         case Type::DayNightTimeline: return "Day/Night Timeline";
         case Type::Cave: return "Cave";
+        case Type::FenceWall: return "Fence / Wall";
         case Type::Other: return "Other";
     }
     return "Other";
@@ -1279,6 +1281,9 @@ EditorAssets::Type EditorAssets::ClassifyExtension(const std::string &extension)
     if (extension == ".3dgweather") {
         return Type::Weather;
     }
+    if (extension == ".3dglighting") {
+        return Type::Lighting;
+    }
     if (extension == ".3dgbuilding") {
         return Type::Building;
     }
@@ -1296,6 +1301,9 @@ EditorAssets::Type EditorAssets::ClassifyExtension(const std::string &extension)
     }
     if (extension == ".3dgcave") {
         return Type::Cave;
+    }
+    if (extension == ".3dgfence") {
+        return Type::FenceWall;
     }
     if (extension == ".h" || extension == ".hpp" || extension == ".lua"
         || extension == ".cpp" || extension == ".cc") {

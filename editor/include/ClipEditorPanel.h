@@ -30,6 +30,7 @@ public:
                      const std::string& previewMeshPath);
     void Draw(const std::string& assetRoot, bool* open, bool* assetSaved,
               std::string* message, float deltaTime);
+    const std::string& Path() const { return m_path; }
 
 private:
     struct AssetChoice { std::string path; std::string displayName; };

@@ -33,11 +33,15 @@ public:
             int clip = -1;
             float value = 0.0f;
             float valueY = 0.0f;
+            // Authoritative metadata resolved from the referenced .3dgclip.
+            // This is runtime data, not an independently authored graph value.
+            float basePlaybackSpeed = 1.0f;
+            float durationSeconds = 0.0f;
         };
         std::string name;
         int   clip  = 0;         // index into SkinnedModel::Animations()
         bool  loop  = true;
-        float speed = 1.0f;      // playback-rate multiplier
+        float speed = 1.0f;      // effective rate for ordinary clip states
         // Auto-selected while param is in [paramMin, paramMax]. Default = manual.
         float paramMin = -std::numeric_limits<float>::infinity();
         float paramMax =  std::numeric_limits<float>::infinity();
@@ -53,12 +57,15 @@ public:
         std::string blendParameterY;
         bool blendSpace2D = false;
         bool synchronizeBlendSpace = true;
+        float speedMultiplier = 1.0f; // graph-authored state multiplier
+        float clipBaseSpeed = 1.0f;   // resolved .3dgclip base rate
     };
 
     struct BlendSpaceResult {
         struct WeightedSample {
             int clip = -1;
             float weight = 0.0f;
+            float basePlaybackSpeed = 1.0f;
         };
         int clipA = -1;
         int clipB = -1;
@@ -167,6 +174,8 @@ public:
     bool  CurrentLoop() const { return (m_cur  >= 0) ? m_states[static_cast<std::size_t>(m_cur)].loop  : true; }
     float CurrentTime() const { return m_curTime; }
     float PrevTime()    const { return m_prevTime; }
+    float CurrentSourceTime() const;
+    float PrevSourceTime() const;
     const std::string& CurrentStateName() const;
     std::size_t StateCount() const { return m_states.size(); }
     std::size_t TransitionCount() const { return m_transitions.size(); }
@@ -176,6 +185,8 @@ private:
     BlendSpaceResult EvaluateBlendSpace(int stateIndex) const;
     float BlendParameter(const std::string& name) const;
     void UpdateBlendParameters(float dt);
+    float StateAdvanceRate(int stateIndex) const;
+    float SourceTime(int stateIndex, float stateTime) const;
     int  PickByParam() const;
     int  PickByTransition() const;
     bool TestTransition(const Transition& transition) const;

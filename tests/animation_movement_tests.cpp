@@ -1,4 +1,5 @@
 #include <engine/animation/AnimatedModel.h>
+#include <engine/animation/AnimationGraphDesc.h>
 #include <engine/ecs/Components.h>
 #include <engine/ecs/Registry.h>
 #include <engine/gameplay/PlayerController.h>
@@ -149,6 +150,108 @@ void TestBlendSpaceInputSmoothing() {
     Check(result.active && result.clipA == 0 && result.clipB == 1
               && result.alpha > 0.0f && result.alpha < 1.0f,
           "Blend Space input eases between samples instead of snapping");
+}
+
+void TestClipBaseSpeedTimesStateMultiplier() {
+    engine::AnimationGraphDesc graph;
+    engine::AnimationGraphDesc::StateDesc state;
+    state.name = "Walk";
+    state.clipIndex = 0;
+    state.clipBaseSpeed = 1.5f;
+    state.speed = 0.5f;
+    graph.states.push_back(state);
+
+    engine::AnimationController controller;
+    engine::BuildAnimationController(controller, graph,
+        [](int fallback, const std::string&) { return fallback; },
+        [](int) { return 2.0f; });
+    controller.Update(1.0f);
+    Check(Near(controller.CurrentTime(), 0.75f),
+          "clip base speed is multiplied by the graph state multiplier");
+}
+
+void TestBlendSamplesPreserveIndependentBaseSpeeds() {
+    engine::AnimationGraphDesc graph;
+    engine::AnimationGraphDesc::StateDesc state;
+    state.name = "Locomotion";
+    state.clipIndex = 0;
+    state.clipName = "Walk";
+    state.speed = 0.5f;
+    state.clipBaseSpeed = 1.0f;
+    state.blendParameter = "Speed";
+    state.synchronizeBlendSpace = false;
+    state.blendSamples = {
+        {0, "Walk", 0.0f, 0.0f, 1.25f, 1.0f},
+        {1, "Run", 2.0f, 0.0f, 1.5f, 0.7f}
+    };
+    graph.states.push_back(state);
+
+    engine::AnimationController controller;
+    engine::BuildAnimationController(controller, graph,
+        [](int fallback, const std::string&) { return fallback; },
+        [](int clip) { return clip == 0 ? 1.0f : 0.7f; });
+    controller.SetParameter("Speed", 1.0f);
+    controller.Update(1.0f);
+    const auto blend = controller.CurrentBlendSpace();
+    Check(Near(controller.CurrentTime(), 0.5f),
+          "unsynchronized Blend Space keeps a state-multiplier wall clock");
+    Check(blend.samples.size() == 2
+          && Near(blend.samples[0].basePlaybackSpeed, 1.25f)
+          && Near(blend.samples[1].basePlaybackSpeed, 1.5f),
+          "each Blend Space sample retains its authoritative clip base speed");
+}
+
+void TestSynchronizedBlendSpaceUsesNormalizedCycleRate() {
+    engine::AnimationGraphDesc graph;
+    engine::AnimationGraphDesc::StateDesc state;
+    state.name = "Synchronized";
+    state.clipIndex = 0;
+    state.clipName = "Walk";
+    state.speed = 1.0f;
+    state.clipBaseSpeed = 1.0f;
+    state.blendParameter = "Speed";
+    state.synchronizeBlendSpace = true;
+    state.blendSamples = {
+        {0, "Walk", 0.0f, 0.0f, 1.0f, 1.0f},
+        {1, "Run", 2.0f, 0.0f, 1.3f, 0.7f}
+    };
+    graph.states.push_back(state);
+
+    engine::AnimationController controller;
+    engine::BuildAnimationController(controller, graph,
+        [](int fallback, const std::string&) { return fallback; },
+        [](int clip) { return clip == 0 ? 1.0f : 0.7f; });
+    controller.SetParameter("Speed", 1.0f);
+    controller.Update(1.0f);
+    const float expected = 0.5f * (1.0f / 1.0f) + 0.5f * (1.3f / 0.7f);
+    Check(Near(controller.CurrentTime(), expected, 0.001f),
+          "synchronized Blend Space advances one phase from weighted sample cycle rates");
+}
+
+void TestExitTimeUsesEffectiveSourceTimeOnce() {
+    engine::AnimationGraphDesc graph;
+    engine::AnimationGraphDesc::StateDesc start;
+    start.name = "Start";
+    start.clipBaseSpeed = 2.0f;
+    start.speed = 1.0f;
+    engine::AnimationGraphDesc::StateDesc end;
+    end.name = "End";
+    graph.states = {start, end};
+    engine::AnimationGraphDesc::TransitionDesc transition;
+    transition.fromState = "Start";
+    transition.toState = "End";
+    transition.useConditions = false;
+    transition.exitTime = 1.0f;
+    graph.transitions.push_back(transition);
+
+    engine::AnimationController controller;
+    engine::BuildAnimationController(controller, graph,
+        [](int fallback, const std::string&) { return fallback; },
+        [](int) { return 2.0f; });
+    controller.Update(1.0f);
+    controller.Update(0.001f);
+    Check(controller.CurrentStateName() == "End",
+          "exit time sees accelerated source time without dividing duration twice");
 }
 
 void TestPlayerControllerMovementGate() {
@@ -527,6 +630,10 @@ int main() {
     TestLocomotionBlendSpaceSampling();
     TestDirectionalBlendSpaceSampling();
     TestBlendSpaceInputSmoothing();
+    TestClipBaseSpeedTimesStateMultiplier();
+    TestBlendSamplesPreserveIndependentBaseSpeeds();
+    TestSynchronizedBlendSpaceUsesNormalizedCycleRate();
+    TestExitTimeUsesEffectiveSourceTimeOnce();
     TestPlayerControllerMovementGate();
     TestPlayerControllerCannotSprintInAir();
     TestPlayerControllerCrouchAndStandClearance();

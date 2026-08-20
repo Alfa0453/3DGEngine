@@ -36,8 +36,8 @@ Status legend:
 | 17 | **COMPLETE** | Biome Editor | Reusable terrain, foliage, water, weather, lighting, particles, and ambient-audio presets. |
 | 18 | **COMPLETE** | Day/Night Timeline | Authors sky, sun, moon, clouds, fog, lighting, and environmental audio over time. |
 | 19 | **COMPLETE** | Cave and Tunnel Tool | Spline-generated cave/tunnel meshes, chambers, entrances, collision, and navigation floors. |
-| 20 | **NEXT** | Fence and Wall Painter | Viewport drawing of connected fences and walls with corners, posts, gates, and snapping. |
-| 21 | PLANNED | Destruction Authoring Tool | Fracture pieces, strength, debris, damaged states, sound, particles, and collision. |
+| 20 | **COMPLETE** | Fence and Wall Painter | Viewport drawing of connected fences and walls with corners, posts, gates, and snapping. |
+| 21 | **NEXT** | Destruction Authoring Tool | Fracture pieces, strength, debris, damaged states, sound, particles, and collision. |
 | 22 | PLANNED | Interactive Door and Lift Tool | Fast setup for doors, gates, elevators, platforms, switches, locks, and access conditions. |
 | 23 | PLANNED | Portal and Teleport Tool | Teleporters, destination previews, seamless doors, and level-transition portals. |
 | 24 | PLANNED | Quest Editor | Objectives, conditions, rewards, state, dialogue triggers, checkpoints, and debugging. |
@@ -386,8 +386,21 @@ double-click reopens cave assets, and C++/Lua can spawn their baked visual mesh 
 runtime. Larger branch networks can be assembled from intersecting authored cave
 splines while keeping each branch independently rebuildable.
 
-## Next Milestone: Fence and Wall Painter
+## Completed Milestone: Fence and Wall Painter
 
-Planned scope: draw connected fence/wall runs directly in the viewport, choose
-repeatable panel/post meshes, handle corners and slopes, insert gates and openings,
-snap endpoints, generate collision, and save reusable engine-owned definitions.
+Delivered as the **Fence and Wall Painter** under Level Design and as reusable
+`.3dgfence` assets. The tool creates an editable level spline for viewport drawing,
+captures or rebuilds from live spline points, snaps endpoints to a configurable grid,
+tiles exact-length panels, follows slopes, deduplicates corner posts, inserts gates
+and empty openings, and supports engine-owned panel/post/gate meshes and materials.
+Generated pieces are normal editable scene objects with optional World Static box
+collision, so they work in Editor Play and packaged levels without a special runtime
+renderer. Saved assets retain stable IDs and dependencies, reopen by Content
+double-click, participate in unsaved-document handling, and are covered by focused
+generation, slope, snapping, gate, serialization, and registry tests.
+
+## Next Milestone: Destruction Authoring Tool
+
+Planned scope: author fracture chunks and damaged states, configure strength and
+impact thresholds, generate debris collision, connect sounds and particles, preview
+breakage, and save reusable destruction definitions for runtime use.
