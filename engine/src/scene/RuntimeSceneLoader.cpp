@@ -134,11 +134,11 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             return false;
         }
     }
-    if (magic != "3DGRuntimeScene" || version < 1 || version > 95) {
+    if (magic != "3DGRuntimeScene" || version < 1 || version > 97) {
         if (error) {
             *error = "Runtime scene file has an unknown format: "
                 + magic + " " + std::to_string(version)
-                + " (expected 3DGRuntimeScene 1..95).";
+                + " (expected 3DGRuntimeScene 1..97).";
         }
         return false;
     }
@@ -218,6 +218,14 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                 return false;
             }
             loaded.environment.skylightOcclusion = enabled != 0;
+            continue;
+        }
+        if (recordType == "lighting_tuning" && version >= 96) {
+            record >> loaded.environment.exposureEV
+                   >> loaded.environment.specularOcclusionStrength
+                   >> loaded.environment.localProbeInfluence;
+            if (version >= 97) record >> loaded.environment.lightingDebugMode;
+            if (!record) { if (error) *error = "Runtime scene contains invalid lighting tuning settings."; return false; }
             continue;
         }
         if (recordType == "lighting_build" && version >= 93) {

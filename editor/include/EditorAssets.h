@@ -53,6 +53,7 @@ public:
         DayNightTimeline,
         Cave,
         FenceWall,
+        Destruction,
         Other
     };
 

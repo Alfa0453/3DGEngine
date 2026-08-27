@@ -315,6 +315,15 @@ protected:
     float AbilityCooldown(const std::string& abilityName) const;
     bool SetAbilityResources(float mana, float stamina);
     bool WasAbilityEvent(const std::string& eventName);
+    bool ConfigureDestructible(const std::string& assetPath);
+    bool DamageDestructible(float damage,
+                            const glm::vec3& hitPoint = glm::vec3(0.0f),
+                            const glm::vec3& impulse = glm::vec3(0.0f));
+    bool ImpactDestructible(float impact,const glm::vec3& hitPoint,
+                            const glm::vec3& direction);
+    float DestructibleHealth() const;
+    bool IsDestructibleBroken() const;
+    bool WasDestructionEvent(const std::string& eventName);
     int SplinePointCount(ecs::Entity spline) const;
     bool IsSplineClosed(ecs::Entity spline) const;
     bool SetSplineClosed(ecs::Entity spline, bool closed);

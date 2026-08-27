@@ -6,6 +6,7 @@
 #include "engine/gameplay/GameplayComponents.h"
 #include "engine/gameplay/RagdollSystem.h"
 #include "engine/gameplay/AbilitySystem.h"
+#include "engine/gameplay/DestructionSystem.h"
 
 #include "engine/animation/AnimatedModel.h"
 #include "engine/animation/Animator.h"
@@ -437,6 +438,23 @@ bool Script::WasAbilityEvent(const std::string& eventName) {
     if (it == abilities->events.end()) return false;
     abilities->events.erase(it);
     return true;
+}
+
+bool Script::ConfigureDestructible(const std::string& assetPath) {
+    return m_context.registry&&engine::ConfigureDestructible(*m_context.registry,m_context.entity,assetPath);
+}
+bool Script::DamageDestructible(float damage,const glm::vec3& point,const glm::vec3& impulse) {
+    return m_context.registry&&engine::DamageDestructible(*m_context.registry,m_context.entity,damage,point,impulse);
+}
+bool Script::ImpactDestructible(float impact,const glm::vec3& point,const glm::vec3& direction) {
+    return m_context.registry&&engine::ImpactDestructible(*m_context.registry,m_context.entity,impact,point,direction);
+}
+float Script::DestructibleHealth() const {return m_context.registry?engine::DestructibleHealth(*m_context.registry,m_context.entity):0.f;}
+bool Script::IsDestructibleBroken() const {return m_context.registry&&engine::IsDestructibleBroken(*m_context.registry,m_context.entity);}
+bool Script::WasDestructionEvent(const std::string& name) {
+    if(!m_context.registry)return false;auto* component=m_context.registry->TryGet<DestructibleComponent>(m_context.entity);if(!component)return false;
+    const auto match=[&](const DestructionRuntimeEvent& event){return (name=="Broken"&&event.type==DestructionRuntimeEvent::Type::Broken)||(name=="Damaged"&&event.type==DestructionRuntimeEvent::Type::DamagedState);};
+    const auto it=std::find_if(component->events.begin(),component->events.end(),match);if(it==component->events.end())return false;component->events.erase(it);return true;
 }
 
 RaycastHit Script::TraceLine(const glm::vec3& start, const glm::vec3& end,

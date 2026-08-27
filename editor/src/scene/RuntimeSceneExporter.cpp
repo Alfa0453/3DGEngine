@@ -100,7 +100,7 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         return engine::MakeAssetReference(
             &assetRegistry, contentRoot, assetPath, type).id;
     };
-    out << "3DGRuntimeScene 95 " << sceneId.ToString() << '\n';
+    out << "3DGRuntimeScene 97 " << sceneId.ToString() << '\n';
     out << "# Runtime export from 3DGEditor. Editor-only flags are omitted.\n";
     const EditorScene::Environment& environment = scene.GetEnvironment();
     out << "environment "
@@ -161,6 +161,10 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         << (environment.skylightOcclusion ? 1 : 0) << ' '
         << environment.skylightOcclusionStrength << ' '
         << environment.minimumSkylight << '\n';
+    out << "lighting_tuning " << environment.exposureEV << ' '
+        << environment.specularOcclusionStrength << ' '
+        << environment.localProbeInfluence << ' '
+        << environment.lightingDebugMode << '\n';
     out << "lighting_build " << std::quoted(StoredPath(environment.lightingBuildAsset))
         << ' ' << environment.lightingBuildHash << '\n';
     out << "sky "

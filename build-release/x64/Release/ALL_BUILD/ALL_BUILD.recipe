@@ -50,6 +50,9 @@
       <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\day_night_timeline_tests.exe</FullPath>
     </ProjectOutput>
     <ProjectOutput>
+      <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\destruction_asset_tests.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
       <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\directional_shadow_shader_tests.exe</FullPath>
     </ProjectOutput>
     <ProjectOutput>

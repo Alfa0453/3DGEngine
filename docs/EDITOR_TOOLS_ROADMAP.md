@@ -37,8 +37,8 @@ Status legend:
 | 18 | **COMPLETE** | Day/Night Timeline | Authors sky, sun, moon, clouds, fog, lighting, and environmental audio over time. |
 | 19 | **COMPLETE** | Cave and Tunnel Tool | Spline-generated cave/tunnel meshes, chambers, entrances, collision, and navigation floors. |
 | 20 | **COMPLETE** | Fence and Wall Painter | Viewport drawing of connected fences and walls with corners, posts, gates, and snapping. |
-| 21 | **NEXT** | Destruction Authoring Tool | Fracture pieces, strength, debris, damaged states, sound, particles, and collision. |
-| 22 | PLANNED | Interactive Door and Lift Tool | Fast setup for doors, gates, elevators, platforms, switches, locks, and access conditions. |
+| 21 | **COMPLETE** | Destruction Authoring Tool | Fracture pieces, strength, debris, damaged states, sound, particles, and collision. |
+| 22 | **NEXT** | Interactive Door and Lift Tool | Fast setup for doors, gates, elevators, platforms, switches, locks, and access conditions. |
 | 23 | PLANNED | Portal and Teleport Tool | Teleporters, destination previews, seamless doors, and level-transition portals. |
 | 24 | PLANNED | Quest Editor | Objectives, conditions, rewards, state, dialogue triggers, checkpoints, and debugging. |
 | 25 | PLANNED | Dialogue Editor | Branching conversations, conditions, events, voice clips, portraits, and localization keys. |
@@ -399,8 +399,21 @@ renderer. Saved assets retain stable IDs and dependencies, reopen by Content
 double-click, participate in unsaved-document handling, and are covered by focused
 generation, slope, snapping, gate, serialization, and registry tests.
 
-## Next Milestone: Destruction Authoring Tool
+## Completed Milestone: Destruction Authoring Tool
 
-Planned scope: author fracture chunks and damaged states, configure strength and
-impact thresholds, generate debris collision, connect sounds and particles, preview
-breakage, and save reusable destruction definitions for runtime use.
+Delivered as the **Destruction Authoring Tool** under Level Design and as reusable
+`.3dgdestruction` assets. The tool captures a selected mesh, authors ordered damaged
+states, deterministic fracture grids, health and impact thresholds, debris mass,
+collision, impulses, lifetime, replacement meshes/materials, and particle/audio
+effects. It offers an isolated fracture preview plus removable dynamic level-preview
+chunks. At runtime, native C++ and Lua can configure, damage, impact, query, and react
+to destructibles; state changes replace visuals and spawn effects, while final breaks
+create physics debris and clean it up after the authored lifetime. Stable asset IDs,
+dependencies, Content double-click, dirty-document handling, focused tests, and the
+Release editor build are verified.
+
+## Next Milestone: Interactive Door and Lift Tool
+
+Planned scope: author hinged/sliding doors, gates, elevators and moving platforms;
+connect switches, locks, access conditions, sounds and animations; preview motion;
+and save reusable interaction assets for scripts and packaged runtime levels.

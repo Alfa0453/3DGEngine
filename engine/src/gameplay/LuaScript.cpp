@@ -507,6 +507,12 @@ void LuaScript::RegisterEngineApi() {
         {"AbilityCooldown", ApiAbilityCooldown},
         {"SetAbilityResources", ApiSetAbilityResources},
         {"WasAbilityEvent", ApiWasAbilityEvent},
+        {"ConfigureDestructible", ApiConfigureDestructible},
+        {"DamageDestructible", ApiDamageDestructible},
+        {"ImpactDestructible", ApiImpactDestructible},
+        {"DestructibleHealth", ApiDestructibleHealth},
+        {"IsDestructibleBroken", ApiIsDestructibleBroken},
+        {"WasDestructionEvent", ApiWasDestructionEvent},
         {"TraceSphere", ApiTraceSphere},
         {"TraceOverlapSphere", ApiTraceOverlapSphere},
         {"IsKeyDown", ApiKeyDown},
@@ -748,6 +754,12 @@ int LuaScript::ApiWasAbilityEvent(lua_State* state) {
     lua_pushboolean(state, Current(state)->WasAbilityEvent(luaL_checkstring(state, 1)));
     return 1;
 }
+int LuaScript::ApiConfigureDestructible(lua_State* state){lua_pushboolean(state,Current(state)->ConfigureDestructible(luaL_checkstring(state,1)));return 1;}
+int LuaScript::ApiDamageDestructible(lua_State* state){const float damage=static_cast<float>(luaL_checknumber(state,1));const glm::vec3 point(static_cast<float>(luaL_optnumber(state,2,0)),static_cast<float>(luaL_optnumber(state,3,0)),static_cast<float>(luaL_optnumber(state,4,0)));const glm::vec3 impulse(static_cast<float>(luaL_optnumber(state,5,0)),static_cast<float>(luaL_optnumber(state,6,0)),static_cast<float>(luaL_optnumber(state,7,0)));lua_pushboolean(state,Current(state)->DamageDestructible(damage,point,impulse));return 1;}
+int LuaScript::ApiImpactDestructible(lua_State* state){const float impact=static_cast<float>(luaL_checknumber(state,1));const glm::vec3 point(static_cast<float>(luaL_checknumber(state,2)),static_cast<float>(luaL_checknumber(state,3)),static_cast<float>(luaL_checknumber(state,4)));const glm::vec3 direction(static_cast<float>(luaL_checknumber(state,5)),static_cast<float>(luaL_checknumber(state,6)),static_cast<float>(luaL_checknumber(state,7)));lua_pushboolean(state,Current(state)->ImpactDestructible(impact,point,direction));return 1;}
+int LuaScript::ApiDestructibleHealth(lua_State* state){lua_pushnumber(state,Current(state)->DestructibleHealth());return 1;}
+int LuaScript::ApiIsDestructibleBroken(lua_State* state){lua_pushboolean(state,Current(state)->IsDestructibleBroken());return 1;}
+int LuaScript::ApiWasDestructionEvent(lua_State* state){lua_pushboolean(state,Current(state)->WasDestructionEvent(luaL_checkstring(state,1)));return 1;}
 
 int LuaScript::ApiTraceSphere(lua_State* state) {
     LuaScript* script = Current(state);

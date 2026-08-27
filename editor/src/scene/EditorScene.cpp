@@ -479,7 +479,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         return false;
     }
 
-    out << "3DGEditorScene 134 " << m_assetId.ToString() << '\n';
+    out << "3DGEditorScene 136 " << m_assetId.ToString() << '\n';
     out << "environment "
         << m_environment.timeOfDay << ' '
         << m_environment.skyLightIntensity << ' '
@@ -555,9 +555,14 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         << (m_environment.skylightOcclusion ? 1 : 0) << ' '
         << m_environment.skylightOcclusionStrength << ' '
         << m_environment.minimumSkylight << '\n';
+    out << "lighting_tuning " << m_environment.exposureEV << ' '
+        << m_environment.specularOcclusionStrength << ' '
+        << m_environment.localProbeInfluence << ' '
+        << m_environment.lightingDebugMode << '\n';
     out << "lighting_build " << std::quoted(m_environment.lightingBuildAsset) << ' '
         << m_environment.lightingBuildHash << ' ' << m_environment.lightingBuildQuality << ' '
-        << m_environment.lightingProbeSpacing << ' ' << m_environment.lightingRayDistance << '\n';
+        << m_environment.lightingProbeSpacing << ' ' << m_environment.lightingRayDistance << ' '
+        << m_environment.lightingIndirectBounceStrength << '\n';
     out << "sky "
         << m_environment.skyMode << ' '
         << StoredPath(m_environment.skyTexturePath) << ' '
@@ -1372,7 +1377,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             return false;
         }
     }
-    if (magic != "3DGEditorScene" ||(version < 1 || version > 134)) {
+    if (magic != "3DGEditorScene" ||(version < 1 || version > 136)) {
         if (error) *error = "Scene file has an unknown format.";
         return false;
     }
@@ -1454,12 +1459,21 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             m_environment.skylightOcclusion = enabled != 0;
             continue;
         }
+        if (recordType == "lighting_tuning" && version >= 135) {
+            in >> m_environment.exposureEV
+               >> m_environment.specularOcclusionStrength
+               >> m_environment.localProbeInfluence;
+            if (version >= 136) in >> m_environment.lightingDebugMode;
+            if (!in) { if (error) *error = "Scene file contains invalid lighting tuning settings."; Clear(); return false; }
+            continue;
+        }
         if (recordType == "lighting_build" && version >= 131) {
             in >> std::quoted(m_environment.lightingBuildAsset)
                >> m_environment.lightingBuildHash
                >> m_environment.lightingBuildQuality
                >> m_environment.lightingProbeSpacing
                >> m_environment.lightingRayDistance;
+            if (version >= 136) in >> m_environment.lightingIndirectBounceStrength;
             if (!in) { if (error) *error = "Scene file contains invalid lighting build settings."; Clear(); return false; }
             continue;
         }

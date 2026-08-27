@@ -98,6 +98,12 @@ private:
     static int ApiAbilityCooldown(lua_State* state);
     static int ApiSetAbilityResources(lua_State* state);
     static int ApiWasAbilityEvent(lua_State* state);
+    static int ApiConfigureDestructible(lua_State* state);
+    static int ApiDamageDestructible(lua_State* state);
+    static int ApiImpactDestructible(lua_State* state);
+    static int ApiDestructibleHealth(lua_State* state);
+    static int ApiIsDestructibleBroken(lua_State* state);
+    static int ApiWasDestructionEvent(lua_State* state);
     static int ApiTraceSphere(lua_State* state);
     static int ApiTraceOverlapSphere(lua_State* state);
     static int ApiKeyDown(lua_State* state);

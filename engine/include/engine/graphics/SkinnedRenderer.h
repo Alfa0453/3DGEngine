@@ -13,6 +13,7 @@ class Camera;
 class Texture;
 class CascadedShadow;
 class IBL;
+class SSAO;
 class LightingProbeGrid;
 namespace ecs { class Registry; }
 
@@ -30,6 +31,11 @@ struct SkinnedLighting {
     bool skylightOcclusion = false;
     float skylightOcclusionStrength = 0.90f, minimumSkylight = 0.06f;
     const LightingProbeGrid* lightingGrid = nullptr;
+    const SSAO* ssao = nullptr;
+    glm::vec2 screenSize{1.0f};
+    float specularOcclusionStrength = 0.85f;
+    float localProbeInfluence = 1.0f;
+    int lightingDebugMode = 0;
     bool cloudShadows = false;
     float cloudShadowStrength = 0.45f, cloudShadowScale = 0.035f;
     float cloudCoverage = 0.45f, cloudDensity = 0.75f, cloudSoftness = 0.18f;

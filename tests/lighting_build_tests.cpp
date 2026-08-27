@@ -1,7 +1,10 @@
 #include <engine/graphics/LightingBuildData.h>
+#include <engine/graphics/PbrLightingCommon.h>
+#include <glm/gtc/epsilon.hpp>
 
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 
 namespace {
@@ -17,6 +20,12 @@ float ClosestVisibility(const engine::LightingBuildData& data,const glm::vec3& t
         glm::vec3 p=data.boundsMin+glm::vec3(x,y,z)*data.spacing;const glm::vec3 delta=p-target;float d=glm::dot(delta,delta);
         if(d<best){best=d;value=data.probes[data.Index(x,y,z)].skyVisibility;}}
     return value;
+}
+glm::vec3 EvaluateProbe(const engine::LightingProbe& probe,const glm::vec3& n){
+    return glm::max(probe.irradianceSH[0]*0.2820947918f
+        +probe.irradianceSH[1]*(0.4886025119f*n.y)
+        +probe.irradianceSH[2]*(0.4886025119f*n.z)
+        +probe.irradianceSH[3]*(0.4886025119f*n.x),glm::vec3(0.0f));
 }
 }
 
@@ -35,6 +44,23 @@ int main(){
     Check(engine::SaveLightingBuildData(path.string(),inside,&error),"lighting asset saves transactionally");
     engine::LightingBuildData loaded;Check(engine::LoadLightingBuildData(path.string(),&loaded,&error),"lighting asset loads");
     Check(loaded.sourceHash==inside.sourceHash&&loaded.probes.size()==inside.probes.size(),"lighting metadata round trips");
+    bool shRoundTrip=true;for(std::size_t i=0;i<4;++i)shRoundTrip&=glm::all(glm::epsilonEqual(loaded.probes.front().irradianceSH[i],inside.probes.front().irradianceSH[i],1e-6f));
+    Check(shRoundTrip,"directional SH coefficients round trip");
+    engine::DirectionalSkyRadiance directional;directional.zenith=glm::vec3(2.0f,0.2f,0.1f);directional.horizon=glm::vec3(0.1f);directional.ground=glm::vec3(0.01f);
+    engine::LightingBuildData directionalData;
+    Check(engine::BuildLightingProbes(open,directional,3,"Directional",settings,&directionalData,nullptr,&error),"directional lighting build succeeds");
+    const auto& probe=directionalData.probes[directionalData.Index(directionalData.dimensions.x/2,directionalData.dimensions.y-1,directionalData.dimensions.z/2)];
+    Check(EvaluateProbe(probe,{0,1,0}).r>EvaluateProbe(probe,{0,-1,0}).r,"SH probes preserve sky directionality");
+    Check(std::isfinite(engine::SmoothFiniteLightAttenuation(0.0f,5.0f)),"finite attenuation is stable at the light origin");
+    Check(engine::SmoothFiniteLightAttenuation(25.0f,5.0f)==0.0f,"finite attenuation reaches zero at its radius");
+    Check(engine::SmoothFiniteLightAttenuation(36.0f,5.0f)==0.0f,"finite attenuation remains zero outside its radius");
+    const std::string composed=engine::ComposePbrLightingShader("#version 330 core\n//__PBR_LIGHTING_COMMON__\nvoid main(){}");
+    Check(composed.find("SmoothFiniteAttenuation")!=std::string::npos&&composed.find("//__PBR_LIGHTING_COMMON__")==std::string::npos,"shared PBR shader block is injected");
+    const auto oldPath=std::filesystem::temp_directory_path()/"3dg_lighting_v1_test.3dglighting";
+    {std::ofstream old(oldPath,std::ios::binary);old.write("3DGLITE1",8);}
+    engine::LightingBuildData oldData;error.clear();
+    Check(!engine::LoadLightingBuildData(oldPath.string(),&oldData,&error)&&error.find("outdated")!=std::string::npos,"legacy lighting data requests an explicit rebuild");
     std::error_code ec;std::filesystem::remove(path,ec);
+    std::filesystem::remove(oldPath,ec);
     if(failures==0)std::cout<<"Lighting build tests passed\n";return failures==0?0:1;
 }

@@ -1192,6 +1192,7 @@ const char *EditorAssets::TypeName(Type type)
         case Type::DayNightTimeline: return "Day/Night Timeline";
         case Type::Cave: return "Cave";
         case Type::FenceWall: return "Fence / Wall";
+        case Type::Destruction: return "Destruction";
         case Type::Other: return "Other";
     }
     return "Other";
@@ -1304,6 +1305,9 @@ EditorAssets::Type EditorAssets::ClassifyExtension(const std::string &extension)
     }
     if (extension == ".3dgfence") {
         return Type::FenceWall;
+    }
+    if (extension == ".3dgdestruction") {
+        return Type::Destruction;
     }
     if (extension == ".h" || extension == ".hpp" || extension == ".lua"
         || extension == ".cpp" || extension == ".cc") {

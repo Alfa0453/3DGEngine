@@ -417,6 +417,10 @@ public:
             bool skylightOcclusion = true;
             float skylightOcclusionStrength = 0.90f;
             float minimumSkylight = 0.06f;
+            float exposureEV = 0.0f;
+            float specularOcclusionStrength = 0.85f;
+            float localProbeInfluence = 1.0f;
+            int lightingDebugMode = 0;
             std::string lightingBuildAsset;
             std::uint64_t lightingBuildHash = 0;
             bool driveSunLight = true;

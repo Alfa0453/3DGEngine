@@ -7,8 +7,10 @@
 #include "engine/graphics/Texture.h"
 #include "engine/graphics/CascadedShadow.h"
 #include "engine/graphics/DirectionalShadowShader.h"
+#include "engine/graphics/PbrLightingCommon.h"
 #include "engine/graphics/LightingBuildData.h"
 #include "engine/graphics/IBL.h"
+#include "engine/graphics/SSAO.h"
 #include "engine/animation/AnimatedModel.h"
 #include "engine/ecs/Registry.h"
 #include "engine/ecs/Components.h"
@@ -102,8 +104,8 @@ void main() {
 }
 )GLSL";
 
-// Cook-Torrance fragment matching PbrRenderer's sun + cascade shadows +
-// ambient/IBL + fog (no clustered/spot/area lights -- characters use the sun).
+// Cook-Torrance fragment matching the world renderer. Shared probe,
+// attenuation, and specular-occlusion code is injected from PbrLightingCommon.
 const char* kPbrFrag = R"GLSL(
 #version 330 core
 const float PI = 3.14159265359;
@@ -122,6 +124,18 @@ uniform sampler2D uAlbedoMap;
 uniform vec3  uSunDir;
 uniform vec3  uSunColor;
 uniform vec3  uAmbient;
+const int MAX_POINTS = 32;
+const int MAX_SPOTS = 4;
+const int MAX_AREAS = 4;
+uniform int uNumPoints;
+uniform vec4 uPointPosRadius[MAX_POINTS];
+uniform vec3 uPointColor[MAX_POINTS];
+uniform int uNumSpots;
+uniform vec3 uSpotPos[MAX_SPOTS], uSpotDir[MAX_SPOTS], uSpotColor[MAX_SPOTS];
+uniform float uSpotCosInner[MAX_SPOTS], uSpotCosOuter[MAX_SPOTS], uSpotRange[MAX_SPOTS];
+uniform int uNumAreas;
+uniform vec3 uAreaPos[MAX_AREAS], uAreaColor[MAX_AREAS];
+uniform float uAreaRadius[MAX_AREAS];
 uniform sampler2DArray uCascadeMaps;
 uniform mat4  uCascadeVP[4];
 uniform float uCascadeSplits[4];
@@ -144,8 +158,11 @@ uniform float uFogHeightFalloff;
 uniform int uSkylightOcclusion;
 uniform float uSkylightOcclusionStrength, uMinimumSkylight;
 uniform int uUseLightingGrid;
-uniform sampler3D uLightingGrid;
 uniform vec3 uLightingGridMin, uLightingGridMax;
+//__PBR_LIGHTING_COMMON__
+uniform int uUseSSAO;
+uniform sampler2D uSsaoMap;
+uniform vec2 uScreenSize;
 uniform int uCloudShadows;
 uniform float uCloudShadowStrength, uCloudShadowScale;
 uniform float uCloudCoverage, uCloudDensity, uCloudSoftness;
@@ -153,7 +170,7 @@ uniform vec2 uCloudWindOffset;
 float LocalSkyVisibility(vec3 worldPos, vec3 normal, float sunVisibility) {
     float hemisphere=mix(0.72,1.0,clamp(normal.y*0.5+0.5,0.0,1.0));
     if(uUseLightingGrid==1){vec3 extent=max(uLightingGridMax-uLightingGridMin,vec3(0.0001));vec3 uvw=(worldPos-uLightingGridMin)/extent;
-        if(all(greaterThanEqual(uvw,vec3(0)))&&all(lessThanEqual(uvw,vec3(1))))return clamp(texture(uLightingGrid,uvw).a*hemisphere,0.0,1.0);}
+        if(all(greaterThanEqual(uvw,vec3(0)))&&all(lessThanEqual(uvw,vec3(1))))return clamp(SampleLocalProbe(worldPos,normal).skyVisibility*hemisphere,0.0,1.0);}
     return clamp(mix(0.82,1.0,sunVisibility)*hemisphere,0.0,1.0);
 }
 float CloudHash(vec2 p) { return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453123); }
@@ -174,33 +191,19 @@ float CloudSunlight(vec3 wp) {
                        uCloudCoverage+max(uCloudSoftness,0.005),s);
     return 1.0-clamp(c*uCloudDensity*uCloudShadowStrength,0.0,0.95);
 }
-float DistributionGGX(vec3 N, vec3 H, float r) {
-    float a = r*r; float a2 = a*a; float NdotH = max(dot(N,H),0.0);
-    float d = (NdotH*NdotH)*(a2-1.0)+1.0; return a2/(PI*d*d);
-}
-float GeometrySchlickGGX(float NdotV, float r) {
-    float k = (r+1.0)*(r+1.0)/8.0; return NdotV/(NdotV*(1.0-k)+k);
-}
-float GeometrySmith(vec3 N, vec3 V, vec3 L, float r) {
-    return GeometrySchlickGGX(max(dot(N,V),0.0),r)*GeometrySchlickGGX(max(dot(N,L),0.0),r);
-}
-vec3 FresnelSchlick(float c, vec3 F0) { return F0+(1.0-F0)*pow(clamp(1.0-c,0.0,1.0),5.0); }
-vec3 FresnelSchlickRough(float c, vec3 F0, float r) {
-    return F0 + (max(vec3(1.0-r), F0) - F0) * pow(clamp(1.0-c,0.0,1.0),5.0);
-}
 //__DIRECTIONAL_SHADOW_IMPLEMENTATION__
 vec3 ACES(vec3 x) {
     const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
     return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
 }
-vec3 Lighting(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 albedo, vec3 F0, float m, float r) {
-    vec3 H = normalize(V+L);
-    float NDF = DistributionGGX(N,H,r);
-    float G = GeometrySmith(N,V,L,r);
-    vec3 F = FresnelSchlick(max(dot(H,V),0.0),F0);
-    vec3 spec = (NDF*G*F)/(4.0*max(dot(N,V),0.0)*max(dot(N,L),0.0)+0.0001);
-    vec3 kD = (vec3(1.0)-F)*(1.0-m);
-    return (kD*albedo/PI+spec)*radiance*max(dot(N,L),0.0);
+vec3 SphereAreaLight(vec3 N, vec3 V, vec3 Lvec, float sourceRadius, vec3 color,
+                     vec3 albedo, vec3 F0, float metallic, float roughness) {
+    float distanceSquared = max(dot(Lvec, Lvec), 0.0001);
+    vec3 L = Lvec * inversesqrt(distanceSquared);
+    float apparentRadius = clamp(sourceRadius / sqrt(distanceSquared), 0.0, 1.0);
+    vec3 radiance = color / distanceSquared;
+    return Lighting(N, V, L, radiance * (1.0 + apparentRadius),
+                    albedo, F0, metallic, roughness);
 }
 void main() {
     vec3 albedo = uAlbedo;
@@ -214,27 +217,60 @@ void main() {
     float shadow = (uHasShadow == 1) ? ShadowFactor(sunNdotL, N) : 0.0;
     vec3 Lo = (1.0 - shadow) * CloudSunlight(vWorldPos)
             * Lighting(N, V, Ls, uSunColor, albedo, F0, metallic, roughness);
+    for (int i=0; i<min(uNumPoints,MAX_POINTS); ++i) {
+        vec3 d=uPointPosRadius[i].xyz-vWorldPos; float distanceSquared=dot(d,d);
+        vec3 L=d*inversesqrt(max(distanceSquared,0.0001));
+        Lo += Lighting(N,V,L,uPointColor[i]*SmoothFiniteAttenuation(distanceSquared,uPointPosRadius[i].w),albedo,F0,metallic,roughness);
+    }
+    for (int i=0; i<min(uNumSpots,MAX_SPOTS); ++i) {
+        vec3 d=uSpotPos[i]-vWorldPos; float distanceSquared=dot(d,d);
+        vec3 L=d*inversesqrt(max(distanceSquared,0.0001));
+        float cone=smoothstep(uSpotCosOuter[i],uSpotCosInner[i],dot(normalize(-uSpotDir[i]),L));
+        Lo += Lighting(N,V,L,uSpotColor[i]*SmoothFiniteAttenuation(distanceSquared,uSpotRange[i])*cone,albedo,F0,metallic,roughness);
+    }
+    for (int i=0; i<min(uNumAreas,MAX_AREAS); ++i)
+        Lo += SphereAreaLight(N,V,uAreaPos[i]-vWorldPos,uAreaRadius[i],uAreaColor[i],albedo,F0,metallic,roughness);
     vec3 ambient;
+    LocalProbeSample localProbe=SampleLocalProbe(vWorldPos,N);
+    float skyVisibility=max(localProbe.skyVisibility,clamp(uMinimumSkylight,0.0,1.0));
+    float screenAo=(uUseSSAO==1)?texture(uSsaoMap,gl_FragCoord.xy/uScreenSize).r:1.0;
+    vec3 diffuseIndirect=vec3(0.0),specularIndirect=vec3(0.0);
+    float specularOcclusion=1.0;
     if (uUseIBL == 1) {
         vec3 F = FresnelSchlickRough(max(dot(N,V),0.0), F0, roughness);
         vec3 kD = (vec3(1.0)-F)*(1.0-metallic);
         vec3 irradiance = texture(uIrradiance, N).rgb;
+        irradiance=mix(irradiance,localProbe.irradiance,localProbe.validity*clamp(uLocalProbeInfluence,0.0,1.0));
         vec3 diffuse = irradiance * albedo;
         vec3 R = reflect(-V, N);
         vec3 prefiltered = textureLod(uPrefilter, R, roughness*uMaxReflectionLod).rgb;
         vec2 brdf = texture(uBrdfLUT, vec2(max(dot(N,V),0.0), roughness)).rg;
         vec3 specular = prefiltered * (F*brdf.x + brdf.y);
-        ambient = (kD*diffuse + specular) * ao;
+        specularOcclusion=PbrSpecularOcclusion(ao*screenAo,max(dot(N,V),0.0),roughness,skyVisibility);
+        specular*=specularOcclusion;
+        vec3 diffuseAmbient=kD*diffuse*ao*screenAo;
+        if(uSkylightOcclusion==1)diffuseAmbient*=mix(1.0,skyVisibility,clamp(uSkylightOcclusionStrength,0.0,1.0));
+        diffuseIndirect=diffuseAmbient; specularIndirect=specular;
+        ambient = diffuseIndirect + specularIndirect;
     } else {
-        ambient = uAmbient*albedo*ao;
+        ambient = uAmbient*albedo*ao*screenAo;
+        diffuseIndirect=ambient;
     }
-    if (uSkylightOcclusion == 1) {
+    if (uSkylightOcclusion == 1 && uUseIBL == 0) {
         float skyVisibility = max(LocalSkyVisibility(vWorldPos, N, 1.0-shadow),
                                   clamp(uMinimumSkylight, 0.0, 1.0));
         ambient *= mix(1.0, skyVisibility, clamp(uSkylightOcclusionStrength, 0.0, 1.0));
     }
     vec3 color = ambient + Lo + uEmissive;
-    if (uFogEnabled == 1) {
+    if(uLightingDebugMode==1)color=Lo;
+    else if(uLightingDebugMode==2)color=diffuseIndirect;
+    else if(uLightingDebugMode==3)color=specularIndirect;
+    else if(uLightingDebugMode==4)color=localProbe.irradiance;
+    else if(uLightingDebugMode==5)color=vec3(skyVisibility);
+    else if(uLightingDebugMode==6)color=vec3(ao*screenAo);
+    else if(uLightingDebugMode==7)color=vec3(specularOcclusion);
+    else if(uLightingDebugMode==8)color=vec3(localProbe.validity);
+    if (uFogEnabled == 1 && uLightingDebugMode == 0) {
         float dist = length(uViewPos - vWorldPos);
         float distFog = 1.0 - exp(-dist * uFogDensity);
         float heightF = clamp(exp(-(vWorldPos.y - uFogHeight) * uFogHeightFalloff), 0.0, 1.0);
@@ -281,7 +317,7 @@ void UploadBones(Shader& sh, const std::vector<glm::mat4>& bones) {
 
 SkinnedRenderer::SkinnedRenderer()
     : m_shader(std::make_unique<Shader>(kVert, kFrag)),
-      m_pbr(std::make_unique<Shader>(kVert, ComposeDirectionalShadowShader(kPbrFrag))),
+      m_pbr(std::make_unique<Shader>(kVert, ComposeDirectionalShadowShader(ComposePbrLightingShader(kPbrFrag).c_str()))),
       m_depth(std::make_unique<Shader>(kDepthVert, kDepthFrag)) {}
 
 SkinnedRenderer::~SkinnedRenderer() = default;
@@ -396,10 +432,17 @@ void SkinnedRenderer::DrawScene(ecs::Registry& reg, const Camera& camera, float 
     m_pbr->SetFloat("uMinimumSkylight", lit.minimumSkylight);
     m_pbr->SetInt("uUseLightingGrid", lit.lightingGrid && lit.lightingGrid->Valid() ? 1 : 0);
     if (lit.lightingGrid && lit.lightingGrid->Valid()) {
-        lit.lightingGrid->Bind(17); m_pbr->SetInt("uLightingGrid",17);
+        lit.lightingGrid->Bind(17);
+        m_pbr->SetInt("uLightingSH0",17); m_pbr->SetInt("uLightingSH1",18);
+        m_pbr->SetInt("uLightingSH2",19); m_pbr->SetInt("uLightingMeta",20);
         m_pbr->SetVec3("uLightingGridMin",lit.lightingGrid->BoundsMin());
         m_pbr->SetVec3("uLightingGridMax",lit.lightingGrid->BoundsMax());
     }
+    m_pbr->SetFloat("uSpecularOcclusionStrength",lit.specularOcclusionStrength);
+    m_pbr->SetFloat("uLocalProbeInfluence",lit.localProbeInfluence);
+    m_pbr->SetInt("uLightingDebugMode",lit.lightingDebugMode);
+    m_pbr->SetInt("uUseSSAO",lit.ssao?1:0);
+    if(lit.ssao){lit.ssao->BindAO(8);m_pbr->SetInt("uSsaoMap",8);m_pbr->SetVec2("uScreenSize",lit.screenSize);}
     m_pbr->SetInt("uCloudShadows", lit.cloudShadows ? 1 : 0);
     m_pbr->SetFloat("uCloudShadowStrength", lit.cloudShadowStrength);
     m_pbr->SetFloat("uCloudShadowScale", lit.cloudShadowScale);
@@ -412,6 +455,24 @@ void SkinnedRenderer::DrawScene(ecs::Registry& reg, const Camera& camera, float 
     m_pbr->SetVec2("uCloudWindOffset",
         glm::vec2(std::cos(cloudAngle), std::sin(cloudAngle))
         * (cloudSeconds * lit.cloudWindSpeed));
+
+    struct PointData{glm::vec3 position,color;float radius;};
+    struct SpotData{glm::vec3 position,direction,color;float inner,outer,range;};
+    struct AreaData{glm::vec3 position,color;float radius;};
+    std::vector<PointData> points;std::vector<SpotData> spots;std::vector<AreaData> areas;
+    auto lights=reg.view<ecs::Transform,ecs::Light>();
+    if(!lights.empty())lights.each([&](ecs::Entity,ecs::Transform&t,ecs::Light&light){
+        const glm::vec3 color=light.color*light.intensity;if(glm::dot(color,color)<=1e-8f)return;
+        if(light.type==ecs::Light::Type::Point&&points.size()<32){const float radius=std::sqrt(std::max({color.r,color.g,color.b})/0.03f);points.push_back({t.position,color,radius});}
+        else if(light.type==ecs::Light::Type::Spot&&spots.size()<4)spots.push_back({t.position,glm::normalize(light.direction),color,glm::cos(glm::radians(light.innerAngle)),glm::cos(glm::radians(light.outerAngle)),std::max(light.range,0.01f)});
+        else if(light.type==ecs::Light::Type::Area&&areas.size()<4)areas.push_back({t.position,color,std::max(light.sourceRadius,0.01f)});
+    });
+    m_pbr->SetInt("uNumPoints",static_cast<int>(points.size()));
+    for(std::size_t i=0;i<points.size();++i){const std::string index=std::to_string(i);m_pbr->SetVec4(("uPointPosRadius["+index+"]").c_str(),glm::vec4(points[i].position,points[i].radius));m_pbr->SetVec3(("uPointColor["+index+"]").c_str(),points[i].color);}
+    m_pbr->SetInt("uNumSpots",static_cast<int>(spots.size()));
+    for(std::size_t i=0;i<spots.size();++i){const std::string index=std::to_string(i);m_pbr->SetVec3(("uSpotPos["+index+"]").c_str(),spots[i].position);m_pbr->SetVec3(("uSpotDir["+index+"]").c_str(),spots[i].direction);m_pbr->SetVec3(("uSpotColor["+index+"]").c_str(),spots[i].color);m_pbr->SetFloat(("uSpotCosInner["+index+"]").c_str(),spots[i].inner);m_pbr->SetFloat(("uSpotCosOuter["+index+"]").c_str(),spots[i].outer);m_pbr->SetFloat(("uSpotRange["+index+"]").c_str(),spots[i].range);}
+    m_pbr->SetInt("uNumAreas",static_cast<int>(areas.size()));
+    for(std::size_t i=0;i<areas.size();++i){const std::string index=std::to_string(i);m_pbr->SetVec3(("uAreaPos["+index+"]").c_str(),areas[i].position);m_pbr->SetVec3(("uAreaColor["+index+"]").c_str(),areas[i].color);m_pbr->SetFloat(("uAreaRadius["+index+"]").c_str(),areas[i].radius);}
 
     // Backface culling: characters are closed meshes, so skip their inside faces.
     // Restored to the default (off) after the pass so other passes are unaffected.

@@ -55,6 +55,9 @@ public:
         bool        skylightOcclusion = false;
         float       skylightOcclusionStrength = 0.90f;
         float       minimumSkylight = 0.06f;
+        float       specularOcclusionStrength = 0.85f;
+        float       localProbeInfluence = 1.0f;
+        int         lightingDebugMode = 0;
         const LightingProbeGrid* lightingGrid = nullptr;
         bool        pointShadows = true;    // omnidirectional shadows for point lights
         bool        spotShadows  = true;  // perspective shadows for spotlights
@@ -118,6 +121,7 @@ private:
     std::vector<glm::vec3> m_spotColors;
     std::vector<float> m_spotCosInner;
     std::vector<float> m_spotCosOuter;
+    std::vector<float> m_spotRanges;
     std::vector<glm::vec3> m_areaPositions;
     std::vector<glm::vec3> m_areaColors;
     std::vector<float> m_areaRadii;

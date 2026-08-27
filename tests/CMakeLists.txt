@@ -453,6 +453,15 @@ else()
 endif()
 add_test(NAME fence_wall_asset_regression COMMAND fence_wall_asset_tests)
 
+add_executable(destruction_asset_tests destruction_asset_tests.cpp)
+target_link_libraries(destruction_asset_tests PRIVATE engine)
+if(MSVC)
+    target_compile_options(destruction_asset_tests PRIVATE /W4)
+else()
+    target_compile_options(destruction_asset_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME destruction_asset_regression COMMAND destruction_asset_tests)
+
 add_executable(editor_scene_hierarchy_tests
     editor_scene_hierarchy_tests.cpp
     ${CMAKE_SOURCE_DIR}/editor/src/scene/EditorScene.cpp)

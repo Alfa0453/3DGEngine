@@ -62,6 +62,7 @@ add_library(engine STATIC
     src/assets/DayNightTimelineAsset.cpp
     src/assets/CaveAsset.cpp
     src/assets/FenceWallAsset.cpp
+    src/assets/DestructionAsset.cpp
     src/assets/TerrainAsset.cpp
     src/assets/TextureAsset.cpp
     src/assets/ForgeMaterialImporter.cpp
@@ -106,6 +107,7 @@ add_library(engine STATIC
     src/gameplay/GameplaySystems.cpp
     src/gameplay/RagdollSystem.cpp
     src/gameplay/AbilitySystem.cpp
+    src/gameplay/DestructionSystem.cpp
     src/gameplay/GameMode.cpp
     src/gameplay/Script.cpp
     src/gameplay/LuaScript.cpp

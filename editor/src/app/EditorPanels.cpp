@@ -98,6 +98,7 @@ const char* PlainPanelName(EditorPanels::Panel panel)
     case Panel::DayNightTimeline: return "Day/Night Timeline";
     case Panel::CaveTunnel: return "Cave and Tunnel Tool";
     case Panel::FenceWallPainter: return "Fence and Wall Painter";
+    case Panel::DestructionAuthoring: return "Destruction Authoring Tool";
     case Panel::Count:     break;
     }
     return "Panel";
@@ -211,6 +212,7 @@ EditorPanels::Group EditorPanels::GroupOf(Panel panel)
     case Panel::BiomeEditor:
     case Panel::CaveTunnel:
     case Panel::FenceWallPainter:
+    case Panel::DestructionAuthoring:
         return Group::LevelDesign;
 
     case Panel::PhysicsStatus:

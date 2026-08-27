@@ -1,0 +1,50 @@
+Start testing: Aug 27 14:07 E. Africa Standard Time
+----------------------------------------------------------
+11/44 Testing: lighting_build_regression
+11/44 Test: lighting_build_regression
+Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/lighting_build_tests.exe"
+Directory: D:/C++_Projects/3DGEngine/build-release/tests
+"lighting_build_regression" start time: Aug 27 14:07 E. Africa Standard Time
+Output:
+----------------------------------------------------------
+Lighting build tests passed
+<end of output>
+Test time =   0.02 sec
+----------------------------------------------------------
+Test Passed.
+"lighting_build_regression" end time: Aug 27 14:07 E. Africa Standard Time
+"lighting_build_regression" time elapsed: 00:00:00
+----------------------------------------------------------
+
+37/44 Testing: lighting_analysis_regression
+37/44 Test: lighting_analysis_regression
+Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/lighting_analysis_tests.exe"
+Directory: D:/C++_Projects/3DGEngine/build-release/tests
+"lighting_analysis_regression" start time: Aug 27 14:07 E. Africa Standard Time
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"lighting_analysis_regression" end time: Aug 27 14:07 E. Africa Standard Time
+"lighting_analysis_regression" time elapsed: 00:00:00
+----------------------------------------------------------
+
+43/44 Testing: editor_scene_hierarchy_regression
+43/44 Test: editor_scene_hierarchy_regression
+Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/editor_scene_hierarchy_tests.exe"
+Directory: D:/C++_Projects/3DGEngine/build-release/tests
+"editor_scene_hierarchy_regression" start time: Aug 27 14:07 E. Africa Standard Time
+Output:
+----------------------------------------------------------
+Editor scene hierarchy tests passed
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"editor_scene_hierarchy_regression" end time: Aug 27 14:07 E. Africa Standard Time
+"editor_scene_hierarchy_regression" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Aug 27 14:07 E. Africa Standard Time

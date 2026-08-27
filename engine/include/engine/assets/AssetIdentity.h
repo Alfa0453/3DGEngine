@@ -69,7 +69,8 @@ enum class AssetType : std::uint32_t {
     Biome, // reusable terrain/environment population preset (.3dgbiome)
     DayNightTimeline, // environment timeline (.3dgdaynight)
     Cave, // spline cave/tunnel definition (.3dgcave)
-    FenceWall // connected fence/wall run definition (.3dgfence)
+    FenceWall, // connected fence/wall run definition (.3dgfence)
+    Destruction // fracture and damaged-state definition (.3dgdestruction)
 };
 
 const char* AssetTypeName(AssetType type);

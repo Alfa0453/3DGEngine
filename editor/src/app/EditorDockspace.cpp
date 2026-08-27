@@ -2231,17 +2231,31 @@ void DrawWorldSettings(EditorScene& scene, EditorDockspace::Context& context, bo
             environment.skylightOcclusion = defaults.skylightOcclusion;
             environment.skylightOcclusionStrength = defaults.skylightOcclusionStrength;
             environment.minimumSkylight = defaults.minimumSkylight;
+            environment.exposureEV = defaults.exposureEV;
+            environment.specularOcclusionStrength = defaults.specularOcclusionStrength;
+            environment.localProbeInfluence = defaults.localProbeInfluence;
+            environment.lightingDebugMode = defaults.lightingDebugMode;
             environment.driveSunLight = defaults.driveSunLight;
             environment.sunIntensity = defaults.sunIntensity;
             changed = true;
         }
         changed |= ImGui::SliderFloat("Time Of Day", &environment.timeOfDay, 0.0f, 1.0f);
         changed |= ImGui::DragFloat("Sky Light", &environment.skyLightIntensity, 0.02f, 0.0f, 8.0f);
+        changed |= ImGui::DragFloat("Exposure (EV)", &environment.exposureEV, 0.05f, -10.0f, 10.0f, "%+.2f EV");
         changed |= ImGui::Checkbox("Skylight Occlusion (Indoor Darkness)", &environment.skylightOcclusion);
         if (!environment.skylightOcclusion) ImGui::BeginDisabled();
         changed |= ImGui::SliderFloat("Indoor Occlusion Strength", &environment.skylightOcclusionStrength, 0.0f, 1.0f, "%.2f");
         changed |= ImGui::SliderFloat("Minimum Indoor Skylight", &environment.minimumSkylight, 0.0f, 1.0f, "%.2f");
         if (!environment.skylightOcclusion) ImGui::EndDisabled();
+        changed |= ImGui::SliderFloat("Specular Occlusion Strength", &environment.specularOcclusionStrength, 0.0f, 1.0f, "%.2f");
+        changed |= ImGui::SliderFloat("Local Probe Influence", &environment.localProbeInfluence, 0.0f, 1.0f, "%.2f");
+        static constexpr const char* kLightingDebugModes[] = {
+            "Final Lighting", "Direct Lighting", "Diffuse Indirect", "Specular Indirect",
+            "Local Probe Irradiance", "Sky Visibility", "Ambient Occlusion",
+            "Specular Occlusion", "Probe Validity"
+        };
+        changed |= ImGui::Combo("Lighting Debug View", &environment.lightingDebugMode,
+                                kLightingDebugModes, IM_ARRAYSIZE(kLightingDebugModes));
         ImGui::TextDisabled("Uses rebuilt local sky visibility; old scenes fall back to dynamic AO/orientation clues.");
         ImGui::SeparatorText("Local Lighting Build");
         if (context.lightingBuildQuality) {
@@ -2251,6 +2265,9 @@ void DrawWorldSettings(EditorScene& scene, EditorDockspace::Context& context, bo
         }
         changed |= ImGui::DragFloat("Probe Spacing", &environment.lightingProbeSpacing, 0.1f, 0.25f, 20.0f, "%.2f m");
         changed |= ImGui::DragFloat("Sky Ray Distance", &environment.lightingRayDistance, 1.0f, 2.0f, 1000.0f, "%.1f m");
+        changed |= ImGui::SliderFloat("Indirect Bounce Strength", &environment.lightingIndirectBounceStrength,
+                                      0.0f, 1.0f, "%.2f");
+        ImGui::TextDisabled("Optional single-bounce diffuse/emissive approximation; rebuild required.");
         ImGui::BeginDisabled(context.lightingBuildRunning || context.playMode);
         if (ImGui::Button("Build Lighting")) context.lightingBuildRequested = true;
         ImGui::EndDisabled();
@@ -10781,6 +10798,8 @@ bool EditorDockspace::Draw(Context& context) {
             break; // drawn by EditorApp (owns cave authoring and baked scene generation)
         case EditorPanels::Panel::FenceWallPainter:
             break; // drawn by EditorApp (owns connected fence/wall authoring)
+        case EditorPanels::Panel::DestructionAuthoring:
+            break; // drawn by EditorApp (owns destruction authoring and preview)
         case EditorPanels::Panel::MeshEditor:
             break; // drawn by EditorApp (owns native mesh editing state)
         case EditorPanels::Panel::DecalPlacement:

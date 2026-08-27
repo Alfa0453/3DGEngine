@@ -5,6 +5,7 @@
 #include <engine/ecs/RuntimeSystems.h>
 #include <engine/gameplay/GameplayComponents.h>
 #include <engine/gameplay/GameplaySystems.h>
+#include <engine/gameplay/DestructionSystem.h>
 #include <engine/gameplay/RagdollSystem.h>
 #include <engine/gameplay/GameMode.h>
 #include <engine/gameplay/Script.h>
@@ -1131,7 +1132,8 @@ void EditorApp::OnRender()
         [](const EditorScene::Environment::PostProcessEffect& effect) {
             return effect.enabled && !effect.shaderPath.empty();
         });
-    const bool  useHdrPost = environment.ssr || wantScale || hasGraphPost || underwaterPost;
+    const bool  useHdrPost = environment.ssr || wantScale || hasGraphPost || underwaterPost
+        || std::abs(environment.exposureEV) > 0.0001f;
     const int   sw = std::max(1, static_cast<int>(std::lround(window.Width()  * scale)));
     const int   sh = std::max(1, static_cast<int>(std::lround(window.Height() * scale)));
     m_renderW = window.Width();
@@ -1156,6 +1158,7 @@ void EditorApp::OnRender()
             m_ssr.emplace(window.Width(), window.Height());
         }
         m_postProcess->settings.fxaa = environment.fxaa;   // FXAA toggle (SSR/HDR path)
+        m_postProcess->settings.exposure = std::exp2(std::clamp(environment.exposureEV, -10.0f, 10.0f));
         m_postProcess->Resize(sw, sh);
         std::vector<engine::PostProcess::Effect> graphEffects;
         engine::RuntimeAssetManager* effectAssets =
@@ -1522,6 +1525,11 @@ void EditorApp::DrawEditModeModels(const glm::mat4 & viewProj)
                     lighting.skylightOcclusion = environment.skylightOcclusion;
                     lighting.skylightOcclusionStrength = environment.skylightOcclusionStrength;
                     lighting.minimumSkylight = environment.minimumSkylight;
+                    lighting.specularOcclusionStrength = environment.specularOcclusionStrength;
+                    lighting.localProbeInfluence = environment.localProbeInfluence;
+                    lighting.lightingDebugMode = environment.lightingDebugMode;
+                    lighting.ssao = environment.ssao && m_ssao ? &*m_ssao : nullptr;
+                    lighting.screenSize = glm::vec2(m_renderW, m_renderH);
                     lighting.lightingGrid = m_lightingProbeGrid.Valid() ? &m_lightingProbeGrid : nullptr;
                     lighting.tonemap = !m_renderingHdrPreview;
                     lighting.fog = environment.fog;
@@ -2138,6 +2146,7 @@ void EditorApp::DrawEditorOverlay()
     DrawDayNightTimelinePanel();
     DrawCaveTunnelPanel();
     DrawFenceWallPainterPanel();
+    DrawDestructionAuthoringPanel();
     DrawLevelVariantPanel();
     DrawLevelLayersPanel();
     DrawViewportBookmarksPanel();
@@ -2409,6 +2418,11 @@ void EditorApp::DrawEditorOverlay()
             m_panels.SetOpen(EditorPanels::Panel::FenceWallPainter, true);
             m_fenceWallPainter.QueueOpen(path);
             m_log.Info("Opening fence/wall asset: " + path);
+            break;
+        case EditorAssets::Type::Destruction:
+            m_panels.SetOpen(EditorPanels::Panel::DestructionAuthoring, true);
+            m_destructionAuthoring.QueueOpen(path);
+            m_log.Info("Opening destruction asset: " + path);
             break;
         case EditorAssets::Type::Terrain:
             m_panels.SetOpen(EditorPanels::Panel::TerrainCreator, true);
@@ -4054,6 +4068,64 @@ void EditorApp::GenerateFenceWall() {
         +" editable objects)");
 }
 
+void EditorApp::DrawDestructionAuthoringPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::DestructionAuthoring)) return;
+    bool open = true;
+    const DestructionAuthoringPanel::Result result = m_destructionAuthoring.Draw(
+        m_scene,m_assets,m_project.AssetRoot(),&open);
+    m_panels.SetOpen(EditorPanels::Panel::DestructionAuthoring,open);
+    if (result.captureSelected) {
+        const EditorScene::Object* selected=m_scene.SelectedObject();
+        if (!selected) m_log.Warning("Destruction authoring: select a mesh first");
+        else if (selected->locked) m_log.Warning("Destruction authoring: selected object is locked");
+        else if (const auto* transform=m_scene.Registry().TryGet<engine::ecs::Transform>(selected->entity)) {
+            m_destructionAuthoring.Capture(*selected,*transform);
+            m_log.Info("Captured '"+selected->name+"' for destruction authoring");
+        }
+    }
+    if (result.buildPreview) GenerateDestructionPreview();
+    if (result.removePreview) {
+        const int removed=DeleteDestructionPreview(m_destructionAuthoring.Asset().name);
+        m_log.Info("Removed "+std::to_string(removed)+" destruction preview chunk(s)");
+    }
+    if (result.saved) {std::string error;if(!m_assets.Refresh(m_project.AssetRoot(),&error))m_log.Warning(error);}
+    if (!result.message.empty()) m_log.Info(result.message);
+}
+
+int EditorApp::DeleteDestructionPreview(const std::string& name) {
+    if(name.empty())return 0;const std::string prefix="DestructionPreview_"+name+"_";
+    std::vector<int> indices;for(int i=0;i<static_cast<int>(m_scene.Objects().size());++i)
+        if(m_scene.Objects()[static_cast<std::size_t>(i)].name.rfind(prefix,0)==0)indices.push_back(i);
+    if(indices.empty())return 0;m_scene.SelectIndices(indices);
+    return m_scene.DeleteSelected()?static_cast<int>(indices.size()):0;
+}
+
+void EditorApp::GenerateDestructionPreview() {
+    if(!m_cube)return;const EditorScene::Object* selected=m_scene.SelectedObject();
+    if(!selected){m_log.Warning("Destruction preview: select the source object first");return;}
+    if(selected->locked){m_log.Warning("Destruction preview: selected object is locked");return;}
+    const auto* source=m_scene.Registry().TryGet<engine::ecs::Transform>(selected->entity);
+    if(!source)return;const engine::ecs::Transform sourceTransform=*source;
+    const engine::DestructionAssetData asset=m_destructionAuthoring.Asset();
+    const auto chunks=engine::GenerateDestructionChunks(asset);
+    if(chunks.empty()){m_log.Warning("Destruction preview generated no chunks");return;}
+    DeleteDestructionPreview(asset.name);bool first=true;int created=0;
+    for(const auto& chunk:chunks){m_scene.SuppressUndo(!first);engine::ecs::Transform transform;
+        transform.position=sourceTransform.position+sourceTransform.rotation*chunk.localCenter;
+        transform.rotation=sourceTransform.rotation;transform.scale=chunk.size;
+        const std::string objectName="DestructionPreview_"+asset.name+"_"+std::to_string(chunk.index);
+        engine::ecs::Collider collider=engine::ecs::Collider::MakeBox(glm::vec3(.5f));
+        collider.layer=engine::ecs::CollisionLayer::WorldDynamic;collider.mask=engine::ecs::CollisionLayer::All;
+        const std::string mesh=asset.debrisMeshPath;
+        bool added=false;if(!mesh.empty()){added=m_scene.AddModel(mesh,*m_cube,transform);if(added){m_scene.SetSelectedName(objectName);if(asset.debrisCollision)m_scene.SetSelectedCollider(collider);}}
+        else {m_scene.AddConfiguredPrimitive(EditorScene::Primitive::Cube,*m_cube,transform,asset.debrisCollision?&collider:nullptr,objectName);added=true;}
+        if(added){engine::ecs::RigidBody body=engine::ecs::RigidBody::Dynamic(std::max(asset.debrisMass/static_cast<float>(chunks.size()),.001f));body.velocity=chunk.impulseDirection*asset.scatterImpulse;body.angularVelocity=chunk.angularVelocity;m_scene.SetSelectedRigidBody(body);const std::string material=asset.debrisMaterialPath.empty()?asset.sourceMaterialPath:asset.debrisMaterialPath;const engine::AssetHandle materialId=asset.debrisMaterialPath.empty()?asset.sourceMaterialId:asset.debrisMaterialId;if(!material.empty())m_scene.SetSelectedMaterialAsset(material,materialId);++created;}
+        if(first){first=false;m_scene.SuppressUndo(true);}
+    }
+    m_scene.SuppressUndo(false);m_editAssets.ResolveRegistryAssets(m_scene.Registry());
+    m_log.Info("Built destruction preview for '"+asset.name+"': "+std::to_string(created)+" dynamic chunks. Clear Preview removes them.");
+}
+
 int EditorApp::DeleteGeneratedRoad(const std::string& roadName) {
     if (roadName.empty()) return 0;
     const std::string prefix = "Road_" + roadName + "_";
@@ -5543,6 +5615,11 @@ std::vector<DirtyDocument> EditorApp::CollectDirtyDocuments() {
         [this](std::string* error) {
             return m_fenceWallPainter.SaveForShutdown(m_project.AssetRoot(),error);
         });
+    if (m_destructionAuthoring.IsDirty()) add(DirtyDocumentType::Asset,
+        m_destructionAuthoring.Path(), "New Destructible",
+        [this](std::string* error) {
+            return m_destructionAuthoring.SaveForShutdown(m_project.AssetRoot(),error);
+        });
     if (m_weatherEditor.IsDirty()) add(DirtyDocumentType::Asset, m_weatherEditor.Path(),
         "New Weather", [this](std::string* error) { return m_weatherEditor.SaveForShutdown(m_project.AssetRoot(),error); });
     if (m_animationRetargeting.IsDirty()) add(DirtyDocumentType::Asset,
@@ -6662,6 +6739,11 @@ void EditorApp::DrawPlayScene(const glm::mat4 & viewProj)
         lighting.skylightOcclusion = environment.skylightOcclusion;
         lighting.skylightOcclusionStrength = environment.skylightOcclusionStrength;
         lighting.minimumSkylight = environment.minimumSkylight;
+        lighting.specularOcclusionStrength = environment.specularOcclusionStrength;
+        lighting.localProbeInfluence = environment.localProbeInfluence;
+        lighting.lightingDebugMode = environment.lightingDebugMode;
+        lighting.ssao = environment.ssao && m_ssao ? &*m_ssao : nullptr;
+        lighting.screenSize = glm::vec2(m_renderW, m_renderH);
         lighting.lightingGrid = m_lightingProbeGrid.Valid() ? &m_lightingProbeGrid : nullptr;
         lighting.cloudShadows = environment.clouds && environment.cloudShadows;
         lighting.cloudShadowStrength = environment.cloudShadowStrength;
@@ -7403,6 +7485,9 @@ void EditorApp::ConfigureEnvironmentPbrOptions(engine::ecs::Registry& registry,
     options.skylightOcclusion = environment.skylightOcclusion;
     options.skylightOcclusionStrength = environment.skylightOcclusionStrength;
     options.minimumSkylight = environment.minimumSkylight;
+    options.specularOcclusionStrength = environment.specularOcclusionStrength;
+    options.localProbeInfluence = environment.localProbeInfluence;
+    options.lightingDebugMode = environment.lightingDebugMode;
     if (environment.lightingBuildAsset != m_loadedLightingAsset) LoadSceneLightingAsset();
     options.lightingGrid = m_lightingProbeGrid.Valid() ? &m_lightingProbeGrid : nullptr;
     options.pointShadows = environment.pointShadows;
@@ -7469,6 +7554,7 @@ std::uint64_t EditorApp::ComputeLightingStateHash() const {
     bytes(&e.skyIntensity,sizeof(e.skyIntensity)); bytes(&e.skyLightIntensity,sizeof(e.skyLightIntensity));
     bytes(&e.skylightOcclusionStrength,sizeof(e.skylightOcclusionStrength)); bytes(&e.minimumSkylight,sizeof(e.minimumSkylight));
     bytes(&e.lightingBuildQuality,sizeof(e.lightingBuildQuality)); bytes(&e.lightingProbeSpacing,sizeof(e.lightingProbeSpacing)); bytes(&e.lightingRayDistance,sizeof(e.lightingRayDistance));
+    bytes(&e.lightingIndirectBounceStrength,sizeof(e.lightingIndirectBounceStrength));
     return hash;
 }
 
@@ -7477,10 +7563,12 @@ std::vector<engine::LightingTriangle> EditorApp::GatherLightingTriangles() const
     for (const auto& object : m_scene.Objects()) {
         if (!object.visible || object.light || object.skeletalModel || object.isWater || object.isSpline || object.navMeshBoundsVolume) continue;
         const auto* transform=m_scene.TryGetTransform(object.entity);
+        const auto* authoredRenderer=m_scene.TryGetMeshRenderer(object.entity);
+        const glm::vec3 surfaceAlbedo=authoredRenderer?glm::clamp(authoredRenderer->color,glm::vec3(0.0f),glm::vec3(1.0f)):glm::vec3(0.8f);
         auto appendMesh=[&](const engine::Mesh& source,const glm::mat4& model){
             const auto vertices=source.ReadbackVertices();const auto indices=source.ReadbackIndices();const std::size_t stride=source.VertexStrideFloats();
             if(stride<3||indices.size()<3)return;auto point=[&](std::uint32_t index){const std::size_t base=static_cast<std::size_t>(index)*stride;if(base+2>=vertices.size())return glm::vec3(0);return glm::vec3(model*glm::vec4(vertices[base],vertices[base+1],vertices[base+2],1.0f));};
-            triangles.reserve(triangles.size()+indices.size()/3);for(std::size_t i=0;i+2<indices.size();i+=3)triangles.push_back({point(indices[i]),point(indices[i+1]),point(indices[i+2])});
+            triangles.reserve(triangles.size()+indices.size()/3);for(std::size_t i=0;i+2<indices.size();i+=3)triangles.push_back({point(indices[i]),point(indices[i+1]),point(indices[i+2]),surfaceAlbedo,glm::vec3(0.0f)});
         };
         if(transform&&!object.modelAssetPath.empty()&&!object.skeletalModel){
             if(const engine::Model* model=m_editAssets.FindModel(object.modelAssetPath)){
@@ -7510,17 +7598,24 @@ void EditorApp::StartLightingBuild() {
     settings.quality=static_cast<engine::LightingBuildQuality>(std::clamp(m_lightingBuildQuality,0,2));
     settings.probeSpacing=std::clamp(environment.lightingProbeSpacing,0.25f,20.0f);
     settings.maxRayDistance=std::clamp(environment.lightingRayDistance,2.0f,1000.0f);
+    settings.indirectBounceStrength=std::clamp(environment.lightingIndirectBounceStrength,0.0f,1.0f);
     settings.raysPerProbe=settings.quality==engine::LightingBuildQuality::Preview?24u:(settings.quality==engine::LightingBuildQuality::High?192u:72u);
     const std::uint64_t hash=ComputeLightingStateHash();
     const std::filesystem::path path=std::filesystem::path(m_project.AssetRoot())/"Lighting"/(std::filesystem::path(m_project.ScenePath()).stem().string()+".3dglighting");
-    const glm::vec3 skyColor=engine::DayNightCycle::At(environment.timeOfDay).ambient*environment.skyLightIntensity;
+    const auto skySample=engine::DayNightCycle::At(environment.timeOfDay);
+    engine::DirectionalSkyRadiance skyRadiance;
+    skyRadiance.zenith=skySample.zenith*environment.skyLightIntensity;
+    skyRadiance.horizon=skySample.horizon*environment.skyLightIntensity;
+    skyRadiance.ground=skySample.ambient*environment.skyLightIntensity*0.10f;
+    skyRadiance.sunDirection=glm::normalize(-skySample.keyLightDirection);
+    skyRadiance.sunRadiance=skySample.keyLightColor*environment.sunIntensity*0.35f;
     m_lightingBuildProgressState=std::make_shared<engine::LightingBuildProgress>();
     auto progress=m_lightingBuildProgressState;
     const std::string scene=m_project.ScenePath(); const std::string output=path.string();
-    m_lightingBuildRunning=true;m_lightingBuildStatus="Building local sky visibility...";
-    m_lightingBuildFuture=std::async(std::launch::async,[triangles=std::move(triangles),settings,hash,skyColor,scene,output,progress]() mutable {
+    m_lightingBuildRunning=true;m_lightingBuildStatus="Building directional SH irradiance...";
+    m_lightingBuildFuture=std::async(std::launch::async,[triangles=std::move(triangles),settings,hash,skyRadiance,scene,output,progress]() mutable {
         LightingBuildResult result;result.path=output;
-        result.success=engine::BuildLightingProbes(triangles,skyColor,hash,scene,settings,&result.data,progress.get(),&result.error)
+        result.success=engine::BuildLightingProbes(triangles,skyRadiance,hash,scene,settings,&result.data,progress.get(),&result.error)
                     && engine::SaveLightingBuildData(output,result.data,&result.error);
         return result;
     });
@@ -12784,6 +12879,7 @@ void EditorApp::StepPlayPhysics(float dt, bool inputEnabled)
         m_playAnimationEvents.clear();
         UpdateAI(step);
         engine::UpdateAbilities(*m_playRegistry, step);
+        engine::UpdateDestruction(*m_playRegistry, step);
         engine::UpdateProjectilesInPlace(*m_playRegistry, step);
         engine::UpdateHealth(*m_playRegistry);
         engine::UpdateRagdollsBeforePhysics(*m_playRegistry, m_playPhysics);
@@ -12822,6 +12918,7 @@ void EditorApp::StepPlayPhysics(float dt, bool inputEnabled)
         engine::ecs::UpdateRuntimeMotion(*m_playRegistry, step);
         UpdateAI(step);
         engine::UpdateAbilities(*m_playRegistry, step);
+        engine::UpdateDestruction(*m_playRegistry, step);
         engine::UpdateProjectilesInPlace(*m_playRegistry, step);
         engine::UpdateHealth(*m_playRegistry);
         engine::UpdateRagdollsBeforePhysics(*m_playRegistry, m_playPhysics);

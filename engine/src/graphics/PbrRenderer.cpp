@@ -10,6 +10,7 @@
 #include "engine/graphics/SSAO.h"
 #include "engine/graphics/CascadedShadow.h"
 #include "engine/graphics/DirectionalShadowShader.h"
+#include "engine/graphics/PbrLightingCommon.h"
 #include "engine/graphics/LightingBuildData.h"
 #include "engine/graphics/Texture.h"
 #include "engine/graphics/Frustum.h"
@@ -178,6 +179,7 @@ uniform vec3  uSpotDir[MAX_SPOTS];
 uniform vec3  uSpotColor[MAX_SPOTS];
 uniform float uSpotCosInner[MAX_SPOTS];
 uniform float uSpotCosOuter[MAX_SPOTS];
+uniform float uSpotRange[MAX_SPOTS];
 uniform mat4  uSpotVP[MAX_SPOTS];
 uniform sampler2D uSpotMap[MAX_SPOTS];
 const int MAX_AREAS = 4;
@@ -214,9 +216,9 @@ uniform int   uSkylightOcclusion;
 uniform float uSkylightOcclusionStrength;
 uniform float uMinimumSkylight;
 uniform int uUseLightingGrid;
-uniform sampler3D uLightingGrid;
 uniform vec3 uLightingGridMin;
 uniform vec3 uLightingGridMax;
+//__PBR_LIGHTING_COMMON__
 uniform int   uCloudShadows;
 uniform float uCloudShadowStrength;
 uniform float uCloudShadowScale;
@@ -231,7 +233,7 @@ float LocalSkyVisibility(vec3 worldPos, vec3 normal, float sunVisibility) {
         vec3 extent = max(uLightingGridMax - uLightingGridMin, vec3(0.0001));
         vec3 uvw = (worldPos - uLightingGridMin) / extent;
         if (all(greaterThanEqual(uvw, vec3(0.0))) && all(lessThanEqual(uvw, vec3(1.0))))
-            return clamp(texture(uLightingGrid, uvw).a * hemisphere, 0.0, 1.0);
+            return clamp(SampleLocalProbe(worldPos, normal).skyVisibility * hemisphere, 0.0, 1.0);
     }
     return clamp(mix(0.82, 1.0, sunVisibility) * hemisphere, 0.0, 1.0);
 }
@@ -264,20 +266,6 @@ float CloudSunlight(vec3 worldPos) {
     float opacity = clamp(cover * uCloudDensity * uCloudShadowStrength, 0.0, 0.95);
     return 1.0 - opacity;
 }
-float DistributionGGX(vec3 N, vec3 H, float r) {
-    float a = r*r; float a2 = a*a; float NdotH = max(dot(N,H),0.0);
-    float d = (NdotH*NdotH)*(a2-1.0)+1.0; return a2/(PI*d*d);
-}
-float GeometrySchlickGGX(float NdotV, float r) {
-    float k = (r+1.0)*(r+1.0)/8.0; return NdotV/(NdotV*(1.0-k)+k);
-}
-float GeometrySmith(vec3 N, vec3 V, vec3 L, float r) {
-    return GeometrySchlickGGX(max(dot(N,V),0.0),r)*GeometrySchlickGGX(max(dot(N,L),0.0),r);
-}
-vec3 FresnelSchlick(float c, vec3 F0) { return F0+(1.0-F0)*pow(clamp(1.0-c,0.0,1.0),5.0); }
-vec3 FresnelSchlickRough(float c, vec3 F0, float r) {
-    return F0 + (max(vec3(1.0-r), F0) - F0) * pow(clamp(1.0-c,0.0,1.0),5.0);
-}
 float PointShadowFactor(int idx, vec3 fragToLight) {
     float closest;
     if (idx == 0)      closest = texture(uPointCube[0], fragToLight).r;
@@ -303,15 +291,6 @@ float SpotShadowFactor(int idx, vec3 worldPos) {
 vec3 ACES(vec3 x) {
     const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
     return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
-}
-vec3 Lighting(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 albedo, vec3 F0, float m, float r) {
-    vec3 H = normalize(V+L);
-    float NDF = DistributionGGX(N,H,r);
-    float G = GeometrySmith(N,V,L,r);
-    vec3 F = FresnelSchlick(max(dot(H,V),0.0),F0);
-    vec3 spec = (NDF*G*F)/(4.0*max(dot(N,V),0.0)*max(dot(N,L),0.0)+0.0001);
-    vec3 kD = (vec3(1.0)-F)*(1.0-m);
-    return (kD*albedo/PI+spec)*radiance*max(dot(N,L),0.0);
 }
 // Sphere area light (representative-point specular + centre diffuse).
 vec3 AreaLight(vec3 N, vec3 V, vec3 Lvec, float srad, vec3 color,
@@ -440,24 +419,54 @@ void main() {
         vec3 d = lp - vWorldPos;
         float dist2 = dot(d, d);
         if (dist2 > lr * lr) continue;
-        vec3 L = d / sqrt(dist2);
-        vec3 radiance = uLightColor[li].rgb / max(dist2, 0.0001);
+        vec3 L = d * inversesqrt(max(dist2, 0.0001));
+        vec3 radiance = uLightColor[li].rgb * SmoothFiniteAttenuation(dist2, lr);
         vec3 contrib = Lighting(N, V, L, radiance, albedo, F0, metallic, roughness);
         if (li < uNumPointShadows) contrib *= (1.0 - PointShadowFactor(li, -d));
         Lo += contrib;
         if (uInstanced == 0) Lo += ClearcoatSpecular(N, V, L, radiance);
     }
+    for (int i = 0; i < min(uNumSpots, MAX_SPOTS); ++i) {
+        vec3 d = uSpotPos[i] - vWorldPos;
+        float dist2 = dot(d, d);
+        vec3 L = d * inversesqrt(max(dist2, 0.0001));
+        float cone = smoothstep(uSpotCosOuter[i], uSpotCosInner[i],
+                                dot(normalize(-uSpotDir[i]), L));
+        vec3 radiance = uSpotColor[i] * SmoothFiniteAttenuation(dist2, uSpotRange[i]) * cone;
+        vec3 contribution = Lighting(N, V, L, radiance, albedo, F0, metallic, roughness);
+        if (i < uNumSpotShadows) contribution *= (1.0 - SpotShadowFactor(i, vWorldPos));
+        Lo += contribution;
+    }
+    for (int i = 0; i < min(uNumAreas, MAX_AREAS); ++i)
+        Lo += AreaLight(N, V, uAreaPos[i] - vWorldPos, uAreaRadius[i], uAreaColor[i],
+                        albedo, F0, metallic, roughness);
     vec3 ambient;
+    LocalProbeSample localProbe = SampleLocalProbe(vWorldPos, N);
+    float skyVisibility = max(localProbe.skyVisibility, clamp(uMinimumSkylight, 0.0, 1.0));
+    float screenAo = (uUseSSAO == 1) ? texture(uSsaoMap, gl_FragCoord.xy / uScreenSize).r : 1.0;
+    vec3 diffuseIndirect = vec3(0.0);
+    vec3 specularIndirect = vec3(0.0);
+    float specularOcclusion = 1.0;
     if (uUseIBL == 1) {
         vec3 F = FresnelSchlickRough(max(dot(N,V),0.0), F0, roughness);
         vec3 kD = (vec3(1.0)-F)*(1.0-metallic);
         vec3 irradiance = texture(uIrradiance, N).rgb;
+        irradiance = mix(irradiance, localProbe.irradiance,
+                         localProbe.validity * clamp(uLocalProbeInfluence, 0.0, 1.0));
         vec3 diffuse = irradiance * albedo;
         vec3 R = reflect(-V, N);
         vec3 prefiltered = textureLod(uPrefilter, R, roughness*uMaxReflectionLod).rgb;
         vec2 brdf = texture(uBrdfLUT, vec2(max(dot(N,V),0.0), roughness)).rg;
         vec3 specular = prefiltered * (F*brdf.x + brdf.y);
-        ambient = (kD*diffuse + specular) * ao;
+        specularOcclusion = PbrSpecularOcclusion(ao * screenAo, max(dot(N,V),0.0), roughness, skyVisibility);
+        specular *= specularOcclusion;
+        vec3 diffuseAmbient = kD * diffuse * ao * screenAo;
+        if (uSkylightOcclusion == 1)
+            diffuseAmbient *= mix(1.0, skyVisibility,
+                                  clamp(uSkylightOcclusionStrength, 0.0, 1.0));
+        diffuseIndirect = diffuseAmbient;
+        specularIndirect = specular;
+        ambient = diffuseIndirect + specularIndirect;
         if (uInstanced == 0 && uTransmission > 0.0) {
             vec3 refracted = refract(-V, N, 1.0 / max(uIor, 1.0));
             vec3 transmitted = textureLod(uPrefilter, refracted, roughness*uMaxReflectionLod).rgb;
@@ -469,14 +478,14 @@ void main() {
             ambient += uClearcoat * textureLod(uPrefilter, Rc, uClearcoatRoughness*uMaxReflectionLod).rgb * 0.04;
         }
     } else {
-        ambient = uAmbient*albedo*ao;
+        ambient = uAmbient*albedo*ao*screenAo;
+        diffuseIndirect = ambient;
     }
-    if (uSkylightOcclusion == 1) {
+    if (uSkylightOcclusion == 1 && uUseIBL == 0) {
         float skyVisibility = max(LocalSkyVisibility(vWorldPos, N, 1.0-shadow),
                                   clamp(uMinimumSkylight, 0.0, 1.0));
         ambient *= mix(1.0, skyVisibility, clamp(uSkylightOcclusionStrength, 0.0, 1.0));
     }
-    if (uUseSSAO == 1) ambient *= texture(uSsaoMap, gl_FragCoord.xy / uScreenSize).r;
     vec3 color = ambient + Lo + ((uInstanced == 1) ? vIEmissive : uEmissive);
     if (uInstanced == 0) {
         float rim = pow(1.0 - max(dot(N, V), 0.0), mix(5.0, 2.0, uSheenRoughness));
@@ -485,7 +494,16 @@ void main() {
         color += uSubsurface * uSubsurfaceColor * albedo * (0.15 + back) * uSunColor;
     }
 
-    if (uFogEnabled == 1) {
+    if (uLightingDebugMode == 1) color = Lo;
+    else if (uLightingDebugMode == 2) color = diffuseIndirect;
+    else if (uLightingDebugMode == 3) color = specularIndirect;
+    else if (uLightingDebugMode == 4) color = localProbe.irradiance;
+    else if (uLightingDebugMode == 5) color = vec3(skyVisibility);
+    else if (uLightingDebugMode == 6) color = vec3(ao * screenAo);
+    else if (uLightingDebugMode == 7) color = vec3(specularOcclusion);
+    else if (uLightingDebugMode == 8) color = vec3(localProbe.validity);
+
+    if (uFogEnabled == 1 && uLightingDebugMode == 0) {
         float dist = length(uViewPos - vWorldPos);
         float distFog = 1.0 - exp(-dist * uFogDensity);
         float heightF = clamp(exp(-(vWorldPos.y - uFogHeight) * uFogHeightFalloff), 0.0, 1.0);
@@ -508,7 +526,7 @@ PbrRenderer::PbrRenderer(int shadowSize)
     : m_cascade(shadowSize),
       m_pointShadow(512),
       m_spotShadow(1024),
-      m_pbr(std::make_unique<Shader>(kPbrVert, ComposeDirectionalShadowShader(kPbrFrag))) {
+      m_pbr(std::make_unique<Shader>(kPbrVert, ComposeDirectionalShadowShader(ComposePbrLightingShader(kPbrFrag).c_str()))) {
     const unsigned int blk = glGetUniformBlockIndex(m_pbr->ID(), "LightBlock");
     if (blk != GL_INVALID_INDEX) glUniformBlockBinding(m_pbr->ID(), blk, 0);
     glGenBuffers(1, &m_instanceVBO);
@@ -539,12 +557,13 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
     auto& spotCol = m_spotColors;
     auto& spotCosIn = m_spotCosInner;
     auto& spotCosOut = m_spotCosOuter;
+    auto& spotRanges = m_spotRanges;
     auto& areaPos = m_areaPositions;
     auto& areaCol = m_areaColors;
     auto& areaRad = m_areaRadii;
     auto& spotList = m_spotShadowLights;
     ppos.clear(); clusterLights.clear(); spotPos.clear(); spotDir.clear(); spotCol.clear();
-    spotCosIn.clear(); spotCosOut.clear(); areaPos.clear(); areaCol.clear(); areaRad.clear(); spotList.clear();
+    spotCosIn.clear(); spotCosOut.clear(); spotRanges.clear(); areaPos.clear(); areaCol.clear(); areaRad.clear(); spotList.clear();
     auto lightView = reg.view<Transform, Light>();
     if (!lightView.empty()) lightView.each([&](Entity, Transform& t, Light& l) {
         const glm::vec3 c = l.color * l.intensity;
@@ -567,6 +586,7 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
             spotCol.push_back(c);
             spotCosIn.push_back(glm::cos(glm::radians(l.innerAngle)));
             spotCosOut.push_back(glm::cos(glm::radians(l.outerAngle)));
+            spotRanges.push_back(range);
             if (spotList.size() < static_cast<std::size_t>(SpotShadow::kMax))
                 spotList.push_back(SpotShadow::Spot{t.position, dir, l.outerAngle, range});
         }
@@ -663,6 +683,7 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
     static constexpr const char* kSpotColorNames[] = {"uSpotColor[0]", "uSpotColor[1]", "uSpotColor[2]", "uSpotColor[3]"};
     static constexpr const char* kSpotInnerNames[] = {"uSpotCosInner[0]", "uSpotCosInner[1]", "uSpotCosInner[2]", "uSpotCosInner[3]"};
     static constexpr const char* kSpotOuterNames[] = {"uSpotCosOuter[0]", "uSpotCosOuter[1]", "uSpotCosOuter[2]", "uSpotCosOuter[3]"};
+    static constexpr const char* kSpotRangeNames[] = {"uSpotRange[0]", "uSpotRange[1]", "uSpotRange[2]", "uSpotRange[3]"};
     static constexpr const char* kSpotVpNames[] = {"uSpotVP[0]", "uSpotVP[1]", "uSpotVP[2]", "uSpotVP[3]"};
     for (std::size_t i = 0; i < spotPos.size() && i < static_cast<std::size_t>(SpotShadow::kMax); ++i) {
         m_pbr->SetVec3(kSpotPosNames[i], spotPos[i]);
@@ -670,6 +691,7 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
         m_pbr->SetVec3(kSpotColorNames[i], spotCol[i]);
         m_pbr->SetFloat(kSpotInnerNames[i], spotCosIn[i]);
         m_pbr->SetFloat(kSpotOuterNames[i], spotCosOut[i]);
+        m_pbr->SetFloat(kSpotRangeNames[i], spotRanges[i]);
         m_pbr->SetMat4(kSpotVpNames[i], m_spotShadow.LightVP(static_cast<int>(i)));
     }
     m_pbr->SetInt("uSpotMap[0]", 13);
@@ -693,10 +715,14 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
     m_pbr->SetInt("uSkylightOcclusion", opt.skylightOcclusion ? 1 : 0);
     m_pbr->SetFloat("uSkylightOcclusionStrength", opt.skylightOcclusionStrength);
     m_pbr->SetFloat("uMinimumSkylight", opt.minimumSkylight);
+    m_pbr->SetFloat("uSpecularOcclusionStrength", opt.specularOcclusionStrength);
+    m_pbr->SetFloat("uLocalProbeInfluence", opt.localProbeInfluence);
+    m_pbr->SetInt("uLightingDebugMode", opt.lightingDebugMode);
     m_pbr->SetInt("uUseLightingGrid", opt.lightingGrid && opt.lightingGrid->Valid() ? 1 : 0);
     if (opt.lightingGrid && opt.lightingGrid->Valid()) {
         opt.lightingGrid->Bind(17);
-        m_pbr->SetInt("uLightingGrid", 17);
+        m_pbr->SetInt("uLightingSH0", 17); m_pbr->SetInt("uLightingSH1", 18);
+        m_pbr->SetInt("uLightingSH2", 19); m_pbr->SetInt("uLightingMeta", 20);
         m_pbr->SetVec3("uLightingGridMin", opt.lightingGrid->BoundsMin());
         m_pbr->SetVec3("uLightingGridMax", opt.lightingGrid->BoundsMax());
     }

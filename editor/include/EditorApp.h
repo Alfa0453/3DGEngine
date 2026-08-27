@@ -72,6 +72,7 @@
 #include "DayNightTimelinePanel.h"
 #include "CaveTunnelPanel.h"
 #include "FenceWallPainterPanel.h"
+#include "DestructionAuthoringPanel.h"
 #include "TerrainCreatorPanel.h"
 #include "ModularPlacementPanel.h"
 #include "PrefabPalettePanel.h"
@@ -257,6 +258,9 @@ private:
     void DrawFenceWallPainterPanel();
     void GenerateFenceWall();
     int DeleteGeneratedFenceWall(const std::string& name);
+    void DrawDestructionAuthoringPanel();
+    void GenerateDestructionPreview();
+    int DeleteDestructionPreview(const std::string& name);
     bool CreatePartitionCellFromSelection(const std::string& path, int cellX, int cellZ);
     void DrawLevelVariantPanel();
     void DrawLevelLayersPanel();
@@ -690,6 +694,7 @@ private:
     DayNightTimelinePanel                  m_dayNightTimeline;
     CaveTunnelPanel                       m_caveTunnel;
     FenceWallPainterPanel                m_fenceWallPainter;
+    DestructionAuthoringPanel            m_destructionAuthoring;
     LevelVariantPanel                    m_levelVariants;
     LevelLayersPanel                     m_levelLayers;
     ViewportBookmarksPanel               m_viewportBookmarks;

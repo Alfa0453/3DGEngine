@@ -25,7 +25,7 @@ AssetDependencyViewerPanel::Result AssetDependencyViewerPanel::Draw(const engine
     ImGui::SameLine();ImGui::TextDisabled("%d assets | %d findings",static_cast<int>(m_graph.Nodes().size()),static_cast<int>(m_graph.Issues().size()));
     ImGui::SetNextItemWidth(260);ImGui::InputTextWithHint("##DependencySearch","Search path, type, or asset ID",m_search.data(),m_search.size());ImGui::SameLine();
     ImGui::SetNextItemWidth(180);const char* preview=m_typeFilter==0?"All asset types":engine::AssetTypeName(static_cast<engine::AssetType>(m_typeFilter));
-    if(ImGui::BeginCombo("##DependencyType",preview)){if(ImGui::Selectable("All asset types",m_typeFilter==0))m_typeFilter=0;for(int i=1;i<=static_cast<int>(engine::AssetType::FenceWall);++i)if(ImGui::Selectable(engine::AssetTypeName(static_cast<engine::AssetType>(i)),m_typeFilter==i))m_typeFilter=i;ImGui::EndCombo();}
+    if(ImGui::BeginCombo("##DependencyType",preview)){if(ImGui::Selectable("All asset types",m_typeFilter==0))m_typeFilter=0;for(int i=1;i<=static_cast<int>(engine::AssetType::Destruction);++i)if(ImGui::Selectable(engine::AssetTypeName(static_cast<engine::AssetType>(i)),m_typeFilter==i))m_typeFilter=i;ImGui::EndCombo();}
     ImGui::SameLine();ImGui::Checkbox("Findings only",&m_issuesOnly);
     ImGui::Separator();
 
