@@ -134,11 +134,11 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             return false;
         }
     }
-    if (magic != "3DGRuntimeScene" || version < 1 || version > 97) {
+    if (magic != "3DGRuntimeScene" || version < 1 || version > 99) {
         if (error) {
             *error = "Runtime scene file has an unknown format: "
                 + magic + " " + std::to_string(version)
-                + " (expected 3DGRuntimeScene 1..97).";
+                + " (expected 3DGRuntimeScene 1..98).";
         }
         return false;
     }
@@ -667,6 +667,58 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             }
             continue;
         }
+        if (recordType == "reflection_probe" && version >= 98) {
+            std::string entityName, stableIdText, cubemapPath, cubemapIdText;
+            int shape = 0;
+            EntityDesc probeEntity;
+            probeEntity.primitive = "Empty";
+            ecs::ReflectionProbe probe;
+            record >> std::quoted(entityName) >> stableIdText >> shape
+                   >> probeEntity.position.x >> probeEntity.position.y
+                   >> probeEntity.position.z
+                   >> probeEntity.rotation.w >> probeEntity.rotation.x
+                   >> probeEntity.rotation.y >> probeEntity.rotation.z
+                   >> probe.boxExtents.x >> probe.boxExtents.y >> probe.boxExtents.z
+                   >> probe.radius >> probe.blendDistance >> probe.intensity
+                   >> probe.priority >> probe.captureResolution
+                   >> probe.includeSky >> probe.enabled
+                   >> std::quoted(cubemapPath) >> cubemapIdText
+                   >> probe.captureSourceHash;
+            probe.shape = shape == 1 ? ecs::ReflectionProbe::Shape::Sphere
+                                     : ecs::ReflectionProbe::Shape::Box;
+            probe.bakedCubemapPath = cubemapPath == "-" ? std::string{} : cubemapPath;
+            if (stableIdText != "-"
+                && !AssetHandle::Parse(stableIdText, &probe.stableId)) {
+                if (error) *error = "Runtime reflection probe has an invalid stable ID.";
+                return false;
+            }
+            if (cubemapIdText != "-"
+                && !AssetHandle::Parse(cubemapIdText, &probe.bakedCubemapId)) {
+                if (error) *error = "Runtime reflection probe has an invalid cubemap ID.";
+                return false;
+            }
+            if (!record || entityName.empty()) {
+                if (error) *error = "Runtime scene contains invalid reflection probe data.";
+                return false;
+            }
+            probe.boxExtents = glm::max(glm::abs(probe.boxExtents), glm::vec3(0.01f));
+            probe.radius = std::max(probe.radius, 0.01f);
+            probe.blendDistance = std::max(probe.blendDistance, 0.0f);
+            probe.intensity = std::max(probe.intensity, 0.0f);
+            probe.captureResolution = std::clamp(probe.captureResolution, 16u, 2048u);
+            auto entity = std::find_if(loaded.entities.begin(), loaded.entities.end(),
+                [&](const EntityDesc& candidate) { return candidate.name == entityName; });
+            if (entity == loaded.entities.end()) {
+                probeEntity.name = entityName;
+                probeEntity.reflectionProbeEnabled = true;
+                probeEntity.reflectionProbe = probe;
+                loaded.entities.push_back(std::move(probeEntity));
+            } else {
+                entity->reflectionProbeEnabled = true;
+                entity->reflectionProbe = probe;
+            }
+            continue;
+        }
         if (recordType == "player_controller" && version >= 48) {
             std::string entityName;
             record >> std::quoted(entityName);
@@ -816,6 +868,8 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                    >> desc.light.intensity
                    >> desc.light.direction.x >> desc.light.direction.y >> desc.light.direction.z
                    >> desc.light.innerAngle >> desc.light.outerAngle >> desc.light.range >> desc.light.sourceRadius;
+            if(version>=99){int areaShape=0,areaTwoSided=0;record>>areaShape>>desc.light.areaWidth>>desc.light.areaHeight>>areaTwoSided;
+                desc.light.areaShape=areaShape==1?ecs::Light::AreaShape::Rectangle:ecs::Light::AreaShape::Sphere;desc.light.areaTwoSided=areaTwoSided!=0;}
 
             if (!record || !ParseLightType(typeName, &desc.light.type)) {
                 if (error) {
@@ -1998,6 +2052,9 @@ bool RuntimeSceneLoader::Instantiate(const Scene &scene, ecs::Registry &registry
         }
         if (desc.colliderEnabled) {
             registry.Add<ecs::Collider>(entity, desc.collider);
+        }
+        if (desc.reflectionProbeEnabled) {
+            registry.Add<ecs::ReflectionProbe>(entity, desc.reflectionProbe);
         }
         if (desc.rotatorEnabled) {
             registry.Add<ecs::Rotator>(entity, desc.rotator);

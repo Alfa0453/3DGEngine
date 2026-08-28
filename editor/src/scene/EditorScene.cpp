@@ -479,7 +479,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         return false;
     }
 
-    out << "3DGEditorScene 136 " << m_assetId.ToString() << '\n';
+    out << "3DGEditorScene 138 " << m_assetId.ToString() << '\n';
     out << "environment "
         << m_environment.timeOfDay << ' '
         << m_environment.skyLightIntensity << ' '
@@ -562,7 +562,10 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
     out << "lighting_build " << std::quoted(m_environment.lightingBuildAsset) << ' '
         << m_environment.lightingBuildHash << ' ' << m_environment.lightingBuildQuality << ' '
         << m_environment.lightingProbeSpacing << ' ' << m_environment.lightingRayDistance << ' '
-        << m_environment.lightingIndirectBounceStrength << '\n';
+        << m_environment.lightingIndirectBounceStrength << ' '
+        << (m_environment.lightingIndirectBounceEnabled?1:0) << ' '
+        << m_environment.lightingEmissiveContribution << ' '
+        << m_environment.lightingIndirectSaturation << '\n';
     out << "sky "
         << m_environment.skyMode << ' '
         << StoredPath(m_environment.skyTexturePath) << ' '
@@ -649,6 +652,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
                 << data.intensity << ' '
                 << data.direction.x << ' ' << data.direction.y << ' ' << data.direction.z << ' '
                 << data.innerAngle << ' ' << data.outerAngle << ' ' << data.range << ' ' << data.sourceRadius << ' '
+                << static_cast<int>(data.areaShape) << ' ' << data.areaWidth << ' ' << data.areaHeight << ' ' << (data.areaTwoSided?1:0) << ' '
                 << (object.visible ? 1 : 0) << ' '
                 << (object.locked ? 1 : 0) << '\n';
             continue;
@@ -1092,6 +1096,36 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
                 << object.editorGroupId << '\n';
     }
 
+    // Local reflection captures are separate, versioned component records so the
+    // main object record stays backward compatible as probe authoring evolves.
+    for (Object& object : m_objects) {
+        if (!object.reflectionProbeEnabled) continue;
+        engine::ecs::ReflectionProbe probe = object.reflectionProbe;
+        if (const auto* component =
+                m_registry.TryGet<engine::ecs::ReflectionProbe>(object.entity))
+            probe = *component;
+        if (!probe.stableId.Valid()) {
+            probe.stableId = engine::AssetHandle::Generate();
+            object.reflectionProbe = probe;
+            if (auto* component =
+                    m_registry.TryGet<engine::ecs::ReflectionProbe>(object.entity))
+                *component = probe;
+        }
+        out << "reflection_probe " << std::quoted(object.name) << ' '
+            << probe.stableId.ToString() << ' '
+            << static_cast<int>(probe.shape) << ' '
+            << probe.boxExtents.x << ' ' << probe.boxExtents.y << ' '
+            << probe.boxExtents.z << ' ' << probe.radius << ' '
+            << probe.blendDistance << ' ' << probe.intensity << ' '
+            << probe.priority << ' ' << probe.captureResolution << ' '
+            << probe.includeSky << ' ' << probe.enabled << ' '
+            << std::quoted(probe.bakedCubemapPath.empty()
+                    ? std::string("-") : probe.bakedCubemapPath) << ' '
+            << (probe.bakedCubemapId.Valid()
+                    ? probe.bakedCubemapId.ToString() : std::string("-")) << ' '
+            << probe.captureSourceHash << '\n';
+    }
+
     // AI movement authoring is stored separately so older object records remain
     // readable and the component can grow without destabilizing the main line.
     for (const Object& object : m_objects) {
@@ -1311,6 +1345,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         addDependency(object.particleConfig.shaderAssetId);
         addDependency(object.audioAssetId);
         addDependency(object.navAgentBrainAssetId);
+        addDependency(object.reflectionProbe.bakedCubemapId);
         for (const engine::ParticleEffectLayer& layer :
              object.particleEffectLayers)
             addDependency(layer.assetId);
@@ -1377,7 +1412,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             return false;
         }
     }
-    if (magic != "3DGEditorScene" ||(version < 1 || version > 136)) {
+    if (magic != "3DGEditorScene" ||(version < 1 || version > 138)) {
         if (error) *error = "Scene file has an unknown format.";
         return false;
     }
@@ -1388,6 +1423,41 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
     std::string recordType;
     bool resolvedDuplicateNames = false;
     while (in >> recordType) {
+        if (recordType == "reflection_probe" && version >= 137) {
+            std::string objectName, stableIdText, cubemapPath, cubemapIdText;
+            int shape = 0;
+            engine::ecs::ReflectionProbe probe;
+            in >> std::quoted(objectName) >> stableIdText >> shape
+               >> probe.boxExtents.x >> probe.boxExtents.y >> probe.boxExtents.z
+               >> probe.radius >> probe.blendDistance >> probe.intensity
+               >> probe.priority >> probe.captureResolution
+               >> probe.includeSky >> probe.enabled
+               >> std::quoted(cubemapPath) >> cubemapIdText
+               >> probe.captureSourceHash;
+            probe.shape = shape == 1
+                ? engine::ecs::ReflectionProbe::Shape::Sphere
+                : engine::ecs::ReflectionProbe::Shape::Box;
+            probe.bakedCubemapPath = cubemapPath == "-" ? std::string{} : cubemapPath;
+            if (!engine::AssetHandle::Parse(stableIdText, &probe.stableId)
+                || (cubemapIdText != "-"
+                    && !engine::AssetHandle::Parse(cubemapIdText,
+                                                   &probe.bakedCubemapId))) {
+                if (error) *error = "Scene contains an invalid reflection probe ID.";
+                Clear(); return false;
+            }
+            if (!in) {
+                if (error) *error = "Scene contains invalid reflection probe data.";
+                Clear(); return false;
+            }
+            for (Object& object : m_objects) {
+                if (object.name != objectName) continue;
+                object.reflectionProbeEnabled = true;
+                object.reflectionProbe = probe;
+                m_registry.Add<engine::ecs::ReflectionProbe>(object.entity, probe);
+                break;
+            }
+            continue;
+        }
         if (recordType == "scene_group" && version >= 133) {
             SceneGroup group;
             int expanded = 1;
@@ -1474,6 +1544,9 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                >> m_environment.lightingProbeSpacing
                >> m_environment.lightingRayDistance;
             if (version >= 136) in >> m_environment.lightingIndirectBounceStrength;
+            if (version >= 138) in >> m_environment.lightingIndirectBounceEnabled
+                                   >> m_environment.lightingEmissiveContribution
+                                   >> m_environment.lightingIndirectSaturation;
             if (!in) { if (error) *error = "Scene file contains invalid lighting build settings."; Clear(); return false; }
             continue;
         }
@@ -1841,8 +1914,10 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                >> light.color.r >> light.color.g >> light.color.b
                >> light.intensity
                >> light.direction.x >> light.direction.y >> light.direction.z
-               >> light.innerAngle >> light.outerAngle >> light.range >> light.sourceRadius
-               >> visible >> locked;
+               >> light.innerAngle >> light.outerAngle >> light.range >> light.sourceRadius;
+            if(version>=138){int areaShape=0,areaTwoSided=0;in>>areaShape>>light.areaWidth>>light.areaHeight>>areaTwoSided;
+                light.areaShape=areaShape==1?Light::AreaShape::Rectangle:Light::AreaShape::Sphere;light.areaTwoSided=areaTwoSided!=0;}
+            in>>visible>>locked;
 
             if (!in || !ParseLightType(lightTypeName, &light.type)) {
                 if (error) *error = "Scene file contains an invalid light record.";
@@ -3675,6 +3750,28 @@ const engine::ecs::MeshRenderer *EditorScene::TryGetMeshRenderer(engine::ecs::En
 const engine::ecs::Light* EditorScene::TryGetLight(engine::ecs::Entity entity) const
 {
     return const_cast<engine::ecs::Registry&>(m_registry).TryGet<Light>(entity);
+}
+
+const engine::ecs::ReflectionProbe* EditorScene::TryGetReflectionProbe(
+    engine::ecs::Entity entity) const
+{
+    return const_cast<engine::ecs::Registry&>(m_registry)
+        .TryGet<engine::ecs::ReflectionProbe>(entity);
+}
+
+bool EditorScene::SetSelectedReflectionProbe(bool enabled,const engine::ecs::ReflectionProbe& input){
+    if(m_selectedIndex<0||m_selectedIndex>=static_cast<int>(m_objects.size()))return false;
+    Object& selected=m_objects[static_cast<std::size_t>(m_selectedIndex)];if(selected.locked)return false;
+    PushUndoSnapshot();engine::ecs::ReflectionProbe probe=input;
+    if(!probe.stableId.Valid())probe.stableId=engine::AssetHandle::Generate();
+    probe.boxExtents=glm::max(probe.boxExtents,glm::vec3(0.01f));probe.radius=std::max(probe.radius,0.01f);
+    probe.blendDistance=std::max(probe.blendDistance,0.001f);probe.intensity=std::max(probe.intensity,0.0f);
+    probe.captureResolution=static_cast<std::uint32_t>(std::clamp<int>(static_cast<int>(probe.captureResolution),32,512));
+    probe.enabled=enabled&&probe.enabled;selected.reflectionProbeEnabled=enabled;selected.reflectionProbe=probe;
+    if(enabled){if(auto* component=m_registry.TryGet<engine::ecs::ReflectionProbe>(selected.entity))*component=probe;
+        else m_registry.Add<engine::ecs::ReflectionProbe>(selected.entity,probe);}
+    else m_registry.Remove<engine::ecs::ReflectionProbe>(selected.entity);
+    m_dirty=true;return true;
 }
 
 bool EditorScene::IsVisible(engine::ecs::Entity entity) const
@@ -6850,6 +6947,16 @@ bool EditorScene::DuplicateSelected(const engine::Mesh & cube, const engine::Mes
     m_objects.back().animationTransitions = selectedCopy.animationTransitions;
     m_objects.back().light = selectedCopy.light;
     m_objects.back().navMeshBoundsVolume = selectedCopy.navMeshBoundsVolume;
+    m_objects.back().reflectionProbeEnabled = selectedCopy.reflectionProbeEnabled;
+    m_objects.back().reflectionProbe = selectedCopy.reflectionProbe;
+    if (selectedCopy.reflectionProbeEnabled) {
+        // A duplicate is a different authored capture even if it initially reuses
+        // the same baked texture. Its dirty state is evaluated independently.
+        m_objects.back().reflectionProbe.stableId = engine::AssetHandle::Generate();
+        m_objects.back().reflectionProbe.captureSourceHash = 0;
+        m_registry.Add<engine::ecs::ReflectionProbe>(
+            m_objects.back().entity, m_objects.back().reflectionProbe);
+    }
     m_objects.back().lightData = selectedCopy.lightData;
     if (selectedCopy.light) {
         m_registry.Add<Light>(m_objects.back().entity, selectedCopy.lightData);
@@ -7117,6 +7224,10 @@ void EditorScene::RestoreSnapshot(const Snapshot & snapshot, const engine::Mesh 
         // survive, but TryGetLight() returns null and edit-mode lighting goes dark.
         if (object.light) {
             m_registry.Add<Light>(entity, object.lightData);
+        }
+        if (object.reflectionProbeEnabled) {
+            m_registry.Add<engine::ecs::ReflectionProbe>(
+                entity, object.reflectionProbe);
         }
         m_objects.push_back(object);
         if (m_objects.back().isSpline) SyncSplineComponent(m_objects.back());

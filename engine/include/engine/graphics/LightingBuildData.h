@@ -22,6 +22,24 @@ struct LightingBuildSettings {
     std::uint32_t raysPerProbe = 96;
     bool directionalIrradiance = true;
     float indirectBounceStrength = 0.0f;
+    bool indirectBounceEnabled = true;
+    float emissiveContribution = 1.0f;
+    float indirectSaturation = 1.0f;
+};
+
+struct LightingBuildLight {
+    enum class Type : std::uint32_t { Directional, Point, Spot, Rectangle };
+    Type type = Type::Directional;
+    glm::vec3 position{0.0f};
+    glm::vec3 direction{0.0f, -1.0f, 0.0f};
+    glm::vec3 color{1.0f};
+    float range = 20.0f;
+    float innerCos = 0.9f;
+    float outerCos = 0.75f;
+    glm::vec2 halfSize{0.5f};
+    glm::vec3 right{1.0f,0.0f,0.0f};
+    glm::vec3 up{0.0f,1.0f,0.0f};
+    bool twoSided = false;
 };
 
 struct LightingTriangle {
@@ -50,6 +68,8 @@ struct LightingProbe {
                                            glm::vec3(0.0f), glm::vec3(0.0f)}};
     float skyVisibility = 1.0f;
     bool valid = true;
+    std::array<glm::vec3, 4> bounceSH{};
+    std::array<glm::vec3, 4> emissiveSH{};
 };
 
 // Compact directional environment used by the offline probe builder. It is
@@ -65,7 +85,7 @@ struct DirectionalSkyRadiance {
 };
 
 struct LightingBuildData {
-    static constexpr std::uint32_t kVersion = 2;
+    static constexpr std::uint32_t kVersion = 3;
     std::uint32_t version = kVersion;
     std::uint64_t sourceHash = 0;
     std::string sourceScene;
@@ -80,15 +100,31 @@ struct LightingBuildData {
 };
 
 struct LightingBuildProgress {
+    enum class Phase : std::uint32_t {
+        PreparingGeometry, BuildingAcceleration, IrradianceProbes,
+        IndirectBounce, CapturingReflectionProbes, FilteringReflectionProbes,
+        SavingBuildData, Complete
+    };
     std::atomic<std::uint32_t> completed{0};
     std::atomic<std::uint32_t> total{0};
     std::atomic<bool> cancel{false};
+    std::atomic<Phase> phase{Phase::PreparingGeometry};
+    std::atomic<std::uint64_t> raysCast{0};
 };
 
 std::uint64_t HashLightingGeometry(const std::vector<LightingTriangle>& triangles,
                                    const LightingBuildSettings& settings);
 bool BuildLightingProbes(const std::vector<LightingTriangle>& triangles,
                          const glm::vec3& skyColor,
+                         std::uint64_t sourceHash,
+                         const std::string& sourceScene,
+                         const LightingBuildSettings& settings,
+                         LightingBuildData* output,
+                         LightingBuildProgress* progress = nullptr,
+                         std::string* error = nullptr);
+bool BuildLightingProbes(const std::vector<LightingTriangle>& triangles,
+                         const std::vector<LightingBuildLight>& staticLights,
+                         const DirectionalSkyRadiance& sky,
                          std::uint64_t sourceHash,
                          const std::string& sourceScene,
                          const LightingBuildSettings& settings,
@@ -113,6 +149,7 @@ bool LoadLightingBuildData(const std::string& path, LightingBuildData* data,
 // valid neighbours and GLSL can renormalize by the filtered validity channel.
 class LightingProbeGrid {
 public:
+    enum class Contribution { Combined, DirectEnvironment, Bounce, Emissive };
     LightingProbeGrid() = default;
     ~LightingProbeGrid();
     LightingProbeGrid(const LightingProbeGrid&) = delete;
@@ -122,14 +159,21 @@ public:
 
     bool Upload(const LightingBuildData& data, std::string* error = nullptr);
     void Reset();
-    void Bind(unsigned int textureUnit) const;
+    void Bind(unsigned int textureUnit, Contribution contribution = Contribution::Combined) const;
     bool Valid() const { return m_textures[0] != 0; }
     const glm::vec3& BoundsMin() const { return m_boundsMin; }
     const glm::vec3& BoundsMax() const { return m_boundsMax; }
+    std::size_t ProbeCount() const { return m_probeCount; }
+    std::uint64_t MemoryBytes() const { return m_memoryBytes; }
 
 private:
-    std::array<unsigned int, 4> m_textures{{0, 0, 0, 0}};
+    // Combined SH (0..2), metadata (3), bounce (4..6), emissive (7..9),
+    // direct environment (10..12). Debug contributions reuse the normal four
+    // sampler slots rather than increasing fragment texture-unit pressure.
+    std::array<unsigned int, 13> m_textures{};
     glm::vec3 m_boundsMin{0.0f}, m_boundsMax{0.0f};
+    std::size_t m_probeCount = 0;
+    std::uint64_t m_memoryBytes = 0;
 };
 
 } // namespace engine

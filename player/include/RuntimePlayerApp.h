@@ -15,6 +15,7 @@
 #include <engine/graphics/PostProcess.h>
 #include <engine/graphics/DayNightCycle.h>
 #include <engine/graphics/IBL.h>
+#include <engine/graphics/ReflectionProbeSystem.h>
 #include <engine/graphics/ParticleRenderer.h>
 #include <engine/graphics/RuntimeParticleSystem.h>
 #include <engine/graphics/CameraSequence.h>
@@ -129,6 +130,7 @@ private:
     std::optional<engine::PostProcess>   m_post;
     std::optional<engine::TextRenderer>  m_text;
     std::optional<engine::IBL>           m_ibl;
+    engine::ReflectionProbeSystem        m_reflectionProbes;
     std::optional<engine::ParticleRenderer> m_particleRenderer;
 
     engine::AudioEngine        m_audio;

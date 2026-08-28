@@ -100,7 +100,7 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         return engine::MakeAssetReference(
             &assetRegistry, contentRoot, assetPath, type).id;
     };
-    out << "3DGRuntimeScene 97 " << sceneId.ToString() << '\n';
+    out << "3DGRuntimeScene 99 " << sceneId.ToString() << '\n';
     out << "# Runtime export from 3DGEditor. Editor-only flags are omitted.\n";
     const EditorScene::Environment& environment = scene.GetEnvironment();
     out << "environment "
@@ -379,7 +379,8 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
                 << data.color.r << ' ' << data.color.g << ' ' << data.color.b << ' '
                 << data.intensity << ' '
                 << data.direction.x << ' ' << data.direction.y << ' ' << data.direction.z << ' '
-                << data.innerAngle << ' ' << data.outerAngle << ' ' << data.range << ' ' << data.sourceRadius << '\n';
+                << data.innerAngle << ' ' << data.outerAngle << ' ' << data.range << ' ' << data.sourceRadius << ' '
+                << static_cast<int>(data.areaShape) << ' ' << data.areaWidth << ' ' << data.areaHeight << ' ' << (data.areaTwoSided?1:0) << '\n';
             continue;
         }
 
@@ -753,6 +754,35 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         out << '\n';
     }
 
+    // Reflection probes carry their own transform so an invisible/empty probe
+    // authoring object is still present in packaged scenes.
+    for (const EditorScene::Object& object : scene.Objects()) {
+        if (!object.visible || !object.reflectionProbeEnabled) continue;
+        const Transform* transform = scene.TryGetTransform(object.entity);
+        if (!transform) continue;
+        const engine::ecs::ReflectionProbe* component =
+            scene.TryGetReflectionProbe(object.entity);
+        const engine::ecs::ReflectionProbe& probe = component
+            ? *component : object.reflectionProbe;
+        out << "reflection_probe " << std::quoted(object.name) << ' '
+            << (probe.stableId.Valid() ? probe.stableId.ToString() : std::string("-")) << ' '
+            << static_cast<int>(probe.shape) << ' '
+            << transform->position.x << ' ' << transform->position.y << ' '
+            << transform->position.z << ' '
+            << transform->rotation.w << ' ' << transform->rotation.x << ' '
+            << transform->rotation.y << ' ' << transform->rotation.z << ' '
+            << probe.boxExtents.x << ' ' << probe.boxExtents.y << ' '
+            << probe.boxExtents.z << ' ' << probe.radius << ' '
+            << probe.blendDistance << ' ' << probe.intensity << ' '
+            << probe.priority << ' ' << probe.captureResolution << ' '
+            << probe.includeSky << ' ' << probe.enabled << ' '
+            << std::quoted(probe.bakedCubemapPath.empty()
+                    ? std::string("-") : probe.bakedCubemapPath) << ' '
+            << (probe.bakedCubemapId.Valid()
+                    ? probe.bakedCubemapId.ToString() : std::string("-")) << ' '
+            << probe.captureSourceHash << '\n';
+    }
+
     // Player-controller settings (name-matched, like material_overrides). The
     // standalone runtime player reads these to spawn a first/third-person player.
     for (const EditorScene::Object& object : scene.Objects()) {
@@ -901,6 +931,7 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
             object.collider.collisionAssetPath, {},
             engine::AssetType::StaticMesh));
         addDependency(object.materialAssetId);
+        addDependency(object.reflectionProbe.bakedCubemapId);
         addDependency(assetIdFor(
             object.audioAssetPath, object.audioAssetId,
             engine::AssetType::Audio));

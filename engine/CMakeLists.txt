@@ -42,6 +42,8 @@ add_library(engine STATIC
     src/graphics/PointShadow.cpp
     src/graphics/SpotShadow.cpp
     src/graphics/IBL.cpp
+    src/graphics/ReflectionProbeSystem.cpp
+    src/graphics/LtcLut.cpp
     src/graphics/SSAO.cpp
     src/graphics/SSR.cpp
     src/graphics/Terrain.cpp

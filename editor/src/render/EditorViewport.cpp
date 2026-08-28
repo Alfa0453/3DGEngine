@@ -946,6 +946,15 @@ void EditorViewport::DrawSceneGizmo(engine::Renderer& renderer,
 
     if (m_gizmoLines && gizmo.CurrentMode() != EditorGizmo::Mode::Rotate) {
         m_gizmoLines->Clear();
+        if(const auto* probe=scene.TryGetReflectionProbe(selected->entity)){
+            const glm::vec3 probeColor=!probe->HasCapture()?glm::vec3(1.0f,0.55f,0.1f):glm::vec3(0.2f,0.75f,1.0f);
+            if(probe->shape==engine::ecs::ReflectionProbe::Shape::Box){const glm::vec3 e=probe->boxExtents*glm::abs(selectedTransform->scale);
+                glm::vec3 corners[8];for(int i=0;i<8;++i)corners[i]=center+glm::vec3((i&1)?e.x:-e.x,(i&2)?e.y:-e.y,(i&4)?e.z:-e.z);
+                const int edges[12][2]={{0,1},{0,2},{0,4},{1,3},{1,5},{2,3},{2,6},{3,7},{4,5},{4,6},{5,7},{6,7}};
+                for(const auto& edge:edges)m_gizmoLines->AddLine(corners[edge[0]],corners[edge[1]],probeColor);}
+            else{const int segments=48;for(int axis=0;axis<3;++axis)for(int i=0;i<segments;++i){const float a=float(i)*6.28318530718f/segments,b=float(i+1)*6.28318530718f/segments;glm::vec3 p0(0),p1(0);
+                    if(axis==0){p0=glm::vec3(0,std::cos(a),std::sin(a));p1=glm::vec3(0,std::cos(b),std::sin(b));}else if(axis==1){p0=glm::vec3(std::cos(a),0,std::sin(a));p1=glm::vec3(std::cos(b),0,std::sin(b));}else{p0=glm::vec3(std::cos(a),std::sin(a),0);p1=glm::vec3(std::cos(b),std::sin(b),0);}m_gizmoLines->AddLine(center+p0*probe->radius,center+p1*probe->radius,probeColor);}}
+        }
         m_gizmoLines->AddLine(center, center + localX * length, xColor);
         m_gizmoLines->AddLine(center, center + localY * length, yColor);
         m_gizmoLines->AddLine(center, center + localZ * length, zColor);

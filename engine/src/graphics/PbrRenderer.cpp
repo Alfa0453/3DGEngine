@@ -8,6 +8,8 @@
 #include "engine/ecs/Components.h"
 #include "engine/graphics/IBL.h"
 #include "engine/graphics/SSAO.h"
+#include "engine/graphics/ReflectionProbeSystem.h"
+#include "engine/graphics/LtcLut.h"
 #include "engine/graphics/CascadedShadow.h"
 #include "engine/graphics/DirectionalShadowShader.h"
 #include "engine/graphics/PbrLightingCommon.h"
@@ -187,6 +189,9 @@ uniform int   uNumAreas;
 uniform vec3  uAreaPos[MAX_AREAS];
 uniform vec3  uAreaColor[MAX_AREAS];
 uniform float uAreaRadius[MAX_AREAS];
+uniform vec3 uAreaRight[MAX_AREAS],uAreaUp[MAX_AREAS];
+uniform vec2 uAreaHalfSize[MAX_AREAS];
+uniform int uAreaShape[MAX_AREAS],uAreaTwoSided[MAX_AREAS];
 uniform sampler2DArray uCascadeMaps;
 uniform mat4  uCascadeVP[4];
 uniform float uCascadeSplits[4];
@@ -206,6 +211,10 @@ uniform sampler2D uBrdfLUT;
 uniform float uMaxReflectionLod;
 uniform int   uUseSSAO;
 uniform sampler2D uSsaoMap;
+uniform sampler2D uRawGtaoMap;
+uniform sampler2D uBentNormalMap;
+uniform int uUseBentNormal;
+uniform mat4 uViewToWorld;
 uniform vec2  uScreenSize;
 uniform int   uFogEnabled;
 uniform vec3  uFogColor;
@@ -437,11 +446,18 @@ void main() {
         if (i < uNumSpotShadows) contribution *= (1.0 - SpotShadowFactor(i, vWorldPos));
         Lo += contribution;
     }
-    for (int i = 0; i < min(uNumAreas, MAX_AREAS); ++i)
-        Lo += AreaLight(N, V, uAreaPos[i] - vWorldPos, uAreaRadius[i], uAreaColor[i],
-                        albedo, F0, metallic, roughness);
+    for (int i = 0; i < min(uNumAreas, MAX_AREAS); ++i){
+        if(uAreaShape[i]==1)Lo+=LtcRectangleLight(N,V,vWorldPos,uAreaPos[i],uAreaRight[i],uAreaUp[i],uAreaHalfSize[i],uAreaTwoSided[i],uAreaColor[i],albedo,F0,metallic,roughness);
+        else Lo += AreaLight(N, V, uAreaPos[i] - vWorldPos, uAreaRadius[i], uAreaColor[i],albedo, F0, metallic, roughness);}
     vec3 ambient;
-    LocalProbeSample localProbe = SampleLocalProbe(vWorldPos, N);
+    vec2 ambientUv = gl_FragCoord.xy / uScreenSize;
+    vec3 indirectN = N;
+    if (uUseBentNormal == 1) {
+        vec3 bentView = normalize(texture(uBentNormalMap, ambientUv).xyz);
+        vec3 bentWorld = normalize(mat3(uViewToWorld) * bentView);
+        if (dot(bentWorld, bentWorld) > 0.5) indirectN = normalize(mix(N, bentWorld, 0.75));
+    }
+    LocalProbeSample localProbe = SampleLocalProbe(vWorldPos, indirectN);
     float skyVisibility = max(localProbe.skyVisibility, clamp(uMinimumSkylight, 0.0, 1.0));
     float screenAo = (uUseSSAO == 1) ? texture(uSsaoMap, gl_FragCoord.xy / uScreenSize).r : 1.0;
     vec3 diffuseIndirect = vec3(0.0);
@@ -450,12 +466,14 @@ void main() {
     if (uUseIBL == 1) {
         vec3 F = FresnelSchlickRough(max(dot(N,V),0.0), F0, roughness);
         vec3 kD = (vec3(1.0)-F)*(1.0-metallic);
-        vec3 irradiance = texture(uIrradiance, N).rgb;
+        vec3 irradiance = texture(uIrradiance, indirectN).rgb;
         irradiance = mix(irradiance, localProbe.irradiance,
                          localProbe.validity * clamp(uLocalProbeInfluence, 0.0, 1.0));
         vec3 diffuse = irradiance * albedo;
         vec3 R = reflect(-V, N);
-        vec3 prefiltered = textureLod(uPrefilter, R, roughness*uMaxReflectionLod).rgb;
+        vec3 globalPrefiltered = textureLod(uPrefilter, R, roughness*uMaxReflectionLod).rgb;
+        float reflectionProbeWeight=0.0;
+        vec3 prefiltered = SampleReflectionEnvironment(vWorldPos,R,roughness,globalPrefiltered,reflectionProbeWeight);
         vec2 brdf = texture(uBrdfLUT, vec2(max(dot(N,V),0.0), roughness)).rg;
         vec3 specular = prefiltered * (F*brdf.x + brdf.y);
         specularOcclusion = PbrSpecularOcclusion(ao * screenAo, max(dot(N,V),0.0), roughness, skyVisibility);
@@ -502,6 +520,17 @@ void main() {
     else if (uLightingDebugMode == 6) color = vec3(ao * screenAo);
     else if (uLightingDebugMode == 7) color = vec3(specularOcclusion);
     else if (uLightingDebugMode == 8) color = vec3(localProbe.validity);
+    else if (uLightingDebugMode == 9) color = indirectN * 0.5 + 0.5;
+    else if (uLightingDebugMode == 10) color = vec3(texture(uRawGtaoMap, ambientUv).r);
+    else if (uLightingDebugMode == 11) color = vec3(screenAo);
+    else if (uLightingDebugMode == 12) {
+        float reflectionWeight = 0.0;
+        if (uReflectionProbeCount > 0) reflectionWeight += ReflectionProbeWeight(0, vWorldPos);
+        if (uReflectionProbeCount > 1) reflectionWeight += ReflectionProbeWeight(1, vWorldPos);
+        color = vec3(clamp(reflectionWeight, 0.0, 1.0));
+    }
+    else if (uLightingDebugMode >= 13 && uLightingDebugMode <= 15)
+        color = localProbe.irradiance;
 
     if (uFogEnabled == 1 && uLightingDebugMode == 0) {
         float dist = length(uViewPos - vWorldPos);
@@ -526,7 +555,8 @@ PbrRenderer::PbrRenderer(int shadowSize)
     : m_cascade(shadowSize),
       m_pointShadow(512),
       m_spotShadow(1024),
-      m_pbr(std::make_unique<Shader>(kPbrVert, ComposeDirectionalShadowShader(ComposePbrLightingShader(kPbrFrag).c_str()))) {
+      m_pbr(std::make_unique<Shader>(kPbrVert, ComposeDirectionalShadowShader(ComposePbrLightingShader(kPbrFrag).c_str()))),
+      m_ltcLut(std::make_unique<LtcLut>()) {
     const unsigned int blk = glGetUniformBlockIndex(m_pbr->ID(), "LightBlock");
     if (blk != GL_INVALID_INDEX) glUniformBlockBinding(m_pbr->ID(), blk, 0);
     glGenBuffers(1, &m_instanceVBO);
@@ -561,9 +591,10 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
     auto& areaPos = m_areaPositions;
     auto& areaCol = m_areaColors;
     auto& areaRad = m_areaRadii;
+    auto& areaRight=m_areaRights;auto& areaUp=m_areaUps;auto& areaHalf=m_areaHalfSizes;auto& areaShape=m_areaShapes;auto& areaTwoSided=m_areaTwoSided;
     auto& spotList = m_spotShadowLights;
     ppos.clear(); clusterLights.clear(); spotPos.clear(); spotDir.clear(); spotCol.clear();
-    spotCosIn.clear(); spotCosOut.clear(); spotRanges.clear(); areaPos.clear(); areaCol.clear(); areaRad.clear(); spotList.clear();
+    spotCosIn.clear(); spotCosOut.clear(); spotRanges.clear(); areaPos.clear(); areaCol.clear(); areaRad.clear();areaRight.clear();areaUp.clear();areaHalf.clear();areaShape.clear();areaTwoSided.clear(); spotList.clear();
     auto lightView = reg.view<Transform, Light>();
     if (!lightView.empty()) lightView.each([&](Entity, Transform& t, Light& l) {
         const glm::vec3 c = l.color * l.intensity;
@@ -596,6 +627,9 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
             areaPos.push_back(t.position);
             areaCol.push_back(c);
             areaRad.push_back(l.sourceRadius);
+            areaRight.push_back(glm::normalize(t.rotation*glm::vec3(1,0,0)));areaUp.push_back(glm::normalize(t.rotation*glm::vec3(0,1,0)));
+            areaHalf.push_back(glm::vec2(std::max(l.areaWidth,0.01f),std::max(l.areaHeight,0.01f))*0.5f);
+            areaShape.push_back(l.areaShape==Light::AreaShape::Rectangle?1:0);areaTwoSided.push_back(l.areaTwoSided?1:0);
         }
     });
 
@@ -630,6 +664,19 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
     m_pbr->SetVec3("uSunColor", sunColor);
     m_pbr->SetVec3("uAmbient", opt.ambient);
     m_pbr->SetInt("uApplyTonemap", opt.tonemap ? 1 : 0);
+    // Stable sampler layout. Optional samplers must also receive unique units:
+    // their uniforms remain active in the linked program even when the feature
+    // flag is off, and mixed sampler types may not alias the default unit 0.
+    m_pbr->SetInt("uLightingSH0", 18);
+    m_pbr->SetInt("uLightingSH1", 19);
+    m_pbr->SetInt("uLightingSH2", 20);
+    m_pbr->SetInt("uLightingMeta", 21);
+    m_pbr->SetInt("uLocalReflection0", 22);
+    m_pbr->SetInt("uLocalReflection1", 23);
+    m_pbr->SetInt("uLtcMatrixLut", 24);
+    m_pbr->SetInt("uLtcAmplitudeLut", 25);
+    m_pbr->SetInt("uBentNormalMap", 26);
+    m_pbr->SetInt("uRawGtaoMap", 27);
     m_clustered.BindLightUBO(0);
     m_clustered.BindTileBuffer(3);
     m_pbr->SetInt("uTileLights", 3);
@@ -659,13 +706,21 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
     } else {
         m_pbr->SetInt("uUseIBL", 0);
     }
+    if(opt.reflectionProbes){opt.reflectionProbes->Sync(reg);opt.reflectionProbes->BindBest(*m_pbr,camera.Position(),22);}
+    else m_pbr->SetInt("uReflectionProbeCount",0);
     if (opt.ssao) {
         opt.ssao->BindAO(8);
+        GLint textureUnits=0;glGetIntegerv(GL_MAX_TEXTURE_IMAGE_UNITS,&textureUnits);
+        if(textureUnits>26)opt.ssao->BindBentNormal(26);
+        if(textureUnits>27)opt.ssao->BindRawAO(27);
         m_pbr->SetInt("uUseSSAO", 1);
         m_pbr->SetInt("uSsaoMap", 8);
+        m_pbr->SetInt("uUseBentNormal", textureUnits>26?1:0);
+        m_pbr->SetMat4("uViewToWorld", glm::inverse(camera.ViewMatrix()));
         m_pbr->SetVec2("uScreenSize", glm::vec2(screenWidth, screenHeight));
     } else {
         m_pbr->SetInt("uUseSSAO", 0);
+        m_pbr->SetInt("uUseBentNormal", 0);
     }
     m_pointShadow.BindCubes(9);
     m_pbr->SetInt("uNumPointShadows", numPointShadows);
@@ -698,6 +753,9 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
     m_pbr->SetInt("uSpotMap[1]", 14);
     m_pbr->SetInt("uSpotMap[2]", 15);
     m_pbr->SetInt("uSpotMap[3]", 16);
+    GLint fragmentTextureUnits=0;
+    glGetIntegerv(GL_MAX_TEXTURE_IMAGE_UNITS,&fragmentTextureUnits);
+    const bool ltcAvailable=fragmentTextureUnits>25;
     m_pbr->SetInt("uNumAreas", static_cast<int>(areaPos.size()));
     static constexpr const char* kAreaPosNames[] = {"uAreaPos[0]", "uAreaPos[1]", "uAreaPos[2]", "uAreaPos[3]"};
     static constexpr const char* kAreaColorNames[] = {"uAreaColor[0]", "uAreaColor[1]", "uAreaColor[2]", "uAreaColor[3]"};
@@ -706,7 +764,10 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
         m_pbr->SetVec3(kAreaPosNames[i], areaPos[i]);
         m_pbr->SetVec3(kAreaColorNames[i], areaCol[i]);
         m_pbr->SetFloat(kAreaRadiusNames[i], areaRad[i]);
+        const std::string index="["+std::to_string(i)+"]";m_pbr->SetVec3("uAreaRight"+index,areaRight[i]);m_pbr->SetVec3("uAreaUp"+index,areaUp[i]);
+        m_pbr->SetVec2("uAreaHalfSize"+index,areaHalf[i]);m_pbr->SetInt("uAreaShape"+index,ltcAvailable?areaShape[i]:0);m_pbr->SetInt("uAreaTwoSided"+index,areaTwoSided[i]);
     }
+    if(ltcAvailable)m_ltcLut->Bind(24,25);
     m_pbr->SetInt("uFogEnabled", opt.fog ? 1 : 0);
     m_pbr->SetVec3("uFogColor", opt.fogColor);
     m_pbr->SetFloat("uFogDensity", opt.fogDensity);
@@ -720,9 +781,11 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
     m_pbr->SetInt("uLightingDebugMode", opt.lightingDebugMode);
     m_pbr->SetInt("uUseLightingGrid", opt.lightingGrid && opt.lightingGrid->Valid() ? 1 : 0);
     if (opt.lightingGrid && opt.lightingGrid->Valid()) {
-        opt.lightingGrid->Bind(17);
-        m_pbr->SetInt("uLightingSH0", 17); m_pbr->SetInt("uLightingSH1", 18);
-        m_pbr->SetInt("uLightingSH2", 19); m_pbr->SetInt("uLightingMeta", 20);
+        engine::LightingProbeGrid::Contribution contribution=engine::LightingProbeGrid::Contribution::Combined;
+        if(opt.lightingDebugMode==13)contribution=engine::LightingProbeGrid::Contribution::DirectEnvironment;
+        else if(opt.lightingDebugMode==14)contribution=engine::LightingProbeGrid::Contribution::Bounce;
+        else if(opt.lightingDebugMode==15)contribution=engine::LightingProbeGrid::Contribution::Emissive;
+        opt.lightingGrid->Bind(18,contribution);
         m_pbr->SetVec3("uLightingGridMin", opt.lightingGrid->BoundsMin());
         m_pbr->SetVec3("uLightingGridMax", opt.lightingGrid->BoundsMax());
     }

@@ -11,6 +11,8 @@
 #include "engine/graphics/LightingBuildData.h"
 #include "engine/graphics/IBL.h"
 #include "engine/graphics/SSAO.h"
+#include "engine/graphics/ReflectionProbeSystem.h"
+#include "engine/graphics/LtcLut.h"
 #include "engine/animation/AnimatedModel.h"
 #include "engine/ecs/Registry.h"
 #include "engine/ecs/Components.h"
@@ -136,6 +138,9 @@ uniform float uSpotCosInner[MAX_SPOTS], uSpotCosOuter[MAX_SPOTS], uSpotRange[MAX
 uniform int uNumAreas;
 uniform vec3 uAreaPos[MAX_AREAS], uAreaColor[MAX_AREAS];
 uniform float uAreaRadius[MAX_AREAS];
+uniform vec3 uAreaRight[MAX_AREAS],uAreaUp[MAX_AREAS];
+uniform vec2 uAreaHalfSize[MAX_AREAS];
+uniform int uAreaShape[MAX_AREAS],uAreaTwoSided[MAX_AREAS];
 uniform sampler2DArray uCascadeMaps;
 uniform mat4  uCascadeVP[4];
 uniform float uCascadeSplits[4];
@@ -162,6 +167,10 @@ uniform vec3 uLightingGridMin, uLightingGridMax;
 //__PBR_LIGHTING_COMMON__
 uniform int uUseSSAO;
 uniform sampler2D uSsaoMap;
+uniform sampler2D uRawGtaoMap;
+uniform sampler2D uBentNormalMap;
+uniform int uUseBentNormal;
+uniform mat4 uViewToWorld;
 uniform vec2 uScreenSize;
 uniform int uCloudShadows;
 uniform float uCloudShadowStrength, uCloudShadowScale;
@@ -228,10 +237,16 @@ void main() {
         float cone=smoothstep(uSpotCosOuter[i],uSpotCosInner[i],dot(normalize(-uSpotDir[i]),L));
         Lo += Lighting(N,V,L,uSpotColor[i]*SmoothFiniteAttenuation(distanceSquared,uSpotRange[i])*cone,albedo,F0,metallic,roughness);
     }
-    for (int i=0; i<min(uNumAreas,MAX_AREAS); ++i)
-        Lo += SphereAreaLight(N,V,uAreaPos[i]-vWorldPos,uAreaRadius[i],uAreaColor[i],albedo,F0,metallic,roughness);
+    for (int i=0; i<min(uNumAreas,MAX_AREAS); ++i){if(uAreaShape[i]==1)
+        Lo+=LtcRectangleLight(N,V,vWorldPos,uAreaPos[i],uAreaRight[i],uAreaUp[i],uAreaHalfSize[i],uAreaTwoSided[i],uAreaColor[i],albedo,F0,metallic,roughness);
+        else Lo += SphereAreaLight(N,V,uAreaPos[i]-vWorldPos,uAreaRadius[i],uAreaColor[i],albedo,F0,metallic,roughness);}
     vec3 ambient;
-    LocalProbeSample localProbe=SampleLocalProbe(vWorldPos,N);
+    vec2 ambientUv=gl_FragCoord.xy/uScreenSize;
+    vec3 indirectN=N;
+    if(uUseBentNormal==1){vec3 bentView=normalize(texture(uBentNormalMap,ambientUv).xyz);
+        vec3 bentWorld=normalize(mat3(uViewToWorld)*bentView);
+        if(dot(bentWorld,bentWorld)>0.5)indirectN=normalize(mix(N,bentWorld,0.75));}
+    LocalProbeSample localProbe=SampleLocalProbe(vWorldPos,indirectN);
     float skyVisibility=max(localProbe.skyVisibility,clamp(uMinimumSkylight,0.0,1.0));
     float screenAo=(uUseSSAO==1)?texture(uSsaoMap,gl_FragCoord.xy/uScreenSize).r:1.0;
     vec3 diffuseIndirect=vec3(0.0),specularIndirect=vec3(0.0);
@@ -239,11 +254,13 @@ void main() {
     if (uUseIBL == 1) {
         vec3 F = FresnelSchlickRough(max(dot(N,V),0.0), F0, roughness);
         vec3 kD = (vec3(1.0)-F)*(1.0-metallic);
-        vec3 irradiance = texture(uIrradiance, N).rgb;
+        vec3 irradiance = texture(uIrradiance, indirectN).rgb;
         irradiance=mix(irradiance,localProbe.irradiance,localProbe.validity*clamp(uLocalProbeInfluence,0.0,1.0));
         vec3 diffuse = irradiance * albedo;
         vec3 R = reflect(-V, N);
-        vec3 prefiltered = textureLod(uPrefilter, R, roughness*uMaxReflectionLod).rgb;
+        vec3 globalPrefiltered=textureLod(uPrefilter,R,roughness*uMaxReflectionLod).rgb;
+        float reflectionProbeWeight=0.0;
+        vec3 prefiltered=SampleReflectionEnvironment(vWorldPos,R,roughness,globalPrefiltered,reflectionProbeWeight);
         vec2 brdf = texture(uBrdfLUT, vec2(max(dot(N,V),0.0), roughness)).rg;
         vec3 specular = prefiltered * (F*brdf.x + brdf.y);
         specularOcclusion=PbrSpecularOcclusion(ao*screenAo,max(dot(N,V),0.0),roughness,skyVisibility);
@@ -270,6 +287,14 @@ void main() {
     else if(uLightingDebugMode==6)color=vec3(ao*screenAo);
     else if(uLightingDebugMode==7)color=vec3(specularOcclusion);
     else if(uLightingDebugMode==8)color=vec3(localProbe.validity);
+    else if(uLightingDebugMode==9)color=indirectN*0.5+0.5;
+    else if(uLightingDebugMode==10)color=vec3(texture(uRawGtaoMap,ambientUv).r);
+    else if(uLightingDebugMode==11)color=vec3(screenAo);
+    else if(uLightingDebugMode==12){float reflectionWeight=0.0;
+        if(uReflectionProbeCount>0)reflectionWeight+=ReflectionProbeWeight(0,vWorldPos);
+        if(uReflectionProbeCount>1)reflectionWeight+=ReflectionProbeWeight(1,vWorldPos);
+        color=vec3(clamp(reflectionWeight,0.0,1.0));}
+    else if(uLightingDebugMode>=13&&uLightingDebugMode<=15)color=localProbe.irradiance;
     if (uFogEnabled == 1 && uLightingDebugMode == 0) {
         float dist = length(uViewPos - vWorldPos);
         float distFog = 1.0 - exp(-dist * uFogDensity);
@@ -318,7 +343,7 @@ void UploadBones(Shader& sh, const std::vector<glm::mat4>& bones) {
 SkinnedRenderer::SkinnedRenderer()
     : m_shader(std::make_unique<Shader>(kVert, kFrag)),
       m_pbr(std::make_unique<Shader>(kVert, ComposeDirectionalShadowShader(ComposePbrLightingShader(kPbrFrag).c_str()))),
-      m_depth(std::make_unique<Shader>(kDepthVert, kDepthFrag)) {}
+      m_depth(std::make_unique<Shader>(kDepthVert, kDepthFrag)),m_ltcLut(std::make_unique<LtcLut>()) {}
 
 SkinnedRenderer::~SkinnedRenderer() = default;
 
@@ -396,6 +421,12 @@ void SkinnedRenderer::DrawScene(ecs::Registry& reg, const Camera& camera, float 
     m_pbr->SetVec3("uAmbient", lit.ambient);
     m_pbr->SetInt("uApplyTonemap", lit.tonemap ? 1 : 0);
     m_pbr->SetFloat("uShadowSoftness", lit.shadowSoftness);
+    // Keep optional sampler types off unit 0 even when their feature is disabled.
+    m_pbr->SetInt("uLightingSH0",18); m_pbr->SetInt("uLightingSH1",19);
+    m_pbr->SetInt("uLightingSH2",20); m_pbr->SetInt("uLightingMeta",21);
+    m_pbr->SetInt("uLocalReflection0",22); m_pbr->SetInt("uLocalReflection1",23);
+    m_pbr->SetInt("uLtcMatrixLut",24); m_pbr->SetInt("uLtcAmplitudeLut",25);
+    m_pbr->SetInt("uBentNormalMap",26); m_pbr->SetInt("uRawGtaoMap",27);
 
     // Sun (cascade) shadows -- same texture array + matrices the static PBR pass built.
     lit.cascade->BindArray(4);
@@ -432,9 +463,11 @@ void SkinnedRenderer::DrawScene(ecs::Registry& reg, const Camera& camera, float 
     m_pbr->SetFloat("uMinimumSkylight", lit.minimumSkylight);
     m_pbr->SetInt("uUseLightingGrid", lit.lightingGrid && lit.lightingGrid->Valid() ? 1 : 0);
     if (lit.lightingGrid && lit.lightingGrid->Valid()) {
-        lit.lightingGrid->Bind(17);
-        m_pbr->SetInt("uLightingSH0",17); m_pbr->SetInt("uLightingSH1",18);
-        m_pbr->SetInt("uLightingSH2",19); m_pbr->SetInt("uLightingMeta",20);
+        LightingProbeGrid::Contribution contribution=LightingProbeGrid::Contribution::Combined;
+        if(lit.lightingDebugMode==13)contribution=LightingProbeGrid::Contribution::DirectEnvironment;
+        else if(lit.lightingDebugMode==14)contribution=LightingProbeGrid::Contribution::Bounce;
+        else if(lit.lightingDebugMode==15)contribution=LightingProbeGrid::Contribution::Emissive;
+        lit.lightingGrid->Bind(18,contribution);
         m_pbr->SetVec3("uLightingGridMin",lit.lightingGrid->BoundsMin());
         m_pbr->SetVec3("uLightingGridMax",lit.lightingGrid->BoundsMax());
     }
@@ -442,7 +475,13 @@ void SkinnedRenderer::DrawScene(ecs::Registry& reg, const Camera& camera, float 
     m_pbr->SetFloat("uLocalProbeInfluence",lit.localProbeInfluence);
     m_pbr->SetInt("uLightingDebugMode",lit.lightingDebugMode);
     m_pbr->SetInt("uUseSSAO",lit.ssao?1:0);
-    if(lit.ssao){lit.ssao->BindAO(8);m_pbr->SetInt("uSsaoMap",8);m_pbr->SetVec2("uScreenSize",lit.screenSize);}
+    if(lit.ssao){lit.ssao->BindAO(8);GLint textureUnits=0;glGetIntegerv(GL_MAX_TEXTURE_IMAGE_UNITS,&textureUnits);
+        if(textureUnits>26)lit.ssao->BindBentNormal(26);if(textureUnits>27)lit.ssao->BindRawAO(27);m_pbr->SetInt("uSsaoMap",8);
+        m_pbr->SetInt("uUseBentNormal",textureUnits>26?1:0);
+        m_pbr->SetMat4("uViewToWorld",glm::inverse(camera.ViewMatrix()));m_pbr->SetVec2("uScreenSize",lit.screenSize);}
+    else m_pbr->SetInt("uUseBentNormal",0);
+    if(lit.reflectionProbes)lit.reflectionProbes->BindBest(*m_pbr,camera.Position(),22);
+    else m_pbr->SetInt("uReflectionProbeCount",0);
     m_pbr->SetInt("uCloudShadows", lit.cloudShadows ? 1 : 0);
     m_pbr->SetFloat("uCloudShadowStrength", lit.cloudShadowStrength);
     m_pbr->SetFloat("uCloudShadowScale", lit.cloudShadowScale);
@@ -458,21 +497,24 @@ void SkinnedRenderer::DrawScene(ecs::Registry& reg, const Camera& camera, float 
 
     struct PointData{glm::vec3 position,color;float radius;};
     struct SpotData{glm::vec3 position,direction,color;float inner,outer,range;};
-    struct AreaData{glm::vec3 position,color;float radius;};
+    struct AreaData{glm::vec3 position,color,right,up;glm::vec2 halfSize;float radius;int shape,twoSided;};
     std::vector<PointData> points;std::vector<SpotData> spots;std::vector<AreaData> areas;
     auto lights=reg.view<ecs::Transform,ecs::Light>();
     if(!lights.empty())lights.each([&](ecs::Entity,ecs::Transform&t,ecs::Light&light){
         const glm::vec3 color=light.color*light.intensity;if(glm::dot(color,color)<=1e-8f)return;
         if(light.type==ecs::Light::Type::Point&&points.size()<32){const float radius=std::sqrt(std::max({color.r,color.g,color.b})/0.03f);points.push_back({t.position,color,radius});}
         else if(light.type==ecs::Light::Type::Spot&&spots.size()<4)spots.push_back({t.position,glm::normalize(light.direction),color,glm::cos(glm::radians(light.innerAngle)),glm::cos(glm::radians(light.outerAngle)),std::max(light.range,0.01f)});
-        else if(light.type==ecs::Light::Type::Area&&areas.size()<4)areas.push_back({t.position,color,std::max(light.sourceRadius,0.01f)});
+        else if(light.type==ecs::Light::Type::Area&&areas.size()<4)areas.push_back({t.position,color,glm::normalize(t.rotation*glm::vec3(1,0,0)),glm::normalize(t.rotation*glm::vec3(0,1,0)),glm::vec2(std::max(light.areaWidth,0.01f),std::max(light.areaHeight,0.01f))*0.5f,std::max(light.sourceRadius,0.01f),light.areaShape==ecs::Light::AreaShape::Rectangle?1:0,light.areaTwoSided?1:0});
     });
     m_pbr->SetInt("uNumPoints",static_cast<int>(points.size()));
     for(std::size_t i=0;i<points.size();++i){const std::string index=std::to_string(i);m_pbr->SetVec4(("uPointPosRadius["+index+"]").c_str(),glm::vec4(points[i].position,points[i].radius));m_pbr->SetVec3(("uPointColor["+index+"]").c_str(),points[i].color);}
     m_pbr->SetInt("uNumSpots",static_cast<int>(spots.size()));
     for(std::size_t i=0;i<spots.size();++i){const std::string index=std::to_string(i);m_pbr->SetVec3(("uSpotPos["+index+"]").c_str(),spots[i].position);m_pbr->SetVec3(("uSpotDir["+index+"]").c_str(),spots[i].direction);m_pbr->SetVec3(("uSpotColor["+index+"]").c_str(),spots[i].color);m_pbr->SetFloat(("uSpotCosInner["+index+"]").c_str(),spots[i].inner);m_pbr->SetFloat(("uSpotCosOuter["+index+"]").c_str(),spots[i].outer);m_pbr->SetFloat(("uSpotRange["+index+"]").c_str(),spots[i].range);}
+    GLint fragmentTextureUnits=0;glGetIntegerv(GL_MAX_TEXTURE_IMAGE_UNITS,&fragmentTextureUnits);
+    const bool ltcAvailable=fragmentTextureUnits>25;
     m_pbr->SetInt("uNumAreas",static_cast<int>(areas.size()));
-    for(std::size_t i=0;i<areas.size();++i){const std::string index=std::to_string(i);m_pbr->SetVec3(("uAreaPos["+index+"]").c_str(),areas[i].position);m_pbr->SetVec3(("uAreaColor["+index+"]").c_str(),areas[i].color);m_pbr->SetFloat(("uAreaRadius["+index+"]").c_str(),areas[i].radius);}
+    for(std::size_t i=0;i<areas.size();++i){const std::string index="["+std::to_string(i)+"]";m_pbr->SetVec3("uAreaPos"+index,areas[i].position);m_pbr->SetVec3("uAreaColor"+index,areas[i].color);m_pbr->SetFloat("uAreaRadius"+index,areas[i].radius);m_pbr->SetVec3("uAreaRight"+index,areas[i].right);m_pbr->SetVec3("uAreaUp"+index,areas[i].up);m_pbr->SetVec2("uAreaHalfSize"+index,areas[i].halfSize);m_pbr->SetInt("uAreaShape"+index,ltcAvailable?areas[i].shape:0);m_pbr->SetInt("uAreaTwoSided"+index,areas[i].twoSided);}
+    if(ltcAvailable)m_ltcLut->Bind(24,25);
 
     // Backface culling: characters are closed meshes, so skip their inside faces.
     // Restored to the default (off) after the pass so other passes are unaffected.

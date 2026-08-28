@@ -179,7 +179,10 @@ add_custom_command(TARGET 3DGEditor POST_BUILD
     COMMENT "Copying editor assets next to the executable")
 
 if(MSVC)
-    target_compile_options(3DGEditor PRIVATE /W4 /bigobj)
+    # The editor has many translation units sharing the target PDB. /FS makes
+    # MSVC serialize PDB writes, which is required for parallel and fast-build
+    # generators that may launch more than one compiler process per target.
+    target_compile_options(3DGEditor PRIVATE /W4 /bigobj /FS)
 else()
     target_compile_options(3DGEditor PRIVATE -Wall -Wextra -Wpedantic)
 endif()

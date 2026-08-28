@@ -5,8 +5,11 @@
 
 #include <glad/glad.h>
 #include <glm/gtc/matrix_transform.hpp>
-
+#include <filesystem>
+#include <fstream>
+#include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <cstdint>
 #include <vector>
 
@@ -318,6 +321,106 @@ void IBL::Bind(unsigned int irradianceUnit, unsigned int prefilterUnit,
     glBindTexture(GL_TEXTURE_CUBE_MAP, m_prefilter);
     glActiveTexture(GL_TEXTURE0 + brdfUnit);
     glBindTexture(GL_TEXTURE_2D, m_brdfLUT);
+}
+
+unsigned int IBL::CapturePrefiltered(
+    const glm::vec3& position, int resolution,
+    const std::function<void(const glm::mat4&, const glm::mat4&)>& drawScene) {
+    resolution = std::clamp(resolution, 32, 512);
+    const int mipCount = std::min(8, 1 + static_cast<int>(std::floor(std::log2(resolution))));
+    const unsigned int source = MakeCubemap(resolution, true);
+    const unsigned int filtered = MakeCubemap(resolution, true);
+    GLint prevFbo=0, viewport[4]{}; glGetIntegerv(GL_FRAMEBUFFER_BINDING,&prevFbo);
+    glGetIntegerv(GL_VIEWPORT,viewport);
+    const glm::mat4 projection=glm::perspective(glm::radians(90.0f),1.0f,0.05f,1000.0f);
+    const glm::mat4 views[6]={
+        glm::lookAt(position,position+glm::vec3(1,0,0),glm::vec3(0,-1,0)),
+        glm::lookAt(position,position+glm::vec3(-1,0,0),glm::vec3(0,-1,0)),
+        glm::lookAt(position,position+glm::vec3(0,1,0),glm::vec3(0,0,1)),
+        glm::lookAt(position,position+glm::vec3(0,-1,0),glm::vec3(0,0,-1)),
+        glm::lookAt(position,position+glm::vec3(0,0,1),glm::vec3(0,-1,0)),
+        glm::lookAt(position,position+glm::vec3(0,0,-1),glm::vec3(0,-1,0))};
+    glBindFramebuffer(GL_FRAMEBUFFER,m_captureFbo); glBindRenderbuffer(GL_RENDERBUFFER,m_captureRbo);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_DEPTH_ATTACHMENT,GL_RENDERBUFFER,m_captureRbo);
+    glRenderbufferStorage(GL_RENDERBUFFER,GL_DEPTH_COMPONENT24,resolution,resolution);
+    glViewport(0,0,resolution,resolution);
+    for(unsigned face=0;face<6;++face){
+        glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,
+            GL_TEXTURE_CUBE_MAP_POSITIVE_X+face,source,0);
+        glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT); drawScene(views[face],projection);
+    }
+    glBindTexture(GL_TEXTURE_CUBE_MAP,source); glGenerateMipmap(GL_TEXTURE_CUBE_MAP);
+    m_prefilterShader.Bind(); m_prefilterShader.SetInt("uEnv",0);
+    m_prefilterShader.SetMat4("uProj",projection); glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_CUBE_MAP,source);
+    for(int mip=0;mip<mipCount;++mip){
+        const int size=std::max(1,resolution>>mip); glRenderbufferStorage(GL_RENDERBUFFER,GL_DEPTH_COMPONENT24,size,size);
+        glViewport(0,0,size,size); m_prefilterShader.SetFloat("uRoughness",mipCount>1?float(mip)/float(mipCount-1):0.0f);
+        for(unsigned face=0;face<6;++face){m_prefilterShader.SetMat4("uView",views[face]);
+            glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_CUBE_MAP_POSITIVE_X+face,filtered,mip);
+            glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);m_cube.Draw();}
+    }
+    glDeleteTextures(1,&source); glBindFramebuffer(GL_FRAMEBUFFER,static_cast<GLuint>(prevFbo));
+    glViewport(viewport[0],viewport[1],viewport[2],viewport[3]); return filtered;
+}
+
+bool IBL::SavePrefilteredCubemap(const std::string& path,unsigned int cubemap,int resolution,
+                                 int mipCount,std::string* error,const ReflectionCaptureMetadata* metadata){
+    if(!cubemap||resolution<=0||mipCount<=0){if(error)*error="Invalid reflection cubemap.";return false;}
+    std::error_code ec;std::filesystem::create_directories(std::filesystem::path(path).parent_path(),ec);
+    const std::string temporary=path+".tmp";std::ofstream out(temporary,std::ios::binary|std::ios::trunc);
+    if(!out){if(error)*error="Could not create reflection asset.";return false;}
+    const char magic[8]={'3','D','G','R','E','F','L','2'};out.write(magic,8);out.write(reinterpret_cast<const char*>(&resolution),4);out.write(reinterpret_cast<const char*>(&mipCount),4);
+    const ReflectionCaptureMetadata stored=metadata?*metadata:ReflectionCaptureMetadata{};
+    out.write(reinterpret_cast<const char*>(&stored.stableIdHigh),sizeof(stored.stableIdHigh));
+    out.write(reinterpret_cast<const char*>(&stored.stableIdLow),sizeof(stored.stableIdLow));
+    out.write(reinterpret_cast<const char*>(&stored.sourceSceneHash),sizeof(stored.sourceSceneHash));
+    out.write(reinterpret_cast<const char*>(&stored.boxExtents),sizeof(stored.boxExtents));
+    out.write(reinterpret_cast<const char*>(&stored.radius),sizeof(stored.radius));
+    out.write(reinterpret_cast<const char*>(&stored.blendDistance),sizeof(stored.blendDistance));
+    out.write(reinterpret_cast<const char*>(&stored.intensity),sizeof(stored.intensity));
+    out.write(reinterpret_cast<const char*>(&stored.shape),sizeof(stored.shape));
+    out.write(reinterpret_cast<const char*>(&stored.includeSky),sizeof(stored.includeSky));
+    glBindTexture(GL_TEXTURE_CUBE_MAP,cubemap);
+    for(int mip=0;mip<mipCount;++mip){const int size=std::max(1,resolution>>mip);std::vector<float> pixels(static_cast<std::size_t>(size)*size*3);
+        for(int face=0;face<6;++face){glGetTexImage(GL_TEXTURE_CUBE_MAP_POSITIVE_X+face,mip,GL_RGB,GL_FLOAT,pixels.data());
+            out.write(reinterpret_cast<const char*>(pixels.data()),static_cast<std::streamsize>(pixels.size()*sizeof(float)));}}
+    out.close();if(!out){std::filesystem::remove(temporary,ec);if(error)*error="Reflection asset write failed.";return false;}
+    const std::string backup=path+".bak";std::filesystem::remove(backup,ec);ec.clear();
+    const bool hadPrevious=std::filesystem::exists(path,ec);ec.clear();
+    if(hadPrevious){std::filesystem::rename(path,backup,ec);if(ec){std::filesystem::remove(temporary,ec);if(error)*error="Could not preserve the previous reflection asset.";return false;}}
+    std::filesystem::rename(temporary,path,ec);
+    if(ec){const std::string message=ec.message();ec.clear();if(hadPrevious)std::filesystem::rename(backup,path,ec);
+        if(error)*error="Could not commit reflection asset: "+message;return false;}
+    if(hadPrevious)std::filesystem::remove(backup,ec);return true;
+}
+
+unsigned int IBL::LoadPrefilteredCubemap(const std::string& path,int* resolutionOut,int* mipCountOut,std::string* error,ReflectionCaptureMetadata* metadata){
+    std::ifstream in(path,std::ios::binary);char magic[8]{};int resolution=0,mipCount=0;
+    in.read(magic,8);in.read(reinterpret_cast<char*>(&resolution),4);in.read(reinterpret_cast<char*>(&mipCount),4);
+    const char expectedPrefix[7]={'3','D','G','R','E','F','L'};
+    const bool v1=std::memcmp(magic,expectedPrefix,7)==0&&magic[7]=='1';
+    const bool v2=std::memcmp(magic,expectedPrefix,7)==0&&magic[7]=='2';
+    if(!in||(!v1&&!v2)||resolution<1||resolution>2048||mipCount<1||mipCount>12){if(error)*error="Invalid or outdated reflection asset.";return 0;}
+    ReflectionCaptureMetadata stored{};
+    if(v2){in.read(reinterpret_cast<char*>(&stored.stableIdHigh),sizeof(stored.stableIdHigh));
+        in.read(reinterpret_cast<char*>(&stored.stableIdLow),sizeof(stored.stableIdLow));
+        in.read(reinterpret_cast<char*>(&stored.sourceSceneHash),sizeof(stored.sourceSceneHash));
+        in.read(reinterpret_cast<char*>(&stored.boxExtents),sizeof(stored.boxExtents));
+        in.read(reinterpret_cast<char*>(&stored.radius),sizeof(stored.radius));
+        in.read(reinterpret_cast<char*>(&stored.blendDistance),sizeof(stored.blendDistance));
+        in.read(reinterpret_cast<char*>(&stored.intensity),sizeof(stored.intensity));
+        in.read(reinterpret_cast<char*>(&stored.shape),sizeof(stored.shape));
+        in.read(reinterpret_cast<char*>(&stored.includeSky),sizeof(stored.includeSky));
+        if(!in){if(error)*error="Truncated reflection metadata.";return 0;}}
+    unsigned int cubemap=0;glGenTextures(1,&cubemap);glBindTexture(GL_TEXTURE_CUBE_MAP,cubemap);
+    for(int mip=0;mip<mipCount;++mip){const int size=std::max(1,resolution>>mip);std::vector<float> pixels(static_cast<std::size_t>(size)*size*3);
+        for(int face=0;face<6;++face){in.read(reinterpret_cast<char*>(pixels.data()),static_cast<std::streamsize>(pixels.size()*sizeof(float)));
+            if(!in){glDeleteTextures(1,&cubemap);if(error)*error="Truncated reflection asset.";return 0;}
+            glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X+face,mip,GL_RGB16F,size,size,0,GL_RGB,GL_FLOAT,pixels.data());}}
+    glTexParameteri(GL_TEXTURE_CUBE_MAP,GL_TEXTURE_MIN_FILTER,GL_LINEAR_MIPMAP_LINEAR);glTexParameteri(GL_TEXTURE_CUBE_MAP,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);glTexParameteri(GL_TEXTURE_CUBE_MAP,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);glTexParameteri(GL_TEXTURE_CUBE_MAP,GL_TEXTURE_WRAP_R,GL_CLAMP_TO_EDGE);
+    if(resolutionOut)*resolutionOut=resolution;if(mipCountOut)*mipCountOut=mipCount;if(metadata)*metadata=stored;return cubemap;
 }
 
 void IBL::BindPrefilter(unsigned int unit) const {

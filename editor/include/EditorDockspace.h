@@ -256,8 +256,11 @@ public:
         bool vsyncChangeRequested = false;   // set by the World Settings checkbox
         bool lightingBuildRequested = false;
         bool lightingBuildCancelRequested = false;
+        bool reflectionProbeCaptureRequested = false;
+        bool reflectionProbeClearRequested = false;
         bool lightingBuildRunning = false;
         bool lightingBuildDirty = false;
+        std::uint64_t lightingStateHash = 0;
         int* lightingBuildQuality = nullptr;
         const std::string* lightingBuildStatus = nullptr;
         float lightingBuildProgress = 0.0f;

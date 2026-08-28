@@ -12,11 +12,12 @@
 #include <fstream>
 #include <limits>
 #include <numeric>
+#include <thread>
 
 namespace engine {
 namespace {
 
-constexpr char kMagic[8] = {'3','D','G','L','I','T','E','2'};
+constexpr char kMagic[8] = {'3','D','G','L','I','T','E','3'};
 constexpr float kPi = 3.14159265358979323846f;
 
 std::array<float, 4> EvaluateSH4Basis(const glm::vec3& direction) {
@@ -112,6 +113,59 @@ glm::vec3 SphereDirection(std::uint32_t i, std::uint32_t count) {
                                     std::sin(angle) * radius));
 }
 
+glm::vec3 AdjustSaturation(glm::vec3 color, float saturation) {
+    const float luminance = glm::dot(color, glm::vec3(0.2126f, 0.7152f, 0.0722f));
+    return glm::max(glm::mix(glm::vec3(luminance), color,
+                            glm::clamp(saturation, 0.0f, 2.0f)), glm::vec3(0.0f));
+}
+
+glm::vec3 EvaluateBuildLights(const std::vector<LightingBuildLight>& lights,
+                              const TriangleBvh& acceleration,
+                              const LightingRayHit& hit, float maximumDistance) {
+    glm::vec3 incoming(0.0f);
+    for (const LightingBuildLight& light : lights) {
+        if(light.type==LightingBuildLight::Type::Rectangle){
+            const glm::vec3 right=glm::normalize(light.right),up=glm::normalize(light.up);
+            const glm::vec3 planeNormal=glm::normalize(glm::cross(right,up));
+            if(!light.twoSided&&glm::dot(planeNormal,hit.position-light.position)<=0.0f)continue;
+            const float area=std::max(4.0f*light.halfSize.x*light.halfSize.y,0.0001f);
+            static constexpr glm::vec2 offsets[4]={{-0.5f,-0.5f},{0.5f,-0.5f},{0.5f,0.5f},{-0.5f,0.5f}};
+            for(const glm::vec2 offset:offsets){const glm::vec3 sample=light.position+
+                    right*(offset.x*2.0f*light.halfSize.x)+up*(offset.y*2.0f*light.halfSize.y);
+                const glm::vec3 delta=sample-hit.position;const float distanceSquared=glm::dot(delta,delta);
+                const float distance=std::sqrt(std::max(distanceSquared,1e-6f));if(distance>=light.range)continue;
+                const glm::vec3 L=delta/distance;const float nDotL=glm::max(glm::dot(hit.normal,L),0.0f);
+                const float lightCos=light.twoSided?std::abs(glm::dot(planeNormal,-L)):glm::max(glm::dot(planeNormal,-L),0.0f);
+                if(nDotL<=0.0f||lightCos<=0.0f||acceleration.Occluded(hit.position+hit.normal*0.025f,L,distance-0.025f))continue;
+                const float normalized=distance/std::max(light.range,0.01f);const float window=glm::clamp(1.0f-std::pow(normalized,4.0f),0.0f,1.0f);
+                incoming+=glm::max(light.color,glm::vec3(0.0f))*(area*0.25f)*lightCos*nDotL*window*window/std::max(distanceSquared,0.01f);}
+            continue;
+        }
+        glm::vec3 L(0.0f); float attenuation = 1.0f; float shadowDistance = maximumDistance;
+        if (light.type == LightingBuildLight::Type::Directional) {
+            L = glm::normalize(-light.direction);
+        } else {
+            const glm::vec3 delta = light.position - hit.position;
+            const float distanceSquared = glm::dot(delta, delta);
+            const float distance = std::sqrt(std::max(distanceSquared, 1e-6f));
+            if (distance >= light.range) continue;
+            L = delta / distance; shadowDistance = distance - 0.025f;
+            const float normalized = distance / std::max(light.range, 0.01f);
+            const float window = glm::clamp(1.0f - normalized * normalized * normalized * normalized, 0.0f, 1.0f);
+            attenuation = window * window / std::max(distanceSquared, 0.01f);
+            if (light.type == LightingBuildLight::Type::Spot) {
+                const float cone = glm::dot(glm::normalize(-light.direction), L);
+                attenuation *= glm::smoothstep(light.outerCos, light.innerCos, cone);
+            }
+        }
+        const float nDotL = glm::max(glm::dot(hit.normal, L), 0.0f);
+        if (nDotL <= 0.0f) continue;
+        if (acceleration.Occluded(hit.position + hit.normal * 0.025f, L, shadowDistance)) continue;
+        incoming += glm::max(light.color, glm::vec3(0.0f)) * attenuation * nDotL;
+    }
+    return incoming;
+}
+
 template <class T> bool Write(std::ofstream& out, const T& value) {
     out.write(reinterpret_cast<const char*>(&value), sizeof(value)); return !!out;
 }
@@ -153,6 +207,8 @@ std::uint64_t HashLightingGeometry(const std::vector<LightingTriangle>& triangle
     HashBytes(hash, settings.maxRayDistance); HashBytes(hash, settings.boundsPadding);
     HashBytes(hash, settings.minimumVisibility); HashBytes(hash, settings.raysPerProbe);
     HashBytes(hash, settings.directionalIrradiance); HashBytes(hash, settings.indirectBounceStrength);
+    HashBytes(hash, settings.indirectBounceEnabled); HashBytes(hash, settings.emissiveContribution);
+    HashBytes(hash, settings.indirectSaturation);
     return hash;
 }
 
@@ -175,14 +231,34 @@ bool BuildLightingProbes(const std::vector<LightingTriangle>& triangles,
                          const std::string& sourceScene,
                          const LightingBuildSettings& input, LightingBuildData* output,
                          LightingBuildProgress* progress, std::string* error) {
+    return BuildLightingProbes(triangles, {}, sky, sourceHash, sourceScene, input,
+                               output, progress, error);
+}
+
+bool BuildLightingProbes(const std::vector<LightingTriangle>& triangles,
+                         const std::vector<LightingBuildLight>& staticLights,
+                         const DirectionalSkyRadiance& sky, std::uint64_t sourceHash,
+                         const std::string& sourceScene,
+                         const LightingBuildSettings& input, LightingBuildData* output,
+                         LightingBuildProgress* progress, std::string* error) {
     if (!output) { if (error) *error = "Lighting build output is null."; return false; }
     if (triangles.empty()) { if (error) *error = "Lighting build found no static triangles."; return false; }
     LightingBuildSettings settings = input;
     settings.probeSpacing = std::max(settings.probeSpacing, 0.25f);
     settings.maxRayDistance = std::max(settings.maxRayDistance, settings.probeSpacing);
     settings.raysPerProbe = std::clamp(settings.raysPerProbe, 8u, 1024u);
-    if (settings.quality == LightingBuildQuality::Preview) settings.raysPerProbe = std::min(settings.raysPerProbe, 32u);
-    if (settings.quality == LightingBuildQuality::High) settings.raysPerProbe = std::max(settings.raysPerProbe, 192u);
+    settings.indirectBounceStrength = glm::clamp(settings.indirectBounceStrength, 0.0f, 1.0f);
+    settings.emissiveContribution = glm::clamp(settings.emissiveContribution, 0.0f, 8.0f);
+    settings.indirectSaturation = glm::clamp(settings.indirectSaturation, 0.0f, 2.0f);
+    if (settings.quality == LightingBuildQuality::Preview) {
+        settings.raysPerProbe = std::min(settings.raysPerProbe, 32u);
+        settings.indirectBounceEnabled = false;
+        settings.emissiveContribution = 0.0f;
+    }
+    if (settings.quality == LightingBuildQuality::High) {
+        settings.raysPerProbe = std::max(settings.raysPerProbe, 192u);
+        settings.indirectBounceEnabled = true;
+    }
 
     glm::vec3 lo(std::numeric_limits<float>::max()), hi(-std::numeric_limits<float>::max());
     for (const auto& t : triangles) {
@@ -206,16 +282,25 @@ bool BuildLightingProbes(const std::vector<LightingTriangle>& triangles,
     built.spacing = settings.probeSpacing; built.settings = settings;
     const std::size_t count = static_cast<std::size_t>(dimensions.x) * dimensions.y * dimensions.z;
     built.probes.resize(count);
+    if (progress) progress->phase = LightingBuildProgress::Phase::BuildingAcceleration;
     const TriangleBvh acceleration(triangles);
-    if (progress) { progress->completed = 0; progress->total = static_cast<std::uint32_t>(count); }
+    if (progress) { progress->completed = 0; progress->total = static_cast<std::uint32_t>(count);
+        progress->raysCast = 0; progress->phase = LightingBuildProgress::Phase::IrradianceProbes; }
 
-    for (int z = 0; z < dimensions.z; ++z) for (int y = 0; y < dimensions.y; ++y)
-    for (int x = 0; x < dimensions.x; ++x) {
-        if (progress && progress->cancel.load()) { if (error) *error = "Lighting build cancelled."; return false; }
+    std::atomic<bool> cancelled{false};
+    auto buildRange = [&](std::size_t begin, std::size_t end) {
+      for (std::size_t flat = begin; flat < end; ++flat) {
+        if (progress && progress->cancel.load()) { cancelled = true; return; }
+        const int x = static_cast<int>(flat % static_cast<std::size_t>(dimensions.x));
+        const std::size_t yz = flat / static_cast<std::size_t>(dimensions.x);
+        const int y = static_cast<int>(yz % static_cast<std::size_t>(dimensions.y));
+        const int z = static_cast<int>(yz / static_cast<std::size_t>(dimensions.y));
         const glm::vec3 position = lo + glm::vec3(x, y, z) * settings.probeSpacing;
         std::uint32_t visible = 0, skySamples = 0;
         std::array<glm::vec3, 4> projected{{glm::vec3(0.0f), glm::vec3(0.0f),
                                             glm::vec3(0.0f), glm::vec3(0.0f)}};
+        std::array<glm::vec3, 4> bounceProjected{};
+        std::array<glm::vec3, 4> emissiveProjected{};
         std::uint32_t nearBlocked = 0;
         static constexpr glm::vec3 axes[6] = {
             {1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
@@ -227,19 +312,33 @@ bool BuildLightingProbes(const std::vector<LightingTriangle>& triangles,
             if (direction.y > 0.0f) ++skySamples;
             LightingRayHit hit;
             const bool blocked = acceleration.Trace(position, direction, settings.maxRayDistance, &hit);
+            if (progress) ++progress->raysCast;
             if (!blocked) {
                 if (direction.y > 0.0f) ++visible;
                 const auto basis = EvaluateSH4Basis(direction);
                 const glm::vec3 radiance = sky.Sample(direction);
                 for (std::size_t coefficient = 0; coefficient < projected.size(); ++coefficient)
                     projected[coefficient] += radiance * basis[coefficient];
-            } else if (settings.indirectBounceStrength > 0.0f) {
+            } else if ((settings.indirectBounceEnabled && settings.indirectBounceStrength > 0.0f)
+                       || settings.emissiveContribution > 0.0f) {
                 const auto basis = EvaluateSH4Basis(direction);
-                const glm::vec3 incident = sky.Sample(hit.normal);
-                const glm::vec3 bounce = hit.emissive + hit.albedo * incident
-                    * (glm::clamp(settings.indirectBounceStrength, 0.0f, 1.0f) / kPi);
-                for (std::size_t coefficient = 0; coefficient < projected.size(); ++coefficient)
-                    projected[coefficient] += bounce * basis[coefficient];
+                glm::vec3 bounced(0.0f);
+                if(settings.indirectBounceEnabled&&settings.indirectBounceStrength>0.0f){
+                    const bool skyOpen=!acceleration.Occluded(hit.position+hit.normal*0.025f,
+                        hit.normal,settings.maxRayDistance);
+                    const glm::vec3 environment=skyOpen?sky.Sample(hit.normal)*0.5f:glm::vec3(0.0f);
+                    const glm::vec3 direct=EvaluateBuildLights(staticLights,acceleration,hit,
+                        settings.maxRayDistance);
+                    bounced=AdjustSaturation(hit.albedo*(environment+direct)/kPi,
+                        settings.indirectSaturation)*settings.indirectBounceStrength;
+                }
+                const glm::vec3 emissive = glm::max(hit.emissive, glm::vec3(0.0f))
+                                         * settings.emissiveContribution;
+                for (std::size_t coefficient = 0; coefficient < projected.size(); ++coefficient) {
+                    bounceProjected[coefficient] += bounced * basis[coefficient];
+                    emissiveProjected[coefficient] += emissive * basis[coefficient];
+                    projected[coefficient] += (bounced + emissive) * basis[coefficient];
+                }
             }
         }
         LightingProbe& probe = built.probes[built.Index(x, y, z)];
@@ -249,6 +348,11 @@ bool BuildLightingProbes(const std::vector<LightingTriangle>& triangles,
         probe.irradianceSH[0] = projected[0] * projectionWeight * kPi;
         for (std::size_t coefficient = 1; coefficient < probe.irradianceSH.size(); ++coefficient)
             probe.irradianceSH[coefficient] = projected[coefficient] * projectionWeight * (2.0f * kPi / 3.0f);
+        for (std::size_t coefficient = 0; coefficient < 4; ++coefficient) {
+            const float convolution = coefficient == 0 ? kPi : (2.0f * kPi / 3.0f);
+            probe.bounceSH[coefficient] = bounceProjected[coefficient] * projectionWeight * convolution;
+            probe.emissiveSH[coefficient] = emissiveProjected[coefficient] * projectionWeight * convolution;
+        }
         const auto up = EvaluateSH4Basis(glm::vec3(0, 1, 0));
         probe.ambient = glm::max(probe.irradianceSH[0] * up[0]
             + probe.irradianceSH[1] * up[1]
@@ -261,7 +365,20 @@ bool BuildLightingProbes(const std::vector<LightingTriangle>& triangles,
                 coefficient = glm::vec3(0.0f);
         }
         if (progress) ++progress->completed;
+      }
+    };
+    const std::size_t hardwareThreads = std::max<std::size_t>(1, std::thread::hardware_concurrency());
+    const std::size_t workerCount = std::min<std::size_t>(hardwareThreads, std::max<std::size_t>(1, count / 32));
+    std::vector<std::thread> workers;
+    workers.reserve(workerCount);
+    for (std::size_t worker = 0; worker < workerCount; ++worker) {
+        const std::size_t begin = count * worker / workerCount;
+        const std::size_t end = count * (worker + 1) / workerCount;
+        workers.emplace_back(buildRange, begin, end);
     }
+    for (auto& worker : workers) worker.join();
+    if (cancelled.load()) { if (error) *error = "Lighting build cancelled."; return false; }
+    if (progress) progress->phase = LightingBuildProgress::Phase::Complete;
     *output = std::move(built);
     return true;
 }
@@ -282,8 +399,13 @@ bool SaveLightingBuildData(const std::string& path, const LightingBuildData& dat
     Write(out, data.settings.boundsPadding); Write(out, data.settings.minimumVisibility); Write(out, data.settings.raysPerProbe);
     const std::uint8_t directional = data.settings.directionalIrradiance ? 1 : 0;
     Write(out, directional); Write(out, data.settings.indirectBounceStrength);
+    const std::uint8_t bounceEnabled = data.settings.indirectBounceEnabled ? 1 : 0;
+    Write(out, bounceEnabled); Write(out, data.settings.emissiveContribution);
+    Write(out, data.settings.indirectSaturation);
     Write(out, probeCount);
-    for (const auto& p : data.probes) { Write(out, p.ambient); for(const auto& sh:p.irradianceSH)Write(out,sh); Write(out, p.skyVisibility); const std::uint8_t valid=p.valid?1:0; Write(out,valid); }
+    for (const auto& p : data.probes) { Write(out, p.ambient); for(const auto& sh:p.irradianceSH)Write(out,sh);
+        for(const auto& sh:p.bounceSH)Write(out,sh); for(const auto& sh:p.emissiveSH)Write(out,sh);
+        Write(out, p.skyVisibility); const std::uint8_t valid=p.valid?1:0; Write(out,valid); }
     out.flush(); out.close();
     if (!out) { std::filesystem::remove(temporary, ec); if (error) *error = "Failed while writing lighting asset."; return false; }
     const std::string backup=path+".bak";std::filesystem::remove(backup,ec);ec.clear();
@@ -308,32 +430,53 @@ bool LoadLightingBuildData(const std::string& path, LightingBuildData* data, std
         ||!Read(in,loaded.settings.boundsPadding)||!Read(in,loaded.settings.minimumVisibility)||!Read(in,loaded.settings.raysPerProbe)
         ) { if(error)*error="Truncated or unsafe lighting asset."; return false; }
     std::uint8_t directional=0;
+    std::uint8_t bounceEnabled=0;
     if(!Read(in,directional)||!Read(in,loaded.settings.indirectBounceStrength)
+        ||!Read(in,bounceEnabled)||!Read(in,loaded.settings.emissiveContribution)
+        ||!Read(in,loaded.settings.indirectSaturation)
         ||!Read(in,probeCount) || probeCount>262144) { if(error)*error="Truncated or unsafe lighting asset."; return false; }
     loaded.settings.directionalIrradiance=directional!=0;
+    loaded.settings.indirectBounceEnabled=bounceEnabled!=0;
     loaded.probes.resize(static_cast<std::size_t>(probeCount));
-    for(auto& p:loaded.probes){std::uint8_t valid=0;if(!Read(in,p.ambient)){if(error)*error="Truncated lighting probes.";return false;}for(auto& sh:p.irradianceSH)if(!Read(in,sh)){if(error)*error="Truncated lighting probes.";return false;}if(!Read(in,p.skyVisibility)||!Read(in,valid)){if(error)*error="Truncated lighting probes.";return false;}p.valid=valid!=0;}
+    for(auto& p:loaded.probes){std::uint8_t valid=0;if(!Read(in,p.ambient)){if(error)*error="Truncated lighting probes.";return false;}
+        for(auto& sh:p.irradianceSH)if(!Read(in,sh)){if(error)*error="Truncated lighting probes.";return false;}
+        for(auto& sh:p.bounceSH)if(!Read(in,sh)){if(error)*error="Truncated lighting probes.";return false;}
+        for(auto& sh:p.emissiveSH)if(!Read(in,sh)){if(error)*error="Truncated lighting probes.";return false;}
+        if(!Read(in,p.skyVisibility)||!Read(in,valid)){if(error)*error="Truncated lighting probes.";return false;}p.valid=valid!=0;}
     if(!loaded.IsValid()){if(error)*error="Lighting asset grid is inconsistent.";return false;}
     *data=std::move(loaded); return true;
 }
 
 LightingProbeGrid::~LightingProbeGrid(){ Reset(); }
 LightingProbeGrid::LightingProbeGrid(LightingProbeGrid&& o) noexcept { *this=std::move(o); }
-LightingProbeGrid& LightingProbeGrid::operator=(LightingProbeGrid&& o) noexcept { if(this!=&o){Reset();m_textures=o.m_textures;o.m_textures={0,0,0,0};m_boundsMin=o.m_boundsMin;m_boundsMax=o.m_boundsMax;}return *this; }
-void LightingProbeGrid::Reset(){ glDeleteTextures(static_cast<GLsizei>(m_textures.size()),m_textures.data());m_textures={0,0,0,0}; }
+LightingProbeGrid& LightingProbeGrid::operator=(LightingProbeGrid&& o) noexcept { if(this!=&o){Reset();m_textures=o.m_textures;o.m_textures.fill(0);m_boundsMin=o.m_boundsMin;m_boundsMax=o.m_boundsMax;m_probeCount=o.m_probeCount;m_memoryBytes=o.m_memoryBytes;o.m_probeCount=0;o.m_memoryBytes=0;}return *this; }
+void LightingProbeGrid::Reset(){ glDeleteTextures(static_cast<GLsizei>(m_textures.size()),m_textures.data());m_textures.fill(0);m_probeCount=0;m_memoryBytes=0; }
 bool LightingProbeGrid::Upload(const LightingBuildData& data,std::string* error){
     if(!data.IsValid()){if(error)*error="Cannot upload invalid lighting grid.";return false;}
-    std::array<std::vector<float>,4> packed;for(auto& texture:packed)texture.resize(data.probes.size()*4,0.0f);
+    std::array<std::vector<float>,13> packed;for(auto& texture:packed)texture.resize(data.probes.size()*4,0.0f);
+    auto packSh=[&](std::size_t base,std::size_t sample,const std::array<glm::vec3,4>& sh,float validity){const std::size_t b=sample*4;
+        packed[base][b]=sh[0].r*validity;packed[base][b+1]=sh[0].g*validity;packed[base][b+2]=sh[0].b*validity;packed[base][b+3]=sh[1].r*validity;
+        packed[base+1][b]=sh[1].g*validity;packed[base+1][b+1]=sh[1].b*validity;packed[base+1][b+2]=sh[2].r*validity;packed[base+1][b+3]=sh[2].g*validity;
+        packed[base+2][b]=sh[2].b*validity;packed[base+2][b+1]=sh[3].r*validity;packed[base+2][b+2]=sh[3].g*validity;packed[base+2][b+3]=sh[3].b*validity;};
     for(std::size_t i=0;i<data.probes.size();++i){const auto&p=data.probes[i];const float v=p.valid?1.0f:0.0f;const std::size_t b=i*4;
-        packed[0][b]=p.irradianceSH[0].r*v;packed[0][b+1]=p.irradianceSH[0].g*v;packed[0][b+2]=p.irradianceSH[0].b*v;packed[0][b+3]=p.irradianceSH[1].r*v;
-        packed[1][b]=p.irradianceSH[1].g*v;packed[1][b+1]=p.irradianceSH[1].b*v;packed[1][b+2]=p.irradianceSH[2].r*v;packed[1][b+3]=p.irradianceSH[2].g*v;
-        packed[2][b]=p.irradianceSH[2].b*v;packed[2][b+1]=p.irradianceSH[3].r*v;packed[2][b+2]=p.irradianceSH[3].g*v;packed[2][b+3]=p.irradianceSH[3].b*v;
-        packed[3][b]=p.skyVisibility*v;packed[3][b+1]=v;}
+        packSh(0,i,p.irradianceSH,v);packSh(4,i,p.bounceSH,v);packSh(7,i,p.emissiveSH,v);
+        std::array<glm::vec3,4> direct{};for(std::size_t coefficient=0;coefficient<4;++coefficient)
+            direct[coefficient]=glm::max(p.irradianceSH[coefficient]-p.bounceSH[coefficient]-p.emissiveSH[coefficient],glm::vec3(0.0f));
+        packSh(10,i,direct,v);packed[3][b]=p.skyVisibility*v;packed[3][b+1]=v;}
     Reset();glGenTextures(static_cast<GLsizei>(m_textures.size()),m_textures.data());
     for(std::size_t index=0;index<m_textures.size();++index){glBindTexture(GL_TEXTURE_3D,m_textures[index]);glTexParameteri(GL_TEXTURE_3D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);glTexParameteri(GL_TEXTURE_3D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);glTexParameteri(GL_TEXTURE_3D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);glTexParameteri(GL_TEXTURE_3D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);glTexParameteri(GL_TEXTURE_3D,GL_TEXTURE_WRAP_R,GL_CLAMP_TO_EDGE);glTexImage3D(GL_TEXTURE_3D,0,GL_RGBA16F,data.dimensions.x,data.dimensions.y,data.dimensions.z,0,GL_RGBA,GL_FLOAT,packed[index].data());}
     const GLenum status=glGetError();glBindTexture(GL_TEXTURE_3D,0);if(status!=GL_NO_ERROR){Reset();if(error)*error="OpenGL could not create the SH lighting probe textures.";return false;}
-    m_boundsMin=data.boundsMin;m_boundsMax=data.boundsMax;return true;
+    m_boundsMin=data.boundsMin;m_boundsMax=data.boundsMax;m_probeCount=data.probes.size();
+    // Thirteen RGBA16F volumes: combined SH (3), metadata (1), bounce SH
+    // (3), emissive SH (3), and direct-environment SH (3) = 104 bytes/probe.
+    m_memoryBytes=static_cast<std::uint64_t>(m_probeCount)*104ull;return true;
 }
-void LightingProbeGrid::Bind(unsigned int unit)const{for(std::size_t i=0;i<m_textures.size();++i){glActiveTexture(GL_TEXTURE0+unit+static_cast<unsigned int>(i));glBindTexture(GL_TEXTURE_3D,m_textures[i]);}}
+void LightingProbeGrid::Bind(unsigned int unit,Contribution contribution)const{
+    std::size_t base=0;if(contribution==Contribution::Bounce)base=4;
+    else if(contribution==Contribution::Emissive)base=7;
+    else if(contribution==Contribution::DirectEnvironment)base=10;
+    for(std::size_t i=0;i<3;++i){glActiveTexture(GL_TEXTURE0+unit+static_cast<unsigned int>(i));glBindTexture(GL_TEXTURE_3D,m_textures[base+i]);}
+    glActiveTexture(GL_TEXTURE0+unit+3);glBindTexture(GL_TEXTURE_3D,m_textures[3]);
+}
 
 } // namespace engine

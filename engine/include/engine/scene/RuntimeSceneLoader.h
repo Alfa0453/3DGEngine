@@ -164,6 +164,8 @@ public:
         glm::vec3 scale{1.0f};
         glm::quat rotation{1.0f, 0.0f, 0.0f, 0.0f};
         glm::vec3 color{1.0f};
+        bool reflectionProbeEnabled = false;
+        ecs::ReflectionProbe reflectionProbe;
         std::string modelPath;
         AssetHandle modelAssetId;
         std::string materialPath;

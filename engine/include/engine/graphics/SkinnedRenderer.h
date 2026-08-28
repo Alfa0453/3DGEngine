@@ -15,6 +15,8 @@ class CascadedShadow;
 class IBL;
 class SSAO;
 class LightingProbeGrid;
+class ReflectionProbeSystem;
+class LtcLut;
 namespace ecs { class Registry; }
 
 // Lighting context for the PBR skinned pass -- mirrors the subset of
@@ -31,6 +33,7 @@ struct SkinnedLighting {
     bool skylightOcclusion = false;
     float skylightOcclusionStrength = 0.90f, minimumSkylight = 0.06f;
     const LightingProbeGrid* lightingGrid = nullptr;
+    const ReflectionProbeSystem* reflectionProbes = nullptr;
     const SSAO* ssao = nullptr;
     glm::vec2 screenSize{1.0f};
     float specularOcclusionStrength = 0.85f;
@@ -89,6 +92,7 @@ private:
     std::unique_ptr<Shader> m_shader;   // Phong
     std::unique_ptr<Shader> m_pbr;      // Cook-Torrance (scene)
     std::unique_ptr<Shader> m_depth;    // depth-only (shadows)
+    std::unique_ptr<LtcLut> m_ltcLut;
 };
 
 } // namespace engine

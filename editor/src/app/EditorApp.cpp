@@ -1767,6 +1767,15 @@ void EditorApp::DrawEditorOverlay()
             } else {
                 ImGui::TextDisabled("GPU timings warming up...");
             }
+            ImGui::SeparatorText("Lighting");
+            ImGui::Text("GTAO GPU: %.2f ms",m_ssao?m_ssao->LastGpuMilliseconds():0.0);
+            ImGui::Text("Irradiance probes: %zu  (%.2f MB)",m_lightingProbeGrid.ProbeCount(),
+                static_cast<double>(m_lightingProbeGrid.MemoryBytes())/(1024.0*1024.0));
+            ImGui::Text("Reflection probes: %zu  (%.2f MB)",m_reflectionProbes.ProbeCount(),
+                static_cast<double>(m_reflectionProbes.MemoryBytes())/(1024.0*1024.0));
+            ImGui::Text("Last reflection capture: %.2f ms",m_lastReflectionCaptureMs);
+            ImGui::Text("Last lighting build: %.2f ms  |  %llu rays",m_lastLightingBuildMs,
+                static_cast<unsigned long long>(m_lastLightingBuildRays));
 
             // Scene counts: what the frame is actually pushing through.
             ImGui::Separator();
@@ -1836,8 +1845,33 @@ void EditorApp::DrawEditorOverlay()
 
     m_audio.SetListener(m_camera.Position(), m_camera.Front());
     PollLightingBuild();
-    if (!m_lightingBuildRunning && !m_scene.GetEnvironment().lightingBuildAsset.empty())
-        m_lightingBuildDirty = m_scene.GetEnvironment().lightingBuildHash != ComputeLightingStateHash();
+    if (!m_lightingBuildRunning && !m_scene.GetEnvironment().lightingBuildAsset.empty()) {
+        const std::uint64_t lightingHash=ComputeLightingStateHash();
+        m_lightingBuildDirty=m_scene.GetEnvironment().lightingBuildHash!=lightingHash;
+        if(!m_lightingBuildDirty)for(const EditorScene::Object& object:m_scene.Objects()){
+            if(const auto* probe=m_scene.TryGetReflectionProbe(object.entity);probe&&probe->enabled&&probe->CaptureIsStale(lightingHash)){
+                m_lightingBuildDirty=true;break;
+            }
+        }
+    }
+    if(m_lightingBuildRunning&&m_lightingBuildProgressState){
+        const auto phase=m_lightingBuildProgressState->phase.load();const char* phaseName="Preparing Geometry";
+        switch(phase){
+        case engine::LightingBuildProgress::Phase::PreparingGeometry: phaseName="Preparing Geometry";break;
+        case engine::LightingBuildProgress::Phase::BuildingAcceleration: phaseName="Building Acceleration";break;
+        case engine::LightingBuildProgress::Phase::IrradianceProbes: phaseName="Irradiance + Indirect Bounce";break;
+        case engine::LightingBuildProgress::Phase::IndirectBounce: phaseName="Indirect Bounce";break;
+        case engine::LightingBuildProgress::Phase::CapturingReflectionProbes: phaseName="Capturing Reflection Probes";break;
+        case engine::LightingBuildProgress::Phase::FilteringReflectionProbes: phaseName="Filtering Reflection Probes";break;
+        case engine::LightingBuildProgress::Phase::SavingBuildData: phaseName="Saving Build Data";break;
+        case engine::LightingBuildProgress::Phase::Complete: phaseName="Finishing";break;
+        }
+        const double elapsed=std::chrono::duration<double>(
+            std::chrono::steady_clock::now()-m_lightingBuildStartedAt).count();
+        m_lightingBuildStatus=std::string(phaseName)+" | "+
+            std::to_string(m_lightingBuildProgressState->raysCast.load())+
+            " rays | "+std::to_string(elapsed)+" s";
+    }
     EditorDockspace::Context dockspaceContext;
     dockspaceContext.panels = &m_panels;
     dockspaceContext.config = &m_config;
@@ -1897,6 +1931,7 @@ void EditorApp::DrawEditorOverlay()
     dockspaceContext.vsync = GetWindow().IsVSync();
     dockspaceContext.lightingBuildRunning = m_lightingBuildRunning;
     dockspaceContext.lightingBuildDirty = m_lightingBuildDirty;
+    dockspaceContext.lightingStateHash = ComputeLightingStateHash();
     dockspaceContext.lightingBuildQuality = &m_lightingBuildQuality;
     dockspaceContext.lightingBuildStatus = &m_lightingBuildStatus;
     if (m_lightingBuildProgressState && m_lightingBuildProgressState->total.load() > 0)
@@ -2017,6 +2052,8 @@ void EditorApp::DrawEditorOverlay()
     if (dockspaceContext.lightingBuildRequested) StartLightingBuild();
     if (dockspaceContext.lightingBuildCancelRequested && m_lightingBuildProgressState)
         m_lightingBuildProgressState->cancel = true;
+    if(dockspaceContext.reflectionProbeCaptureRequested)CaptureSelectedReflectionProbe(false);
+    if(dockspaceContext.reflectionProbeClearRequested)CaptureSelectedReflectionProbe(true);
     if (dockspaceContext.nativeScriptSourceCreated) {
         AcknowledgeCreatedScriptSource();
     }
@@ -6700,6 +6737,11 @@ void EditorApp::DrawPlayScene(const glm::mat4 & viewProj)
             }
         );
         AddTerrainMeshes(pbrRegistry);
+        m_playRegistry->view<Transform, engine::ecs::ReflectionProbe>().each(
+            [&](Entity, Transform& transform, engine::ecs::ReflectionProbe& probe) {
+                const Entity entity=pbrRegistry.Create();pbrRegistry.Add<Transform>(entity,transform);
+                pbrRegistry.Add<engine::ecs::ReflectionProbe>(entity,probe);
+            });
         AddEnvironmentSunIfNeeded(pbrRegistry, environment, sky, environmentSunApplied);
 
         engine::PbrRenderer::Options options;
@@ -6745,6 +6787,7 @@ void EditorApp::DrawPlayScene(const glm::mat4 & viewProj)
         lighting.ssao = environment.ssao && m_ssao ? &*m_ssao : nullptr;
         lighting.screenSize = glm::vec2(m_renderW, m_renderH);
         lighting.lightingGrid = m_lightingProbeGrid.Valid() ? &m_lightingProbeGrid : nullptr;
+        lighting.reflectionProbes = &m_reflectionProbes;
         lighting.cloudShadows = environment.clouds && environment.cloudShadows;
         lighting.cloudShadowStrength = environment.cloudShadowStrength;
         lighting.cloudShadowScale = environment.cloudShadowScale;
@@ -7169,6 +7212,9 @@ void EditorApp::DrawEditScene(const glm::mat4 & viewProj)
             if (const engine::ecs::Light* light = m_scene.TryGetLight(object.entity)) {
                 pbrRegistry.Add<engine::ecs::Light>(entity, *light);
             }
+            if (const engine::ecs::ReflectionProbe* probe = m_scene.TryGetReflectionProbe(object.entity)) {
+                pbrRegistry.Add<engine::ecs::ReflectionProbe>(entity, *probe);
+            }
         }
 
         AddTerrainMeshes(pbrRegistry);
@@ -7490,6 +7536,7 @@ void EditorApp::ConfigureEnvironmentPbrOptions(engine::ecs::Registry& registry,
     options.lightingDebugMode = environment.lightingDebugMode;
     if (environment.lightingBuildAsset != m_loadedLightingAsset) LoadSceneLightingAsset();
     options.lightingGrid = m_lightingProbeGrid.Valid() ? &m_lightingProbeGrid : nullptr;
+    options.reflectionProbes = &m_reflectionProbes;
     options.pointShadows = environment.pointShadows;
     options.spotShadows = environment.spotShadows;
     options.directionalShadows = environment.directionalShadows;
@@ -7537,8 +7584,28 @@ std::uint64_t EditorApp::ComputeLightingStateHash() const {
     };
     auto string = [&](const std::string& value){bytes(value.data(),value.size());};
     for (const auto& object : m_scene.Objects()) {
-        if (!object.visible || object.light || object.navMeshBoundsVolume || object.isWater || object.isSpline) continue;
+        if(!object.visible)continue;
+        if(const auto* light=m_scene.TryGetLight(object.entity)){
+            // Hash authored fields explicitly. Hashing the whole struct also hashes
+            // compiler padding, which made an unchanged scene occasionally appear stale.
+            bytes(&light->type,sizeof(light->type));bytes(&light->color,sizeof(light->color));
+            bytes(&light->intensity,sizeof(light->intensity));bytes(&light->direction,sizeof(light->direction));
+            bytes(&light->innerAngle,sizeof(light->innerAngle));bytes(&light->outerAngle,sizeof(light->outerAngle));
+            bytes(&light->range,sizeof(light->range));bytes(&light->sourceRadius,sizeof(light->sourceRadius));
+            bytes(&light->areaShape,sizeof(light->areaShape));bytes(&light->areaWidth,sizeof(light->areaWidth));
+            bytes(&light->areaHeight,sizeof(light->areaHeight));bytes(&light->areaTwoSided,sizeof(light->areaTwoSided));
+            if(const auto* t=m_scene.TryGetTransform(object.entity)){bytes(&t->position,sizeof(t->position));bytes(&t->rotation,sizeof(t->rotation));}
+            continue;
+        }
+        if(const auto* probe=m_scene.TryGetReflectionProbe(object.entity)){bytes(&probe->shape,sizeof(probe->shape));bytes(&probe->boxExtents,sizeof(probe->boxExtents));bytes(&probe->radius,sizeof(probe->radius));bytes(&probe->blendDistance,sizeof(probe->blendDistance));bytes(&probe->intensity,sizeof(probe->intensity));bytes(&probe->priority,sizeof(probe->priority));bytes(&probe->captureResolution,sizeof(probe->captureResolution));bytes(&probe->includeSky,sizeof(probe->includeSky));bytes(&probe->enabled,sizeof(probe->enabled));if(const auto*t=m_scene.TryGetTransform(object.entity)){bytes(&t->position,sizeof(t->position));bytes(&t->rotation,sizeof(t->rotation));bytes(&t->scale,sizeof(t->scale));}continue;}
+        if (object.navMeshBoundsVolume || object.isWater || object.isSpline) continue;
         string(object.name); string(object.modelAssetPath); bytes(&object.primitive,sizeof(object.primitive));
+        string(object.materialAssetPath);
+        if(const auto* renderer=m_scene.TryGetMeshRenderer(object.entity))bytes(&renderer->color,sizeof(renderer->color));
+        std::vector<std::pair<std::string,std::string>> sortedParameters(
+            object.materialParameterOverrides.begin(),object.materialParameterOverrides.end());
+        std::sort(sortedParameters.begin(),sortedParameters.end());
+        for(const auto& parameter:sortedParameters){string(parameter.first);string(parameter.second);}
         if (const auto* transform=m_scene.TryGetTransform(object.entity)) {
             bytes(&transform->position,sizeof(transform->position)); bytes(&transform->rotation,sizeof(transform->rotation)); bytes(&transform->scale,sizeof(transform->scale));
         }
@@ -7555,6 +7622,8 @@ std::uint64_t EditorApp::ComputeLightingStateHash() const {
     bytes(&e.skylightOcclusionStrength,sizeof(e.skylightOcclusionStrength)); bytes(&e.minimumSkylight,sizeof(e.minimumSkylight));
     bytes(&e.lightingBuildQuality,sizeof(e.lightingBuildQuality)); bytes(&e.lightingProbeSpacing,sizeof(e.lightingProbeSpacing)); bytes(&e.lightingRayDistance,sizeof(e.lightingRayDistance));
     bytes(&e.lightingIndirectBounceStrength,sizeof(e.lightingIndirectBounceStrength));
+    bytes(&e.lightingIndirectBounceEnabled,sizeof(e.lightingIndirectBounceEnabled));bytes(&e.lightingEmissiveContribution,sizeof(e.lightingEmissiveContribution));
+    bytes(&e.lightingIndirectSaturation,sizeof(e.lightingIndirectSaturation));bytes(&e.timeOfDay,sizeof(e.timeOfDay));bytes(&e.sunIntensity,sizeof(e.sunIntensity));
     return hash;
 }
 
@@ -7564,11 +7633,14 @@ std::vector<engine::LightingTriangle> EditorApp::GatherLightingTriangles() const
         if (!object.visible || object.light || object.skeletalModel || object.isWater || object.isSpline || object.navMeshBoundsVolume) continue;
         const auto* transform=m_scene.TryGetTransform(object.entity);
         const auto* authoredRenderer=m_scene.TryGetMeshRenderer(object.entity);
-        const glm::vec3 surfaceAlbedo=authoredRenderer?glm::clamp(authoredRenderer->color,glm::vec3(0.0f),glm::vec3(1.0f)):glm::vec3(0.8f);
+        glm::vec3 surfaceAlbedo=authoredRenderer?glm::clamp(authoredRenderer->color,glm::vec3(0.0f),glm::vec3(1.0f)):glm::vec3(0.8f);
+        glm::vec3 surfaceEmissive(0.0f);if(const auto* material=m_editAssets.FindMaterial(object.materialAssetPath)){
+            const glm::vec3 tint=authoredRenderer?authoredRenderer->color:glm::vec3(1.0f);
+            surfaceAlbedo=glm::clamp(material->material.albedo*tint,glm::vec3(0),glm::vec3(1));surfaceEmissive=glm::max(material->material.emissive,glm::vec3(0));}
         auto appendMesh=[&](const engine::Mesh& source,const glm::mat4& model){
             const auto vertices=source.ReadbackVertices();const auto indices=source.ReadbackIndices();const std::size_t stride=source.VertexStrideFloats();
             if(stride<3||indices.size()<3)return;auto point=[&](std::uint32_t index){const std::size_t base=static_cast<std::size_t>(index)*stride;if(base+2>=vertices.size())return glm::vec3(0);return glm::vec3(model*glm::vec4(vertices[base],vertices[base+1],vertices[base+2],1.0f));};
-            triangles.reserve(triangles.size()+indices.size()/3);for(std::size_t i=0;i+2<indices.size();i+=3)triangles.push_back({point(indices[i]),point(indices[i+1]),point(indices[i+2]),surfaceAlbedo,glm::vec3(0.0f)});
+            triangles.reserve(triangles.size()+indices.size()/3);for(std::size_t i=0;i+2<indices.size();i+=3)triangles.push_back({point(indices[i]),point(indices[i+1]),point(indices[i+2]),surfaceAlbedo,surfaceEmissive});
         };
         if(transform&&!object.modelAssetPath.empty()&&!object.skeletalModel){
             if(const engine::Model* model=m_editAssets.FindModel(object.modelAssetPath)){
@@ -7586,6 +7658,60 @@ std::vector<engine::LightingTriangle> EditorApp::GatherLightingTriangles() const
     return triangles;
 }
 
+bool EditorApp::CaptureSelectedReflectionProbe(bool clearOnly,bool buildCapture){
+    const auto captureStartedAt=std::chrono::steady_clock::now();
+    const EditorScene::Object* selected=m_scene.SelectedObject();
+    if(!selected||!selected->reflectionProbeEnabled){m_log.Warning("Select an object with a Reflection Probe component.");return false;}
+    const Transform* transform=m_scene.TryGetTransform(selected->entity);if(!transform||!m_ibl){m_log.Warning("Reflection capture is unavailable.");return false;}
+    engine::ecs::ReflectionProbe probe=selected->reflectionProbe;
+    if(const auto* component=m_scene.TryGetReflectionProbe(selected->entity))probe=*component;
+    if(clearOnly){std::error_code ec;if(!probe.bakedCubemapPath.empty())std::filesystem::remove(probe.bakedCubemapPath,ec);
+        probe.bakedCubemapPath.clear();probe.bakedCubemapId={};probe.captureSourceHash=0;m_scene.SetSelectedReflectionProbe(true,probe);
+        m_reflectionProbes.Clear();m_lightingBuildDirty=true;m_log.Info("Cleared reflection probe capture.");return true;}
+    if(!probe.stableId.Valid())probe.stableId=engine::AssetHandle::Generate();
+    int resolution=std::clamp<int>(static_cast<int>(probe.captureResolution),32,512);
+    if(buildCapture){if(m_lightingBuildQuality==0)resolution=std::min(resolution,64);
+        else if(m_lightingBuildQuality==1)resolution=std::min(resolution,128);}
+    const int mipCount=std::min(8,1+static_cast<int>(std::floor(std::log2(resolution))));
+    if(buildCapture&&m_lightingBuildProgressState)
+        m_lightingBuildProgressState->phase=engine::LightingBuildProgress::Phase::CapturingReflectionProbes;
+    const EditorScene::Environment environment=m_scene.GetEnvironment();
+    const engine::DayNightCycle::Sample sky=engine::DayNightCycle::At(environment.timeOfDay);
+    const unsigned int cubemap=m_ibl->CapturePrefiltered(transform->position,resolution,
+        [&](const glm::mat4& view,const glm::mat4& projection){
+            const glm::mat4 viewProjection=projection*view;
+            if(probe.includeSky)DrawEnvironmentSky(view,projection,sky,false);
+            if(m_shader&&m_cube){m_shader->Bind();m_shader->SetMat4("uViewProj",viewProjection);
+                m_shader->SetVec3("uLightPos",transform->position+glm::vec3(-4,6,4));m_shader->SetVec3("uLightColor",glm::vec3(1));
+                m_shader->SetVec3("uViewPos",transform->position);
+                for(const EditorScene::Object& object:m_scene.Objects()){
+                    if(!object.visible||object.entity==selected->entity)continue;
+                    const Transform* objectTransform=m_scene.TryGetTransform(object.entity);
+                    const engine::ecs::MeshRenderer* mesh=m_scene.TryGetMeshRenderer(object.entity);
+                    if(objectTransform&&mesh)m_viewport.DrawSceneObject(m_renderer,*m_shader,*objectTransform,*mesh,nullptr,glm::vec3(0));}}
+            DrawEditModeModels(viewProjection);
+        });
+    if(!cubemap){m_log.Error("Reflection probe capture failed.");return false;}
+    if(buildCapture&&m_lightingBuildProgressState)
+        m_lightingBuildProgressState->phase=engine::LightingBuildProgress::Phase::FilteringReflectionProbes;
+    std::filesystem::path folder=std::filesystem::path(m_project.AssetRoot())/"Lighting";
+    const std::filesystem::path output=folder/(probe.stableId.ToString()+".3dgrefl");std::string error;
+    const std::uint64_t captureHash=ComputeLightingStateHash();engine::ReflectionCaptureMetadata metadata;
+    metadata.stableIdHigh=probe.stableId.high;metadata.stableIdLow=probe.stableId.low;metadata.sourceSceneHash=captureHash;
+    metadata.boxExtents=probe.boxExtents;metadata.radius=probe.radius;metadata.blendDistance=probe.blendDistance;
+    metadata.intensity=probe.intensity;metadata.shape=probe.shape==engine::ecs::ReflectionProbe::Shape::Sphere?1u:0u;
+    metadata.includeSky=probe.includeSky?1u:0u;
+    const bool saved=engine::IBL::SavePrefilteredCubemap(output.string(),cubemap,resolution,mipCount,&error,&metadata);glDeleteTextures(1,&cubemap);
+    if(!saved){m_log.Error("Reflection probe save failed: "+error);return false;}
+    probe.bakedCubemapPath=output.string();probe.captureSourceHash=captureHash;
+    m_scene.SetSelectedReflectionProbe(true,probe);m_reflectionProbes.Clear();
+    m_lastReflectionCaptureMs=std::chrono::duration<double,std::milli>(
+        std::chrono::steady_clock::now()-captureStartedAt).count();
+    m_log.Info("Captured and prefiltered reflection probe: "+output.string()+
+               " ("+std::to_string(m_lastReflectionCaptureMs)+" ms)");
+    return true;
+}
+
 void EditorApp::StartLightingBuild() {
     if(m_lightingBuildRunning)return;
     auto triangles=GatherLightingTriangles();
@@ -7599,6 +7725,9 @@ void EditorApp::StartLightingBuild() {
     settings.probeSpacing=std::clamp(environment.lightingProbeSpacing,0.25f,20.0f);
     settings.maxRayDistance=std::clamp(environment.lightingRayDistance,2.0f,1000.0f);
     settings.indirectBounceStrength=std::clamp(environment.lightingIndirectBounceStrength,0.0f,1.0f);
+    settings.indirectBounceEnabled=environment.lightingIndirectBounceEnabled;
+    settings.emissiveContribution=std::clamp(environment.lightingEmissiveContribution,0.0f,4.0f);
+    settings.indirectSaturation=std::clamp(environment.lightingIndirectSaturation,0.0f,2.0f);
     settings.raysPerProbe=settings.quality==engine::LightingBuildQuality::Preview?24u:(settings.quality==engine::LightingBuildQuality::High?192u:72u);
     const std::uint64_t hash=ComputeLightingStateHash();
     const std::filesystem::path path=std::filesystem::path(m_project.AssetRoot())/"Lighting"/(std::filesystem::path(m_project.ScenePath()).stem().string()+".3dglighting");
@@ -7609,14 +7738,31 @@ void EditorApp::StartLightingBuild() {
     skyRadiance.ground=skySample.ambient*environment.skyLightIntensity*0.10f;
     skyRadiance.sunDirection=glm::normalize(-skySample.keyLightDirection);
     skyRadiance.sunRadiance=skySample.keyLightColor*environment.sunIntensity*0.35f;
+    std::vector<engine::LightingBuildLight> staticLights;
+    for(const EditorScene::Object& object:m_scene.Objects()){
+        const auto* light=m_scene.TryGetLight(object.entity);const auto* transform=m_scene.TryGetTransform(object.entity);
+        if(!light||!transform||!object.visible)continue;engine::LightingBuildLight baked;
+        baked.position=transform->position;baked.direction=glm::normalize(light->direction);
+        baked.color=glm::max(light->color*light->intensity,glm::vec3(0));baked.range=std::max(light->range,0.01f);
+        baked.innerCos=std::cos(glm::radians(light->innerAngle));baked.outerCos=std::cos(glm::radians(light->outerAngle));
+        baked.halfSize=glm::vec2(std::max(light->areaWidth,0.01f),std::max(light->areaHeight,0.01f))*0.5f;
+        baked.right=glm::normalize(transform->rotation*glm::vec3(1,0,0));baked.up=glm::normalize(transform->rotation*glm::vec3(0,1,0));
+        baked.twoSided=light->areaTwoSided;
+        if(light->type==engine::ecs::Light::Type::Directional)baked.type=engine::LightingBuildLight::Type::Directional;
+        else if(light->type==engine::ecs::Light::Type::Point)baked.type=engine::LightingBuildLight::Type::Point;
+        else if(light->type==engine::ecs::Light::Type::Spot)baked.type=engine::LightingBuildLight::Type::Spot;
+        else baked.type=engine::LightingBuildLight::Type::Rectangle;staticLights.push_back(baked);
+    }
     m_lightingBuildProgressState=std::make_shared<engine::LightingBuildProgress>();
     auto progress=m_lightingBuildProgressState;
     const std::string scene=m_project.ScenePath(); const std::string output=path.string();
-    m_lightingBuildRunning=true;m_lightingBuildStatus="Building directional SH irradiance...";
-    m_lightingBuildFuture=std::async(std::launch::async,[triangles=std::move(triangles),settings,hash,skyRadiance,scene,output,progress]() mutable {
+    m_lightingBuildRunning=true;m_lightingBuildStatus="Preparing lighting geometry...";
+    m_lightingBuildStartedAt=std::chrono::steady_clock::now();
+    m_lightingBuildFuture=std::async(std::launch::async,[triangles=std::move(triangles),staticLights=std::move(staticLights),settings,hash,skyRadiance,scene,output,progress]() mutable {
         LightingBuildResult result;result.path=output;
-        result.success=engine::BuildLightingProbes(triangles,skyRadiance,hash,scene,settings,&result.data,progress.get(),&result.error)
-                    && engine::SaveLightingBuildData(output,result.data,&result.error);
+        result.success=engine::BuildLightingProbes(triangles,staticLights,skyRadiance,hash,scene,settings,&result.data,progress.get(),&result.error);
+        if(result.success){progress->phase=engine::LightingBuildProgress::Phase::SavingBuildData;
+            result.success=engine::SaveLightingBuildData(output,result.data,&result.error);}
         return result;
     });
 }
@@ -7624,12 +7770,23 @@ void EditorApp::StartLightingBuild() {
 void EditorApp::PollLightingBuild() {
     if(!m_lightingBuildRunning||!m_lightingBuildFuture.valid())return;
     if(m_lightingBuildFuture.wait_for(std::chrono::seconds(0))!=std::future_status::ready)return;
-    LightingBuildResult result=m_lightingBuildFuture.get();m_lightingBuildRunning=false;
-    if(!result.success){m_lightingBuildStatus=result.error.empty()?"Lighting build failed":result.error;m_log.Error(m_lightingBuildStatus);return;}
+    LightingBuildResult result=m_lightingBuildFuture.get();
+    if(m_lightingBuildProgressState)m_lastLightingBuildRays=m_lightingBuildProgressState->raysCast.load();
+    if(!result.success){m_lightingBuildRunning=false;m_lastLightingBuildMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-m_lightingBuildStartedAt).count();m_lightingBuildStatus=result.error.empty()?"Lighting build failed":result.error;m_log.Error(m_lightingBuildStatus);return;}
     std::string error;
-    if(!m_lightingProbeGrid.Upload(result.data,&error)){m_lightingBuildStatus=error;m_log.Error(error);return;}
+    if(!m_lightingProbeGrid.Upload(result.data,&error)){m_lightingBuildRunning=false;m_lightingBuildStatus=error;m_log.Error(error);return;}
     auto environment=m_scene.GetEnvironment(); environment.lightingBuildAsset=result.path; environment.lightingBuildHash=result.data.sourceHash; m_scene.SetEnvironment(environment);
-    m_loadedLightingAsset=result.path;m_lightingBuildDirty=false;m_lightingBuildStatus="Lighting built: "+std::to_string(result.data.probes.size())+" probes";m_log.Info(m_lightingBuildStatus);
+    m_loadedLightingAsset=result.path;
+    const EditorScene::Object* original=m_scene.SelectedObject();const Entity originalEntity=original?original->entity:engine::ecs::kNull;
+    std::vector<Entity> reflectionEntities;for(const EditorScene::Object& object:m_scene.Objects())if(object.reflectionProbeEnabled)reflectionEntities.push_back(object.entity);
+    bool capturesSucceeded=true;
+    if(m_lightingBuildProgressState){m_lightingBuildProgressState->phase=engine::LightingBuildProgress::Phase::CapturingReflectionProbes;m_lightingBuildProgressState->completed=0;m_lightingBuildProgressState->total=static_cast<std::uint32_t>(reflectionEntities.size());}
+    for(Entity entity:reflectionEntities){if(m_scene.SelectEntity(entity))capturesSucceeded&=CaptureSelectedReflectionProbe(false,true);else capturesSucceeded=false;if(m_lightingBuildProgressState)++m_lightingBuildProgressState->completed;}
+    if(originalEntity!=engine::ecs::kNull)m_scene.SelectEntity(originalEntity);
+    m_lightingBuildRunning=false;m_lastLightingBuildMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-m_lightingBuildStartedAt).count();
+    m_lightingBuildDirty=!capturesSucceeded;
+    m_lightingBuildStatus=(capturesSucceeded?"Lighting built: ":"GI built, but one or more reflection captures failed: ")+std::to_string(result.data.probes.size())+" irradiance probes, "+std::to_string(reflectionEntities.size())+" reflection probes";
+    if(capturesSucceeded)m_log.Info(m_lightingBuildStatus);else m_log.Warning(m_lightingBuildStatus);
 }
 
 void EditorApp::LoadSceneLightingAsset() {

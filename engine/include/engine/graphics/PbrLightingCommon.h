@@ -25,6 +25,19 @@ uniform sampler3D uLightingMeta;
 uniform float uLocalProbeInfluence;
 uniform float uSpecularOcclusionStrength;
 uniform int uLightingDebugMode;
+uniform samplerCube uLocalReflection0;
+uniform samplerCube uLocalReflection1;
+uniform int uReflectionProbeCount;
+uniform vec3 uReflectionProbePosition[2];
+uniform vec3 uReflectionProbeExtents[2];
+uniform float uReflectionProbeRadius[2];
+uniform float uReflectionProbeBlend[2];
+uniform float uReflectionProbeIntensity[2];
+uniform float uReflectionProbePriorityFactor[2];
+uniform int uReflectionProbeShape[2];
+uniform float uReflectionProbeMaxLod[2];
+uniform sampler2D uLtcMatrixLut;
+uniform sampler2D uLtcAmplitudeLut;
 
 float SmoothFiniteAttenuation(float distanceSquared, float radius) {
     float safeRadius = max(radius, 0.001);
@@ -70,6 +83,45 @@ float PbrSpecularOcclusion(float ao, float nDotV, float roughness, float skyVisi
     return mix(1.0, gtao * local, clamp(uSpecularOcclusionStrength, 0.0, 1.0));
 }
 
+float ReflectionProbeWeight(int index, vec3 p) {
+    if (uReflectionProbeShape[index] == 1) {
+        float distanceToEdge = uReflectionProbeRadius[index]
+            - length(p-uReflectionProbePosition[index]);
+        return smoothstep(0.0, max(uReflectionProbeBlend[index],0.001), distanceToEdge);
+    }
+    vec3 local = abs(p-uReflectionProbePosition[index]);
+    vec3 inside = uReflectionProbeExtents[index]-local;
+    if (min(inside.x,min(inside.y,inside.z)) < 0.0) return 0.0;
+    return smoothstep(0.0,max(uReflectionProbeBlend[index],0.001),
+                      min(inside.x,min(inside.y,inside.z)));
+}
+vec3 BoxProjectedDirection(int index, vec3 p, vec3 direction) {
+    vec3 safeDirection=vec3(abs(direction.x)<1e-5?(direction.x<0.0?-1e-5:1e-5):direction.x,
+                            abs(direction.y)<1e-5?(direction.y<0.0?-1e-5:1e-5):direction.y,
+                            abs(direction.z)<1e-5?(direction.z<0.0?-1e-5:1e-5):direction.z);
+    vec3 boxMin=uReflectionProbePosition[index]-uReflectionProbeExtents[index];
+    vec3 boxMax=uReflectionProbePosition[index]+uReflectionProbeExtents[index];
+    vec3 t0=(boxMin-p)/safeDirection, t1=(boxMax-p)/safeDirection;
+    vec3 farT=max(t0,t1); float distance=min(farT.x,min(farT.y,farT.z));
+    return (p+direction*max(distance,0.0))-uReflectionProbePosition[index];
+}
+vec3 SampleLocalReflectionProbe(int index, vec3 p, vec3 direction, float roughness) {
+    vec3 lookup=uReflectionProbeShape[index]==0?BoxProjectedDirection(index,p,direction):direction;
+    if(index==0)return textureLod(uLocalReflection0,lookup,roughness*uReflectionProbeMaxLod[0]).rgb;
+    return textureLod(uLocalReflection1,lookup,roughness*uReflectionProbeMaxLod[1]).rgb;
+}
+vec3 SampleReflectionEnvironment(vec3 p, vec3 direction, float roughness,
+                                 vec3 globalReflection, out float localWeight) {
+    float w0=uReflectionProbeCount>0?ReflectionProbeWeight(0,p)*uReflectionProbePriorityFactor[0]:0.0;
+    float w1=uReflectionProbeCount>1?ReflectionProbeWeight(1,p)*uReflectionProbePriorityFactor[1]:0.0;
+    float sum=max(w0+w1,1.0); w0/=sum; w1/=sum;
+    localWeight=clamp(w0+w1,0.0,1.0);
+    vec3 local=vec3(0.0);
+    if(w0>0.0)local+=SampleLocalReflectionProbe(0,p,direction,roughness)*w0*uReflectionProbeIntensity[0];
+    if(w1>0.0)local+=SampleLocalReflectionProbe(1,p,direction,roughness)*w1*uReflectionProbeIntensity[1];
+    return local+globalReflection*(1.0-localWeight);
+}
+
 float DistributionGGX(vec3 N, vec3 H, float roughness) {
     float alpha = roughness * roughness;
     float alphaSquared = alpha * alpha;
@@ -102,6 +154,39 @@ vec3 Lighting(vec3 N, vec3 V, vec3 L, vec3 radiance, vec3 albedo,
         / (4.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0) + 0.0001);
     vec3 diffuseWeight = (vec3(1.0) - fresnel) * (1.0 - metallic);
     return (diffuseWeight * albedo / PI + specular) * radiance * max(dot(N, L), 0.0);
+}
+vec3 LtcIntegrateEdge(vec3 a,vec3 b){
+    float cosine=clamp(dot(a,b),-0.9999,0.9999);float theta=acos(cosine);
+    return cross(a,b)*(theta/max(sin(theta),0.0001));
+}
+float LtcIntegrateQuad(vec3 points[4],mat3 transform){
+    vec3 p0=normalize(transform*points[0]),p1=normalize(transform*points[1]);
+    vec3 p2=normalize(transform*points[2]),p3=normalize(transform*points[3]);
+    vec3 sum=LtcIntegrateEdge(p0,p1)+LtcIntegrateEdge(p1,p2)+
+             LtcIntegrateEdge(p2,p3)+LtcIntegrateEdge(p3,p0);
+    return max(sum.z,0.0)/(2.0*PI);
+}
+vec3 LtcRectangleLight(vec3 N,vec3 V,vec3 worldPosition,vec3 center,vec3 right,vec3 up,
+                       vec2 halfSize,int twoSided,vec3 radiance,vec3 albedo,vec3 F0,
+                       float metallic,float roughness){
+    vec3 planeNormal=normalize(cross(right,up));float facing=dot(planeNormal,worldPosition-center);
+    if(twoSided==0&&facing<=0.0)return vec3(0.0);
+    float nDotV=clamp(dot(N,V),0.0,1.0);vec2 lutUv=vec2(clamp(roughness,0.0,1.0),nDotV);
+    vec4 ltc=texture(uLtcMatrixLut,lutUv);vec2 amplitude=texture(uLtcAmplitudeLut,lutUv).rg;
+    vec3 tangent=V-N*dot(V,N);if(dot(tangent,tangent)<1e-6)tangent=abs(N.y)<0.999?cross(vec3(0,1,0),N):cross(vec3(1,0,0),N);
+    tangent=normalize(tangent);vec3 bitangent=normalize(cross(N,tangent));
+    mat3 worldToShading=transpose(mat3(tangent,bitangent,N));
+    vec3 corners[4]=vec3[4](center-right*halfSize.x-up*halfSize.y-worldPosition,
+        center+right*halfSize.x-up*halfSize.y-worldPosition,
+        center+right*halfSize.x+up*halfSize.y-worldPosition,
+        center-right*halfSize.x+up*halfSize.y-worldPosition);
+    for(int i=0;i<4;++i)corners[i]=worldToShading*corners[i];
+    float diffuseIntegral=LtcIntegrateQuad(corners,mat3(1.0));
+    mat3 inverseLtc=mat3(vec3(ltc.x,0.0,ltc.y),vec3(0.0,1.0,0.0),vec3(ltc.z,0.0,max(ltc.w,0.001)));
+    float specularIntegral=LtcIntegrateQuad(corners,inverseLtc);
+    vec3 fresnelAmplitude=F0*amplitude.x+(vec3(1.0)-F0)*amplitude.y;
+    vec3 diffuse=(1.0-metallic)*albedo/PI*diffuseIntegral;
+    return radiance*(diffuse+fresnelAmplitude*specularIntegral);
 }
 )GLSL";
 }

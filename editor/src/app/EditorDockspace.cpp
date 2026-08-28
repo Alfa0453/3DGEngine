@@ -285,7 +285,8 @@ enum class AddableComponent {
     NavAgent,
     Script,
     AudioSource,
-    ParticleSystem
+    ParticleSystem,
+    ReflectionProbe
 };
 
 struct ComponentCatalogEntry {
@@ -309,6 +310,7 @@ constexpr ComponentCatalogEntry kComponentCatalog[] = {
     // Script is added via the dedicated "+ Add Script" button, not this catalog.
     {"Audio Source", "Audio", "2D or spatial sound playback", AddableComponent::AudioSource},
     {"Particle System", "Effects", "Animated billboard particle emitter", AddableComponent::ParticleSystem},
+    {"Reflection Probe", "Lighting", "Local box or sphere specular reflection capture", AddableComponent::ReflectionProbe},
 };
 
 struct PrimitiveCreatorState {
@@ -1556,6 +1558,7 @@ bool HasComponent(const EditorScene::Object& object, AddableComponent component)
         return object.scriptEnabled || !object.scriptClassName.empty() || !object.scriptPath.empty();
     case AddableComponent::AudioSource: return object.audioSourceEnabled;
     case AddableComponent::ParticleSystem: return object.particleSystemEnabled;
+    case AddableComponent::ReflectionProbe: return object.reflectionProbeEnabled;
     }
     return false;
 }
@@ -1628,6 +1631,11 @@ bool AddComponent(EditorDockspace::Context& context, AddableComponent component)
         if (added && context.panels) {
             context.panels->SetOpen(EditorPanels::Panel::ParticleEditor, true);
         }
+        break;
+    }
+    case AddableComponent::ReflectionProbe: {
+        engine::ecs::ReflectionProbe probe;
+        added=context.scene->SetSelectedReflectionProbe(true,probe);
         break;
     }
     }
@@ -2252,7 +2260,9 @@ void DrawWorldSettings(EditorScene& scene, EditorDockspace::Context& context, bo
         static constexpr const char* kLightingDebugModes[] = {
             "Final Lighting", "Direct Lighting", "Diffuse Indirect", "Specular Indirect",
             "Local Probe Irradiance", "Sky Visibility", "Ambient Occlusion",
-            "Specular Occlusion", "Probe Validity"
+            "Specular Occlusion", "Probe Validity", "Bent Normal",
+            "Raw GTAO", "Filtered GTAO", "Reflection Probe Weight",
+            "Direct Environment GI", "Bounce GI", "Emissive GI"
         };
         changed |= ImGui::Combo("Lighting Debug View", &environment.lightingDebugMode,
                                 kLightingDebugModes, IM_ARRAYSIZE(kLightingDebugModes));
@@ -2267,6 +2277,9 @@ void DrawWorldSettings(EditorScene& scene, EditorDockspace::Context& context, bo
         changed |= ImGui::DragFloat("Sky Ray Distance", &environment.lightingRayDistance, 1.0f, 2.0f, 1000.0f, "%.1f m");
         changed |= ImGui::SliderFloat("Indirect Bounce Strength", &environment.lightingIndirectBounceStrength,
                                       0.0f, 1.0f, "%.2f");
+        changed |= ImGui::Checkbox("Indirect Bounce Enabled",&environment.lightingIndirectBounceEnabled);
+        changed |= ImGui::SliderFloat("Emissive Contribution",&environment.lightingEmissiveContribution,0.0f,4.0f,"%.2f");
+        changed |= ImGui::SliderFloat("Indirect Saturation",&environment.lightingIndirectSaturation,0.0f,2.0f,"%.2f");
         ImGui::TextDisabled("Optional single-bounce diffuse/emissive approximation; rebuild required.");
         ImGui::BeginDisabled(context.lightingBuildRunning || context.playMode);
         if (ImGui::Button("Build Lighting")) context.lightingBuildRequested = true;
@@ -4779,6 +4792,39 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             if (ImGui::DragFloat("Source Radius", &light.sourceRadius, 0.05f, 0.0f, 1000.0f)) {
                 context.scene->SetSelectedLight(light);
             }
+            if(light.type==engine::ecs::Light::Type::Area){int shape=light.areaShape==engine::ecs::Light::AreaShape::Rectangle?1:0;
+                const char* shapes[]={"Sphere","Rectangle"};if(ImGui::Combo("Area Shape",&shape,shapes,2)){light.areaShape=shape?engine::ecs::Light::AreaShape::Rectangle:engine::ecs::Light::AreaShape::Sphere;context.scene->SetSelectedLight(light);}
+                if(shape==1){bool areaChanged=false;areaChanged|=ImGui::DragFloat("Width",&light.areaWidth,0.05f,0.01f,1000.0f);
+                    areaChanged|=ImGui::DragFloat("Height",&light.areaHeight,0.05f,0.01f,1000.0f);areaChanged|=ImGui::Checkbox("Two Sided",&light.areaTwoSided);
+                    ImGui::TextDisabled("LTC lighting; shadows currently use the existing approximation.");if(areaChanged)context.scene->SetSelectedLight(light);}}
+        }
+    }
+
+    if(selected->reflectionProbeEnabled){
+        if(ImGui::CollapsingHeader("Reflection Probe",ImGuiTreeNodeFlags_DefaultOpen)){
+            engine::ecs::ReflectionProbe probe=selected->reflectionProbe;
+            if(const auto* component=context.scene->TryGetReflectionProbe(selected->entity))probe=*component;
+            bool changed=false;int shape=probe.shape==engine::ecs::ReflectionProbe::Shape::Sphere?1:0;
+            const char* shapes[]={"Box","Sphere"};if(ImGui::Combo("Shape",&shape,shapes,2)){probe.shape=shape?engine::ecs::ReflectionProbe::Shape::Sphere:engine::ecs::ReflectionProbe::Shape::Box;changed=true;}
+            if(shape==0)changed|=ImGui::DragFloat3("Box Extents",&probe.boxExtents.x,0.1f,0.01f,10000.0f);
+            else changed|=ImGui::DragFloat("Radius",&probe.radius,0.1f,0.01f,10000.0f);
+            changed|=ImGui::DragFloat("Blend Distance",&probe.blendDistance,0.05f,0.001f,1000.0f);
+            changed|=ImGui::DragFloat("Probe Intensity",&probe.intensity,0.02f,0.0f,16.0f);
+            changed|=ImGui::InputInt("Priority",&probe.priority);
+            int resolution=static_cast<int>(probe.captureResolution);
+            const char* resolutions[]={"32","64","128","256","512"};int resolutionIndex=resolution<=32?0:resolution<=64?1:resolution<=128?2:resolution<=256?3:4;
+            if(ImGui::Combo("Capture Resolution",&resolutionIndex,resolutions,5)){probe.captureResolution=32u<<resolutionIndex;changed=true;}
+            changed|=ImGui::Checkbox("Include Sky",&probe.includeSky);changed|=ImGui::Checkbox("Enabled",&probe.enabled);
+            ImGui::Text("Probe ID: %s",probe.stableId.Valid()?probe.stableId.ToString().c_str():"Assigned on first capture");
+            const std::uint64_t currentHash=context.lightingStateHash;
+            if(probe.CaptureIsStale(currentHash))ImGui::TextColored(ImVec4(1.0f,0.65f,0.1f,1.0f),"Lighting Needs Rebuild");
+            else ImGui::TextColored(ImVec4(0.35f,1.0f,0.45f,1.0f),"Capture valid");
+            if(ImGui::Button("Capture Probe"))context.reflectionProbeCaptureRequested=true;ImGui::SameLine();
+            if(ImGui::Button("Rebuild Probe"))context.reflectionProbeCaptureRequested=true;ImGui::SameLine();
+            if(ImGui::Button("Clear Probe"))context.reflectionProbeClearRequested=true;
+            if(!probe.bakedCubemapPath.empty())ImGui::TextWrapped("Asset: %s",probe.bakedCubemapPath.c_str());
+            if(changed)context.scene->SetSelectedReflectionProbe(true,probe);
+            if(ImGui::Button("Remove Reflection Probe"))context.scene->SetSelectedReflectionProbe(false,probe);
         }
     }
 

@@ -12,7 +12,6 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
-#include <random>
 #include <string>
 #include <vector>
 
@@ -72,47 +71,84 @@ void main() { vUV = aUV; gl_Position = vec4(aPos, 0.0, 1.0); }
 
 const char* kSsaoFrag = R"GLSL(
 #version 330 core
-in vec2 vUV; out float FragColor;
+in vec2 vUV;
+layout(location=0) out float FragAO;
+layout(location=1) out vec3 FragBentNormal;
 uniform sampler2D gPosition;
 uniform sampler2D gNormal;
-uniform sampler2D texNoise;
-uniform vec3  uSamples[64];
 uniform mat4  uProjection;
-uniform vec2  uNoiseScale;
 uniform float uRadius;
 uniform float uBias;
 void main() {
     vec3 fragPos = texture(gPosition, vUV).xyz;
     vec3 normal  = normalize(texture(gNormal, vUV).xyz);
-    vec3 randomVec = normalize(texture(texNoise, vUV * uNoiseScale).xyz);
-    vec3 tangent   = normalize(randomVec - normal * dot(randomVec, normal));
-    vec3 bitangent = cross(normal, tangent);
-    mat3 TBN = mat3(tangent, bitangent, normal);
-    float occlusion = 0.0;
-    for (int i = 0; i < 64; ++i) {
-        vec3 samplePos = fragPos + (TBN * uSamples[i]) * uRadius;
-        vec4 offset = uProjection * vec4(samplePos, 1.0);
-        offset.xyz /= offset.w;
-        offset.xyz = offset.xyz * 0.5 + 0.5;
-        float sampleDepth = texture(gPosition, offset.xy).z;
-        float rangeCheck = smoothstep(0.0, 1.0, uRadius / abs(fragPos.z - sampleDepth));
-        occlusion += (sampleDepth >= samplePos.z + uBias ? 1.0 : 0.0) * rangeCheck;
+    if (dot(normal, normal) < 0.25 || fragPos.z >= -0.0001) {
+        FragAO = 1.0; FragBentNormal = vec3(0.0, 0.0, 1.0); return;
     }
-    FragColor = 1.0 - occlusion / 64.0;
+    vec2 pixel = 1.0 / vec2(textureSize(gPosition, 0));
+    float projectedRadius = max(1.0, abs(uProjection[1][1]) * uRadius /
+                                max(abs(fragPos.z), 0.05) * 0.5 * float(textureSize(gPosition,0).y));
+    float obscurance = 0.0;
+    vec3 openDirection = normal * 0.001;
+    const int directions = 8;
+    const int steps = 6;
+    for (int d=0; d<directions; ++d) {
+        float angle = (float(d) + 0.5 * mod(float(int(gl_FragCoord.x)+int(gl_FragCoord.y)),2.0))
+                    * 6.28318530718 / float(directions);
+        vec2 axis = vec2(cos(angle), sin(angle));
+        float horizon = -1.0;
+        vec3 bestOpen = normal;
+        for (int s=1; s<=steps; ++s) {
+            float fraction = (float(s)-0.35) / float(steps);
+            vec2 uv = vUV + axis * pixel * projectedRadius * fraction;
+            if (any(lessThan(uv,vec2(0.0))) || any(greaterThan(uv,vec2(1.0)))) continue;
+            vec3 samplePos = texture(gPosition, uv).xyz;
+            vec3 delta = samplePos - fragPos;
+            float distanceToSample = length(delta);
+            if (distanceToSample < uBias || distanceToSample > uRadius) continue;
+            vec3 sampleDir = delta / max(distanceToSample, 1e-5);
+            float elevation = dot(sampleDir, normal);
+            float falloff = 1.0 - distanceToSample / uRadius;
+            horizon = max(horizon, elevation * falloff);
+            if (elevation < horizon) bestOpen += sampleDir * (1.0-elevation) * falloff;
+        }
+        float directionOcclusion = clamp((horizon + 0.08) / 1.08, 0.0, 1.0);
+        obscurance += directionOcclusion;
+        openDirection += normalize(bestOpen) * (1.0-directionOcclusion);
+    }
+    FragAO = clamp(1.0 - obscurance / float(directions), 0.0, 1.0);
+    FragBentNormal = normalize(openDirection);
 }
 )GLSL";
 
 const char* kBlurFrag = R"GLSL(
 #version 330 core
-in vec2 vUV; out float FragColor;
+in vec2 vUV;
+layout(location=0) out float FragAO;
+layout(location=1) out vec3 FragBentNormal;
 uniform sampler2D uSsao;
+uniform sampler2D uBentNormal;
+uniform sampler2D gPosition;
+uniform sampler2D gNormal;
 void main() {
     vec2 texel = 1.0 / vec2(textureSize(uSsao, 0));
-    float result = 0.0;
-    for (int x = -2; x < 2; ++x)
-        for (int y = -2; y < 2; ++y)
-            result += texture(uSsao, vUV + vec2(x, y) * texel).r;
-    FragColor = result / 16.0;
+    vec3 centerPosition=texture(gPosition,vUV).xyz;
+    vec3 centerNormal=normalize(texture(gNormal,vUV).xyz);
+    float result=0.0, weightSum=0.0; vec3 bent=vec3(0.0);
+    for(int x=-2;x<=2;++x) for(int y=-2;y<=2;++y){
+        vec2 uv=vUV+vec2(x,y)*texel;
+        vec3 p=texture(gPosition,uv).xyz;
+        vec3 n=normalize(texture(gNormal,uv).xyz);
+        float depthWeight=exp(-abs(p.z-centerPosition.z)*32.0/max(abs(centerPosition.z),0.25));
+        float normalWeight=pow(max(dot(n,centerNormal),0.0),16.0);
+        float spatialWeight=exp(-0.35*float(x*x+y*y));
+        float w=depthWeight*normalWeight*spatialWeight;
+        result+=texture(uSsao,uv).r*w;
+        bent+=texture(uBentNormal,uv).xyz*w;
+        weightSum+=w;
+    }
+    FragAO=result/max(weightSum,1e-5);
+    FragBentNormal=normalize(bent/max(weightSum,1e-5));
 }
 )GLSL";
 
@@ -142,27 +178,7 @@ SSAO::SSAO(int width, int height)
       m_ssao(kQuadVert, kSsaoFrag),
       m_blur(kQuadVert, kBlurFrag),
       m_quad(MakeQuad()) {
-    // Hemisphere sample kernel, clustered toward the origin.
-    std::mt19937 rng(1337);
-    std::uniform_real_distribution<float> u01(0.0f, 1.0f), u11(-1.0f, 1.0f);
-    for (int i = 0; i < 64; ++i) {
-        glm::vec3 s(u11(rng), u11(rng), u01(rng));
-        s = glm::normalize(s) * u01(rng);
-        float scale = static_cast<float>(i) / 64.0f;
-        scale = 0.1f + (scale * scale) * 0.9f;      // bias toward the centre
-        m_kernel.push_back(s * scale);    
-    }
-    // 4x4 rotation-noise texture (tiled across the screen).
-    std::vector<glm::vec3> noise;
-    for (int i = 0; i < 16; ++i) noise .emplace_back(u11(rng), u11(rng), 0.0f);
-    glGenTextures(1, &m_noiseTex);
-    glBindTexture(GL_TEXTURE_2D, m_noiseTex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, 4, 4, 0, GL_RGB, GL_FLOAT, noise.data());
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-
+    glGenQueries(6, &m_timestampQueries[0][0]);
     CreateTargets();
 }
 
@@ -189,21 +205,29 @@ void SSAO::CreateTargets() {
     glGenFramebuffers(1, &m_ssaoFbo);
     glBindFramebuffer(GL_FRAMEBUFFER, m_ssaoFbo);
     m_ssaoTex = MakeColorTex(m_width, m_height, GL_R16F, GL_RED);
+    m_bentNormalTex = MakeColorTex(m_width, m_height, GL_RGB16F, GL_RGB);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_ssaoTex, 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, m_bentNormalTex, 0);
+    const unsigned int aoBuffers[2]={GL_COLOR_ATTACHMENT0,GL_COLOR_ATTACHMENT1};
+    glDrawBuffers(2,aoBuffers);
 
     glGenFramebuffers(1, &m_blurFbo);
     glBindFramebuffer(GL_FRAMEBUFFER, m_blurFbo);
     m_blurTex = MakeColorTex(m_width, m_height, GL_R16F, GL_RED);
+    m_filteredBentNormalTex = MakeColorTex(m_width, m_height, GL_RGB16F, GL_RGB);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_blurTex, 0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, m_filteredBentNormalTex, 0);
+    glDrawBuffers(2,aoBuffers);
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
 void SSAO::ReleaseTargets() {
     unsigned int texs[] = {
-        m_gPos, m_gNormal, m_gVelocity, m_ssaoTex, m_blurTex
+        m_gPos, m_gNormal, m_gVelocity, m_ssaoTex, m_bentNormalTex,
+        m_blurTex, m_filteredBentNormalTex
     };
-    glDeleteTextures(5, texs);
+    glDeleteTextures(7, texs);
     glDeleteRenderbuffers(1, &m_gDepth);
     unsigned int fbos[] = {m_gFbo, m_ssaoFbo, m_blurFbo};
     glDeleteFramebuffers(3, fbos);
@@ -211,7 +235,7 @@ void SSAO::ReleaseTargets() {
 
 SSAO::~SSAO() {
     ReleaseTargets();
-    glDeleteTextures(1, &m_noiseTex);
+    glDeleteQueries(6, &m_timestampQueries[0][0]);
 }
 
 void SSAO::Resize(int width, int height) {
@@ -222,6 +246,24 @@ void SSAO::Resize(int width, int height) {
 }
 
 void SSAO::Generate(ecs::Registry& reg, const Camera& camera, float aspect, int width, int height) {
+    // Timestamp queries can be nested inside the editor's whole-scene elapsed
+    // query, unlike another GL_TIME_ELAPSED scope. Read a three-frame-old result
+    // without stalling, then reuse that slot for this GTAO pass.
+    if (m_timestampSubmitted[m_timestampIndex]) {
+        GLint ready = GL_FALSE;
+        glGetQueryObjectiv(m_timestampQueries[m_timestampIndex][1],
+                           GL_QUERY_RESULT_AVAILABLE, &ready);
+        if (ready == GL_TRUE) {
+            GLuint64 begin = 0, end = 0;
+            glGetQueryObjectui64v(m_timestampQueries[m_timestampIndex][0],
+                                  GL_QUERY_RESULT, &begin);
+            glGetQueryObjectui64v(m_timestampQueries[m_timestampIndex][1],
+                                  GL_QUERY_RESULT, &end);
+            if (end >= begin)
+                m_lastGpuMilliseconds = static_cast<double>(end - begin) / 1.0e6;
+        }
+    }
+    glQueryCounter(m_timestampQueries[m_timestampIndex][0], GL_TIMESTAMP);
     Resize(width, height);
     const glm::mat4 view = camera.ViewMatrix();
     const glm::mat4 proj = camera.ProjectionMatrix(aspect);
@@ -271,24 +313,13 @@ void SSAO::Generate(ecs::Registry& reg, const Camera& camera, float aspect, int 
     glBindFramebuffer(GL_FRAMEBUFFER, m_ssaoFbo);
     glClear(GL_COLOR_BUFFER_BIT);
     m_ssao.Bind();
-    static const auto kSampleUniforms = [] {
-        std::array<std::string, 64> names{};
-        for (std::size_t i = 0; i < names.size(); ++i)
-            names[i] = "uSamples[" + std::to_string(i) + "]";
-        return names;
-    }();
-    for (std::size_t i = 0; i < kSampleUniforms.size(); ++i)
-        m_ssao.SetVec3(kSampleUniforms[i], m_kernel[i]);
     m_ssao.SetMat4("uProjection", proj);
-    m_ssao.SetVec2("uNoiseScale", glm::vec2(m_width / 4.0f, m_height / 4.0f));
     m_ssao.SetFloat("uRadius", radius);
     m_ssao.SetFloat("uBias", bias);
     m_ssao.SetInt("gPosition", 0);
     m_ssao.SetInt("gNormal", 1);
-    m_ssao.SetInt("texNoise", 2);
     glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, m_gPos);
     glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, m_gNormal);
-    glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, m_noiseTex);
     glDisable(GL_DEPTH_TEST);
     m_quad.Draw();
 
@@ -297,11 +328,30 @@ void SSAO::Generate(ecs::Registry& reg, const Camera& camera, float aspect, int 
     glClear(GL_COLOR_BUFFER_BIT);
     m_blur.Bind();
     m_blur.SetInt("uSsao", 0);
+    m_blur.SetInt("uBentNormal", 1);
+    m_blur.SetInt("gPosition", 2);
+    m_blur.SetInt("gNormal", 3);
     glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, m_ssaoTex);
+    glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, m_bentNormalTex);
+    glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, m_gPos);
+    glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, m_gNormal);
     m_quad.Draw();
     glEnable(GL_DEPTH_TEST);
 
     glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prevFbo));
+    glQueryCounter(m_timestampQueries[m_timestampIndex][1], GL_TIMESTAMP);
+    m_timestampSubmitted[m_timestampIndex] = true;
+    m_timestampIndex = (m_timestampIndex + 1) % 3;
+}
+
+void SSAO::BindBentNormal(unsigned int unit) const {
+    glActiveTexture(GL_TEXTURE0 + unit);
+    glBindTexture(GL_TEXTURE_2D, m_filteredBentNormalTex);
+}
+
+void SSAO::BindRawAO(unsigned int unit) const {
+    glActiveTexture(GL_TEXTURE0 + unit);
+    glBindTexture(GL_TEXTURE_2D, m_ssaoTex);
 }
 
 void SSAO::BindAO(unsigned int unit) const {

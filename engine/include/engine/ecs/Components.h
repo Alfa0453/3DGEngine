@@ -53,6 +53,36 @@ struct Transform {
     }
 };
 
+// Authored local image-based-lighting capture. Box probes are the default because
+// they fit rooms and corridors without leaking reflections through nearby walls.
+// The stable ID survives object renames; captureSourceHash identifies the exact
+// scene state used to produce the baked cubemap.
+struct ReflectionProbe {
+    enum class Shape : std::uint8_t { Box = 0, Sphere = 1 };
+
+    AssetHandle stableId;
+    Shape shape = Shape::Box;
+    glm::vec3 boxExtents{5.0f};
+    float radius = 5.0f;
+    float blendDistance = 1.0f;
+    float intensity = 1.0f;
+    int priority = 0;
+    std::uint32_t captureResolution = 128;
+    bool includeSky = true;
+    bool enabled = true;
+    std::string bakedCubemapPath;
+    AssetHandle bakedCubemapId;
+    std::uint64_t captureSourceHash = 0;
+
+    bool HasCapture() const {
+        return !bakedCubemapPath.empty() || bakedCubemapId.Valid();
+    }
+    bool CaptureIsStale(std::uint64_t currentSceneHash) const {
+        return !HasCapture() || captureSourceHash == 0
+            || captureSourceHash != currentSceneHash;
+    }
+};
+
 struct LinearVelocity {
     glm::vec3 velocity{0.0f};
 };
@@ -385,6 +415,7 @@ struct LoadedMaterialAsset {
 // directional lights use `direction`. `intensity` scales `color`.
 struct Light {
     enum class Type { Directional, Point, Spot, Area };
+    enum class AreaShape { Sphere = 0, Rectangle = 1 };
     Type      type     = Type::Point;
     glm::vec3 color{1.0f, 1.0f, 1.0f};
     float     intensity = 1.0f;
@@ -393,6 +424,10 @@ struct Light {
     float     outerAngle = 30.0f;             // Spot: degrees, fades to zero at the edge
     float     range      = 40.0f;             // Spot: shadow far plane
     float     sourceRadius = 1.0f;            // Area: physical sphere radius
+    AreaShape areaShape = AreaShape::Sphere;
+    float areaWidth = 1.0f;
+    float areaHeight = 1.0f;
+    bool areaTwoSided = false;
 };
 
 // Small native gameplay component used by the editor/runtime path. Rotates an

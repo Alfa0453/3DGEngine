@@ -2525,8 +2525,10 @@ void RuntimePlayerApp::OnRender() {
     m_renderer.Clear();
     const RuntimeSceneLoader::Scene::Environment& env = m_scene.environment;
     engine::PbrRenderer::Options opt;
+    m_reflectionProbes.Sync(m_registry);
     opt.ambient = m_sample.ambient + glm::vec3(0.04f);
     opt.ibl = &*m_ibl;
+    opt.reflectionProbes = &m_reflectionProbes;
     opt.skylightOcclusion = env.skylightOcclusion;
     opt.skylightOcclusionStrength = env.skylightOcclusionStrength;
     opt.minimumSkylight = env.minimumSkylight;
@@ -2584,6 +2586,7 @@ void RuntimePlayerApp::OnRender() {
         lighting.ambient = m_sample.ambient * env.skyLightIntensity;
         lighting.cascade = &m_pbr->Cascade();
         lighting.ibl = &*m_ibl;
+        lighting.reflectionProbes = &m_reflectionProbes;
         lighting.skylightOcclusion = env.skylightOcclusion;
         lighting.skylightOcclusionStrength = env.skylightOcclusionStrength;
         lighting.minimumSkylight = env.minimumSkylight;

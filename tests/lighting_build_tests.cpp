@@ -1,5 +1,6 @@
 #include <engine/graphics/LightingBuildData.h>
 #include <engine/graphics/PbrLightingCommon.h>
+#include <engine/ecs/Components.h>
 #include <glm/gtc/epsilon.hpp>
 
 #include <cmath>
@@ -26,6 +27,12 @@ glm::vec3 EvaluateProbe(const engine::LightingProbe& probe,const glm::vec3& n){
         +probe.irradianceSH[1]*(0.4886025119f*n.y)
         +probe.irradianceSH[2]*(0.4886025119f*n.z)
         +probe.irradianceSH[3]*(0.4886025119f*n.x),glm::vec3(0.0f));
+}
+float SumContribution(const engine::LightingBuildData& data,bool emissive){
+    float total=0.0f;
+    for(const auto& probe:data.probes)for(const auto& coefficient:(emissive?probe.emissiveSH:probe.bounceSH))
+        total+=coefficient.r+coefficient.g+coefficient.b;
+    return total;
 }
 }
 
@@ -54,8 +61,56 @@ int main(){
     Check(std::isfinite(engine::SmoothFiniteLightAttenuation(0.0f,5.0f)),"finite attenuation is stable at the light origin");
     Check(engine::SmoothFiniteLightAttenuation(25.0f,5.0f)==0.0f,"finite attenuation reaches zero at its radius");
     Check(engine::SmoothFiniteLightAttenuation(36.0f,5.0f)==0.0f,"finite attenuation remains zero outside its radius");
+
+    // Emissive transport is a separate path: disabling diffuse bounce must not
+    // accidentally disable emissive surfaces. Preview intentionally disables both.
+    std::vector<engine::LightingTriangle> emissiveSurface=open;
+    for(auto& triangle:emissiveSurface)triangle.emissive=glm::vec3(8.0f,0.5f,0.1f);
+    engine::LightingBuildSettings emissiveSettings=settings;
+    emissiveSettings.quality=engine::LightingBuildQuality::Medium;
+    emissiveSettings.raysPerProbe=32;
+    emissiveSettings.indirectBounceEnabled=false;
+    emissiveSettings.indirectBounceStrength=0.0f;
+    emissiveSettings.emissiveContribution=1.0f;
+    engine::LightingBuildData emissiveData;
+    Check(engine::BuildLightingProbes(emissiveSurface,{0,0,0},4,"Emissive",emissiveSettings,&emissiveData,nullptr,&error),"emissive-only lighting build succeeds");
+    Check(SumContribution(emissiveData,true)>0.01f,"emissive lighting remains active when diffuse bounce is disabled");
+    engine::LightingBuildData previewData;
+    emissiveSettings.quality=engine::LightingBuildQuality::Preview;
+    Check(engine::BuildLightingProbes(emissiveSurface,{0,0,0},5,"Preview",emissiveSettings,&previewData,nullptr,&error),"preview lighting build succeeds");
+    Check(SumContribution(previewData,true)==0.0f&&SumContribution(previewData,false)==0.0f,"preview quality skips bounce and emissive transport");
+
+    // Parallel probe ranges must remain deterministic, and cancellation must
+    // never replace the caller's last known-good data.
+    engine::LightingBuildData deterministicA,deterministicB;
+    emissiveSettings.quality=engine::LightingBuildQuality::Medium;
+    Check(engine::BuildLightingProbes(emissiveSurface,{0,0,0},6,"Deterministic",emissiveSettings,&deterministicA,nullptr,&error),"first deterministic build succeeds");
+    Check(engine::BuildLightingProbes(emissiveSurface,{0,0,0},6,"Deterministic",emissiveSettings,&deterministicB,nullptr,&error),"second deterministic build succeeds");
+    bool deterministic=deterministicA.probes.size()==deterministicB.probes.size();
+    for(std::size_t i=0;deterministic&&i<deterministicA.probes.size();++i)
+        for(std::size_t c=0;c<4;++c)
+            deterministic&=glm::all(glm::epsilonEqual(deterministicA.probes[i].irradianceSH[c],deterministicB.probes[i].irradianceSH[c],1e-6f));
+    Check(deterministic,"multithreaded probe builds are deterministic");
+    engine::LightingBuildProgress cancelledProgress;cancelledProgress.cancel=true;
+    engine::LightingBuildData preserved=deterministicA;const auto preservedHash=preserved.sourceHash;
+    error.clear();
+    Check(!engine::BuildLightingProbes(emissiveSurface,{0,0,0},99,"Cancelled",emissiveSettings,&preserved,&cancelledProgress,&error),"cancelled lighting build reports failure");
+    Check(preserved.sourceHash==preservedHash&&error.find("cancelled")!=std::string::npos,"cancellation preserves the previous lighting build");
     const std::string composed=engine::ComposePbrLightingShader("#version 330 core\n//__PBR_LIGHTING_COMMON__\nvoid main(){}");
     Check(composed.find("SmoothFiniteAttenuation")!=std::string::npos&&composed.find("//__PBR_LIGHTING_COMMON__")==std::string::npos,"shared PBR shader block is injected");
+    Check(composed.find("BoxProjectedDirection")!=std::string::npos,"shared PBR shader includes reflection-probe parallax correction");
+    Check(composed.find("LtcIntegrateQuad")!=std::string::npos&&composed.find("LtcRectangleLight")!=std::string::npos,"shared PBR shader includes area-integrated rectangle lighting");
+    engine::ecs::ReflectionProbe reflectionProbe;
+    Check(reflectionProbe.shape==engine::ecs::ReflectionProbe::Shape::Box,
+          "reflection probes default to box influence volumes");
+    Check(reflectionProbe.CaptureIsStale(1234),
+          "an uncaptured reflection probe starts stale");
+    reflectionProbe.bakedCubemapPath="Reflections/Room.3dgtex";
+    reflectionProbe.captureSourceHash=1234;
+    Check(!reflectionProbe.CaptureIsStale(1234),
+          "matching reflection capture hashes remain valid");
+    Check(reflectionProbe.CaptureIsStale(5678),
+          "scene changes invalidate a reflection capture hash");
     const auto oldPath=std::filesystem::temp_directory_path()/"3dg_lighting_v1_test.3dglighting";
     {std::ofstream old(oldPath,std::ios::binary);old.write("3DGLITE1",8);}
     engine::LightingBuildData oldData;error.clear();

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <chrono>
+
 #include <engine/core/Application.h>
 #include <engine/core/Config.h>
 #include <engine/assets/AssetRegistry.h>
@@ -38,6 +40,7 @@
 #include <engine/graphics/GpuProfiler.h>
 #include <engine/graphics/TextRenderer.h>
 #include <engine/graphics/LightingBuildData.h>
+#include <engine/graphics/ReflectionProbeSystem.h>
 #include <engine/gameplay/PlayerController.h>
 #include <engine/gameplay/CameraDirector.h>
 #include <engine/physics/PhysicsComponents.h>
@@ -357,6 +360,7 @@ private:
     std::vector<engine::LightingTriangle> GatherLightingTriangles() const;
     void StartLightingBuild();
     void PollLightingBuild();
+    bool CaptureSelectedReflectionProbe(bool clearOnly, bool buildCapture = false);
     void LoadSceneLightingAsset();
     void TogglePanel(EditorPanels::Panel panel);
     void HandleMouseAssetDrag();
@@ -577,6 +581,7 @@ private:
     std::optional<engine::Shader>        m_skinnedOutlineShader;
     std::optional<engine::PbrRenderer>   m_pbrRenderer;
     engine::LightingProbeGrid            m_lightingProbeGrid;
+    engine::ReflectionProbeSystem        m_reflectionProbes;
     struct LightingBuildResult {
         bool success = false;
         engine::LightingBuildData data;
@@ -589,6 +594,10 @@ private:
     bool                                 m_lightingBuildDirty = false;
     int                                  m_lightingBuildQuality = 1;
     std::string                          m_lightingBuildStatus = "No lighting data";
+    std::chrono::steady_clock::time_point m_lightingBuildStartedAt{};
+    double                               m_lastLightingBuildMs = 0.0;
+    double                               m_lastReflectionCaptureMs = 0.0;
+    std::uint64_t                        m_lastLightingBuildRays = 0;
     std::string                          m_loadedLightingAsset;
     std::optional<engine::FoliageRenderer> m_foliageRenderer;
     std::optional<engine::ParticleRenderer> m_particleRenderer;

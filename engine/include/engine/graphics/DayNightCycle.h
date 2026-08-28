@@ -64,7 +64,16 @@ struct DayNightCycle {
         s.sunDisc          = sunWarm;
         s.moonDisc         = glm::vec3(0.8f, 0.85f, 0.95f);
         s.keyLightColor    = sunRad + moonRad * (1.0f - dayFactor);
-        s.keyLightDirection = -glm::normalize(glm::mix(moonToward, sunToward, dayFactor));
+        // The sun and moon directions are exact opposites. Normalizing their
+        // 50/50 blend therefore normalizes a zero vector at twilight, which
+        // propagates NaNs through every PBR fragment and makes scene geometry
+        // appear to vanish while editor debug lines still draw. Select the
+        // dominant light direction instead; the switch occurs while both are
+        // dim and is always finite.
+        const float sunEnergy = glm::dot(sunRad, sunRad);
+        const glm::vec3 visibleMoonRad = moonRad * (1.0f - dayFactor);
+        const float moonEnergy = glm::dot(visibleMoonRad, visibleMoonRad);
+        s.keyLightDirection = -(sunEnergy >= moonEnergy ? sunToward : moonToward);
         s.ambient          = glm::mix(glm::vec3(0.010f, 0.012f, 0.020f),
                                       glm::vec3(0.050f, 0.055f, 0.070f), dayFactor);
         return s;

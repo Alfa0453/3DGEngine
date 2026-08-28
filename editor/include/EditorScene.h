@@ -229,6 +229,8 @@ public:
         Primitive primitive = Primitive::Cube;
         bool light = false;
         bool navMeshBoundsVolume = false;
+        bool reflectionProbeEnabled = false;
+        engine::ecs::ReflectionProbe reflectionProbe;
         bool decal = false;
         float decalOpacity = 1.0f;
         float decalSurfaceOffset = 0.012f;
@@ -597,6 +599,9 @@ public:
         float lightingProbeSpacing = 2.0f;
         float lightingRayDistance = 80.0f;
         float lightingIndirectBounceStrength = 0.0f;
+        bool lightingIndirectBounceEnabled = true;
+        float lightingEmissiveContribution = 1.0f;
+        float lightingIndirectSaturation = 1.0f;
         bool driveSunLight = true;
         float sunIntensity = 1.0f;
         bool clouds = true;
@@ -706,6 +711,8 @@ public:
     const engine::ecs::Transform* TryGetTransform(engine::ecs::Entity entity) const;
     const engine::ecs::MeshRenderer* TryGetMeshRenderer(engine::ecs::Entity entity) const;
     const engine::ecs::Light* TryGetLight(engine::ecs::Entity entity) const;
+    const engine::ecs::ReflectionProbe* TryGetReflectionProbe(engine::ecs::Entity entity) const;
+    bool SetSelectedReflectionProbe(bool enabled, const engine::ecs::ReflectionProbe& probe);
     const Environment& GetEnvironment() const { return m_environment; }
     const GameModeSettings& GetGameModeSettings() const { return m_gameMode; }
     void SetGameModeSettings(const GameModeSettings& settings);

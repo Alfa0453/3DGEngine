@@ -21,6 +21,8 @@ class IBL;
 class SSAO;
 class Mesh;
 class LightingProbeGrid;
+class ReflectionProbeSystem;
+class LtcLut;
 namespace ecs { class Registry; struct Transform; struct MeshPBR; }
 
 // A drop-in physically-based scene renderer. Give it an ECS registry and a
@@ -59,6 +61,7 @@ public:
         float       localProbeInfluence = 1.0f;
         int         lightingDebugMode = 0;
         const LightingProbeGrid* lightingGrid = nullptr;
+        ReflectionProbeSystem* reflectionProbes = nullptr;
         bool        pointShadows = true;    // omnidirectional shadows for point lights
         bool        spotShadows  = true;  // perspective shadows for spotlights
         bool        directionalShadows = true; // cascaded shadows for the directional sun
@@ -112,6 +115,7 @@ private:
     SpotShadow              m_spotShadow;
     ClusteredLights         m_clustered;
     std::unique_ptr<Shader> m_pbr;
+    std::unique_ptr<LtcLut> m_ltcLut;
     unsigned int            m_instanceVBO = 0;   // per-instance data for batching
     std::size_t             m_instanceCapacity = 0;
     std::vector<glm::vec3> m_pointPositions;
@@ -125,6 +129,9 @@ private:
     std::vector<glm::vec3> m_areaPositions;
     std::vector<glm::vec3> m_areaColors;
     std::vector<float> m_areaRadii;
+    std::vector<glm::vec3> m_areaRights,m_areaUps;
+    std::vector<glm::vec2> m_areaHalfSizes;
+    std::vector<int> m_areaShapes,m_areaTwoSided;
     std::vector<SpotShadow::Spot> m_spotShadowLights;
     std::unordered_map<const Mesh*, std::vector<float>> m_meshBatches;
     std::vector<std::pair<ecs::Transform*, ecs::MeshPBR*>> m_texturedObjects;
