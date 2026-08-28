@@ -40,6 +40,8 @@
 #include <engine/graphics/GpuProfiler.h>
 #include <engine/graphics/TextRenderer.h>
 #include <engine/graphics/LightingBuildData.h>
+#include <engine/graphics/DynamicIrradiance.h>
+#include <engine/graphics/SSGI.h>
 #include <engine/graphics/ReflectionProbeSystem.h>
 #include <engine/gameplay/PlayerController.h>
 #include <engine/gameplay/CameraDirector.h>
@@ -357,11 +359,15 @@ private:
                                         const EditorScene::Environment& environment,
                                         const engine::DayNightCycle::Sample& sky);
     std::uint64_t ComputeLightingStateHash() const;
+    std::uint64_t ComputeDynamicGiGeometryHash() const;
     std::vector<engine::LightingTriangle> GatherLightingTriangles() const;
     void StartLightingBuild();
     void PollLightingBuild();
     bool CaptureSelectedReflectionProbe(bool clearOnly, bool buildCapture = false);
     void LoadSceneLightingAsset();
+    void UpdateDynamicGi(engine::ecs::Registry& registry,
+                         const EditorScene::Environment& environment,
+                         const engine::DayNightCycle::Sample& sky);
     void TogglePanel(EditorPanels::Panel panel);
     void HandleMouseAssetDrag();
     void HandleMouseViewportSelection();
@@ -581,6 +587,11 @@ private:
     std::optional<engine::Shader>        m_skinnedOutlineShader;
     std::optional<engine::PbrRenderer>   m_pbrRenderer;
     engine::LightingProbeGrid            m_lightingProbeGrid;
+    engine::DynamicIrradianceSystem       m_dynamicGi;
+    std::optional<engine::LightingBuildData> m_loadedLightingData;
+    std::uint64_t                        m_dynamicGiConfigurationHash = 0;
+    std::uint64_t                        m_dynamicGiGeometryHash = 0;
+    std::uint32_t                        m_dynamicGiFrame = 0;
     engine::ReflectionProbeSystem        m_reflectionProbes;
     struct LightingBuildResult {
         bool success = false;
@@ -608,6 +619,7 @@ private:
     std::string                          m_lastSkySignature;   // IBL re-bake key
     std::optional<engine::IBL>           m_ibl;
     std::optional<engine::SSAO>          m_ssao;
+    std::optional<engine::SSGI>          m_ssgi;
     std::optional<engine::SSR>           m_ssr;
     std::optional<engine::Framebuffer>   m_viewportFbo;   // scene-in-a-panel display target
     std::optional<engine::Framebuffer>   m_waterSceneCopy; // opaque colour + depth sampled by water

@@ -25,6 +25,9 @@ uniform sampler3D uLightingMeta;
 uniform float uLocalProbeInfluence;
 uniform float uSpecularOcclusionStrength;
 uniform int uLightingDebugMode;
+uniform int uProbeVisibilityWeighting;
+uniform vec3 uLightingGridDimensions;
+uniform float uProbeVisibilityMaxDistance;
 uniform samplerCube uLocalReflection0;
 uniform samplerCube uLocalReflection1;
 uniform int uReflectionProbeCount;
@@ -46,10 +49,11 @@ float SmoothFiniteAttenuation(float distanceSquared, float radius) {
     return window / max(distanceSquared, 0.0025);
 }
 
-struct LocalProbeSample { vec3 irradiance; float skyVisibility; float validity; };
+struct LocalProbeSample { vec3 irradiance; float skyVisibility; float validity; float visibility; };
 LocalProbeSample SampleLocalProbe(vec3 worldPosition, vec3 normal) {
     LocalProbeSample result;
-    result.irradiance = vec3(0.0); result.skyVisibility = 1.0; result.validity = 0.0;
+    result.irradiance = vec3(0.0); result.skyVisibility = 1.0;
+    result.validity = 0.0; result.visibility = 1.0;
     if (uUseLightingGrid != 1) return result;
     vec3 extent = max(uLightingGridMax - uLightingGridMin, vec3(0.0001));
     vec3 uvw = (worldPosition - uLightingGridMin) / extent;
@@ -73,6 +77,23 @@ LocalProbeSample SampleLocalProbe(vec3 worldPosition, vec3 normal) {
                             vec3(0.0));
     result.skyVisibility = clamp(meta.r * invValidity, 0.0, 1.0);
     result.validity = clamp(validity, 0.0, 1.0);
+    if (uProbeVisibilityWeighting == 1) {
+        vec3 cells = max(uLightingGridDimensions - vec3(1.0), vec3(1.0));
+        vec3 nearestCell = clamp(floor(uvw * cells + vec3(0.5)), vec3(0.0), cells);
+        vec3 probePosition = uLightingGridMin + (nearestCell / cells) * extent;
+        vec3 toSurface = worldPosition - probePosition;
+        float distanceToSurface = length(toSurface) / max(uProbeVisibilityMaxDistance, 0.001);
+        float mean = clamp(meta.b * invValidity, 0.0, 1.0);
+        float secondMoment = clamp(meta.a * invValidity, 0.0, 1.0);
+        float variance = max(secondMoment - mean * mean, 0.00002);
+        float delta = max(distanceToSurface - mean - 0.0125, 0.0);
+        float chebyshev = variance / (variance + delta * delta);
+        float normalWeight = dot(toSurface, toSurface) > 1e-8
+            ? clamp(dot(normalize(toSurface), normal) * 0.5 + 0.5, 0.15, 1.0) : 1.0;
+        result.visibility = distanceToSurface <= mean ? 1.0 : clamp(chebyshev, 0.05, 1.0);
+        result.visibility *= normalWeight;
+        result.irradiance *= result.visibility;
+    }
     return result;
 }
 

@@ -1,5 +1,7 @@
 #include <engine/graphics/LightingBuildData.h>
+#include <engine/graphics/DynamicIrradiance.h>
 #include <engine/graphics/PbrLightingCommon.h>
+#include <engine/graphics/EnvironmentLighting.h>
 #include <engine/ecs/Components.h>
 #include <glm/gtc/epsilon.hpp>
 
@@ -37,6 +39,51 @@ float SumContribution(const engine::LightingBuildData& data,bool emissive){
 }
 
 int main(){
+    const auto noonSample = engine::DayNightCycle::At(0.5f);
+    const engine::EnvironmentLightingState noon =
+        engine::ResolveEnvironmentLighting(0.5f, noonSample);
+    const glm::vec3 noonZenith = noon.SampleEnvironmentRadiance({0,1,0});
+    Check(std::isfinite(noonZenith.x) && std::isfinite(noonZenith.y)
+          && std::isfinite(noonZenith.z) && glm::dot(noonZenith,noonZenith)>0.0f,
+          "shared atmosphere sampler returns finite daylight radiance");
+    const auto nightSample = engine::DayNightCycle::At(0.0f);
+    const engine::EnvironmentLightingState night =
+        engine::ResolveEnvironmentLighting(0.0f, nightSample);
+    Check(glm::length(night.ToDirectionalSkyRadiance().zenith)
+          < glm::length(noon.ToDirectionalSkyRadiance().zenith),
+          "night environment is dimmer than the daylight GI source");
+    engine::DynamicIrradianceSettings dynamicSettings;
+    dynamicSettings.enabled = true;
+    dynamicSettings.boundsMin = {-2.0f, 0.0f, -2.0f};
+    dynamicSettings.boundsMax = { 2.0f, 2.0f,  2.0f};
+    dynamicSettings.probeSpacing = 1.0f;
+    dynamicSettings.raysPerProbe = 16;
+    dynamicSettings.probesPerFrame = 3;
+    dynamicSettings.maxGiRaysPerFrame = 32;
+    dynamicSettings.Normalize();
+    Check(dynamicSettings.maxGiRaysPerFrame == 32,
+          "dynamic GI normalization preserves a valid ray budget");
+    engine::DirectionalSkyRadiance dynamicSky;
+    dynamicSky.zenith = {0.2f, 0.3f, 0.5f};
+    dynamicSky.horizon = {0.1f, 0.12f, 0.16f};
+    dynamicSky.ground = {0.02f, 0.02f, 0.02f};
+    dynamicSky.sunDirection = glm::normalize(glm::vec3(0.4f, 1.0f, 0.2f));
+    dynamicSky.sunRadiance = {2.0f, 1.8f, 1.5f};
+    engine::DynamicIrradianceSystem dynamicGi;
+    std::string dynamicError;
+    Check(dynamicGi.Configure(dynamicSettings, dynamicSky, nullptr, &dynamicError),
+          "dynamic GI configures without baked data");
+    std::vector<engine::LightingTriangle> dynamicFloor;
+    Quad(dynamicFloor, 0.0f, 5.0f);
+    dynamicGi.SetSceneGeometry(dynamicFloor);
+    dynamicGi.Update({0.0f, 1.0f, 0.0f}, dynamicSky, {}, 1u);
+    Check(dynamicGi.Stats().probesUpdated <= 2u,
+          "dynamic GI obeys the per-frame ray budget");
+    Check(dynamicGi.Stats().raysCast <= dynamicSettings.maxGiRaysPerFrame,
+          "dynamic GI never exceeds max rays per frame");
+    Check(dynamicGi.ComposedData().IsValid(),
+          "dynamic GI produces a shader-compatible SH4 grid");
+
     engine::LightingBuildSettings settings;settings.quality=engine::LightingBuildQuality::Preview;
     settings.probeSpacing=1.0f;settings.boundsPadding=0.25f;settings.maxRayDistance=30.0f;settings.raysPerProbe=24;
     std::vector<engine::LightingTriangle> open;Quad(open,0.0f,10.0f);

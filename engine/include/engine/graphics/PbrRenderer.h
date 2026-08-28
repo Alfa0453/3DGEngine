@@ -61,6 +61,8 @@ public:
         float       localProbeInfluence = 1.0f;
         int         lightingDebugMode = 0;
         const LightingProbeGrid* lightingGrid = nullptr;
+        bool        probeVisibilityWeighting = false;
+        float       probeVisibilityMaxDistance = 60.0f;
         ReflectionProbeSystem* reflectionProbes = nullptr;
         bool        pointShadows = true;    // omnidirectional shadows for point lights
         bool        spotShadows  = true;  // perspective shadows for spotlights

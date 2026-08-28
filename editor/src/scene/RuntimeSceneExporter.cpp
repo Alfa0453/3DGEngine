@@ -100,7 +100,7 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         return engine::MakeAssetReference(
             &assetRegistry, contentRoot, assetPath, type).id;
     };
-    out << "3DGRuntimeScene 99 " << sceneId.ToString() << '\n';
+    out << "3DGRuntimeScene 102 " << sceneId.ToString() << '\n';
     out << "# Runtime export from 3DGEditor. Editor-only flags are omitted.\n";
     const EditorScene::Environment& environment = scene.GetEnvironment();
     out << "environment "
@@ -157,6 +157,30 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         << (environment.cloudShadows ? 1 : 0) << ' '
         << environment.cloudShadowStrength << ' '
         << environment.cloudShadowScale << '\n';
+    out << "atmosphere " << environment.atmosphereRayleigh << ' '
+        << environment.atmosphereRayleighHeight << ' ' << environment.atmosphereMie << ' '
+        << environment.atmosphereMieHeight << ' ' << environment.atmosphereMieAnisotropy << ' '
+        << environment.atmosphereOzone << ' ' << environment.atmosphereIntensity << ' '
+        << environment.sunAngularDiameter << ' ' << environment.sunDiskIntensity << '\n';
+    out << "night_environment " << environment.stars << ' ' << environment.starIntensity << ' '
+        << environment.moon << ' ' << environment.moonColor.r << ' ' << environment.moonColor.g << ' '
+        << environment.moonColor.b << ' ' << environment.moonIntensity << ' '
+        << environment.moonAngularDiameter << ' ' << environment.moonPhase << '\n';
+    out << "volumetrics " << environment.volumetricFog << ' '
+        << environment.volumetricScattering << ' ' << environment.volumetricExtinction << ' '
+        << environment.volumetricAnisotropy << ' ' << environment.volumetricStartDistance << ' '
+        << environment.volumetricMaxDistance << ' ' << environment.environmentQuality << '\n';
+    out << "presentation " << environment.autoExposure << ' ' << environment.exposureMinEV << ' '
+        << environment.exposureMaxEV << ' ' << environment.exposureCompensationEV << ' '
+        << environment.exposureSpeedUp << ' ' << environment.exposureSpeedDown << ' '
+        << environment.bloom << ' ' << environment.bloomThreshold << ' ' << environment.bloomKnee << ' '
+        << environment.bloomStrength << ' ' << environment.colorTemperature << ' '
+        << environment.colorTint << ' ' << environment.colorSaturation << ' ' << environment.colorContrast << ' '
+        << environment.colorLift.r << ' ' << environment.colorLift.g << ' ' << environment.colorLift.b << ' '
+        << environment.colorGamma.r << ' ' << environment.colorGamma.g << ' ' << environment.colorGamma.b << ' '
+        << environment.colorGain.r << ' ' << environment.colorGain.g << ' ' << environment.colorGain.b << ' '
+        << environment.colorLutIntensity << ' '
+        << std::quoted(StoredPath(environment.colorLutPath)) << '\n';
     out << "skylight_occlusion "
         << (environment.skylightOcclusion ? 1 : 0) << ' '
         << environment.skylightOcclusionStrength << ' '
@@ -167,6 +191,16 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         << environment.lightingDebugMode << '\n';
     out << "lighting_build " << std::quoted(StoredPath(environment.lightingBuildAsset))
         << ' ' << environment.lightingBuildHash << '\n';
+    out << "dynamic_gi " << environment.dynamicGiEnabled << ' '
+        << environment.dynamicGiQuality << ' ' << environment.dynamicGiProbeSpacing << ' '
+        << environment.dynamicGiRaysPerProbe << ' ' << environment.dynamicGiProbesPerFrame << ' '
+        << environment.dynamicGiMaxRaysPerFrame << ' ' << environment.dynamicGiMaxRayDistance << ' '
+        << environment.dynamicGiHysteresis << ' ' << environment.dynamicGiIntensity << ' '
+        << environment.dynamicGiRelocation << ' ' << environment.dynamicGiClassification << ' '
+        << environment.dynamicGiVisibilityWeighting << '\n';
+    out << "ssgi " << environment.ssgiEnabled << ' ' << environment.ssgiRayLength << ' '
+        << environment.ssgiSteps << ' ' << environment.ssgiThickness << ' '
+        << environment.ssgiIntensity << '\n';
     out << "sky "
         << environment.skyMode << ' '
         << StoredPath(environment.skyTexturePath) << ' '
@@ -380,7 +414,8 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
                 << data.intensity << ' '
                 << data.direction.x << ' ' << data.direction.y << ' ' << data.direction.z << ' '
                 << data.innerAngle << ' ' << data.outerAngle << ' ' << data.range << ' ' << data.sourceRadius << ' '
-                << static_cast<int>(data.areaShape) << ' ' << data.areaWidth << ' ' << data.areaHeight << ' ' << (data.areaTwoSided?1:0) << '\n';
+                << static_cast<int>(data.areaShape) << ' ' << data.areaWidth << ' ' << data.areaHeight << ' ' << (data.areaTwoSided?1:0) << ' '
+                << (data.affectDynamicGi?1:0) << '\n';
             continue;
         }
 
@@ -781,6 +816,27 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
             << (probe.bakedCubemapId.Valid()
                     ? probe.bakedCubemapId.ToString() : std::string("-")) << ' '
             << probe.captureSourceHash << '\n';
+    }
+    for(const EditorScene::Object& object:scene.Objects()){
+        const Transform* transform=scene.TryGetTransform(object.entity);if(!transform)continue;
+        if(object.postProcessVolumeEnabled){const auto& v=object.postProcessVolume;
+            out<<"post_process_volume "<<std::quoted(object.name)<<' '
+               <<transform->position.x<<' '<<transform->position.y<<' '<<transform->position.z<<' '
+               <<transform->scale.x<<' '<<transform->scale.y<<' '<<transform->scale.z<<' '
+               <<v.enabled<<' '<<v.unbound<<' '<<v.priority<<' '<<v.blendDistance<<' '<<v.blendWeight<<' '
+               <<v.boxExtents.x<<' '<<v.boxExtents.y<<' '<<v.boxExtents.z<<' '
+               <<v.overrideExposure<<' '<<v.exposureCompensationEV<<' '<<v.overrideBloom<<' '<<v.bloomStrength<<' '
+               <<v.overrideColorGrading<<' '<<v.temperature<<' '<<v.tint<<' '<<v.saturation<<' '<<v.contrast<<' '
+               <<v.overrideFogDensity<<' '<<v.fogDensity<<' '
+               <<(v.stableId.Valid()?v.stableId.ToString():std::string("-"))<<'\n';}
+        if(object.localFogVolumeEnabled){const auto& v=object.localFogVolume;
+            out<<"local_fog_volume "<<std::quoted(object.name)<<' '
+               <<transform->position.x<<' '<<transform->position.y<<' '<<transform->position.z<<' '
+               <<transform->scale.x<<' '<<transform->scale.y<<' '<<transform->scale.z<<' '
+               <<v.enabled<<' '<<static_cast<int>(v.shape)<<' '<<v.boxExtents.x<<' '<<v.boxExtents.y<<' '<<v.boxExtents.z<<' '
+               <<v.radius<<' '<<v.blendDistance<<' '<<v.density<<' '<<v.albedo.x<<' '<<v.albedo.y<<' '<<v.albedo.z<<' '
+               <<v.extinction<<' '<<v.anisotropy<<' '
+               <<(v.stableId.Valid()?v.stableId.ToString():std::string("-"))<<'\n';}
     }
 
     // Player-controller settings (name-matched, like material_overrides). The

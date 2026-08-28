@@ -70,6 +70,10 @@ struct LightingProbe {
     bool valid = true;
     std::array<glm::vec3, 4> bounceSH{};
     std::array<glm::vec3, 4> emissiveSH{};
+    // Runtime dynamic-GI visibility moments. They intentionally are not stored
+    // in v3 baked assets; zero means that no directional visibility data exists.
+    float depthMean = 0.0f;
+    float depthSecondMoment = 0.0f;
 };
 
 // Compact directional environment used by the offline probe builder. It is
@@ -158,11 +162,17 @@ public:
     LightingProbeGrid& operator=(LightingProbeGrid&& other) noexcept;
 
     bool Upload(const LightingBuildData& data, std::string* error = nullptr);
+    // Replaces only the combined SH and metadata cells listed in changedIndices.
+    // The texture allocation is retained, which keeps temporal GI updates cheap.
+    bool UpdateCombined(const LightingBuildData& data,
+                        const std::vector<std::size_t>& changedIndices,
+                        std::string* error = nullptr);
     void Reset();
     void Bind(unsigned int textureUnit, Contribution contribution = Contribution::Combined) const;
     bool Valid() const { return m_textures[0] != 0; }
     const glm::vec3& BoundsMin() const { return m_boundsMin; }
     const glm::vec3& BoundsMax() const { return m_boundsMax; }
+    const glm::ivec3& Dimensions() const { return m_dimensions; }
     std::size_t ProbeCount() const { return m_probeCount; }
     std::uint64_t MemoryBytes() const { return m_memoryBytes; }
 
@@ -172,6 +182,7 @@ private:
     // sampler slots rather than increasing fragment texture-unit pressure.
     std::array<unsigned int, 13> m_textures{};
     glm::vec3 m_boundsMin{0.0f}, m_boundsMax{0.0f};
+    glm::ivec3 m_dimensions{0};
     std::size_t m_probeCount = 0;
     std::uint64_t m_memoryBytes = 0;
 };

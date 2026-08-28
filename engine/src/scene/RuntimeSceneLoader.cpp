@@ -134,11 +134,11 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             return false;
         }
     }
-    if (magic != "3DGRuntimeScene" || version < 1 || version > 99) {
+    if (magic != "3DGRuntimeScene" || version < 1 || version > 102) {
         if (error) {
             *error = "Runtime scene file has an unknown format: "
                 + magic + " " + std::to_string(version)
-                + " (expected 3DGRuntimeScene 1..98).";
+                + " (expected 3DGRuntimeScene 1..102).";
         }
         return false;
     }
@@ -154,6 +154,49 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
         std::istringstream record(line);
         std::string recordType;
         record >> recordType;
+        if (recordType == "atmosphere" && version >= 101) {
+            record >> loaded.environment.atmosphereRayleigh >> loaded.environment.atmosphereRayleighHeight
+                   >> loaded.environment.atmosphereMie >> loaded.environment.atmosphereMieHeight
+                   >> loaded.environment.atmosphereMieAnisotropy >> loaded.environment.atmosphereOzone
+                   >> loaded.environment.atmosphereIntensity >> loaded.environment.sunAngularDiameter
+                   >> loaded.environment.sunDiskIntensity;
+            if (!record) { if (error) *error = "Runtime scene has invalid atmosphere settings."; return false; }
+            continue;
+        }
+        if (recordType == "night_environment" && version >= 101) {
+            record >> loaded.environment.stars >> loaded.environment.starIntensity
+                   >> loaded.environment.moon >> loaded.environment.moonColor.r
+                   >> loaded.environment.moonColor.g >> loaded.environment.moonColor.b
+                   >> loaded.environment.moonIntensity >> loaded.environment.moonAngularDiameter
+                   >> loaded.environment.moonPhase;
+            if (!record) { if (error) *error = "Runtime scene has invalid night environment settings."; return false; }
+            continue;
+        }
+        if (recordType == "volumetrics" && version >= 101) {
+            record >> loaded.environment.volumetricFog >> loaded.environment.volumetricScattering
+                   >> loaded.environment.volumetricExtinction >> loaded.environment.volumetricAnisotropy
+                   >> loaded.environment.volumetricStartDistance >> loaded.environment.volumetricMaxDistance
+                   >> loaded.environment.environmentQuality;
+            if (!record) { if (error) *error = "Runtime scene has invalid volumetric settings."; return false; }
+            continue;
+        }
+        if (recordType == "presentation" && version >= 101) {
+            record >> loaded.environment.autoExposure >> loaded.environment.exposureMinEV
+                   >> loaded.environment.exposureMaxEV >> loaded.environment.exposureCompensationEV
+                   >> loaded.environment.exposureSpeedUp >> loaded.environment.exposureSpeedDown
+                   >> loaded.environment.bloom >> loaded.environment.bloomThreshold
+                   >> loaded.environment.bloomKnee >> loaded.environment.bloomStrength
+                   >> loaded.environment.colorTemperature >> loaded.environment.colorTint
+                   >> loaded.environment.colorSaturation >> loaded.environment.colorContrast
+                   >> loaded.environment.colorLift.r >> loaded.environment.colorLift.g >> loaded.environment.colorLift.b
+                   >> loaded.environment.colorGamma.r >> loaded.environment.colorGamma.g >> loaded.environment.colorGamma.b
+                   >> loaded.environment.colorGain.r >> loaded.environment.colorGain.g >> loaded.environment.colorGain.b
+                   >> loaded.environment.colorLutIntensity
+                   >> std::quoted(loaded.environment.colorLutPath);
+            if (loaded.environment.colorLutPath == "-") loaded.environment.colorLutPath.clear();
+            if (!record) { if (error) *error = "Runtime scene has invalid presentation settings."; return false; }
+            continue;
+        }
         if (recordType == "ragdoll" && version >= 78) {
             std::string objectName;
             Ragdoll ragdoll;
@@ -232,6 +275,23 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             record >> std::quoted(loaded.environment.lightingBuildAsset)
                    >> loaded.environment.lightingBuildHash;
             if (!record) { if (error) *error = "Runtime scene contains invalid lighting build data."; return false; }
+            continue;
+        }
+        if (recordType == "dynamic_gi" && version >= 100) {
+            record >> loaded.environment.dynamicGiEnabled >> loaded.environment.dynamicGiQuality
+                   >> loaded.environment.dynamicGiProbeSpacing >> loaded.environment.dynamicGiRaysPerProbe
+                   >> loaded.environment.dynamicGiProbesPerFrame >> loaded.environment.dynamicGiMaxRaysPerFrame
+                   >> loaded.environment.dynamicGiMaxRayDistance >> loaded.environment.dynamicGiHysteresis
+                   >> loaded.environment.dynamicGiIntensity >> loaded.environment.dynamicGiRelocation
+                   >> loaded.environment.dynamicGiClassification >> loaded.environment.dynamicGiVisibilityWeighting;
+            if (!record) { if (error) *error = "Runtime scene contains invalid dynamic GI settings."; return false; }
+            continue;
+        }
+        if (recordType == "ssgi" && version >= 100) {
+            record >> loaded.environment.ssgiEnabled >> loaded.environment.ssgiRayLength
+                   >> loaded.environment.ssgiSteps >> loaded.environment.ssgiThickness
+                   >> loaded.environment.ssgiIntensity;
+            if (!record) { if (error) *error = "Runtime scene contains invalid SSGI settings."; return false; }
             continue;
         }
         if (recordType == "sky" && version >= 88) {
@@ -719,6 +779,33 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             }
             continue;
         }
+        if(recordType=="post_process_volume"&&version>=102){
+            EntityDesc desc;desc.primitive="Empty";ecs::PostProcessVolume v;std::string id;
+            record>>std::quoted(desc.name)>>desc.position.x>>desc.position.y>>desc.position.z
+                  >>desc.scale.x>>desc.scale.y>>desc.scale.z>>v.enabled>>v.unbound>>v.priority
+                  >>v.blendDistance>>v.blendWeight>>v.boxExtents.x>>v.boxExtents.y>>v.boxExtents.z
+                  >>v.overrideExposure>>v.exposureCompensationEV>>v.overrideBloom>>v.bloomStrength
+                  >>v.overrideColorGrading>>v.temperature>>v.tint>>v.saturation>>v.contrast
+                  >>v.overrideFogDensity>>v.fogDensity>>id;
+            if(id!="-"&&!AssetHandle::Parse(id,&v.stableId)){if(error)*error="Runtime post-process volume has invalid ID.";return false;}
+            auto entity=std::find_if(loaded.entities.begin(),loaded.entities.end(),[&](const EntityDesc& e){return e.name==desc.name;});
+            if(entity==loaded.entities.end()){desc.postProcessVolumeEnabled=true;desc.postProcessVolume=v;loaded.entities.push_back(std::move(desc));}
+            else{entity->postProcessVolumeEnabled=true;entity->postProcessVolume=v;}
+            continue;
+        }
+        if(recordType=="local_fog_volume"&&version>=102){
+            EntityDesc desc;desc.primitive="Empty";ecs::LocalFogVolume v;std::string id;int shape=0;
+            record>>std::quoted(desc.name)>>desc.position.x>>desc.position.y>>desc.position.z
+                  >>desc.scale.x>>desc.scale.y>>desc.scale.z>>v.enabled>>shape
+                  >>v.boxExtents.x>>v.boxExtents.y>>v.boxExtents.z>>v.radius>>v.blendDistance>>v.density
+                  >>v.albedo.x>>v.albedo.y>>v.albedo.z>>v.extinction>>v.anisotropy>>id;
+            v.shape=shape==1?ecs::LocalFogVolume::Shape::Sphere:ecs::LocalFogVolume::Shape::Box;
+            if(id!="-"&&!AssetHandle::Parse(id,&v.stableId)){if(error)*error="Runtime local fog volume has invalid ID.";return false;}
+            auto entity=std::find_if(loaded.entities.begin(),loaded.entities.end(),[&](const EntityDesc& e){return e.name==desc.name;});
+            if(entity==loaded.entities.end()){desc.localFogVolumeEnabled=true;desc.localFogVolume=v;loaded.entities.push_back(std::move(desc));}
+            else{entity->localFogVolumeEnabled=true;entity->localFogVolume=v;}
+            continue;
+        }
         if (recordType == "player_controller" && version >= 48) {
             std::string entityName;
             record >> std::quoted(entityName);
@@ -870,6 +957,7 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                    >> desc.light.innerAngle >> desc.light.outerAngle >> desc.light.range >> desc.light.sourceRadius;
             if(version>=99){int areaShape=0,areaTwoSided=0;record>>areaShape>>desc.light.areaWidth>>desc.light.areaHeight>>areaTwoSided;
                 desc.light.areaShape=areaShape==1?ecs::Light::AreaShape::Rectangle:ecs::Light::AreaShape::Sphere;desc.light.areaTwoSided=areaTwoSided!=0;}
+            if(version>=100){int affectDynamicGi=1;record>>affectDynamicGi;desc.light.affectDynamicGi=affectDynamicGi!=0;}
 
             if (!record || !ParseLightType(typeName, &desc.light.type)) {
                 if (error) {
@@ -2056,6 +2144,10 @@ bool RuntimeSceneLoader::Instantiate(const Scene &scene, ecs::Registry &registry
         if (desc.reflectionProbeEnabled) {
             registry.Add<ecs::ReflectionProbe>(entity, desc.reflectionProbe);
         }
+        if (desc.postProcessVolumeEnabled)
+            registry.Add<ecs::PostProcessVolume>(entity, desc.postProcessVolume);
+        if (desc.localFogVolumeEnabled)
+            registry.Add<ecs::LocalFogVolume>(entity, desc.localFogVolume);
         if (desc.rotatorEnabled) {
             registry.Add<ecs::Rotator>(entity, desc.rotator);
         }

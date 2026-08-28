@@ -32,12 +32,17 @@ add_library(engine STATIC
     src/graphics/ShadowCasters.cpp
     src/graphics/CascadedShadow.cpp
     src/graphics/DirectionalShadowShader.cpp
+    src/graphics/LightingScene.cpp
+    src/graphics/DynamicIrradiance.cpp
+    src/graphics/EnvironmentLighting.cpp
+    src/graphics/SSGI.cpp
     src/graphics/LightingBuildData.cpp
     src/graphics/ClusteredLights.cpp
     src/graphics/Skybox.cpp
     src/graphics/PbrRenderer.cpp
     src/graphics/Framebuffer.cpp
     src/graphics/PostProcess.cpp
+    src/graphics/PostProcessVolume.cpp
     src/graphics/ProceduralSky.cpp
     src/graphics/PointShadow.cpp
     src/graphics/SpotShadow.cpp

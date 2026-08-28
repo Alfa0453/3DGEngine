@@ -9,6 +9,7 @@
 
 #include <engine/assets/RuntimeAssetManager.h>
 #include <engine/graphics/Camera.h>
+#include <engine/graphics/DynamicIrradiance.h>
 #include <engine/graphics/CameraSequence.h>
 #include <engine/ecs/Components.h>
 #include <engine/graphics/Mesh.h>
@@ -716,8 +717,41 @@ EditorViewport::EditorViewport()
       m_blockoutLines(std::make_unique<EditorLineRenderer>()),
       m_scatterLines(std::make_unique<EditorLineRenderer>()),
       m_arrayLines(std::make_unique<EditorLineRenderer>()),
-      m_measurementLines(std::make_unique<EditorLineRenderer>())
+      m_measurementLines(std::make_unique<EditorLineRenderer>()),
+      m_dynamicGiLines(std::make_unique<EditorLineRenderer>())
 {
+}
+
+void EditorViewport::DrawDynamicIrradianceProbes(
+    const engine::DynamicIrradianceSystem& system,
+    const glm::vec3& cameraPosition, const glm::mat4& viewProj) const {
+    if (!m_dynamicGiLines || !system.Ready()) return;
+    m_dynamicGiLines->Clear();
+    const auto& probes = system.Probes();
+    const float activeDistance = system.Settings().activeDistance;
+    const float marker = std::clamp(system.Settings().probeSpacing * 0.075f, 0.04f, 0.35f);
+    // Keep debug submission bounded for very large volumes.
+    const std::size_t stride = std::max<std::size_t>(1, (probes.size() + 8191) / 8192);
+    for (std::size_t index = 0; index < probes.size(); index += stride) {
+        const engine::DynamicIrradianceProbe& probe = probes[index];
+        const glm::vec3 position = system.ProbeSamplePosition(index);
+        if (glm::distance(position, cameraPosition) > activeDistance) continue;
+        glm::vec3 color(0.15f, 0.95f, 0.35f);
+        switch (probe.state) {
+        case engine::DynamicProbeState::Sleeping: color = glm::vec3(0.42f); break;
+        case engine::DynamicProbeState::Relocated: color = glm::vec3(1.0f, 0.65f, 0.08f); break;
+        case engine::DynamicProbeState::Invalid:
+        case engine::DynamicProbeState::InsideGeometry: color = glm::vec3(1.0f, 0.12f, 0.08f); break;
+        case engine::DynamicProbeState::OutsideGeometry: color = glm::vec3(0.15f, 0.45f, 1.0f); break;
+        default: break;
+        }
+        m_dynamicGiLines->AddLine(position - glm::vec3(marker, 0, 0), position + glm::vec3(marker, 0, 0), color);
+        m_dynamicGiLines->AddLine(position - glm::vec3(0, marker, 0), position + glm::vec3(0, marker, 0), color);
+        m_dynamicGiLines->AddLine(position - glm::vec3(0, 0, marker), position + glm::vec3(0, 0, marker), color);
+        if (glm::dot(probe.relocationOffset, probe.relocationOffset) > 1e-6f)
+            m_dynamicGiLines->AddLine(system.ProbeGridPosition(index), position, glm::vec3(0.1f, 0.9f, 1.0f));
+    }
+    m_dynamicGiLines->Draw(viewProj, 1.5f, true, true);
 }
 
 EditorViewport::~EditorViewport() = default;

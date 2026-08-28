@@ -33,6 +33,8 @@ struct SkinnedLighting {
     bool skylightOcclusion = false;
     float skylightOcclusionStrength = 0.90f, minimumSkylight = 0.06f;
     const LightingProbeGrid* lightingGrid = nullptr;
+    bool probeVisibilityWeighting = false;
+    float probeVisibilityMaxDistance = 60.0f;
     const ReflectionProbeSystem* reflectionProbes = nullptr;
     const SSAO* ssao = nullptr;
     glm::vec2 screenSize{1.0f};

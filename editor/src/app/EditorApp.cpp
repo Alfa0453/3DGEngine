@@ -22,6 +22,8 @@
 #include <engine/ai/AgentCollision.h>
 #include <engine/ai/AiMovement.h>
 #include <engine/graphics/ImageDecode.h>
+#include <engine/graphics/EnvironmentLighting.h>
+#include <engine/graphics/PostProcessVolume.h>
 #include <engine/graphics/GrassField.h>
 #include <engine/math/Spline.h>
 #include <engine/assets/MaterialAssetLoader.h>
@@ -70,6 +72,75 @@ using engine::ecs::MeshRenderer;
 using engine::ecs::Transform;
 
 namespace {
+
+engine::EnvironmentLightingState ResolveEnvironment(
+    const EditorScene::Environment& e, const engine::DayNightCycle::Sample& sample) {
+    engine::AtmosphereParameters atmosphere;
+    atmosphere.rayleighDensity = e.atmosphereRayleigh;
+    atmosphere.rayleighScaleHeightKm = e.atmosphereRayleighHeight;
+    atmosphere.mieDensity = e.atmosphereMie;
+    atmosphere.mieScaleHeightKm = e.atmosphereMieHeight;
+    atmosphere.mieAnisotropy = e.atmosphereMieAnisotropy;
+    atmosphere.ozone = e.atmosphereOzone;
+    atmosphere.intensity = e.atmosphereIntensity;
+    atmosphere.sunAngularDiameterDegrees = e.sunAngularDiameter;
+    atmosphere.sunDiskIntensity = e.sunDiskIntensity;
+    engine::EnvironmentCloudParameters clouds;
+    clouds.enabled = e.clouds; clouds.coverage = e.cloudCoverage;
+    clouds.density = e.cloudDensity; clouds.albedo = e.cloudColor;
+    engine::NightEnvironment night;
+    night.stars = e.stars; night.starIntensity = e.starIntensity;
+    night.moon = e.moon; night.moonRadiance = e.moonColor * e.moonIntensity;
+    night.moonAngularDiameterDegrees = e.moonAngularDiameter;
+    night.moonPhase = e.moonPhase;
+    auto state = engine::ResolveEnvironmentLighting(e.timeOfDay, sample, atmosphere,
+        clouds, night, static_cast<engine::EnvironmentQuality>(std::clamp(e.environmentQuality, 0, 3)));
+    state.sunRadiance *= e.sunIntensity;
+    state.ambientRadiance *= e.skyLightIntensity;
+    return state;
+}
+
+std::vector<engine::PostProcess::VolumetricLight> GatherVolumetricLights(
+    engine::ecs::Registry& registry) {
+    std::vector<engine::PostProcess::VolumetricLight> result;
+    registry.view<engine::ecs::Transform,engine::ecs::Light>().each(
+        [&](Entity,engine::ecs::Transform& transform,engine::ecs::Light& light) {
+            if(result.size()>=16 || light.type==engine::ecs::Light::Type::Directional
+                || light.type==engine::ecs::Light::Type::Area) return;
+            engine::PostProcess::VolumetricLight volumeLight;
+            volumeLight.position=transform.position;
+            volumeLight.direction=glm::normalize(light.direction);
+            volumeLight.radiance=glm::max(light.color*light.intensity,glm::vec3(0.0f));
+            volumeLight.range=std::max(light.range,0.01f);
+            volumeLight.outerCos=light.type==engine::ecs::Light::Type::Spot
+                ? std::cos(glm::radians(light.outerAngle)) : -1.0f;
+            result.push_back(volumeLight);
+        });
+    return result;
+}
+
+std::vector<engine::PostProcess::LocalFogVolume> GatherLocalFogVolumes(
+    engine::ecs::Registry& registry) {
+    std::vector<engine::PostProcess::LocalFogVolume> result;
+    registry.view<engine::ecs::Transform, engine::ecs::LocalFogVolume>().each(
+        [&](Entity, engine::ecs::Transform& transform, engine::ecs::LocalFogVolume& authored) {
+            if (!authored.enabled || result.size() >= 8) return;
+            engine::PostProcess::LocalFogVolume fog;
+            fog.position = transform.position;
+            fog.boxExtents = glm::max(authored.boxExtents * glm::abs(transform.scale), glm::vec3(0.001f));
+            const glm::vec3 absoluteScale = glm::abs(transform.scale);
+            fog.radius = authored.radius * std::max(absoluteScale.x,
+                std::max(absoluteScale.y, absoluteScale.z));
+            fog.blendDistance = authored.blendDistance;
+            fog.density = authored.density;
+            fog.albedo = authored.albedo;
+            fog.extinction = authored.extinction;
+            fog.anisotropy = authored.anisotropy;
+            fog.sphere = authored.shape == engine::ecs::LocalFogVolume::Shape::Sphere;
+            result.push_back(fog);
+        });
+    return result;
+}
 
 EditorAssets::Type EditorAssetTypeFor(engine::AssetType type) {
     using A = engine::AssetType;
@@ -1132,8 +1203,13 @@ void EditorApp::OnRender()
         [](const EditorScene::Environment::PostProcessEffect& effect) {
             return effect.enabled && !effect.shaderPath.empty();
         });
+    const bool presentationChanged = environment.autoExposure || environment.bloom
+        || environment.volumetricFog || std::abs(environment.colorTemperature - 6500.0f) > 0.1f
+        || std::abs(environment.colorTint) > 0.0001f
+        || std::abs(environment.colorSaturation - 1.0f) > 0.0001f
+        || std::abs(environment.colorContrast - 1.0f) > 0.0001f;
     const bool  useHdrPost = environment.ssr || wantScale || hasGraphPost || underwaterPost
-        || std::abs(environment.exposureEV) > 0.0001f;
+        || presentationChanged || std::abs(environment.exposureEV) > 0.0001f;
     const int   sw = std::max(1, static_cast<int>(std::lround(window.Width()  * scale)));
     const int   sh = std::max(1, static_cast<int>(std::lround(window.Height() * scale)));
     m_renderW = window.Width();
@@ -1159,11 +1235,57 @@ void EditorApp::OnRender()
         }
         m_postProcess->settings.fxaa = environment.fxaa;   // FXAA toggle (SSR/HDR path)
         m_postProcess->settings.exposure = std::exp2(std::clamp(environment.exposureEV, -10.0f, 10.0f));
+        m_postProcess->settings.autoExposure = environment.autoExposure;
+        m_postProcess->settings.minEV = environment.exposureMinEV;
+        m_postProcess->settings.maxEV = environment.exposureMaxEV;
+        m_postProcess->settings.exposureCompensationEV = environment.exposureCompensationEV + environment.exposureEV;
+        m_postProcess->settings.adaptationSpeedUp = environment.exposureSpeedUp;
+        m_postProcess->settings.adaptationSpeedDown = environment.exposureSpeedDown;
+        m_postProcess->settings.bloom = environment.bloom;
+        m_postProcess->settings.bloomThreshold = environment.bloomThreshold;
+        m_postProcess->settings.bloomKnee = environment.bloomKnee;
+        m_postProcess->settings.bloomStrength = environment.bloomStrength;
+        m_postProcess->settings.temperature = environment.colorTemperature;
+        m_postProcess->settings.tint = environment.colorTint;
+        m_postProcess->settings.saturation = environment.colorSaturation;
+        m_postProcess->settings.contrast = environment.colorContrast;
+        m_postProcess->settings.lift = environment.colorLift;
+        m_postProcess->settings.gamma = environment.colorGamma;
+        m_postProcess->settings.gain = environment.colorGain;
+        m_postProcess->settings.lutIntensity = environment.colorLutIntensity;
+        m_postProcess->volumetrics.enabled = environment.volumetricFog;
+        m_postProcess->volumetrics.density = environment.fogDensity;
+        m_postProcess->volumetrics.scattering = environment.volumetricScattering;
+        m_postProcess->volumetrics.extinction = environment.volumetricExtinction;
+        m_postProcess->volumetrics.anisotropy = environment.volumetricAnisotropy;
+        m_postProcess->volumetrics.baseHeight = environment.fogHeight;
+        m_postProcess->volumetrics.heightFalloff = environment.fogHeightFalloff;
+        m_postProcess->volumetrics.startDistance = environment.volumetricStartDistance;
+        m_postProcess->volumetrics.maxDistance = environment.volumetricMaxDistance;
+        const int quality = std::clamp(environment.environmentQuality, 0, 3);
+        m_postProcess->volumetrics.depthSlices = 24 + quality * 16;
+        m_postProcess->volumetrics.xyDownsample = quality == 0 ? 6 : (quality == 1 ? 4 : (quality == 2 ? 3 : 2));
+        m_postProcess->volumetrics.historyWeight = quality == 0 ? 0.82f : (quality == 1 ? 0.88f : 0.92f);
+        m_postProcess->settings.bloomLevels = 3 + quality;
+        m_postProcess->SetVolumetricCamera(glm::inverse(
+            m_camera.ProjectionMatrix(window.AspectRatio()) * m_camera.ViewMatrix()),
+            m_camera.Position(), ResolveEnvironment(environment,
+                engine::DayNightCycle::At(environment.timeOfDay)));
+        engine::ecs::Registry& presentationRegistry =
+            (m_mode == EditorMode::Play && m_playRegistry) ? *m_playRegistry : m_scene.Registry();
+        engine::ApplyPostProcessVolumes(
+            presentationRegistry, m_camera.Position(), *m_postProcess);
         m_postProcess->Resize(sw, sh);
         std::vector<engine::PostProcess::Effect> graphEffects;
         engine::RuntimeAssetManager* effectAssets =
             m_mode == EditorMode::Play && m_playAssets
                 ? &*m_playAssets : &m_editAssets;
+        const engine::Texture* colorLut = nullptr;
+        if (!environment.colorLutPath.empty()) {
+            std::string lutError;
+            colorLut = effectAssets->LoadTexture(environment.colorLutPath, &lutError);
+        }
+        m_postProcess->SetColorLut(colorLut);
         for (const auto& authored : environment.postProcessEffects) {
             if (!authored.enabled || authored.shaderPath.empty()) continue;
             std::string loadError;
@@ -1207,6 +1329,8 @@ void EditorApp::OnRender()
     } else {
         DrawEditScene(viewProj);
     }
+    if (environment.lightingDebugMode == 17 && m_dynamicGi.Ready())
+        m_viewport.DrawDynamicIrradianceProbes(m_dynamicGi, m_camera.Position(), viewProj);
     DrawFoliage(m_camera, GetWindow().AspectRatio());        // batched trees/bushes/rocks
     DrawGrass(m_camera, GetWindow().AspectRatio());          // opaque grass on terrain (before water)
     CaptureWaterSceneBuffers();                              // copy opaque colour/depth once for all water
@@ -1229,6 +1353,29 @@ void EditorApp::OnRender()
                          m_camera.ProjectionMatrix(window.AspectRatio()), m_postProcess->HdrFbo(),
                          m_renderW, m_renderH);
         }
+        if (environment.ssgiEnabled && m_ssao) {
+            if (!m_ssgi) m_ssgi.emplace(m_renderW, m_renderH);
+            m_ssgi->Resize(m_renderW, m_renderH);
+            m_ssgi->rayLength = environment.ssgiRayLength;
+            m_ssgi->steps = environment.ssgiSteps;
+            m_ssgi->thickness = environment.ssgiThickness;
+            m_ssgi->intensity = environment.ssgiIntensity;
+            m_ssgi->Generate(m_postProcess->HdrColor(), m_ssao->PositionTexture(),
+                             m_ssao->NormalTexture(),
+                             m_camera.ProjectionMatrix(window.AspectRatio()));
+            m_postProcess->SetIndirectTexture(m_ssgi->Texture(), environment.ssgiIntensity);
+        } else {
+            m_postProcess->SetIndirectTexture(0, 0.0f);
+        }
+        m_postProcess->SetIndirectDebug(environment.lightingDebugMode == 18);
+        m_postProcess->SetVolumetricDirectionalShadow(
+            m_pbrRenderer && environment.directionalShadows
+                ? &m_pbrRenderer->Cascade() : nullptr,
+            m_camera.ViewMatrix());
+        engine::ecs::Registry& volumeRegistry =
+            (m_mode==EditorMode::Play && m_playRegistry) ? *m_playRegistry : m_scene.Registry();
+        m_postProcess->SetVolumetricLights(GatherVolumetricLights(volumeRegistry));
+        m_postProcess->SetLocalFogVolumes(GatherLocalFogVolumes(volumeRegistry));
         m_renderingHdrPreview = false;
         m_postProcess->RenderToScreen(window.Width(), window.Height(), m_dt);   // upscales to window
         m_gpuProfiler.End();
@@ -1530,7 +1677,11 @@ void EditorApp::DrawEditModeModels(const glm::mat4 & viewProj)
                     lighting.lightingDebugMode = environment.lightingDebugMode;
                     lighting.ssao = environment.ssao && m_ssao ? &*m_ssao : nullptr;
                     lighting.screenSize = glm::vec2(m_renderW, m_renderH);
-                    lighting.lightingGrid = m_lightingProbeGrid.Valid() ? &m_lightingProbeGrid : nullptr;
+                    lighting.lightingGrid = m_dynamicGi.GpuReady() ? &m_dynamicGi.Grid()
+                        : (m_lightingProbeGrid.Valid() ? &m_lightingProbeGrid : nullptr);
+                    lighting.probeVisibilityWeighting = m_dynamicGi.GpuReady()
+                        && environment.dynamicGiVisibilityWeighting;
+                    lighting.probeVisibilityMaxDistance = environment.dynamicGiMaxRayDistance;
                     lighting.tonemap = !m_renderingHdrPreview;
                     lighting.fog = environment.fog;
                     lighting.fogColor = sky.horizon;
@@ -1769,6 +1920,20 @@ void EditorApp::DrawEditorOverlay()
             }
             ImGui::SeparatorText("Lighting");
             ImGui::Text("GTAO GPU: %.2f ms",m_ssao?m_ssao->LastGpuMilliseconds():0.0);
+            ImGui::Text("SSGI submit: %.2f ms  | denoise: %.2f ms",
+                m_ssgi ? m_ssgi->LastMilliseconds() : 0.0,
+                m_ssgi ? m_ssgi->LastDenoiseMilliseconds() : 0.0);
+            const engine::DynamicGiStats& dynamicStats = m_dynamicGi.Stats();
+            ImGui::Text("Dynamic GI: %.2f ms update | %.2f ms upload",
+                dynamicStats.updateMilliseconds, dynamicStats.uploadMilliseconds);
+            ImGui::Text("  %u probes | %llu rays/frame",
+                dynamicStats.probesUpdated,
+                static_cast<unsigned long long>(dynamicStats.raysCast));
+            ImGui::Text("  active %u | sleeping %u | relocated %u | invalid %u",
+                dynamicStats.activeProbes, dynamicStats.sleepingProbes,
+                dynamicStats.relocatedProbes, dynamicStats.invalidProbes);
+            ImGui::Text("  memory %.2f MB",
+                static_cast<double>(dynamicStats.memoryBytes) / (1024.0 * 1024.0));
             ImGui::Text("Irradiance probes: %zu  (%.2f MB)",m_lightingProbeGrid.ProbeCount(),
                 static_cast<double>(m_lightingProbeGrid.MemoryBytes())/(1024.0*1024.0));
             ImGui::Text("Reflection probes: %zu  (%.2f MB)",m_reflectionProbes.ProbeCount(),
@@ -6786,7 +6951,11 @@ void EditorApp::DrawPlayScene(const glm::mat4 & viewProj)
         lighting.lightingDebugMode = environment.lightingDebugMode;
         lighting.ssao = environment.ssao && m_ssao ? &*m_ssao : nullptr;
         lighting.screenSize = glm::vec2(m_renderW, m_renderH);
-        lighting.lightingGrid = m_lightingProbeGrid.Valid() ? &m_lightingProbeGrid : nullptr;
+        lighting.lightingGrid = m_dynamicGi.GpuReady() ? &m_dynamicGi.Grid()
+            : (m_lightingProbeGrid.Valid() ? &m_lightingProbeGrid : nullptr);
+        lighting.probeVisibilityWeighting = m_dynamicGi.GpuReady()
+            && environment.dynamicGiVisibilityWeighting;
+        lighting.probeVisibilityMaxDistance = environment.dynamicGiMaxRayDistance;
         lighting.reflectionProbes = &m_reflectionProbes;
         lighting.cloudShadows = environment.clouds && environment.cloudShadows;
         lighting.cloudShadowStrength = environment.cloudShadowStrength;
@@ -7482,7 +7651,8 @@ void EditorApp::DrawEnvironmentSky(const glm::mat4& view, const glm::mat4& proje
                             glm::radians(environment.skyRotation),
                             std::max(environment.skyIntensity, 0.0f));
     } else if (m_sky) {
-        m_sky->Draw(view, projection, sky, tonemap, SkyClouds(environment));
+        m_sky->Draw(view, projection, ResolveEnvironment(environment, sky),
+                    tonemap, SkyClouds(environment));
     }
 }
 
@@ -7535,7 +7705,12 @@ void EditorApp::ConfigureEnvironmentPbrOptions(engine::ecs::Registry& registry,
     options.localProbeInfluence = environment.localProbeInfluence;
     options.lightingDebugMode = environment.lightingDebugMode;
     if (environment.lightingBuildAsset != m_loadedLightingAsset) LoadSceneLightingAsset();
-    options.lightingGrid = m_lightingProbeGrid.Valid() ? &m_lightingProbeGrid : nullptr;
+    UpdateDynamicGi(registry, environment, sky);
+    options.lightingGrid = m_dynamicGi.GpuReady() ? &m_dynamicGi.Grid()
+        : (m_lightingProbeGrid.Valid() ? &m_lightingProbeGrid : nullptr);
+    options.probeVisibilityWeighting = m_dynamicGi.GpuReady()
+        && environment.dynamicGiVisibilityWeighting;
+    options.probeVisibilityMaxDistance = environment.dynamicGiMaxRayDistance;
     options.reflectionProbes = &m_reflectionProbes;
     options.pointShadows = environment.pointShadows;
     options.spotShadows = environment.spotShadows;
@@ -7553,7 +7728,8 @@ void EditorApp::ConfigureEnvironmentPbrOptions(engine::ecs::Registry& registry,
     options.fog = environment.fog;
     // Fog tint follows the sky horizon so it darkens with the day/night cycle
     // (this intentionally overrides the authored Environment.fogColor).
-    options.fogColor = sky.horizon;
+    options.fogColor = ResolveEnvironment(environment, sky).SampleEnvironmentRadiance(
+        glm::normalize(glm::vec3(1.0f, 0.04f, 0.0f)));
     options.fogDensity = environment.fogDensity;
     options.fogHeight = environment.fogHeight;
     options.fogHeightFalloff = environment.fogHeightFalloff;
@@ -7564,7 +7740,7 @@ void EditorApp::ConfigureEnvironmentPbrOptions(engine::ecs::Registry& registry,
         [](const EditorScene::Environment::PostProcessEffect& effect) {
             return effect.enabled && !effect.shaderPath.empty();
         });
-    if (environment.ssao || environment.ssr || graphPostNeedsGeometry) {
+    if (environment.ssao || environment.ssr || environment.ssgiEnabled || graphPostNeedsGeometry) {
         if (!m_ssao) {
             m_ssao.emplace(window.Width(), window.Height());
         }
@@ -7574,6 +7750,137 @@ void EditorApp::ConfigureEnvironmentPbrOptions(engine::ecs::Registry& registry,
             registry, m_camera, window.AspectRatio(), m_renderW, m_renderH);
         options.ssao = environment.ssao ? &*m_ssao : nullptr;
     }
+}
+
+void EditorApp::UpdateDynamicGi(engine::ecs::Registry& registry,
+                                const EditorScene::Environment& environment,
+                                const engine::DayNightCycle::Sample& sky) {
+    const bool enabled = environment.dynamicGiEnabled
+        && std::clamp(environment.dynamicGiQuality, 0, 3) > 0;
+    if (!enabled) {
+        if (m_dynamicGi.Ready()) m_dynamicGi.Reset();
+        m_dynamicGiConfigurationHash = 0;
+        return;
+    }
+    auto hashBytes = [](std::uint64_t& hash, const void* data, std::size_t size) {
+        const auto* bytes = static_cast<const unsigned char*>(data);
+        for (std::size_t i = 0; i < size; ++i) { hash ^= bytes[i]; hash *= 1099511628211ull; }
+    };
+    std::uint64_t settingsHash = 1469598103934665603ull;
+    hashBytes(settingsHash, &environment.dynamicGiQuality, sizeof(environment.dynamicGiQuality));
+    hashBytes(settingsHash, &environment.dynamicGiProbeSpacing, sizeof(environment.dynamicGiProbeSpacing));
+    hashBytes(settingsHash, &environment.dynamicGiRaysPerProbe, sizeof(environment.dynamicGiRaysPerProbe));
+    hashBytes(settingsHash, &environment.dynamicGiProbesPerFrame, sizeof(environment.dynamicGiProbesPerFrame));
+    hashBytes(settingsHash, &environment.dynamicGiMaxRaysPerFrame, sizeof(environment.dynamicGiMaxRaysPerFrame));
+    hashBytes(settingsHash, &environment.dynamicGiMaxRayDistance, sizeof(environment.dynamicGiMaxRayDistance));
+    hashBytes(settingsHash, &environment.dynamicGiHysteresis, sizeof(environment.dynamicGiHysteresis));
+    hashBytes(settingsHash, &environment.dynamicGiIntensity, sizeof(environment.dynamicGiIntensity));
+    hashBytes(settingsHash, &environment.dynamicGiRelocation, sizeof(environment.dynamicGiRelocation));
+    hashBytes(settingsHash, &environment.dynamicGiClassification, sizeof(environment.dynamicGiClassification));
+    hashBytes(settingsHash, &environment.dynamicGiVisibilityWeighting, sizeof(environment.dynamicGiVisibilityWeighting));
+    hashBytes(settingsHash, environment.lightingBuildAsset.data(), environment.lightingBuildAsset.size());
+
+    const engine::DirectionalSkyRadiance radiance =
+        ResolveEnvironment(environment, sky).ToDirectionalSkyRadiance();
+
+    const std::uint64_t geometryHash = ComputeDynamicGiGeometryHash();
+    if (!m_dynamicGi.Ready() || settingsHash != m_dynamicGiConfigurationHash) {
+        engine::DynamicIrradianceSettings settings;
+        settings.enabled = true;
+        settings.quality = static_cast<engine::DynamicGiQuality>(
+            std::clamp(environment.dynamicGiQuality, 0, 3));
+        settings.probeSpacing = environment.dynamicGiProbeSpacing;
+        settings.raysPerProbe = static_cast<std::uint32_t>(std::max(environment.dynamicGiRaysPerProbe, 8));
+        settings.probesPerFrame = static_cast<std::uint32_t>(std::max(environment.dynamicGiProbesPerFrame, 1));
+        settings.maxGiRaysPerFrame = static_cast<std::uint32_t>(std::max(environment.dynamicGiMaxRaysPerFrame, 8));
+        settings.maxRayDistance = environment.dynamicGiMaxRayDistance;
+        settings.hysteresis = environment.dynamicGiHysteresis;
+        settings.intensity = environment.dynamicGiIntensity;
+        settings.relocation = environment.dynamicGiRelocation;
+        settings.classification = environment.dynamicGiClassification;
+        settings.visibilityWeighting = environment.dynamicGiVisibilityWeighting;
+        std::vector<engine::LightingTriangle> triangles = GatherLightingTriangles();
+        if (!m_loadedLightingData && !triangles.empty()) {
+            glm::vec3 minimum(std::numeric_limits<float>::max());
+            glm::vec3 maximum(-std::numeric_limits<float>::max());
+            for (const auto& triangle : triangles) {
+                minimum = glm::min(minimum, glm::min(triangle.a, glm::min(triangle.b, triangle.c)));
+                maximum = glm::max(maximum, glm::max(triangle.a, glm::max(triangle.b, triangle.c)));
+            }
+            settings.boundsMin = minimum - glm::vec3(settings.probeSpacing);
+            settings.boundsMax = maximum + glm::vec3(settings.probeSpacing);
+        }
+        std::string error;
+        if (!m_dynamicGi.Configure(settings, radiance,
+                                   m_loadedLightingData ? &*m_loadedLightingData : nullptr,
+                                   &error)) {
+            m_lightingBuildStatus = "Dynamic GI: " + error;
+            return;
+        }
+        m_dynamicGi.SetSceneGeometry(triangles);
+        if (!m_dynamicGi.InitializeGpu(&error)) {
+            m_lightingBuildStatus = "Dynamic GI upload: " + error;
+            m_dynamicGi.Reset();
+            return;
+        }
+        m_dynamicGiConfigurationHash = settingsHash;
+        m_dynamicGiGeometryHash = geometryHash;
+    } else if (geometryHash != m_dynamicGiGeometryHash) {
+        m_dynamicGi.SetSceneGeometry(GatherLightingTriangles());
+        m_dynamicGiGeometryHash = geometryHash;
+    }
+
+    std::vector<engine::DynamicGiLight> giLights;
+    registry.view<engine::ecs::Transform, engine::ecs::Light>().each(
+        [&](engine::ecs::Entity, engine::ecs::Transform& transform, engine::ecs::Light& light) {
+            if (!light.affectDynamicGi || light.type == engine::ecs::Light::Type::Directional
+                || light.type == engine::ecs::Light::Type::Area) return;
+            engine::DynamicGiLight giLight;
+            giLight.type = light.type == engine::ecs::Light::Type::Spot
+                ? engine::DynamicGiLight::Type::Spot : engine::DynamicGiLight::Type::Point;
+            giLight.position = transform.position;
+            giLight.direction = glm::normalize(light.direction);
+            giLight.radiance = glm::max(light.color * light.intensity, glm::vec3(0.0f));
+            giLight.range = std::max(light.range, 0.01f);
+            giLight.innerCos = std::cos(glm::radians(light.innerAngle));
+            giLight.outerCos = std::cos(glm::radians(light.outerAngle));
+            giLights.push_back(giLight);
+        });
+    m_dynamicGi.Update(m_camera.Position(), radiance, giLights, ++m_dynamicGiFrame);
+}
+
+std::uint64_t EditorApp::ComputeDynamicGiGeometryHash() const {
+    std::uint64_t hash = 1469598103934665603ull;
+    auto bytes = [&](const void* data, std::size_t size) {
+        const auto* p = static_cast<const unsigned char*>(data);
+        for (std::size_t i = 0; i < size; ++i) { hash ^= p[i]; hash *= 1099511628211ull; }
+    };
+    auto string = [&](const std::string& value) { bytes(value.data(), value.size()); };
+    for (const auto& object : m_scene.Objects()) {
+        if (!object.visible || m_scene.TryGetLight(object.entity)
+            || m_scene.TryGetReflectionProbe(object.entity)
+            || object.navMeshBoundsVolume || object.isWater || object.isSpline) continue;
+        string(object.modelAssetPath);
+        string(object.materialAssetPath);
+        bytes(&object.primitive, sizeof(object.primitive));
+        bytes(&object.modelOrientationEuler, sizeof(object.modelOrientationEuler));
+        bytes(&object.modelOffsetPosition, sizeof(object.modelOffsetPosition));
+        bytes(&object.modelOffsetScale, sizeof(object.modelOffsetScale));
+        if (const auto* transform = m_scene.TryGetTransform(object.entity)) {
+            bytes(&transform->position, sizeof(transform->position));
+            bytes(&transform->rotation, sizeof(transform->rotation));
+            bytes(&transform->scale, sizeof(transform->scale));
+        }
+        if (const auto* renderer = m_scene.TryGetMeshRenderer(object.entity))
+            bytes(&renderer->color, sizeof(renderer->color));
+        bytes(&object.isTerrain, sizeof(object.isTerrain));
+        bytes(&object.terrainRes, sizeof(object.terrainRes));
+        bytes(&object.terrainSize, sizeof(object.terrainSize));
+        bytes(&object.terrainMaxHeight, sizeof(object.terrainMaxHeight));
+        if (!object.terrainHeights.empty())
+            bytes(object.terrainHeights.data(), object.terrainHeights.size() * sizeof(float));
+    }
+    return hash;
 }
 
 std::uint64_t EditorApp::ComputeLightingStateHash() const {
@@ -7732,12 +8039,8 @@ void EditorApp::StartLightingBuild() {
     const std::uint64_t hash=ComputeLightingStateHash();
     const std::filesystem::path path=std::filesystem::path(m_project.AssetRoot())/"Lighting"/(std::filesystem::path(m_project.ScenePath()).stem().string()+".3dglighting");
     const auto skySample=engine::DayNightCycle::At(environment.timeOfDay);
-    engine::DirectionalSkyRadiance skyRadiance;
-    skyRadiance.zenith=skySample.zenith*environment.skyLightIntensity;
-    skyRadiance.horizon=skySample.horizon*environment.skyLightIntensity;
-    skyRadiance.ground=skySample.ambient*environment.skyLightIntensity*0.10f;
-    skyRadiance.sunDirection=glm::normalize(-skySample.keyLightDirection);
-    skyRadiance.sunRadiance=skySample.keyLightColor*environment.sunIntensity*0.35f;
+    const engine::DirectionalSkyRadiance skyRadiance =
+        ResolveEnvironment(environment, skySample).ToDirectionalSkyRadiance();
     std::vector<engine::LightingBuildLight> staticLights;
     for(const EditorScene::Object& object:m_scene.Objects()){
         const auto* light=m_scene.TryGetLight(object.entity);const auto* transform=m_scene.TryGetTransform(object.entity);
@@ -7775,6 +8078,8 @@ void EditorApp::PollLightingBuild() {
     if(!result.success){m_lightingBuildRunning=false;m_lastLightingBuildMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-m_lightingBuildStartedAt).count();m_lightingBuildStatus=result.error.empty()?"Lighting build failed":result.error;m_log.Error(m_lightingBuildStatus);return;}
     std::string error;
     if(!m_lightingProbeGrid.Upload(result.data,&error)){m_lightingBuildRunning=false;m_lightingBuildStatus=error;m_log.Error(error);return;}
+    m_loadedLightingData = result.data;
+    m_dynamicGi.Reset(); m_dynamicGiConfigurationHash = 0;
     auto environment=m_scene.GetEnvironment(); environment.lightingBuildAsset=result.path; environment.lightingBuildHash=result.data.sourceHash; m_scene.SetEnvironment(environment);
     m_loadedLightingAsset=result.path;
     const EditorScene::Object* original=m_scene.SelectedObject();const Entity originalEntity=original?original->entity:engine::ecs::kNull;
@@ -7793,10 +8098,13 @@ void EditorApp::LoadSceneLightingAsset() {
     const auto& environment=m_scene.GetEnvironment();
     m_lightingBuildQuality=std::clamp(environment.lightingBuildQuality,0,2);
     m_loadedLightingAsset=environment.lightingBuildAsset;m_lightingProbeGrid.Reset();
+    m_loadedLightingData.reset();
+    m_dynamicGi.Reset(); m_dynamicGiConfigurationHash=0;
     if(environment.lightingBuildAsset.empty()){m_lightingBuildStatus="No lighting data";return;}
     engine::LightingBuildData data;std::string error;
     if(!engine::LoadLightingBuildData(environment.lightingBuildAsset,&data,&error)){m_lightingBuildStatus=error;return;}
     if(!m_lightingProbeGrid.Upload(data,&error)){m_lightingBuildStatus=error;return;}
+    m_loadedLightingData=data;
     m_lightingBuildDirty=data.sourceHash!=ComputeLightingStateHash();
     m_lightingBuildStatus=m_lightingBuildDirty?"Lighting data is stale":"Lighting data loaded";
 }

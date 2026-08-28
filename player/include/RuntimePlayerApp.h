@@ -16,6 +16,9 @@
 #include <engine/graphics/DayNightCycle.h>
 #include <engine/graphics/IBL.h>
 #include <engine/graphics/ReflectionProbeSystem.h>
+#include <engine/graphics/DynamicIrradiance.h>
+#include <engine/graphics/SSAO.h>
+#include <engine/graphics/SSGI.h>
 #include <engine/graphics/ParticleRenderer.h>
 #include <engine/graphics/RuntimeParticleSystem.h>
 #include <engine/graphics/CameraSequence.h>
@@ -67,6 +70,8 @@ protected:
 private:
     void LoadScene();
     void ConfigurePhysics();
+    void UpdateDynamicGi(const engine::Camera& camera);
+    std::vector<engine::LightingTriangle> GatherLightingTriangles() const;
     void LoadHud();
     void DrawHudOverlay();
     void RestartScene();
@@ -153,6 +158,13 @@ private:
     engine::RuntimeSceneLoader::Scene  m_persistentScene;
     engine::PhysicsWorld               m_physics;
     engine::RuntimeAssetManager        m_assets;   // resolves HUD image textures
+    engine::LightingProbeGrid          m_lightingProbeGrid;
+    engine::DynamicIrradianceSystem    m_dynamicGi;
+    std::optional<engine::SSAO>        m_ssao;
+    std::optional<engine::SSGI>        m_ssgi;
+    std::optional<engine::LightingBuildData> m_loadedLightingData;
+    bool                               m_dynamicGiConfigured = false;
+    std::uint32_t                      m_dynamicGiFrame = 0;
     engine::DayNightCycle::Sample      m_sample{};
 
     // HUD (the scene's referenced .hud, drawn during play).

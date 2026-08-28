@@ -295,6 +295,10 @@ void main() {
         if(uReflectionProbeCount>1)reflectionWeight+=ReflectionProbeWeight(1,vWorldPos);
         color=vec3(clamp(reflectionWeight,0.0,1.0));}
     else if(uLightingDebugMode>=13&&uLightingDebugMode<=15)color=localProbe.irradiance;
+    else if(uLightingDebugMode==16)color=vec3(localProbe.visibility);
+    else if(uLightingDebugMode==17)color=localProbe.irradiance;
+    else if(uLightingDebugMode==18)color=vec3(0.0);
+    else if(uLightingDebugMode==19)color=diffuseIndirect+specularIndirect;
     if (uFogEnabled == 1 && uLightingDebugMode == 0) {
         float dist = length(uViewPos - vWorldPos);
         float distFog = 1.0 - exp(-dist * uFogDensity);
@@ -462,6 +466,8 @@ void SkinnedRenderer::DrawScene(ecs::Registry& reg, const Camera& camera, float 
     m_pbr->SetFloat("uSkylightOcclusionStrength", lit.skylightOcclusionStrength);
     m_pbr->SetFloat("uMinimumSkylight", lit.minimumSkylight);
     m_pbr->SetInt("uUseLightingGrid", lit.lightingGrid && lit.lightingGrid->Valid() ? 1 : 0);
+    m_pbr->SetInt("uProbeVisibilityWeighting",lit.probeVisibilityWeighting?1:0);
+    m_pbr->SetFloat("uProbeVisibilityMaxDistance",std::max(lit.probeVisibilityMaxDistance,0.001f));
     if (lit.lightingGrid && lit.lightingGrid->Valid()) {
         LightingProbeGrid::Contribution contribution=LightingProbeGrid::Contribution::Combined;
         if(lit.lightingDebugMode==13)contribution=LightingProbeGrid::Contribution::DirectEnvironment;
@@ -470,6 +476,8 @@ void SkinnedRenderer::DrawScene(ecs::Registry& reg, const Camera& camera, float 
         lit.lightingGrid->Bind(18,contribution);
         m_pbr->SetVec3("uLightingGridMin",lit.lightingGrid->BoundsMin());
         m_pbr->SetVec3("uLightingGridMax",lit.lightingGrid->BoundsMax());
+        const glm::ivec3 dimensions=lit.lightingGrid->Dimensions();
+        m_pbr->SetVec3("uLightingGridDimensions",glm::vec3(dimensions));
     }
     m_pbr->SetFloat("uSpecularOcclusionStrength",lit.specularOcclusionStrength);
     m_pbr->SetFloat("uLocalProbeInfluence",lit.localProbeInfluence);

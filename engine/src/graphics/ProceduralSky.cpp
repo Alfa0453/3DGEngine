@@ -44,6 +44,17 @@ uniform float uCloudTime;
 uniform vec2  uCloudWind;
 uniform float uCloudHorizon;
 uniform vec3  uCloudColor;
+uniform float uRayleighDensity;
+uniform float uMieDensity;
+uniform float uMieG;
+uniform float uOzone;
+uniform float uAtmosphereIntensity;
+uniform float uSunAngularRadius;
+uniform float uSunDiskIntensity;
+uniform float uCloudOpticalDepth;
+uniform float uCloudForwardScatter;
+uniform float uCloudSilverLining;
+uniform float uStarIntensity;
 
 float hash(vec3 p) {
     return fract(sin(dot(floor(p), vec3(12.9898, 78.233, 37.719))) * 43758.5453);
@@ -76,18 +87,37 @@ float fbm3(vec3 p) {
     return value;
 }
 
+float hg(float mu, float g) {
+    float gg = g * g;
+    return (1.0 - gg) / max(12.56637 * pow(1.0 + gg - 2.0 * g * mu, 1.5), 1e-4);
+}
+
 void main() {
     vec3 d = normalize(vDir);
     float night = 1.0 - uDayFactor;
 
-    // Vertical gradient (ground tint below the horizon).
+    // Compact Bruneton-style approximation. The expensive optical integration is
+    // represented by stable analytical transmittance terms; the same coefficients
+    // are used by the CPU environment sampler that feeds GI and reflection captures.
     float t = clamp(d.y, 0.0, 1.0);
-    vec3 col = (d.y < 0.0) ? uHorizon * 0.4 * (1.0 + d.y * 0.3)
-                           : mix(uHorizon, uZenith, t);
+    float airMass = 1.0 / max(0.08, d.y + 0.12);
+    vec3 betaR = vec3(0.0058, 0.0135, 0.0331) * uRayleighDensity;
+    vec3 betaM = vec3(0.0040) * uMieDensity;
+    vec3 betaO = vec3(0.00065, 0.00115, 0.00008) * uOzone;
+    vec3 transmittance = exp(-(betaR + betaM + betaO) * airMass * 22.0);
+    float sunMu = clamp(dot(d, uSunToward), -1.0, 1.0);
+    float phaseR = 3.0 * (1.0 + sunMu * sunMu) / 50.26548;
+    vec3 physical = (betaR * phaseR + betaM * hg(sunMu, uMieG))
+                    * (vec3(1.0) - transmittance) * 38.0
+                    * uSunDisc * uAtmosphereIntensity;
+    vec3 col = physical;
+    if (d.y < 0.0) col = mix(uHorizon * 0.10, physical, smoothstep(-0.08, 0.0, d.y));
 
     // Sun: a tight disc plus a daytime halo.
     float sd = clamp(dot(d, uSunToward), 0.0, 1.0);
-    col += uSunDisc * pow(sd, 260.0) * 1.8;
+    float disk = smoothstep(cos(uSunAngularRadius * 1.12),
+                            cos(uSunAngularRadius * 0.88), sd);
+    col += uSunDisc * disk * uSunDiskIntensity;
     col += uSunDisc * pow(sd, 8.0) * 0.15 * uDayFactor;
 
     // Moon: disc + soft halo, visible at night.
@@ -99,7 +129,7 @@ void main() {
     if (d.y > 0.02) {
         float h = hash(d * 220.0);
         float star = step(0.9986, h);
-        col += vec3(star) * night * (0.6 + 0.6 * t);
+        col += vec3(star) * night * uStarIntensity * (0.6 + 0.6 * t);
     }
 
     // Sample a three-dimensional noise field on the sky sphere. Unlike longitude /
@@ -115,10 +145,14 @@ void main() {
                                  uCloudCoverage + edge, shape);
         cloud *= clamp(uCloudDensity, 0.0, 2.0);
         cloud *= smoothstep(-0.02, max(uCloudHorizon, 0.005), d.y);
-        cloud = clamp(cloud, 0.0, 0.96);
+        float optical = max(cloud * uCloudOpticalDepth, 0.0);
+        float cloudTransmittance = exp(-optical);
+        cloud = clamp(1.0 - cloudTransmittance, 0.0, 0.985);
 
-        float sunLight = 0.55 + 0.45 * pow(sd, 3.0);
-        vec3 dayCloud = uCloudColor * sunLight;
+        float forward = hg(sd, uCloudForwardScatter) * 2.5;
+        float rim = pow(sd, 18.0) * uCloudSilverLining * cloudTransmittance;
+        float sunLight = 0.28 + 0.42 * pow(sd, 3.0) + forward + rim;
+        vec3 dayCloud = uCloudColor * sunLight * mix(uHorizon, uSunDisc, 0.65);
         vec3 nightCloud = mix(uZenith, uMoonDisc, 0.18) * 0.55;
         vec3 cloudColor = mix(nightCloud, dayCloud, uDayFactor);
         col = mix(col, cloudColor, cloud);
@@ -137,6 +171,19 @@ ProceduralSky::ProceduralSky()
 void ProceduralSky::Draw(const glm::mat4& view, const glm::mat4& projection,
                          const DayNightCycle::Sample& sky, bool tonemap,
                          const CloudSettings& clouds) {
+    EnvironmentCloudParameters resolvedClouds;
+    resolvedClouds.enabled = clouds.enabled;
+    resolvedClouds.coverage = clouds.coverage;
+    resolvedClouds.density = clouds.density;
+    resolvedClouds.albedo = clouds.color;
+    EnvironmentLightingState environment = ResolveEnvironmentLighting(
+        0.5f, sky, AtmosphereParameters{}, resolvedClouds);
+    Draw(view, projection, environment, tonemap, clouds);
+}
+
+void ProceduralSky::Draw(const glm::mat4& view, const glm::mat4& projection,
+                         const EnvironmentLightingState& environment, bool tonemap,
+                         const CloudSettings& clouds) {
     GLint previousDepthFunc = GL_LESS;
     GLboolean previousDepthMask = GL_TRUE;
     glGetIntegerv(GL_DEPTH_FUNC, &previousDepthFunc);
@@ -145,13 +192,16 @@ void ProceduralSky::Draw(const glm::mat4& view, const glm::mat4& projection,
     glDepthFunc(GL_LEQUAL);
     m_shader.Bind();
     m_shader.SetMat4("uViewProj", projection * glm::mat4(glm::mat3(view)));
-    m_shader.SetVec3("uSunToward",  sky.sunToward);
-    m_shader.SetVec3("uMoonToward", sky.moonToward);
-    m_shader.SetVec3("uHorizon",    sky.horizon);
-    m_shader.SetVec3("uZenith",     sky.zenith);
-    m_shader.SetVec3("uSunDisc",    sky.sunDisc);
-    m_shader.SetVec3("uMoonDisc",   sky.moonDisc);
-    m_shader.SetFloat("uDayFactor", sky.dayFactor);
+    const glm::vec3 horizon = environment.SampleEnvironmentRadiance(
+        glm::normalize(glm::vec3(1.0f, 0.03f, 0.0f)));
+    const glm::vec3 zenith = environment.SampleEnvironmentRadiance(glm::vec3(0,1,0));
+    m_shader.SetVec3("uSunToward", environment.sunDirection);
+    m_shader.SetVec3("uMoonToward", environment.night.moonDirection);
+    m_shader.SetVec3("uHorizon", horizon);
+    m_shader.SetVec3("uZenith", zenith);
+    m_shader.SetVec3("uSunDisc", glm::max(environment.sunRadiance, glm::vec3(0.001f)));
+    m_shader.SetVec3("uMoonDisc", environment.night.moonRadiance);
+    m_shader.SetFloat("uDayFactor", environment.dayFactor);
     m_shader.SetInt("uApplyTonemap", tonemap ? 1 : 0);
     m_shader.SetInt("uCloudsEnabled", clouds.enabled ? 1 : 0);
     m_shader.SetFloat("uCloudCoverage", clouds.coverage);
@@ -165,6 +215,19 @@ void ProceduralSky::Draw(const glm::mat4& view, const glm::mat4& projection,
     m_shader.SetVec2("uCloudWind", glm::vec2(std::cos(direction), std::sin(direction)));
     m_shader.SetFloat("uCloudHorizon", clouds.horizonHeight);
     m_shader.SetVec3("uCloudColor", clouds.color);
+    m_shader.SetFloat("uRayleighDensity", environment.atmosphere.rayleighDensity);
+    m_shader.SetFloat("uMieDensity", environment.atmosphere.mieDensity);
+    m_shader.SetFloat("uMieG", environment.atmosphere.mieAnisotropy);
+    m_shader.SetFloat("uOzone", environment.atmosphere.ozone);
+    m_shader.SetFloat("uAtmosphereIntensity", environment.atmosphere.intensity);
+    m_shader.SetFloat("uSunAngularRadius", glm::radians(
+        environment.atmosphere.sunAngularDiameterDegrees * 0.5f));
+    m_shader.SetFloat("uSunDiskIntensity", environment.atmosphere.sunDiskIntensity);
+    m_shader.SetFloat("uCloudOpticalDepth", environment.clouds.opticalDepth);
+    m_shader.SetFloat("uCloudForwardScatter", environment.clouds.forwardScattering);
+    m_shader.SetFloat("uCloudSilverLining", environment.clouds.silverLining);
+    m_shader.SetFloat("uStarIntensity", environment.night.stars
+        ? environment.night.starIntensity : 0.0f);
     m_cube.Draw();
     glDepthMask(previousDepthMask);
     glDepthFunc(previousDepthFunc);

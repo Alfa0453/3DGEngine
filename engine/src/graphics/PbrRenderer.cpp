@@ -531,6 +531,10 @@ void main() {
     }
     else if (uLightingDebugMode >= 13 && uLightingDebugMode <= 15)
         color = localProbe.irradiance;
+    else if (uLightingDebugMode == 16) color = vec3(localProbe.visibility);
+    else if (uLightingDebugMode == 17) color = localProbe.irradiance;
+    else if (uLightingDebugMode == 18) color = vec3(0.0);
+    else if (uLightingDebugMode == 19) color = diffuseIndirect + specularIndirect;
 
     if (uFogEnabled == 1 && uLightingDebugMode == 0) {
         float dist = length(uViewPos - vWorldPos);
@@ -780,6 +784,8 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
     m_pbr->SetFloat("uLocalProbeInfluence", opt.localProbeInfluence);
     m_pbr->SetInt("uLightingDebugMode", opt.lightingDebugMode);
     m_pbr->SetInt("uUseLightingGrid", opt.lightingGrid && opt.lightingGrid->Valid() ? 1 : 0);
+    m_pbr->SetInt("uProbeVisibilityWeighting", opt.probeVisibilityWeighting ? 1 : 0);
+    m_pbr->SetFloat("uProbeVisibilityMaxDistance", std::max(opt.probeVisibilityMaxDistance, 0.001f));
     if (opt.lightingGrid && opt.lightingGrid->Valid()) {
         engine::LightingProbeGrid::Contribution contribution=engine::LightingProbeGrid::Contribution::Combined;
         if(opt.lightingDebugMode==13)contribution=engine::LightingProbeGrid::Contribution::DirectEnvironment;
@@ -788,6 +794,8 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
         opt.lightingGrid->Bind(18,contribution);
         m_pbr->SetVec3("uLightingGridMin", opt.lightingGrid->BoundsMin());
         m_pbr->SetVec3("uLightingGridMax", opt.lightingGrid->BoundsMax());
+        const glm::ivec3 dimensions = opt.lightingGrid->Dimensions();
+        m_pbr->SetVec3("uLightingGridDimensions", glm::vec3(dimensions));
     }
     m_pbr->SetInt("uCloudShadows", opt.cloudShadows ? 1 : 0);
     m_pbr->SetFloat("uCloudShadowStrength", opt.cloudShadowStrength);

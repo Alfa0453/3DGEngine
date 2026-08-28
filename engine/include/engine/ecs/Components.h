@@ -83,6 +83,47 @@ struct ReflectionProbe {
     }
 };
 
+// Camera-local presentation override. It changes only the final HDR
+// presentation; it never feeds values back into PBR, GI, or reflection probes.
+// A stable ID makes overlapping-volume ordering deterministic across saves.
+struct PostProcessVolume {
+    AssetHandle stableId = AssetHandle::Generate();
+    bool enabled = true;
+    bool unbound = false;
+    int priority = 0;
+    float blendDistance = 2.0f;
+    float blendWeight = 1.0f;
+    glm::vec3 boxExtents{5.0f};
+
+    bool overrideExposure = false;
+    float exposureCompensationEV = 0.0f;
+    bool overrideBloom = false;
+    float bloomStrength = 0.6f;
+    bool overrideColorGrading = false;
+    float temperature = 6500.0f;
+    float tint = 0.0f;
+    float saturation = 1.0f;
+    float contrast = 1.0f;
+    bool overrideFogDensity = false;
+    float fogDensity = 0.008f;
+};
+
+// Local participating medium injected into the existing volumetric integration.
+// Density fades at the boundary; this is not a separate per-volume ray marcher.
+struct LocalFogVolume {
+    enum class Shape : std::uint8_t { Box = 0, Sphere = 1 };
+    AssetHandle stableId = AssetHandle::Generate();
+    Shape shape = Shape::Box;
+    bool enabled = true;
+    glm::vec3 boxExtents{3.0f};
+    float radius = 3.0f;
+    float blendDistance = 1.0f;
+    float density = 0.02f;
+    glm::vec3 albedo{0.72f, 0.80f, 0.92f};
+    float extinction = 1.0f;
+    float anisotropy = 0.2f;
+};
+
 struct LinearVelocity {
     glm::vec3 velocity{0.0f};
 };
@@ -428,6 +469,7 @@ struct Light {
     float areaWidth = 1.0f;
     float areaHeight = 1.0f;
     bool areaTwoSided = false;
+    bool affectDynamicGi = true;
 };
 
 // Small native gameplay component used by the editor/runtime path. Rotates an

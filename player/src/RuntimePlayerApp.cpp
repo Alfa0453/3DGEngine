@@ -23,6 +23,8 @@
 #include <engine/assets/TextureAsset.h>
 #include <engine/assets/DayNightTimelineAsset.h>
 #include <engine/graphics/ImageDecode.h>
+#include <engine/graphics/EnvironmentLighting.h>
+#include <engine/graphics/PostProcessVolume.h>
 #include <engine/core/Paths.h>
 
 #include <glad/glad.h>
@@ -48,6 +50,67 @@ using engine::ecs::PbrMaterial;
 using engine::RuntimeSceneLoader;
 
 namespace {
+engine::EnvironmentLightingState ResolveEnvironment(
+    const RuntimeSceneLoader::Scene::Environment& e,
+    const engine::DayNightCycle::Sample& sample) {
+    engine::AtmosphereParameters atmosphere;
+    atmosphere.rayleighDensity=e.atmosphereRayleigh;
+    atmosphere.rayleighScaleHeightKm=e.atmosphereRayleighHeight;
+    atmosphere.mieDensity=e.atmosphereMie;
+    atmosphere.mieScaleHeightKm=e.atmosphereMieHeight;
+    atmosphere.mieAnisotropy=e.atmosphereMieAnisotropy;
+    atmosphere.ozone=e.atmosphereOzone;
+    atmosphere.intensity=e.atmosphereIntensity;
+    atmosphere.sunAngularDiameterDegrees=e.sunAngularDiameter;
+    atmosphere.sunDiskIntensity=e.sunDiskIntensity;
+    engine::EnvironmentCloudParameters clouds;
+    clouds.enabled=e.clouds; clouds.coverage=e.cloudCoverage;
+    clouds.density=e.cloudDensity; clouds.albedo=e.cloudColor;
+    engine::NightEnvironment night;
+    night.stars=e.stars; night.starIntensity=e.starIntensity;
+    night.moon=e.moon; night.moonRadiance=e.moonColor*e.moonIntensity;
+    night.moonAngularDiameterDegrees=e.moonAngularDiameter; night.moonPhase=e.moonPhase;
+    auto state=engine::ResolveEnvironmentLighting(e.timeOfDay,sample,atmosphere,clouds,night,
+        static_cast<engine::EnvironmentQuality>(std::clamp(e.environmentQuality,0,3)));
+    state.sunRadiance*=e.sunIntensity; state.ambientRadiance*=e.skyLightIntensity;
+    return state;
+}
+std::vector<engine::PostProcess::VolumetricLight> GatherVolumetricLights(
+    engine::ecs::Registry& registry) {
+    std::vector<engine::PostProcess::VolumetricLight> result;
+    registry.view<engine::ecs::Transform,engine::ecs::Light>().each(
+        [&](Entity,engine::ecs::Transform& transform,engine::ecs::Light& light) {
+            if(result.size()>=16 || light.type==engine::ecs::Light::Type::Directional
+                || light.type==engine::ecs::Light::Type::Area) return;
+            engine::PostProcess::VolumetricLight volumeLight;
+            volumeLight.position=transform.position; volumeLight.direction=glm::normalize(light.direction);
+            volumeLight.radiance=glm::max(light.color*light.intensity,glm::vec3(0.0f));
+            volumeLight.range=std::max(light.range,0.01f);
+            volumeLight.outerCos=light.type==engine::ecs::Light::Type::Spot
+                ? std::cos(glm::radians(light.outerAngle)):-1.0f;
+            result.push_back(volumeLight);
+        });
+    return result;
+}
+std::vector<engine::PostProcess::LocalFogVolume> GatherLocalFogVolumes(
+    engine::ecs::Registry& registry) {
+    std::vector<engine::PostProcess::LocalFogVolume> result;
+    registry.view<engine::ecs::Transform,engine::ecs::LocalFogVolume>().each(
+        [&](Entity,engine::ecs::Transform& transform,engine::ecs::LocalFogVolume& authored) {
+            if(!authored.enabled || result.size()>=8) return;
+            engine::PostProcess::LocalFogVolume fog;
+            fog.position=transform.position;
+            fog.boxExtents=glm::max(authored.boxExtents*glm::abs(transform.scale),glm::vec3(0.001f));
+            const glm::vec3 absoluteScale=glm::abs(transform.scale);
+            fog.radius=authored.radius*std::max(absoluteScale.x,std::max(absoluteScale.y,absoluteScale.z));
+            fog.blendDistance=authored.blendDistance; fog.density=authored.density;
+            fog.albedo=authored.albedo; fog.extinction=authored.extinction;
+            fog.anisotropy=authored.anisotropy;
+            fog.sphere=authored.shape==engine::ecs::LocalFogVolume::Shape::Sphere;
+            result.push_back(fog);
+        });
+    return result;
+}
 engine::WindowProps MakeProps(engine::Config& cfg) {
     engine::WindowProps p;
     p.title  = "3DGEngine — Runtime Player";
@@ -460,6 +523,11 @@ void RuntimePlayerApp::FinishStreamedLevelUnload(std::size_t levelIndex) {
 
 void RuntimePlayerApp::LoadScene() {
     m_runtimeWarnings.clear();
+    m_dynamicGi.Reset();
+    m_lightingProbeGrid.Reset();
+    m_loadedLightingData.reset();
+    m_dynamicGiConfigured = false;
+    m_dynamicGiFrame = 0;
     if (m_scenePath.empty()) {
         m_loadError = "No scene specified. Pass a .3dgscene or .3dgworld path on the command line.";
         return;
@@ -628,6 +696,125 @@ void RuntimePlayerApp::ConfigurePhysics() {
     m_physics.sleepLinearVelocity    = env.physicsSleepLinearVelocity;
     m_physics.sleepAngularVelocity   = env.physicsSleepAngularVelocity;
     m_physics.timeToSleep            = env.physicsTimeToSleep;
+}
+
+std::vector<engine::LightingTriangle> RuntimePlayerApp::GatherLightingTriangles() const {
+    std::vector<engine::LightingTriangle> triangles;
+    auto appendMesh = [&](const engine::Mesh& mesh, const glm::mat4& model,
+                          const glm::vec3& albedo, const glm::vec3& emissive) {
+        const auto vertices = mesh.ReadbackVertices();
+        const auto indices = mesh.ReadbackIndices();
+        const std::size_t stride = mesh.VertexStrideFloats();
+        if (stride < 3 || indices.size() < 3) return;
+        auto point = [&](std::uint32_t index) {
+            const std::size_t base = static_cast<std::size_t>(index) * stride;
+            return base + 2 < vertices.size()
+                ? glm::vec3(model * glm::vec4(vertices[base], vertices[base + 1], vertices[base + 2], 1.0f))
+                : glm::vec3(0.0f);
+        };
+        triangles.reserve(triangles.size() + indices.size() / 3);
+        for (std::size_t i = 0; i + 2 < indices.size(); i += 3)
+            triangles.push_back({point(indices[i]), point(indices[i + 1]), point(indices[i + 2]),
+                                 glm::clamp(albedo, glm::vec3(0.0f), glm::vec3(1.0f)),
+                                 glm::max(emissive, glm::vec3(0.0f))});
+    };
+    const_cast<engine::ecs::Registry&>(m_registry).view<engine::ecs::Transform, engine::ecs::MeshPBR>().each(
+        [&](Entity, engine::ecs::Transform& transform, engine::ecs::MeshPBR& renderer) {
+            if (renderer.mesh) appendMesh(*renderer.mesh, transform.Model(),
+                                          renderer.material.albedo, renderer.material.emissive);
+        });
+    const_cast<engine::ecs::Registry&>(m_registry).view<engine::ecs::Transform, engine::ecs::LoadedModelAsset>().each(
+        [&](Entity, engine::ecs::Transform& transform, engine::ecs::LoadedModelAsset& loaded) {
+            if (!loaded.model) return;
+            for (const engine::SubMesh& submesh : loaded.model->SubMeshes()) {
+                glm::vec3 albedo(0.8f), emissive(0.0f);
+                if (submesh.material >= 0
+                    && static_cast<std::size_t>(submesh.material) < loaded.model->Materials().size()) {
+                    const engine::Material& material = loaded.model->Materials()[submesh.material];
+                    albedo = material.diffuse; emissive = material.emissive;
+                }
+                appendMesh(submesh.mesh, transform.Model(), albedo, emissive);
+            }
+        });
+    return triangles;
+}
+
+void RuntimePlayerApp::UpdateDynamicGi(const engine::Camera& camera) {
+    const auto& env = m_scene.environment;
+    if (!env.dynamicGiEnabled || env.dynamicGiQuality <= 0) {
+        if (m_dynamicGi.Ready()) m_dynamicGi.Reset();
+        m_dynamicGiConfigured = false;
+        return;
+    }
+    const engine::DirectionalSkyRadiance sky =
+        ResolveEnvironment(env, m_sample).ToDirectionalSkyRadiance();
+    if (!m_dynamicGiConfigured) {
+        m_loadedLightingData.reset();
+        m_lightingProbeGrid.Reset();
+        if (!env.lightingBuildAsset.empty()) {
+            std::filesystem::path lightingPath(env.lightingBuildAsset);
+            if (!lightingPath.is_absolute() && !std::filesystem::exists(lightingPath))
+                lightingPath = std::filesystem::path(m_scenePath).parent_path() / lightingPath;
+            engine::LightingBuildData data;
+            std::string error;
+            if (engine::LoadLightingBuildData(lightingPath.lexically_normal().string(), &data, &error)) {
+                m_loadedLightingData = data;
+                m_lightingProbeGrid.Upload(data, nullptr);
+            } else m_runtimeWarnings.push_back("Lighting: " + error);
+        }
+        engine::DynamicIrradianceSettings settings;
+        settings.enabled = true;
+        settings.quality = static_cast<engine::DynamicGiQuality>(std::clamp(env.dynamicGiQuality, 0, 3));
+        settings.probeSpacing = env.dynamicGiProbeSpacing;
+        settings.raysPerProbe = static_cast<std::uint32_t>(std::max(env.dynamicGiRaysPerProbe, 8));
+        settings.probesPerFrame = static_cast<std::uint32_t>(std::max(env.dynamicGiProbesPerFrame, 1));
+        settings.maxGiRaysPerFrame = static_cast<std::uint32_t>(std::max(env.dynamicGiMaxRaysPerFrame, 8));
+        settings.maxRayDistance = env.dynamicGiMaxRayDistance;
+        settings.hysteresis = env.dynamicGiHysteresis;
+        settings.intensity = env.dynamicGiIntensity;
+        settings.relocation = env.dynamicGiRelocation;
+        settings.classification = env.dynamicGiClassification;
+        settings.visibilityWeighting = env.dynamicGiVisibilityWeighting;
+        std::vector<engine::LightingTriangle> geometry = GatherLightingTriangles();
+        if (!m_loadedLightingData && !geometry.empty()) {
+            glm::vec3 minimum(std::numeric_limits<float>::max());
+            glm::vec3 maximum(-std::numeric_limits<float>::max());
+            for (const auto& triangle : geometry) {
+                minimum = glm::min(minimum, glm::min(triangle.a, glm::min(triangle.b, triangle.c)));
+                maximum = glm::max(maximum, glm::max(triangle.a, glm::max(triangle.b, triangle.c)));
+            }
+            settings.boundsMin = minimum - glm::vec3(settings.probeSpacing);
+            settings.boundsMax = maximum + glm::vec3(settings.probeSpacing);
+        }
+        std::string error;
+        if (!m_dynamicGi.Configure(settings, sky,
+                                   m_loadedLightingData ? &*m_loadedLightingData : nullptr, &error)) {
+            m_runtimeWarnings.push_back("Dynamic GI: " + error); return;
+        }
+        m_dynamicGi.SetSceneGeometry(geometry);
+        if (!m_dynamicGi.InitializeGpu(&error)) {
+            m_runtimeWarnings.push_back("Dynamic GI upload: " + error);
+            m_dynamicGi.Reset(); return;
+        }
+        m_dynamicGiConfigured = true;
+    }
+    std::vector<engine::DynamicGiLight> lights;
+    m_registry.view<engine::ecs::Transform, engine::ecs::Light>().each(
+        [&](Entity, engine::ecs::Transform& transform, engine::ecs::Light& light) {
+            if (!light.affectDynamicGi || light.type == engine::ecs::Light::Type::Directional
+                || light.type == engine::ecs::Light::Type::Area) return;
+            engine::DynamicGiLight dynamic;
+            dynamic.type = light.type == engine::ecs::Light::Type::Spot
+                ? engine::DynamicGiLight::Type::Spot : engine::DynamicGiLight::Type::Point;
+            dynamic.position = transform.position;
+            dynamic.direction = glm::normalize(light.direction);
+            dynamic.radiance = glm::max(light.color * light.intensity, glm::vec3(0.0f));
+            dynamic.range = std::max(light.range, 0.01f);
+            dynamic.innerCos = std::cos(glm::radians(light.innerAngle));
+            dynamic.outerCos = std::cos(glm::radians(light.outerAngle));
+            lights.push_back(dynamic);
+        });
+    m_dynamicGi.Update(camera.Position(), sky, lights, ++m_dynamicGiFrame);
 }
 
 void RuntimePlayerApp::RestartScene() {
@@ -1158,7 +1345,8 @@ void RuntimePlayerApp::DrawEnvironmentSky(const glm::mat4& view, const glm::mat4
         m_importedSky->Draw(view, projection, tonemap,
                             glm::radians(env.skyRotation), std::max(env.skyIntensity, 0.0f));
     } else if (m_sky) {
-        m_sky->Draw(view, projection, m_sample, tonemap, SkyClouds(env));
+        m_sky->Draw(view, projection, ResolveEnvironment(env, m_sample),
+                    tonemap, SkyClouds(env));
     }
 }
 
@@ -2520,15 +2708,70 @@ void RuntimePlayerApp::OnRender() {
         m_terrainCameraConstraint.Reset();
     }
     UpdateUnderwaterState(cam, m_dt);
-
+    const RuntimeSceneLoader::Scene::Environment& env = m_scene.environment;
+    UpdateDynamicGi(cam);
+    m_post->settings.autoExposure = env.autoExposure;
+    m_post->settings.exposure = std::exp2(env.exposureCompensationEV);
+    m_post->settings.minEV = env.exposureMinEV;
+    m_post->settings.maxEV = env.exposureMaxEV;
+    m_post->settings.exposureCompensationEV = env.exposureCompensationEV;
+    m_post->settings.adaptationSpeedUp = env.exposureSpeedUp;
+    m_post->settings.adaptationSpeedDown = env.exposureSpeedDown;
+    m_post->settings.bloom = env.bloom;
+    m_post->settings.bloomThreshold = env.bloomThreshold;
+    m_post->settings.bloomKnee = env.bloomKnee;
+    m_post->settings.bloomStrength = env.bloomStrength;
+    m_post->settings.temperature = env.colorTemperature;
+    m_post->settings.tint = env.colorTint;
+    m_post->settings.saturation = env.colorSaturation;
+    m_post->settings.contrast = env.colorContrast;
+    m_post->settings.lift = env.colorLift;
+    m_post->settings.gamma = env.colorGamma;
+    m_post->settings.gain = env.colorGain;
+    m_post->settings.lutIntensity = env.colorLutIntensity;
+    const engine::Texture* colorLut = nullptr;
+    if (!env.colorLutPath.empty()) {
+        std::string lutError;
+        colorLut = m_assets.LoadTexture(env.colorLutPath, &lutError);
+    }
+    m_post->SetColorLut(colorLut);
+    m_post->volumetrics.enabled = env.volumetricFog;
+    m_post->volumetrics.density = env.fogDensity;
+    m_post->volumetrics.scattering = env.volumetricScattering;
+    m_post->volumetrics.extinction = env.volumetricExtinction;
+    m_post->volumetrics.anisotropy = env.volumetricAnisotropy;
+    m_post->volumetrics.baseHeight = env.fogHeight;
+    m_post->volumetrics.heightFalloff = env.fogHeightFalloff;
+    m_post->volumetrics.startDistance = env.volumetricStartDistance;
+    m_post->volumetrics.maxDistance = env.volumetricMaxDistance;
+    const int environmentQuality=std::clamp(env.environmentQuality,0,3);
+    m_post->volumetrics.depthSlices=24+environmentQuality*16;
+    m_post->volumetrics.xyDownsample=environmentQuality==0?6:(environmentQuality==1?4:(environmentQuality==2?3:2));
+    m_post->volumetrics.historyWeight=environmentQuality==0?0.82f:(environmentQuality==1?0.88f:0.92f);
+    m_post->settings.bloomLevels=3+environmentQuality;
+    m_post->SetVolumetricCamera(glm::inverse(
+        cam.ProjectionMatrix(aspect)*cam.ViewMatrix()),cam.Position(),
+        ResolveEnvironment(env,m_sample));
+    engine::ApplyPostProcessVolumes(m_registry,cam.Position(),*m_post);
     m_post->BeginScene();
     m_renderer.Clear();
-    const RuntimeSceneLoader::Scene::Environment& env = m_scene.environment;
+    if (env.ssgiEnabled) {
+        if (!m_ssao) m_ssao.emplace(w.Width(), w.Height());
+        m_ssao->Resize(w.Width(), w.Height());
+        m_ssao->Generate(m_registry, cam, aspect, w.Width(), w.Height());
+    }
     engine::PbrRenderer::Options opt;
     m_reflectionProbes.Sync(m_registry);
     opt.ambient = m_sample.ambient + glm::vec3(0.04f);
     opt.ibl = &*m_ibl;
     opt.reflectionProbes = &m_reflectionProbes;
+    opt.lightingGrid = m_dynamicGi.GpuReady() ? &m_dynamicGi.Grid()
+        : (m_lightingProbeGrid.Valid() ? &m_lightingProbeGrid : nullptr);
+    opt.localProbeInfluence = env.localProbeInfluence;
+    opt.specularOcclusionStrength = env.specularOcclusionStrength;
+    opt.lightingDebugMode = env.lightingDebugMode;
+    opt.probeVisibilityWeighting = m_dynamicGi.GpuReady() && env.dynamicGiVisibilityWeighting;
+    opt.probeVisibilityMaxDistance = env.dynamicGiMaxRayDistance;
     opt.skylightOcclusion = env.skylightOcclusion;
     opt.skylightOcclusionStrength = env.skylightOcclusionStrength;
     opt.minimumSkylight = env.minimumSkylight;
@@ -2536,6 +2779,8 @@ void RuntimePlayerApp::OnRender() {
     opt.fogDensity = env.fogDensity;
     opt.fogHeight = env.fogHeight;
     opt.fogHeightFalloff = env.fogHeightFalloff;
+    opt.fogColor = ResolveEnvironment(env, m_sample).SampleEnvironmentRadiance(
+        glm::normalize(glm::vec3(1.0f, 0.04f, 0.0f)));
     opt.cloudShadows = env.clouds && env.cloudShadows;
     opt.cloudShadowStrength = env.cloudShadowStrength;
     opt.cloudShadowScale = env.cloudShadowScale;
@@ -2587,6 +2832,13 @@ void RuntimePlayerApp::OnRender() {
         lighting.cascade = &m_pbr->Cascade();
         lighting.ibl = &*m_ibl;
         lighting.reflectionProbes = &m_reflectionProbes;
+        lighting.lightingGrid = m_dynamicGi.GpuReady() ? &m_dynamicGi.Grid()
+            : (m_lightingProbeGrid.Valid() ? &m_lightingProbeGrid : nullptr);
+        lighting.localProbeInfluence = env.localProbeInfluence;
+        lighting.specularOcclusionStrength = env.specularOcclusionStrength;
+        lighting.lightingDebugMode = env.lightingDebugMode;
+        lighting.probeVisibilityWeighting = m_dynamicGi.GpuReady() && env.dynamicGiVisibilityWeighting;
+        lighting.probeVisibilityMaxDistance = env.dynamicGiMaxRayDistance;
         lighting.skylightOcclusion = env.skylightOcclusion;
         lighting.skylightOcclusionStrength = env.skylightOcclusionStrength;
         lighting.minimumSkylight = env.minimumSkylight;
@@ -2600,7 +2852,8 @@ void RuntimePlayerApp::OnRender() {
         lighting.cloudWindDirectionDegrees = env.cloudWindDirection;
         lighting.tonemap = true;
         lighting.fog = env.fog;
-        lighting.fogColor = m_sample.horizon;
+        lighting.fogColor = ResolveEnvironment(env, m_sample).SampleEnvironmentRadiance(
+            glm::normalize(glm::vec3(1.0f, 0.04f, 0.0f)));
         lighting.fogDensity = env.fogDensity;
         lighting.fogHeight = env.fogHeight;
         lighting.fogHeightFalloff = env.fogHeightFalloff;
@@ -2638,6 +2891,25 @@ void RuntimePlayerApp::OnRender() {
                     if (layer.enabled) m_particleRenderer->Draw(layer.system, cam, aspect);
             });
     }
+    if (env.ssgiEnabled && m_ssao) {
+        if (!m_ssgi) m_ssgi.emplace(w.Width(), w.Height());
+        m_ssgi->Resize(w.Width(), w.Height());
+        m_ssgi->rayLength = env.ssgiRayLength;
+        m_ssgi->steps = env.ssgiSteps;
+        m_ssgi->thickness = env.ssgiThickness;
+        m_ssgi->intensity = env.ssgiIntensity;
+        m_ssgi->Generate(m_post->HdrColor(), m_ssao->PositionTexture(),
+                         m_ssao->NormalTexture(), cam.ProjectionMatrix(aspect));
+        m_post->SetIndirectTexture(m_ssgi->Texture(), env.ssgiIntensity);
+    } else {
+        m_post->SetIndirectTexture(0, 0.0f);
+    }
+    m_post->SetIndirectDebug(env.lightingDebugMode == 18);
+    m_post->SetVolumetricDirectionalShadow(
+        m_pbr ? &m_pbr->Cascade() : nullptr,
+        cam.ViewMatrix());
+    m_post->SetVolumetricLights(GatherVolumetricLights(m_registry));
+    m_post->SetLocalFogVolumes(GatherLocalFogVolumes(m_registry));
     m_post->RenderToScreen(w.Width(), w.Height(), m_dt);
 
     engine::DrawWorldHealthBars(

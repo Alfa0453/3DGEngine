@@ -479,7 +479,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         return false;
     }
 
-    out << "3DGEditorScene 138 " << m_assetId.ToString() << '\n';
+    out << "3DGEditorScene 141 " << m_assetId.ToString() << '\n';
     out << "environment "
         << m_environment.timeOfDay << ' '
         << m_environment.skyLightIntensity << ' '
@@ -551,6 +551,35 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         << (m_environment.cloudShadows ? 1 : 0) << ' '
         << m_environment.cloudShadowStrength << ' '
         << m_environment.cloudShadowScale << '\n';
+    out << "atmosphere "
+        << m_environment.atmosphereRayleigh << ' ' << m_environment.atmosphereRayleighHeight << ' '
+        << m_environment.atmosphereMie << ' ' << m_environment.atmosphereMieHeight << ' '
+        << m_environment.atmosphereMieAnisotropy << ' ' << m_environment.atmosphereOzone << ' '
+        << m_environment.atmosphereIntensity << ' ' << m_environment.sunAngularDiameter << ' '
+        << m_environment.sunDiskIntensity << '\n';
+    out << "night_environment " << m_environment.stars << ' ' << m_environment.starIntensity << ' '
+        << m_environment.moon << ' ' << m_environment.moonColor.r << ' '
+        << m_environment.moonColor.g << ' ' << m_environment.moonColor.b << ' '
+        << m_environment.moonIntensity << ' ' << m_environment.moonAngularDiameter << ' '
+        << m_environment.moonPhase << '\n';
+    out << "volumetrics " << m_environment.volumetricFog << ' '
+        << m_environment.volumetricScattering << ' ' << m_environment.volumetricExtinction << ' '
+        << m_environment.volumetricAnisotropy << ' ' << m_environment.volumetricStartDistance << ' '
+        << m_environment.volumetricMaxDistance << ' ' << m_environment.environmentQuality << '\n';
+    out << "presentation " << m_environment.autoExposure << ' '
+        << m_environment.exposureMinEV << ' ' << m_environment.exposureMaxEV << ' '
+        << m_environment.exposureCompensationEV << ' ' << m_environment.exposureSpeedUp << ' '
+        << m_environment.exposureSpeedDown << ' ' << m_environment.bloom << ' '
+        << m_environment.bloomThreshold << ' ' << m_environment.bloomKnee << ' '
+        << m_environment.bloomStrength << ' ' << m_environment.colorTemperature << ' '
+        << m_environment.colorTint << ' ' << m_environment.colorSaturation << ' '
+        << m_environment.colorContrast << ' ' << m_environment.colorLift.r << ' '
+        << m_environment.colorLift.g << ' ' << m_environment.colorLift.b << ' '
+        << m_environment.colorGamma.r << ' ' << m_environment.colorGamma.g << ' '
+        << m_environment.colorGamma.b << ' ' << m_environment.colorGain.r << ' '
+        << m_environment.colorGain.g << ' ' << m_environment.colorGain.b << ' '
+        << m_environment.colorLutIntensity << ' '
+        << std::quoted(m_environment.colorLutPath.empty() ? std::string("-") : m_environment.colorLutPath) << '\n';
     out << "skylight_occlusion "
         << (m_environment.skylightOcclusion ? 1 : 0) << ' '
         << m_environment.skylightOcclusionStrength << ' '
@@ -566,6 +595,16 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         << (m_environment.lightingIndirectBounceEnabled?1:0) << ' '
         << m_environment.lightingEmissiveContribution << ' '
         << m_environment.lightingIndirectSaturation << '\n';
+    out << "dynamic_gi " << m_environment.dynamicGiEnabled << ' '
+        << m_environment.dynamicGiQuality << ' ' << m_environment.dynamicGiProbeSpacing << ' '
+        << m_environment.dynamicGiRaysPerProbe << ' ' << m_environment.dynamicGiProbesPerFrame << ' '
+        << m_environment.dynamicGiMaxRaysPerFrame << ' ' << m_environment.dynamicGiMaxRayDistance << ' '
+        << m_environment.dynamicGiHysteresis << ' ' << m_environment.dynamicGiIntensity << ' '
+        << m_environment.dynamicGiRelocation << ' ' << m_environment.dynamicGiClassification << ' '
+        << m_environment.dynamicGiVisibilityWeighting << '\n';
+    out << "ssgi " << m_environment.ssgiEnabled << ' ' << m_environment.ssgiRayLength << ' '
+        << m_environment.ssgiSteps << ' ' << m_environment.ssgiThickness << ' '
+        << m_environment.ssgiIntensity << '\n';
     out << "sky "
         << m_environment.skyMode << ' '
         << StoredPath(m_environment.skyTexturePath) << ' '
@@ -653,6 +692,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
                 << data.direction.x << ' ' << data.direction.y << ' ' << data.direction.z << ' '
                 << data.innerAngle << ' ' << data.outerAngle << ' ' << data.range << ' ' << data.sourceRadius << ' '
                 << static_cast<int>(data.areaShape) << ' ' << data.areaWidth << ' ' << data.areaHeight << ' ' << (data.areaTwoSided?1:0) << ' '
+                << (data.affectDynamicGi?1:0) << ' '
                 << (object.visible ? 1 : 0) << ' '
                 << (object.locked ? 1 : 0) << '\n';
             continue;
@@ -1125,6 +1165,27 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
                     ? probe.bakedCubemapId.ToString() : std::string("-")) << ' '
             << probe.captureSourceHash << '\n';
     }
+    for (const Object& object : m_objects) {
+        if (object.postProcessVolumeEnabled) {
+            const auto& v=object.postProcessVolume;
+            out<<"post_process_volume "<<std::quoted(object.name)<<' '<<v.enabled<<' '<<v.unbound<<' '
+               <<v.priority<<' '<<v.blendDistance<<' '<<v.blendWeight<<' '
+               <<v.boxExtents.x<<' '<<v.boxExtents.y<<' '<<v.boxExtents.z<<' '
+               <<v.overrideExposure<<' '<<v.exposureCompensationEV<<' '
+               <<v.overrideBloom<<' '<<v.bloomStrength<<' '
+               <<v.overrideColorGrading<<' '<<v.temperature<<' '<<v.tint<<' '<<v.saturation<<' '<<v.contrast<<' '
+               <<v.overrideFogDensity<<' '<<v.fogDensity<<' '
+               <<(v.stableId.Valid()?v.stableId.ToString():std::string("-"))<<'\n';
+        }
+        if (object.localFogVolumeEnabled) {
+            const auto& v=object.localFogVolume;
+            out<<"local_fog_volume "<<std::quoted(object.name)<<' '<<v.enabled<<' '<<static_cast<int>(v.shape)<<' '
+               <<v.boxExtents.x<<' '<<v.boxExtents.y<<' '<<v.boxExtents.z<<' '<<v.radius<<' '
+               <<v.blendDistance<<' '<<v.density<<' '<<v.albedo.x<<' '<<v.albedo.y<<' '<<v.albedo.z<<' '
+               <<v.extinction<<' '<<v.anisotropy<<' '
+               <<(v.stableId.Valid()?v.stableId.ToString():std::string("-"))<<'\n';
+        }
+    }
 
     // AI movement authoring is stored separately so older object records remain
     // readable and the component can grow without destabilizing the main line.
@@ -1412,7 +1473,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             return false;
         }
     }
-    if (magic != "3DGEditorScene" ||(version < 1 || version > 138)) {
+    if (magic != "3DGEditorScene" ||(version < 1 || version > 141)) {
         if (error) *error = "Scene file has an unknown format.";
         return false;
     }
@@ -1423,6 +1484,48 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
     std::string recordType;
     bool resolvedDuplicateNames = false;
     while (in >> recordType) {
+        if (recordType == "atmosphere" && version >= 140) {
+            in >> m_environment.atmosphereRayleigh >> m_environment.atmosphereRayleighHeight
+               >> m_environment.atmosphereMie >> m_environment.atmosphereMieHeight
+               >> m_environment.atmosphereMieAnisotropy >> m_environment.atmosphereOzone
+               >> m_environment.atmosphereIntensity >> m_environment.sunAngularDiameter
+               >> m_environment.sunDiskIntensity;
+            if (!in) { if (error) *error = "Scene contains invalid atmosphere settings."; Clear(); return false; }
+            continue;
+        }
+        if (recordType == "night_environment" && version >= 140) {
+            in >> m_environment.stars >> m_environment.starIntensity >> m_environment.moon
+               >> m_environment.moonColor.r >> m_environment.moonColor.g >> m_environment.moonColor.b
+               >> m_environment.moonIntensity >> m_environment.moonAngularDiameter
+               >> m_environment.moonPhase;
+            if (!in) { if (error) *error = "Scene contains invalid night environment settings."; Clear(); return false; }
+            continue;
+        }
+        if (recordType == "volumetrics" && version >= 140) {
+            in >> m_environment.volumetricFog >> m_environment.volumetricScattering
+               >> m_environment.volumetricExtinction >> m_environment.volumetricAnisotropy
+               >> m_environment.volumetricStartDistance >> m_environment.volumetricMaxDistance
+               >> m_environment.environmentQuality;
+            if (!in) { if (error) *error = "Scene contains invalid volumetric settings."; Clear(); return false; }
+            continue;
+        }
+        if (recordType == "presentation" && version >= 140) {
+            in >> m_environment.autoExposure >> m_environment.exposureMinEV
+               >> m_environment.exposureMaxEV >> m_environment.exposureCompensationEV
+               >> m_environment.exposureSpeedUp >> m_environment.exposureSpeedDown
+               >> m_environment.bloom >> m_environment.bloomThreshold
+               >> m_environment.bloomKnee >> m_environment.bloomStrength
+               >> m_environment.colorTemperature >> m_environment.colorTint
+               >> m_environment.colorSaturation >> m_environment.colorContrast
+               >> m_environment.colorLift.r >> m_environment.colorLift.g >> m_environment.colorLift.b
+               >> m_environment.colorGamma.r >> m_environment.colorGamma.g >> m_environment.colorGamma.b
+               >> m_environment.colorGain.r >> m_environment.colorGain.g >> m_environment.colorGain.b
+               >> m_environment.colorLutIntensity
+               >> std::quoted(m_environment.colorLutPath);
+            if (m_environment.colorLutPath == "-") m_environment.colorLutPath.clear();
+            if (!in) { if (error) *error = "Scene contains invalid presentation settings."; Clear(); return false; }
+            continue;
+        }
         if (recordType == "reflection_probe" && version >= 137) {
             std::string objectName, stableIdText, cubemapPath, cubemapIdText;
             int shape = 0;
@@ -1456,6 +1559,26 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                 m_registry.Add<engine::ecs::ReflectionProbe>(object.entity, probe);
                 break;
             }
+            continue;
+        }
+        if(recordType=="post_process_volume"&&version>=141){
+            std::string name,id;engine::ecs::PostProcessVolume v;
+            in>>std::quoted(name)>>v.enabled>>v.unbound>>v.priority>>v.blendDistance>>v.blendWeight
+              >>v.boxExtents.x>>v.boxExtents.y>>v.boxExtents.z
+              >>v.overrideExposure>>v.exposureCompensationEV>>v.overrideBloom>>v.bloomStrength
+              >>v.overrideColorGrading>>v.temperature>>v.tint>>v.saturation>>v.contrast
+              >>v.overrideFogDensity>>v.fogDensity>>id;
+            if(id!="-"&&!engine::AssetHandle::Parse(id,&v.stableId)){if(error)*error="Invalid post-process volume ID.";Clear();return false;}
+            for(Object& object:m_objects)if(object.name==name){object.postProcessVolumeEnabled=true;object.postProcessVolume=v;m_registry.Add<engine::ecs::PostProcessVolume>(object.entity,v);break;}
+            continue;
+        }
+        if(recordType=="local_fog_volume"&&version>=141){
+            std::string name,id;int shape=0;engine::ecs::LocalFogVolume v;
+            in>>std::quoted(name)>>v.enabled>>shape>>v.boxExtents.x>>v.boxExtents.y>>v.boxExtents.z>>v.radius
+              >>v.blendDistance>>v.density>>v.albedo.x>>v.albedo.y>>v.albedo.z>>v.extinction>>v.anisotropy>>id;
+            v.shape=shape==1?engine::ecs::LocalFogVolume::Shape::Sphere:engine::ecs::LocalFogVolume::Shape::Box;
+            if(id!="-"&&!engine::AssetHandle::Parse(id,&v.stableId)){if(error)*error="Invalid local fog volume ID.";Clear();return false;}
+            for(Object& object:m_objects)if(object.name==name){object.localFogVolumeEnabled=true;object.localFogVolume=v;m_registry.Add<engine::ecs::LocalFogVolume>(object.entity,v);break;}
             continue;
         }
         if (recordType == "scene_group" && version >= 133) {
@@ -1548,6 +1671,23 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                                    >> m_environment.lightingEmissiveContribution
                                    >> m_environment.lightingIndirectSaturation;
             if (!in) { if (error) *error = "Scene file contains invalid lighting build settings."; Clear(); return false; }
+            continue;
+        }
+        if (recordType == "dynamic_gi" && version >= 139) {
+            in >> m_environment.dynamicGiEnabled >> m_environment.dynamicGiQuality
+               >> m_environment.dynamicGiProbeSpacing >> m_environment.dynamicGiRaysPerProbe
+               >> m_environment.dynamicGiProbesPerFrame >> m_environment.dynamicGiMaxRaysPerFrame
+               >> m_environment.dynamicGiMaxRayDistance >> m_environment.dynamicGiHysteresis
+               >> m_environment.dynamicGiIntensity >> m_environment.dynamicGiRelocation
+               >> m_environment.dynamicGiClassification >> m_environment.dynamicGiVisibilityWeighting;
+            if (!in) { if (error) *error = "Scene file contains invalid dynamic GI settings."; Clear(); return false; }
+            continue;
+        }
+        if (recordType == "ssgi" && version >= 139) {
+            in >> m_environment.ssgiEnabled >> m_environment.ssgiRayLength
+               >> m_environment.ssgiSteps >> m_environment.ssgiThickness
+               >> m_environment.ssgiIntensity;
+            if (!in) { if (error) *error = "Scene file contains invalid SSGI settings."; Clear(); return false; }
             continue;
         }
         if (recordType == "sky" && version >= 123) {
@@ -1917,6 +2057,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                >> light.innerAngle >> light.outerAngle >> light.range >> light.sourceRadius;
             if(version>=138){int areaShape=0,areaTwoSided=0;in>>areaShape>>light.areaWidth>>light.areaHeight>>areaTwoSided;
                 light.areaShape=areaShape==1?Light::AreaShape::Rectangle:Light::AreaShape::Sphere;light.areaTwoSided=areaTwoSided!=0;}
+            if(version>=139){int affectDynamicGi=1;in>>affectDynamicGi;light.affectDynamicGi=affectDynamicGi!=0;}
             in>>visible>>locked;
 
             if (!in || !ParseLightType(lightTypeName, &light.type)) {
@@ -3774,6 +3915,35 @@ bool EditorScene::SetSelectedReflectionProbe(bool enabled,const engine::ecs::Ref
     m_dirty=true;return true;
 }
 
+bool EditorScene::SetSelectedPostProcessVolume(bool enabled,const engine::ecs::PostProcessVolume& input){
+    if(m_selectedIndex<0||m_selectedIndex>=static_cast<int>(m_objects.size()))return false;
+    Object& selected=m_objects[static_cast<std::size_t>(m_selectedIndex)];if(selected.locked)return false;
+    PushUndoSnapshot();engine::ecs::PostProcessVolume volume=input;
+    if(!volume.stableId.Valid())volume.stableId=engine::AssetHandle::Generate();
+    volume.boxExtents=glm::max(volume.boxExtents,glm::vec3(0.01f));
+    volume.blendDistance=std::max(volume.blendDistance,0.0f);
+    volume.blendWeight=std::clamp(volume.blendWeight,0.0f,1.0f);
+    selected.postProcessVolumeEnabled=enabled;selected.postProcessVolume=volume;
+    if(enabled)m_registry.Add<engine::ecs::PostProcessVolume>(selected.entity,volume);
+    else m_registry.Remove<engine::ecs::PostProcessVolume>(selected.entity);
+    m_dirty=true;return true;
+}
+
+bool EditorScene::SetSelectedLocalFogVolume(bool enabled,const engine::ecs::LocalFogVolume& input){
+    if(m_selectedIndex<0||m_selectedIndex>=static_cast<int>(m_objects.size()))return false;
+    Object& selected=m_objects[static_cast<std::size_t>(m_selectedIndex)];if(selected.locked)return false;
+    PushUndoSnapshot();engine::ecs::LocalFogVolume volume=input;
+    if(!volume.stableId.Valid())volume.stableId=engine::AssetHandle::Generate();
+    volume.boxExtents=glm::max(volume.boxExtents,glm::vec3(0.01f));
+    volume.radius=std::max(volume.radius,0.01f);volume.blendDistance=std::max(volume.blendDistance,0.001f);
+    volume.density=std::max(volume.density,0.0f);volume.extinction=std::max(volume.extinction,0.0f);
+    volume.anisotropy=std::clamp(volume.anisotropy,-0.94f,0.94f);
+    selected.localFogVolumeEnabled=enabled;selected.localFogVolume=volume;
+    if(enabled)m_registry.Add<engine::ecs::LocalFogVolume>(selected.entity,volume);
+    else m_registry.Remove<engine::ecs::LocalFogVolume>(selected.entity);
+    m_dirty=true;return true;
+}
+
 bool EditorScene::IsVisible(engine::ecs::Entity entity) const
 {
     for (const Object& object : m_objects) {
@@ -5090,6 +5260,19 @@ void EditorScene::SetEnvironment(const Environment& environment) {
     PushUndoSnapshot();
     m_environment = environment;
     m_environment.shadowDistance = std::clamp(m_environment.shadowDistance, 10.0f, 5000.0f);
+    m_environment.atmosphereRayleigh = std::clamp(m_environment.atmosphereRayleigh,0.0f,8.0f);
+    m_environment.atmosphereRayleighHeight = std::clamp(m_environment.atmosphereRayleighHeight,1.0f,32.0f);
+    m_environment.atmosphereMie = std::clamp(m_environment.atmosphereMie,0.0f,8.0f);
+    m_environment.atmosphereMieHeight = std::clamp(m_environment.atmosphereMieHeight,0.1f,8.0f);
+    m_environment.atmosphereMieAnisotropy = std::clamp(m_environment.atmosphereMieAnisotropy,-0.94f,0.94f);
+    m_environment.atmosphereOzone = std::clamp(m_environment.atmosphereOzone,0.0f,4.0f);
+    m_environment.volumetricAnisotropy = std::clamp(m_environment.volumetricAnisotropy,-0.94f,0.94f);
+    m_environment.volumetricMaxDistance = std::max(m_environment.volumetricMaxDistance,1.0f);
+    m_environment.environmentQuality = std::clamp(m_environment.environmentQuality,0,3);
+    if(m_environment.exposureMinEV>m_environment.exposureMaxEV)
+        std::swap(m_environment.exposureMinEV,m_environment.exposureMaxEV);
+    m_environment.colorGamma=glm::max(m_environment.colorGamma,glm::vec3(0.01f));
+    m_environment.colorGain=glm::max(m_environment.colorGain,glm::vec3(0.0f));
     m_dirty = true;
 }
 
@@ -6957,6 +7140,12 @@ bool EditorScene::DuplicateSelected(const engine::Mesh & cube, const engine::Mes
         m_registry.Add<engine::ecs::ReflectionProbe>(
             m_objects.back().entity, m_objects.back().reflectionProbe);
     }
+    m_objects.back().postProcessVolumeEnabled=selectedCopy.postProcessVolumeEnabled;
+    m_objects.back().postProcessVolume=selectedCopy.postProcessVolume;
+    if(selectedCopy.postProcessVolumeEnabled){m_objects.back().postProcessVolume.stableId=engine::AssetHandle::Generate();m_registry.Add<engine::ecs::PostProcessVolume>(m_objects.back().entity,m_objects.back().postProcessVolume);}
+    m_objects.back().localFogVolumeEnabled=selectedCopy.localFogVolumeEnabled;
+    m_objects.back().localFogVolume=selectedCopy.localFogVolume;
+    if(selectedCopy.localFogVolumeEnabled){m_objects.back().localFogVolume.stableId=engine::AssetHandle::Generate();m_registry.Add<engine::ecs::LocalFogVolume>(m_objects.back().entity,m_objects.back().localFogVolume);}
     m_objects.back().lightData = selectedCopy.lightData;
     if (selectedCopy.light) {
         m_registry.Add<Light>(m_objects.back().entity, selectedCopy.lightData);
@@ -7229,6 +7418,10 @@ void EditorScene::RestoreSnapshot(const Snapshot & snapshot, const engine::Mesh 
             m_registry.Add<engine::ecs::ReflectionProbe>(
                 entity, object.reflectionProbe);
         }
+        if (object.postProcessVolumeEnabled)
+            m_registry.Add<engine::ecs::PostProcessVolume>(entity, object.postProcessVolume);
+        if (object.localFogVolumeEnabled)
+            m_registry.Add<engine::ecs::LocalFogVolume>(entity, object.localFogVolume);
         m_objects.push_back(object);
         if (m_objects.back().isSpline) SyncSplineComponent(m_objects.back());
         if (m_objects.back().isFoliage) SyncFoliageComponent(m_objects.back());

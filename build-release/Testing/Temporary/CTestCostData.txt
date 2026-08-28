@@ -1,45 +1,85 @@
-particle_regression 3 0.0145012
-animation_movement_regression 3 0.00440303
-terrain_regression 3 0.00439093
-spline_regression 3 0.00396743
-camera_manager_regression 3 0.00782017
-optimization_auditor_regression 3 0.00482793
-audio_system_regression 3 0.00630693
-shader_asset_regression 3 0.0735913
-material_shader_regression 3 0.0162524
-directional_shadow_shader_regression 4 0.00317607
-lighting_build_regression 7 0.010726
-script_system_regression 3 0.00542663
-project_script_tools_regression 3 0.00686463
-script_reload_safety_regression 3 0.00633167
-runtime_ai_regression 3 0.0060488
-image_decode_regression 3 0.0043078
-editor_assets_regression 3 0.0344404
-asset_registry_regression 3 0.00696713
-asset_cooker_regression 3 0.0303739
-world_streaming_regression 3 0.00478303
-static_mesh_asset_regression 3 0.0142776
-foliage_asset_regression 3 0.0055722
-ragdoll_asset_regression 3 0.00537653
-animation_retarget_regression 3 0.00548087
-ability_system_regression 3 0.00686397
-runtime_property_snapshot_regression 3 0.0040775
-asset_dependency_graph_regression 3 0.0044777
-weather_asset_regression 3 0.00535177
-procedural_building_regression 3 0.0044953
-road_generator_regression 3 0.00461767
-level_instance_regression 3 0.00598573
-world_partition_regression 3 0.00496647
-skeletal_asset_regression 3 0.0903543
-forge_material_importer_regression 3 0.0120194
-mesh_geometry_operations_regression 3 0.0041306
-scatter_graph_regression 3 0.00572573
-lighting_analysis_regression 5 0.00110438
-biome_asset_regression 3 0.0051604
-day_night_timeline_regression 4 0.0044453
-cave_asset_regression 3 0.0056325
-fence_wall_asset_regression 3 0.00547857
-destruction_asset_regression 3 0.00642917
-editor_scene_hierarchy_regression 5 0.00170358
-editor_dirty_document_regression 3 0.0047953
+particle_regression 3 0
+animation_movement_regression 3 0
+terrain_regression 3 0
+spline_regression 3 0
+camera_manager_regression 4 0.0141233
+optimization_auditor_regression 3 0
+audio_system_regression 3 0
+shader_asset_regression 3 0
+material_shader_regression 3 0
+directional_shadow_shader_regression 5 0.00194862
+lighting_build_regression 8 0.00968575
+script_system_regression 3 0
+project_script_tools_regression 3 0
+script_reload_safety_regression 3 0
+runtime_ai_regression 3 0
+image_decode_regression 3 0
+editor_assets_regression 3 0
+asset_registry_regression 3 0
+asset_cooker_regression 3 0
+world_streaming_regression 3 0
+static_mesh_asset_regression 3 0
+foliage_asset_regression 3 0
+ragdoll_asset_regression 3 0
+animation_retarget_regression 3 0
+ability_system_regression 3 0
+runtime_property_snapshot_regression 3 0
+asset_dependency_graph_regression 3 0
+weather_asset_regression 3 0
+procedural_building_regression 3 0
+road_generator_regression 3 0
+level_instance_regression 3 0
+world_partition_regression 3 0
+skeletal_asset_regression 3 0
+forge_material_importer_regression 3 0
+mesh_geometry_operations_regression 3 0
+scatter_graph_regression 3 0
+lighting_analysis_regression 5 0
+biome_asset_regression 3 0
+day_night_timeline_regression 5 0.00328448
+cave_asset_regression 3 0
+fence_wall_asset_regression 3 0
+destruction_asset_regression 3 0
+editor_scene_hierarchy_regression 5 0
+editor_dirty_document_regression 3 0
 ---
+particle_regression
+animation_movement_regression
+terrain_regression
+spline_regression
+optimization_auditor_regression
+audio_system_regression
+shader_asset_regression
+material_shader_regression
+script_system_regression
+project_script_tools_regression
+script_reload_safety_regression
+runtime_ai_regression
+image_decode_regression
+editor_assets_regression
+asset_registry_regression
+asset_cooker_regression
+world_streaming_regression
+static_mesh_asset_regression
+foliage_asset_regression
+ragdoll_asset_regression
+animation_retarget_regression
+ability_system_regression
+runtime_property_snapshot_regression
+asset_dependency_graph_regression
+weather_asset_regression
+procedural_building_regression
+road_generator_regression
+level_instance_regression
+world_partition_regression
+skeletal_asset_regression
+forge_material_importer_regression
+mesh_geometry_operations_regression
+scatter_graph_regression
+lighting_analysis_regression
+biome_asset_regression
+cave_asset_regression
+fence_wall_asset_regression
+destruction_asset_regression
+editor_scene_hierarchy_regression
+editor_dirty_document_regression

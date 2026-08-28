@@ -286,7 +286,9 @@ enum class AddableComponent {
     Script,
     AudioSource,
     ParticleSystem,
-    ReflectionProbe
+    ReflectionProbe,
+    PostProcessVolume,
+    LocalFogVolume
 };
 
 struct ComponentCatalogEntry {
@@ -311,6 +313,8 @@ constexpr ComponentCatalogEntry kComponentCatalog[] = {
     {"Audio Source", "Audio", "2D or spatial sound playback", AddableComponent::AudioSource},
     {"Particle System", "Effects", "Animated billboard particle emitter", AddableComponent::ParticleSystem},
     {"Reflection Probe", "Lighting", "Local box or sphere specular reflection capture", AddableComponent::ReflectionProbe},
+    {"Post Process Volume", "Lighting", "Camera-local exposure, bloom, grading, and fog overrides", AddableComponent::PostProcessVolume},
+    {"Local Fog Volume", "Lighting", "Box or sphere participating medium", AddableComponent::LocalFogVolume},
 };
 
 struct PrimitiveCreatorState {
@@ -1559,6 +1563,8 @@ bool HasComponent(const EditorScene::Object& object, AddableComponent component)
     case AddableComponent::AudioSource: return object.audioSourceEnabled;
     case AddableComponent::ParticleSystem: return object.particleSystemEnabled;
     case AddableComponent::ReflectionProbe: return object.reflectionProbeEnabled;
+    case AddableComponent::PostProcessVolume: return object.postProcessVolumeEnabled;
+    case AddableComponent::LocalFogVolume: return object.localFogVolumeEnabled;
     }
     return false;
 }
@@ -1636,6 +1642,16 @@ bool AddComponent(EditorDockspace::Context& context, AddableComponent component)
     case AddableComponent::ReflectionProbe: {
         engine::ecs::ReflectionProbe probe;
         added=context.scene->SetSelectedReflectionProbe(true,probe);
+        break;
+    }
+    case AddableComponent::PostProcessVolume: {
+        engine::ecs::PostProcessVolume volume;
+        added=context.scene->SetSelectedPostProcessVolume(true,volume);
+        break;
+    }
+    case AddableComponent::LocalFogVolume: {
+        engine::ecs::LocalFogVolume volume;
+        added=context.scene->SetSelectedLocalFogVolume(true,volume);
         break;
     }
     }
@@ -1716,6 +1732,33 @@ void DrawAddComponentPopup(EditorDockspace::Context& context) {
 
 bool IsMaterialDocument(const std::filesystem::path& path) {
     return path.extension() == ".3dgmat";
+}
+
+std::vector<EditorAssets::Asset> FindTextureAssets(const EditorAssets& assets) {
+    std::vector<EditorAssets::Asset> textures;
+    std::error_code ec;
+    const std::filesystem::path root = assets.RootPath();
+    if (!std::filesystem::exists(root, ec) || !std::filesystem::is_directory(root, ec))
+        return textures;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(root, ec)) {
+        if (ec) break;
+        if (!entry.is_regular_file(ec)) continue;
+        std::string extension = entry.path().extension().string();
+        std::transform(extension.begin(), extension.end(), extension.begin(),
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (extension != ".3dgtex") continue;
+        EditorAssets::Asset texture;
+        texture.relativePath = std::filesystem::relative(entry.path(), root, ec).string();
+        if (ec) continue;
+        std::replace(texture.relativePath.begin(), texture.relativePath.end(), '\\', '/');
+        texture.displayName = entry.path().filename().string();
+        texture.type = EditorAssets::Type::Texture;
+        textures.push_back(std::move(texture));
+    }
+    std::sort(textures.begin(), textures.end(), [](const auto& a, const auto& b) {
+        return a.relativePath < b.relativePath;
+    });
+    return textures;
 }
 
 std::vector<EditorAssets::Asset> FindMaterialAssets(const EditorAssets& assets) {
@@ -2262,7 +2305,8 @@ void DrawWorldSettings(EditorScene& scene, EditorDockspace::Context& context, bo
             "Local Probe Irradiance", "Sky Visibility", "Ambient Occlusion",
             "Specular Occlusion", "Probe Validity", "Bent Normal",
             "Raw GTAO", "Filtered GTAO", "Reflection Probe Weight",
-            "Direct Environment GI", "Bounce GI", "Emissive GI"
+            "Direct Environment GI", "Bounce GI", "Emissive GI",
+            "Probe Visibility", "Dynamic Probe Classification", "SSGI", "Final Indirect"
         };
         changed |= ImGui::Combo("Lighting Debug View", &environment.lightingDebugMode,
                                 kLightingDebugModes, IM_ARRAYSIZE(kLightingDebugModes));
@@ -2294,6 +2338,57 @@ void DrawWorldSettings(EditorScene& scene, EditorDockspace::Context& context, bo
         if (context.lightingBuildStatus) ImGui::TextWrapped("%s", context.lightingBuildStatus->c_str());
         changed |= ImGui::Checkbox("Time Sun", &environment.driveSunLight);
         changed |= ImGui::DragFloat("Sun Intensity", &environment.sunIntensity, 0.02f, 0.0f, 8.0f);
+
+        ImGui::SeparatorText("Dynamic Global Illumination");
+        changed |= ImGui::Checkbox("Dynamic GI Enabled", &environment.dynamicGiEnabled);
+        const char* giQualities[] = {"Low (Baked Only)", "Medium", "High", "Ultra"};
+        const int previousGiQuality = environment.dynamicGiQuality;
+        if (ImGui::Combo("Dynamic GI Quality", &environment.dynamicGiQuality, giQualities, 4)) {
+            changed = true;
+            if (environment.dynamicGiQuality != previousGiQuality) {
+                if (environment.dynamicGiQuality == 0) {
+                    environment.dynamicGiRaysPerProbe = 8; environment.dynamicGiProbesPerFrame = 1;
+                    environment.dynamicGiMaxRaysPerFrame = 8;
+                    environment.ssgiEnabled = false;
+                } else if (environment.dynamicGiQuality == 1) {
+                    environment.dynamicGiRaysPerProbe = 24; environment.dynamicGiProbesPerFrame = 6;
+                    environment.dynamicGiMaxRaysPerFrame = 192;
+                    environment.ssgiEnabled = false;
+                } else if (environment.dynamicGiQuality == 2) {
+                    environment.dynamicGiRaysPerProbe = 48; environment.dynamicGiProbesPerFrame = 12;
+                    environment.dynamicGiMaxRaysPerFrame = 768;
+                    environment.ssgiEnabled = true; environment.ssgiSteps = 12;
+                } else {
+                    environment.dynamicGiRaysPerProbe = 96; environment.dynamicGiProbesPerFrame = 24;
+                    environment.dynamicGiMaxRaysPerFrame = 3072;
+                    environment.ssgiEnabled = true; environment.ssgiSteps = 20;
+                }
+            }
+        }
+        if (!environment.dynamicGiEnabled) ImGui::BeginDisabled();
+        changed |= ImGui::DragFloat("Dynamic Probe Spacing", &environment.dynamicGiProbeSpacing, 0.1f, 0.5f, 50.0f, "%.2f m");
+        changed |= ImGui::DragInt("Rays Per Dynamic Probe", &environment.dynamicGiRaysPerProbe, 1.0f, 8, 512);
+        changed |= ImGui::DragInt("Dynamic Probes Per Frame", &environment.dynamicGiProbesPerFrame, 1.0f, 1, 1024);
+        changed |= ImGui::DragInt("Maximum GI Rays Per Frame", &environment.dynamicGiMaxRaysPerFrame, 8.0f, 8, 262144);
+        changed |= ImGui::DragFloat("Dynamic GI Ray Distance", &environment.dynamicGiMaxRayDistance, 1.0f, 1.0f, 2000.0f, "%.1f m");
+        changed |= ImGui::SliderFloat("GI Hysteresis", &environment.dynamicGiHysteresis, 0.0f, 0.995f, "%.3f");
+        changed |= ImGui::SliderFloat("Dynamic GI Intensity", &environment.dynamicGiIntensity, 0.0f, 2.0f, "%.2f");
+        if (ImGui::TreeNode("Advanced Dynamic GI")) {
+            changed |= ImGui::Checkbox("Probe Relocation", &environment.dynamicGiRelocation);
+            changed |= ImGui::Checkbox("Probe Classification", &environment.dynamicGiClassification);
+            changed |= ImGui::Checkbox("Probe Visibility Weighting", &environment.dynamicGiVisibilityWeighting);
+            ImGui::TreePop();
+        }
+        if (!environment.dynamicGiEnabled) ImGui::EndDisabled();
+
+        ImGui::SeparatorText("Screen-Space GI");
+        changed |= ImGui::Checkbox("SSGI Enabled", &environment.ssgiEnabled);
+        if (!environment.ssgiEnabled) ImGui::BeginDisabled();
+        changed |= ImGui::DragFloat("SSGI Ray Length", &environment.ssgiRayLength, 0.05f, 0.25f, 20.0f, "%.2f m");
+        changed |= ImGui::DragInt("SSGI Steps", &environment.ssgiSteps, 1.0f, 4, 48);
+        changed |= ImGui::DragFloat("SSGI Thickness", &environment.ssgiThickness, 0.01f, 0.01f, 2.0f, "%.2f m");
+        changed |= ImGui::SliderFloat("SSGI Intensity", &environment.ssgiIntensity, 0.0f, 1.0f, "%.2f");
+        if (!environment.ssgiEnabled) ImGui::EndDisabled();
     }
 
     if (ImGui::CollapsingHeader("Clouds", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -2556,6 +2651,74 @@ void DrawWorldSettings(EditorScene& scene, EditorDockspace::Context& context, bo
         changed |= ImGui::DragFloat("Fog Density", &environment.fogDensity, 0.001f, 0.0f, 0.20f, "%.4f");
         changed |= ImGui::DragFloat("Fog Height", &environment.fogHeight, 0.02f, -20.0f, 20.0f);
         changed |= ImGui::DragFloat("Fog Falloff", &environment.fogHeightFalloff, 0.005f, 0.001f, 2.0f, "%.3f");
+        ImGui::SeparatorText("Physical Scattering");
+        changed |= ImGui::SliderFloat("Rayleigh Density", &environment.atmosphereRayleigh, 0.0f, 4.0f);
+        changed |= ImGui::SliderFloat("Rayleigh Scale Height", &environment.atmosphereRayleighHeight, 1.0f, 32.0f, "%.1f km");
+        changed |= ImGui::SliderFloat("Mie Density", &environment.atmosphereMie, 0.0f, 4.0f);
+        changed |= ImGui::SliderFloat("Mie Scale Height", &environment.atmosphereMieHeight, 0.1f, 8.0f, "%.2f km");
+        changed |= ImGui::SliderFloat("Mie Anisotropy", &environment.atmosphereMieAnisotropy, -0.94f, 0.94f);
+        changed |= ImGui::SliderFloat("Ozone", &environment.atmosphereOzone, 0.0f, 4.0f);
+        changed |= ImGui::SliderFloat("Atmosphere Intensity", &environment.atmosphereIntensity, 0.0f, 8.0f);
+        changed |= ImGui::SliderFloat("Sun Angular Diameter", &environment.sunAngularDiameter, 0.05f, 5.0f, "%.2f deg");
+        changed |= ImGui::SliderFloat("Sun Disk Intensity", &environment.sunDiskIntensity, 0.0f, 40.0f);
+        ImGui::SeparatorText("Night Sky");
+        changed |= ImGui::Checkbox("Stars", &environment.stars);
+        changed |= ImGui::SliderFloat("Star Intensity", &environment.starIntensity, 0.0f, 4.0f);
+        changed |= ImGui::Checkbox("Moon", &environment.moon);
+        changed |= ImGui::ColorEdit3("Moon Color", &environment.moonColor.x);
+        changed |= ImGui::SliderFloat("Moon Intensity", &environment.moonIntensity, 0.0f, 2.0f);
+        changed |= ImGui::SliderFloat("Moon Phase", &environment.moonPhase, 0.0f, 1.0f);
+        ImGui::SeparatorText("Volumetric Fog");
+        changed |= ImGui::Checkbox("Enabled##Volumetric", &environment.volumetricFog);
+        changed |= ImGui::SliderFloat("Scattering", &environment.volumetricScattering, 0.0f, 4.0f);
+        changed |= ImGui::SliderFloat("Extinction", &environment.volumetricExtinction, 0.0f, 4.0f);
+        changed |= ImGui::SliderFloat("Anisotropy", &environment.volumetricAnisotropy, -0.94f, 0.94f);
+        changed |= ImGui::DragFloat("Start Distance", &environment.volumetricStartDistance, 0.5f, 0.0f, 1000.0f);
+        changed |= ImGui::DragFloat("Maximum Distance", &environment.volumetricMaxDistance, 1.0f, 1.0f, 10000.0f);
+        const char* qualityNames[] = {"Low", "Medium", "High", "Ultra"};
+        changed |= ImGui::Combo("Environment Quality", &environment.environmentQuality, qualityNames, 4);
+    }
+
+    if (ImGui::CollapsingHeader("Exposure and Color", ImGuiTreeNodeFlags_DefaultOpen)) {
+        changed |= ImGui::Checkbox("Automatic Exposure", &environment.autoExposure);
+        changed |= ImGui::SliderFloat("Minimum EV", &environment.exposureMinEV, -16.0f, 16.0f);
+        changed |= ImGui::SliderFloat("Maximum EV", &environment.exposureMaxEV, -16.0f, 16.0f);
+        changed |= ImGui::SliderFloat("Exposure Compensation", &environment.exposureCompensationEV, -8.0f, 8.0f, "%.2f EV");
+        changed |= ImGui::SliderFloat("Adapt Bright", &environment.exposureSpeedUp, 0.0f, 12.0f);
+        changed |= ImGui::SliderFloat("Adapt Dark", &environment.exposureSpeedDown, 0.0f, 12.0f);
+        changed |= ImGui::Checkbox("HDR Bloom", &environment.bloom);
+        changed |= ImGui::SliderFloat("Bloom Threshold", &environment.bloomThreshold, 0.0f, 20.0f);
+        changed |= ImGui::SliderFloat("Bloom Knee", &environment.bloomKnee, 0.001f, 5.0f);
+        changed |= ImGui::SliderFloat("Bloom Strength", &environment.bloomStrength, 0.0f, 2.0f);
+        changed |= ImGui::SliderFloat("Temperature", &environment.colorTemperature, 1000.0f, 15000.0f, "%.0f K");
+        changed |= ImGui::SliderFloat("Tint", &environment.colorTint, -1.0f, 1.0f);
+        changed |= ImGui::SliderFloat("Saturation", &environment.colorSaturation, 0.0f, 2.0f);
+        changed |= ImGui::SliderFloat("Contrast", &environment.colorContrast, 0.0f, 2.0f);
+        changed |= ImGui::ColorEdit3("Lift", &environment.colorLift.x, ImGuiColorEditFlags_Float);
+        changed |= ImGui::ColorEdit3("Gamma", &environment.colorGamma.x, ImGuiColorEditFlags_Float);
+        changed |= ImGui::ColorEdit3("Gain", &environment.colorGain.x, ImGuiColorEditFlags_Float);
+        changed |= ImGui::SliderFloat("Color LUT Strength", &environment.colorLutIntensity, 0.0f, 1.0f);
+        if (context.assets) {
+            const std::vector<EditorAssets::Asset> textures = FindTextureAssets(*context.assets);
+            const std::string lutPreview = environment.colorLutPath.empty()
+                ? "No color LUT" : std::filesystem::path(environment.colorLutPath).filename().string();
+            if (ImGui::BeginCombo("Color LUT", lutPreview.c_str())) {
+                if (ImGui::Selectable("No color LUT", environment.colorLutPath.empty())) {
+                    environment.colorLutPath.clear();
+                    changed = true;
+                }
+                for (const auto& texture : textures) {
+                    const bool selected = environment.colorLutPath == texture.relativePath;
+                    if (ImGui::Selectable(texture.displayName.c_str(), selected)) {
+                        environment.colorLutPath = texture.relativePath;
+                        changed = true;
+                    }
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", texture.relativePath.c_str());
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::TextDisabled("Use an engine texture with flattened N*N by N LUT layout.");
+        }
     }
 
     if (ImGui::CollapsingHeader("Physics", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -4792,6 +4955,9 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             if (ImGui::DragFloat("Source Radius", &light.sourceRadius, 0.05f, 0.0f, 1000.0f)) {
                 context.scene->SetSelectedLight(light);
             }
+            if (ImGui::Checkbox("Affect Dynamic GI", &light.affectDynamicGi)) {
+                context.scene->SetSelectedLight(light);
+            }
             if(light.type==engine::ecs::Light::Type::Area){int shape=light.areaShape==engine::ecs::Light::AreaShape::Rectangle?1:0;
                 const char* shapes[]={"Sphere","Rectangle"};if(ImGui::Combo("Area Shape",&shape,shapes,2)){light.areaShape=shape?engine::ecs::Light::AreaShape::Rectangle:engine::ecs::Light::AreaShape::Sphere;context.scene->SetSelectedLight(light);}
                 if(shape==1){bool areaChanged=false;areaChanged|=ImGui::DragFloat("Width",&light.areaWidth,0.05f,0.01f,1000.0f);
@@ -4826,6 +4992,48 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             if(changed)context.scene->SetSelectedReflectionProbe(true,probe);
             if(ImGui::Button("Remove Reflection Probe"))context.scene->SetSelectedReflectionProbe(false,probe);
         }
+    }
+
+    if(selected->postProcessVolumeEnabled && ImGui::CollapsingHeader("Post Process Volume",ImGuiTreeNodeFlags_DefaultOpen)){
+        engine::ecs::PostProcessVolume volume=selected->postProcessVolume;bool changed=false;
+        changed|=ImGui::Checkbox("Enabled##PPVolume",&volume.enabled);
+        changed|=ImGui::Checkbox("Unbound",&volume.unbound);
+        changed|=ImGui::InputInt("Priority##PPVolume",&volume.priority);
+        changed|=ImGui::DragFloat3("Box Extents##PPVolume",&volume.boxExtents.x,0.1f,0.01f,10000.0f);
+        changed|=ImGui::DragFloat("Blend Distance##PPVolume",&volume.blendDistance,0.05f,0.0f,1000.0f);
+        changed|=ImGui::SliderFloat("Blend Weight##PPVolume",&volume.blendWeight,0.0f,1.0f);
+        changed|=ImGui::Checkbox("Override Exposure",&volume.overrideExposure);
+        if(volume.overrideExposure)changed|=ImGui::SliderFloat("Exposure EV##PPVolume",&volume.exposureCompensationEV,-8.0f,8.0f);
+        changed|=ImGui::Checkbox("Override Bloom",&volume.overrideBloom);
+        if(volume.overrideBloom)changed|=ImGui::SliderFloat("Bloom Strength##PPVolume",&volume.bloomStrength,0.0f,2.0f);
+        changed|=ImGui::Checkbox("Override Color Grading",&volume.overrideColorGrading);
+        if(volume.overrideColorGrading){
+            changed|=ImGui::SliderFloat("Temperature##PPVolume",&volume.temperature,1000.0f,15000.0f);
+            changed|=ImGui::SliderFloat("Tint##PPVolume",&volume.tint,-1.0f,1.0f);
+            changed|=ImGui::SliderFloat("Saturation##PPVolume",&volume.saturation,0.0f,2.0f);
+            changed|=ImGui::SliderFloat("Contrast##PPVolume",&volume.contrast,0.0f,2.0f);
+        }
+        changed|=ImGui::Checkbox("Override Fog Density",&volume.overrideFogDensity);
+        if(volume.overrideFogDensity)changed|=ImGui::DragFloat("Fog Density##PPVolume",&volume.fogDensity,0.001f,0.0f,2.0f);
+        if(changed)context.scene->SetSelectedPostProcessVolume(true,volume);
+        if(ImGui::Button("Remove Post Process Volume"))context.scene->SetSelectedPostProcessVolume(false,volume);
+    }
+
+    if(selected->localFogVolumeEnabled && ImGui::CollapsingHeader("Local Fog Volume",ImGuiTreeNodeFlags_DefaultOpen)){
+        engine::ecs::LocalFogVolume volume=selected->localFogVolume;bool changed=false;
+        changed|=ImGui::Checkbox("Enabled##LocalFog",&volume.enabled);
+        int shape=volume.shape==engine::ecs::LocalFogVolume::Shape::Sphere?1:0;
+        const char* shapes[]={"Box","Sphere"};
+        if(ImGui::Combo("Shape##LocalFog",&shape,shapes,2)){volume.shape=shape?engine::ecs::LocalFogVolume::Shape::Sphere:engine::ecs::LocalFogVolume::Shape::Box;changed=true;}
+        if(shape==0)changed|=ImGui::DragFloat3("Box Extents##LocalFog",&volume.boxExtents.x,0.1f,0.01f,10000.0f);
+        else changed|=ImGui::DragFloat("Radius##LocalFog",&volume.radius,0.1f,0.01f,10000.0f);
+        changed|=ImGui::DragFloat("Blend Distance##LocalFog",&volume.blendDistance,0.05f,0.001f,1000.0f);
+        changed|=ImGui::DragFloat("Density##LocalFog",&volume.density,0.001f,0.0f,2.0f);
+        changed|=ImGui::ColorEdit3("Albedo##LocalFog",&volume.albedo.x,ImGuiColorEditFlags_Float);
+        changed|=ImGui::SliderFloat("Extinction##LocalFog",&volume.extinction,0.0f,4.0f);
+        changed|=ImGui::SliderFloat("Anisotropy##LocalFog",&volume.anisotropy,-0.94f,0.94f);
+        if(changed)context.scene->SetSelectedLocalFogVolume(true,volume);
+        if(ImGui::Button("Remove Local Fog Volume"))context.scene->SetSelectedLocalFogVolume(false,volume);
     }
 
     if (selected->audioSourceEnabled) {

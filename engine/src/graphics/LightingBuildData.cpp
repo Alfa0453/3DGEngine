@@ -1,4 +1,5 @@
 #include "engine/graphics/LightingBuildData.h"
+#include "engine/graphics/LightingScene.h"
 
 #include <glad/glad.h>
 #include <glm/common.hpp>
@@ -10,8 +11,6 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
-#include <limits>
-#include <numeric>
 #include <thread>
 
 namespace engine {
@@ -30,80 +29,6 @@ template <class T> void HashBytes(std::uint64_t& h, const T& value) {
     for (std::size_t i = 0; i < sizeof(T); ++i) { h ^= p[i]; h *= 1099511628211ull; }
 }
 
-bool RayTriangle(const glm::vec3& origin, const glm::vec3& direction,
-                 const LightingTriangle& triangle, float maxDistance,
-                 float* hitDistance = nullptr, glm::vec3* barycentric = nullptr) {
-    const glm::vec3 e1 = triangle.b - triangle.a;
-    const glm::vec3 e2 = triangle.c - triangle.a;
-    const glm::vec3 p = glm::cross(direction, e2);
-    const float det = glm::dot(e1, p);
-    if (std::abs(det) < 1e-7f) return false;
-    const float inv = 1.0f / det;
-    const glm::vec3 t = origin - triangle.a;
-    const float u = glm::dot(t, p) * inv;
-    if (u < 0.0f || u > 1.0f) return false;
-    const glm::vec3 q = glm::cross(t, e1);
-    const float v = glm::dot(direction, q) * inv;
-    if (v < 0.0f || u + v > 1.0f) return false;
-    const float distance = glm::dot(e2, q) * inv;
-    if (distance <= 0.015f || distance >= maxDistance) return false;
-    if (hitDistance) *hitDistance = distance;
-    if (barycentric) *barycentric = glm::vec3(1.0f - u - v, u, v);
-    return true;
-}
-
-struct BvhNode {
-    glm::vec3 lo{0.0f}, hi{0.0f};
-    std::uint32_t begin=0, count=0;
-    int left=-1, right=-1;
-};
-
-class TriangleBvh {
-public:
-    explicit TriangleBvh(const std::vector<LightingTriangle>& source):triangles(source),order(source.size()) {
-        std::iota(order.begin(),order.end(),0u); if(!order.empty())Build(0,static_cast<std::uint32_t>(order.size()));
-    }
-    bool Occluded(const glm::vec3& origin,const glm::vec3& direction,float maximum)const {
-        if(nodes.empty())return false;std::array<int,64> stack{};int top=0;stack[top++]=0;
-        while(top){const BvhNode& node=nodes[stack[--top]];if(!HitBox(origin,direction,node.lo,node.hi,maximum))continue;
-            if(node.left<0){for(std::uint32_t i=0;i<node.count;++i)if(RayTriangle(origin,direction,triangles[order[node.begin+i]],maximum))return true;}
-            else{if(top+2>static_cast<int>(stack.size()))continue;stack[top++]=node.left;stack[top++]=node.right;}}
-        return false;
-    }
-    bool Trace(const glm::vec3& origin,const glm::vec3& direction,float maximum,
-               LightingRayHit* result) const {
-        if(result)*result=LightingRayHit{};
-        if(nodes.empty())return false;
-        std::array<int,64> stack{};int top=0;stack[top++]=0;
-        float nearest=maximum;std::uint32_t nearestIndex=0;glm::vec3 nearestBary(0.0f);bool found=false;
-        while(top){const BvhNode& node=nodes[stack[--top]];if(!HitBox(origin,direction,node.lo,node.hi,nearest))continue;
-            if(node.left<0){for(std::uint32_t i=0;i<node.count;++i){const std::uint32_t ti=order[node.begin+i];float distance=0.0f;glm::vec3 bary;
-                if(RayTriangle(origin,direction,triangles[ti],nearest,&distance,&bary)){nearest=distance;nearestIndex=ti;nearestBary=bary;found=true;}}}
-            else if(top+2<=static_cast<int>(stack.size())){stack[top++]=node.left;stack[top++]=node.right;}}
-        if(found&&result){const auto&t=triangles[nearestIndex];result->hit=true;result->distance=nearest;
-            result->position=origin+direction*nearest;result->normal=glm::normalize(glm::cross(t.b-t.a,t.c-t.a));
-            if(glm::dot(result->normal,direction)>0.0f)result->normal=-result->normal;
-            result->barycentric=nearestBary;result->albedo=t.albedo;result->emissive=t.emissive;result->triangleIndex=nearestIndex;}
-        return found;
-    }
-private:
-    const std::vector<LightingTriangle>& triangles;std::vector<std::uint32_t> order;std::vector<BvhNode> nodes;
-    static glm::vec3 Centroid(const LightingTriangle& t){return(t.a+t.b+t.c)/3.0f;}
-    static bool HitBox(const glm::vec3&o,const glm::vec3&d,const glm::vec3&lo,const glm::vec3&hi,float maximum){
-        const glm::vec3 inv=1.0f/glm::vec3(std::abs(d.x)<1e-8f?std::copysign(1e-8f,d.x):d.x,std::abs(d.y)<1e-8f?std::copysign(1e-8f,d.y):d.y,std::abs(d.z)<1e-8f?std::copysign(1e-8f,d.z):d.z);
-        const glm::vec3 a=(lo-o)*inv,b=(hi-o)*inv;const glm::vec3 near=glm::min(a,b),far=glm::max(a,b);
-        return std::max({near.x,near.y,near.z,0.0f})<=std::min({far.x,far.y,far.z,maximum});
-    }
-    int Build(std::uint32_t begin,std::uint32_t count){
-        const int index=static_cast<int>(nodes.size());nodes.emplace_back();BvhNode& node=nodes.back();node.begin=begin;node.count=count;
-        node.lo=glm::vec3(std::numeric_limits<float>::max());node.hi=-node.lo;glm::vec3 clo=node.lo,chi=node.hi;
-        for(std::uint32_t i=0;i<count;++i){const auto&t=triangles[order[begin+i]];node.lo=glm::min(node.lo,glm::min(t.a,glm::min(t.b,t.c)));node.hi=glm::max(node.hi,glm::max(t.a,glm::max(t.b,t.c)));const auto c=Centroid(t);clo=glm::min(clo,c);chi=glm::max(chi,c);}
-        if(count<=8)return index;const glm::vec3 extent=chi-clo;int axis=extent.y>extent.x?1:0;if(extent.z>extent[axis])axis=2;
-        const std::uint32_t middle=begin+count/2;std::nth_element(order.begin()+begin,order.begin()+middle,order.begin()+begin+count,[&](auto a,auto b){return Centroid(triangles[a])[axis]<Centroid(triangles[b])[axis];});
-        const int left=Build(begin,middle-begin),right=Build(middle,begin+count-middle);nodes[index].left=left;nodes[index].right=right;nodes[index].count=0;return index;
-    }
-};
-
 glm::vec3 SphereDirection(std::uint32_t i, std::uint32_t count) {
     constexpr float golden = 2.39996322972865332f;
     const float y = 1.0f - 2.0f * (static_cast<float>(i) + 0.5f) / static_cast<float>(count);
@@ -120,7 +45,7 @@ glm::vec3 AdjustSaturation(glm::vec3 color, float saturation) {
 }
 
 glm::vec3 EvaluateBuildLights(const std::vector<LightingBuildLight>& lights,
-                              const TriangleBvh& acceleration,
+                              const LightingSceneBvh& acceleration,
                               const LightingRayHit& hit, float maximumDistance) {
     glm::vec3 incoming(0.0f);
     for (const LightingBuildLight& light : lights) {
@@ -283,7 +208,7 @@ bool BuildLightingProbes(const std::vector<LightingTriangle>& triangles,
     const std::size_t count = static_cast<std::size_t>(dimensions.x) * dimensions.y * dimensions.z;
     built.probes.resize(count);
     if (progress) progress->phase = LightingBuildProgress::Phase::BuildingAcceleration;
-    const TriangleBvh acceleration(triangles);
+    const LightingSceneBvh acceleration(triangles);
     if (progress) { progress->completed = 0; progress->total = static_cast<std::uint32_t>(count);
         progress->raysCast = 0; progress->phase = LightingBuildProgress::Phase::IrradianceProbes; }
 
@@ -449,8 +374,18 @@ bool LoadLightingBuildData(const std::string& path, LightingBuildData* data, std
 
 LightingProbeGrid::~LightingProbeGrid(){ Reset(); }
 LightingProbeGrid::LightingProbeGrid(LightingProbeGrid&& o) noexcept { *this=std::move(o); }
-LightingProbeGrid& LightingProbeGrid::operator=(LightingProbeGrid&& o) noexcept { if(this!=&o){Reset();m_textures=o.m_textures;o.m_textures.fill(0);m_boundsMin=o.m_boundsMin;m_boundsMax=o.m_boundsMax;m_probeCount=o.m_probeCount;m_memoryBytes=o.m_memoryBytes;o.m_probeCount=0;o.m_memoryBytes=0;}return *this; }
-void LightingProbeGrid::Reset(){ glDeleteTextures(static_cast<GLsizei>(m_textures.size()),m_textures.data());m_textures.fill(0);m_probeCount=0;m_memoryBytes=0; }
+LightingProbeGrid& LightingProbeGrid::operator=(LightingProbeGrid&& o) noexcept { if(this!=&o){Reset();m_textures=o.m_textures;o.m_textures.fill(0);m_boundsMin=o.m_boundsMin;m_boundsMax=o.m_boundsMax;m_dimensions=o.m_dimensions;m_probeCount=o.m_probeCount;m_memoryBytes=o.m_memoryBytes;o.m_dimensions=glm::ivec3(0);o.m_probeCount=0;o.m_memoryBytes=0;}return *this; }
+void LightingProbeGrid::Reset(){
+    // The CPU-side probe builder and its tests are valid before an OpenGL
+    // context exists.  GLAD function pointers are null in that phase.
+    if (glad_glDeleteTextures) {
+        glDeleteTextures(static_cast<GLsizei>(m_textures.size()), m_textures.data());
+    }
+    m_textures.fill(0);
+    m_dimensions=glm::ivec3(0);
+    m_probeCount=0;
+    m_memoryBytes=0;
+}
 bool LightingProbeGrid::Upload(const LightingBuildData& data,std::string* error){
     if(!data.IsValid()){if(error)*error="Cannot upload invalid lighting grid.";return false;}
     std::array<std::vector<float>,13> packed;for(auto& texture:packed)texture.resize(data.probes.size()*4,0.0f);
@@ -462,14 +397,36 @@ bool LightingProbeGrid::Upload(const LightingBuildData& data,std::string* error)
         packSh(0,i,p.irradianceSH,v);packSh(4,i,p.bounceSH,v);packSh(7,i,p.emissiveSH,v);
         std::array<glm::vec3,4> direct{};for(std::size_t coefficient=0;coefficient<4;++coefficient)
             direct[coefficient]=glm::max(p.irradianceSH[coefficient]-p.bounceSH[coefficient]-p.emissiveSH[coefficient],glm::vec3(0.0f));
-        packSh(10,i,direct,v);packed[3][b]=p.skyVisibility*v;packed[3][b+1]=v;}
+        packSh(10,i,direct,v);packed[3][b]=p.skyVisibility*v;packed[3][b+1]=v;
+        packed[3][b+2]=p.depthMean*v;packed[3][b+3]=p.depthSecondMoment*v;}
     Reset();glGenTextures(static_cast<GLsizei>(m_textures.size()),m_textures.data());
     for(std::size_t index=0;index<m_textures.size();++index){glBindTexture(GL_TEXTURE_3D,m_textures[index]);glTexParameteri(GL_TEXTURE_3D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);glTexParameteri(GL_TEXTURE_3D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);glTexParameteri(GL_TEXTURE_3D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);glTexParameteri(GL_TEXTURE_3D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);glTexParameteri(GL_TEXTURE_3D,GL_TEXTURE_WRAP_R,GL_CLAMP_TO_EDGE);glTexImage3D(GL_TEXTURE_3D,0,GL_RGBA16F,data.dimensions.x,data.dimensions.y,data.dimensions.z,0,GL_RGBA,GL_FLOAT,packed[index].data());}
     const GLenum status=glGetError();glBindTexture(GL_TEXTURE_3D,0);if(status!=GL_NO_ERROR){Reset();if(error)*error="OpenGL could not create the SH lighting probe textures.";return false;}
-    m_boundsMin=data.boundsMin;m_boundsMax=data.boundsMax;m_probeCount=data.probes.size();
+    m_boundsMin=data.boundsMin;m_boundsMax=data.boundsMax;m_dimensions=data.dimensions;m_probeCount=data.probes.size();
     // Thirteen RGBA16F volumes: combined SH (3), metadata (1), bounce SH
     // (3), emissive SH (3), and direct-environment SH (3) = 104 bytes/probe.
     m_memoryBytes=static_cast<std::uint64_t>(m_probeCount)*104ull;return true;
+}
+bool LightingProbeGrid::UpdateCombined(const LightingBuildData& data,
+                                       const std::vector<std::size_t>& changedIndices,
+                                       std::string* error){
+    if(!Valid()||!data.IsValid()||data.dimensions!=m_dimensions||data.probes.size()!=m_probeCount){
+        if(error)*error="Dynamic lighting update does not match the allocated probe grid.";return false;}
+    std::vector<std::size_t> indices=changedIndices;
+    indices.erase(std::remove_if(indices.begin(),indices.end(),[&](std::size_t i){return i>=m_probeCount;}),indices.end());
+    std::sort(indices.begin(),indices.end());indices.erase(std::unique(indices.begin(),indices.end()),indices.end());
+    auto pack=[&](const LightingProbe&p,std::array<std::array<float,4>,4>& texels){
+        const float v=p.valid?1.0f:0.0f;const auto&sh=p.irradianceSH;
+        texels[0]={sh[0].r*v,sh[0].g*v,sh[0].b*v,sh[1].r*v};
+        texels[1]={sh[1].g*v,sh[1].b*v,sh[2].r*v,sh[2].g*v};
+        texels[2]={sh[2].b*v,sh[3].r*v,sh[3].g*v,sh[3].b*v};
+        texels[3]={p.skyVisibility*v,v,p.depthMean*v,p.depthSecondMoment*v};};
+    for(std::size_t flat:indices){const int x=static_cast<int>(flat%static_cast<std::size_t>(m_dimensions.x));
+        const std::size_t yz=flat/static_cast<std::size_t>(m_dimensions.x);const int y=static_cast<int>(yz%static_cast<std::size_t>(m_dimensions.y));const int z=static_cast<int>(yz/static_cast<std::size_t>(m_dimensions.y));
+        std::array<std::array<float,4>,4> texels{};pack(data.probes[flat],texels);
+        for(std::size_t texture=0;texture<4;++texture){glBindTexture(GL_TEXTURE_3D,m_textures[texture]);
+            glTexSubImage3D(GL_TEXTURE_3D,0,x,y,z,1,1,1,GL_RGBA,GL_FLOAT,texels[texture].data());}}
+    const GLenum status=glGetError();glBindTexture(GL_TEXTURE_3D,0);if(status!=GL_NO_ERROR){if(error)*error="OpenGL rejected a partial dynamic probe upload.";return false;}return true;
 }
 void LightingProbeGrid::Bind(unsigned int unit,Contribution contribution)const{
     std::size_t base=0;if(contribution==Contribution::Bounce)base=4;

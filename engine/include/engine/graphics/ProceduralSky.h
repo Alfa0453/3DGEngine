@@ -3,6 +3,7 @@
 #include "engine/graphics/Mesh.h"
 #include "engine/graphics/Shader.h"
 #include "engine/graphics/DayNightCycle.h"
+#include "engine/graphics/EnvironmentLighting.h"
 
 #include <glm/glm.hpp>
 
@@ -36,6 +37,9 @@ public:
     // Draw behind the scene. tonemap=false outputs linear HDR for a post pass.
     void Draw(const glm::mat4& view, const glm::mat4& projection,
               const DayNightCycle::Sample& sky, bool tonemap = true,
+              const CloudSettings& clouds = {});
+    void Draw(const glm::mat4& view, const glm::mat4& projection,
+              const EnvironmentLightingState& environment, bool tonemap = true,
               const CloudSettings& clouds = {});
 
 private:
