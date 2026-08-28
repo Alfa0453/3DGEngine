@@ -33,7 +33,14 @@ uniform sampler2D uScene;
 uniform float uThreshold;
 uniform float uKnee;
 void main() {
-    vec3 c = texture(uScene, vUV).rgb;
+    vec2 texel = 1.0 / vec2(textureSize(uScene, 0));
+    // A compact prefilter prevents sub-pixel emissive details from entering and
+    // leaving the bloom pyramid as single-frame flashes.
+    vec3 c = texture(uScene, vUV).rgb * 0.50;
+    c += texture(uScene, vUV + vec2(texel.x, 0.0)).rgb * 0.125;
+    c += texture(uScene, vUV - vec2(texel.x, 0.0)).rgb * 0.125;
+    c += texture(uScene, vUV + vec2(0.0, texel.y)).rgb * 0.125;
+    c += texture(uScene, vUV - vec2(0.0, texel.y)).rgb * 0.125;
     float b = max(max(c.r, c.g), c.b);
     float knee = max(uKnee, 1e-4);
     float soft = clamp((b - uThreshold + knee) / (2.0 * knee), 0.0, 1.0);
@@ -135,16 +142,20 @@ void main() {
     vec2 sampleUv = clamp(vUV + wave * (0.5 * uUnderwaterDistortion * underwater),
                           vec2(0.001), vec2(0.999));
     vec3 hdr = texture(uScene, sampleUv).rgb;
-    vec4 volume = sampleDepthAwareVolume(sampleUv);
-    if (uVolumetricEnabled == 1)
+    vec4 volume = vec4(0.0, 0.0, 0.0, 1.0);
+    if (uVolumetricEnabled == 1) {
+        volume = sampleDepthAwareVolume(sampleUv);
         hdr = hdr * clamp(volume.a, 0.0, 1.0) + max(volume.rgb, vec3(0.0));
+    }
     vec3 indirect = texture(uIndirect, sampleUv).rgb * uIndirectStrength;
     hdr = uIndirectDebug == 1 ? indirect : hdr + indirect;
-    vec3 bloom = textureLod(uBloom, sampleUv, 0.0).rgb;
-    bloom += textureLod(uBloom, sampleUv, 1.0).rgb * 0.75;
-    bloom += textureLod(uBloom, sampleUv, 2.0).rgb * 0.50;
-    bloom += textureLod(uBloom, sampleUv, 3.0).rgb * 0.30;
-    hdr += bloom * uBloomStrength;
+    if (uBloomStrength > 0.0001) {
+        vec3 bloom = textureLod(uBloom, sampleUv, 0.0).rgb;
+        bloom += textureLod(uBloom, sampleUv, 1.0).rgb * 0.75;
+        bloom += textureLod(uBloom, sampleUv, 2.0).rgb * 0.50;
+        bloom += textureLod(uBloom, sampleUv, 3.0).rgb * 0.30;
+        hdr += bloom * uBloomStrength;
+    }
     if (underwater > 0.0001) {
         float rawDepth = texture(uSceneDepth, sampleUv).r;
         float distanceHint = smoothstep(0.15, 1.0, rawDepth);
@@ -454,6 +465,19 @@ PostProcess::~PostProcess() {
     if (m_fallbackIndirect) glDeleteTextures(1, &m_fallbackIndirect);
 }
 
+std::uint64_t PostProcess::MemoryBytes() const {
+    const std::uint64_t full = static_cast<std::uint64_t>(m_width) * m_height;
+    const std::uint64_t half = static_cast<std::uint64_t>(std::max(m_width / 2, 1))
+        * std::max(m_height / 2, 1);
+    const std::uint64_t volume = static_cast<std::uint64_t>(std::max(m_width / m_volumeDownsample, 1))
+        * std::max(m_height / m_volumeDownsample, 1);
+    // HDR color+depth, two bloom buffers, two graph intermediates, LDR,
+    // two volumetric history buffers and the luminance histogram target.
+    return full * (8u + 4u + 8u + 8u + 4u)
+        + half * 8u * 2u + volume * 8u * 2u
+        + static_cast<std::uint64_t>(m_lumSize) * m_lumSize * sizeof(float);
+}
+
 void PostProcess::BeginScene() {
     m_hdr.Bind();
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
@@ -501,7 +525,9 @@ void PostProcess::RenderComposite(int screenWidth, int screenHeight, float dt,
     // accumulated before depth-aware composition in the HDR pass.
     Framebuffer* volumeCurrent = &m_volumetricA;
     Framebuffer* volumeHistory = &m_volumetricB;
-    if (volumetrics.enabled) {
+    const bool volumeActive = volumetrics.enabled
+        && (volumetrics.density > 0.000001f || !m_localFogVolumes.empty());
+    if (volumeActive) {
         volumeCurrent->Bind();
         m_volumetricShader.Bind();
         m_hdr.BindDepthTexture(0); m_volumetricShader.SetInt("uDepth",0);
@@ -631,6 +657,8 @@ void PostProcess::RenderComposite(int screenWidth, int screenHeight, float dt,
             m_targetEV = std::clamp(std::log2(std::max(targetExposure, 1e-6f))
                 + settings.exposureCompensationEV, settings.minEV, settings.maxEV);
         }
+        if (std::abs(m_targetEV - m_currentEV) < std::max(settings.exposureDeadZoneEV, 0.0f))
+            m_targetEV = m_currentEV;
         const float targetExposure = std::exp2(m_targetEV);
         const float speed = targetExposure > m_exposure ? settings.adaptationSpeedUp
                                                         : settings.adaptationSpeedDown;
@@ -641,33 +669,35 @@ void PostProcess::RenderComposite(int screenWidth, int screenHeight, float dt,
         exposure = m_exposure;
     }
 
-    // Bright-pass into the half-res bloom buffer.
-    m_bloomA.Bind();
-    m_bright.Bind();
-    scene->BindColorTexture(0);
-    m_bright.SetInt("uScene", 0);
-    m_bright.SetFloat("uThreshold", settings.bloomThreshold);
-    m_bright.SetFloat("uKnee", settings.bloomKnee);
-    m_quad.Draw();
-
-    // Ping-pong Gaussian blur (5 horizontal + 5 vertical).
-    m_blur.Bind();
-    m_blur.SetInt("uImage", 0);
     Framebuffer* src = &m_bloomA;
-    Framebuffer* dst = &m_bloomB;
-    bool horizontal = true;
-    const int bloomPasses = std::clamp(settings.bloomLevels, 1, 6) * 2;
-    for (int i = 0; i < bloomPasses; i++) {
-        dst->Bind();
-        src->BindColorTexture(0);
-        m_blur.SetFloat("uHorizontal", horizontal ? 1.0f : 0.0f);
+    if (settings.bloom && settings.bloomStrength > 0.0001f) {
+        // Bright-pass into the half-res bloom buffer. Disabled bloom performs no
+        // extraction or blur work; the composite strength is already zero.
+        m_bloomA.Bind();
+        m_bright.Bind();
+        scene->BindColorTexture(0);
+        m_bright.SetInt("uScene", 0);
+        m_bright.SetFloat("uThreshold", settings.bloomThreshold);
+        m_bright.SetFloat("uKnee", settings.bloomKnee);
         m_quad.Draw();
-        std::swap(src, dst);
-        horizontal = !horizontal;
+
+        m_blur.Bind();
+        m_blur.SetInt("uImage", 0);
+        Framebuffer* dst = &m_bloomB;
+        bool horizontal = true;
+        const int bloomPasses = std::clamp(settings.bloomLevels, 1, 6) * 2;
+        for (int i = 0; i < bloomPasses; i++) {
+            dst->Bind();
+            src->BindColorTexture(0);
+            m_blur.SetFloat("uHorizontal", horizontal ? 1.0f : 0.0f);
+            m_quad.Draw();
+            std::swap(src, dst);
+            horizontal = !horizontal;
+        }
+        glBindTexture(GL_TEXTURE_2D, src->ColorTexture());
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+        glGenerateMipmap(GL_TEXTURE_2D);
     }
-    glBindTexture(GL_TEXTURE_2D, src->ColorTexture());
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-    glGenerateMipmap(GL_TEXTURE_2D);
 
     // Composite (scene + bloom, exposure, ACES, gamma). With FXAA on, render into the
     // LDR buffer first; otherwise composite straight to the final target.
@@ -684,7 +714,7 @@ void PostProcess::RenderComposite(int screenWidth, int screenHeight, float dt,
     m_composite.SetFloat("uIndirectStrength", m_indirectTexture ? std::clamp(m_indirectStrength,0.0f,1.0f) : 0.0f);
     m_composite.SetInt("uIndirectDebug", m_indirectDebug ? 1 : 0);
     volumeHistory->BindColorTexture(4); m_composite.SetInt("uVolumetric",4);
-    m_composite.SetInt("uVolumetricEnabled",volumetrics.enabled?1:0);
+    m_composite.SetInt("uVolumetricEnabled",volumeActive?1:0);
     m_composite.SetFloat("uExposure", exposure);
     m_composite.SetFloat("uBloomStrength", settings.bloom ? settings.bloomStrength : 0.0f);
     m_composite.SetFloat("uTime", m_time);

@@ -1075,6 +1075,7 @@ void TerrainCreatorPanel::Draw(EditorScene& scene, const std::string& contentRoo
             if (ImGui::BeginCombo("Paint Material", selectedLayer.c_str())) {
                 for (int layer = 1; layer <= 5; ++layer) {
                     const std::string label = layerLabel(layer);
+                    ImGui::PushID(layer);
                     if (ImGui::Selectable(label.c_str(), layer == m_paintLayer)) {
                         m_paintLayer = layer;
                         if (layer == 1 && !m_asset.grassEnabled) {
@@ -1083,6 +1084,7 @@ void TerrainCreatorPanel::Draw(EditorScene& scene, const std::string& contentRoo
                             m_dirty = true;
                         }
                     }
+                    ImGui::PopID();
                 }
                 ImGui::EndCombo();
             }
@@ -1099,12 +1101,14 @@ void TerrainCreatorPanel::Draw(EditorScene& scene, const std::string& contentRoo
                 for (const std::string& material : materials) {
                     const std::string filename =
                         std::filesystem::path(material).filename().string();
+                    ImGui::PushID(material.c_str());
                     if (ImGui::Selectable(filename.c_str(), material == current)) {
                         m_asset.layerMaterials[m_paintLayer] = material;
                         m_materialPreviewSignature.clear();
                         m_previewTerrainDirty = true;
                         m_dirty = true;
                     }
+                    ImGui::PopID();
                 }
                 ImGui::EndCombo();
             }
@@ -1136,11 +1140,13 @@ void TerrainCreatorPanel::Draw(EditorScene& scene, const std::string& contentRoo
                     m_materialPreviewSignature.clear(); m_previewTerrainDirty = true;
                 }
                 for (const std::string& material : materials) {
+                    ImGui::PushID(material.c_str());
                     if (ImGui::Selectable(std::filesystem::path(material).filename().string().c_str(),
                                           material == current)) {
                         m_asset.layerMaterials[layer] = material; m_dirty = true;
                         m_materialPreviewSignature.clear(); m_previewTerrainDirty = true;
                     }
+                    ImGui::PopID();
                 }
                 ImGui::EndCombo();
             }

@@ -19,8 +19,10 @@ const char* TargetName(engine::AbilityTargetMode t){using T=engine::AbilityTarge
 bool AssetCombo(const char* label,std::string& value,const std::vector<std::string>& paths){
     bool changed=false;const std::string preview=value.empty()?"Choose asset...":std::filesystem::path(value).filename().string();
     if(ImGui::BeginCombo(label,preview.c_str())){for(const auto& p:paths){const bool selected=p==value;
+        ImGui::PushID(p.c_str());
         if(ImGui::Selectable(std::filesystem::path(p).filename().string().c_str(),selected)){value=p;changed=true;}
-        if(selected)ImGui::SetItemDefaultFocus();}ImGui::EndCombo();}return changed;
+        if(selected)ImGui::SetItemDefaultFocus();
+        ImGui::PopID();}ImGui::EndCombo();}return changed;
 }
 float Duration(const engine::AbilityAssetData& a){float result=0;for(const auto& p:a.phases)result+=std::max(p.duration,0.f);return result;}
 }

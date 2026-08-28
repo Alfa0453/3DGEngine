@@ -516,14 +516,21 @@ bool ParticleEditorPanel::DrawModuleStack(engine::ParticleSystemComponent& s) {
             engine::ParticleModuleType::Trails
         };
         for (const engine::ParticleModuleType type : addableModules) {
+            ImGui::PushID(static_cast<int>(type));
             const bool alreadyAdded = std::any_of(modules.begin(), modules.end(),
                 [type](const engine::ParticleModule& module) { return module.type == type; });
-            if (alreadyAdded && !engine::SupportsDuplicateParticleModules(type)) continue;
+            if (alreadyAdded && !engine::SupportsDuplicateParticleModules(type)) {
+                ImGui::PopID();
+                continue;
+            }
             std::string name = engine::ParticleModuleName(type);
             std::string lowerName = name;
             std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(),
                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-            if (!search.empty() && lowerName.find(search) == std::string::npos) continue;
+            if (!search.empty() && lowerName.find(search) == std::string::npos) {
+                ImGui::PopID();
+                continue;
+            }
             found = true;
             if (ImGui::Selectable(name.c_str())) {
                 std::uint32_t nextId = 1;
@@ -551,6 +558,7 @@ bool ParticleEditorPanel::DrawModuleStack(engine::ParticleSystemComponent& s) {
                 changed = true;
                 ImGui::CloseCurrentPopup();
             }
+            ImGui::PopID();
         }
         if (!found) ImGui::TextDisabled("No available modules match the search.");
         ImGui::EndPopup();

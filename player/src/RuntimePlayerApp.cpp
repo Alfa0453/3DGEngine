@@ -25,6 +25,7 @@
 #include <engine/graphics/ImageDecode.h>
 #include <engine/graphics/EnvironmentLighting.h>
 #include <engine/graphics/PostProcessVolume.h>
+#include <engine/graphics/LightingScalability.h>
 #include <engine/core/Paths.h>
 
 #include <glad/glad.h>
@@ -76,20 +77,25 @@ engine::EnvironmentLightingState ResolveEnvironment(
     return state;
 }
 std::vector<engine::PostProcess::VolumetricLight> GatherVolumetricLights(
-    engine::ecs::Registry& registry) {
-    std::vector<engine::PostProcess::VolumetricLight> result;
+    engine::ecs::Registry& registry,const glm::vec3& cameraPosition,int maximumLights) {
+    struct Candidate{float score;engine::PostProcess::VolumetricLight light;};std::vector<Candidate> candidates;
     registry.view<engine::ecs::Transform,engine::ecs::Light>().each(
         [&](Entity,engine::ecs::Transform& transform,engine::ecs::Light& light) {
-            if(result.size()>=16 || light.type==engine::ecs::Light::Type::Directional
+            if(!light.affectVolumetricFog || light.type==engine::ecs::Light::Type::Directional
                 || light.type==engine::ecs::Light::Type::Area) return;
+            const float distance=glm::distance(cameraPosition,transform.position);if(distance>light.range+220.0f)return;
             engine::PostProcess::VolumetricLight volumeLight;
             volumeLight.position=transform.position; volumeLight.direction=glm::normalize(light.direction);
             volumeLight.radiance=glm::max(light.color*light.intensity,glm::vec3(0.0f));
             volumeLight.range=std::max(light.range,0.01f);
             volumeLight.outerCos=light.type==engine::ecs::Light::Type::Spot
                 ? std::cos(glm::radians(light.outerAngle)):-1.0f;
-            result.push_back(volumeLight);
+            const float luminance=glm::dot(volumeLight.radiance,glm::vec3(0.2126f,0.7152f,0.0722f));
+            candidates.push_back({float(light.volumetricPriority)*1000.0f+luminance/(1.0f+distance*distance),volumeLight});
         });
+    const std::size_t keep=std::min<std::size_t>(candidates.size(),static_cast<std::size_t>(std::clamp(maximumLights,0,16)));
+    if(keep<candidates.size())std::partial_sort(candidates.begin(),candidates.begin()+keep,candidates.end(),[](const Candidate&a,const Candidate&b){return a.score>b.score;});
+    std::vector<engine::PostProcess::VolumetricLight> result;result.reserve(keep);for(std::size_t i=0;i<keep;++i)result.push_back(candidates[i].light);
     return result;
 }
 std::vector<engine::PostProcess::LocalFogVolume> GatherLocalFogVolumes(
@@ -2744,11 +2750,10 @@ void RuntimePlayerApp::OnRender() {
     m_post->volumetrics.heightFalloff = env.fogHeightFalloff;
     m_post->volumetrics.startDistance = env.volumetricStartDistance;
     m_post->volumetrics.maxDistance = env.volumetricMaxDistance;
-    const int environmentQuality=std::clamp(env.environmentQuality,0,3);
-    m_post->volumetrics.depthSlices=24+environmentQuality*16;
-    m_post->volumetrics.xyDownsample=environmentQuality==0?6:(environmentQuality==1?4:(environmentQuality==2?3:2));
-    m_post->volumetrics.historyWeight=environmentQuality==0?0.82f:(environmentQuality==1?0.88f:0.92f);
-    m_post->settings.bloomLevels=3+environmentQuality;
+    const auto& lightingProfile=engine::GetLightingQualityProfile(
+        static_cast<engine::LightingQuality>(std::clamp(env.environmentQuality,0,3)));
+    engine::ApplyLightingQuality(lightingProfile,nullptr,nullptr,
+                                 m_ssgi?&*m_ssgi:nullptr,&m_reflectionProbes,&*m_post);
     m_post->SetVolumetricCamera(glm::inverse(
         cam.ProjectionMatrix(aspect)*cam.ViewMatrix()),cam.Position(),
         ResolveEnvironment(env,m_sample));
@@ -2761,7 +2766,9 @@ void RuntimePlayerApp::OnRender() {
         m_ssao->Generate(m_registry, cam, aspect, w.Width(), w.Height());
     }
     engine::PbrRenderer::Options opt;
-    m_reflectionProbes.Sync(m_registry);
+    engine::ApplyLightingQuality(lightingProfile,&opt,nullptr,
+                                 m_ssgi?&*m_ssgi:nullptr,&m_reflectionProbes,&*m_post);
+    m_reflectionProbes.Sync(m_registry,cam.Position());
     opt.ambient = m_sample.ambient + glm::vec3(0.04f);
     opt.ibl = &*m_ibl;
     opt.reflectionProbes = &m_reflectionProbes;
@@ -2842,6 +2849,8 @@ void RuntimePlayerApp::OnRender() {
         lighting.skylightOcclusion = env.skylightOcclusion;
         lighting.skylightOcclusionStrength = env.skylightOcclusionStrength;
         lighting.minimumSkylight = env.minimumSkylight;
+        lighting.shadowBlockerSamples=lightingProfile.shadowBlockerSamples;
+        lighting.shadowFilterSamples=lightingProfile.shadowFilterSamples;
         lighting.cloudShadows = env.clouds && env.cloudShadows;
         lighting.cloudShadowStrength = env.cloudShadowStrength;
         lighting.cloudShadowScale = env.cloudShadowScale;
@@ -2895,12 +2904,12 @@ void RuntimePlayerApp::OnRender() {
         if (!m_ssgi) m_ssgi.emplace(w.Width(), w.Height());
         m_ssgi->Resize(w.Width(), w.Height());
         m_ssgi->rayLength = env.ssgiRayLength;
-        m_ssgi->steps = env.ssgiSteps;
+        m_ssgi->steps = std::min(env.ssgiSteps, lightingProfile.ssgiSteps);
         m_ssgi->thickness = env.ssgiThickness;
-        m_ssgi->intensity = env.ssgiIntensity;
+        m_ssgi->intensity = std::min(env.ssgiIntensity, lightingProfile.ssgiIntensity);
         m_ssgi->Generate(m_post->HdrColor(), m_ssao->PositionTexture(),
                          m_ssao->NormalTexture(), cam.ProjectionMatrix(aspect));
-        m_post->SetIndirectTexture(m_ssgi->Texture(), env.ssgiIntensity);
+        m_post->SetIndirectTexture(m_ssgi->Texture(), m_ssgi->intensity);
     } else {
         m_post->SetIndirectTexture(0, 0.0f);
     }
@@ -2908,7 +2917,8 @@ void RuntimePlayerApp::OnRender() {
     m_post->SetVolumetricDirectionalShadow(
         m_pbr ? &m_pbr->Cascade() : nullptr,
         cam.ViewMatrix());
-    m_post->SetVolumetricLights(GatherVolumetricLights(m_registry));
+    m_post->SetVolumetricLights(GatherVolumetricLights(
+        m_registry,cam.Position(),lightingProfile.maxVolumetricLights));
     m_post->SetLocalFogVolumes(GatherLocalFogVolumes(m_registry));
     m_post->RenderToScreen(w.Width(), w.Height(), m_dt);
 

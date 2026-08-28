@@ -2,6 +2,7 @@
 
 #include <glm/glm.hpp>
 
+#include <cstdint>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -39,5 +40,10 @@ private:
     struct TexturedRecord { const Mesh* mesh; glm::mat4 model; const ecs::PbrMaterial* material; };
     std::vector<TexturedRecord> m_textured;  // per-object fallback
 };
+
+// Stable content signature used by every shadow implementation. It changes when
+// a visible caster's mesh, transform, alpha-shadow material, foliage instances,
+// or shadow participation changes. Camera motion does not affect this value.
+std::uint64_t ComputeShadowCasterRevision(ecs::Registry& registry);
 
 } // namespace engine

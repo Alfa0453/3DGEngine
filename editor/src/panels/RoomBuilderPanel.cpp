@@ -135,8 +135,10 @@ RoomBuilderPanel::Result RoomBuilderPanel::Draw(const std::string& assetRoot, bo
     if (ImGui::BeginCombo("Material", selectedMaterialName.c_str())) {
         if (ImGui::Selectable("Default", m_materialPath.empty())) m_materialPath.clear();
         for (const MaterialChoice& material : m_materials) {
+            ImGui::PushID(material.path.c_str());
             if (ImGui::Selectable(material.name.c_str(), material.path == m_materialPath))
                 m_materialPath = material.path;
+            ImGui::PopID();
         }
         ImGui::EndCombo();
     }

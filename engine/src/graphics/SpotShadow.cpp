@@ -7,6 +7,8 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 #include <algorithm>
+#include <array>
+#include <cstdint>
 
 using engine::ecs::Entity;
 using engine::ecs::Transform;
@@ -14,6 +16,17 @@ using engine::ecs::MeshPBR;
 
 namespace engine {
 namespace {
+
+std::uint64_t HashSpot(const SpotShadow::Spot& spot) {
+    std::uint64_t hash = 1469598103934665603ull;
+    auto add = [&](const void* data, std::size_t bytes) {
+        const auto* input = static_cast<const unsigned char*>(data);
+        for (std::size_t i = 0; i < bytes; ++i) { hash ^= input[i]; hash *= 1099511628211ull; }
+    };
+    add(&spot.position, sizeof(spot.position)); add(&spot.direction, sizeof(spot.direction));
+    add(&spot.outerAngle, sizeof(spot.outerAngle)); add(&spot.range, sizeof(spot.range));
+    return hash;
+}
 
 const char* kVert = R"GLSL(
 #version 330 core
@@ -73,14 +86,32 @@ SpotShadow::~SpotShadow() {
 
 void SpotShadow::Generate(ecs::Registry& reg, const std::vector<Spot>& spots) {
     m_count = std::min(static_cast<int>(spots.size()), kMax);
+    m_renderedLastFrame = 0;
+    m_reusedLastFrame = 0;
+    const std::uint64_t casterRevision = ComputeShadowCasterRevision(reg);
+    const bool castersChanged = !m_cacheValid || casterRevision != m_casterRevision;
+    std::array<bool, kMax> dirty{};
+    bool anyDirty = false;
+    for (int i = 0; i < m_count; ++i) {
+        const std::uint64_t signature = HashSpot(spots[static_cast<std::size_t>(i)]);
+        dirty[static_cast<std::size_t>(i)] = castersChanged || signature != m_lightSignatures[i];
+        if (dirty[static_cast<std::size_t>(i)]) { anyDirty = true; ++m_renderedLastFrame; }
+        else ++m_reusedLastFrame;
+        m_lightSignatures[i] = signature;
+    }
+    m_casterRevision = casterRevision;
+    m_cacheValid = true;
+    if (!anyDirty) return;
 
     GLint prevFbo = 0;
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFbo);
     glViewport(0, 0, m_size, m_size);
     glBindFramebuffer(GL_FRAMEBUFFER, m_fbo);
     m_shader.Bind();
+    m_batch.Build(reg);
 
     for (int i = 0; i < m_count; ++i) {
+        if (!dirty[static_cast<std::size_t>(i)]) continue;
         const Spot& sp = spots[static_cast<std::size_t>(i)];
         const glm::vec3 dir = glm::normalize(sp.direction);
         glm::vec3 up = glm::vec3(0.0f, 1.0f, 0.0f);
@@ -97,6 +128,10 @@ void SpotShadow::Generate(ecs::Registry& reg, const std::vector<Spot>& spots) {
     }
 
     glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prevFbo));
+}
+
+std::uint64_t SpotShadow::MemoryBytes() const {
+    return static_cast<std::uint64_t>(m_size) * m_size * kMax * sizeof(float);
 }
 
 void SpotShadow::BindMaps(unsigned int startUnit) const {

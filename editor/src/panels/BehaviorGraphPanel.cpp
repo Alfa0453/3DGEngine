@@ -101,8 +101,11 @@ void ScriptPicker(const char* label, std::string& name) {
         if (names.empty()) {
             ImGui::TextDisabled("No BtScripts registered");
         }
-        for (const std::string& n : names) {
+        for (std::size_t index = 0; index < names.size(); ++index) {
+            const std::string& n = names[index];
+            ImGui::PushID(static_cast<int>(index));
             if (ImGui::Selectable(n.c_str(), n == name)) name = n;
+            ImGui::PopID();
         }
         ImGui::EndCombo();
     }
@@ -115,8 +118,11 @@ void KeyPicker(const char* id, const std::vector<engine::ai::BlackboardEntry>& s
     ImGui::SetNextItemWidth(150.0f);
     if (ImGui::BeginCombo(id, preview)) {
         if (schema.empty()) ImGui::TextDisabled("Add keys in Blackboard above");
-        for (const engine::ai::BlackboardEntry& e : schema) {
+        for (std::size_t index = 0; index < schema.size(); ++index) {
+            const engine::ai::BlackboardEntry& e = schema[index];
+            ImGui::PushID(static_cast<int>(index));
             if (!e.key.empty() && ImGui::Selectable(e.key.c_str(), e.key == key)) key = e.key;
+            ImGui::PopID();
         }
         ImGui::EndCombo();
     }

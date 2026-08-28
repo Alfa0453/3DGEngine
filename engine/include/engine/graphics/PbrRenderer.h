@@ -9,6 +9,7 @@
 
 #include <functional>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <unordered_map>
 #include <vector>
@@ -68,6 +69,9 @@ public:
         bool        spotShadows  = true;  // perspective shadows for spotlights
         bool        directionalShadows = true; // cascaded shadows for the directional sun
         float       shadowSoftness = 2.5f; // PCSS sun-shadow softness (light size)
+        int         shadowBlockerSamples = 16;
+        int         shadowFilterSamples = 24;
+        int         maxShadowedLocalLights = 4;
         // How far from the camera the sun's cascaded shadows reach (view units).
         // Beyond this, geometry no longer casts/receives sun shadows -- raise it if
         // shadows "pop in" only near the player (they follow the camera). Larger
@@ -110,6 +114,18 @@ public:
     // The sun's cascaded shadow map from the most recent Render() call, for
     // sharing with other passes (e.g. SkinnedRenderer) that light the same scene.
     const CascadedShadow& Cascade() const { return m_cascade; }
+    struct ShadowStats {
+        std::uint32_t cascadesRendered = 0, cascadesReused = 0;
+        std::uint32_t pointMapsRendered = 0, pointMapsReused = 0;
+        std::uint32_t spotMapsRendered = 0, spotMapsReused = 0;
+        std::uint64_t memoryBytes = 0;
+    };
+    ShadowStats GetShadowStats() const {
+        return {m_cascade.CascadesRenderedLastFrame(), m_cascade.CascadesReusedLastFrame(),
+                m_pointShadow.MapsRenderedLastFrame(), m_pointShadow.MapsReusedLastFrame(),
+                m_spotShadow.MapsRenderedLastFrame(), m_spotShadow.MapsReusedLastFrame(),
+                m_cascade.MemoryBytes() + m_pointShadow.MemoryBytes() + m_spotShadow.MemoryBytes()};
+    }
 
 private:
     CascadedShadow          m_cascade;

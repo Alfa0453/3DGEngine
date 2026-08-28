@@ -239,17 +239,23 @@ void ProceduralBuildingPanel::DrawMaterialCombo(const char* label, std::string& 
     if (!ImGui::BeginCombo(label, current.c_str())) return;
     if (ImGui::Selectable("Default", value.empty())) { value.clear(); m_dirty = true; }
     for (const AssetChoice& material : m_materials) {
+        ImGui::PushID(material.path.c_str());
         if (ImGui::Selectable(material.name.c_str(), material.path == value)) {
             value = material.path;
             m_dirty = true;
         }
+        ImGui::PopID();
     }
     ImGui::EndCombo();
 }
 
 void ProceduralBuildingPanel::DrawSourceSettings(const char* label, SourceSettings& settings) {
-    if (!ImGui::TreeNode(label)) return;
-    ImGui::PushID(label);
+    // The visible names (Walls, Roof, ...) are reused by the material pickers
+    // later in this window. Use the settings address as the tree/control ID so
+    // the readable label can safely be shared without colliding in ImGui.
+    if (!ImGui::TreeNodeEx(static_cast<const void*>(&settings),
+                           ImGuiTreeNodeFlags_None, "%s", label)) return;
+    ImGui::PushID(static_cast<const void*>(&settings));
     int source = static_cast<int>(settings.source);
     const char* sourceNames[] = {"Primitive", "Static Mesh"};
     if (ImGui::Combo("Source", &source, sourceNames, 2)) {
@@ -269,11 +275,13 @@ void ProceduralBuildingPanel::DrawSourceSettings(const char* label, SourceSettin
             : std::filesystem::path(settings.staticMeshPath).stem().string();
         if (ImGui::BeginCombo("Static Mesh", current.c_str())) {
             for (const AssetChoice& mesh : m_staticMeshes) {
+                ImGui::PushID(mesh.path.c_str());
                 if (ImGui::Selectable(mesh.name.c_str(), mesh.path == settings.staticMeshPath)) {
                     settings.staticMeshPath = mesh.path;
                     settings.staticMeshId = mesh.id;
                     m_dirty = true;
                 }
+                ImGui::PopID();
             }
             ImGui::EndCombo();
         }

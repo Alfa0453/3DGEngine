@@ -1850,7 +1850,7 @@ void ShaderEditorPanel::Draw(EditorAssets& assets, bool* open)
         ImGui::EndPopup();
     }
 
-    ImGui::SeparatorText("Compile");
+    ImGui::SeparatorText("Compile##CompileSection");
     if (ImGui::Button("Compile")) Compile(true);
     ImGui::SameLine();
     ImGui::Checkbox("Auto Compile", &m_autoCompile);
@@ -1894,6 +1894,7 @@ void ShaderEditorPanel::Draw(EditorAssets& assets, bool* open)
         for (std::size_t i = 0; i < report->diagnostics.size(); ++i)
         {
             const auto& diagnostic = report->diagnostics[i];
+            ImGui::PushID(static_cast<int>(i));
             if (ImGui::Selectable(diagnostic.message.c_str(),
                                   m_selectedDiagnostic == static_cast<int>(i)))
             {
@@ -1913,6 +1914,7 @@ void ShaderEditorPanel::Draw(EditorAssets& assets, bool* open)
                     }
                 }
             }
+            ImGui::PopID();
         }
     }
     const std::vector<engine::ShaderAssetIssue> graphIssues =

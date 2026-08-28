@@ -199,6 +199,8 @@ uniform float uCascadeWorldTexelSize[4];
 uniform float uCascadeDepthRange[4];
 uniform mat4  uView;
 uniform float uShadowSoftness;
+uniform int uShadowBlockerSamples;
+uniform int uShadowFilterSamples;
 uniform int   uSunShadow;   // 0 disables the directional (sun) shadow
 uniform samplerCube uPointCube[4];
 uniform int uNumPointShadows;
@@ -577,6 +579,10 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
 
 void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
                          int screenWidth, int screenHeight, const Options& opt) {
+    if (opt.shadowFilterSamples <= 6) m_cascade.SetUpdateIntervals({1,4,8,16});
+    else if (opt.shadowFilterSamples <= 12) m_cascade.SetUpdateIntervals({1,3,6,12});
+    else if (opt.shadowFilterSamples <= 18) m_cascade.SetUpdateIntervals({1,2,4,8});
+    else m_cascade.SetUpdateIntervals({1,1,2,4});
     const glm::mat4 view = camera.ViewMatrix();
     const glm::mat4 proj = camera.ProjectionMatrix(aspect);
     const glm::mat4 viewProj = proj * view;
@@ -608,7 +614,7 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
             const float radius = std::sqrt(std::max(std::max(c.r, c.g), c.b) / 0.03f);
             if (!SphereInFrustum(frustum, t.position, std::max(radius, 0.01f))) return;
             clusterLights.push_back({t.position, c, radius});
-            if (ppos.size() < static_cast<std::size_t>(PointShadow::kMax))
+            if (ppos.size() < static_cast<std::size_t>(std::clamp(opt.maxShadowedLocalLights,0,PointShadow::kMax)))
                 ppos.push_back(t.position);
         }
         else if (l.type == Light::Type::Spot) {
@@ -622,7 +628,7 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
             spotCosIn.push_back(glm::cos(glm::radians(l.innerAngle)));
             spotCosOut.push_back(glm::cos(glm::radians(l.outerAngle)));
             spotRanges.push_back(range);
-            if (spotList.size() < static_cast<std::size_t>(SpotShadow::kMax))
+            if (spotList.size() < static_cast<std::size_t>(std::clamp(opt.maxShadowedLocalLights,0,SpotShadow::kMax)))
                 spotList.push_back(SpotShadow::Spot{t.position, dir, l.outerAngle, range});
         }
         else {  // Area (sphere)
@@ -689,6 +695,8 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
     m_pbr->SetInt("uCascadeMaps", 4);
     m_pbr->SetMat4("uView", view);
     m_pbr->SetFloat("uShadowSoftness", opt.shadowSoftness);
+    m_pbr->SetInt("uShadowBlockerSamples", std::clamp(opt.shadowBlockerSamples, 4, 16));
+    m_pbr->SetInt("uShadowFilterSamples", std::clamp(opt.shadowFilterSamples, 6, 24));
     m_pbr->SetInt("uSunShadow", sunShadowEnabled ? 1 : 0);
     static constexpr const char* kCascadeVpNames[] = {"uCascadeVP[0]", "uCascadeVP[1]", "uCascadeVP[2]", "uCascadeVP[3]"};
     static constexpr const char* kCascadeSplitNames[] = {"uCascadeSplits[0]", "uCascadeSplits[1]", "uCascadeSplits[2]", "uCascadeSplits[3]"};
@@ -710,7 +718,7 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
     } else {
         m_pbr->SetInt("uUseIBL", 0);
     }
-    if(opt.reflectionProbes){opt.reflectionProbes->Sync(reg);opt.reflectionProbes->BindBest(*m_pbr,camera.Position(),22);}
+    if(opt.reflectionProbes){opt.reflectionProbes->Sync(reg,camera.Position());opt.reflectionProbes->BindBest(*m_pbr,camera.Position(),22);}
     else m_pbr->SetInt("uReflectionProbeCount",0);
     if (opt.ssao) {
         opt.ssao->BindAO(8);

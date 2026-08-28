@@ -1107,9 +1107,13 @@ void AnimationGraphEditorPanel::Draw(const std::string& assetRoot, bool* open, b
             } else {
                 const auto parameterCombo = [&](const char* label, std::string& value) {
                     if (ImGui::BeginCombo(label, value.empty() ? "None" : value.c_str())) {
-                        for (const auto& parameter : m_asset.parameters) {
+                        for (std::size_t parameterIndex = 0;
+                             parameterIndex < m_asset.parameters.size(); ++parameterIndex) {
+                            const auto& parameter = m_asset.parameters[parameterIndex];
                             if (parameter.type != EditorScene::AnimationParameter::Type::Float) continue;
+                            ImGui::PushID(static_cast<int>(parameterIndex));
                             if (ImGui::Selectable(parameter.name.c_str(), value == parameter.name)) { value = parameter.name; m_controllerDirty = true; }
+                            ImGui::PopID();
                         }
                         ImGui::EndCombo();
                     }
@@ -1170,8 +1174,13 @@ void AnimationGraphEditorPanel::Draw(const std::string& assetRoot, bool* open, b
                                            float& threshold) {
                 ImGui::PushID(id);
                 if (ImGui::BeginCombo("Parameter", parameterName.empty() ? "None" : parameterName.c_str())) {
-                    for (const auto& parameter : m_asset.parameters)
+                    for (std::size_t parameterIndex = 0;
+                         parameterIndex < m_asset.parameters.size(); ++parameterIndex) {
+                        const auto& parameter = m_asset.parameters[parameterIndex];
+                        ImGui::PushID(static_cast<int>(parameterIndex));
                         if (ImGui::Selectable(parameter.name.c_str(), parameter.name == parameterName)) { parameterName = parameter.name; m_controllerDirty = true; }
+                        ImGui::PopID();
+                    }
                     ImGui::EndCombo();
                 }
                 auto type = EditorScene::AnimationParameter::Type::Float;

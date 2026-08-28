@@ -14,6 +14,8 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
+#include <cstring>
 
 using engine::ecs::Entity;
 using engine::ecs::Transform;
@@ -21,6 +23,19 @@ using engine::ecs::MeshPBR;
 
 namespace engine {
 namespace {
+
+void HashBytes(std::uint64_t& hash, const void* data, std::size_t size) {
+    const auto* bytes = static_cast<const unsigned char*>(data);
+    for (std::size_t i = 0; i < size; ++i) {
+        hash ^= static_cast<std::uint64_t>(bytes[i]);
+        hash *= 1099511628211ull;
+    }
+}
+
+template <typename T>
+void HashValue(std::uint64_t& hash, const T& value) {
+    HashBytes(hash, &value, sizeof(T));
+}
 
 glm::mat4 FoliageInstanceMatrix(const Transform& owner,
                                 const ecs::FoliageInstance& instance) {
@@ -33,6 +48,54 @@ glm::mat4 FoliageInstanceMatrix(const Transform& owner,
 }
 
 } // namespace
+
+std::uint64_t ComputeShadowCasterRevision(ecs::Registry& reg) {
+    std::uint64_t hash = 1469598103934665603ull;
+    auto meshView = reg.view<Transform, MeshPBR>();
+    if (!meshView.empty()) meshView.each([&](Entity entity, Transform& transform, MeshPBR& mesh) {
+        if (!mesh.mesh || mesh.material.blendMode == ecs::PbrMaterial::BlendMode::Transparent)
+            return;
+        const glm::vec3& emissive = mesh.material.emissive;
+        if (emissive.x > 0.0f || emissive.y > 0.0f || emissive.z > 0.0f) return;
+        HashValue(hash, entity);
+        const glm::mat4 model = transform.Model();
+        HashBytes(hash, glm::value_ptr(model), sizeof(glm::mat4));
+        const std::uintptr_t meshIdentity = reinterpret_cast<std::uintptr_t>(mesh.mesh);
+        HashValue(hash, meshIdentity);
+        HashValue(hash, mesh.material.blendMode);
+        HashValue(hash, mesh.material.alphaCutoff);
+        HashValue(hash, mesh.material.opacity);
+        HashValue(hash, mesh.material.uvScale);
+        HashValue(hash, mesh.material.uvOffset);
+        HashValue(hash, mesh.material.uvRotation);
+        const std::uintptr_t albedo = reinterpret_cast<std::uintptr_t>(mesh.material.albedoMap);
+        HashValue(hash, albedo);
+    });
+    auto foliageView = reg.view<Transform, ecs::FoliageComponent>();
+    if (!foliageView.empty()) foliageView.each(
+        [&](Entity entity, Transform& owner, ecs::FoliageComponent& foliage) {
+            if (!foliage.visible) return;
+            HashValue(hash, entity);
+            const glm::mat4 ownerModel = owner.Model();
+            HashBytes(hash, glm::value_ptr(ownerModel), sizeof(glm::mat4));
+            for (std::size_t typeIndex = 0; typeIndex < foliage.types.size(); ++typeIndex) {
+                const auto& type = foliage.types[typeIndex];
+                if (!type.castShadows || !type.model) continue;
+                HashValue(hash, typeIndex);
+                const std::uintptr_t modelIdentity = reinterpret_cast<std::uintptr_t>(type.model);
+                HashValue(hash, modelIdentity);
+            }
+            for (const auto& instance : foliage.instances) {
+                if (!instance.enabled || instance.typeIndex >= foliage.types.size()
+                    || !foliage.types[instance.typeIndex].castShadows) continue;
+                HashValue(hash, instance.typeIndex);
+                HashValue(hash, instance.position);
+                HashValue(hash, instance.rotationDegrees);
+                HashValue(hash, instance.scale);
+            }
+        });
+    return hash;
+}
 
 ShadowCasterBatch::ShadowCasterBatch()  { glGenBuffers(1, &m_vbo); }
 ShadowCasterBatch::~ShadowCasterBatch() { if (m_vbo) glDeleteBuffers(1, &m_vbo); }

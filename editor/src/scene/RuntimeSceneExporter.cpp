@@ -100,7 +100,7 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         return engine::MakeAssetReference(
             &assetRegistry, contentRoot, assetPath, type).id;
     };
-    out << "3DGRuntimeScene 102 " << sceneId.ToString() << '\n';
+    out << "3DGRuntimeScene 103 " << sceneId.ToString() << '\n';
     out << "# Runtime export from 3DGEditor. Editor-only flags are omitted.\n";
     const EditorScene::Environment& environment = scene.GetEnvironment();
     out << "environment "
@@ -415,7 +415,8 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
                 << data.direction.x << ' ' << data.direction.y << ' ' << data.direction.z << ' '
                 << data.innerAngle << ' ' << data.outerAngle << ' ' << data.range << ' ' << data.sourceRadius << ' '
                 << static_cast<int>(data.areaShape) << ' ' << data.areaWidth << ' ' << data.areaHeight << ' ' << (data.areaTwoSided?1:0) << ' '
-                << (data.affectDynamicGi?1:0) << '\n';
+                << (data.affectDynamicGi?1:0) << ' '
+                << (data.affectVolumetricFog?1:0) << ' ' << data.volumetricPriority << '\n';
             continue;
         }
 

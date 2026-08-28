@@ -148,6 +148,8 @@ uniform float uCascadeWorldTexelSize[4];
 uniform float uCascadeDepthRange[4];
 uniform mat4  uView;
 uniform float uShadowSoftness;
+uniform int uShadowBlockerSamples;
+uniform int uShadowFilterSamples;
 uniform int   uHasShadow;
 uniform int   uUseIBL;
 uniform samplerCube uIrradiance;
@@ -425,6 +427,8 @@ void SkinnedRenderer::DrawScene(ecs::Registry& reg, const Camera& camera, float 
     m_pbr->SetVec3("uAmbient", lit.ambient);
     m_pbr->SetInt("uApplyTonemap", lit.tonemap ? 1 : 0);
     m_pbr->SetFloat("uShadowSoftness", lit.shadowSoftness);
+    m_pbr->SetInt("uShadowBlockerSamples", std::clamp(lit.shadowBlockerSamples, 4, 16));
+    m_pbr->SetInt("uShadowFilterSamples", std::clamp(lit.shadowFilterSamples, 6, 24));
     // Keep optional sampler types off unit 0 even when their feature is disabled.
     m_pbr->SetInt("uLightingSH0",18); m_pbr->SetInt("uLightingSH1",19);
     m_pbr->SetInt("uLightingSH2",20); m_pbr->SetInt("uLightingMeta",21);

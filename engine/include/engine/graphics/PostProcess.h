@@ -9,6 +9,8 @@
 #include <glm/gtc/matrix_inverse.hpp>
 
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -58,6 +60,7 @@ public:
         float adaptationSpeedDown = 1.0f;
         float histogramLowPercent = 0.02f;
         float histogramHighPercent = 0.95f;
+        float exposureDeadZoneEV = 0.08f;
         float bloomKnee = 0.5f;
         int bloomLevels = 5;
         float temperature = 6500.0f;
@@ -160,10 +163,36 @@ public:
     }
     void SetVolumetricLights(std::vector<VolumetricLight> lights) {
         if (lights.size() > 16) lights.resize(16);
+        bool changed = lights.size() != m_volumetricLights.size();
+        for (std::size_t i = 0; !changed && i < lights.size(); ++i) {
+            const VolumetricLight& a = lights[i];
+            const VolumetricLight& b = m_volumetricLights[i];
+            changed = glm::dot(a.position-b.position, a.position-b.position) > 0.0001f
+                || glm::dot(a.direction-b.direction, a.direction-b.direction) > 0.0001f
+                || glm::dot(a.radiance-b.radiance, a.radiance-b.radiance) > 0.0001f
+                || std::abs(a.range - b.range) > 0.001f
+                || std::abs(a.outerCos - b.outerCos) > 0.0001f;
+        }
+        if (changed) m_volumeHistoryValid = false;
         m_volumetricLights = std::move(lights);
     }
     void SetLocalFogVolumes(std::vector<LocalFogVolume> volumes) {
         if (volumes.size() > 8) volumes.resize(8);
+        bool changed = volumes.size() != m_localFogVolumes.size();
+        for (std::size_t i = 0; !changed && i < volumes.size(); ++i) {
+            const LocalFogVolume& a = volumes[i];
+            const LocalFogVolume& b = m_localFogVolumes[i];
+            changed = a.sphere != b.sphere
+                || glm::dot(a.position-b.position, a.position-b.position) > 0.0001f
+                || glm::dot(a.boxExtents-b.boxExtents, a.boxExtents-b.boxExtents) > 0.0001f
+                || glm::dot(a.albedo-b.albedo, a.albedo-b.albedo) > 0.0001f
+                || std::abs(a.radius - b.radius) > 0.001f
+                || std::abs(a.blendDistance - b.blendDistance) > 0.001f
+                || std::abs(a.density - b.density) > 0.0001f
+                || std::abs(a.extinction - b.extinction) > 0.0001f
+                || std::abs(a.anisotropy - b.anisotropy) > 0.0001f;
+        }
+        if (changed) m_volumeHistoryValid = false;
         m_localFogVolumes = std::move(volumes);
     }
     void SetEffects(std::vector<Effect> effects) { m_effects = std::move(effects); }
@@ -183,6 +212,7 @@ public:
     void Resize(int width, int height);
     unsigned int HdrFbo()   const { return m_hdr.FboId(); }
     unsigned int HdrColor() const { return m_hdr.ColorTexture(); }
+    std::uint64_t MemoryBytes() const;
 
 private:
     void RenderComposite(int width, int height, float dt, const Framebuffer* target);

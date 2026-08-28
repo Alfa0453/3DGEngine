@@ -6,6 +6,8 @@
 #include <glm/glm.hpp>
 
 #include <functional>
+#include <cstdint>
+#include <array>
 
 namespace engine {
 
@@ -37,6 +39,11 @@ public:
     float WorldTexelSize(int i) const { return m_worldTexelSize[i]; }
     float DepthRange(int i) const { return m_depthRange[i]; }
     int   Count() const { return kCascades; }
+    std::uint32_t CascadesRenderedLastFrame() const { return m_renderedLastFrame; }
+    std::uint32_t CascadesReusedLastFrame() const { return m_reusedLastFrame; }
+    std::uint64_t MemoryBytes() const;
+    void SetUpdateIntervals(const std::array<std::uint32_t, kCascades>& intervals);
+    void Invalidate() { m_cacheValid = false; }
 
 private:
     int m_size;
@@ -49,6 +56,15 @@ private:
     float     m_depthRange[kCascades] = {1, 1, 1, 1};
     Shader    m_shader;
     ShadowCasterBatch m_batch;
+    std::array<std::uint32_t, kCascades> m_updateIntervals{{1, 2, 4, 8}};
+    std::array<std::uint64_t, kCascades> m_lastUpdateFrame{{0, 0, 0, 0}};
+    std::uint64_t m_frameIndex = 0;
+    std::uint64_t m_casterRevision = 0;
+    glm::vec3 m_lastLightDirection{0.0f};
+    float m_lastShadowFar = 0.0f;
+    bool m_cacheValid = false;
+    std::uint32_t m_renderedLastFrame = 0;
+    std::uint32_t m_reusedLastFrame = 0;
 };
 
 } // namespace engine

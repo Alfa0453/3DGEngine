@@ -60,9 +60,12 @@ SplineBuilderPanel::Result SplineBuilderPanel::Draw(
 
     ImGui::InputText("Group Name", m_groupName.data(), m_groupName.size());
     if (ImGui::BeginCombo("Spline", m_splineName.empty() ? "No spline available" : m_splineName.c_str())) {
-        for (const EditorScene::Object* spline : splines)
+        for (const EditorScene::Object* spline : splines) {
+            ImGui::PushID(spline);
             if (ImGui::Selectable(spline->name.c_str(), spline->name == m_splineName))
                 m_splineName = spline->name;
+            ImGui::PopID();
+        }
         ImGui::EndCombo();
     }
     static const char* modes[] = {"Road", "Fence", "Prop Line"};
@@ -83,9 +86,12 @@ SplineBuilderPanel::Result SplineBuilderPanel::Draw(
         const std::string modelName = m_modelPath.empty() ? "Choose static mesh..."
             : std::filesystem::path(m_modelPath).stem().string();
         if (ImGui::BeginCombo("Prop Mesh", modelName.c_str())) {
-            for (const AssetChoice& model : m_models)
+            for (const AssetChoice& model : m_models) {
+                ImGui::PushID(model.path.c_str());
                 if (ImGui::Selectable(model.name.c_str(), model.path == m_modelPath))
                     m_modelPath = model.path;
+                ImGui::PopID();
+            }
             ImGui::EndCombo();
         }
         ImGui::DragFloat("Prop Scale", &m_propScale, 0.02f, 0.01f, 1000.0f, "%.2f");
@@ -102,9 +108,12 @@ SplineBuilderPanel::Result SplineBuilderPanel::Draw(
             : std::filesystem::path(m_materialPath).stem().string();
         if (ImGui::BeginCombo("Material", materialName.c_str())) {
             if (ImGui::Selectable("Default", m_materialPath.empty())) m_materialPath.clear();
-            for (const AssetChoice& material : m_materials)
+            for (const AssetChoice& material : m_materials) {
+                ImGui::PushID(material.path.c_str());
                 if (ImGui::Selectable(material.name.c_str(), material.path == m_materialPath))
                     m_materialPath = material.path;
+                ImGui::PopID();
+            }
             ImGui::EndCombo();
         }
     }

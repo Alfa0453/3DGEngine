@@ -9,6 +9,7 @@
 #include <imgui.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -120,6 +121,50 @@ void LightingAnalysisPanel::Scan(const EditorScene& scene,
             "High shadow softness increases filtering pressure on every shadow map.",
             "Reduce softness where crisp shadows are acceptable or reserve it for cinematic presets."});
     }
+    if (environment.dynamicGiEnabled) {
+        if (environment.dynamicGiProbeSpacing < 0.25f)
+            m_report.findings.push_back({editor::lighting::Severity::Critical, -1,
+                "World Settings", "Dynamic GI volume",
+                "Dynamic GI probe spacing is below 0.25 world units.",
+                "Increase probe spacing or restrict the GI bounds before running the level."});
+        if (environment.dynamicGiRaysPerProbe * environment.dynamicGiProbesPerFrame
+            > environment.dynamicGiMaxRaysPerFrame)
+            m_report.findings.push_back({editor::lighting::Severity::Warning, -1,
+                "World Settings", "Dynamic GI budget",
+                "Requested dynamic GI updates exceed the authored rays-per-frame budget.",
+                "Lower rays per probe/probes per frame or explicitly raise the budget."});
+    }
+
+    int unboundPostVolumes = 0;
+    int reflectionCount = 0;
+    std::uint64_t reflectionBytes = 0;
+    for (int index = 0; index < static_cast<int>(objects.size()); ++index) {
+        const EditorScene::Object& object = objects[static_cast<std::size_t>(index)];
+        if (object.postProcessVolumeEnabled && object.postProcessVolume.enabled
+            && object.postProcessVolume.unbound) ++unboundPostVolumes;
+        if (!object.reflectionProbeEnabled || !object.reflectionProbe.enabled) continue;
+        ++reflectionCount;
+        const std::uint64_t resolution = std::max<std::uint32_t>(
+            object.reflectionProbe.captureResolution, 1u);
+        reflectionBytes += resolution * resolution * 6ull * 8ull * 4ull / 3ull;
+        if (!object.reflectionProbe.HasCapture())
+            m_report.findings.push_back({editor::lighting::Severity::Warning, index,
+                object.name, "Stale reflection capture",
+                "Reflection probe has no derived cubemap capture.",
+                "Capture the selected reflection probe before packaging."});
+    }
+    if (unboundPostVolumes > 1)
+        m_report.findings.push_back({editor::lighting::Severity::Warning, -1,
+            "World Settings", "Post-process conflict",
+            std::to_string(unboundPostVolumes)
+                + " unbound post-process volumes can compete globally.",
+            "Keep one global volume and use bounded volumes for local overrides."});
+    if (reflectionBytes > 256ull * 1024ull * 1024ull)
+        m_report.findings.push_back({editor::lighting::Severity::Critical, -1,
+            "World Settings", "Reflection memory",
+            std::to_string(reflectionCount) + " probes require approximately "
+                + std::to_string(reflectionBytes / (1024ull * 1024ull)) + " MB.",
+            "Reduce capture resolution/overlap or shorten reflection streaming distance."});
 
     for (int index = 0; index < static_cast<int>(objects.size()); ++index) {
         const EditorScene::Object& object = objects[static_cast<std::size_t>(index)];

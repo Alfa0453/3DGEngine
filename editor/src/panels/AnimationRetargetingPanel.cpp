@@ -36,8 +36,10 @@ bool AssetCombo(const char* label, std::string& value,
         for (const std::string& path : paths) {
             const bool selected = path == value;
             const std::string display = std::filesystem::path(path).filename().string();
+            ImGui::PushID(path.c_str());
             if (ImGui::Selectable(display.c_str(), selected)) { value = path; changed = true; }
             if (selected) ImGui::SetItemDefaultFocus();
+            ImGui::PopID();
         }
         ImGui::EndCombo();
     }
@@ -310,17 +312,27 @@ void AnimationRetargetingPanel::Draw(EditorAssets& assets, const std::string& ro
         ImGui::SeparatorText("Selected Bone Correction");
         if (m_inputsLoaded) {
             if (ImGui::BeginCombo("Source Bone", map.sourceBone.c_str())) {
-                for (const engine::Bone& bone : m_sourceSkeleton.skeleton.bones)
+                for (std::size_t boneIndex = 0;
+                     boneIndex < m_sourceSkeleton.skeleton.bones.size(); ++boneIndex) {
+                    const engine::Bone& bone = m_sourceSkeleton.skeleton.bones[boneIndex];
+                    ImGui::PushID(static_cast<int>(boneIndex));
                     if (ImGui::Selectable(bone.name.c_str(), bone.name==map.sourceBone)) {
                         map.sourceBone=bone.name; m_dirty=true;
                     }
+                    ImGui::PopID();
+                }
                 ImGui::EndCombo();
             }
             if (ImGui::BeginCombo("Target Bone", map.targetBone.c_str())) {
-                for (const engine::Bone& bone : m_targetSkeleton.skeleton.bones)
+                for (std::size_t boneIndex = 0;
+                     boneIndex < m_targetSkeleton.skeleton.bones.size(); ++boneIndex) {
+                    const engine::Bone& bone = m_targetSkeleton.skeleton.bones[boneIndex];
+                    ImGui::PushID(static_cast<int>(boneIndex));
                     if (ImGui::Selectable(bone.name.c_str(), bone.name==map.targetBone)) {
                         map.targetBone=bone.name; m_dirty=true;
                     }
+                    ImGui::PopID();
+                }
                 ImGui::EndCombo();
             }
         }
@@ -344,8 +356,11 @@ void AnimationRetargetingPanel::Draw(EditorAssets& assets, const std::string& ro
     ImGui::SeparatorText("Output");
     if (!m_sourceAnimation.clips.empty()) {
         const char* preview=m_sourceAnimation.clips[static_cast<std::size_t>(m_selectedClip)].animation.name.c_str();
-        if(ImGui::BeginCombo("Clip",preview)){for(int i=0;i<(int)m_sourceAnimation.clips.size();++i)
-            if(ImGui::Selectable(m_sourceAnimation.clips[static_cast<std::size_t>(i)].animation.name.c_str(),i==m_selectedClip))m_selectedClip=i; ImGui::EndCombo();}
+        if(ImGui::BeginCombo("Clip",preview)){for(int i=0;i<(int)m_sourceAnimation.clips.size();++i) {
+            ImGui::PushID(i);
+            if(ImGui::Selectable(m_sourceAnimation.clips[static_cast<std::size_t>(i)].animation.name.c_str(),i==m_selectedClip))m_selectedClip=i;
+            ImGui::PopID();
+        } ImGui::EndCombo();}
     }
     ImGui::InputText("Output Name", &m_outputName);
     const bool selectedClicked = ImGui::Button("Retarget Selected Clip");

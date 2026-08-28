@@ -149,11 +149,13 @@ void LevelLayersPanel::Draw(EditorScene& scene, bool* open) {
                 for (int index : layer.objects) {
                     const EditorScene::Object& object = scene.Objects()[static_cast<std::size_t>(index)];
                     if (!ContainsInsensitive(object.name, m_filter)) continue;
+                    ImGui::PushID(index);
                     ImGui::Indent(30.0f);
                     const bool selected = std::find(scene.SelectedIndices().begin(), scene.SelectedIndices().end(), index)
                         != scene.SelectedIndices().end();
                     if (ImGui::Selectable(object.name.c_str(), selected)) scene.SelectIndex(index);
                     ImGui::Unindent(30.0f);
+                    ImGui::PopID();
                 }
             }
             ImGui::PopID();

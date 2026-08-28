@@ -5,6 +5,7 @@
 
 #include <glm/glm.hpp>
 
+#include <cstdint>
 #include <vector>
 
 namespace engine {
@@ -35,6 +36,10 @@ public:
     void BindMaps(unsigned int startUnit) const;
     const glm::mat4& LightVP(int i) const { return m_vp[i]; }
     int Count() const { return m_count; }
+    std::uint32_t MapsRenderedLastFrame() const { return m_renderedLastFrame; }
+    std::uint32_t MapsReusedLastFrame() const { return m_reusedLastFrame; }
+    std::uint64_t MemoryBytes() const;
+    void Invalidate() { m_cacheValid = false; }
 
 private:
     int m_size;
@@ -42,6 +47,11 @@ private:
     unsigned int m_fbo = 0;
     unsigned int m_maps[kMax] = {0, 0, 0, 0};
     glm::mat4 m_vp[kMax];
+    std::uint64_t m_casterRevision = 0;
+    std::uint64_t m_lightSignatures[kMax] = {0, 0, 0, 0};
+    bool m_cacheValid = false;
+    std::uint32_t m_renderedLastFrame = 0;
+    std::uint32_t m_reusedLastFrame = 0;
     Shader m_shader;
     ShadowCasterBatch m_batch;
 };

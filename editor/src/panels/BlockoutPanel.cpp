@@ -75,9 +75,12 @@ BlockoutPanel::Result BlockoutPanel::Draw(const std::string& assetRoot, bool* op
         ? "Default" : std::filesystem::path(m_materialPath).stem().string();
     if (ImGui::BeginCombo("Material", materialName.c_str())) {
         if (ImGui::Selectable("Default", m_materialPath.empty())) m_materialPath.clear();
-        for (const MaterialChoice& material : m_materials)
+        for (const MaterialChoice& material : m_materials) {
+            ImGui::PushID(material.path.c_str());
             if (ImGui::Selectable(material.name.c_str(), material.path == m_materialPath))
                 m_materialPath = material.path;
+            ImGui::PopID();
+        }
         ImGui::EndCombo();
     }
     ImGui::Checkbox("Generate Colliders", &m_collider);

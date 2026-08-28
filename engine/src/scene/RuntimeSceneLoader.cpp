@@ -134,11 +134,11 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             return false;
         }
     }
-    if (magic != "3DGRuntimeScene" || version < 1 || version > 102) {
+    if (magic != "3DGRuntimeScene" || version < 1 || version > 103) {
         if (error) {
             *error = "Runtime scene file has an unknown format: "
                 + magic + " " + std::to_string(version)
-                + " (expected 3DGRuntimeScene 1..102).";
+                + " (expected 3DGRuntimeScene 1..103).";
         }
         return false;
     }
@@ -958,6 +958,7 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             if(version>=99){int areaShape=0,areaTwoSided=0;record>>areaShape>>desc.light.areaWidth>>desc.light.areaHeight>>areaTwoSided;
                 desc.light.areaShape=areaShape==1?ecs::Light::AreaShape::Rectangle:ecs::Light::AreaShape::Sphere;desc.light.areaTwoSided=areaTwoSided!=0;}
             if(version>=100){int affectDynamicGi=1;record>>affectDynamicGi;desc.light.affectDynamicGi=affectDynamicGi!=0;}
+            if(version>=103){int affectVolumetric=1;record>>affectVolumetric>>desc.light.volumetricPriority;desc.light.affectVolumetricFog=affectVolumetric!=0;}
 
             if (!record || !ParseLightType(typeName, &desc.light.type)) {
                 if (error) {

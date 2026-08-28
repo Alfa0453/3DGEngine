@@ -11,6 +11,7 @@
 #include <imgui.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <filesystem>
 #include <sstream>
 #include <unordered_map>
@@ -64,6 +65,9 @@ void OptimizationAuditorPanel::Scan(const EditorScene& scene,
     std::size_t colliders = 0;
     std::size_t totalParticles = 0;
     std::size_t totalFoliage = 0;
+    std::size_t reflectionProbeCount = 0;
+    std::size_t localFogVolumeCount = 0;
+    std::uint64_t reflectionProbeBytes = 0;
     std::unordered_set<std::string> auditedMaterials;
     std::unordered_set<std::string> auditedTextures;
 
@@ -235,6 +239,23 @@ void OptimizationAuditorPanel::Scan(const EditorScene& scene,
                 estimatedDrawCalls += object.lightData.type == Type::Point ? 6 : 1;
             }
         }
+        if (object.reflectionProbeEnabled && object.reflectionProbe.enabled) {
+            ++reflectionProbeCount;
+            const std::uint64_t resolution = std::max<std::uint32_t>(
+                object.reflectionProbe.captureResolution, 1u);
+            reflectionProbeBytes += resolution * resolution * 6ull * 8ull * 4ull / 3ull;
+            if (!object.reflectionProbe.HasCapture())
+                add(Severity::Warning, "Lighting", index,
+                    "Reflection probe has no baked capture.",
+                    "Capture this probe before packaging the level.", 20.0);
+            if (resolution >= 512)
+                add(Severity::Warning, "Lighting", index,
+                    "Reflection probe resolution is " + std::to_string(resolution) + ".",
+                    "Use 128-256 for ordinary rooms and reserve 512 for hero spaces.",
+                    static_cast<double>(resolution));
+        }
+        if (object.localFogVolumeEnabled && object.localFogVolume.enabled)
+            ++localFogVolumeCount;
         if (object.colliderEnabled) {
             ++colliders;
             if (object.rigidBodyEnabled
@@ -306,6 +327,37 @@ void OptimizationAuditorPanel::Scan(const EditorScene& scene,
             "Scene has " + CountText(shadowLights) + " shadow-casting lights.",
             "Disable shadows on decorative lights and limit overlapping point lights.",
             static_cast<double>(shadowLights));
+    if (reflectionProbeBytes > 256ull * 1024ull * 1024ull)
+        add(Severity::Critical, "Lighting", -1,
+            "Reflection captures require about "
+                + std::to_string(reflectionProbeBytes / (1024ull * 1024ull)) + " MB.",
+            "Reduce capture resolution, overlap, or streaming distance.",
+            static_cast<double>(reflectionProbeBytes));
+    else if (reflectionProbeBytes > 128ull * 1024ull * 1024ull)
+        add(Severity::Warning, "Lighting", -1,
+            "Reflection captures require about "
+                + std::to_string(reflectionProbeBytes / (1024ull * 1024ull)) + " MB.",
+            "Check the reflection memory budget and stream distant probes.",
+            static_cast<double>(reflectionProbeBytes));
+    if (localFogVolumeCount > 8)
+        add(Severity::Warning, "Lighting", -1,
+            "Scene has " + CountText(localFogVolumeCount)
+                + " local fog volumes; only the highest-priority visible set is practical.",
+            "Split them across streamed level cells and keep overlaps shallow.",
+            static_cast<double>(localFogVolumeCount));
+    if (environment.dynamicGiEnabled
+        && environment.dynamicGiRaysPerProbe * environment.dynamicGiProbesPerFrame
+            > environment.dynamicGiMaxRaysPerFrame)
+        add(Severity::Warning, "Lighting", -1,
+            "Dynamic GI requested rays exceed its per-frame ray budget.",
+            "Lower rays per probe/probes per frame or raise the explicit budget.",
+            static_cast<double>(environment.dynamicGiRaysPerProbe
+                * environment.dynamicGiProbesPerFrame));
+    if (environment.ssgiEnabled && environment.ssgiSteps > 24)
+        add(Severity::Warning, "Lighting", -1,
+            "SSGI uses more than 24 trace steps.",
+            "Use the High/Ultra preset only after measuring the target GPU.",
+            static_cast<double>(environment.ssgiSteps));
     else if (shadowLights >= 4)
         add(Severity::Warning, "Lighting", -1,
             "Scene has " + CountText(shadowLights) + " shadow-casting lights.",
@@ -348,6 +400,7 @@ void OptimizationAuditorPanel::Scan(const EditorScene& scene,
             << " triangles | " << totalVertices << " vertices | ~"
             << estimatedDrawCalls << " draw calls | " << totalParticles
             << " particle capacity | " << totalFoliage << " foliage | "
+            << reflectionProbeCount << " reflection probes | "
             << critical << " critical | " << warnings << " warnings";
     m_summary = summary.str();
     m_status = "Scan completed.";

@@ -36,14 +36,18 @@ void DecalPlacementPanel::Draw(bool* open,
         if (!materials.empty()) ImGui::SeparatorText("Materials");
         for (const std::string& path : materials) {
             const std::string label = std::filesystem::path(path).filename().string();
+            ImGui::PushID(path.c_str());
             if (ImGui::Selectable(label.c_str(), m_settings.materialPath == path))
                 m_settings.materialPath = path;
+            ImGui::PopID();
         }
         if (!textures.empty()) ImGui::SeparatorText("Textures");
         for (const std::string& path : textures) {
             const std::string label = std::filesystem::path(path).filename().string();
+            ImGui::PushID(path.c_str());
             if (ImGui::Selectable(label.c_str(), m_settings.materialPath == path))
                 m_settings.materialPath = path;
+            ImGui::PopID();
         }
         ImGui::EndCombo();
     }

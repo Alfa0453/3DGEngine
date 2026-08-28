@@ -75,8 +75,11 @@ ArrayToolPanel::Result ArrayToolPanel::Draw(const EditorScene& scene, bool* open
             m_splineName = splines.empty() ? std::string() : splines.front();
         const char* preview = m_splineName.empty() ? "No spline available" : m_splineName.c_str();
         if (ImGui::BeginCombo("Spline", preview)) {
-            for (const std::string& name : splines) {
+            for (std::size_t splineIndex = 0; splineIndex < splines.size(); ++splineIndex) {
+                const std::string& name = splines[splineIndex];
+                ImGui::PushID(static_cast<int>(splineIndex));
                 if (ImGui::Selectable(name.c_str(), name == m_splineName)) m_splineName = name;
+                ImGui::PopID();
             }
             ImGui::EndCombo();
         }

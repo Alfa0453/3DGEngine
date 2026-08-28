@@ -55,7 +55,11 @@ void RoadGeneratorPanel::MaterialCombo(const char* label,std::string& path){
     const std::string selected=path.empty()?"Default":std::filesystem::path(path).stem().string();
     if(!ImGui::BeginCombo(label,selected.c_str()))return;
     if(ImGui::Selectable("Default",path.empty())){path.clear();m_dirty=true;}
-    for(const auto& asset:m_materials)if(ImGui::Selectable(asset.name.c_str(),asset.path==path)){path=asset.path;m_dirty=true;}
+    for(const auto& asset:m_materials){
+        ImGui::PushID(asset.path.c_str());
+        if(ImGui::Selectable(asset.name.c_str(),asset.path==path)){path=asset.path;m_dirty=true;}
+        ImGui::PopID();
+    }
     ImGui::EndCombo();
 }
 const std::string& RoadGeneratorPanel::MaterialFor(Surface surface)const{
@@ -112,7 +116,7 @@ RoadGeneratorPanel::Result RoadGeneratorPanel::Draw(const EditorScene& scene,con
     if(!FindSpline(scene,m_splineName)&&!splines.empty())m_splineName=splines.front()->name;
     if(ImGui::Button("New"))NewAsset();ImGui::SameLine();if(ImGui::Button("Save")){std::string error;if(Save(root,&error)){m_status="Saved "+m_path;result.assetsChanged=true;}else m_status=error;}ImGui::SameLine();if(ImGui::Button("Generate / Rebuild"))result.generate=true;ImGui::SameLine();if(ImGui::Button("Delete Generated"))result.remove=true;
     if(ImGui::InputText("Name",m_name.data(),m_name.size()))m_dirty=true;
-    if(ImGui::BeginCombo("Spline",m_splineName.empty()?"No spline":m_splineName.c_str())){for(const auto* spline:splines)if(ImGui::Selectable(spline->name.c_str(),spline->name==m_splineName)){m_splineName=spline->name;m_dirty=true;}ImGui::EndCombo();}
+    if(ImGui::BeginCombo("Spline",m_splineName.empty()?"No spline":m_splineName.c_str())){for(const auto* spline:splines){ImGui::PushID(spline);if(ImGui::Selectable(spline->name.c_str(),spline->name==m_splineName)){m_splineName=spline->name;m_dirty=true;}ImGui::PopID();}ImGui::EndCombo();}
     ImGui::TextUnformatted("Presets:");ImGui::SameLine();if(ImGui::SmallButton("Basic"))Preset(0);ImGui::SameLine();if(ImGui::SmallButton("Country"))Preset(1);ImGui::SameLine();if(ImGui::SmallButton("City"))Preset(2);ImGui::SameLine();if(ImGui::SmallButton("Highway"))Preset(3);
     ImGui::SeparatorText("Road Geometry");m_dirty|=ImGui::DragFloat("Width",&m_width,.1f,.5f,100.f,"%.2f m");m_dirty|=ImGui::DragFloat("Thickness",&m_thickness,.01f,.02f,5.f,"%.2f m");m_dirty|=ImGui::DragFloat("Curve Resolution",&m_spacing,.05f,.2f,10.f,"%.2f m");m_dirty|=ImGui::SliderInt("Lanes",&m_lanes,1,12);
     m_dirty|=ImGui::Checkbox("Shoulders",&m_shoulders);if(m_shoulders){ImGui::SameLine();m_dirty|=ImGui::DragFloat("Shoulder Width",&m_shoulderWidth,.05f,.1f,10.f,"%.2f m");}

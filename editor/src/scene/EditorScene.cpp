@@ -479,7 +479,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         return false;
     }
 
-    out << "3DGEditorScene 141 " << m_assetId.ToString() << '\n';
+    out << "3DGEditorScene 142 " << m_assetId.ToString() << '\n';
     out << "environment "
         << m_environment.timeOfDay << ' '
         << m_environment.skyLightIntensity << ' '
@@ -693,6 +693,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
                 << data.innerAngle << ' ' << data.outerAngle << ' ' << data.range << ' ' << data.sourceRadius << ' '
                 << static_cast<int>(data.areaShape) << ' ' << data.areaWidth << ' ' << data.areaHeight << ' ' << (data.areaTwoSided?1:0) << ' '
                 << (data.affectDynamicGi?1:0) << ' '
+                << (data.affectVolumetricFog?1:0) << ' ' << data.volumetricPriority << ' '
                 << (object.visible ? 1 : 0) << ' '
                 << (object.locked ? 1 : 0) << '\n';
             continue;
@@ -1473,7 +1474,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             return false;
         }
     }
-    if (magic != "3DGEditorScene" ||(version < 1 || version > 141)) {
+    if (magic != "3DGEditorScene" ||(version < 1 || version > 142)) {
         if (error) *error = "Scene file has an unknown format.";
         return false;
     }
@@ -2058,6 +2059,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             if(version>=138){int areaShape=0,areaTwoSided=0;in>>areaShape>>light.areaWidth>>light.areaHeight>>areaTwoSided;
                 light.areaShape=areaShape==1?Light::AreaShape::Rectangle:Light::AreaShape::Sphere;light.areaTwoSided=areaTwoSided!=0;}
             if(version>=139){int affectDynamicGi=1;in>>affectDynamicGi;light.affectDynamicGi=affectDynamicGi!=0;}
+            if(version>=142){int affectVolumetric=1;in>>affectVolumetric>>light.volumetricPriority;light.affectVolumetricFog=affectVolumetric!=0;}
             in>>visible>>locked;
 
             if (!in || !ParseLightType(lightTypeName, &light.type)) {

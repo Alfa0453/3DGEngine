@@ -5,6 +5,7 @@
 
 #include <glm/glm.hpp>
 
+#include <cstdint>
 #include <vector>
 
 namespace engine {
@@ -33,6 +34,10 @@ public:
 
     int   Count()    const { return m_count; }
     float FarPlane() const { return m_far; }
+    std::uint32_t MapsRenderedLastFrame() const { return m_renderedLastFrame; }
+    std::uint32_t MapsReusedLastFrame() const { return m_reusedLastFrame; }
+    std::uint64_t MemoryBytes() const;
+    void Invalidate() { m_cacheValid = false; }
 
 private:
     int   m_faceSize;
@@ -40,6 +45,11 @@ private:
     float m_far   = 50.0f;
     unsigned int m_fbo = 0, m_depthRbo = 0;
     unsigned int m_cubes[kMax] = {0, 0, 0, 0};
+    std::uint64_t m_casterRevision = 0;
+    std::uint64_t m_lightSignatures[kMax] = {0, 0, 0, 0};
+    bool m_cacheValid = false;
+    std::uint32_t m_renderedLastFrame = 0;
+    std::uint32_t m_reusedLastFrame = 0;
     Shader m_shader;
     ShadowCasterBatch m_batch;
 };

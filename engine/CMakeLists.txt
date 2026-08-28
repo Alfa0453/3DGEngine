@@ -35,6 +35,7 @@ add_library(engine STATIC
     src/graphics/LightingScene.cpp
     src/graphics/DynamicIrradiance.cpp
     src/graphics/EnvironmentLighting.cpp
+    src/graphics/LightingScalability.cpp
     src/graphics/SSGI.cpp
     src/graphics/LightingBuildData.cpp
     src/graphics/ClusteredLights.cpp

@@ -30,6 +30,8 @@ struct SkinnedLighting {
     const CascadedShadow* cascade = nullptr;   // sun (cascade) shadows
     const IBL*            ibl     = nullptr;    // image-based ambient
     float shadowSoftness = 2.5f;
+    int shadowBlockerSamples = 16;
+    int shadowFilterSamples = 24;
     bool skylightOcclusion = false;
     float skylightOcclusionStrength = 0.90f, minimumSkylight = 0.06f;
     const LightingProbeGrid* lightingGrid = nullptr;

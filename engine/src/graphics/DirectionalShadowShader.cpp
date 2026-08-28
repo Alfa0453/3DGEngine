@@ -84,7 +84,10 @@ float SampleDirectionalCascade(vec3 shadowWorldPos, float NdotL, int layer) {
 
     float blockerSum = 0.0;
     int blockerCount = 0;
+    int blockerSamples = clamp(uShadowBlockerSamples - layer * 2, 4,
+                               DIRECTIONAL_BLOCKER_SAMPLES);
     for (int i = 0; i < DIRECTIONAL_BLOCKER_SAMPLES; ++i) {
+        if (i >= blockerSamples) break;
         vec2 offset = rotation * DIRECTIONAL_POISSON[i] * texel * searchRadius;
         float sampleDepth = texture(uCascadeMaps,
                                     vec3(projected.xy + offset, float(layer))).r;
@@ -106,12 +109,15 @@ float SampleDirectionalCascade(vec3 shadowWorldPos, float NdotL, int layer) {
     float filterRadius = clamp(penumbraWorld / worldTexel, 0.75, 10.0);
 
     float shadow = 0.0;
+    int filterSamples = clamp(uShadowFilterSamples - layer * 3, 6,
+                              DIRECTIONAL_FILTER_SAMPLES);
     for (int i = 0; i < DIRECTIONAL_FILTER_SAMPLES; ++i) {
+        if (i >= filterSamples) break;
         vec2 offset = rotation * DIRECTIONAL_POISSON[i] * texel * filterRadius;
         shadow += BilinearShadowCompare(projected.xy + offset, layer,
                                         receiverDepth - bias);
     }
-    return clamp(shadow / float(DIRECTIONAL_FILTER_SAMPLES), 0.0, 1.0);
+    return clamp(shadow / float(filterSamples), 0.0, 1.0);
 }
 
 float ShadowFactor(float NdotL, vec3 N) {

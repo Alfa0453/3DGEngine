@@ -7,6 +7,9 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 #include <algorithm>
+#include <array>
+#include <cstdint>
+#include <cstring>
 
 using engine::ecs::Entity;
 using engine::ecs::Transform;
@@ -14,6 +17,16 @@ using engine::ecs::MeshPBR;
 
 namespace engine {
 namespace {
+
+std::uint64_t HashPointLight(const glm::vec3& position, float farPlane) {
+    std::uint64_t hash = 1469598103934665603ull;
+    auto add = [&](const void* data, std::size_t bytes) {
+        const auto* input = static_cast<const unsigned char*>(data);
+        for (std::size_t i = 0; i < bytes; ++i) { hash ^= input[i]; hash *= 1099511628211ull; }
+    };
+    add(&position, sizeof(position)); add(&farPlane, sizeof(farPlane));
+    return hash;
+}
 
 const char* kVert = R"GLSL(
 #version 330 core
@@ -84,6 +97,22 @@ PointShadow::~PointShadow() {
 void PointShadow::Generate(ecs::Registry &reg, const std::vector<glm::vec3> &lights, float farPlane) {
     m_far = farPlane;
     m_count = std::min(static_cast<int>(lights.size()), kMax);
+    m_renderedLastFrame = 0;
+    m_reusedLastFrame = 0;
+    const std::uint64_t casterRevision = ComputeShadowCasterRevision(reg);
+    const bool castersChanged = !m_cacheValid || casterRevision != m_casterRevision;
+    std::array<bool, kMax> dirty{};
+    bool anyDirty = false;
+    for (int i = 0; i < m_count; ++i) {
+        const std::uint64_t signature = HashPointLight(lights[static_cast<std::size_t>(i)], farPlane);
+        dirty[static_cast<std::size_t>(i)] = castersChanged || signature != m_lightSignatures[i];
+        if (dirty[static_cast<std::size_t>(i)]) { anyDirty = true; ++m_renderedLastFrame; }
+        else ++m_reusedLastFrame;
+        m_lightSignatures[i] = signature;
+    }
+    m_casterRevision = casterRevision;
+    m_cacheValid = true;
+    if (!anyDirty) return;
 
     GLint prevFbo = 0;
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFbo);
@@ -101,6 +130,7 @@ void PointShadow::Generate(ecs::Registry &reg, const std::vector<glm::vec3> &lig
    
     m_batch.Build(reg);
     for (int i = 0; i < m_count; ++i) {
+        if (!dirty[static_cast<std::size_t>(i)]) continue;
         const glm::vec3 lp = lights[static_cast<std::size_t>(i)];
         m_shader.SetVec3("uLightPos", lp);
         for (unsigned int f = 0; f < 6; ++f) {
@@ -114,6 +144,12 @@ void PointShadow::Generate(ecs::Registry &reg, const std::vector<glm::vec3> &lig
 
     glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prevFbo));
     glClearColor(prevClear[0], prevClear[1], prevClear[2], prevClear[3]);
+}
+
+std::uint64_t PointShadow::MemoryBytes() const {
+    const std::uint64_t pixels = static_cast<std::uint64_t>(m_faceSize) * m_faceSize;
+    return pixels * 6u * kMax * sizeof(float)
+        + pixels * 3u; // shared 24-bit depth attachment
 }
 
 void PointShadow::BindCubes(unsigned int startUnit) const {

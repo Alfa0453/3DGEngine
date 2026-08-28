@@ -255,6 +255,7 @@ public:
         bool vsync = false;                  // current window vsync (filled by the app)
         bool vsyncChangeRequested = false;   // set by the World Settings checkbox
         bool lightingBuildRequested = false;
+        bool validateLightingRequested = false;
         bool lightingBuildCancelRequested = false;
         bool reflectionProbeCaptureRequested = false;
         bool reflectionProbeClearRequested = false;

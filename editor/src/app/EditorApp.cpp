@@ -24,6 +24,7 @@
 #include <engine/graphics/ImageDecode.h>
 #include <engine/graphics/EnvironmentLighting.h>
 #include <engine/graphics/PostProcessVolume.h>
+#include <engine/graphics/LightingScalability.h>
 #include <engine/graphics/GrassField.h>
 #include <engine/math/Spline.h>
 #include <engine/assets/MaterialAssetLoader.h>
@@ -101,12 +102,15 @@ engine::EnvironmentLightingState ResolveEnvironment(
 }
 
 std::vector<engine::PostProcess::VolumetricLight> GatherVolumetricLights(
-    engine::ecs::Registry& registry) {
-    std::vector<engine::PostProcess::VolumetricLight> result;
+    engine::ecs::Registry& registry, const glm::vec3& cameraPosition, int maximumLights) {
+    struct Candidate { float score; engine::PostProcess::VolumetricLight light; };
+    std::vector<Candidate> candidates;
     registry.view<engine::ecs::Transform,engine::ecs::Light>().each(
         [&](Entity,engine::ecs::Transform& transform,engine::ecs::Light& light) {
-            if(result.size()>=16 || light.type==engine::ecs::Light::Type::Directional
+            if(!light.affectVolumetricFog || light.type==engine::ecs::Light::Type::Directional
                 || light.type==engine::ecs::Light::Type::Area) return;
+            const float distance=glm::distance(cameraPosition,transform.position);
+            if(distance>light.range+220.0f)return;
             engine::PostProcess::VolumetricLight volumeLight;
             volumeLight.position=transform.position;
             volumeLight.direction=glm::normalize(light.direction);
@@ -114,8 +118,13 @@ std::vector<engine::PostProcess::VolumetricLight> GatherVolumetricLights(
             volumeLight.range=std::max(light.range,0.01f);
             volumeLight.outerCos=light.type==engine::ecs::Light::Type::Spot
                 ? std::cos(glm::radians(light.outerAngle)) : -1.0f;
-            result.push_back(volumeLight);
+            const float luminance=glm::dot(volumeLight.radiance,glm::vec3(0.2126f,0.7152f,0.0722f));
+            candidates.push_back({float(light.volumetricPriority)*1000.0f+luminance/(1.0f+distance*distance),volumeLight});
         });
+    const std::size_t keep=std::min<std::size_t>(candidates.size(),static_cast<std::size_t>(std::clamp(maximumLights,0,16)));
+    if(keep<candidates.size())std::partial_sort(candidates.begin(),candidates.begin()+keep,candidates.end(),[](const Candidate&a,const Candidate&b){return a.score>b.score;});
+    std::vector<engine::PostProcess::VolumetricLight> result;result.reserve(keep);
+    for(std::size_t i=0;i<keep;++i)result.push_back(candidates[i].light);
     return result;
 }
 
@@ -1223,6 +1232,9 @@ void EditorApp::OnRender()
 
     m_renderer.SetMultisample(environment.msaa);   // MSAA toggle (direct render path)
 
+    const auto& lightingProfile = engine::GetLightingQualityProfile(
+        static_cast<engine::LightingQuality>(std::clamp(environment.environmentQuality, 0, 3)));
+
     if (useHdrPost) {
         if (!m_postProcess) {
             m_postProcess.emplace(sw, sh);
@@ -1262,11 +1274,9 @@ void EditorApp::OnRender()
         m_postProcess->volumetrics.heightFalloff = environment.fogHeightFalloff;
         m_postProcess->volumetrics.startDistance = environment.volumetricStartDistance;
         m_postProcess->volumetrics.maxDistance = environment.volumetricMaxDistance;
-        const int quality = std::clamp(environment.environmentQuality, 0, 3);
-        m_postProcess->volumetrics.depthSlices = 24 + quality * 16;
-        m_postProcess->volumetrics.xyDownsample = quality == 0 ? 6 : (quality == 1 ? 4 : (quality == 2 ? 3 : 2));
-        m_postProcess->volumetrics.historyWeight = quality == 0 ? 0.82f : (quality == 1 ? 0.88f : 0.92f);
-        m_postProcess->settings.bloomLevels = 3 + quality;
+        engine::ApplyLightingQuality(lightingProfile, nullptr, nullptr,
+                                     m_ssgi ? &*m_ssgi : nullptr,
+                                     &m_reflectionProbes, &*m_postProcess);
         m_postProcess->SetVolumetricCamera(glm::inverse(
             m_camera.ProjectionMatrix(window.AspectRatio()) * m_camera.ViewMatrix()),
             m_camera.Position(), ResolveEnvironment(environment,
@@ -1357,13 +1367,13 @@ void EditorApp::OnRender()
             if (!m_ssgi) m_ssgi.emplace(m_renderW, m_renderH);
             m_ssgi->Resize(m_renderW, m_renderH);
             m_ssgi->rayLength = environment.ssgiRayLength;
-            m_ssgi->steps = environment.ssgiSteps;
+            m_ssgi->steps = std::min(environment.ssgiSteps, lightingProfile.ssgiSteps);
             m_ssgi->thickness = environment.ssgiThickness;
-            m_ssgi->intensity = environment.ssgiIntensity;
+            m_ssgi->intensity = std::min(environment.ssgiIntensity, lightingProfile.ssgiIntensity);
             m_ssgi->Generate(m_postProcess->HdrColor(), m_ssao->PositionTexture(),
                              m_ssao->NormalTexture(),
                              m_camera.ProjectionMatrix(window.AspectRatio()));
-            m_postProcess->SetIndirectTexture(m_ssgi->Texture(), environment.ssgiIntensity);
+            m_postProcess->SetIndirectTexture(m_ssgi->Texture(), m_ssgi->intensity);
         } else {
             m_postProcess->SetIndirectTexture(0, 0.0f);
         }
@@ -1374,7 +1384,8 @@ void EditorApp::OnRender()
             m_camera.ViewMatrix());
         engine::ecs::Registry& volumeRegistry =
             (m_mode==EditorMode::Play && m_playRegistry) ? *m_playRegistry : m_scene.Registry();
-        m_postProcess->SetVolumetricLights(GatherVolumetricLights(volumeRegistry));
+        m_postProcess->SetVolumetricLights(GatherVolumetricLights(
+            volumeRegistry,m_camera.Position(),lightingProfile.maxVolumetricLights));
         m_postProcess->SetLocalFogVolumes(GatherLocalFogVolumes(volumeRegistry));
         m_renderingHdrPreview = false;
         m_postProcess->RenderToScreen(window.Width(), window.Height(), m_dt);   // upscales to window
@@ -1669,6 +1680,10 @@ void EditorApp::DrawEditModeModels(const glm::mat4 & viewProj)
                     lighting.cascade = &m_pbrRenderer->Cascade();
                     lighting.ibl = environment.ibl && m_ibl ? &*m_ibl : nullptr;
                     lighting.shadowSoftness = environment.shadowSoftness;
+                    const auto& profile = engine::GetLightingQualityProfile(
+                        static_cast<engine::LightingQuality>(std::clamp(environment.environmentQuality,0,3)));
+                    lighting.shadowBlockerSamples = profile.shadowBlockerSamples;
+                    lighting.shadowFilterSamples = profile.shadowFilterSamples;
                     lighting.skylightOcclusion = environment.skylightOcclusion;
                     lighting.skylightOcclusionStrength = environment.skylightOcclusionStrength;
                     lighting.minimumSkylight = environment.minimumSkylight;
@@ -1863,10 +1878,34 @@ void EditorApp::DrawEditorOverlay()
                          ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing)) {
             const ImGuiIO& io = ImGui::GetIO();
 
-            // Record this frame's real time into the rolling history.
-            const float frameMs = io.DeltaTime * 1000.0f;
+            // Keep raw samples for min/max and percentile statistics. The visible graph is
+            // deliberately decoupled from the render rate below: at several hundred FPS,
+            // plotting every frame aliases normal scheduler/present jitter into a sawtooth.
+            const float deltaSeconds = std::clamp(io.DeltaTime, 0.0f, 0.25f);
+            const float frameMs = deltaSeconds * 1000.0f;
             m_frameMsHistory[static_cast<std::size_t>(m_frameMsHead)] = frameMs;
             m_frameMsHead = (m_frameMsHead + 1) % kFrameHistory;
+
+            // Time-based exponential smoothing behaves consistently at both 30 FPS and an
+            // uncapped editor. An 80 ms time constant removes alternating micro-jitter while
+            // retaining visible hitches and sustained slow frames.
+            constexpr float kGraphSmoothingSeconds = 0.080f;
+            constexpr float kGraphSampleSeconds = 1.0f / 30.0f;
+            if (!m_frameGraphInitialized) {
+                m_smoothedFrameMs = frameMs;
+                m_frameGraphHistory.fill(frameMs);
+                m_frameGraphInitialized = true;
+            } else {
+                const float alpha = 1.0f - std::exp(-deltaSeconds / kGraphSmoothingSeconds);
+                m_smoothedFrameMs += (frameMs - m_smoothedFrameMs) * alpha;
+            }
+            m_frameGraphAccumulator += deltaSeconds;
+            while (m_frameGraphAccumulator >= kGraphSampleSeconds) {
+                m_frameGraphHistory[static_cast<std::size_t>(m_frameGraphHead)] =
+                    m_smoothedFrameMs;
+                m_frameGraphHead = (m_frameGraphHead + 1) % kFrameHistory;
+                m_frameGraphAccumulator -= kGraphSampleSeconds;
+            }
 
             // Window stats (min / avg / max) over the recorded history.
             float mn = 1.0e9f, mx = 0.0f, sum = 0.0f;
@@ -1882,10 +1921,20 @@ void EditorApp::DrawEditorOverlay()
             if (samples == 0) mn = 0.0f;
 
             ImGui::Text("FPS: %.0f  (%.2f ms/frame)", io.Framerate, frameMs);
-            // Frame-time graph: spikes reveal hitches (streaming, GC, big uploads).
-            const float plotMax = std::max(mx * 1.1f, 16.7f);
-            ImGui::PlotLines("##frametime", m_frameMsHistory.data(), kFrameHistory,
-                             m_frameMsHead, nullptr, 0.0f, plotMax, ImVec2(220.0f, 45.0f));
+            ImGui::SameLine();
+            ImGui::TextDisabled("smooth %.2f ms", m_smoothedFrameMs);
+            // A stable 60-FPS floor keeps tiny uncapped-frame variations from occupying the
+            // full plot height. Slow frames still expand the scale and remain obvious.
+            auto graphScaleSamples = m_frameGraphHistory;
+            std::sort(graphScaleSamples.begin(), graphScaleSamples.end());
+            const std::size_t graphP95Index = static_cast<std::size_t>(
+                0.95f * static_cast<float>(graphScaleSamples.size() - 1));
+            const float plotMax = std::max(
+                graphScaleSamples[graphP95Index] * 1.35f, 16.7f);
+            ImGui::PlotLines("##frametime", m_frameGraphHistory.data(), kFrameHistory,
+                             m_frameGraphHead, nullptr, 0.0f, plotMax, ImVec2(220.0f, 45.0f));
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("30 Hz graph sample, 80 ms smoothing\nRaw statistics remain unsmoothed.");
             ImGui::Text("min %.2f  avg %.2f  max %.2f ms", mn, avg, mx);
             // 1% low: the worst-1% (99th percentile) frame time as an FPS figure — a far
             // better "felt smoothness" measure than average FPS (spikes show here first).
@@ -1908,9 +1957,11 @@ void EditorApp::DrawEditorOverlay()
             ImGui::Text("Draw calls: %d", m_gpuProfiler.DrawCalls());
             ImGui::Separator();
             double gpuTotal = 0.0;
+            double postGpu = 0.0;
             for (const std::pair<std::string, double>& r : m_gpuProfiler.Results()) {
                 ImGui::Text("GPU %-8s %6.2f ms", r.first.c_str(), r.second);
                 gpuTotal += r.second;
+                if (r.first == "Post") postGpu = r.second;
             }
             if (!m_gpuProfiler.Results().empty()) {
                 ImGui::Separator();
@@ -1920,6 +1971,15 @@ void EditorApp::DrawEditorOverlay()
             }
             ImGui::SeparatorText("Lighting");
             ImGui::Text("GTAO GPU: %.2f ms",m_ssao?m_ssao->LastGpuMilliseconds():0.0);
+            static float lightingGpuBudgetMs = 6.0f;
+            ImGui::SetNextItemWidth(120.0f);
+            ImGui::DragFloat("Lighting GPU budget (ms)", &lightingGpuBudgetMs,
+                0.1f, 0.5f, 33.0f, "%.1f");
+            const double trackedLightingGpu = postGpu
+                + (m_ssao ? m_ssao->LastGpuMilliseconds() : 0.0);
+            if (trackedLightingGpu > lightingGpuBudgetMs)
+                ImGui::TextColored(ImVec4(1.0f,0.35f,0.18f,1.0f),
+                    "Tracked lighting/post cost %.2f ms exceeds budget", trackedLightingGpu);
             ImGui::Text("SSGI submit: %.2f ms  | denoise: %.2f ms",
                 m_ssgi ? m_ssgi->LastMilliseconds() : 0.0,
                 m_ssgi ? m_ssgi->LastDenoiseMilliseconds() : 0.0);
@@ -1938,6 +1998,22 @@ void EditorApp::DrawEditorOverlay()
                 static_cast<double>(m_lightingProbeGrid.MemoryBytes())/(1024.0*1024.0));
             ImGui::Text("Reflection probes: %zu  (%.2f MB)",m_reflectionProbes.ProbeCount(),
                 static_cast<double>(m_reflectionProbes.MemoryBytes())/(1024.0*1024.0));
+            ImGui::Text("  resident %zu | candidates/query %zu%s",
+                m_reflectionProbes.ResidentProbeCount(), m_reflectionProbes.CandidateCountLastQuery(),
+                m_reflectionProbes.OverBudget() ? " | OVER BUDGET" : "");
+            if (m_pbrRenderer) {
+                const auto shadows = m_pbrRenderer->GetShadowStats();
+                ImGui::Text("Shadows: rendered %u | cache hits %u | %.2f MB",
+                    shadows.cascadesRendered + shadows.pointMapsRendered + shadows.spotMapsRendered,
+                    shadows.cascadesReused + shadows.pointMapsReused + shadows.spotMapsReused,
+                    static_cast<double>(shadows.memoryBytes)/(1024.0*1024.0));
+            }
+            const std::uint64_t screenLightingBytes =
+                (m_ssao ? m_ssao->MemoryBytes() : 0u)
+                + (m_ssgi ? m_ssgi->MemoryBytes() : 0u)
+                + (m_postProcess ? m_postProcess->MemoryBytes() : 0u);
+            ImGui::Text("Screen lighting/post memory: %.2f MB",
+                static_cast<double>(screenLightingBytes)/(1024.0*1024.0));
             ImGui::Text("Last reflection capture: %.2f ms",m_lastReflectionCaptureMs);
             ImGui::Text("Last lighting build: %.2f ms  |  %llu rays",m_lastLightingBuildMs,
                 static_cast<unsigned long long>(m_lastLightingBuildRays));
@@ -2215,6 +2291,11 @@ void EditorApp::DrawEditorOverlay()
     m_dockspace.Draw(dockspaceContext);
     if (dockspaceContext.exitEditorRequested) RequestCloseEditor();
     if (dockspaceContext.lightingBuildRequested) StartLightingBuild();
+    if (dockspaceContext.validateLightingRequested) {
+        m_lightingAnalysis.Scan(m_scene, m_editAssets);
+        m_panels.SetOpen(EditorPanels::Panel::LightingAnalysis, true);
+        m_log.Info("Lighting validation completed. Opened Lighting Analysis.");
+    }
     if (dockspaceContext.lightingBuildCancelRequested && m_lightingBuildProgressState)
         m_lightingBuildProgressState->cancel = true;
     if(dockspaceContext.reflectionProbeCaptureRequested)CaptureSelectedReflectionProbe(false);
@@ -6943,6 +7024,10 @@ void EditorApp::DrawPlayScene(const glm::mat4 & viewProj)
         lighting.cascade = &m_pbrRenderer->Cascade();
         lighting.ibl = environment.ibl && m_ibl ? &*m_ibl : nullptr;
         lighting.shadowSoftness = environment.shadowSoftness;
+        const auto& profile = engine::GetLightingQualityProfile(
+            static_cast<engine::LightingQuality>(std::clamp(environment.environmentQuality,0,3)));
+        lighting.shadowBlockerSamples = profile.shadowBlockerSamples;
+        lighting.shadowFilterSamples = profile.shadowFilterSamples;
         lighting.skylightOcclusion = environment.skylightOcclusion;
         lighting.skylightOcclusionStrength = environment.skylightOcclusionStrength;
         lighting.minimumSkylight = environment.minimumSkylight;
@@ -7716,6 +7801,11 @@ void EditorApp::ConfigureEnvironmentPbrOptions(engine::ecs::Registry& registry,
     options.spotShadows = environment.spotShadows;
     options.directionalShadows = environment.directionalShadows;
     options.shadowSoftness = environment.shadowSoftness;
+    const auto& lightingProfile = engine::GetLightingQualityProfile(
+        static_cast<engine::LightingQuality>(std::clamp(environment.environmentQuality, 0, 3)));
+    engine::ApplyLightingQuality(lightingProfile, &options, nullptr,
+                                 m_ssgi ? &*m_ssgi : nullptr,
+                                 &m_reflectionProbes, m_postProcess ? &*m_postProcess : nullptr);
     options.shadowDistance = environment.shadowDistance;
     options.cloudShadows = environment.clouds && environment.cloudShadows;
     options.cloudShadowStrength = environment.cloudShadowStrength;

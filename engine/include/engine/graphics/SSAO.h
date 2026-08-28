@@ -39,6 +39,10 @@ public:
     unsigned int NormalTexture()   const { return m_gNormal; }  // view-space normal
     unsigned int VelocityTexture() const { return m_gVelocity; } // screen UV motion
     double LastGpuMilliseconds() const { return m_lastGpuMilliseconds; }
+    std::uint64_t MemoryBytes() const {
+        const std::uint64_t pixels = static_cast<std::uint64_t>(m_width) * m_height;
+        return pixels * (8u + 8u + 4u + 3u + 2u + 6u + 2u + 6u);
+    }
 
     float radius = 0.5f;
     float bias   = 0.025f;

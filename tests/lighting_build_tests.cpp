@@ -2,6 +2,7 @@
 #include <engine/graphics/DynamicIrradiance.h>
 #include <engine/graphics/PbrLightingCommon.h>
 #include <engine/graphics/EnvironmentLighting.h>
+#include <engine/graphics/LightingScalability.h>
 #include <engine/ecs/Components.h>
 #include <glm/gtc/epsilon.hpp>
 
@@ -39,6 +40,17 @@ float SumContribution(const engine::LightingBuildData& data,bool emissive){
 }
 
 int main(){
+    const auto& lightingLow = engine::GetLightingQualityProfile(engine::LightingQuality::Low);
+    const auto& lightingHigh = engine::GetLightingQualityProfile(engine::LightingQuality::High);
+    const auto& lightingUltra = engine::GetLightingQualityProfile(engine::LightingQuality::Ultra);
+    Check(lightingLow.shadowFilterSamples < lightingHigh.shadowFilterSamples
+          && lightingHigh.shadowFilterSamples <= lightingUltra.shadowFilterSamples,
+          "lighting quality increases shadow filtering monotonically");
+    Check(lightingLow.reflectionBudgetBytes < lightingHigh.reflectionBudgetBytes,
+          "lighting quality exposes an explicit reflection-memory budget");
+    Check(lightingLow.maxVolumetricLights < lightingUltra.maxVolumetricLights
+          && lightingLow.volumetricSlices < lightingUltra.volumetricSlices,
+          "lighting quality scales volumetric work as one profile");
     const auto noonSample = engine::DayNightCycle::At(0.5f);
     const engine::EnvironmentLightingState noon =
         engine::ResolveEnvironmentLighting(0.5f, noonSample);

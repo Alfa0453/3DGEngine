@@ -46,9 +46,11 @@ bool BiomeEditorPanel::AssetCombo(const char* label, EditorAssets::Type type,
         if (ImGui::Selectable("None", path.empty())) { path.clear(); id = {}; changed = true; }
         for (const std::string& candidate : assets.ContentAssetPaths(type)) {
             const std::string name = std::filesystem::path(candidate).filename().string();
+            ImGui::PushID(candidate.c_str());
             if (ImGui::Selectable(name.c_str(), path == candidate)) {
                 path = candidate; id = assets.AssetIdForPath(candidate); changed = true;
             }
+            ImGui::PopID();
         }
         ImGui::EndCombo();
     }

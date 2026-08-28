@@ -470,6 +470,8 @@ struct Light {
     float areaHeight = 1.0f;
     bool areaTwoSided = false;
     bool affectDynamicGi = true;
+    bool affectVolumetricFog = true;
+    int volumetricPriority = 0;
 };
 
 // Small native gameplay component used by the editor/runtime path. Rotates an

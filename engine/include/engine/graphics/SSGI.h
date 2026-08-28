@@ -5,6 +5,7 @@
 #include "engine/graphics/Mesh.h"
 
 #include <glm/glm.hpp>
+#include <cstdint>
 
 namespace engine {
 
@@ -20,6 +21,7 @@ public:
     unsigned int Texture() const { return m_filtered.ColorTexture(); }
     double LastMilliseconds() const { return m_lastMilliseconds; }
     double LastDenoiseMilliseconds() const { return m_lastDenoiseMilliseconds; }
+    std::uint64_t MemoryBytes() const { return static_cast<std::uint64_t>(m_width) * m_height * 16u; }
 
     float rayLength = 3.0f;
     int steps = 12;

@@ -1256,10 +1256,14 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
             if (ImGui::BeginCombo("Bone", bonePreview)) {
                 if (ImGui::Selectable("(model origin)", sock.boneName.empty())) { sock.boneName.clear(); changed = true; }
                 if (m_previewModel) {
-                    for (const engine::Bone& b : m_previewModel->GetSkeleton().bones) {
+                    for (std::size_t boneIndex = 0;
+                         boneIndex < m_previewModel->GetSkeleton().bones.size(); ++boneIndex) {
+                        const engine::Bone& b = m_previewModel->GetSkeleton().bones[boneIndex];
+                        ImGui::PushID(static_cast<int>(boneIndex));
                         if (ImGui::Selectable(b.name.c_str(), sock.boneName == b.name)) {
                             sock.boneName = b.name; changed = true;
                         }
+                        ImGui::PopID();
                     }
                 } else {
                     ImGui::TextDisabled("Load a skeletal model to list its bones.");
@@ -1331,14 +1335,17 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
                 if (m_asset.sockets.empty()) {
                     ImGui::TextDisabled("Add a socket above first.");
                 }
-                for (const CharacterSocket& s : m_asset.sockets) {
+                for (std::size_t socketIndex = 0;
+                     socketIndex < m_asset.sockets.size(); ++socketIndex) {
+                    const CharacterSocket& s = m_asset.sockets[socketIndex];
+                    ImGui::PushID(static_cast<int>(socketIndex));
                     if (ImGui::Selectable(s.name.c_str(), att.socketName == s.name)) {
                         att.socketName = s.name;
-                        if (m_selectedAttachment == static_cast<int>(i)) {
-                            m_selectedSocket = static_cast<int>(&s - m_asset.sockets.data());
-                        }
+                        if (m_selectedAttachment == static_cast<int>(i))
+                            m_selectedSocket = static_cast<int>(socketIndex);
                         changed = true;
                     }
+                    ImGui::PopID();
                 }
                 ImGui::EndCombo();
             }
@@ -1575,7 +1582,7 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
     } else if (m_component == 4) {
         // Animation is authored entirely in a .3dggraph asset (Animation Graph Editor) and baked
         // onto placed characters on Apply. The character just references one.
-        ImGui::SeparatorText("Animation Graph");
+        ImGui::SeparatorText("Animation Graph##AnimationGraphSection");
         ImGui::TextWrapped("Author animation (clips, states, transitions, blend spaces, movement) "
                            "in the Animation Graph Editor, save a .3dggraph, and reference it here.");
         const std::string graphPreview = m_asset.animationGraphPath.empty()
@@ -1589,12 +1596,14 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
             const std::string graphFilter = Lower(m_graphSearch.data());
             for (const AssetChoice& choice : m_graphChoices) {
                 if (!graphFilter.empty() && Lower(choice.displayName).find(graphFilter) == std::string::npos) continue;
+                ImGui::PushID(choice.path.c_str());
                 if (ImGui::Selectable(choice.displayName.c_str(), m_asset.animationGraphPath == choice.path)) {
                     m_asset.animationGraphPath = choice.path;
                     m_asset.animationGraphAssetId = {};
                     changed = true;
                 }
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", choice.path.c_str());
+                ImGui::PopID();
             }
             if (m_graphChoices.empty()) ImGui::TextDisabled("No .3dggraph assets - make one in the Animation Graph Editor.");
             ImGui::EndCombo();
@@ -1648,6 +1657,7 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
                     m_asset.actionClipAssets.begin(),
                     m_asset.actionClipAssets.end(), choice.path)
                     != m_asset.actionClipAssets.end();
+                ImGui::PushID(choice.path.c_str());
                 if (ImGui::Selectable(choice.displayName.c_str(), attached)) {
                     if (!attached) {
                         m_asset.actionClipAssets.push_back(choice.path);
@@ -1659,6 +1669,7 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
                     ImGui::SetTooltip("Action: %s\n%s",
                         candidate.name.c_str(), choice.path.c_str());
                 }
+                ImGui::PopID();
             }
             ImGui::EndCombo();
         }
@@ -1791,10 +1802,13 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
                     state.clipIndex=std::clamp(state.clipIndex,0,static_cast<int>(clips->size()-1));
                     const char* clipLabel=state.clipName.empty()?(*clips)[static_cast<std::size_t>(state.clipIndex)].name.c_str():state.clipName.c_str();
                     if (ImGui::BeginCombo("Clip",clipLabel)) {
-                        for (std::size_t ci=0;ci<clips->size();++ci)
+                        for (std::size_t ci=0;ci<clips->size();++ci) {
+                            ImGui::PushID(static_cast<int>(ci));
                             if (ImGui::Selectable((*clips)[ci].name.c_str(),state.clipIndex==static_cast<int>(ci))) {
                                 state.clipIndex=static_cast<int>(ci); state.clipName=(*clips)[ci].name; changed=true;
                             }
+                            ImGui::PopID();
+                        }
                         ImGui::EndCombo();
                     }
                 } else ImGui::TextDisabled("Load a skeletal model to choose clips.");
@@ -1818,22 +1832,30 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
                     changed |= ImGui::Checkbox("Synchronize Animation Cycles", &state.synchronizeBlendSpace);
                     if (ImGui::BeginCombo("Blend Parameter",
                             state.blendParameter.empty() ? "Choose parameter..." : state.blendParameter.c_str())) {
-                        for (const auto& parameter : m_asset.animationParameters) {
+                        for (std::size_t parameterIndex = 0;
+                             parameterIndex < m_asset.animationParameters.size(); ++parameterIndex) {
+                            const auto& parameter = m_asset.animationParameters[parameterIndex];
                             if (parameter.type != EditorScene::AnimationParameter::Type::Float) continue;
+                            ImGui::PushID(static_cast<int>(parameterIndex));
                             if (ImGui::Selectable(parameter.name.c_str(), state.blendParameter == parameter.name)) {
                                 state.blendParameter = parameter.name; changed = true;
                             }
+                            ImGui::PopID();
                         }
                         ImGui::EndCombo();
                     }
                     if (state.blendSpace2D) {
                         if (state.blendParameterY.empty()) state.blendParameterY = "Direction";
                         if (ImGui::BeginCombo("Direction Parameter", state.blendParameterY.c_str())) {
-                            for (const auto& parameter : m_asset.animationParameters) {
+                            for (std::size_t parameterIndex = 0;
+                                 parameterIndex < m_asset.animationParameters.size(); ++parameterIndex) {
+                                const auto& parameter = m_asset.animationParameters[parameterIndex];
                                 if (parameter.type != EditorScene::AnimationParameter::Type::Float) continue;
+                                ImGui::PushID(static_cast<int>(parameterIndex));
                                 if (ImGui::Selectable(parameter.name.c_str(), state.blendParameterY == parameter.name)) {
                                     state.blendParameterY = parameter.name; changed = true;
                                 }
+                                ImGui::PopID();
                             }
                             ImGui::EndCombo();
                         }
@@ -1852,12 +1874,14 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
                                 : sample.clipName.c_str();
                             if (ImGui::BeginCombo("Animation", sampleLabel)) {
                                 for (std::size_t clipIndex = 0; clipIndex < clips->size(); ++clipIndex) {
+                                    ImGui::PushID(static_cast<int>(clipIndex));
                                     if (ImGui::Selectable((*clips)[clipIndex].name.c_str(),
                                             sample.clipIndex == static_cast<int>(clipIndex))) {
                                         sample.clipIndex = static_cast<int>(clipIndex);
                                         sample.clipName = (*clips)[clipIndex].name;
                                         changed = true;
                                     }
+                                    ImGui::PopID();
                                 }
                                 ImGui::EndCombo();
                             }
@@ -1990,13 +2014,13 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
             auto stateCombo=[&](const char* label,std::string& value,bool any){
                 if(ImGui::BeginCombo(label,value.empty()?(any?"Any State":"None"):value.c_str())){
                     if(any&&ImGui::Selectable("Any State",value.empty())){value.clear();changed=true;}
-                    for(const auto& s:m_asset.animationStates)if(ImGui::Selectable(s.name.c_str(),value==s.name)){value=s.name;changed=true;}
+                    for(std::size_t stateIndex=0;stateIndex<m_asset.animationStates.size();++stateIndex){const auto& s=m_asset.animationStates[stateIndex];ImGui::PushID(static_cast<int>(stateIndex));if(ImGui::Selectable(s.name.c_str(),value==s.name)){value=s.name;changed=true;}ImGui::PopID();}
                     ImGui::EndCombo();
                 }
             };
             stateCombo("From",transition.fromState,true); stateCombo("To",transition.toState,false);
             if(ImGui::BeginCombo("Parameter",transition.parameter.empty()?"None":transition.parameter.c_str())){
-                for(const auto& p:m_asset.animationParameters)if(ImGui::Selectable(p.name.c_str(),transition.parameter==p.name)){transition.parameter=p.name;changed=true;}
+                for(std::size_t parameterIndex=0;parameterIndex<m_asset.animationParameters.size();++parameterIndex){const auto& p=m_asset.animationParameters[parameterIndex];ImGui::PushID(static_cast<int>(parameterIndex));if(ImGui::Selectable(p.name.c_str(),transition.parameter==p.name)){transition.parameter=p.name;changed=true;}ImGui::PopID();}
                 ImGui::EndCombo();
             }
             // Determine the selected parameter's type so a bool/trigger gets a proper
@@ -2153,13 +2177,16 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
                 m_asset.navTargetName.clear();
                 changed = true;
             }
-            for (const EditorScene::Object& object : scene.Objects()) {
+            for (std::size_t objectIndex = 0; objectIndex < scene.Objects().size(); ++objectIndex) {
+                const EditorScene::Object& object = scene.Objects()[objectIndex];
                 const bool selected = object.name == m_asset.navTargetName;
+                ImGui::PushID(static_cast<int>(objectIndex));
                 if (ImGui::Selectable(object.name.c_str(), selected)) {
                     m_asset.navTargetName = object.name;
                     changed = true;
                 }
                 if (selected) ImGui::SetItemDefaultFocus();
+                ImGui::PopID();
             }
             ImGui::EndCombo();
         }
@@ -2222,6 +2249,7 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
                         continue;
                     }
                     const bool selected = choice.path == script.path;
+                    ImGui::PushID(choice.path.c_str());
                     if (ImGui::Selectable(choice.displayName.c_str(), selected)) {
                         script.className = choice.displayName;
                         script.path = choice.path;
@@ -2232,6 +2260,7 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
                     if (ImGui::IsItemHovered()) {
                         ImGui::SetTooltip("%s", choice.path.c_str());
                     }
+                    ImGui::PopID();
                 }
                 if (m_scriptChoices.empty()) {
                     ImGui::TextDisabled("No scripts found in Content/Scripts");
@@ -2259,12 +2288,14 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
                         const auto found = std::find(script.dependencies.begin(),
                             script.dependencies.end(), choice.displayName);
                         const bool required = found != script.dependencies.end();
+                        ImGui::PushID(choice.path.c_str());
                         if (ImGui::Selectable(choice.displayName.c_str(), required,
                                               ImGuiSelectableFlags_DontClosePopups)) {
                             if (required) script.dependencies.erase(found);
                             else script.dependencies.push_back(choice.displayName);
                             changed = true;
                         }
+                        ImGui::PopID();
                     }
                     ImGui::EndCombo();
                 }

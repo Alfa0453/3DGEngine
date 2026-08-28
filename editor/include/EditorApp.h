@@ -675,9 +675,17 @@ private:
     double                               m_cpuFrameMs = 0.0;   // CPU cost of OnRender
     double                               m_cpuSceneMs = 0.0;   // CPU cost of scene submission
     double                               m_cpuUiMs = 0.0;      // CPU cost of building the UI
-    static constexpr int                 kFrameHistory = 120;  // ~2s of frame times at 60fps
-    std::array<float, kFrameHistory>     m_frameMsHistory{};   // rolling frame-time graph (ms)
-    int                                  m_frameMsHead = 0;    // ring-buffer write cursor
+    static constexpr int                 kFrameHistory = 120;
+    std::array<float, kFrameHistory>     m_frameMsHistory{};   // raw frames used by statistics
+    int                                  m_frameMsHead = 0;    // raw ring-buffer write cursor
+    // The graph is sampled at a fixed rate and lightly filtered. Recording one point per
+    // rendered frame makes an uncapped editor graph alias with OS/GPU scheduling and look
+    // unstable even when frame pacing is healthy.
+    std::array<float, kFrameHistory>     m_frameGraphHistory{};
+    int                                  m_frameGraphHead = 0;
+    float                                m_smoothedFrameMs = 0.0f;
+    float                                m_frameGraphAccumulator = 0.0f;
+    bool                                 m_frameGraphInitialized = false;
     int                                  m_renderW = 0;        // 3D render target width (render scale)
     int                                  m_renderH = 0;        // 3D render target height
     material_maker::MaterialMakerPanel   m_materialMaker;

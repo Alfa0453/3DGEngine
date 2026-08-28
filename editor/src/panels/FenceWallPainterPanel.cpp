@@ -45,9 +45,11 @@ bool FenceWallPainterPanel::AssetCombo(
         }
         for (const std::string& candidate : assets.ContentAssetPaths(type)) {
             const std::string name = std::filesystem::path(candidate).filename().string();
+            ImGui::PushID(candidate.c_str());
             if (ImGui::Selectable(name.c_str(), candidate == path)) {
                 path = candidate; id = assets.AssetIdForPath(candidate); changed = true;
             }
+            ImGui::PopID();
         }
         ImGui::EndCombo();
     }
@@ -152,9 +154,12 @@ FenceWallPainterPanel::Result FenceWallPainterPanel::Draw(
         }
     }
     if (ImGui::BeginCombo("Drawing Spline",m_splineName.empty()?"No spline":m_splineName.c_str())) {
-        for (const auto* spline:splines)
+        for (const auto* spline:splines) {
+            ImGui::PushID(spline);
             if (ImGui::Selectable(spline->name.c_str(),spline->name==m_splineName))
                 m_splineName=spline->name;
+            ImGui::PopID();
+        }
         ImGui::EndCombo();
     }
     ImGui::TextDisabled("Edit the chosen spline in the level viewport, then Capture Spline.");

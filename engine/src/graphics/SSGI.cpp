@@ -53,13 +53,17 @@ void main(){
                 vec3 hitNormal=normalize(texture(uNormal,uv).xyz);
                 float facing=max(dot(hitNormal,-direction),0.0);
                 float falloff=1.0-t/max(uRayLength,0.001);
+                falloff*=falloff; // SSGI is deliberately near-field detail, not another full GI baseline.
                 indirect+=texture(uScene,uv).rgb*facing*falloff;
                 weight+=max(facing,0.05);break;
             }
         }
     }
     indirect=weight>0.0?indirect/weight:vec3(0);
-    FragColor=vec4(max(indirect,vec3(0)),weight>0.0?1.0:0.0);
+    float edgeDistance=min(min(vUv.x,vUv.y),min(1.0-vUv.x,1.0-vUv.y));
+    float edgeConfidence=smoothstep(0.0,0.075,edgeDistance);
+    FragColor=vec4(max(indirect,vec3(0))*edgeConfidence,
+                   (weight>0.0?1.0:0.0)*edgeConfidence);
 }
 )GLSL";
 

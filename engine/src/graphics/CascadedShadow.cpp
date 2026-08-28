@@ -106,6 +106,7 @@ CascadeFit FitCascade(const glm::mat4& camView, const glm::mat4& subProj,
 } // namespace
 
 CascadedShadow::CascadedShadow(int size) : m_size(size), m_shader(kVert, kFrag) {
+    for (glm::mat4& matrix : m_vp) matrix = glm::mat4(1.0f);
     glGenFramebuffers(1, &m_fbo);
     glGenTextures(1, &m_texArray);
     glBindTexture(GL_TEXTURE_2D_ARRAY, m_texArray);
@@ -132,6 +133,9 @@ CascadedShadow::~CascadedShadow() {
 void CascadedShadow::Generate(ecs::Registry& reg, const Camera& camera, float aspect,
                               const glm::vec3& lightDir, float shadowFar,
                               const std::function<void(const glm::mat4&)>& drawExtraCasters) {
+    ++m_frameIndex;
+    m_renderedLastFrame = 0;
+    m_reusedLastFrame = 0;
     const glm::mat4 camView = camera.ViewMatrix();
     const float near = camera.nearPlane;
 
@@ -144,6 +148,43 @@ void CascadedShadow::Generate(ecs::Registry& reg, const Camera& camera, float as
         splitFar[i] = 0.5f * logd + 0.5f * lind;
         m_splits[i] = splitFar[i];
     }
+
+    std::array<CascadeFit, kCascades> fits;
+    for (int i = 0; i < kCascades; ++i) {
+        const float cn = (i == 0) ? near : splitFar[i - 1];
+        const glm::mat4 subProj = glm::perspective(glm::radians(camera.fov), aspect, cn, splitFar[i]);
+        fits[static_cast<std::size_t>(i)] = FitCascade(camView, subProj, lightDir, m_size);
+    }
+    const std::uint64_t casterRevision = ComputeShadowCasterRevision(reg);
+    const glm::vec3 normalizedLight = glm::normalize(lightDir);
+    const bool globalDirty = !m_cacheValid || casterRevision != m_casterRevision
+        || glm::distance(normalizedLight, m_lastLightDirection) > 0.0005f
+        || std::abs(shadowFar - m_lastShadowFar) > 0.01f;
+    std::array<bool, kCascades> dirty{};
+    bool anyDirty = false;
+    for (int i = 0; i < kCascades; ++i) {
+        float matrixDelta = 0.0f;
+        if (m_cacheValid) {
+            for (int column = 0; column < 4; ++column)
+                for (int row = 0; row < 4; ++row)
+                    matrixDelta = std::max(matrixDelta, std::abs(
+                        fits[static_cast<std::size_t>(i)].viewProjection[column][row] - m_vp[i][column][row]));
+        }
+        const std::uint64_t age = m_frameIndex - m_lastUpdateFrame[static_cast<std::size_t>(i)];
+        const bool scheduled = age >= m_updateIntervals[static_cast<std::size_t>(i)];
+        const bool largeCameraChange = matrixDelta > (0.035f + 0.015f * static_cast<float>(i));
+        const bool dynamicCasterDue = static_cast<bool>(drawExtraCasters)
+            && (i == 0 || scheduled);
+        dirty[static_cast<std::size_t>(i)] = globalDirty || largeCameraChange
+            || (matrixDelta > 1.0e-5f && (i == 0 || scheduled)) || dynamicCasterDue;
+        if (dirty[static_cast<std::size_t>(i)]) { anyDirty = true; ++m_renderedLastFrame; }
+        else ++m_reusedLastFrame;
+    }
+    m_casterRevision = casterRevision;
+    m_lastLightDirection = normalizedLight;
+    m_lastShadowFar = shadowFar;
+    m_cacheValid = true;
+    if (!anyDirty) return;
 
     GLint prevFbo = 0;
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFbo);
@@ -169,9 +210,8 @@ void CascadedShadow::Generate(ecs::Registry& reg, const Camera& camera, float as
     m_batch.Build(reg);
 
     for (int i = 0; i < kCascades; ++i) {
-        const float cn = (i == 0) ? near : splitFar[i - 1];
-        const glm::mat4 subProj = glm::perspective(glm::radians(camera.fov), aspect, cn, splitFar[i]);
-        const CascadeFit fit = FitCascade(camView, subProj, lightDir, m_size);
+        if (!dirty[static_cast<std::size_t>(i)]) continue;
+        const CascadeFit& fit = fits[static_cast<std::size_t>(i)];
         m_vp[i] = fit.viewProjection;
         m_worldTexelSize[i] = fit.worldTexelSize;
         m_depthRange[i] = fit.depthRange;
@@ -181,12 +221,24 @@ void CascadedShadow::Generate(ecs::Registry& reg, const Camera& camera, float as
         m_shader.SetMat4("uLightVP", m_vp[i]);
         m_batch.Draw(m_shader);
         if (drawExtraCasters) drawExtraCasters(m_vp[i]);   // skinned / non-ECS casters
+        m_lastUpdateFrame[static_cast<std::size_t>(i)] = m_frameIndex;
     }
 
     glPolygonOffset(previousPolygonOffsetFactor, previousPolygonOffsetUnits);
     if (!polygonOffsetWasEnabled) glDisable(GL_POLYGON_OFFSET_FILL);
     if (cullFaceWasEnabled) glEnable(GL_CULL_FACE); else glDisable(GL_CULL_FACE);
     glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prevFbo));
+}
+
+void CascadedShadow::SetUpdateIntervals(
+    const std::array<std::uint32_t, kCascades>& intervals) {
+    for (int i = 0; i < kCascades; ++i)
+        m_updateIntervals[static_cast<std::size_t>(i)] =
+            std::clamp(intervals[static_cast<std::size_t>(i)], 1u, 60u);
+}
+
+std::uint64_t CascadedShadow::MemoryBytes() const {
+    return static_cast<std::uint64_t>(m_size) * m_size * kCascades * sizeof(float);
 }
 
 void CascadedShadow::BindArray(unsigned int unit) const {

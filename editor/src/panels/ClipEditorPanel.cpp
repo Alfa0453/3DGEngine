@@ -274,10 +274,12 @@ void ClipEditorPanel::Draw(const std::string& assetRoot, bool* open, bool* asset
             const std::string filter = Lower(search.data());
             for (const AssetChoice& choice : m_modelChoices) {
                 if (!filter.empty() && Lower(choice.displayName).find(filter) == std::string::npos) continue;
+                ImGui::PushID(choice.path.c_str());
                 if (ImGui::Selectable(choice.displayName.c_str(), value == choice.path)) {
                     value = choice.path; picked = true; ImGui::CloseCurrentPopup();
                 }
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", choice.path.c_str());
+                ImGui::PopID();
             }
             ImGui::EndCombo();
         }

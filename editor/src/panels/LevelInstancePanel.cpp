@@ -85,7 +85,11 @@ void LevelInstancePanel::RefreshScenes(const std::string& root) {
 void LevelInstancePanel::SceneCombo(const char* label,std::string& path) {
     const std::string preview=path.empty()?"Choose a saved level...":std::filesystem::path(path).filename().string();
     if(!ImGui::BeginCombo(label,preview.c_str()))return;
-    for(const auto& scene:m_scenes)if(ImGui::Selectable(scene.label.c_str(),SamePath(scene.path,path,m_scannedRoot)))path=scene.path;
+    for(const auto& scene:m_scenes){
+        ImGui::PushID(scene.path.c_str());
+        if(ImGui::Selectable(scene.label.c_str(),SamePath(scene.path,path,m_scannedRoot)))path=scene.path;
+        ImGui::PopID();
+    }
     ImGui::EndCombo();
 }
 

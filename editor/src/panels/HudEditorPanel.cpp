@@ -345,7 +345,9 @@ HudEditorPanel::Result HudEditorPanel::Draw(HudDocument& doc,
                                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
                         if (low.find(filter) == std::string::npos) continue;
                     }
+                    ImGui::PushID(img.c_str());
                     if (ImGui::Selectable(img.c_str(), img == w.imageAsset)) w.imageAsset = img;
+                    ImGui::PopID();
                 }
                 ImGui::EndListBox();
             }

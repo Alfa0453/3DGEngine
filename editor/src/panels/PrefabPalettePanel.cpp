@@ -227,8 +227,10 @@ PrefabPalettePanel::Result PrefabPalettePanel::Draw(const std::string& assetRoot
     ImGui::SetNextItemWidth(180.0f);
     if (ImGui::BeginCombo("Category", m_category.c_str())) {
         for (const std::string& category : m_categories) {
+            ImGui::PushID(category.c_str());
             if (ImGui::Selectable(category.c_str(), category == m_category))
                 m_category = category;
+            ImGui::PopID();
         }
         ImGui::EndCombo();
     }

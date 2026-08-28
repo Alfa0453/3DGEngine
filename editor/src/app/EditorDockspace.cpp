@@ -4958,6 +4958,14 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             if (ImGui::Checkbox("Affect Dynamic GI", &light.affectDynamicGi)) {
                 context.scene->SetSelectedLight(light);
             }
+            if (light.type != engine::ecs::Light::Type::Directional
+                && light.type != engine::ecs::Light::Type::Area) {
+                if (ImGui::Checkbox("Affect Volumetric Fog", &light.affectVolumetricFog))
+                    context.scene->SetSelectedLight(light);
+                if (light.affectVolumetricFog
+                    && ImGui::DragInt("Volumetric Priority", &light.volumetricPriority, 1.0f, -100, 100))
+                    context.scene->SetSelectedLight(light);
+            }
             if(light.type==engine::ecs::Light::Type::Area){int shape=light.areaShape==engine::ecs::Light::AreaShape::Rectangle?1:0;
                 const char* shapes[]={"Sphere","Rectangle"};if(ImGui::Combo("Area Shape",&shape,shapes,2)){light.areaShape=shape?engine::ecs::Light::AreaShape::Rectangle:engine::ecs::Light::AreaShape::Sphere;context.scene->SetSelectedLight(light);}
                 if(shape==1){bool areaChanged=false;areaChanged|=ImGui::DragFloat("Width",&light.areaWidth,0.05f,0.01f,1000.0f);
@@ -4971,9 +4979,9 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             engine::ecs::ReflectionProbe probe=selected->reflectionProbe;
             if(const auto* component=context.scene->TryGetReflectionProbe(selected->entity))probe=*component;
             bool changed=false;int shape=probe.shape==engine::ecs::ReflectionProbe::Shape::Sphere?1:0;
-            const char* shapes[]={"Box","Sphere"};if(ImGui::Combo("Shape",&shape,shapes,2)){probe.shape=shape?engine::ecs::ReflectionProbe::Shape::Sphere:engine::ecs::ReflectionProbe::Shape::Box;changed=true;}
+            const char* shapes[]={"Box","Sphere"};if(ImGui::Combo("Shape##ReflectionProbe",&shape,shapes,2)){probe.shape=shape?engine::ecs::ReflectionProbe::Shape::Sphere:engine::ecs::ReflectionProbe::Shape::Box;changed=true;}
             if(shape==0)changed|=ImGui::DragFloat3("Box Extents",&probe.boxExtents.x,0.1f,0.01f,10000.0f);
-            else changed|=ImGui::DragFloat("Radius",&probe.radius,0.1f,0.01f,10000.0f);
+            else changed|=ImGui::DragFloat("Radius##ReflectionProbe",&probe.radius,0.1f,0.01f,10000.0f);
             changed|=ImGui::DragFloat("Blend Distance",&probe.blendDistance,0.05f,0.001f,1000.0f);
             changed|=ImGui::DragFloat("Probe Intensity",&probe.intensity,0.02f,0.0f,16.0f);
             changed|=ImGui::InputInt("Priority",&probe.priority);
@@ -5261,7 +5269,7 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                 changed |= ImGui::DragFloat("Burst Interval", &settings.burstInterval, 0.05f, 0.0f, 10000.0f, "%.2f s");
                 ImGui::TreePop();
             }
-            if (ImGui::TreeNodeEx("Shape", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (ImGui::TreeNodeEx("Shape##ParticleSystem", ImGuiTreeNodeFlags_DefaultOpen)) {
                 int shape = static_cast<int>(settings.config.shape);
                 const char* shapes[] = {"Point", "Sphere", "Cone"};
                 if (ImGui::Combo("Emit Shape", &shape, shapes, 3)) {
@@ -6019,7 +6027,7 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                 ImGui::EndDisabled();
                 ImGui::TreePop();
             }
-            if (!firstPerson && ImGui::TreeNodeEx("Rotation",
+            if (!firstPerson && ImGui::TreeNodeEx("Rotation##PlayerController",
                     ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_SpanAvailWidth)) {
                 const char* facingModes[] = { "Face Camera (strafe)", "Face Movement (free camera)" };
                 int facing = (player.facingMode == 1) ? 1 : 0;
@@ -7392,12 +7400,12 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                 engine::ecs::FoliageInstance edited = current;
                 bool instanceChanged = false;
                 ImGui::PushID(static_cast<int>(current.id));
-                instanceChanged |= ImGui::Checkbox("Enabled", &edited.enabled);
-                instanceChanged |= ImGui::DragFloat3("Local Position", &edited.position.x,
+                instanceChanged |= ImGui::Checkbox("Enabled##FoliageInstance", &edited.enabled);
+                instanceChanged |= ImGui::DragFloat3("Local Position##FoliageInstance", &edited.position.x,
                     0.05f, -100000.0f, 100000.0f, "%.2f");
-                instanceChanged |= ImGui::DragFloat3("Rotation", &edited.rotationDegrees.x,
+                instanceChanged |= ImGui::DragFloat3("Rotation##FoliageInstance", &edited.rotationDegrees.x,
                     1.0f, -360.0f, 360.0f, "%.1f deg");
-                instanceChanged |= ImGui::DragFloat3("Scale", &edited.scale.x,
+                instanceChanged |= ImGui::DragFloat3("Scale##FoliageInstance", &edited.scale.x,
                     0.01f, 0.001f, 100.0f, "%.2f");
                 if (instanceChanged)
                     context.scene->SetSelectedFoliageInstance(current.id, edited);
@@ -10838,6 +10846,8 @@ bool EditorDockspace::Draw(Context& context) {
             ImGui::BeginDisabled(context.lightingBuildRunning || context.playMode);
             if (ImGui::MenuItem("Build Lighting")) context.lightingBuildRequested = true;
             ImGui::EndDisabled();
+            if (ImGui::MenuItem("Validate Lighting"))
+                context.validateLightingRequested = true;
             if (context.lightingBuildRunning && ImGui::MenuItem("Cancel Lighting Build"))
                 context.lightingBuildCancelRequested = true;
             ImGui::Separator();
