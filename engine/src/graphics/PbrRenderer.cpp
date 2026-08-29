@@ -243,10 +243,16 @@ float LocalSkyVisibility(vec3 worldPos, vec3 normal, float sunVisibility) {
     if (uUseLightingGrid == 1) {
         vec3 extent = max(uLightingGridMax - uLightingGridMin, vec3(0.0001));
         vec3 uvw = (worldPos - uLightingGridMin) / extent;
-        if (all(greaterThanEqual(uvw, vec3(0.0))) && all(lessThanEqual(uvw, vec3(1.0))))
-            return clamp(SampleLocalProbe(worldPos, normal).skyVisibility * hemisphere, 0.0, 1.0);
+        if (all(greaterThanEqual(uvw, vec3(0.0))) && all(lessThanEqual(uvw, vec3(1.0)))) {
+            LocalProbeSample probe = SampleLocalProbe(worldPos, normal);
+            if (probe.validity > 0.001)
+                return clamp(probe.skyVisibility * hemisphere, 0.0, 1.0);
+        }
     }
-    return clamp(mix(0.82, 1.0, sunVisibility) * hemisphere, 0.0, 1.0);
+    // No build data: use the directional visibility as a conservative clue.
+    // A fully shadowed sealed room can therefore reach zero instead of being
+    // forced to at least 82 percent outdoor skylight.
+    return clamp(0.25 * sunVisibility * hemisphere, 0.0, 1.0);
 }
 
 float CloudHash(vec2 p) {
@@ -460,7 +466,10 @@ void main() {
         if (dot(bentWorld, bentWorld) > 0.5) indirectN = normalize(mix(N, bentWorld, 0.75));
     }
     LocalProbeSample localProbe = SampleLocalProbe(vWorldPos, indirectN);
-    float skyVisibility = max(localProbe.skyVisibility, clamp(uMinimumSkylight, 0.0, 1.0));
+    float fallbackSkyVisibility = LocalSkyVisibility(vWorldPos, indirectN, 1.0-shadow);
+    float resolvedSkyVisibility = mix(fallbackSkyVisibility, localProbe.skyVisibility,
+                                      step(0.001, localProbe.validity));
+    float skyVisibility = max(resolvedSkyVisibility, clamp(uMinimumSkylight, 0.0, 1.0));
     float screenAo = (uUseSSAO == 1) ? texture(uSsaoMap, gl_FragCoord.xy / uScreenSize).r : 1.0;
     vec3 diffuseIndirect = vec3(0.0);
     vec3 specularIndirect = vec3(0.0);
@@ -468,7 +477,8 @@ void main() {
     if (uUseIBL == 1) {
         vec3 F = FresnelSchlickRough(max(dot(N,V),0.0), F0, roughness);
         vec3 kD = (vec3(1.0)-F)*(1.0-metallic);
-        vec3 irradiance = texture(uIrradiance, indirectN).rgb;
+        vec3 globalIrradiance = texture(uIrradiance, indirectN).rgb;
+        vec3 irradiance = globalIrradiance;
         irradiance = mix(irradiance, localProbe.irradiance,
                          localProbe.validity * clamp(uLocalProbeInfluence, 0.0, 1.0));
         vec3 diffuse = irradiance * albedo;
@@ -479,7 +489,9 @@ void main() {
         vec2 brdf = texture(uBrdfLUT, vec2(max(dot(N,V),0.0), roughness)).rg;
         vec3 specular = prefiltered * (F*brdf.x + brdf.y);
         specularOcclusion = PbrSpecularOcclusion(ao * screenAo, max(dot(N,V),0.0), roughness, skyVisibility);
-        specular *= specularOcclusion;
+        // Global sky reflections are visibility-limited; valid local probes
+        // remain usable as the indoor reflection source.
+        specular *= mix(specularOcclusion, 1.0, reflectionProbeWeight);
         vec3 diffuseAmbient = kD * diffuse * ao * screenAo;
         if (uSkylightOcclusion == 1)
             diffuseAmbient *= mix(1.0, skyVisibility,
@@ -490,20 +502,20 @@ void main() {
         if (uInstanced == 0 && uTransmission > 0.0) {
             vec3 refracted = refract(-V, N, 1.0 / max(uIor, 1.0));
             vec3 transmitted = textureLod(uPrefilter, refracted, roughness*uMaxReflectionLod).rgb;
+            transmitted *= specularOcclusion;
             transmitted *= exp(-uThickness * max(vec3(0.02), vec3(1.0) - uSubsurfaceColor));
             ambient = mix(ambient, transmitted, uTransmission);
         }
         if (uInstanced == 0 && uClearcoat > 0.0) {
             vec3 Rc = reflect(-V, N);
-            ambient += uClearcoat * textureLod(uPrefilter, Rc, uClearcoatRoughness*uMaxReflectionLod).rgb * 0.04;
+            ambient += uClearcoat * textureLod(uPrefilter, Rc, uClearcoatRoughness*uMaxReflectionLod).rgb
+                     * 0.04 * specularOcclusion;
         }
     } else {
         ambient = uAmbient*albedo*ao*screenAo;
         diffuseIndirect = ambient;
     }
     if (uSkylightOcclusion == 1 && uUseIBL == 0) {
-        float skyVisibility = max(LocalSkyVisibility(vWorldPos, N, 1.0-shadow),
-                                  clamp(uMinimumSkylight, 0.0, 1.0));
         ambient *= mix(1.0, skyVisibility, clamp(uSkylightOcclusionStrength, 0.0, 1.0));
     }
     vec3 color = ambient + Lo + ((uInstanced == 1) ? vIEmissive : uEmissive);
@@ -537,6 +549,20 @@ void main() {
     else if (uLightingDebugMode == 17) color = localProbe.irradiance;
     else if (uLightingDebugMode == 18) color = vec3(0.0);
     else if (uLightingDebugMode == 19) color = diffuseIndirect + specularIndirect;
+    else if (uLightingDebugMode == 20) color = vec3(1.0 - shadow);
+    else if (uLightingDebugMode == 21) color = DirectionalCascadeDebugColor(vWorldPos);
+    else if (uLightingDebugMode == 22) {
+        vec3 debugF = FresnelSchlickRough(max(dot(N,V),0.0), F0, roughness);
+        vec3 debugKd = (vec3(1.0)-debugF)*(1.0-metallic);
+        vec3 globalDiffuse = debugKd * texture(uIrradiance, indirectN).rgb * albedo * ao * screenAo;
+        if (uSkylightOcclusion == 1)
+            globalDiffuse *= mix(1.0, skyVisibility, clamp(uSkylightOcclusionStrength,0.0,1.0));
+        vec3 debugR = reflect(-V,N);
+        vec2 debugBrdf = texture(uBrdfLUT,vec2(max(dot(N,V),0.0),roughness)).rg;
+        vec3 globalSpecular = textureLod(uPrefilter,debugR,roughness*uMaxReflectionLod).rgb
+                            * (debugF*debugBrdf.x+debugBrdf.y) * specularOcclusion;
+        color = globalDiffuse + globalSpecular;
+    }
 
     if (uFogEnabled == 1 && uLightingDebugMode == 0) {
         float dist = length(uViewPos - vWorldPos);
@@ -546,7 +572,7 @@ void main() {
         color = mix(color, uFogColor, fog);
     }
 
-    if (uApplyTonemap == 1) {
+    if (uApplyTonemap == 1 && uLightingDebugMode != 20 && uLightingDebugMode != 21) {
         color = ACES(color);                     // filmic tone map (was Reinhard)
         color = pow(color, vec3(1.0/2.2));       // linear -> sRGB
     }
@@ -648,6 +674,7 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
         && glm::dot(sunColor, sunColor) > 1.0e-8f;
     if (sunShadowEnabled) {
         const float shadowFar = std::max(opt.shadowDistance, camera.nearPlane + 1.0f);
+        m_cascade.SetForceUpdateEveryFrame(opt.forceDirectionalShadowUpdate);
         m_cascade.Generate(reg, camera, aspect, sunDir, shadowFar, opt.shadowCasters);
         glViewport(0, 0, screenWidth, screenHeight);
     }

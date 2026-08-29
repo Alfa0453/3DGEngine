@@ -157,7 +157,7 @@ void CascadedShadow::Generate(ecs::Registry& reg, const Camera& camera, float as
     }
     const std::uint64_t casterRevision = ComputeShadowCasterRevision(reg);
     const glm::vec3 normalizedLight = glm::normalize(lightDir);
-    const bool globalDirty = !m_cacheValid || casterRevision != m_casterRevision
+    const bool globalDirty = m_forceUpdateEveryFrame || !m_cacheValid || casterRevision != m_casterRevision
         || glm::distance(normalizedLight, m_lastLightDirection) > 0.0005f
         || std::abs(shadowFar - m_lastShadowFar) > 0.01f;
     std::array<bool, kCascades> dirty{};
@@ -201,7 +201,9 @@ void CascadedShadow::Generate(ecs::Registry& reg, const Camera& camera, float as
     // Without this, large coplanar receivers repeatedly shadow themselves and
     // expose the individual PCF levels as broad bands (shadow acne).
     glEnable(GL_POLYGON_OFFSET_FILL);
-    glPolygonOffset(2.0f, 4.0f);
+    // Receiver bias is cascade/world-texel aware; keep caster offset modest so
+    // contact shadows are not detached from walls and floors.
+    glPolygonOffset(1.1f, 1.5f);
     // Depth-only shadow casting is deliberately two-sided. Thin authored walls
     // and ceilings must block the sun regardless of winding; normal material
     // rendering keeps its existing back-face culling policy.

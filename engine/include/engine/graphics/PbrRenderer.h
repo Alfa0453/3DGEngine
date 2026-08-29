@@ -56,8 +56,8 @@ public:
         const IBL*  ibl   = nullptr;   // image-based ambient lighting (optional)
         const SSAO* ssao = nullptr;    // screen-space ambient occlusion (optional)
         bool        skylightOcclusion = false;
-        float       skylightOcclusionStrength = 0.90f;
-        float       minimumSkylight = 0.06f;
+        float       skylightOcclusionStrength = 1.0f;
+        float       minimumSkylight = 0.0f;
         float       specularOcclusionStrength = 0.85f;
         float       localProbeInfluence = 1.0f;
         int         lightingDebugMode = 0;
@@ -68,6 +68,7 @@ public:
         bool        pointShadows = true;    // omnidirectional shadows for point lights
         bool        spotShadows  = true;  // perspective shadows for spotlights
         bool        directionalShadows = true; // cascaded shadows for the directional sun
+        bool        forceDirectionalShadowUpdate = false; // editor diagnostic
         float       shadowSoftness = 2.5f; // PCSS sun-shadow softness (light size)
         int         shadowBlockerSamples = 16;
         int         shadowFilterSamples = 24;

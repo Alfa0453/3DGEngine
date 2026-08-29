@@ -604,7 +604,8 @@ private:
     bool                                 m_lightingBuildRunning = false;
     bool                                 m_lightingBuildDirty = false;
     int                                  m_lightingBuildQuality = 1;
-    std::string                          m_lightingBuildStatus = "No lighting data";
+    std::string                          m_lightingBuildStatus = "Missing - no lighting asset is assigned";
+    bool                                 m_forceDirectionalShadowUpdate = false;
     std::chrono::steady_clock::time_point m_lightingBuildStartedAt{};
     double                               m_lastLightingBuildMs = 0.0;
     double                               m_lastReflectionCaptureMs = 0.0;

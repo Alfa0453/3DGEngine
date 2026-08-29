@@ -2301,12 +2301,13 @@ void DrawWorldSettings(EditorScene& scene, EditorDockspace::Context& context, bo
         changed |= ImGui::SliderFloat("Specular Occlusion Strength", &environment.specularOcclusionStrength, 0.0f, 1.0f, "%.2f");
         changed |= ImGui::SliderFloat("Local Probe Influence", &environment.localProbeInfluence, 0.0f, 1.0f, "%.2f");
         static constexpr const char* kLightingDebugModes[] = {
-            "Final Lighting", "Direct Lighting", "Diffuse Indirect", "Specular Indirect",
+            "Final Lighting", "Direct Lighting Only", "Diffuse Indirect", "Specular Indirect",
             "Local Probe Irradiance", "Sky Visibility", "Ambient Occlusion",
             "Specular Occlusion", "Probe Validity", "Bent Normal",
             "Raw GTAO", "Filtered GTAO", "Reflection Probe Weight",
             "Direct Environment GI", "Bounce GI", "Emissive GI",
-            "Probe Visibility", "Dynamic Probe Classification", "SSGI", "Final Indirect"
+            "Probe Visibility", "Dynamic Probe Classification", "SSGI", "Indirect Lighting Only",
+            "Raw Directional Shadow", "Directional Cascade Index", "Global IBL Only"
         };
         changed |= ImGui::Combo("Lighting Debug View", &environment.lightingDebugMode,
                                 kLightingDebugModes, IM_ARRAYSIZE(kLightingDebugModes));
@@ -2333,9 +2334,13 @@ void DrawWorldSettings(EditorScene& scene, EditorDockspace::Context& context, bo
             ImGui::ProgressBar(context.lightingBuildProgress, ImVec2(130.0f, 0.0f));
             ImGui::SameLine(); if (ImGui::SmallButton("Cancel")) context.lightingBuildCancelRequested = true;
         } else if (context.lightingBuildDirty) {
-            ImGui::TextColored(ImVec4(1.0f,0.65f,0.12f,1.0f), "Needs rebuild");
-        } else ImGui::TextDisabled("Up to date");
+            ImGui::TextColored(ImVec4(1.0f,0.65f,0.12f,1.0f), "Stale");
+        } else if (context.lightingGridBound) {
+            ImGui::TextColored(ImVec4(0.35f,0.9f,0.45f,1.0f), "Valid");
+        } else ImGui::TextDisabled("Missing");
         if (context.lightingBuildStatus) ImGui::TextWrapped("%s", context.lightingBuildStatus->c_str());
+        ImGui::TextDisabled("Probe count: %zu | GPU grid: %s", context.lightingProbeCount,
+                            context.lightingGridBound ? "bound" : "not bound");
         changed |= ImGui::Checkbox("Time Sun", &environment.driveSunLight);
         changed |= ImGui::DragFloat("Sun Intensity", &environment.sunIntensity, 0.02f, 0.0f, 8.0f);
 
@@ -2627,6 +2632,12 @@ void DrawWorldSettings(EditorScene& scene, EditorDockspace::Context& context, bo
             changed = true;
         }
         changed |= ImGui::Checkbox("Sun Shadows", &environment.directionalShadows);
+        if (context.forceDirectionalShadowUpdate) {
+            ImGui::SameLine();
+            ImGui::Checkbox("Force Shadow Update", context.forceDirectionalShadowUpdate);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                "Diagnostic: bypass the directional-shadow cache every frame.");
+        }
         changed |= ImGui::Checkbox("Point Shadows", &environment.pointShadows);
         changed |= ImGui::Checkbox("Spot Shadows", &environment.spotShadows);
         changed |= ImGui::DragFloat("Shadow Softness", &environment.shadowSoftness, 0.05f, 0.1f, 12.0f, "%.2f");

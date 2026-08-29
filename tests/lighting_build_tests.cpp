@@ -18,6 +18,16 @@ void Quad(std::vector<engine::LightingTriangle>& out,float y,float half){
     out.push_back({{-half,y,-half},{ half,y,-half},{ half,y, half}});
     out.push_back({{-half,y,-half},{ half,y, half},{-half,y, half}});
 }
+void Enclose(std::vector<engine::LightingTriangle>& out,float floorY,float ceilingY,float half){
+    const glm::vec3 a{-half,floorY,-half}, b{half,floorY,-half};
+    const glm::vec3 c{half,ceilingY,-half}, d{-half,ceilingY,-half};
+    const glm::vec3 e{-half,floorY,half}, f{half,floorY,half};
+    const glm::vec3 g{half,ceilingY,half}, h{-half,ceilingY,half};
+    out.push_back({a,b,c}); out.push_back({a,c,d});
+    out.push_back({f,e,h}); out.push_back({f,h,g});
+    out.push_back({e,a,d}); out.push_back({e,d,h});
+    out.push_back({b,f,g}); out.push_back({b,g,c});
+}
 float ClosestVisibility(const engine::LightingBuildData& data,const glm::vec3& target){
     float best=1e30f,value=1.0f;
     for(int z=0;z<data.dimensions.z;++z)for(int y=0;y<data.dimensions.y;++y)for(int x=0;x<data.dimensions.x;++x){
@@ -102,10 +112,13 @@ int main(){
     engine::LightingBuildData outside;std::string error;
     Check(engine::BuildLightingProbes(open,{1,1,1},1,"Open",settings,&outside,nullptr,&error),"open lighting build succeeds");
     std::vector<engine::LightingTriangle> closed=open;Quad(closed,2.0f,10.0f);
+    Enclose(closed,0.0f,2.0f,10.0f);
     engine::LightingBuildData inside;
     Check(engine::BuildLightingProbes(closed,{1,1,1},2,"Closed",settings,&inside,nullptr,&error),"closed lighting build succeeds");
     Check(ClosestVisibility(outside,{0,1,0})>0.9f,"open sky remains visible");
     Check(ClosestVisibility(inside,{0,1,0})<0.2f,"roof blocks local sky visibility");
+    Check(ClosestVisibility(inside,{0,1,0})<0.001f,
+          "sealed overhead visibility can reach true zero without an artistic floor");
     const auto path=std::filesystem::temp_directory_path()/"3dg_lighting_build_test.3dglighting";
     Check(engine::SaveLightingBuildData(path.string(),inside,&error),"lighting asset saves transactionally");
     engine::LightingBuildData loaded;Check(engine::LoadLightingBuildData(path.string(),&loaded,&error),"lighting asset loads");
@@ -159,6 +172,8 @@ int main(){
     Check(composed.find("SmoothFiniteAttenuation")!=std::string::npos&&composed.find("//__PBR_LIGHTING_COMMON__")==std::string::npos,"shared PBR shader block is injected");
     Check(composed.find("BoxProjectedDirection")!=std::string::npos,"shared PBR shader includes reflection-probe parallax correction");
     Check(composed.find("LtcIntegrateQuad")!=std::string::npos&&composed.find("LtcRectangleLight")!=std::string::npos,"shared PBR shader includes area-integrated rectangle lighting");
+    Check(composed.find("max(skyVisibility, 0.08)")==std::string::npos,
+          "specular occlusion has no hard-coded indoor sky floor");
     engine::ecs::ReflectionProbe reflectionProbe;
     Check(reflectionProbe.shape==engine::ecs::ReflectionProbe::Shape::Box,
           "reflection probes default to box influence volumes");

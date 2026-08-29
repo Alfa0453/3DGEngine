@@ -33,7 +33,7 @@ struct SkinnedLighting {
     int shadowBlockerSamples = 16;
     int shadowFilterSamples = 24;
     bool skylightOcclusion = false;
-    float skylightOcclusionStrength = 0.90f, minimumSkylight = 0.06f;
+    float skylightOcclusionStrength = 1.0f, minimumSkylight = 0.0f;
     const LightingProbeGrid* lightingGrid = nullptr;
     bool probeVisibilityWeighting = false;
     float probeVisibilityMaxDistance = 60.0f;

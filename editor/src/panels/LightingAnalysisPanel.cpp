@@ -104,8 +104,21 @@ void LightingAnalysisPanel::Scan(const EditorScene& scene,
     m_settings.boundsMax = boundsMax + padding;
     m_settings.sampleHeight = lowestY + 0.08f;
     const float ambient = std::max(0.0f, environment.skyLightIntensity)
-        * std::max(environment.minimumSkylight, 0.02f);
+        * std::clamp(environment.minimumSkylight, 0.0f, 1.0f);
     m_report = editor::lighting::Analyze(lights, m_settings, ambient);
+
+    if (environment.lightingBuildAsset.empty()) {
+        m_report.findings.push_back({editor::lighting::Severity::Warning, -1,
+            "World Settings", "Missing local lighting build",
+            "No irradiance-probe asset is assigned, so indoor sky visibility uses the conservative runtime fallback.",
+            "Build Lighting after the room shell is complete, then confirm the status is Valid and the GPU grid is bound."});
+    }
+    if (environment.minimumSkylight > 0.0f) {
+        m_report.findings.push_back({editor::lighting::Severity::Info, -1,
+            "World Settings", "Artificial skylight floor",
+            "Minimum Indoor Skylight prevents fully enclosed surfaces from reaching physical darkness.",
+            "Set it to 0 for correctness testing; raise it only as an intentional artistic control."});
+    }
 
     if (environment.directionalShadows && environment.shadowDistance > 250.0f) {
         m_report.findings.push_back({editor::lighting::Severity::Warning, -1,
@@ -178,6 +191,15 @@ void LightingAnalysisPanel::Scan(const EditorScene& scene,
                 object.name, "Transparency cost",
                 "Transparent material requires ordered blending and increases overdraw.",
                 "Keep transparent surfaces small, reduce layers, or use Masked blending."});
+            const auto* transform = scene.TryGetTransform(object.entity);
+            if (transform && std::max({std::abs(transform->scale.x),
+                                      std::abs(transform->scale.y),
+                                      std::abs(transform->scale.z)}) > 2.0f) {
+                m_report.findings.push_back({editor::lighting::Severity::Critical, index,
+                    object.name, "Room caster validation",
+                    "A large transparent object does not participate in the directional shadow caster pass and may be part of the room shell.",
+                    "Use opaque or masked shadow-casting wall/ceiling geometry, then rebuild lighting and inspect Raw Directional Shadow."});
+            }
         } else if (material->material.blendMode == engine::ecs::PbrMaterial::BlendMode::Masked
                    && material->material.opacity < 0.5f) {
             m_report.findings.push_back({editor::lighting::Severity::Info, index,

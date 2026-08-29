@@ -1378,6 +1378,8 @@ void EditorApp::OnRender()
             m_postProcess->SetIndirectTexture(0, 0.0f);
         }
         m_postProcess->SetIndirectDebug(environment.lightingDebugMode == 18);
+        m_postProcess->SetLightingDebugPassthrough(environment.lightingDebugMode != 0
+                                                   && environment.lightingDebugMode != 18);
         m_postProcess->SetVolumetricDirectionalShadow(
             m_pbrRenderer && environment.directionalShadows
                 ? &m_pbrRenderer->Cascade() : nullptr,
@@ -1996,6 +1998,8 @@ void EditorApp::DrawEditorOverlay()
                 static_cast<double>(dynamicStats.memoryBytes) / (1024.0 * 1024.0));
             ImGui::Text("Irradiance probes: %zu  (%.2f MB)",m_lightingProbeGrid.ProbeCount(),
                 static_cast<double>(m_lightingProbeGrid.MemoryBytes())/(1024.0*1024.0));
+            ImGui::TextWrapped("Build data: %s", m_lightingBuildStatus.c_str());
+            ImGui::Text("Lighting grid bound: %s", m_lightingProbeGrid.Valid() ? "yes" : "no");
             ImGui::Text("Reflection probes: %zu  (%.2f MB)",m_reflectionProbes.ProbeCount(),
                 static_cast<double>(m_reflectionProbes.MemoryBytes())/(1024.0*1024.0));
             ImGui::Text("  resident %zu | candidates/query %zu%s",
@@ -2175,6 +2179,9 @@ void EditorApp::DrawEditorOverlay()
     dockspaceContext.lightingStateHash = ComputeLightingStateHash();
     dockspaceContext.lightingBuildQuality = &m_lightingBuildQuality;
     dockspaceContext.lightingBuildStatus = &m_lightingBuildStatus;
+    dockspaceContext.lightingProbeCount = m_lightingProbeGrid.ProbeCount();
+    dockspaceContext.lightingGridBound = m_lightingProbeGrid.Valid();
+    dockspaceContext.forceDirectionalShadowUpdate = &m_forceDirectionalShadowUpdate;
     if (m_lightingBuildProgressState && m_lightingBuildProgressState->total.load() > 0)
         dockspaceContext.lightingBuildProgress = static_cast<float>(m_lightingBuildProgressState->completed.load()) / m_lightingBuildProgressState->total.load();
     // Terrain sculpting and painting are owned by Terrain Creator rather than
@@ -7800,6 +7807,7 @@ void EditorApp::ConfigureEnvironmentPbrOptions(engine::ecs::Registry& registry,
     options.pointShadows = environment.pointShadows;
     options.spotShadows = environment.spotShadows;
     options.directionalShadows = environment.directionalShadows;
+    options.forceDirectionalShadowUpdate = m_forceDirectionalShadowUpdate;
     options.shadowSoftness = environment.shadowSoftness;
     const auto& lightingProfile = engine::GetLightingQualityProfile(
         static_cast<engine::LightingQuality>(std::clamp(environment.environmentQuality, 0, 3)));
@@ -8165,9 +8173,9 @@ void EditorApp::PollLightingBuild() {
     if(m_lightingBuildFuture.wait_for(std::chrono::seconds(0))!=std::future_status::ready)return;
     LightingBuildResult result=m_lightingBuildFuture.get();
     if(m_lightingBuildProgressState)m_lastLightingBuildRays=m_lightingBuildProgressState->raysCast.load();
-    if(!result.success){m_lightingBuildRunning=false;m_lastLightingBuildMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-m_lightingBuildStartedAt).count();m_lightingBuildStatus=result.error.empty()?"Lighting build failed":result.error;m_log.Error(m_lightingBuildStatus);return;}
+    if(!result.success){m_lightingBuildRunning=false;m_lastLightingBuildMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-m_lightingBuildStartedAt).count();m_lightingBuildStatus="Failed - "+(result.error.empty()?std::string("lighting build failed"):result.error);m_log.Error(m_lightingBuildStatus);return;}
     std::string error;
-    if(!m_lightingProbeGrid.Upload(result.data,&error)){m_lightingBuildRunning=false;m_lightingBuildStatus=error;m_log.Error(error);return;}
+    if(!m_lightingProbeGrid.Upload(result.data,&error)){m_lightingBuildRunning=false;m_lightingBuildStatus="Failed - "+error;m_log.Error(m_lightingBuildStatus);return;}
     m_loadedLightingData = result.data;
     m_dynamicGi.Reset(); m_dynamicGiConfigurationHash = 0;
     auto environment=m_scene.GetEnvironment(); environment.lightingBuildAsset=result.path; environment.lightingBuildHash=result.data.sourceHash; m_scene.SetEnvironment(environment);
@@ -8180,7 +8188,7 @@ void EditorApp::PollLightingBuild() {
     if(originalEntity!=engine::ecs::kNull)m_scene.SelectEntity(originalEntity);
     m_lightingBuildRunning=false;m_lastLightingBuildMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-m_lightingBuildStartedAt).count();
     m_lightingBuildDirty=!capturesSucceeded;
-    m_lightingBuildStatus=(capturesSucceeded?"Lighting built: ":"GI built, but one or more reflection captures failed: ")+std::to_string(result.data.probes.size())+" irradiance probes, "+std::to_string(reflectionEntities.size())+" reflection probes";
+    m_lightingBuildStatus=(capturesSucceeded?"Valid - lighting built: ":"Failed - GI built, but one or more reflection captures failed: ")+std::to_string(result.data.probes.size())+" irradiance probes, "+std::to_string(reflectionEntities.size())+" reflection probes";
     if(capturesSucceeded)m_log.Info(m_lightingBuildStatus);else m_log.Warning(m_lightingBuildStatus);
 }
 
@@ -8190,13 +8198,23 @@ void EditorApp::LoadSceneLightingAsset() {
     m_loadedLightingAsset=environment.lightingBuildAsset;m_lightingProbeGrid.Reset();
     m_loadedLightingData.reset();
     m_dynamicGi.Reset(); m_dynamicGiConfigurationHash=0;
-    if(environment.lightingBuildAsset.empty()){m_lightingBuildStatus="No lighting data";return;}
+    if(environment.lightingBuildAsset.empty()){m_lightingBuildDirty=false;m_lightingBuildStatus="Missing - no lighting asset is assigned";return;}
     engine::LightingBuildData data;std::string error;
-    if(!engine::LoadLightingBuildData(environment.lightingBuildAsset,&data,&error)){m_lightingBuildStatus=error;return;}
-    if(!m_lightingProbeGrid.Upload(data,&error)){m_lightingBuildStatus=error;return;}
+    std::filesystem::path lightingPath(environment.lightingBuildAsset);
+    if(!lightingPath.is_absolute()&&!std::filesystem::exists(lightingPath)){
+        const std::filesystem::path sceneRelative=std::filesystem::path(m_project.ScenePath()).parent_path()/lightingPath;
+        const std::filesystem::path assetRelative=std::filesystem::path(m_project.AssetRoot())/lightingPath;
+        if(std::filesystem::exists(sceneRelative))lightingPath=sceneRelative;
+        else if(std::filesystem::exists(assetRelative))lightingPath=assetRelative;
+    }
+    lightingPath=lightingPath.lexically_normal();
+    if(!engine::LoadLightingBuildData(lightingPath.string(),&data,&error)){m_lightingBuildDirty=true;m_lightingBuildStatus="Failed - "+error+" ("+lightingPath.string()+")";return;}
+    if(!m_lightingProbeGrid.Upload(data,&error)){m_lightingBuildDirty=true;m_lightingBuildStatus="Failed - "+error;return;}
     m_loadedLightingData=data;
     m_lightingBuildDirty=data.sourceHash!=ComputeLightingStateHash();
-    m_lightingBuildStatus=m_lightingBuildDirty?"Lighting data is stale":"Lighting data loaded";
+    m_lightingBuildStatus=m_lightingBuildDirty
+        ? "Stale - scene or lighting settings changed since the last build"
+        : "Valid - "+std::to_string(data.probes.size())+" irradiance probes loaded and grid bound";
 }
 
 void EditorApp::TogglePanel(EditorPanels::Panel panel)

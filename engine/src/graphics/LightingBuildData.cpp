@@ -16,7 +16,7 @@
 namespace engine {
 namespace {
 
-constexpr char kMagic[8] = {'3','D','G','L','I','T','E','3'};
+constexpr char kMagic[8] = {'3','D','G','L','I','T','E','4'};
 constexpr float kPi = 3.14159265358979323846f;
 
 std::array<float, 4> EvaluateSH4Basis(const glm::vec3& direction) {

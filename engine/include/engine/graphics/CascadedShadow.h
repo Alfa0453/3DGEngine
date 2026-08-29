@@ -43,6 +43,8 @@ public:
     std::uint32_t CascadesReusedLastFrame() const { return m_reusedLastFrame; }
     std::uint64_t MemoryBytes() const;
     void SetUpdateIntervals(const std::array<std::uint32_t, kCascades>& intervals);
+    void SetForceUpdateEveryFrame(bool enabled) { m_forceUpdateEveryFrame = enabled; }
+    bool ForceUpdateEveryFrame() const { return m_forceUpdateEveryFrame; }
     void Invalidate() { m_cacheValid = false; }
 
 private:
@@ -63,6 +65,7 @@ private:
     glm::vec3 m_lastLightDirection{0.0f};
     float m_lastShadowFar = 0.0f;
     bool m_cacheValid = false;
+    bool m_forceUpdateEveryFrame = false;
     std::uint32_t m_renderedLastFrame = 0;
     std::uint32_t m_reusedLastFrame = 0;
 };

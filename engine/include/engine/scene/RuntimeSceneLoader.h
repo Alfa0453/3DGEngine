@@ -421,8 +421,8 @@ public:
             bool dayNightTimelineAutoplay = true;
             float skyLightIntensity = 1.0f;
             bool skylightOcclusion = true;
-            float skylightOcclusionStrength = 0.90f;
-            float minimumSkylight = 0.06f;
+            float skylightOcclusionStrength = 1.0f;
+            float minimumSkylight = 0.0f;
             float exposureEV = 0.0f;
             float specularOcclusionStrength = 0.85f;
             float localProbeInfluence = 1.0f;

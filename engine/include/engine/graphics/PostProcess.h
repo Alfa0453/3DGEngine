@@ -209,6 +209,7 @@ public:
         m_indirectStrength = strength;
     }
     void SetIndirectDebug(bool enabled) { m_indirectDebug = enabled; }
+    void SetLightingDebugPassthrough(bool enabled) { m_lightingDebugPassthrough = enabled; }
     void Resize(int width, int height);
     unsigned int HdrFbo()   const { return m_hdr.FboId(); }
     unsigned int HdrColor() const { return m_hdr.ColorTexture(); }
@@ -241,6 +242,7 @@ private:
     unsigned int m_indirectTexture = 0;
     float m_indirectStrength = 0.0f;
     bool m_indirectDebug = false;
+    bool m_lightingDebugPassthrough = false;
     glm::mat4 m_inverseViewProjection{1.0f};
     glm::mat4 m_currentViewProjection{1.0f};
     glm::mat4 m_previousViewProjection{1.0f};

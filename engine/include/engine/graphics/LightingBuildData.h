@@ -18,7 +18,8 @@ struct LightingBuildSettings {
     float probeSpacing = 2.0f;
     float maxRayDistance = 80.0f;
     float boundsPadding = 2.0f;
-    float minimumVisibility = 0.02f;
+    // Physical visibility may legitimately be zero in a sealed volume.
+    float minimumVisibility = 0.0f;
     std::uint32_t raysPerProbe = 96;
     bool directionalIrradiance = true;
     float indirectBounceStrength = 0.0f;
@@ -89,7 +90,7 @@ struct DirectionalSkyRadiance {
 };
 
 struct LightingBuildData {
-    static constexpr std::uint32_t kVersion = 3;
+    static constexpr std::uint32_t kVersion = 4;
     std::uint32_t version = kVersion;
     std::uint64_t sourceHash = 0;
     std::string sourceScene;

@@ -80,6 +80,7 @@ uniform sampler2D uSceneDepth;
 uniform sampler2D uIndirect;
 uniform float uIndirectStrength;
 uniform int uIndirectDebug;
+uniform int uLightingDebugPassthrough;
 uniform float uExposure;
 uniform float uBloomStrength;
 uniform float uTime;
@@ -135,6 +136,10 @@ vec4 sampleDepthAwareVolume(vec2 uv) {
     return accumulated / max(totalWeight, 1e-4);
 }
 void main() {
+    if (uLightingDebugPassthrough == 1) {
+        FragColor = vec4(clamp(texture(uScene, vUV).rgb, 0.0, 1.0), 1.0);
+        return;
+    }
     float underwater = clamp(uUnderwaterBlend, 0.0, 1.0);
     vec2 wave = vec2(
         sin(vUV.y * 31.0 + uTime * 1.7) + sin(vUV.y * 13.0 - uTime * 0.9),
@@ -713,6 +718,7 @@ void PostProcess::RenderComposite(int screenWidth, int screenHeight, float dt,
     m_composite.SetInt("uIndirect", 3);
     m_composite.SetFloat("uIndirectStrength", m_indirectTexture ? std::clamp(m_indirectStrength,0.0f,1.0f) : 0.0f);
     m_composite.SetInt("uIndirectDebug", m_indirectDebug ? 1 : 0);
+    m_composite.SetInt("uLightingDebugPassthrough", m_lightingDebugPassthrough ? 1 : 0);
     volumeHistory->BindColorTexture(4); m_composite.SetInt("uVolumetric",4);
     m_composite.SetInt("uVolumetricEnabled",volumeActive?1:0);
     m_composite.SetFloat("uExposure", exposure);

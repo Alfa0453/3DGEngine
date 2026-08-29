@@ -52,7 +52,9 @@ float SmoothFiniteAttenuation(float distanceSquared, float radius) {
 struct LocalProbeSample { vec3 irradiance; float skyVisibility; float validity; float visibility; };
 LocalProbeSample SampleLocalProbe(vec3 worldPosition, vec3 normal) {
     LocalProbeSample result;
-    result.irradiance = vec3(0.0); result.skyVisibility = 1.0;
+    // Missing/invalid build data must not silently become an outdoor probe.
+    // Callers resolve invalid samples through their conservative fallback.
+    result.irradiance = vec3(0.0); result.skyVisibility = 0.0;
     result.validity = 0.0; result.visibility = 1.0;
     if (uUseLightingGrid != 1) return result;
     vec3 extent = max(uLightingGridMax - uLightingGridMin, vec3(0.0001));
@@ -100,7 +102,7 @@ LocalProbeSample SampleLocalProbe(vec3 worldPosition, vec3 normal) {
 float PbrSpecularOcclusion(float ao, float nDotV, float roughness, float skyVisibility) {
     float exponent = exp2(-16.0 * roughness - 1.0);
     float gtao = clamp(pow(clamp(nDotV + ao, 0.0, 1.0), exponent) - 1.0 + ao, 0.0, 1.0);
-    float local = mix(1.0, max(skyVisibility, 0.08), 0.70);
+    float local = clamp(skyVisibility, 0.0, 1.0);
     return mix(1.0, gtao * local, clamp(uSpecularOcclusionStrength, 0.0, 1.0));
 }
 

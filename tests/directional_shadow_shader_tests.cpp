@@ -33,6 +33,14 @@ int main() {
                   "filter radius must be normalized by cascade world texel size");
     ok &= Require(composed.find("cascadeLength * 0.08") != std::string::npos,
                   "cascade selection must include the 8 percent transition region");
+    ok &= Require(composed.find("DirectionalReceiverBias") != std::string::npos,
+                  "receiver bias must be derived in world-space per cascade");
+    ok &= Require(composed.find("ClampDirectionalShadowUv") != std::string::npos,
+                  "PCSS samples must use stable clamped border handling");
+    ok &= Require(composed.find("if (nextValid)") != std::string::npos,
+                  "cascade blending must not blend toward an invalid lit sample");
+    ok &= Require(composed.find("DirectionalCascadeDebugColor") != std::string::npos,
+                  "the shared shadow code must expose cascade debug colours");
     ok &= Require(composed.find("for (int x = -2") == std::string::npos,
                   "the old square-grid kernel must not return");
 

@@ -264,6 +264,9 @@ public:
         std::uint64_t lightingStateHash = 0;
         int* lightingBuildQuality = nullptr;
         const std::string* lightingBuildStatus = nullptr;
+        std::size_t lightingProbeCount = 0;
+        bool lightingGridBound = false;
+        bool* forceDirectionalShadowUpdate = nullptr;
         float lightingBuildProgress = 0.0f;
         char* scenePathBuffer = nullptr;
         std::size_t scenePathBufferSize = 0;

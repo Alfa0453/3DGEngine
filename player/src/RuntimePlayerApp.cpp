@@ -590,6 +590,27 @@ void RuntimePlayerApp::LoadScene() {
     }
     m_entityCount = created.size();
     m_sample = engine::DayNightCycle::At(m_scene.environment.timeOfDay);
+    // Baked lighting is a scene resource, not a Dynamic-GI implementation
+    // detail. Load it for every runtime scene so editor play and packaged play
+    // bind the same probe grid even when Dynamic GI is disabled.
+    if (!m_scene.environment.lightingBuildAsset.empty()) {
+        std::filesystem::path lightingPath(m_scene.environment.lightingBuildAsset);
+        if (!lightingPath.is_absolute() && !std::filesystem::exists(lightingPath))
+            lightingPath = std::filesystem::path(bootScenePath).parent_path() / lightingPath;
+        lightingPath = lightingPath.lexically_normal();
+        engine::LightingBuildData data;
+        std::string lightingError;
+        if (engine::LoadLightingBuildData(lightingPath.string(), &data, &lightingError)) {
+            if (m_lightingProbeGrid.Upload(data, &lightingError)) {
+                m_loadedLightingData = std::move(data);
+            } else {
+                m_runtimeWarnings.push_back("Lighting upload: " + lightingError);
+            }
+        } else {
+            m_runtimeWarnings.push_back("Lighting load: " + lightingError
+                                        + " (" + lightingPath.string() + ")");
+        }
+    }
     if (!m_scene.environment.dayNightTimelinePath.empty()) {
         std::filesystem::path timelinePath(m_scene.environment.dayNightTimelinePath);
         if (!timelinePath.is_absolute() && !std::filesystem::exists(timelinePath))
@@ -755,19 +776,6 @@ void RuntimePlayerApp::UpdateDynamicGi(const engine::Camera& camera) {
     const engine::DirectionalSkyRadiance sky =
         ResolveEnvironment(env, m_sample).ToDirectionalSkyRadiance();
     if (!m_dynamicGiConfigured) {
-        m_loadedLightingData.reset();
-        m_lightingProbeGrid.Reset();
-        if (!env.lightingBuildAsset.empty()) {
-            std::filesystem::path lightingPath(env.lightingBuildAsset);
-            if (!lightingPath.is_absolute() && !std::filesystem::exists(lightingPath))
-                lightingPath = std::filesystem::path(m_scenePath).parent_path() / lightingPath;
-            engine::LightingBuildData data;
-            std::string error;
-            if (engine::LoadLightingBuildData(lightingPath.lexically_normal().string(), &data, &error)) {
-                m_loadedLightingData = data;
-                m_lightingProbeGrid.Upload(data, nullptr);
-            } else m_runtimeWarnings.push_back("Lighting: " + error);
-        }
         engine::DynamicIrradianceSettings settings;
         settings.enabled = true;
         settings.quality = static_cast<engine::DynamicGiQuality>(std::clamp(env.dynamicGiQuality, 0, 3));
@@ -2914,6 +2922,8 @@ void RuntimePlayerApp::OnRender() {
         m_post->SetIndirectTexture(0, 0.0f);
     }
     m_post->SetIndirectDebug(env.lightingDebugMode == 18);
+    m_post->SetLightingDebugPassthrough(env.lightingDebugMode != 0
+                                        && env.lightingDebugMode != 18);
     m_post->SetVolumetricDirectionalShadow(
         m_pbr ? &m_pbr->Cascade() : nullptr,
         cam.ViewMatrix());

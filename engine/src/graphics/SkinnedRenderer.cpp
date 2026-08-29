@@ -181,8 +181,9 @@ uniform vec2 uCloudWindOffset;
 float LocalSkyVisibility(vec3 worldPos, vec3 normal, float sunVisibility) {
     float hemisphere=mix(0.72,1.0,clamp(normal.y*0.5+0.5,0.0,1.0));
     if(uUseLightingGrid==1){vec3 extent=max(uLightingGridMax-uLightingGridMin,vec3(0.0001));vec3 uvw=(worldPos-uLightingGridMin)/extent;
-        if(all(greaterThanEqual(uvw,vec3(0)))&&all(lessThanEqual(uvw,vec3(1))))return clamp(SampleLocalProbe(worldPos,normal).skyVisibility*hemisphere,0.0,1.0);}
-    return clamp(mix(0.82,1.0,sunVisibility)*hemisphere,0.0,1.0);
+        if(all(greaterThanEqual(uvw,vec3(0)))&&all(lessThanEqual(uvw,vec3(1)))){LocalProbeSample probe=SampleLocalProbe(worldPos,normal);
+            if(probe.validity>0.001)return clamp(probe.skyVisibility*hemisphere,0.0,1.0);}}
+    return clamp(0.25*sunVisibility*hemisphere,0.0,1.0);
 }
 float CloudHash(vec2 p) { return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453123); }
 float CloudNoise(vec2 p) {
@@ -249,7 +250,9 @@ void main() {
         vec3 bentWorld=normalize(mat3(uViewToWorld)*bentView);
         if(dot(bentWorld,bentWorld)>0.5)indirectN=normalize(mix(N,bentWorld,0.75));}
     LocalProbeSample localProbe=SampleLocalProbe(vWorldPos,indirectN);
-    float skyVisibility=max(localProbe.skyVisibility,clamp(uMinimumSkylight,0.0,1.0));
+    float fallbackSkyVisibility=LocalSkyVisibility(vWorldPos,indirectN,1.0-shadow);
+    float resolvedSkyVisibility=mix(fallbackSkyVisibility,localProbe.skyVisibility,step(0.001,localProbe.validity));
+    float skyVisibility=max(resolvedSkyVisibility,clamp(uMinimumSkylight,0.0,1.0));
     float screenAo=(uUseSSAO==1)?texture(uSsaoMap,gl_FragCoord.xy/uScreenSize).r:1.0;
     vec3 diffuseIndirect=vec3(0.0),specularIndirect=vec3(0.0);
     float specularOcclusion=1.0;
@@ -266,7 +269,7 @@ void main() {
         vec2 brdf = texture(uBrdfLUT, vec2(max(dot(N,V),0.0), roughness)).rg;
         vec3 specular = prefiltered * (F*brdf.x + brdf.y);
         specularOcclusion=PbrSpecularOcclusion(ao*screenAo,max(dot(N,V),0.0),roughness,skyVisibility);
-        specular*=specularOcclusion;
+        specular*=mix(specularOcclusion,1.0,reflectionProbeWeight);
         vec3 diffuseAmbient=kD*diffuse*ao*screenAo;
         if(uSkylightOcclusion==1)diffuseAmbient*=mix(1.0,skyVisibility,clamp(uSkylightOcclusionStrength,0.0,1.0));
         diffuseIndirect=diffuseAmbient; specularIndirect=specular;
@@ -276,8 +279,6 @@ void main() {
         diffuseIndirect=ambient;
     }
     if (uSkylightOcclusion == 1 && uUseIBL == 0) {
-        float skyVisibility = max(LocalSkyVisibility(vWorldPos, N, 1.0-shadow),
-                                  clamp(uMinimumSkylight, 0.0, 1.0));
         ambient *= mix(1.0, skyVisibility, clamp(uSkylightOcclusionStrength, 0.0, 1.0));
     }
     vec3 color = ambient + Lo + uEmissive;
@@ -301,6 +302,15 @@ void main() {
     else if(uLightingDebugMode==17)color=localProbe.irradiance;
     else if(uLightingDebugMode==18)color=vec3(0.0);
     else if(uLightingDebugMode==19)color=diffuseIndirect+specularIndirect;
+    else if(uLightingDebugMode==20)color=vec3(1.0-shadow);
+    else if(uLightingDebugMode==21)color=DirectionalCascadeDebugColor(vWorldPos);
+    else if(uLightingDebugMode==22){vec3 debugF=FresnelSchlickRough(max(dot(N,V),0.0),F0,roughness);
+        vec3 debugKd=(vec3(1.0)-debugF)*(1.0-metallic);
+        vec3 globalDiffuse=debugKd*texture(uIrradiance,indirectN).rgb*albedo*ao*screenAo;
+        if(uSkylightOcclusion==1)globalDiffuse*=mix(1.0,skyVisibility,clamp(uSkylightOcclusionStrength,0.0,1.0));
+        vec3 debugR=reflect(-V,N);vec2 debugBrdf=texture(uBrdfLUT,vec2(max(dot(N,V),0.0),roughness)).rg;
+        vec3 globalSpecular=textureLod(uPrefilter,debugR,roughness*uMaxReflectionLod).rgb*(debugF*debugBrdf.x+debugBrdf.y)*specularOcclusion;
+        color=globalDiffuse+globalSpecular;}
     if (uFogEnabled == 1 && uLightingDebugMode == 0) {
         float dist = length(uViewPos - vWorldPos);
         float distFog = 1.0 - exp(-dist * uFogDensity);
@@ -308,7 +318,7 @@ void main() {
         float fog = clamp(distFog * heightF, 0.0, 1.0);
         color = mix(color, uFogColor, fog);
     }
-    if (uApplyTonemap == 1) {
+    if (uApplyTonemap == 1 && uLightingDebugMode != 20 && uLightingDebugMode != 21) {
         color = ACES(color);                 // filmic tone map (was Reinhard)
         color = pow(color, vec3(1.0/2.2));   // linear -> sRGB
     }
