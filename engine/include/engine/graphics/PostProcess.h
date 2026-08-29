@@ -61,6 +61,8 @@ public:
         float histogramLowPercent = 0.02f;
         float histogramHighPercent = 0.95f;
         float exposureDeadZoneEV = 0.08f;
+        bool preserveNightDarkness = true;
+        float nightExposureLimitEV = 1.0f;
         float bloomKnee = 0.5f;
         int bloomLevels = 5;
         float temperature = 6500.0f;
@@ -131,6 +133,7 @@ public:
     float Exposure() const { return m_exposure; }   // current adapted exposure
     float CurrentEV() const { return m_currentEV; }
     float TargetEV() const { return m_targetEV; }
+    float EffectiveMaxEV() const { return m_effectiveMaxEV; }
     void NotifyCameraCut() {
         m_resetExposure = true;
         m_volumeHistoryValid = false;
@@ -230,6 +233,7 @@ private:
     float m_exposure = 1.0f;   // adapted over time
     float m_currentEV = 0.0f;
     float m_targetEV = 0.0f;
+    float m_effectiveMaxEV = 4.0f;
     bool m_resetExposure = true;
     unsigned int m_exposureFrame = 0;
     float m_time = 0.0f;

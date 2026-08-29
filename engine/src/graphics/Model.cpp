@@ -1,6 +1,7 @@
 #include "engine/graphics/Model.h"
 
 #include "engine/assets/StaticMeshAsset.h"
+#include "engine/assets/ImportedMaterialResolver.h"
 #include "engine/graphics/ImageDecode.h"
 #include "engine/graphics/VertexLayout.h"
 
@@ -56,6 +57,11 @@ Model Model::FromFile(const std::string& path) {
             throw std::runtime_error("Model: " + error);
 
         Model model;
+        if (!asset.materialSlots.empty()) {
+            ResolveImportedMaterialSlots(path, asset.materialSlots,
+                &model.m_materials, &model.m_textures, nullptr);
+        }
+        if (model.m_materials.empty()) {
         model.m_materials.reserve(asset.materials.size());
         for (const StaticMeshMaterialData& source : asset.materials) {
             Material material;
@@ -72,6 +78,7 @@ Model Model::FromFile(const std::string& path) {
             material.specularMap = source.specularMap;
             material.emissiveMap = source.emissiveMap;
             model.m_materials.push_back(std::move(material));
+        }
         }
         model.m_textures.reserve(asset.textures.size());
         for (const StaticMeshTextureData& source : asset.textures) {

@@ -12,6 +12,7 @@
 #include <engine/graphics/Camera.h>
 #include <engine/graphics/SkinnedModel.h>
 #include <engine/graphics/ImageDecode.h>
+#include <engine/graphics/DayNightCycle.h>
 #include <engine/assets/ShaderAsset.h>
 #include <engine/assets/FoliageAsset.h>
 #include <engine/math/Spline.h>
@@ -2679,6 +2680,25 @@ void DrawWorldSettings(EditorScene& scene, EditorDockspace::Context& context, bo
         changed |= ImGui::ColorEdit3("Moon Color", &environment.moonColor.x);
         changed |= ImGui::SliderFloat("Moon Intensity", &environment.moonIntensity, 0.0f, 2.0f);
         changed |= ImGui::SliderFloat("Moon Phase", &environment.moonPhase, 0.0f, 1.0f);
+        changed |= ImGui::SliderFloat("Moon GI Contribution", &environment.moonGiContribution, 0.0f, 1.0f);
+        ImGui::SeparatorText("Environment Energy");
+        changed |= ImGui::SliderFloat("Day Environment Intensity", &environment.dayEnvironmentIntensity, 0.0f, 4.0f, "%.3f");
+        changed |= ImGui::SliderFloat("Twilight Environment Intensity", &environment.twilightEnvironmentIntensity, 0.0f, 1.0f, "%.3f");
+        changed |= ImGui::SliderFloat("Night Environment Intensity", &environment.nightEnvironmentIntensity, 0.0f, 0.20f, "%.4f");
+        if (ImGui::TreeNode("Advanced Night Energy")) {
+            changed |= ImGui::SliderFloat("Night Reflection Intensity", &environment.nightReflectionIntensity, 0.0f, 2.0f);
+            changed |= ImGui::SliderFloat("Night Fog Environment Scattering", &environment.nightFogScattering, 0.0f, 2.0f);
+            changed |= ImGui::SliderFloat("Night Cloud Ambient", &environment.nightCloudAmbient, 0.0f, 2.0f);
+            ImGui::TreePop();
+        }
+        const engine::DayNightCycle::Sample lightingSample =
+            engine::DayNightCycle::At(environment.timeOfDay);
+        const float energy = lightingSample.dayFactor * environment.dayEnvironmentIntensity
+            + lightingSample.twilightFactor * environment.twilightEnvironmentIntensity
+            + lightingSample.nightFactor * environment.nightEnvironmentIntensity;
+        ImGui::TextDisabled("Sun elev %.3f | Day %.2f | Twilight %.2f | Night %.2f | Env %.4f",
+            lightingSample.solarElevation, lightingSample.dayFactor,
+            lightingSample.twilightFactor, lightingSample.nightFactor, energy);
         ImGui::SeparatorText("Volumetric Fog");
         changed |= ImGui::Checkbox("Enabled##Volumetric", &environment.volumetricFog);
         changed |= ImGui::SliderFloat("Scattering", &environment.volumetricScattering, 0.0f, 4.0f);
@@ -2697,6 +2717,9 @@ void DrawWorldSettings(EditorScene& scene, EditorDockspace::Context& context, bo
         changed |= ImGui::SliderFloat("Exposure Compensation", &environment.exposureCompensationEV, -8.0f, 8.0f, "%.2f EV");
         changed |= ImGui::SliderFloat("Adapt Bright", &environment.exposureSpeedUp, 0.0f, 12.0f);
         changed |= ImGui::SliderFloat("Adapt Dark", &environment.exposureSpeedDown, 0.0f, 12.0f);
+        changed |= ImGui::Checkbox("Preserve Night Darkness", &environment.preserveNightDarkness);
+        if (environment.preserveNightDarkness)
+            changed |= ImGui::SliderFloat("Night Exposure Limit", &environment.nightExposureLimitEV, -8.0f, 8.0f, "%.2f EV");
         changed |= ImGui::Checkbox("HDR Bloom", &environment.bloom);
         changed |= ImGui::SliderFloat("Bloom Threshold", &environment.bloomThreshold, 0.0f, 20.0f);
         changed |= ImGui::SliderFloat("Bloom Knee", &environment.bloomKnee, 0.001f, 5.0f);
@@ -8213,6 +8236,31 @@ void DrawAssets(EditorDockspace::Context& context, bool* open) {
                 ImGui::Checkbox("Flip UVs", &settings.flipUVs);
                 ImGui::Checkbox("Import Animations",
                                 &settings.importEmbeddedAnimations);
+                ImGui::SeparatorText("Materials and Textures");
+                ImGui::Checkbox("Import Materials", &settings.importMaterials);
+                if (!settings.importMaterials) ImGui::BeginDisabled();
+                ImGui::Checkbox("Import Textures", &settings.importTextures);
+                ImGui::Checkbox("Apply Imported Materials",
+                                &settings.applyImportedMaterials);
+                ImGui::Checkbox("Create Materials Folder",
+                                &settings.createMaterialFolder);
+                ImGui::Checkbox("Create Textures Folder",
+                                &settings.createTextureFolder);
+                ImGui::Checkbox("Reuse Existing Materials",
+                                &settings.reuseExistingMaterials);
+                ImGui::Checkbox("Reuse Existing Textures",
+                                &settings.reuseExistingTextures);
+                ImGui::Checkbox("Keep Legacy Embedded Fallback",
+                                &settings.keepLegacyEmbeddedFallback);
+                int reimportPolicy = static_cast<int>(settings.materialReimportPolicy);
+                const char* policies[] = {"Preserve edited materials",
+                    "Update source properties", "Recreate generated materials"};
+                if (ImGui::Combo("Material Reimport", &reimportPolicy,
+                                 policies, IM_ARRAYSIZE(policies)))
+                    settings.materialReimportPolicy = static_cast<
+                        engine::StaticMeshImportOptions::MaterialReimportPolicy>(
+                            reimportPolicy);
+                if (!settings.importMaterials) ImGui::EndDisabled();
                 const bool animationMode = importModelMode
                     == static_cast<int>(EditorAssets::ModelImportMode::Animation);
                 ImGui::SeparatorText(animationMode
@@ -8294,6 +8342,31 @@ void DrawAssets(EditorDockspace::Context& context, bool* open) {
                 ImGui::Checkbox("Join Identical Vertices",
                                 &settings.joinIdenticalVertices);
                 ImGui::Checkbox("Flip UVs", &settings.flipUVs);
+                ImGui::SeparatorText("Materials and Textures");
+                ImGui::Checkbox("Import Materials", &settings.importMaterials);
+                if (!settings.importMaterials) ImGui::BeginDisabled();
+                ImGui::Checkbox("Import Textures", &settings.importTextures);
+                ImGui::Checkbox("Apply Imported Materials",
+                                &settings.applyImportedMaterials);
+                ImGui::Checkbox("Create Materials Folder",
+                                &settings.createMaterialFolder);
+                ImGui::Checkbox("Create Textures Folder",
+                                &settings.createTextureFolder);
+                ImGui::Checkbox("Reuse Existing Materials",
+                                &settings.reuseExistingMaterials);
+                ImGui::Checkbox("Reuse Existing Textures",
+                                &settings.reuseExistingTextures);
+                ImGui::Checkbox("Keep Legacy Embedded Fallback",
+                                &settings.keepLegacyEmbeddedFallback);
+                int reimportPolicy = static_cast<int>(settings.materialReimportPolicy);
+                const char* policies[] = {"Preserve edited materials",
+                    "Update source properties", "Recreate generated materials"};
+                if (ImGui::Combo("Material Reimport", &reimportPolicy,
+                                 policies, IM_ARRAYSIZE(policies)))
+                    settings.materialReimportPolicy = static_cast<
+                        engine::StaticMeshImportOptions::MaterialReimportPolicy>(
+                            reimportPolicy);
+                if (!settings.importMaterials) ImGui::EndDisabled();
             }
         } else if (importingTexture) {
             engine::TextureImportOptions& settings =
@@ -8313,6 +8386,9 @@ void DrawAssets(EditorDockspace::Context& context, bool* open) {
         }
 
         ImGui::TextUnformatted("Store in project");
+        if (importingModel)
+            ImGui::TextDisabled(
+                "A model package folder containing the mesh, Materials, and Textures will be created here.");
         const std::string destinationLabel = importDestination.empty()
             ? std::string("Content/")
             : std::string("Content/") + importDestination;

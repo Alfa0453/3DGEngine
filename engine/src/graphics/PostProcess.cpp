@@ -540,8 +540,8 @@ void PostProcess::RenderComposite(int screenWidth, int screenHeight, float dt,
         m_volumetricShader.SetMat4("uInvViewProjection",m_inverseViewProjection);
         m_volumetricShader.SetMat4("uPreviousViewProjection",m_previousViewProjection);
         m_volumetricShader.SetVec3("uCameraPosition",m_cameraPosition);
-        m_volumetricShader.SetVec3("uSunDirection",m_environment.sunDirection);
-        m_volumetricShader.SetVec3("uSunRadiance",m_environment.sunRadiance);
+        m_volumetricShader.SetVec3("uSunDirection",-m_environment.keyLightDirection);
+        m_volumetricShader.SetVec3("uSunRadiance",m_environment.keyLightRadiance);
         m_volumetricShader.SetVec3("uSkyRadiance",m_environment.ambientRadiance);
         m_volumetricShader.SetVec3("uAlbedo",volumetrics.scatteringAlbedo);
         m_volumetricShader.SetFloat("uDensity",volumetrics.density);
@@ -635,6 +635,11 @@ void PostProcess::RenderComposite(int screenWidth, int screenHeight, float dt,
     // or emissive pixel cannot dominate adaptation. ---
     float exposure = settings.exposure;
     if (settings.autoExposure) {
+        const float minimumEv = std::min(settings.minEV, settings.maxEV);
+        const float authoredMaximumEv = std::max(settings.minEV, settings.maxEV);
+        m_effectiveMaxEV = std::max(minimumEv, ResolveNightExposureMaxEv(authoredMaximumEv,
+            settings.nightExposureLimitEV, m_environment.nightFactor,
+            settings.preserveNightDarkness));
         glBindFramebuffer(GL_FRAMEBUFFER, m_lumFbo);
         glViewport(0, 0, m_lumSize, m_lumSize);
         m_luminance.Bind();
@@ -660,7 +665,7 @@ void PostProcess::RenderComposite(int screenWidth, int screenHeight, float dt,
             const float avgLum = std::exp(avgLog);
             const float targetExposure = settings.exposureKey / std::max(avgLum, 1e-4f);
             m_targetEV = std::clamp(std::log2(std::max(targetExposure, 1e-6f))
-                + settings.exposureCompensationEV, settings.minEV, settings.maxEV);
+                + settings.exposureCompensationEV, minimumEv, m_effectiveMaxEV);
         }
         if (std::abs(m_targetEV - m_currentEV) < std::max(settings.exposureDeadZoneEV, 0.0f))
             m_targetEV = m_currentEV;

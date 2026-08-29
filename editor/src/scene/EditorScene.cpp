@@ -479,7 +479,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         return false;
     }
 
-    out << "3DGEditorScene 142 " << m_assetId.ToString() << '\n';
+    out << "3DGEditorScene 143 " << m_assetId.ToString() << '\n';
     out << "environment "
         << m_environment.timeOfDay << ' '
         << m_environment.skyLightIntensity << ' '
@@ -562,6 +562,15 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         << m_environment.moonColor.g << ' ' << m_environment.moonColor.b << ' '
         << m_environment.moonIntensity << ' ' << m_environment.moonAngularDiameter << ' '
         << m_environment.moonPhase << '\n';
+    out << "night_energy " << m_environment.dayEnvironmentIntensity << ' '
+        << m_environment.twilightEnvironmentIntensity << ' '
+        << m_environment.nightEnvironmentIntensity << ' '
+        << m_environment.moonGiContribution << ' '
+        << m_environment.nightReflectionIntensity << ' '
+        << m_environment.nightFogScattering << ' '
+        << m_environment.nightCloudAmbient << '\n';
+    out << "night_exposure " << m_environment.preserveNightDarkness << ' '
+        << m_environment.nightExposureLimitEV << '\n';
     out << "volumetrics " << m_environment.volumetricFog << ' '
         << m_environment.volumetricScattering << ' ' << m_environment.volumetricExtinction << ' '
         << m_environment.volumetricAnisotropy << ' ' << m_environment.volumetricStartDistance << ' '
@@ -1474,7 +1483,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             return false;
         }
     }
-    if (magic != "3DGEditorScene" ||(version < 1 || version > 142)) {
+    if (magic != "3DGEditorScene" ||(version < 1 || version > 143)) {
         if (error) *error = "Scene file has an unknown format.";
         return false;
     }
@@ -1500,6 +1509,23 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                >> m_environment.moonIntensity >> m_environment.moonAngularDiameter
                >> m_environment.moonPhase;
             if (!in) { if (error) *error = "Scene contains invalid night environment settings."; Clear(); return false; }
+            continue;
+        }
+        if (recordType == "night_energy" && version >= 143) {
+            in >> m_environment.dayEnvironmentIntensity
+               >> m_environment.twilightEnvironmentIntensity
+               >> m_environment.nightEnvironmentIntensity
+               >> m_environment.moonGiContribution
+               >> m_environment.nightReflectionIntensity
+               >> m_environment.nightFogScattering
+               >> m_environment.nightCloudAmbient;
+            if (!in) { if (error) *error = "Scene contains invalid night energy settings."; Clear(); return false; }
+            continue;
+        }
+        if (recordType == "night_exposure" && version >= 143) {
+            in >> m_environment.preserveNightDarkness
+               >> m_environment.nightExposureLimitEV;
+            if (!in) { if (error) *error = "Scene contains invalid night exposure settings."; Clear(); return false; }
             continue;
         }
         if (recordType == "volumetrics" && version >= 140) {

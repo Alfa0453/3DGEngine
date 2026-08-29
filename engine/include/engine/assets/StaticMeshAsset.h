@@ -11,8 +11,8 @@ namespace engine {
 
 class AssetRegistry;
 
-inline constexpr std::uint32_t kStaticMeshAssetVersion = 3;
-inline constexpr std::uint32_t kStaticMeshImporterVersion = 1;
+inline constexpr std::uint32_t kStaticMeshAssetVersion = 4;
+inline constexpr std::uint32_t kStaticMeshImporterVersion = 2;
 inline constexpr std::uint32_t kStaticMeshVertexStride = 11;
 
 // CPU-side representation stored in a .3dgmesh. Textures are embedded as
@@ -31,10 +31,33 @@ struct StaticMeshMaterialData {
     std::array<float, 3> specular{{0.2f, 0.2f, 0.2f}};
     std::array<float, 3> emissive{{0.0f, 0.0f, 0.0f}};
     float shininess = 32.0f;
+    // PBR source values retained during import. Legacy assets derive roughness
+    // from shininess when loaded; new imports use Assimp's glTF values when
+    // present and the Phong conversion otherwise.
+    float metallic = 0.0f;
+    float roughness = 0.5f;
+    float ao = 1.0f;
+    float opacity = 1.0f;
+    std::int32_t alphaMode = 0; // ecs::PbrMaterial::BlendMode numeric value
     std::int32_t diffuseMap = -1;
     std::int32_t normalMap = -1;
     std::int32_t specularMap = -1;
     std::int32_t emissiveMap = -1;
+    std::int32_t metalRoughMap = -1;
+    std::int32_t metallicMap = -1;
+    std::int32_t roughnessMap = -1;
+    std::int32_t aoMap = -1;
+    std::int32_t heightMap = -1;
+};
+
+// Stable indirection between source material indices and standalone engine
+// material assets. Submeshes continue to store a compact slot index.
+struct MeshMaterialSlot {
+    std::string name;
+    AssetHandle materialId;
+    // Content-relative fallback. AssetHandle remains the primary identity so
+    // Content moves and renames do not break the mesh.
+    std::string materialPath;
 };
 
 struct StaticMeshSubMeshData {
@@ -57,6 +80,7 @@ struct StaticMeshAssetData {
     std::array<float, 3> maximum{{0.0f, 0.0f, 0.0f}};
     std::vector<StaticMeshMaterialData> materials;
     std::vector<StaticMeshTextureData> textures;
+    std::vector<MeshMaterialSlot> materialSlots;
     std::vector<StaticMeshSubMeshData> subMeshes;
     StaticMeshCollisionType collisionType = StaticMeshCollisionType::None;
 };
@@ -67,6 +91,21 @@ struct StaticMeshImportOptions {
     bool generateTangents = true;
     bool joinIdenticalVertices = true;
     bool flipUVs = false;
+    bool importMaterials = true;
+    bool importTextures = true;
+    bool applyImportedMaterials = true;
+    bool createMaterialFolder = true;
+    bool createTextureFolder = true;
+    bool reuseExistingMaterials = true;
+    bool reuseExistingTextures = true;
+    bool keepLegacyEmbeddedFallback = false;
+    enum class MaterialReimportPolicy {
+        PreserveExisting = 0,
+        UpdateSourceProperties = 1,
+        Recreate = 2
+    };
+    MaterialReimportPolicy materialReimportPolicy =
+        MaterialReimportPolicy::PreserveExisting;
 };
 
 struct StaticMeshImportResult {
@@ -77,6 +116,12 @@ struct StaticMeshImportResult {
     std::size_t vertexCount = 0;
     std::size_t triangleCount = 0;
     std::size_t embeddedTextureCount = 0;
+    std::size_t importedMaterialCount = 0;
+    std::size_t importedTextureCount = 0;
+    std::size_t reusedMaterialCount = 0;
+    std::size_t reusedTextureCount = 0;
+    std::size_t failedTextureCount = 0;
+    std::size_t assignedMaterialSlotCount = 0;
 };
 
 bool ValidateStaticMeshAsset(const StaticMeshAssetData& asset,

@@ -273,8 +273,32 @@ bool EditorAssets::ImportAsset(const std::string& sourcePath,
         || extension == ".gltf" || extension == ".glb" || extension == ".dae"
         || extension == ".ply" || extension == ".stl";
     if (staticMeshSource) {
-        const fs::path destination = UniqueDestinationPath(
-            fs::path(CurrentPath()) / (source.stem().string() + ".3dgmesh"));
+        fs::path package = fs::path(CurrentPath()) / source.stem();
+        int packageSuffix = 1;
+        while (fs::exists(package, ec))
+            package = fs::path(CurrentPath()) /
+                (source.stem().string() + "_" + std::to_string(packageSuffix++));
+        fs::create_directories(package, ec);
+        if (ec) {
+            if (error) *error = "Could not create model asset package: " + ec.message();
+            return false;
+        }
+        const bool hasRegistry = m_assetRegistry != nullptr;
+        const engine::AssetRegistry registryBefore = hasRegistry
+            ? *m_assetRegistry : engine::AssetRegistry{};
+        const auto rollbackPackage = [&]() {
+            std::error_code cleanupError;
+            fs::remove_all(package, cleanupError);
+            if (hasRegistry) {
+                *m_assetRegistry = registryBefore;
+                std::string ignored;
+                m_assetRegistry->Save(
+                    engine::AssetRegistry::DefaultRegistryPath(m_rootPath),
+                    &ignored);
+            }
+        };
+        const fs::path destination = package /
+            (package.filename().string() + ".3dgmesh");
         engine::StaticMeshImportResult result;
         std::string staticError;
         const bool tryStatic = modelMode == ModelImportMode::Automatic
@@ -287,7 +311,11 @@ bool EditorAssets::ImportAsset(const std::string& sourcePath,
                 + " (" + std::to_string(result.subMeshCount) + " submesh(es), "
                 + std::to_string(result.vertexCount) + " vertices, "
                 + std::to_string(result.triangleCount) + " triangles, "
-                + std::to_string(result.embeddedTextureCount) + " texture(s))";
+                + std::to_string(result.importedMaterialCount) + " material(s), "
+                + std::to_string(result.importedTextureCount) + " texture(s), "
+                + std::to_string(result.assignedMaterialSlotCount) + " assigned slot(s))";
+            m_currentFolder = NormalizeSlashes(
+                fs::relative(package, m_rootPath, ec).string());
             if (!Refresh(m_rootPath, error)) return false;
             const std::string importedRelative = NormalizeSlashes(
                 fs::relative(destination, m_rootPath, ec).string());
@@ -300,11 +328,25 @@ bool EditorAssets::ImportAsset(const std::string& sourcePath,
             return true;
         }
         if (modelMode == ModelImportMode::StaticMesh) {
+            rollbackPackage();
             if (error) *error = staticError;
             return false;
         }
+        if (tryStatic) {
+            // Automatic mode may first discover that the source is skeletal.
+            // Remove every artifact from that failed attempt before starting
+            // the skeletal transaction in the same package.
+            rollbackPackage();
+            ec.clear();
+            fs::create_directories(package, ec);
+            if (ec) {
+                if (error) *error = "Could not recreate model asset package: "
+                    + ec.message();
+                return false;
+            }
+        }
 
-        fs::path base = fs::path(CurrentPath()) / source.stem();
+        fs::path base = package / package.filename();
         const auto generatedAnimationExists = [&](const fs::path& candidate) {
             const fs::path folder = candidate.parent_path();
             const std::string prefix = candidate.filename().string() + "_";
@@ -323,8 +365,8 @@ bool EditorAssets::ImportAsset(const std::string& sourcePath,
         while (fs::exists(base.string() + ".3dgskmesh", ec)
                || fs::exists(base.string() + ".3dgskel", ec)
                || generatedAnimationExists(base)) {
-            base = fs::path(CurrentPath())
-                / (source.stem().string() + "_" + std::to_string(suffix++));
+            base = package
+                / (package.filename().string() + "_" + std::to_string(suffix++));
         }
         engine::SkeletalImportResult skeletalResult;
         std::string skeletalError;
@@ -332,6 +374,7 @@ bool EditorAssets::ImportAsset(const std::string& sourcePath,
                 source.string(), base.string(), m_rootPath,
                 m_skeletalImportOptions, m_assetRegistry,
                 &skeletalResult, &skeletalError)) {
+            rollbackPackage();
             if (error) {
                 *error = tryStatic
                     ? staticError + " Skeletal import also failed: "
@@ -349,6 +392,15 @@ bool EditorAssets::ImportAsset(const std::string& sourcePath,
         if (!skeletalResult.skeletonPath.empty())
             m_lastImportMessage += ", skeleton "
                 + fs::path(skeletalResult.skeletonPath).filename().string();
+        m_lastImportMessage += ", "
+            + std::to_string(skeletalResult.importedMaterialCount)
+            + " material(s), "
+            + std::to_string(skeletalResult.importedTextureCount)
+            + " texture(s), "
+            + std::to_string(skeletalResult.assignedMaterialSlotCount)
+            + " assigned slot(s)";
+        m_currentFolder = NormalizeSlashes(
+            fs::relative(package, m_rootPath, ec).string());
         if (!Refresh(m_rootPath, error)) return false;
         std::string selectedPath = !skeletalResult.skeletalMeshPath.empty()
             ? skeletalResult.skeletalMeshPath
@@ -524,7 +576,9 @@ bool EditorAssets::ReimportSelectedStaticMesh(std::string* error) {
     }
     m_lastImportMessage = "Reimported static mesh: " + destination.filename().string()
         + " (" + std::to_string(result.vertexCount) + " vertices, "
-        + std::to_string(result.triangleCount) + " triangles)";
+        + std::to_string(result.triangleCount) + " triangles, "
+        + std::to_string(result.reusedMaterialCount) + " material(s) reused, "
+        + std::to_string(result.reusedTextureCount) + " texture(s) updated)";
     if (!Refresh(m_rootPath, error)) return false;
     for (int i = 0; i < static_cast<int>(m_assets.size()); ++i) {
         if (m_assets[static_cast<std::size_t>(i)].relativePath == selectedRelative) {
@@ -576,7 +630,9 @@ bool EditorAssets::ReimportSelectedSkeletalAssets(std::string* error) {
     m_lastImportMessage = "Reimported skeletal assets: "
         + std::to_string(result.boneCount) + " bones, "
         + std::to_string(result.vertexCount) + " vertices, "
-        + std::to_string(result.animationPaths.size()) + " animation clip(s)";
+        + std::to_string(result.animationPaths.size()) + " animation clip(s), "
+        + std::to_string(result.reusedMaterialCount) + " material(s) reused, "
+        + std::to_string(result.reusedTextureCount) + " texture(s) updated";
     const std::string selectedRelative = selected->relativePath;
     if (!Refresh(m_rootPath, error)) return false;
     for (int i = 0; i < static_cast<int>(m_assets.size()); ++i) {

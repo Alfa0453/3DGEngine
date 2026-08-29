@@ -72,7 +72,12 @@ bool ParseLightType(const std::string& value, ecs::Light::Type* type) {
 
 ecs::Light EnvironmentSunLight(const RuntimeSceneLoader::Scene::Environment& environment) {
     const DayNightCycle::Sample sky = DayNightCycle::At(environment.timeOfDay);
-    const glm::vec3 radiance = sky.keyLightColor * std::max(environment.sunIntensity, 0.0f);
+    const glm::vec3 sun = sky.sunRadiance * std::max(environment.sunIntensity, 0.0f);
+    const glm::vec3 moon = environment.moon
+        ? glm::max(environment.moonColor * environment.moonIntensity
+                   * environment.moonPhase * sky.nightFactor, glm::vec3(0.0f))
+        : glm::vec3(0.0f);
+    const glm::vec3 radiance = sun + moon;
 
     ecs::Light light;
     light.type = ecs::Light::Type::Directional;
@@ -134,11 +139,11 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             return false;
         }
     }
-    if (magic != "3DGRuntimeScene" || version < 1 || version > 103) {
+    if (magic != "3DGRuntimeScene" || version < 1 || version > 104) {
         if (error) {
             *error = "Runtime scene file has an unknown format: "
                 + magic + " " + std::to_string(version)
-                + " (expected 3DGRuntimeScene 1..103).";
+                + " (expected 3DGRuntimeScene 1..104).";
         }
         return false;
     }
@@ -170,6 +175,23 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                    >> loaded.environment.moonIntensity >> loaded.environment.moonAngularDiameter
                    >> loaded.environment.moonPhase;
             if (!record) { if (error) *error = "Runtime scene has invalid night environment settings."; return false; }
+            continue;
+        }
+        if (recordType == "night_energy" && version >= 104) {
+            record >> loaded.environment.dayEnvironmentIntensity
+                   >> loaded.environment.twilightEnvironmentIntensity
+                   >> loaded.environment.nightEnvironmentIntensity
+                   >> loaded.environment.moonGiContribution
+                   >> loaded.environment.nightReflectionIntensity
+                   >> loaded.environment.nightFogScattering
+                   >> loaded.environment.nightCloudAmbient;
+            if (!record) { if (error) *error = "Runtime scene has invalid night energy settings."; return false; }
+            continue;
+        }
+        if (recordType == "night_exposure" && version >= 104) {
+            record >> loaded.environment.preserveNightDarkness
+                   >> loaded.environment.nightExposureLimitEV;
+            if (!record) { if (error) *error = "Runtime scene has invalid night exposure settings."; return false; }
             continue;
         }
         if (recordType == "volumetrics" && version >= 101) {

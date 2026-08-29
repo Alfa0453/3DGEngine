@@ -1,6 +1,7 @@
 #include "engine/assets/ForgeMaterialImporter.h"
 
 #include "engine/assets/AssetRegistry.h"
+#include "engine/assets/MaterialAssetLoader.h"
 #include "engine/assets/StaticMeshAsset.h"
 #include "engine/assets/TextureAsset.h"
 #include "engine/graphics/ImageDecode.h"
@@ -12,12 +13,10 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
-#include <iomanip>
 #include <iterator>
 #include <limits>
 #include <map>
 #include <set>
-#include <sstream>
 #include <stdexcept>
 #include <utility>
 
@@ -308,28 +307,6 @@ std::string SanitizeStem(const std::string& name) {
     return result.empty() ? "material" : result;
 }
 
-std::string EscapeJson(const std::string& value) {
-    std::ostringstream output;
-    for (unsigned char c : value) {
-        switch (c) {
-            case '"': output << "\\\""; break;
-            case '\\': output << "\\\\"; break;
-            case '\b': output << "\\b"; break;
-            case '\f': output << "\\f"; break;
-            case '\n': output << "\\n"; break;
-            case '\r': output << "\\r"; break;
-            case '\t': output << "\\t"; break;
-            default:
-                if (c < 0x20u) {
-                    output << "\\u" << std::hex << std::setw(4)
-                           << std::setfill('0') << static_cast<unsigned>(c)
-                           << std::dec;
-                } else output << static_cast<char>(c);
-        }
-    }
-    return output.str();
-}
-
 bool IsInside(const std::filesystem::path& candidate,
               const std::filesystem::path& root,
               std::filesystem::path* relative,
@@ -504,93 +481,23 @@ bool WriteMaterial(const std::filesystem::path& path,
                    AssetHandle materialId,
                    const ForgeMaterialImportResult& imported,
                    std::string* error) {
-    const std::filesystem::path temporary = path.string() + ".tmp";
-    std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
-    if (!output) {
-        SetError(error, "Could not open cooked material for writing.");
-        return false;
-    }
-    auto fileName = [](const std::string& value) {
-        return std::filesystem::path(value).filename().generic_string();
-    };
-    output << "3DG_MATERIAL 5 " << materialId.ToString() << '\n';
-    output << "{\n"
-           << "  \"schema\": \"3DGEngine.PbrMaterial\",\n"
-           << "  \"version\": 5,\n"
-           << "  \"assetId\": \"" << materialId.ToString() << "\",\n"
-           << "  \"name\": \"" << EscapeJson(name) << "\",\n"
-           << "  \"albedo\": [1.0000, 1.0000, 1.0000],\n"
-           << "  \"metallic\": 1.0000,\n"
-           << "  \"roughness\": 1.0000,\n"
-           << "  \"ao\": 1.0000,\n"
-           << "  \"emissive\": [0.0000, 0.0000, 0.0000],\n"
-           << "  \"emissiveColor\": [0.0000, 0.0000, 0.0000],\n"
-           << "  \"emissiveStrength\": 1.0000,\n"
-           << "  \"blendMode\": 0,\n"
-           << "  \"opacity\": 1.0000,\n"
-           << "  \"alphaCutoff\": 0.5000,\n"
-           << "  \"uvScale\": [1.0000, 1.0000],\n"
-           << "  \"uvOffset\": [0.0000, 0.0000],\n"
-           << "  \"uvRotation\": 0.0000,\n"
-           << "  \"worldSpaceUv\": 0,\n"
-           << "  \"normalStrength\": 1.0000,\n"
-           << "  \"heightScale\": 0.0500,\n"
-           << "  \"clearcoat\": 0.0000,\n"
-           << "  \"clearcoatRoughness\": 0.1000,\n"
-           << "  \"transmission\": 0.0000,\n"
-           << "  \"ior\": 1.5000,\n"
-           << "  \"thickness\": 0.0000,\n"
-           << "  \"anisotropy\": 0.0000,\n"
-           << "  \"anisotropyRotation\": 0.0000,\n"
-           << "  \"sheenColor\": [0.0000, 0.0000, 0.0000],\n"
-           << "  \"sheenRoughness\": 0.5000,\n"
-           << "  \"specularLevel\": 0.5000,\n"
-           << "  \"subsurface\": 0.0000,\n"
-           << "  \"subsurfaceColor\": [1.0000, 1.0000, 1.0000],\n"
-           << "  \"shader\": \"\",\n"
-           << "  \"shaderAssetId\": \"00000000000000000000000000000000\",\n"
-           << "  \"shaderParameters\": [],\n"
-           << "  \"maps\": {\n"
-           << "    \"albedo\": \"" << EscapeJson(fileName(imported.albedoMapPath)) << "\",\n"
-           << "    \"normal\": \"" << EscapeJson(fileName(imported.normalMapPath)) << "\",\n"
-           << "    \"metalRough\": \"" << EscapeJson(fileName(imported.metalRoughMapPath)) << "\",\n"
-           << "    \"height\": \"" << EscapeJson(fileName(imported.heightMapPath)) << "\"\n"
-           << "  },\n"
-           << "  \"mapAssetIds\": {\n"
-           << "    \"albedoAssetId\": \"" << imported.albedoMapId.ToString() << "\",\n"
-           << "    \"normalAssetId\": \"" << imported.normalMapId.ToString() << "\",\n"
-           << "    \"metalRoughAssetId\": \"" << imported.metalRoughMapId.ToString() << "\",\n"
-           << "    \"heightAssetId\": \"" << imported.heightMapId.ToString() << "\"\n"
-           << "  },\n"
-           << "  \"engineMapping\": {\n"
-           << "    \"component\": \"engine::ecs::PbrMaterial\",\n"
-           << "    \"metalRoughMap\": \"glTF ORM convention: G = roughness, B = metallic\"\n"
-           << "  }\n"
-           << "}\n";
-    std::vector<AssetHandle> dependencies{
-        imported.albedoMapId, imported.normalMapId,
-        imported.metalRoughMapId, imported.heightMapId};
-    output << "ASSET_DEPS " << dependencies.size();
-    for (AssetHandle dependency : dependencies)
-        output << ' ' << dependency.ToString();
-    output << '\n';
-    output.close();
-    if (!output) {
-        std::error_code ignored;
-        std::filesystem::remove(temporary, ignored);
-        SetError(error, "Could not finish writing cooked material.");
-        return false;
-    }
-    std::error_code ec;
-    std::filesystem::remove(path, ec);
-    ec.clear();
-    std::filesystem::rename(temporary, path, ec);
-    if (ec) {
-        std::filesystem::remove(temporary, ec);
-        SetError(error, "Could not commit cooked material: " + ec.message());
-        return false;
-    }
-    return true;
+    RuntimeMaterialAsset material;
+    material.id = materialId;
+    material.name = name;
+    material.material.albedo = glm::vec3(1.0f);
+    material.material.metallic = 1.0f;
+    material.material.roughness = 1.0f;
+    material.material.ao = 1.0f;
+    material.material.heightScale = 0.05f;
+    material.albedoMapPath = imported.albedoMapPath;
+    material.albedoMapAssetId = imported.albedoMapId;
+    material.normalMapPath = imported.normalMapPath;
+    material.normalMapAssetId = imported.normalMapId;
+    material.metalRoughMapPath = imported.metalRoughMapPath;
+    material.metalRoughMapAssetId = imported.metalRoughMapId;
+    material.heightMapPath = imported.heightMapPath;
+    material.heightMapAssetId = imported.heightMapId;
+    return SaveMaterialAssetFile(path.string(), std::move(material), error);
 }
 
 bool RegisterCookedAsset(AssetRegistry* registry,

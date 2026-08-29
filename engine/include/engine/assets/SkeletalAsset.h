@@ -15,8 +15,8 @@ class AssetRegistry;
 
 inline constexpr std::uint32_t kSkeletonAssetVersion = 1;
 inline constexpr std::uint32_t kAnimationAssetVersion = 1;
-inline constexpr std::uint32_t kSkeletalMeshAssetVersion = 1;
-inline constexpr std::uint32_t kSkeletalImporterVersion = 1;
+inline constexpr std::uint32_t kSkeletalMeshAssetVersion = 2;
+inline constexpr std::uint32_t kSkeletalImporterVersion = 2;
 inline constexpr std::uint32_t kSkeletalMeshVertexStride = 16;
 
 struct SkeletonAssetData {
@@ -53,6 +53,7 @@ struct SkeletalMeshAssetData {
     std::array<float, 3> maximum{{0.0f, 0.0f, 0.0f}};
     std::vector<StaticMeshMaterialData> materials;
     std::vector<StaticMeshTextureData> textures;
+    std::vector<MeshMaterialSlot> materialSlots;
     std::vector<SkeletalMeshSubMeshData> subMeshes;
 };
 
@@ -70,6 +71,16 @@ struct SkeletalImportOptions {
     // imported animations depend on this skeleton instead of creating another
     // skeleton asset. A requested mesh is remapped to its bone order by name.
     std::string reuseSkeletonPath;
+    bool importMaterials = true;
+    bool importTextures = true;
+    bool applyImportedMaterials = true;
+    bool createMaterialFolder = true;
+    bool createTextureFolder = true;
+    bool reuseExistingMaterials = true;
+    bool reuseExistingTextures = true;
+    bool keepLegacyEmbeddedFallback = false;
+    StaticMeshImportOptions::MaterialReimportPolicy materialReimportPolicy =
+        StaticMeshImportOptions::MaterialReimportPolicy::PreserveExisting;
 };
 
 struct SkeletalImportResult {
@@ -83,6 +94,12 @@ struct SkeletalImportResult {
     std::size_t boneCount = 0;
     std::size_t vertexCount = 0;
     std::size_t triangleCount = 0;
+    std::size_t importedMaterialCount = 0;
+    std::size_t importedTextureCount = 0;
+    std::size_t reusedMaterialCount = 0;
+    std::size_t reusedTextureCount = 0;
+    std::size_t failedTextureCount = 0;
+    std::size_t assignedMaterialSlotCount = 0;
 };
 
 struct ModelSourceInfo {

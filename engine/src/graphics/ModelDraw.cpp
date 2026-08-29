@@ -23,6 +23,8 @@ void DrawModel(const Model& model, Shader& shader,
     shader.SetInt("uNormalTex",   1);
     shader.SetInt("uSpecularTex", 2);
     shader.SetInt("uEmissiveTex", 3);
+    shader.SetInt("uMetalRoughMap", 4);
+    shader.SetInt("uHeightMap", 5);
 
     // DrawModel has no object transform argument, so its model-space winding is
     // the imported convention. Callers with mirrored transforms use the PBR path.
@@ -42,9 +44,15 @@ void DrawModel(const Model& model, Shader& shader,
             ? materialOverride->emissive : m.emissive);
         shader.SetFloat("uShininess", materialOverride
             ? materialOverride->shininess : m.shininess);
+        shader.SetFloat("uMetallic", materialOverride ? 0.0f : m.metallic);
+        shader.SetFloat("uRoughness", materialOverride ? 0.5f : m.roughness);
+        shader.SetFloat("uAO", materialOverride ? 1.0f : m.ao);
+        shader.SetFloat("uOpacity", materialOverride ? 1.0f : m.opacity);
 
         auto bind = [&](int idx, int unit, const char* flag) {
-            const bool has = idx >= 0;
+            const bool has = idx >= 0
+                && idx < static_cast<int>(model.Textures().size())
+                && model.Textures()[static_cast<std::size_t>(idx)];
             shader.SetInt(flag, has ? 1 : 0);
             if (has) model.Textures()[static_cast<std::size_t>(idx)]->Bind(static_cast<unsigned>(unit));
         };
@@ -65,6 +73,8 @@ void DrawModel(const Model& model, Shader& shader,
                          "uSpecularTex", "uHasSpecular");
             bindOverride(materialOverride->emissiveMap, 3,
                          "uEmissiveTex", "uHasEmissive");
+            shader.SetInt("uHasMetalRoughMap", 0);
+            shader.SetInt("uHasHeightMap", 0);
         } else if (albedoOverride) {
             albedoOverride->Bind(0);
             shader.SetInt("uDiffuseTex", 0);
@@ -72,11 +82,15 @@ void DrawModel(const Model& model, Shader& shader,
             bind(m.normalMap,   1, "uHasNormal");
             bind(m.specularMap, 2, "uHasSpecular");
             bind(m.emissiveMap, 3, "uHasEmissive");
+            bind(m.metalRoughMap, 4, "uHasMetalRoughMap");
+            bind(m.heightMap, 5, "uHasHeightMap");
         } else {
             bind(m.diffuseMap, 0, "uHasDiffuse");
             bind(m.normalMap,   1, "uHasNormal");
             bind(m.specularMap, 2, "uHasSpecular");
             bind(m.emissiveMap, 3, "uHasEmissive");
+            bind(m.metalRoughMap, 4, "uHasMetalRoughMap");
+            bind(m.heightMap, 5, "uHasHeightMap");
         }
 
         sm.mesh.Draw();

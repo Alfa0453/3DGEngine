@@ -48,6 +48,18 @@ struct NightEnvironment {
     glm::vec3 moonRadiance{0.035f, 0.045f, 0.070f};
     float moonAngularDiameterDegrees = 0.52f;
     float moonPhase = 1.0f;
+    float moonGiContribution = 1.0f;
+};
+
+struct EnvironmentEnergyParameters {
+    float dayIntensity = 1.0f;
+    float twilightIntensity = 0.20f;
+    float nightIntensity = 0.015f;
+    float nightReflectionIntensity = 1.0f;
+    float nightFogScattering = 1.0f;
+    float nightCloudAmbient = 1.0f;
+
+    void Normalize();
 };
 
 // Resolved, authoritative frame state shared by the sky, direct light, baked
@@ -55,12 +67,19 @@ struct NightEnvironment {
 struct EnvironmentLightingState {
     float timeOfDay = 0.5f;
     float dayFactor = 1.0f;
+    float twilightFactor = 0.0f;
+    float nightFactor = 0.0f;
+    float solarElevation = 1.0f;
+    float environmentIntensity = 1.0f;
     glm::vec3 sunDirection{0.0f, 1.0f, 0.0f}; // points toward the sun
     glm::vec3 sunRadiance{1.0f};
+    glm::vec3 keyLightDirection{0.0f, -1.0f, 0.0f}; // light travel direction
+    glm::vec3 keyLightRadiance{1.0f};
     glm::vec3 ambientRadiance{0.03f};
     AtmosphereParameters atmosphere;
     EnvironmentCloudParameters clouds;
     NightEnvironment night;
+    EnvironmentEnergyParameters energy;
     EnvironmentQuality quality = EnvironmentQuality::High;
     std::uint64_t atmosphereRevision = 1;
     std::uint64_t skyRevision = 1;
@@ -74,6 +93,10 @@ EnvironmentLightingState ResolveEnvironmentLighting(
     const AtmosphereParameters& atmosphere = {},
     const EnvironmentCloudParameters& clouds = {},
     const NightEnvironment& night = {},
+    const EnvironmentEnergyParameters& energy = {},
     EnvironmentQuality quality = EnvironmentQuality::High);
+
+float ResolveNightExposureMaxEv(float dayMaxEv, float nightLimitEv,
+                                float nightFactor, bool preserveNightDarkness);
 
 } // namespace engine

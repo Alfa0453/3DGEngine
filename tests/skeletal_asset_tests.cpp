@@ -2,6 +2,7 @@
 #include <engine/assets/SkeletalAsset.h>
 
 #include <cmath>
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
@@ -119,9 +120,21 @@ int main() {
               && registry.Find(first.skeletonId)
               && registry.Find(first.skeletalMeshId)->dependencies.size()
                      == first.animationIds.size() + 1
+                        + first.assignedMaterialSlotCount
               && registry.Referencers(first.skeletonId).size()
                      == first.animationIds.size() + 1,
           "registry records skeleton and animation dependencies");
+    engine::SkeletalMeshAssetData generatedSkeletalMesh;
+    Check(engine::LoadSkeletalMeshAsset(
+              first.skeletalMeshPath, &generatedSkeletalMesh, &error)
+              && first.assignedMaterialSlotCount
+                    == generatedSkeletalMesh.materialSlots.size()
+              && first.importedMaterialCount
+                    == generatedSkeletalMesh.materialSlots.size(),
+          "skeletal import emits standalone material slots with static-mesh parity");
+    std::vector<engine::AssetHandle> firstMaterialIds;
+    for (const engine::MeshMaterialSlot& slot : generatedSkeletalMesh.materialSlots)
+        firstMaterialIds.push_back(slot.materialId);
 
     const fs::path animationOnlyBase =
         content / "Animations" / "WizardMotion";
@@ -182,8 +195,13 @@ int main() {
               && reusedMesh.skeletonId == first.skeletonId
               && reusedMesh.animationPaths.empty()
               && registry.Find(reusedMesh.skeletalMeshId)
-              && registry.Find(reusedMesh.skeletalMeshId)->dependencies
-                  == std::vector<engine::AssetHandle>{first.skeletonId},
+              && std::find(
+                  registry.Find(reusedMesh.skeletalMeshId)->dependencies.begin(),
+                  registry.Find(reusedMesh.skeletalMeshId)->dependencies.end(),
+                  first.skeletonId)
+                    != registry.Find(reusedMesh.skeletalMeshId)->dependencies.end()
+              && registry.Find(reusedMesh.skeletalMeshId)->dependencies.size()
+                    == reusedMesh.assignedMaterialSlotCount + 1,
           "mesh output can reuse a skeleton without duplicating skeleton or animations");
 
     const engine::AssetHandle meshId = first.skeletalMeshId;
@@ -219,6 +237,16 @@ int main() {
               && reimported.skeletonId == skeletonId
               && reimported.animationIds == animationIds,
           "skeletal reimport preserves mesh, skeleton and animation identities");
+    engine::SkeletalMeshAssetData stableMaterialsMesh;
+    std::vector<engine::AssetHandle> reimportedMaterialIds;
+    Check(engine::LoadSkeletalMeshAsset(
+              reimported.skeletalMeshPath, &stableMaterialsMesh, &error),
+          "load reimported skeletal material slots");
+    for (const engine::MeshMaterialSlot& slot : stableMaterialsMesh.materialSlots)
+        reimportedMaterialIds.push_back(slot.materialId);
+    Check(reimportedMaterialIds == firstMaterialIds
+              && reimported.reusedMaterialCount == firstMaterialIds.size(),
+          "skeletal reimport preserves generated material identities");
     if (staleAnimationId.Valid())
         Check(!registry.Find(staleAnimationId)
                   && !fs::exists(staleAnimationPath),

@@ -15,6 +15,11 @@ struct DayNightCycle {
         glm::vec3 keyLightColor;        // radiance (colour * intensity)
         glm::vec3 ambient;              // ambient fill
         float     dayFactor;            // 0 night .. 1 day
+        float     twilightFactor;       // 0 outside twilight .. 1 near horizon
+        float     nightFactor;          // 0 day .. 1 true night
+        float     solarElevation;       // sine of solar elevation, -1 .. 1
+        glm::vec3 sunRadiance;           // direct solar radiance only
+        glm::vec3 moonRadiance;          // direct lunar radiance only
 
         // Sky.
         glm::vec3 sunToward, moonToward;   // directions toward sun / moon
@@ -35,7 +40,10 @@ struct DayNightCycle {
         const glm::vec3 moonToward = -sunToward;
         const float elev = sunToward.y;
 
-        const float dayFactor = sstep(-0.10f, 0.20f, elev);
+        const float dayFactor = sstep(-0.06f, 0.16f, elev);
+        const float nightFactor = 1.0f - sstep(-0.24f, -0.08f, elev);
+        const float twilightFactor = glm::clamp(
+            1.0f - dayFactor - nightFactor, 0.0f, 1.0f);
         const float highSun   = sstep(0.0f, 0.35f, elev);   // 0 at horizon, 1 overhead
 
         // Sun colour: warm/orange near the horizon, white overhead.
@@ -52,18 +60,25 @@ struct DayNightCycle {
         horizon = glm::mix(horizon, glm::vec3(0.95f, 0.5f, 0.3f), sunset * 0.6f);
         
         // Key light: the sun by day, a dim cool moon by night.
-        const glm::vec3 sunRad  = sunWarm * (3.3f * dayFactor);
-        const glm::vec3 moonRad = glm::vec3(0.35f, 0.42f, 0.6f) * 0.18f;
+        const float sunVisibility = sstep(-0.035f, 0.045f, elev);
+        const glm::vec3 sunRad  = sunWarm * (3.3f * sunVisibility);
+        const glm::vec3 moonRad = glm::vec3(0.50f, 0.62f, 0.90f)
+            * (0.035f * nightFactor);
 
         Sample s;
         s.dayFactor        = dayFactor;
+        s.twilightFactor   = twilightFactor;
+        s.nightFactor      = nightFactor;
+        s.solarElevation   = elev;
+        s.sunRadiance      = sunRad;
+        s.moonRadiance     = moonRad;
         s.sunToward        = sunToward;
         s.moonToward       = moonToward;
         s.horizon          = horizon;
         s.zenith           = zenith;
         s.sunDisc          = sunWarm;
         s.moonDisc         = glm::vec3(0.8f, 0.85f, 0.95f);
-        s.keyLightColor    = sunRad + moonRad * (1.0f - dayFactor);
+        s.keyLightColor    = sunRad + moonRad;
         // The sun and moon directions are exact opposites. Normalizing their
         // 50/50 blend therefore normalizes a zero vector at twilight, which
         // propagates NaNs through every PBR fragment and makes scene geometry
@@ -71,10 +86,10 @@ struct DayNightCycle {
         // dominant light direction instead; the switch occurs while both are
         // dim and is always finite.
         const float sunEnergy = glm::dot(sunRad, sunRad);
-        const glm::vec3 visibleMoonRad = moonRad * (1.0f - dayFactor);
+        const glm::vec3 visibleMoonRad = moonRad;
         const float moonEnergy = glm::dot(visibleMoonRad, visibleMoonRad);
         s.keyLightDirection = -(sunEnergy >= moonEnergy ? sunToward : moonToward);
-        s.ambient          = glm::mix(glm::vec3(0.010f, 0.012f, 0.020f),
+        s.ambient          = glm::mix(glm::vec3(0.00015f, 0.00022f, 0.00045f),
                                       glm::vec3(0.050f, 0.055f, 0.070f), dayFactor);
         return s;
     }

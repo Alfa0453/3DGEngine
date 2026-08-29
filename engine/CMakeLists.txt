@@ -74,6 +74,8 @@ add_library(engine STATIC
     src/assets/TerrainAsset.cpp
     src/assets/TextureAsset.cpp
     src/assets/ForgeMaterialImporter.cpp
+    src/assets/ImportedMaterialAssets.cpp
+    src/assets/ImportedMaterialResolver.cpp
     src/assets/SkeletalAsset.cpp
     src/assets/MaterialAssetLoader.cpp
     src/assets/ParticleAsset.cpp

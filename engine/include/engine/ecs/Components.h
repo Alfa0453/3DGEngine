@@ -185,6 +185,7 @@ struct PbrMaterial {
     const Texture* normalMap     = nullptr;   // tangent-space normals
     const Texture* metalRoughMap = nullptr;   // glTF ORM: G = roughness, B = metallic
     const Texture* heightMap     = nullptr;   // grayscale displacement for parallax
+    const Texture* emissiveMap   = nullptr;   // sRGB emissive color/intensity
 };
 
 // Batched foliage placement. A single entity owns many lightweight instance
@@ -445,6 +446,7 @@ struct LoadedMaterialAsset {
     const Texture* normalMap = nullptr;
     const Texture* metalRoughMap = nullptr;
     const Texture* heightMap = nullptr;
+    const Texture* emissiveMap = nullptr;
     const Shader* shader = nullptr;
     const Shader* skinnedShader = nullptr;
     std::unordered_map<std::string, std::string> shaderParameters;

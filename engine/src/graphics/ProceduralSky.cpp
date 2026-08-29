@@ -55,6 +55,8 @@ uniform float uCloudOpticalDepth;
 uniform float uCloudForwardScatter;
 uniform float uCloudSilverLining;
 uniform float uStarIntensity;
+uniform float uEnvironmentIntensity;
+uniform float uNightCloudAmbient;
 
 float hash(vec3 p) {
     return fract(sin(dot(floor(p), vec3(12.9898, 78.233, 37.719))) * 43758.5453);
@@ -153,7 +155,8 @@ void main() {
         float rim = pow(sd, 18.0) * uCloudSilverLining * cloudTransmittance;
         float sunLight = 0.28 + 0.42 * pow(sd, 3.0) + forward + rim;
         vec3 dayCloud = uCloudColor * sunLight * mix(uHorizon, uSunDisc, 0.65);
-        vec3 nightCloud = mix(uZenith, uMoonDisc, 0.18) * 0.55;
+        vec3 nightCloud = (uZenith + uMoonDisc * uEnvironmentIntensity * 0.18)
+            * 0.55 * uNightCloudAmbient;
         vec3 cloudColor = mix(nightCloud, dayCloud, uDayFactor);
         col = mix(col, cloudColor, cloud);
     }
@@ -228,6 +231,9 @@ void ProceduralSky::Draw(const glm::mat4& view, const glm::mat4& projection,
     m_shader.SetFloat("uCloudSilverLining", environment.clouds.silverLining);
     m_shader.SetFloat("uStarIntensity", environment.night.stars
         ? environment.night.starIntensity : 0.0f);
+    m_shader.SetFloat("uEnvironmentIntensity", environment.environmentIntensity);
+    m_shader.SetFloat("uNightCloudAmbient", glm::mix(1.0f,
+        environment.energy.nightCloudAmbient, environment.nightFactor));
     m_cube.Draw();
     glDepthMask(previousDepthMask);
     glDepthFunc(previousDepthFunc);

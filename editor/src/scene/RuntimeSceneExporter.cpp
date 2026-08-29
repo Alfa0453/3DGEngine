@@ -100,7 +100,7 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         return engine::MakeAssetReference(
             &assetRegistry, contentRoot, assetPath, type).id;
     };
-    out << "3DGRuntimeScene 103 " << sceneId.ToString() << '\n';
+    out << "3DGRuntimeScene 104 " << sceneId.ToString() << '\n';
     out << "# Runtime export from 3DGEditor. Editor-only flags are omitted.\n";
     const EditorScene::Environment& environment = scene.GetEnvironment();
     out << "environment "
@@ -166,6 +166,15 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         << environment.moon << ' ' << environment.moonColor.r << ' ' << environment.moonColor.g << ' '
         << environment.moonColor.b << ' ' << environment.moonIntensity << ' '
         << environment.moonAngularDiameter << ' ' << environment.moonPhase << '\n';
+    out << "night_energy " << environment.dayEnvironmentIntensity << ' '
+        << environment.twilightEnvironmentIntensity << ' '
+        << environment.nightEnvironmentIntensity << ' '
+        << environment.moonGiContribution << ' '
+        << environment.nightReflectionIntensity << ' '
+        << environment.nightFogScattering << ' '
+        << environment.nightCloudAmbient << '\n';
+    out << "night_exposure " << environment.preserveNightDarkness << ' '
+        << environment.nightExposureLimitEV << '\n';
     out << "volumetrics " << environment.volumetricFog << ' '
         << environment.volumetricScattering << ' ' << environment.volumetricExtinction << ' '
         << environment.volumetricAnisotropy << ' ' << environment.volumetricStartDistance << ' '

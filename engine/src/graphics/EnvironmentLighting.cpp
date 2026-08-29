@@ -44,8 +44,10 @@ glm::vec3 PhysicalSky(const EnvironmentLightingState& s, glm::vec3 d) {
                                       std::cos(angularRadius * 0.88f), mu);
     scatter += s.sunRadiance * disk * s.atmosphere.sunDiskIntensity;
 
-    const float night = 1.0f - s.dayFactor;
-    scatter += glm::vec3(0.0025f, 0.0045f, 0.012f) * night;
+    const float night = s.nightFactor;
+    // Sky visibility and lighting energy are intentionally separate. Exposure
+    // may reveal this signal without turning it into a daylight-strength fill.
+    scatter += glm::vec3(0.055f, 0.080f, 0.18f) * night;
     if (s.night.moon) {
         const float moonMu = glm::dot(d, glm::normalize(s.night.moonDirection));
         const float moonRadius = glm::radians(s.night.moonAngularDiameterDegrees * 0.5f);
@@ -53,8 +55,17 @@ glm::vec3 PhysicalSky(const EnvironmentLightingState& s, glm::vec3 d) {
                                               std::cos(moonRadius * 0.85f), moonMu);
         scatter += s.night.moonRadiance * moonDisk * s.night.moonPhase * night;
     }
-    return glm::max(scatter, glm::vec3(0.0f));
+    return glm::max(scatter, glm::vec3(0.0f)) * s.environmentIntensity;
 }
+}
+
+void EnvironmentEnergyParameters::Normalize() {
+    dayIntensity = std::clamp(dayIntensity, 0.0f, 20.0f);
+    twilightIntensity = std::clamp(twilightIntensity, 0.0f, 20.0f);
+    nightIntensity = std::clamp(nightIntensity, 0.0f, 20.0f);
+    nightReflectionIntensity = std::clamp(nightReflectionIntensity, 0.0f, 4.0f);
+    nightFogScattering = std::clamp(nightFogScattering, 0.0f, 4.0f);
+    nightCloudAmbient = std::clamp(nightCloudAmbient, 0.0f, 4.0f);
 }
 
 void AtmosphereParameters::Normalize() {
@@ -82,8 +93,8 @@ DirectionalSkyRadiance EnvironmentLightingState::ToDirectionalSkyRadiance(
     result.zenith = SampleEnvironmentRadiance(glm::vec3(0.0f, 1.0f, 0.0f)) * intensity;
     result.horizon = SampleEnvironmentRadiance(glm::normalize(glm::vec3(1.0f, 0.03f, 0.0f))) * intensity;
     result.ground = SampleEnvironmentRadiance(glm::vec3(0.0f, -1.0f, 0.0f)) * intensity;
-    result.sunDirection = sunDirection;
-    result.sunRadiance = sunRadiance * intensity * 0.35f;
+    result.sunDirection = -keyLightDirection;
+    result.sunRadiance = keyLightRadiance * intensity * 0.35f;
     return result;
 }
 
@@ -92,12 +103,23 @@ EnvironmentLightingState ResolveEnvironmentLighting(
     const AtmosphereParameters& authoredAtmosphere,
     const EnvironmentCloudParameters& clouds,
     const NightEnvironment& authoredNight,
+    const EnvironmentEnergyParameters& authoredEnergy,
     EnvironmentQuality quality) {
     EnvironmentLightingState state;
     state.timeOfDay = timeOfDay - std::floor(timeOfDay);
     state.dayFactor = std::clamp(dayNight.dayFactor, 0.0f, 1.0f);
+    state.twilightFactor = std::clamp(dayNight.twilightFactor, 0.0f, 1.0f);
+    state.nightFactor = std::clamp(dayNight.nightFactor, 0.0f, 1.0f);
+    state.solarElevation = std::clamp(dayNight.solarElevation, -1.0f, 1.0f);
     state.sunDirection = glm::normalize(dayNight.sunToward);
-    state.sunRadiance = glm::max(dayNight.keyLightColor, glm::vec3(0.0f));
+    state.sunRadiance = glm::max(dayNight.sunRadiance, glm::vec3(0.0f));
+    state.keyLightDirection = dayNight.keyLightDirection;
+    const bool moonDominant = glm::dot(dayNight.moonRadiance, dayNight.moonRadiance)
+        > glm::dot(dayNight.sunRadiance, dayNight.sunRadiance);
+    state.keyLightRadiance = moonDominant
+        ? glm::max(dayNight.moonRadiance, glm::vec3(0.0f))
+            * std::clamp(authoredNight.moonGiContribution, 0.0f, 1.0f)
+        : state.sunRadiance;
     state.ambientRadiance = glm::max(dayNight.ambient, glm::vec3(0.0f));
     state.atmosphere = authoredAtmosphere;
     state.atmosphere.Normalize();
@@ -111,8 +133,25 @@ EnvironmentLightingState ResolveEnvironmentLighting(
     state.night.moonDirection = glm::normalize(dayNight.moonToward);
     state.night.starIntensity = std::clamp(state.night.starIntensity, 0.0f, 10.0f);
     state.night.moonPhase = std::clamp(state.night.moonPhase, 0.0f, 1.0f);
+    state.night.moonGiContribution = std::clamp(
+        state.night.moonGiContribution, 0.0f, 1.0f);
+    state.energy = authoredEnergy;
+    state.energy.Normalize();
+    const float factorSum = std::max(
+        state.dayFactor + state.twilightFactor + state.nightFactor, 1e-5f);
+    state.environmentIntensity = (state.dayFactor * state.energy.dayIntensity
+        + state.twilightFactor * state.energy.twilightIntensity
+        + state.nightFactor * state.energy.nightIntensity) / factorSum;
+    state.ambientRadiance *= state.environmentIntensity;
     state.quality = quality;
     return state;
+}
+
+float ResolveNightExposureMaxEv(float dayMaxEv, float nightLimitEv,
+                                float nightFactor, bool preserveNightDarkness) {
+    if (!preserveNightDarkness) return dayMaxEv;
+    return glm::mix(dayMaxEv, std::min(dayMaxEv, nightLimitEv),
+                    std::clamp(nightFactor, 0.0f, 1.0f));
 }
 
 } // namespace engine

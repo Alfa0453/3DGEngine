@@ -91,14 +91,17 @@ int main() {
     const EditorAssets::Asset* converted = AssetNamed(assets, "BrowserTriangle.3dgmesh");
     Check(converted && converted->type == EditorAssets::Type::Model
               && !fs::exists(root / "BrowserTriangle.obj")
-              && registry.FindByPath("/Game/BrowserTriangle.3dgmesh")
+              && registry.FindByPath(
+                  "/Game/BrowserTriangle/BrowserTriangle.3dgmesh")
               && assets.LastImportMessage().find("3 vertices") != std::string::npos,
           "Content Browser exposes the native asset and registers import statistics");
     engine::StaticMeshAssetData browserMesh;
     Check(engine::LoadStaticMeshAsset(
-              (root / "BrowserTriangle.3dgmesh").string(), &browserMesh, &error)
+              (root / "BrowserTriangle" / "BrowserTriangle.3dgmesh").string(),
+              &browserMesh, &error)
               && browserMesh.header.id
-                     == registry.FindByPath("/Game/BrowserTriangle.3dgmesh")->id,
+                     == registry.FindByPath(
+                         "/Game/BrowserTriangle/BrowserTriangle.3dgmesh")->id,
           "Content Browser output contains the registered stable identity");
     const engine::AssetHandle browserMeshId = browserMesh.header.id;
     {
@@ -111,7 +114,7 @@ int main() {
     assets.StaticMeshImportSettings().uniformScale = 2.0f;
     Check(assets.ReimportSelectedStaticMesh(&error)
               && engine::LoadStaticMeshAsset(
-                  (root / "BrowserTriangle.3dgmesh").string(),
+                  (root / "BrowserTriangle" / "BrowserTriangle.3dgmesh").string(),
                   &browserMesh, &error)
               && browserMesh.header.id == browserMeshId
               && browserMesh.maximum[0] == 4.0f,
@@ -127,9 +130,10 @@ int main() {
     Check(assets.ImportAssetToFolder(
               importSource.string(), importFolder, &error)
               && fs::is_regular_file(
-                  root / "Imported" / "Meshes" / "BrowserTriangle.3dgmesh")
+                  root / "Imported" / "Meshes" / "BrowserTriangle"
+                    / "BrowserTriangle.3dgmesh")
               && registry.FindByPath(
-                  "/Game/Imported/Meshes/BrowserTriangle.3dgmesh"),
+                  "/Game/Imported/Meshes/BrowserTriangle/BrowserTriangle.3dgmesh"),
           "system-browser import stores converted assets in the chosen project folder");
     Check(!assets.ImportAssetToFolder(
               importSource.string(), "../Outside", &error),
@@ -143,6 +147,8 @@ int main() {
                     "Imported/Meshes") != importFolders.end(),
           "destination picker lists nested Content folders");
     fs::remove(importSource, ec);
+
+    Check(assets.GoUp(&error), "return to Content root after package import");
 
     Check(assets.CreateFolder("Original", &error), "create folder to rename");
     fs::create_directories(root / "Original" / "Nested");

@@ -123,6 +123,8 @@ uniform float uAO;
 uniform vec3  uEmissive;
 uniform int   uHasAlbedoMap;
 uniform sampler2D uAlbedoMap;
+uniform int   uHasEmissiveMap;
+uniform sampler2D uEmissiveMap;
 uniform vec3  uSunDir;
 uniform vec3  uSunColor;
 uniform vec3  uAmbient;
@@ -156,6 +158,8 @@ uniform samplerCube uIrradiance;
 uniform samplerCube uPrefilter;
 uniform sampler2D   uBrdfLUT;
 uniform float uMaxReflectionLod;
+uniform float uGlobalIblIntensity;
+uniform float uGlobalReflectionIntensity;
 uniform int   uApplyTonemap;
 uniform int   uFogEnabled;
 uniform vec3  uFogColor;
@@ -220,6 +224,9 @@ vec3 SphereAreaLight(vec3 N, vec3 V, vec3 Lvec, float sourceRadius, vec3 color,
 void main() {
     vec3 albedo = uAlbedo;
     if (uHasAlbedoMap == 1) albedo *= pow(texture(uAlbedoMap, vUV).rgb, vec3(2.2));  // sRGB -> linear
+    vec3 emissive = uEmissive;
+    if (uHasEmissiveMap == 1)
+        emissive *= pow(texture(uEmissiveMap, vUV).rgb, vec3(2.2));
     float metallic = uMetallic, roughness = uRoughness, ao = uAO;
     vec3 N = normalize(vNormal);
     vec3 V = normalize(uViewPos - vWorldPos);
@@ -259,11 +266,12 @@ void main() {
     if (uUseIBL == 1) {
         vec3 F = FresnelSchlickRough(max(dot(N,V),0.0), F0, roughness);
         vec3 kD = (vec3(1.0)-F)*(1.0-metallic);
-        vec3 irradiance = texture(uIrradiance, indirectN).rgb;
+        vec3 irradiance = texture(uIrradiance, indirectN).rgb * uGlobalIblIntensity;
         irradiance=mix(irradiance,localProbe.irradiance,localProbe.validity*clamp(uLocalProbeInfluence,0.0,1.0));
         vec3 diffuse = irradiance * albedo;
         vec3 R = reflect(-V, N);
-        vec3 globalPrefiltered=textureLod(uPrefilter,R,roughness*uMaxReflectionLod).rgb;
+        vec3 globalPrefiltered=textureLod(uPrefilter,R,roughness*uMaxReflectionLod).rgb
+            *uGlobalIblIntensity*uGlobalReflectionIntensity;
         float reflectionProbeWeight=0.0;
         vec3 prefiltered=SampleReflectionEnvironment(vWorldPos,R,roughness,globalPrefiltered,reflectionProbeWeight);
         vec2 brdf = texture(uBrdfLUT, vec2(max(dot(N,V),0.0), roughness)).rg;
@@ -281,7 +289,7 @@ void main() {
     if (uSkylightOcclusion == 1 && uUseIBL == 0) {
         ambient *= mix(1.0, skyVisibility, clamp(uSkylightOcclusionStrength, 0.0, 1.0));
     }
-    vec3 color = ambient + Lo + uEmissive;
+    vec3 color = ambient + Lo + emissive;
     if(uLightingDebugMode==1)color=Lo;
     else if(uLightingDebugMode==2)color=diffuseIndirect;
     else if(uLightingDebugMode==3)color=specularIndirect;
@@ -469,6 +477,8 @@ void SkinnedRenderer::DrawScene(ecs::Registry& reg, const Camera& camera, float 
         m_pbr->SetInt("uPrefilter", 6);
         m_pbr->SetInt("uBrdfLUT", 7);
         m_pbr->SetFloat("uMaxReflectionLod", lit.ibl->MaxReflectionLod());
+        m_pbr->SetFloat("uGlobalIblIntensity", std::max(lit.globalIblIntensity, 0.0f));
+        m_pbr->SetFloat("uGlobalReflectionIntensity", std::max(lit.globalReflectionIntensity, 0.0f));
     }
     // Fog.
     m_pbr->SetInt("uFogEnabled", lit.fog ? 1 : 0);
@@ -598,15 +608,19 @@ void SkinnedRenderer::DrawScene(ecs::Registry& reg, const Camera& camera, float 
         const auto& texs = am.model->Textures();
         for (const SubMesh& sm : am.model->SubMeshes()) {
             glm::vec3 diffuse(0.8f), emissive(0.0f);
-            int diffuseMap = -1;
+            int diffuseMap = -1, metalRoughMap = -1, emissiveMap = -1;
+            float metallic = am.metallic, roughness = am.roughness, ao = 1.0f;
             if (sm.material >= 0 && sm.material < static_cast<int>(mats.size())) {
                 const Material& m = mats[static_cast<std::size_t>(sm.material)];
                 diffuse = m.diffuse; emissive = m.emissive; diffuseMap = m.diffuseMap;
+                metallic = m.metallic; roughness = m.roughness; ao = m.ao;
+                metalRoughMap = m.metalRoughMap;
+                emissiveMap = m.emissiveMap;
             }
             m_pbr->SetVec3("uAlbedo", am.albedoOverride ? am.tint : (diffuse * am.tint));
-            m_pbr->SetFloat("uMetallic", am.metallic);
-            m_pbr->SetFloat("uRoughness", am.roughness);
-            m_pbr->SetFloat("uAO", 1.0f);
+            m_pbr->SetFloat("uMetallic", metallic);
+            m_pbr->SetFloat("uRoughness", roughness);
+            m_pbr->SetFloat("uAO", ao);
             m_pbr->SetVec3("uEmissive", emissive);
             if (am.albedoOverride) {
                 m_pbr->SetInt("uHasAlbedoMap", 1);              // override bound above
@@ -620,6 +634,24 @@ void SkinnedRenderer::DrawScene(ecs::Registry& reg, const Camera& camera, float 
                 m_pbr->SetInt("uHasAlbedoMap", 1);
             } else {
                 m_pbr->SetInt("uHasAlbedoMap", 0);
+            }
+            if (metalRoughMap >= 0
+                && metalRoughMap < static_cast<int>(texs.size())
+                && texs[static_cast<std::size_t>(metalRoughMap)]) {
+                texs[static_cast<std::size_t>(metalRoughMap)]->Bind(2);
+                m_pbr->SetInt("uMetalRoughMap", 2);
+                m_pbr->SetInt("uHasMetalRoughMap", 1);
+            } else {
+                m_pbr->SetInt("uHasMetalRoughMap", 0);
+            }
+            if (emissiveMap >= 0
+                && emissiveMap < static_cast<int>(texs.size())
+                && texs[static_cast<std::size_t>(emissiveMap)]) {
+                texs[static_cast<std::size_t>(emissiveMap)]->Bind(16);
+                m_pbr->SetInt("uEmissiveMap", 16);
+                m_pbr->SetInt("uHasEmissiveMap", 1);
+            } else {
+                m_pbr->SetInt("uHasEmissiveMap", 0);
             }
             sm.mesh.Draw();
         }

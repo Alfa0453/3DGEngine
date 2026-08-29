@@ -23,11 +23,17 @@ struct Material {
     glm::vec3   specular{0.2f};     // highlight colour
     glm::vec3   emissive{0.0f};     // self-illumination
     float       shininess = 32.0f;  // Ns — specular exponent
+    float       metallic = 0.0f;
+    float       roughness = 0.5f;
+    float       ao = 1.0f;
+    float       opacity = 1.0f;
 
     int diffuseMap  = -1;            // indices into Model::Textures(), or -1
     int normalMap   = -1;
     int specularMap = -1;
     int emissiveMap = -1;
+    int metalRoughMap = -1;
+    int heightMap = -1;
 };
 
 // One drawable chunk: geometry plus the index of the material it uses. A model

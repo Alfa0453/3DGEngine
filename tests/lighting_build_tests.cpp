@@ -71,9 +71,30 @@ int main(){
     const auto nightSample = engine::DayNightCycle::At(0.0f);
     const engine::EnvironmentLightingState night =
         engine::ResolveEnvironmentLighting(0.0f, nightSample);
-    Check(glm::length(night.ToDirectionalSkyRadiance().zenith)
-          < glm::length(noon.ToDirectionalSkyRadiance().zenith),
-          "night environment is dimmer than the daylight GI source");
+    const float noonEnergy = glm::length(noon.ToDirectionalSkyRadiance().zenith);
+    const float nightEnergy = glm::length(night.ToDirectionalSkyRadiance().zenith);
+    Check(nightEnergy < noonEnergy * 0.08f,
+          "night environment energy is substantially below daylight");
+    Check(glm::length(night.sunRadiance) < 0.0001f,
+          "direct solar radiance reaches zero below the horizon");
+    Check(night.nightFactor > 0.99f && noon.dayFactor > 0.99f,
+          "solar elevation resolves stable day and night factors");
+    const auto twilightSample = engine::DayNightCycle::At(0.25f);
+    Check(twilightSample.twilightFactor > 0.0f
+          && twilightSample.dayFactor + twilightSample.twilightFactor
+             + twilightSample.nightFactor > 0.99f,
+          "day twilight and night factors transition smoothly");
+    engine::EnvironmentEnergyParameters darkEnergy;
+    darkEnergy.nightIntensity = 0.005f;
+    const auto darkerNight = engine::ResolveEnvironmentLighting(0.0f, nightSample,
+        {}, {}, {}, darkEnergy);
+    Check(glm::length(darkerNight.SampleEnvironmentRadiance({0,1,0}))
+          < glm::length(night.SampleEnvironmentRadiance({0,1,0})),
+          "authored night intensity controls shared environment radiance");
+    Check(std::abs(engine::ResolveNightExposureMaxEv(4.0f, 1.0f, 1.0f, true)-1.0f)<0.001f
+          && std::abs(engine::ResolveNightExposureMaxEv(4.0f, 1.0f, 0.0f, true)-4.0f)<0.001f
+          && std::abs(engine::ResolveNightExposureMaxEv(4.0f, 1.0f, 1.0f, false)-4.0f)<0.001f,
+          "night exposure limit preserves day range and supports opt-out");
     engine::DynamicIrradianceSettings dynamicSettings;
     dynamicSettings.enabled = true;
     dynamicSettings.boundsMin = {-2.0f, 0.0f, -2.0f};

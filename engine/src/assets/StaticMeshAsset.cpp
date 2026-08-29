@@ -1,12 +1,14 @@
 #include "engine/assets/StaticMeshAsset.h"
 
 #include "engine/assets/AssetRegistry.h"
+#include "engine/assets/ImportedMaterialAssets.h"
 #include "engine/graphics/ImageDecode.h"
 
 #include <assimp/Importer.hpp>
 #include <assimp/material.h>
 #include <assimp/postprocess.h>
 #include <assimp/scene.h>
+#include <assimp/version.h>
 
 #include <glm/glm.hpp>
 
@@ -131,6 +133,15 @@ bool PayloadSize(const StaticMeshAssetData& asset, std::uint64_t* size) {
                                     * sizeof(float)))
             return false;
     }
+    if (!AddSize(&total, sizeof(std::uint32_t))) return false;
+    for (const MeshMaterialSlot& slot : asset.materialSlots) {
+        if (!AddStringSize(&total, slot.name)
+            || !AddSize(&total, 2u * sizeof(std::uint64_t))
+            || !AddStringSize(&total, slot.materialPath)) return false;
+    }
+    if (!AddSize(&total, sizeof(std::uint32_t)
+        + asset.materials.size() * (4u * sizeof(float)
+            + 6u * sizeof(std::int32_t)))) return false;
     *size = total;
     return true;
 }
@@ -182,6 +193,26 @@ bool WritePayload(std::ostream& output, const StaticMeshAssetData& asset) {
             if (!WriteFloat(output, value)) return false;
     }
     if (!WriteUnsigned(output, static_cast<std::uint32_t>(asset.collisionType))) return false;
+    if (!WriteUnsigned(output, static_cast<std::uint32_t>(asset.materialSlots.size())))
+        return false;
+    for (const MeshMaterialSlot& slot : asset.materialSlots)
+        if (!WriteString(output, slot.name)
+            || !WriteUnsigned(output, slot.materialId.high)
+            || !WriteUnsigned(output, slot.materialId.low)
+            || !WriteString(output, slot.materialPath)) return false;
+    if (!WriteUnsigned(output, static_cast<std::uint32_t>(asset.materials.size())))
+        return false;
+    for (const StaticMeshMaterialData& material : asset.materials)
+        if (!WriteFloat(output, material.metallic)
+            || !WriteFloat(output, material.roughness)
+            || !WriteFloat(output, material.ao)
+            || !WriteFloat(output, material.opacity)
+            || !WriteSigned32(output, material.alphaMode)
+            || !WriteSigned32(output, material.metalRoughMap)
+            || !WriteSigned32(output, material.metallicMap)
+            || !WriteSigned32(output, material.roughnessMap)
+            || !WriteSigned32(output, material.aoMap)
+            || !WriteSigned32(output, material.heightMap)) return false;
     return true;
 }
 
@@ -269,6 +300,36 @@ bool ReadPayload(std::istream& input, StaticMeshAssetData* asset,
             || collisionType > static_cast<std::uint32_t>(StaticMeshCollisionType::TriangleMesh))
             return false;
         asset->collisionType = static_cast<StaticMeshCollisionType>(collisionType);
+    }
+    if (assetVersion >= 4u) {
+        std::uint32_t slotCount = 0;
+        if (!ReadUnsigned(input, &slotCount) || slotCount > kMaximumCollectionEntries)
+            return false;
+        asset->materialSlots.resize(slotCount);
+        for (MeshMaterialSlot& slot : asset->materialSlots)
+            if (!ReadString(input, &slot.name)
+                || !ReadUnsigned(input, &slot.materialId.high)
+                || !ReadUnsigned(input, &slot.materialId.low)
+                || !ReadString(input, &slot.materialPath)) return false;
+        std::uint32_t extendedCount = 0;
+        if (!ReadUnsigned(input, &extendedCount)
+            || extendedCount != asset->materials.size()) return false;
+        for (StaticMeshMaterialData& material : asset->materials)
+            if (!ReadFloat(input, &material.metallic)
+                || !ReadFloat(input, &material.roughness)
+                || !ReadFloat(input, &material.ao)
+                || !ReadFloat(input, &material.opacity)
+                || !ReadSigned32(input, &material.alphaMode)
+                || !ReadSigned32(input, &material.metalRoughMap)
+                || !ReadSigned32(input, &material.metallicMap)
+                || !ReadSigned32(input, &material.roughnessMap)
+                || !ReadSigned32(input, &material.aoMap)
+                || !ReadSigned32(input, &material.heightMap)) return false;
+    } else {
+        for (StaticMeshMaterialData& material : asset->materials)
+            material.roughness = std::clamp(
+                std::sqrt(2.0f / (std::max(0.0f, material.shininess) + 2.0f)),
+                0.04f, 1.0f);
     }
     return true;
 }
@@ -409,6 +470,10 @@ bool ValidMapIndex(std::int32_t index, std::size_t textureCount) {
         || (index >= 0 && static_cast<std::size_t>(index) < textureCount);
 }
 
+bool ValidMaterialSlot(const MeshMaterialSlot& slot) {
+    return !slot.name.empty();
+}
+
 } // namespace
 
 bool ValidateStaticMeshAsset(const StaticMeshAssetData& asset, std::string* error) {
@@ -433,6 +498,7 @@ bool ValidateStaticMeshAsset(const StaticMeshAssetData& asset, std::string* erro
     }
     if (asset.materials.size() > kMaximumCollectionEntries
         || asset.textures.size() > kMaximumCollectionEntries
+        || asset.materialSlots.size() > kMaximumCollectionEntries
         || asset.subMeshes.size() > kMaximumCollectionEntries) {
         SetError(error, "Static mesh contains too many records.");
         return false;
@@ -452,11 +518,27 @@ bool ValidateStaticMeshAsset(const StaticMeshAssetData& asset, std::string* erro
             || !ValidMapIndex(material.diffuseMap, asset.textures.size())
             || !ValidMapIndex(material.normalMap, asset.textures.size())
             || !ValidMapIndex(material.specularMap, asset.textures.size())
-            || !ValidMapIndex(material.emissiveMap, asset.textures.size())) {
+            || !ValidMapIndex(material.emissiveMap, asset.textures.size())
+            || !ValidMapIndex(material.metalRoughMap, asset.textures.size())
+            || !ValidMapIndex(material.metallicMap, asset.textures.size())
+            || !ValidMapIndex(material.roughnessMap, asset.textures.size())
+            || !ValidMapIndex(material.aoMap, asset.textures.size())
+            || !ValidMapIndex(material.heightMap, asset.textures.size())
+            || !std::isfinite(material.metallic)
+            || !std::isfinite(material.roughness)
+            || !std::isfinite(material.ao)
+            || !std::isfinite(material.opacity)) {
             SetError(error, "Static mesh contains an invalid material.");
             return false;
         }
     }
+    for (const MeshMaterialSlot& slot : asset.materialSlots)
+        if (!ValidMaterialSlot(slot)) {
+            SetError(error, "Static mesh contains an invalid material slot.");
+            return false;
+        }
+    const std::size_t materialCount = asset.materialSlots.empty()
+        ? asset.materials.size() : asset.materialSlots.size();
     for (const StaticMeshSubMeshData& subMesh : asset.subMeshes) {
         if (subMesh.vertices.empty()
             || subMesh.vertices.size() % kStaticMeshVertexStride != 0
@@ -464,7 +546,7 @@ bool ValidateStaticMeshAsset(const StaticMeshAssetData& asset, std::string* erro
             || (subMesh.material < -1
                 || (subMesh.material >= 0
                     && static_cast<std::size_t>(subMesh.material)
-                           >= asset.materials.size()))) {
+                           >= materialCount))) {
             SetError(error, "Static mesh contains invalid geometry or material indices.");
             return false;
         }
@@ -699,6 +781,10 @@ bool ImportStaticMeshSource(const std::string& sourcePath,
         aiColor3D color;
         if (source->Get(AI_MATKEY_COLOR_DIFFUSE, color) == AI_SUCCESS)
             material.diffuse = {{color.r, color.g, color.b}};
+#if ASSIMP_VERSION_MAJOR >= 5
+        if (source->Get(AI_MATKEY_BASE_COLOR, color) == AI_SUCCESS)
+            material.diffuse = {{color.r, color.g, color.b}};
+#endif
         if (source->Get(AI_MATKEY_COLOR_SPECULAR, color) == AI_SUCCESS)
             material.specular = {{color.r, color.g, color.b}};
         if (source->Get(AI_MATKEY_COLOR_EMISSIVE, color) == AI_SUCCESS)
@@ -707,12 +793,40 @@ bool ImportStaticMeshSource(const std::string& sourcePath,
         if (source->Get(AI_MATKEY_SHININESS, shininess) == AI_SUCCESS
             && shininess > 0.0f)
             material.shininess = shininess;
-        material.diffuseMap = loadTexture(source, aiTextureType_DIFFUSE);
+        material.roughness = std::clamp(
+            std::sqrt(2.0f / (material.shininess + 2.0f)), 0.04f, 1.0f);
+        float scalar = 0.0f;
+#if ASSIMP_VERSION_MAJOR >= 5
+        if (source->Get(AI_MATKEY_METALLIC_FACTOR, scalar) == AI_SUCCESS)
+            material.metallic = scalar;
+        if (source->Get(AI_MATKEY_ROUGHNESS_FACTOR, scalar) == AI_SUCCESS)
+            material.roughness = scalar;
+#endif
+        if (source->Get(AI_MATKEY_OPACITY, scalar) == AI_SUCCESS) {
+            material.opacity = scalar;
+            if (scalar < 0.999f) material.alphaMode = 2;
+        }
+#if ASSIMP_VERSION_MAJOR >= 5
+        material.diffuseMap = loadTexture(source, aiTextureType_BASE_COLOR);
+        if (material.diffuseMap < 0)
+#endif
+            material.diffuseMap = loadTexture(source, aiTextureType_DIFFUSE);
         material.specularMap = loadTexture(source, aiTextureType_SPECULAR);
         material.emissiveMap = loadTexture(source, aiTextureType_EMISSIVE);
         material.normalMap = loadTexture(source, aiTextureType_NORMALS);
+#if ASSIMP_VERSION_MAJOR >= 5
+        if (material.normalMap < 0)
+            material.normalMap = loadTexture(source, aiTextureType_NORMAL_CAMERA);
+        material.metallicMap = loadTexture(source, aiTextureType_METALNESS);
+        material.roughnessMap = loadTexture(source, aiTextureType_DIFFUSE_ROUGHNESS);
+        material.aoMap = loadTexture(source, aiTextureType_AMBIENT_OCCLUSION);
+        if (material.metallicMap >= 0
+            && material.metallicMap == material.roughnessMap)
+            material.metalRoughMap = material.metallicMap;
+#endif
         if (material.normalMap < 0)
             material.normalMap = loadTexture(source, aiTextureType_HEIGHT);
+        material.heightMap = loadTexture(source, aiTextureType_HEIGHT);
         imported.materials.push_back(std::move(material));
     }
 
@@ -839,6 +953,39 @@ bool ImportStaticMeshToAsset(const std::string& sourcePath,
     AssetRegistryEntry entry;
     if (registry) {
         updated = *registry;
+    }
+
+    ImportedMaterialGenerationOptions materialOptions;
+    materialOptions.importMaterials = options.importMaterials;
+    materialOptions.importTextures = options.importTextures;
+    materialOptions.applyImportedMaterials = options.applyImportedMaterials;
+    materialOptions.createMaterialFolder = options.createMaterialFolder;
+    materialOptions.createTextureFolder = options.createTextureFolder;
+    materialOptions.reuseExistingMaterials = options.reuseExistingMaterials;
+    materialOptions.reuseExistingTextures = options.reuseExistingTextures;
+    materialOptions.materialReimportPolicy = options.materialReimportPolicy;
+    ImportedMaterialGenerationStats materialStats;
+    if (!CreateImportedMaterialAssets(
+            sourcePath, destinationPath, contentRoot, materialOptions,
+            imported.materials, imported.textures,
+            registry ? &updated : nullptr, &imported.materialSlots,
+            &imported.header.dependencies, &materialStats, error))
+        return false;
+    importResult.importedMaterialCount = materialStats.importedMaterials;
+    importResult.importedTextureCount = materialStats.importedTextures;
+    importResult.reusedMaterialCount = materialStats.reusedMaterials;
+    importResult.reusedTextureCount = materialStats.reusedTextures;
+    importResult.failedTextureCount = materialStats.failedTextures;
+    importResult.assignedMaterialSlotCount = materialStats.assignedSlots;
+    if (!options.keepLegacyEmbeddedFallback) {
+        imported.materials.clear();
+        imported.textures.clear();
+        if (imported.materialSlots.empty())
+            for (StaticMeshSubMeshData& subMesh : imported.subMeshes)
+                subMesh.material = -1;
+    }
+
+    if (registry) {
         ec.clear();
         const std::filesystem::path absoluteContent =
             std::filesystem::absolute(contentRoot, ec).lexically_normal();

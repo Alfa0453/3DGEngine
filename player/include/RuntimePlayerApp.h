@@ -166,6 +166,7 @@ private:
     bool                               m_dynamicGiConfigured = false;
     std::uint32_t                      m_dynamicGiFrame = 0;
     engine::DayNightCycle::Sample      m_sample{};
+    float                              m_lastIblEnvironmentEnergy = -1.0f;
 
     // HUD (the scene's referenced .hud, drawn during play).
     engine::HudDocument m_hud;

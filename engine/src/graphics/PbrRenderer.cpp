@@ -160,10 +160,12 @@ uniform int uHasAlbedoMap;
 uniform int uHasNormalMap;
 uniform int uHasMetalRoughMap;
 uniform int uHasHeightMap;
+uniform int uHasEmissiveMap;
 uniform sampler2D uAlbedoMap;
 uniform sampler2D uNormalMap;
 uniform sampler2D uMetalRoughMap;
 uniform sampler2D uHeightMap;
+uniform sampler2D uEmissiveMap;
 uniform vec3  uSunDir;
 uniform vec3  uSunColor;
 uniform vec3  uAmbient;
@@ -211,6 +213,8 @@ uniform samplerCube uIrradiance;
 uniform samplerCube uPrefilter;
 uniform sampler2D uBrdfLUT;
 uniform float uMaxReflectionLod;
+uniform float uGlobalIblIntensity;
+uniform float uGlobalReflectionIntensity;
 uniform int   uUseSSAO;
 uniform sampler2D uSsaoMap;
 uniform sampler2D uRawGtaoMap;
@@ -393,6 +397,9 @@ void main() {
     vec4 albedoSample = (uHasAlbedoMap == 1) ? texture(uAlbedoMap, uv) : vec4(1.0);
     albedoSample.rgb = pow(albedoSample.rgb, vec3(2.2));   // sRGB texture -> linear
     albedo *= albedoSample.rgb;
+    vec3 emissive = (uInstanced == 1) ? vIEmissive : uEmissive;
+    if (uHasEmissiveMap == 1)
+        emissive *= pow(texture(uEmissiveMap, uv).rgb, vec3(2.2));
     float opacity = (uInstanced == 1) ? 1.0 : uOpacity * albedoSample.a;
     if (uBlendMode == 1 && opacity < uAlphaCutoff) discard;
     float metallic = (uInstanced == 1) ? vIMRA.x : uMetallic;
@@ -477,13 +484,14 @@ void main() {
     if (uUseIBL == 1) {
         vec3 F = FresnelSchlickRough(max(dot(N,V),0.0), F0, roughness);
         vec3 kD = (vec3(1.0)-F)*(1.0-metallic);
-        vec3 globalIrradiance = texture(uIrradiance, indirectN).rgb;
+        vec3 globalIrradiance = texture(uIrradiance, indirectN).rgb * uGlobalIblIntensity;
         vec3 irradiance = globalIrradiance;
         irradiance = mix(irradiance, localProbe.irradiance,
                          localProbe.validity * clamp(uLocalProbeInfluence, 0.0, 1.0));
         vec3 diffuse = irradiance * albedo;
         vec3 R = reflect(-V, N);
-        vec3 globalPrefiltered = textureLod(uPrefilter, R, roughness*uMaxReflectionLod).rgb;
+        vec3 globalPrefiltered = textureLod(uPrefilter, R, roughness*uMaxReflectionLod).rgb
+            * uGlobalIblIntensity * uGlobalReflectionIntensity;
         float reflectionProbeWeight=0.0;
         vec3 prefiltered = SampleReflectionEnvironment(vWorldPos,R,roughness,globalPrefiltered,reflectionProbeWeight);
         vec2 brdf = texture(uBrdfLUT, vec2(max(dot(N,V),0.0), roughness)).rg;
@@ -518,7 +526,7 @@ void main() {
     if (uSkylightOcclusion == 1 && uUseIBL == 0) {
         ambient *= mix(1.0, skyVisibility, clamp(uSkylightOcclusionStrength, 0.0, 1.0));
     }
-    vec3 color = ambient + Lo + ((uInstanced == 1) ? vIEmissive : uEmissive);
+    vec3 color = ambient + Lo + emissive;
     if (uInstanced == 0) {
         float rim = pow(1.0 - max(dot(N, V), 0.0), mix(5.0, 2.0, uSheenRoughness));
         color += uSheenColor * rim;
@@ -742,6 +750,8 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
         m_pbr->SetInt("uPrefilter", 6);
         m_pbr->SetInt("uBrdfLUT", 7);
         m_pbr->SetFloat("uMaxReflectionLod", opt.ibl->MaxReflectionLod());
+        m_pbr->SetFloat("uGlobalIblIntensity", std::max(opt.globalIblIntensity, 0.0f));
+        m_pbr->SetFloat("uGlobalReflectionIntensity", std::max(opt.globalReflectionIntensity, 0.0f));
     } else {
         m_pbr->SetInt("uUseIBL", 0);
     }
@@ -881,7 +891,7 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
             m.material.specularLevel != defaults.specularLevel || m.material.subsurface != defaults.subsurface ||
             m.material.worldSpaceUv != defaults.worldSpaceUv;
         if (m.material.albedoMap || m.material.normalMap || m.material.metalRoughMap ||
-            m.material.heightMap || advanced || !opt.instancing) {
+            m.material.heightMap || m.material.emissiveMap || advanced || !opt.instancing) {
             textured.emplace_back(&t, &m);   // textured, or instancing disabled -> per-object
             return;
         }
@@ -912,7 +922,8 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
             if (am.albedoMap != bm.albedoMap) return pointerOrder(am.albedoMap, bm.albedoMap);
             if (am.normalMap != bm.normalMap) return pointerOrder(am.normalMap, bm.normalMap);
             if (am.metalRoughMap != bm.metalRoughMap) return pointerOrder(am.metalRoughMap, bm.metalRoughMap);
-            return pointerOrder(am.heightMap, bm.heightMap);
+            if (am.heightMap != bm.heightMap) return pointerOrder(am.heightMap, bm.heightMap);
+            return pointerOrder(am.emissiveMap, bm.emissiveMap);
         }
         const glm::vec3 da = a.first->position - camera.Position();
         const glm::vec3 db = b.first->position - camera.Position();
@@ -976,6 +987,7 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
         bindMap(m.material.normalMap,     1, "uHasNormalMap",     "uNormalMap");
         bindMap(m.material.metalRoughMap, 2, "uHasMetalRoughMap", "uMetalRoughMap");
         bindMap(m.material.heightMap,    17, "uHasHeightMap",     "uHeightMap");
+        bindMap(m.material.emissiveMap,  16, "uHasEmissiveMap",   "uEmissiveMap");
         if (m.material.blendMode == PbrMaterial::BlendMode::Transparent) {
             glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDepthMask(GL_FALSE);
         } else {
@@ -998,6 +1010,7 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
         m_pbr->SetInt("uHasAlbedoMap", 0);
         m_pbr->SetInt("uHasNormalMap", 0);
         m_pbr->SetInt("uHasMetalRoughMap", 0);
+        m_pbr->SetInt("uHasEmissiveMap", 0);
         m_pbr->SetInt("uHasHeightMap", 0);
         m_pbr->SetInt("uBlendMode", 0); m_pbr->SetFloat("uOpacity", 1.0f);
         m_pbr->SetVec2("uUvScale", glm::vec2(1.0f)); m_pbr->SetVec2("uUvOffset", glm::vec2(0.0f));

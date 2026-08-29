@@ -54,6 +54,8 @@ public:
         float     shadowRadius = -1.0f;
         bool      tonemap = true;   // false = output linear HDR (for post-processing)
         const IBL*  ibl   = nullptr;   // image-based ambient lighting (optional)
+        float       globalIblIntensity = 1.0f;
+        float       globalReflectionIntensity = 1.0f;
         const SSAO* ssao = nullptr;    // screen-space ambient occlusion (optional)
         bool        skylightOcclusion = false;
         float       skylightOcclusionStrength = 1.0f;

@@ -71,11 +71,33 @@ engine::EnvironmentLightingState ResolveEnvironment(
     night.stars=e.stars; night.starIntensity=e.starIntensity;
     night.moon=e.moon; night.moonRadiance=e.moonColor*e.moonIntensity;
     night.moonAngularDiameterDegrees=e.moonAngularDiameter; night.moonPhase=e.moonPhase;
+    night.moonGiContribution=e.moonGiContribution;
+    engine::EnvironmentEnergyParameters energy;
+    energy.dayIntensity=e.dayEnvironmentIntensity;
+    energy.twilightIntensity=e.twilightEnvironmentIntensity;
+    energy.nightIntensity=e.nightEnvironmentIntensity;
+    energy.nightReflectionIntensity=e.nightReflectionIntensity;
+    energy.nightFogScattering=e.nightFogScattering;
+    energy.nightCloudAmbient=e.nightCloudAmbient;
     auto state=engine::ResolveEnvironmentLighting(e.timeOfDay,sample,atmosphere,clouds,night,
-        static_cast<engine::EnvironmentQuality>(std::clamp(e.environmentQuality,0,3)));
+        energy,static_cast<engine::EnvironmentQuality>(std::clamp(e.environmentQuality,0,3)));
     state.sunRadiance*=e.sunIntensity; state.ambientRadiance*=e.skyLightIntensity;
+    const glm::vec3 authoredMoon=e.moon
+        ?glm::max(e.moonColor*e.moonIntensity*e.moonPhase*sample.nightFactor,glm::vec3(0.0f))
+        :glm::vec3(0.0f);
+    state.keyLightRadiance=glm::dot(authoredMoon,authoredMoon)>glm::dot(state.sunRadiance,state.sunRadiance)
+        ?authoredMoon*e.moonGiContribution:state.sunRadiance;
     return state;
 }
+glm::vec3 EnvironmentKeyRadiance(const RuntimeSceneLoader::Scene::Environment& e,
+                                 const engine::DayNightCycle::Sample& sample) {
+    const glm::vec3 sun=sample.sunRadiance*std::max(e.sunIntensity,0.0f);
+    const glm::vec3 moon=e.moon
+        ?glm::max(e.moonColor*e.moonIntensity*e.moonPhase*sample.nightFactor,glm::vec3(0.0f))
+        :glm::vec3(0.0f);
+    return sun+moon;
+}
+float MaxLightComponent(const glm::vec3& value){return std::max({value.x,value.y,value.z});}
 std::vector<engine::PostProcess::VolumetricLight> GatherVolumetricLights(
     engine::ecs::Registry& registry,const glm::vec3& cameraPosition,int maximumLights) {
     struct Candidate{float score;engine::PostProcess::VolumetricLight light;};std::vector<Candidate> candidates;
@@ -1367,8 +1389,8 @@ void RuntimePlayerApp::DrawEnvironmentSky(const glm::mat4& view, const glm::mat4
 void RuntimePlayerApp::DrawWaters(const engine::Camera& camera, float aspect) {
     if (m_waters.empty()) return;
     const auto& environment = m_scene.environment;
-    const glm::vec3 sunColor = m_sample.keyLightColor * environment.sunIntensity;
-    const glm::vec3 ambient = m_sample.ambient * environment.skyLightIntensity;
+    const glm::vec3 sunColor = EnvironmentKeyRadiance(environment,m_sample);
+    const glm::vec3 ambient = ResolveEnvironment(environment,m_sample).ambientRadiance;
     std::vector<glm::vec4> contacts;
     contacts.reserve(engine::Water::kMaxContacts);
     for (RuntimeWater& runtime : m_waters) {
@@ -2731,6 +2753,8 @@ void RuntimePlayerApp::OnRender() {
     m_post->settings.exposureCompensationEV = env.exposureCompensationEV;
     m_post->settings.adaptationSpeedUp = env.exposureSpeedUp;
     m_post->settings.adaptationSpeedDown = env.exposureSpeedDown;
+    m_post->settings.preserveNightDarkness = env.preserveNightDarkness;
+    m_post->settings.nightExposureLimitEV = env.nightExposureLimitEV;
     m_post->settings.bloom = env.bloom;
     m_post->settings.bloomThreshold = env.bloomThreshold;
     m_post->settings.bloomKnee = env.bloomKnee;
@@ -2751,7 +2775,17 @@ void RuntimePlayerApp::OnRender() {
     m_post->SetColorLut(colorLut);
     m_post->volumetrics.enabled = env.volumetricFog;
     m_post->volumetrics.density = env.fogDensity;
-    m_post->volumetrics.scattering = env.volumetricScattering;
+    const auto resolvedEnvironment = ResolveEnvironment(env,m_sample);
+    if (env.skyMode != 1
+        && std::abs(resolvedEnvironment.environmentIntensity
+                    - m_lastIblEnvironmentEnergy) > 0.03f) {
+        m_ibl->Generate([&](const glm::mat4& view, const glm::mat4& projection) {
+            DrawEnvironmentSky(view, projection, false);
+        });
+        m_lastIblEnvironmentEnergy = resolvedEnvironment.environmentIntensity;
+    }
+    m_post->volumetrics.scattering = env.volumetricScattering
+        * glm::mix(1.0f,env.nightFogScattering,resolvedEnvironment.nightFactor);
     m_post->volumetrics.extinction = env.volumetricExtinction;
     m_post->volumetrics.anisotropy = env.volumetricAnisotropy;
     m_post->volumetrics.baseHeight = env.fogHeight;
@@ -2777,8 +2811,12 @@ void RuntimePlayerApp::OnRender() {
     engine::ApplyLightingQuality(lightingProfile,&opt,nullptr,
                                  m_ssgi?&*m_ssgi:nullptr,&m_reflectionProbes,&*m_post);
     m_reflectionProbes.Sync(m_registry,cam.Position());
-    opt.ambient = m_sample.ambient + glm::vec3(0.04f);
+    opt.ambient = resolvedEnvironment.ambientRadiance;
     opt.ibl = &*m_ibl;
+    opt.globalIblIntensity = env.skyMode == 1
+        ? resolvedEnvironment.environmentIntensity : 1.0f;
+    opt.globalReflectionIntensity = glm::mix(1.0f,
+        env.nightReflectionIntensity,m_sample.nightFactor);
     opt.reflectionProbes = &m_reflectionProbes;
     opt.lightingGrid = m_dynamicGi.GpuReady() ? &m_dynamicGi.Grid()
         : (m_lightingProbeGrid.Valid() ? &m_lightingProbeGrid : nullptr);
@@ -2796,7 +2834,8 @@ void RuntimePlayerApp::OnRender() {
     opt.fogHeightFalloff = env.fogHeightFalloff;
     opt.fogColor = ResolveEnvironment(env, m_sample).SampleEnvironmentRadiance(
         glm::normalize(glm::vec3(1.0f, 0.04f, 0.0f)));
-    opt.cloudShadows = env.clouds && env.cloudShadows;
+    opt.cloudShadows = env.clouds && env.cloudShadows
+        && MaxLightComponent(m_sample.sunRadiance) > 0.001f;
     opt.cloudShadowStrength = env.cloudShadowStrength;
     opt.cloudShadowScale = env.cloudShadowScale;
     opt.cloudCoverage = env.cloudCoverage;
@@ -2817,8 +2856,8 @@ void RuntimePlayerApp::OnRender() {
     if (m_foliageRenderer) {
         m_foliageRenderer->Draw(m_registry, cam, aspect,
             m_sample.keyLightDirection,
-            m_sample.keyLightColor * env.sunIntensity,
-            m_sample.ambient * env.skyLightIntensity,
+            EnvironmentKeyRadiance(env,m_sample),
+            resolvedEnvironment.ambientRadiance,
             static_cast<float>(glfwGetTime()));   // drives wind sway
     }
 
@@ -2826,8 +2865,7 @@ void RuntimePlayerApp::OnRender() {
     if (m_modelShader) {
         const glm::mat4 viewProj = cam.ProjectionMatrix(aspect) * cam.ViewMatrix();
         const float lightIntensity =
-            std::max({m_sample.keyLightColor.x, m_sample.keyLightColor.y, m_sample.keyLightColor.z})
-            * env.sunIntensity;
+            MaxLightComponent(EnvironmentKeyRadiance(env,m_sample));
         m_modelShader->Bind();
         m_modelShader->SetMat4("uViewProj", viewProj);
         m_modelShader->SetVec3("uLightPos", cam.Position() + glm::vec3(-4.0f, 6.0f, 4.0f));
@@ -2842,10 +2880,14 @@ void RuntimePlayerApp::OnRender() {
     if (m_skinnedRenderer) {
         engine::SkinnedLighting lighting;
         lighting.sunDir = m_sample.keyLightDirection;
-        lighting.sunColor = m_sample.keyLightColor * env.sunIntensity;
-        lighting.ambient = m_sample.ambient * env.skyLightIntensity;
+        lighting.sunColor = EnvironmentKeyRadiance(env,m_sample);
+        lighting.ambient = resolvedEnvironment.ambientRadiance;
         lighting.cascade = &m_pbr->Cascade();
         lighting.ibl = &*m_ibl;
+        lighting.globalIblIntensity = env.skyMode == 1
+            ? resolvedEnvironment.environmentIntensity : 1.0f;
+        lighting.globalReflectionIntensity = glm::mix(1.0f,
+            env.nightReflectionIntensity,m_sample.nightFactor);
         lighting.reflectionProbes = &m_reflectionProbes;
         lighting.lightingGrid = m_dynamicGi.GpuReady() ? &m_dynamicGi.Grid()
             : (m_lightingProbeGrid.Valid() ? &m_lightingProbeGrid : nullptr);
@@ -2859,7 +2901,8 @@ void RuntimePlayerApp::OnRender() {
         lighting.minimumSkylight = env.minimumSkylight;
         lighting.shadowBlockerSamples=lightingProfile.shadowBlockerSamples;
         lighting.shadowFilterSamples=lightingProfile.shadowFilterSamples;
-        lighting.cloudShadows = env.clouds && env.cloudShadows;
+        lighting.cloudShadows = env.clouds && env.cloudShadows
+            && MaxLightComponent(m_sample.sunRadiance) > 0.001f;
         lighting.cloudShadowStrength = env.cloudShadowStrength;
         lighting.cloudShadowScale = env.cloudShadowScale;
         lighting.cloudCoverage = env.cloudCoverage;

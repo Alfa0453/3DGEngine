@@ -94,11 +94,41 @@ engine::EnvironmentLightingState ResolveEnvironment(
     night.moon = e.moon; night.moonRadiance = e.moonColor * e.moonIntensity;
     night.moonAngularDiameterDegrees = e.moonAngularDiameter;
     night.moonPhase = e.moonPhase;
+    night.moonGiContribution = e.moonGiContribution;
+    engine::EnvironmentEnergyParameters energy;
+    energy.dayIntensity = e.dayEnvironmentIntensity;
+    energy.twilightIntensity = e.twilightEnvironmentIntensity;
+    energy.nightIntensity = e.nightEnvironmentIntensity;
+    energy.nightReflectionIntensity = e.nightReflectionIntensity;
+    energy.nightFogScattering = e.nightFogScattering;
+    energy.nightCloudAmbient = e.nightCloudAmbient;
     auto state = engine::ResolveEnvironmentLighting(e.timeOfDay, sample, atmosphere,
-        clouds, night, static_cast<engine::EnvironmentQuality>(std::clamp(e.environmentQuality, 0, 3)));
+        clouds, night, energy,
+        static_cast<engine::EnvironmentQuality>(std::clamp(e.environmentQuality, 0, 3)));
     state.sunRadiance *= e.sunIntensity;
     state.ambientRadiance *= e.skyLightIntensity;
+    const glm::vec3 authoredMoon = e.moon
+        ? glm::max(e.moonColor * e.moonIntensity * e.moonPhase
+                   * sample.nightFactor, glm::vec3(0.0f))
+        : glm::vec3(0.0f);
+    state.keyLightRadiance = glm::dot(authoredMoon, authoredMoon)
+        > glm::dot(state.sunRadiance, state.sunRadiance)
+        ? authoredMoon * e.moonGiContribution : state.sunRadiance;
     return state;
+}
+
+glm::vec3 EnvironmentKeyRadiance(const EditorScene::Environment& environment,
+                                 const engine::DayNightCycle::Sample& sky) {
+    const glm::vec3 sun = sky.sunRadiance * std::max(environment.sunIntensity, 0.0f);
+    const glm::vec3 moon = environment.moon
+        ? glm::max(environment.moonColor * environment.moonIntensity
+                   * environment.moonPhase * sky.nightFactor, glm::vec3(0.0f))
+        : glm::vec3(0.0f);
+    return sun + moon;
+}
+
+float MaxLightComponent(const glm::vec3& value) {
+    return std::max({value.x, value.y, value.z});
 }
 
 std::vector<engine::PostProcess::VolumetricLight> GatherVolumetricLights(
@@ -482,12 +512,13 @@ float LightEmissiveScale(const EditorScene& scene, const EditorScene::Object& ob
     return 1.0f + std::max(intensity, 0.0f) * 0.1f;
 }
 
-engine::ecs::Light EnvironmentSunLight(const engine::DayNightCycle::Sample& sky, float intensityScale) {
+engine::ecs::Light EnvironmentSunLight(const engine::DayNightCycle::Sample& sky,
+                                       const EditorScene::Environment& environment) {
     engine::ecs::Light light;
     light.type = engine::ecs::Light::Type::Directional;
     light.direction = sky.keyLightDirection;
 
-    const glm::vec3 radiance = sky.keyLightColor * std::max(intensityScale, 0.0f);
+    const glm::vec3 radiance = EnvironmentKeyRadiance(environment, sky);
     light.intensity = std::max(std::max(radiance.r, radiance.g), radiance.b);
     light.color = light.intensity > 0.0001f ? radiance / light.intensity : glm::vec3(1.0f);
     return light;
@@ -517,7 +548,7 @@ void AddEnvironmentSunIfNeeded(engine::ecs::Registry& registry,
 
     const Entity entity = registry.Create();
     registry.Add<Transform>(entity, Transform{});
-    registry.Add<engine::ecs::Light>(entity, EnvironmentSunLight(sky, environment.sunIntensity));
+    registry.Add<engine::ecs::Light>(entity, EnvironmentSunLight(sky, environment));
 }
 
 } // namespace
@@ -1253,6 +1284,8 @@ void EditorApp::OnRender()
         m_postProcess->settings.exposureCompensationEV = environment.exposureCompensationEV + environment.exposureEV;
         m_postProcess->settings.adaptationSpeedUp = environment.exposureSpeedUp;
         m_postProcess->settings.adaptationSpeedDown = environment.exposureSpeedDown;
+        m_postProcess->settings.preserveNightDarkness = environment.preserveNightDarkness;
+        m_postProcess->settings.nightExposureLimitEV = environment.nightExposureLimitEV;
         m_postProcess->settings.bloom = environment.bloom;
         m_postProcess->settings.bloomThreshold = environment.bloomThreshold;
         m_postProcess->settings.bloomKnee = environment.bloomKnee;
@@ -1267,7 +1300,11 @@ void EditorApp::OnRender()
         m_postProcess->settings.lutIntensity = environment.colorLutIntensity;
         m_postProcess->volumetrics.enabled = environment.volumetricFog;
         m_postProcess->volumetrics.density = environment.fogDensity;
-        m_postProcess->volumetrics.scattering = environment.volumetricScattering;
+        const auto resolvedEnvironment = ResolveEnvironment(environment,
+            engine::DayNightCycle::At(environment.timeOfDay));
+        m_postProcess->volumetrics.scattering = environment.volumetricScattering
+            * glm::mix(1.0f, environment.nightFogScattering,
+                       resolvedEnvironment.nightFactor);
         m_postProcess->volumetrics.extinction = environment.volumetricExtinction;
         m_postProcess->volumetrics.anisotropy = environment.volumetricAnisotropy;
         m_postProcess->volumetrics.baseHeight = environment.fogHeight;
@@ -1677,10 +1714,14 @@ void EditorApp::DrawEditModeModels(const glm::mat4 & viewProj)
                 if (m_pbrRenderer) {
                     engine::SkinnedLighting lighting;
                     lighting.sunDir = sky.keyLightDirection;
-                    lighting.sunColor = sky.keyLightColor * environment.sunIntensity;
-                    lighting.ambient = sky.ambient * environment.skyLightIntensity;
+                    lighting.sunColor = EnvironmentKeyRadiance(environment, sky);
+                    lighting.ambient = ResolveEnvironment(environment, sky).ambientRadiance;
                     lighting.cascade = &m_pbrRenderer->Cascade();
                     lighting.ibl = environment.ibl && m_ibl ? &*m_ibl : nullptr;
+                    lighting.globalIblIntensity = environment.skyMode == 1
+                        ? ResolveEnvironment(environment, sky).environmentIntensity : 1.0f;
+                    lighting.globalReflectionIntensity = glm::mix(1.0f,
+                        environment.nightReflectionIntensity, sky.nightFactor);
                     lighting.shadowSoftness = environment.shadowSoftness;
                     const auto& profile = engine::GetLightingQualityProfile(
                         static_cast<engine::LightingQuality>(std::clamp(environment.environmentQuality,0,3)));
@@ -1714,8 +1755,8 @@ void EditorApp::DrawEditModeModels(const glm::mat4 & viewProj)
                                             m_camera,
                                             window.AspectRatio(),
                                             sky.keyLightDirection,
-                                            sky.keyLightColor * environment.sunIntensity,
-                                            sky.ambient * environment.skyLightIntensity);
+                                            EnvironmentKeyRadiance(environment, sky),
+                                            ResolveEnvironment(environment, sky).ambientRadiance);
                 }
                 // Draw socketed attachments (weapons/shields) on the animated bones.
                 if (m_modelShader && !preview->attachments.empty()) {
@@ -1758,8 +1799,7 @@ void EditorApp::DrawEditModeModels(const glm::mat4 & viewProj)
         }
         engine::ecs::RenderLoadedModels(
             previewRegistry, *m_modelShader, viewProj, sky.keyLightDirection,
-            std::max({sky.keyLightColor.x, sky.keyLightColor.y,
-                      sky.keyLightColor.z}) * environment.sunIntensity);
+            MaxLightComponent(EnvironmentKeyRadiance(environment, sky)));
     }
 
     for (auto it = m_editAnimationPoses.begin();
@@ -6964,7 +7004,7 @@ void EditorApp::DrawPlayScene(const glm::mat4 & viewProj)
                     if (environment.driveSunLight
                         && renderLight.type == engine::ecs::Light::Type::Directional
                         && !environmentSunApplied) {
-                        renderLight = EnvironmentSunLight(sky, environment.sunIntensity);
+                        renderLight = EnvironmentSunLight(sky, environment);
                         environmentSunApplied = true;
                     }
                     pbrRegistry.Add<engine::ecs::Light>(entity, renderLight);
@@ -6983,7 +7023,7 @@ void EditorApp::DrawPlayScene(const glm::mat4 & viewProj)
                 if (environment.driveSunLight
                     && renderLight.type == engine::ecs::Light::Type::Directional
                     && !environmentSunApplied) {
-                    renderLight = EnvironmentSunLight(sky, environment.sunIntensity);
+                    renderLight = EnvironmentSunLight(sky, environment);
                     environmentSunApplied = true;
                 }
                 pbrRegistry.Add<engine::ecs::Light>(entity, renderLight);
@@ -7018,18 +7058,21 @@ void EditorApp::DrawPlayScene(const glm::mat4 & viewProj)
         m_modelShader->SetVec3("uViewPos", m_camera.Position());
         engine::ecs::RenderLoadedModels(
             *m_playRegistry, *m_modelShader, viewProj, sky.keyLightDirection,
-            std::max({sky.keyLightColor.x, sky.keyLightColor.y,
-                      sky.keyLightColor.z}) * environment.sunIntensity);
+            MaxLightComponent(EnvironmentKeyRadiance(environment, sky)));
     }
 
     if (m_skinnedRenderer && m_playRegistry && m_pbrRenderer) {
         const engine::Window& window = GetWindow();
         engine::SkinnedLighting lighting;
         lighting.sunDir = sky.keyLightDirection;
-        lighting.sunColor = sky.keyLightColor * environment.sunIntensity;
-        lighting.ambient = sky.ambient * environment.skyLightIntensity;
+        lighting.sunColor = EnvironmentKeyRadiance(environment, sky);
+        lighting.ambient = ResolveEnvironment(environment, sky).ambientRadiance;
         lighting.cascade = &m_pbrRenderer->Cascade();
         lighting.ibl = environment.ibl && m_ibl ? &*m_ibl : nullptr;
+        lighting.globalIblIntensity = environment.skyMode == 1
+            ? ResolveEnvironment(environment, sky).environmentIntensity : 1.0f;
+        lighting.globalReflectionIntensity = glm::mix(1.0f,
+            environment.nightReflectionIntensity, sky.nightFactor);
         lighting.shadowSoftness = environment.shadowSoftness;
         const auto& profile = engine::GetLightingQualityProfile(
             static_cast<engine::LightingQuality>(std::clamp(environment.environmentQuality,0,3)));
@@ -7049,7 +7092,8 @@ void EditorApp::DrawPlayScene(const glm::mat4 & viewProj)
             && environment.dynamicGiVisibilityWeighting;
         lighting.probeVisibilityMaxDistance = environment.dynamicGiMaxRayDistance;
         lighting.reflectionProbes = &m_reflectionProbes;
-        lighting.cloudShadows = environment.clouds && environment.cloudShadows;
+        lighting.cloudShadows = environment.clouds && environment.cloudShadows
+            && MaxLightComponent(sky.sunRadiance) > 0.001f;
         lighting.cloudShadowStrength = environment.cloudShadowStrength;
         lighting.cloudShadowScale = environment.cloudShadowScale;
         lighting.cloudCoverage = environment.cloudCoverage;
@@ -7769,13 +7813,14 @@ void EditorApp::UpdateEnvironmentIbl(const EditorScene::Environment& environment
             + std::to_string(environment.skyIntensity);
     }
     const bool skyChanged = signature != m_lastSkySignature;
+    const float environmentEnergy = ResolveEnvironment(environment, sky).environmentIntensity;
     const bool dayChanged = (environment.skyMode != 1)
-        && std::abs(sky.dayFactor - m_lastIblDay) > 0.04f;
+        && std::abs(environmentEnergy - m_lastIblDay) > 0.03f;
     if (skyChanged || dayChanged) {
         m_ibl->Generate([&](const glm::mat4& view, const glm::mat4& projection) {
             DrawEnvironmentSky(view, projection, sky, false);
         });
-        m_lastIblDay = sky.dayFactor;
+        m_lastIblDay = environmentEnergy;
         m_lastSkySignature = signature;
     }
 }
@@ -7787,9 +7832,13 @@ void EditorApp::ConfigureEnvironmentPbrOptions(engine::ecs::Registry& registry,
     const engine::Window& window = GetWindow();
     UpdateEnvironmentIbl(environment, sky);
 
-    options.ambient = sky.ambient * environment.skyLightIntensity;
+    options.ambient = ResolveEnvironment(environment, sky).ambientRadiance;
     options.tonemap = !m_renderingHdrPreview;
     options.ibl = environment.ibl && m_ibl ? &*m_ibl : nullptr;
+    options.globalIblIntensity = environment.skyMode == 1
+        ? ResolveEnvironment(environment, sky).environmentIntensity : 1.0f;
+    options.globalReflectionIntensity = glm::mix(1.0f,
+        environment.nightReflectionIntensity, sky.nightFactor);
     options.skylightOcclusion = environment.skylightOcclusion;
     options.skylightOcclusionStrength = environment.skylightOcclusionStrength;
     options.minimumSkylight = environment.minimumSkylight;
@@ -7815,7 +7864,8 @@ void EditorApp::ConfigureEnvironmentPbrOptions(engine::ecs::Registry& registry,
                                  m_ssgi ? &*m_ssgi : nullptr,
                                  &m_reflectionProbes, m_postProcess ? &*m_postProcess : nullptr);
     options.shadowDistance = environment.shadowDistance;
-    options.cloudShadows = environment.clouds && environment.cloudShadows;
+    options.cloudShadows = environment.clouds && environment.cloudShadows
+        && MaxLightComponent(sky.sunRadiance) > 0.001f;
     options.cloudShadowStrength = environment.cloudShadowStrength;
     options.cloudShadowScale = environment.cloudShadowScale;
     options.cloudCoverage = environment.cloudCoverage;
@@ -9776,8 +9826,8 @@ void EditorApp::DrawGrass(const engine::Camera& camera, float aspect) {
     const EditorScene::Environment& env = m_scene.GetEnvironment();
     const engine::DayNightCycle::Sample sky = engine::DayNightCycle::At(env.timeOfDay);
     const glm::vec3 sunDir   = sky.keyLightDirection;
-    const glm::vec3 sunColor = sky.keyLightColor * env.sunIntensity;
-    const glm::vec3 ambient  = sky.ambient * env.skyLightIntensity;
+    const glm::vec3 sunColor = EnvironmentKeyRadiance(env, sky);
+    const glm::vec3 ambient  = ResolveEnvironment(env, sky).ambientRadiance;
 
     // Interactors: objects that push/flatten the grass as they move through it. Each is
     // (worldX, worldY, worldZ, radius). Play mode uses physics bodies (incl. the player);
@@ -9828,8 +9878,8 @@ void EditorApp::DrawWaterBodies(const engine::Camera& camera, float aspect) {
     const EditorScene::Environment& env = m_scene.GetEnvironment();
     const engine::DayNightCycle::Sample sky = engine::DayNightCycle::At(env.timeOfDay);
     const glm::vec3 sunDir   = sky.keyLightDirection;
-    const glm::vec3 sunColor = sky.keyLightColor * env.sunIntensity;
-    const glm::vec3 ambient  = sky.ambient * env.skyLightIntensity;
+    const glm::vec3 sunColor = EnvironmentKeyRadiance(env, sky);
+    const glm::vec3 ambient  = ResolveEnvironment(env, sky).ambientRadiance;
 
     for (const EditorScene::Object& object : m_scene.Objects()) {
         if (!object.isWater || !object.visible) continue;
@@ -10022,8 +10072,8 @@ void EditorApp::DrawFoliage(const engine::Camera& camera, float aspect) {
         (m_mode == EditorMode::Play && m_playRegistry) ? *m_playRegistry : m_scene.Registry();
     m_foliageRenderer->Draw(registry, camera, aspect,
         sky.keyLightDirection,
-        sky.keyLightColor * env.sunIntensity,
-        sky.ambient * env.skyLightIntensity,
+        EnvironmentKeyRadiance(env, sky),
+        ResolveEnvironment(env, sky).ambientRadiance,
         static_cast<float>(glfwGetTime()));   // drives wind sway
 }
 

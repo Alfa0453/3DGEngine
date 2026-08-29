@@ -1,6 +1,7 @@
 #include "MeshEditorPanel.h"
 #include "EditorPanels.h"
 #include "MeshGeometryOperations.h"
+#include <engine/assets/MaterialAssetLoader.h>
 #include <engine/physics/CollisionMesh.h>
 
 #include <imgui.h>
@@ -19,6 +20,49 @@ glm::vec3 Vec3(const std::array<float, 3>& value) {
 
 std::array<float, 3> Array3(const glm::vec3& value) {
     return {{value.x, value.y, value.z}};
+}
+
+std::filesystem::path ContentRootFor(const std::string& assetPath) {
+    std::filesystem::path current =
+        std::filesystem::absolute(assetPath).parent_path();
+    while (!current.empty()) {
+        std::string name = current.filename().string();
+        std::transform(name.begin(), name.end(), name.begin(),
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (name == "content") return current;
+        if (current == current.root_path()) break;
+        current = current.parent_path();
+    }
+    return std::filesystem::absolute(assetPath).parent_path();
+}
+
+struct MaterialChoice {
+    std::string label;
+    std::string virtualPath;
+    engine::AssetHandle id;
+};
+
+std::vector<MaterialChoice> MaterialChoices(const std::string& assetPath) {
+    std::vector<MaterialChoice> choices;
+    const std::filesystem::path root = ContentRootFor(assetPath);
+    std::error_code ec;
+    for (std::filesystem::recursive_directory_iterator it(
+             root, std::filesystem::directory_options::skip_permission_denied, ec), end;
+         !ec && it != end; it.increment(ec)) {
+        if (!it->is_regular_file(ec) || it->path().extension() != ".3dgmat")
+            continue;
+        engine::RuntimeMaterialAsset material;
+        if (!engine::LoadMaterialAssetFile(it->path().string(), &material, nullptr))
+            continue;
+        const std::string relative = std::filesystem::relative(
+            it->path(), root, ec).generic_string();
+        if (ec) { ec.clear(); continue; }
+        choices.push_back({relative, "/Game/" + relative, material.id});
+    }
+    std::sort(choices.begin(), choices.end(), [](const auto& a, const auto& b) {
+        return a.label < b.label;
+    });
+    return choices;
 }
 
 glm::vec3 ReadPosition(const std::vector<float>& vertices,
@@ -69,6 +113,7 @@ bool MeshEditorPanel::Load(const std::string& path, std::string* error) {
     m_undoGeometry.clear(); m_redoGeometry.clear(); m_selectedFaces.clear();
     m_selectedVertices.clear(); m_geometryDirty = false;
     m_collisionDirty = false;
+    m_materialDirty = false;
     m_previewYaw = -0.55f;
     m_previewPitch = 0.30f;
     m_previewZoom = 1.0f;
@@ -256,6 +301,13 @@ bool MeshEditorPanel::SaveForShutdown(std::string* error) {
         m_paintDirty = false;
         m_geometryDirty = false;
         m_collisionDirty = false;
+    }
+    if (m_materialDirty) {
+        const bool saved = m_kind == Kind::Static
+            ? engine::SaveStaticMeshAsset(m_path, m_staticAsset, error)
+            : engine::SaveSkeletalMeshAsset(m_path, m_skeletalAsset, error);
+        if (!saved) return false;
+        m_materialDirty = false;
     }
     return true;
 }
@@ -483,6 +535,9 @@ void MeshEditorPanel::Draw(bool* open, bool* assetSaved, std::string* message) {
     if (m_kind != Kind::Static) ImGui::BeginDisabled();
     if (ImGui::Button(m_editMode == 3 ? "Collision *" : "Collision")) m_editMode = 3;
     if (m_kind != Kind::Static) ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (ImGui::Button(m_editMode == 4 ? "Materials *" : "Materials"))
+        m_editMode = 4;
     ImGui::Separator();
 
     bool requestBakeConfirmation = false;
@@ -636,7 +691,7 @@ void MeshEditorPanel::Draw(bool* open, bool* assetSaved, std::string* message) {
             ImGui::SeparatorText("History");const bool noUndo=m_undoGeometry.empty();if(noUndo)ImGui::BeginDisabled();if(ImGui::Button("Undo Geometry")){m_redoGeometry.push_back(m_staticAsset);m_staticAsset=m_undoGeometry.back();m_undoGeometry.pop_back();RefreshGeometryState();}if(noUndo)ImGui::EndDisabled();ImGui::SameLine();const bool noRedo=m_redoGeometry.empty();if(noRedo)ImGui::BeginDisabled();if(ImGui::Button("Redo Geometry")){m_undoGeometry.push_back(m_staticAsset);m_staticAsset=m_redoGeometry.back();m_redoGeometry.pop_back();RefreshGeometryState();}if(noRedo)ImGui::EndDisabled();
             ImGui::Separator();if(!m_geometryDirty)ImGui::BeginDisabled();if(ImGui::Button("Apply Geometry To Asset",ImVec2(-1,0))){std::string error;if(SaveGeometry(&error)){if(assetSaved)*assetSaved=true;if(message)*message="Saved mesh geometry: "+m_path;}else if(message)*message="Geometry save failed: "+error;}if(ImGui::Button("Revert Geometry",ImVec2(-1,0))){m_staticAsset=m_geometryOriginal;m_undoGeometry.clear();m_redoGeometry.clear();RefreshGeometryState();m_geometryDirty=false;}if(!m_geometryDirty)ImGui::EndDisabled();
             ImGui::TextColored(m_geometryDirty?ImVec4(1,.72f,.25f,1):ImVec4(.35f,.85f,.45f,1),m_geometryDirty?"Unsaved geometry":"Geometry saved");
-        } else {
+        } else if (m_editMode == 3) {
             ImGui::TextUnformatted("COLLISION");
             ImGui::TextWrapped("Collision geometry is cooked once from this engine-owned mesh and shared by every instance.");
             const char* types[] = {"None", "Box", "Sphere", "Capsule",
@@ -695,6 +750,81 @@ void MeshEditorPanel::Draw(bool* open, bool* assetSaved, std::string* message) {
                                                  : ImVec4(.35f,.85f,.45f,1),
                                m_collisionDirty ? "Collision needs rebuild"
                                                 : "Collision is current");
+        } else {
+            ImGui::TextUnformatted("MATERIAL SLOTS");
+            ImGui::TextWrapped("Slots resolve saved engine materials by stable asset ID, "
+                               "with the Content path retained as a fallback.");
+            auto& slots = m_kind == Kind::Static
+                ? m_staticAsset.materialSlots : m_skeletalAsset.materialSlots;
+            std::size_t requiredSlots = slots.size();
+            const auto inspectSlots = [&requiredSlots](const auto& subMeshes) {
+                for (const auto& subMesh : subMeshes)
+                    if (subMesh.material >= 0)
+                        requiredSlots = std::max(requiredSlots,
+                            static_cast<std::size_t>(subMesh.material + 1));
+            };
+            if (m_kind == Kind::Static) inspectSlots(m_staticAsset.subMeshes);
+            else inspectSlots(m_skeletalAsset.subMeshes);
+            if (slots.size() < requiredSlots) {
+                slots.resize(requiredSlots);
+                for (std::size_t i = 0; i < slots.size(); ++i)
+                    if (slots[i].name.empty())
+                        slots[i].name = "Material " + std::to_string(i + 1);
+            }
+            const std::vector<MaterialChoice> choices = MaterialChoices(m_path);
+            ImGui::Text("%zu slot(s) | %zu saved material(s)",
+                        slots.size(), choices.size());
+            for (std::size_t i = 0; i < slots.size(); ++i) {
+                engine::MeshMaterialSlot& slot = slots[i];
+                ImGui::PushID(static_cast<int>(i));
+                ImGui::SeparatorText(slot.name.c_str());
+                const char* preview = slot.materialPath.empty()
+                    ? "None" : slot.materialPath.c_str();
+                if (ImGui::BeginCombo("Material", preview)) {
+                    if (ImGui::Selectable("None", slot.materialPath.empty())) {
+                        slot.materialId = {};
+                        slot.materialPath.clear();
+                        m_materialDirty = true;
+                    }
+                    for (const MaterialChoice& choice : choices) {
+                        const bool selected = slot.materialId == choice.id;
+                        if (ImGui::Selectable(choice.label.c_str(), selected)) {
+                            slot.materialId = choice.id;
+                            slot.materialPath = choice.virtualPath;
+                            m_materialDirty = true;
+                        }
+                        if (selected) ImGui::SetItemDefaultFocus();
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::TextDisabled("ID: %s", slot.materialId.Valid()
+                    ? slot.materialId.ToString().c_str() : "unassigned");
+                ImGui::PopID();
+            }
+            if (ImGui::Button("Save Material Slots", ImVec2(-1.0f, 0.0f))) {
+                std::vector<engine::AssetHandle>& dependencies = m_kind == Kind::Static
+                    ? m_staticAsset.header.dependencies
+                    : m_skeletalAsset.header.dependencies;
+                for (const engine::MeshMaterialSlot& slot : slots)
+                    if (slot.materialId.Valid()) dependencies.push_back(slot.materialId);
+                std::sort(dependencies.begin(), dependencies.end());
+                dependencies.erase(std::unique(dependencies.begin(), dependencies.end()),
+                                   dependencies.end());
+                std::string saveError;
+                const bool saved = m_kind == Kind::Static
+                    ? engine::SaveStaticMeshAsset(m_path, m_staticAsset, &saveError)
+                    : engine::SaveSkeletalMeshAsset(m_path, m_skeletalAsset, &saveError);
+                if (saved) {
+                    m_materialDirty = false;
+                    if (assetSaved) *assetSaved = true;
+                    if (message) *message = "Saved mesh material slots: " + m_path;
+                } else if (message) {
+                    *message = "Material slot save failed: " + saveError;
+                }
+            }
+            ImGui::TextColored(m_materialDirty
+                ? ImVec4(1,.72f,.25f,1) : ImVec4(.35f,.85f,.45f,1),
+                m_materialDirty ? "Unsaved material slots" : "Material slots saved");
         }
     }
     ImGui::EndChild();

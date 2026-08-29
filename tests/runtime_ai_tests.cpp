@@ -126,6 +126,30 @@ int main() {
           && Near(scene.environment.minimumSkylight, 0.04f),
           "skylight occlusion settings");
 
+    // Version 104 adds energy-based night lighting and exposure constraints.
+    {
+        std::ofstream output(path);
+        output << "3DGRuntimeScene 104 " << engine::AssetHandle::Generate().ToString() << "\n"
+               << "night_energy 1.0 0.18 0.012 0.7 0.9 0.8 0.6\n"
+               << "night_exposure 1 0.5\n";
+    }
+    scene = {};
+    error.clear();
+    Check(engine::RuntimeSceneLoader::Load(path.string(), &scene, &error),
+          "load runtime night lighting settings");
+    Check(Near(scene.environment.dayEnvironmentIntensity, 1.0f)
+          && Near(scene.environment.twilightEnvironmentIntensity, 0.18f)
+          && Near(scene.environment.nightEnvironmentIntensity, 0.012f),
+          "runtime environment energy settings");
+    Check(Near(scene.environment.moonGiContribution, 0.7f)
+          && Near(scene.environment.nightReflectionIntensity, 0.9f)
+          && Near(scene.environment.nightFogScattering, 0.8f)
+          && Near(scene.environment.nightCloudAmbient, 0.6f),
+          "runtime advanced night energy settings");
+    Check(scene.environment.preserveNightDarkness
+          && Near(scene.environment.nightExposureLimitEV, 0.5f),
+          "runtime night exposure settings");
+
     {
         std::ofstream output(path);
         output << "3DGRuntimeScene 57\n"

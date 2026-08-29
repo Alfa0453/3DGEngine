@@ -1,5 +1,7 @@
 #include <engine/assets/AssetRegistry.h>
+#include <engine/assets/MaterialAssetLoader.h>
 #include <engine/assets/StaticMeshAsset.h>
+#include <engine/assets/TextureAsset.h>
 #include <engine/physics/CollisionMesh.h>
 
 #include <array>
@@ -98,8 +100,20 @@ int main() {
         0.0f, 1.0f, 0.0f, 0.5f,
         0.0f, 0.0f, 1.0f, 0.0f};
     imported.collisionType = engine::StaticMeshCollisionType::TriangleMesh;
+    engine::MeshMaterialSlot roundTripSlot;
+    roundTripSlot.name = "Red";
+    roundTripSlot.materialId = engine::AssetHandle::Generate();
+    roundTripSlot.materialPath = "/Game/Materials/Red.3dgmat";
+    imported.materialSlots.resize(imported.materials.size());
+    for (std::size_t i = 0; i < imported.materialSlots.size(); ++i)
+        imported.materialSlots[i].name = imported.materials[i].name.empty()
+            ? "Material_" + std::to_string(i) : imported.materials[i].name;
+    imported.materialSlots[static_cast<std::size_t>(importedMaterial)] = roundTripSlot;
 
-    Check(engine::SaveStaticMeshAsset(destination.string(), imported, &error),
+    const bool savedRoundTrip =
+        engine::SaveStaticMeshAsset(destination.string(), imported, &error);
+    if (!savedRoundTrip) std::cerr << "Save error: " << error << '\n';
+    Check(savedRoundTrip,
           "save versioned native static mesh");
     engine::StaticMeshAssetData loaded;
     Check(engine::LoadStaticMeshAsset(destination.string(), &loaded, &error)
@@ -109,6 +123,11 @@ int main() {
               && loaded.subMeshes[0].indices == imported.subMeshes[0].indices
               && loaded.subMeshes[0].vertexColors == imported.subMeshes[0].vertexColors
               && loaded.collisionType == engine::StaticMeshCollisionType::TriangleMesh
+              && loaded.materialSlots.size() == imported.materials.size()
+              && loaded.materialSlots[static_cast<std::size_t>(importedMaterial)].materialId
+                     == roundTripSlot.materialId
+              && loaded.materialSlots[static_cast<std::size_t>(importedMaterial)].materialPath
+                     == roundTripSlot.materialPath
               && loaded.materials[0].diffuse == imported.materials[0].diffuse
               && loaded.textures.size() == 1
               && loaded.textures[0].rgba == imported.textures[0].rgba,
@@ -146,6 +165,29 @@ int main() {
               && fs::is_regular_file(
                   engine::AssetRegistry::DefaultRegistryPath(contentRoot.string())),
           "static mesh import registers stable identity and source metadata");
+    engine::StaticMeshAssetData generatedMesh;
+    Check(engine::LoadStaticMeshAsset(destination.string(), &generatedMesh, &error)
+              && firstImport.importedMaterialCount >= 1
+              && firstImport.importedTextureCount == 1
+              && firstImport.assignedMaterialSlotCount
+                    == generatedMesh.materialSlots.size()
+              && !generatedMesh.materialSlots.empty(),
+          "complete import generates standalone material and texture slots");
+    const engine::MeshMaterialSlot generatedSlot = generatedMesh.materialSlots[0];
+    std::string generatedMaterialRelative = generatedSlot.materialPath;
+    if (generatedMaterialRelative.rfind("/Game/", 0) == 0)
+        generatedMaterialRelative.erase(0, 6);
+    const fs::path generatedMaterialPath =
+        contentRoot / fs::path(generatedMaterialRelative);
+    engine::RuntimeMaterialAsset artistMaterial;
+    Check(engine::LoadMaterialAssetFile(
+              generatedMaterialPath.string(), &artistMaterial, &error)
+              && artistMaterial.id == generatedSlot.materialId,
+          "generated material is a valid standalone engine asset");
+    artistMaterial.material.albedo = {0.13f, 0.27f, 0.61f};
+    Check(engine::SaveMaterialAssetFile(
+              generatedMaterialPath.string(), artistMaterial, &error),
+          "artist can edit a generated material independently of the mesh");
 
     const engine::AssetHandle originalId = firstImport.id;
     const std::uint64_t originalHash = firstImport.sourceHash;
@@ -160,11 +202,78 @@ int main() {
               && registry.Find(originalId)->sourceHash == reimport.sourceHash,
           "reimport preserves AssetHandle while refreshing source hash");
 
+    engine::RuntimeMaterialAsset preservedMaterial;
+    engine::StaticMeshAssetData reimportedMesh;
+    Check(engine::LoadMaterialAssetFile(
+              generatedMaterialPath.string(), &preservedMaterial, &error)
+              && engine::LoadStaticMeshAsset(
+                  destination.string(), &reimportedMesh, &error)
+              && preservedMaterial.id == artistMaterial.id
+              && preservedMaterial.material.albedo == artistMaterial.material.albedo
+              && !reimportedMesh.materialSlots.empty()
+              && reimportedMesh.materialSlots[0].materialId == generatedSlot.materialId
+              && reimport.reusedMaterialCount >= 1
+              && reimport.reusedTextureCount == 1,
+          "default reimport updates textures while preserving artist material edits and IDs");
+
     engine::StaticMeshAssetData reloaded;
     Check(engine::LoadStaticMeshAsset(destination.string(), &reloaded, &error)
               && reloaded.header.id == originalId
               && reloaded.maximum[0] == 2.0f,
           "reimport replaces geometry without changing asset identity");
+
+    const auto importWithOptions = [&](const char* packageName,
+                                       const engine::StaticMeshImportOptions& options,
+                                       engine::StaticMeshAssetData* mesh,
+                                       engine::StaticMeshImportResult* result) {
+        const fs::path optionRoot = root / packageName / "Content";
+        const fs::path optionMesh = optionRoot / packageName
+            / (std::string(packageName) + ".3dgmesh");
+        engine::AssetRegistry optionRegistry;
+        return engine::ImportStaticMeshToAsset(
+                   source.string(), optionMesh.string(), optionRoot.string(), options,
+                   &optionRegistry, result, &error)
+            && engine::LoadStaticMeshAsset(optionMesh.string(), mesh, &error);
+    };
+
+    engine::StaticMeshImportOptions noMaterialsOptions;
+    noMaterialsOptions.importMaterials = false;
+    engine::StaticMeshAssetData noMaterialsMesh;
+    engine::StaticMeshImportResult noMaterialsResult;
+    Check(importWithOptions("NoMaterials", noMaterialsOptions,
+                            &noMaterialsMesh, &noMaterialsResult)
+              && noMaterialsResult.importedMaterialCount == 0
+              && noMaterialsResult.importedTextureCount == 0
+              && noMaterialsMesh.materialSlots.empty()
+              && noMaterialsMesh.materials.empty()
+              && noMaterialsMesh.textures.empty()
+              && noMaterialsMesh.subMeshes[0].material == -1,
+          "disabling material import leaves the mesh on its default surface");
+
+    engine::StaticMeshImportOptions noTexturesOptions;
+    noTexturesOptions.importTextures = false;
+    engine::StaticMeshAssetData noTexturesMesh;
+    engine::StaticMeshImportResult noTexturesResult;
+    Check(importWithOptions("NoTextures", noTexturesOptions,
+                            &noTexturesMesh, &noTexturesResult)
+              && noTexturesResult.importedMaterialCount >= 1
+              && noTexturesResult.importedTextureCount == 0
+              && !noTexturesMesh.materialSlots.empty()
+              && noTexturesMesh.materials.empty()
+              && noTexturesMesh.textures.empty(),
+          "disabling texture import creates scalar-only standalone materials");
+
+    engine::StaticMeshImportOptions doNotApplyOptions;
+    doNotApplyOptions.applyImportedMaterials = false;
+    engine::StaticMeshAssetData doNotApplyMesh;
+    engine::StaticMeshImportResult doNotApplyResult;
+    Check(importWithOptions("DoNotApply", doNotApplyOptions,
+                            &doNotApplyMesh, &doNotApplyResult)
+              && doNotApplyResult.importedMaterialCount >= 1
+              && doNotApplyResult.importedTextureCount == 1
+              && doNotApplyMesh.materialSlots.empty()
+              && doNotApplyMesh.subMeshes[0].material == -1,
+          "disabling apply still creates assets without assigning mesh slots");
 
     {
         std::ofstream corrupt(destination, std::ios::binary | std::ios::app);

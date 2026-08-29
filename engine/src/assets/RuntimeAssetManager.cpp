@@ -639,6 +639,10 @@ RuntimeAssetManager::ResolveReport RuntimeAssetManager::ResolveRegistryAssets(ec
             if (!material->heightMapPath.empty()) {
                 loaded.heightMap = LoadTexture(material->heightMapPath, &error);
             }
+            if (!material->emissiveMapPath.empty()) {
+                loaded.emissiveMap = LoadTexture(
+                    material->emissiveMapPath, &error);
+            }
             if (!material->shaderPath.empty()) {
                 loaded.shader = LoadShader(material->shaderPath, false, &error);
                 loaded.skinnedShader = LoadShader(material->shaderPath, true, &error);
@@ -696,6 +700,7 @@ RuntimeAssetManager::ResolveReport RuntimeAssetManager::ResolveRegistryAssets(ec
         loaded.material.normalMap = loaded.normalMap;
         loaded.material.metalRoughMap = loaded.metalRoughMap;
         loaded.material.heightMap = loaded.heightMap;
+        loaded.material.emissiveMap = loaded.emissiveMap;
 
         // Skinned characters: the default skinned draw path reads the AnimatedModel's
         // own surface fields, not LoadedMaterialAsset (only a custom skinned shader is

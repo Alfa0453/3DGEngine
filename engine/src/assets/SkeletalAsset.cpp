@@ -1,6 +1,7 @@
 #include "engine/assets/SkeletalAsset.h"
 
 #include "engine/assets/AssetRegistry.h"
+#include "engine/assets/ImportedMaterialAssets.h"
 #include "engine/graphics/ImageDecode.h"
 #include "engine/graphics/SkinnedModel.h"
 
@@ -8,6 +9,7 @@
 #include <assimp/material.h>
 #include <assimp/postprocess.h>
 #include <assimp/scene.h>
+#include <assimp/version.h>
 
 #include <glm/gtc/matrix_inverse.hpp>
 
@@ -331,6 +333,66 @@ bool ReadTextures(std::istream& input,
     return true;
 }
 
+bool WriteMaterialSlots(std::ostream& output,
+                        const std::vector<MeshMaterialSlot>& slots) {
+    if (slots.size() > std::numeric_limits<std::uint32_t>::max()
+        || !WriteU(output, static_cast<std::uint32_t>(slots.size()))) return false;
+    for (const MeshMaterialSlot& slot : slots)
+        if (!WriteString(output, slot.name)
+            || !WriteU(output, slot.materialId.high)
+            || !WriteU(output, slot.materialId.low)
+            || !WriteString(output, slot.materialPath)) return false;
+    return true;
+}
+
+bool ReadMaterialSlots(std::istream& input,
+                       std::vector<MeshMaterialSlot>* slots) {
+    std::uint32_t count = 0;
+    if (!slots || !ReadU(input, &count) || count > kMaximumRecords) return false;
+    slots->resize(count);
+    for (MeshMaterialSlot& slot : *slots)
+        if (!ReadString(input, &slot.name)
+            || !ReadU(input, &slot.materialId.high)
+            || !ReadU(input, &slot.materialId.low)
+            || !ReadString(input, &slot.materialPath)) return false;
+    return true;
+}
+
+bool WriteExtendedMaterials(std::ostream& output,
+        const std::vector<StaticMeshMaterialData>& materials) {
+    if (!WriteU(output, static_cast<std::uint32_t>(materials.size()))) return false;
+    for (const auto& material : materials)
+        if (!WriteF(output, material.metallic)
+            || !WriteF(output, material.roughness)
+            || !WriteF(output, material.ao)
+            || !WriteF(output, material.opacity)
+            || !WriteI(output, material.alphaMode)
+            || !WriteI(output, material.metalRoughMap)
+            || !WriteI(output, material.metallicMap)
+            || !WriteI(output, material.roughnessMap)
+            || !WriteI(output, material.aoMap)
+            || !WriteI(output, material.heightMap)) return false;
+    return true;
+}
+
+bool ReadExtendedMaterials(std::istream& input,
+        std::vector<StaticMeshMaterialData>* materials) {
+    std::uint32_t count = 0;
+    if (!materials || !ReadU(input, &count) || count != materials->size()) return false;
+    for (auto& material : *materials)
+        if (!ReadF(input, &material.metallic)
+            || !ReadF(input, &material.roughness)
+            || !ReadF(input, &material.ao)
+            || !ReadF(input, &material.opacity)
+            || !ReadI(input, &material.alphaMode)
+            || !ReadI(input, &material.metalRoughMap)
+            || !ReadI(input, &material.metallicMap)
+            || !ReadI(input, &material.roughnessMap)
+            || !ReadI(input, &material.aoMap)
+            || !ReadI(input, &material.heightMap)) return false;
+    return true;
+}
+
 template<typename Writer>
 bool SaveNative(const std::string& path, NativeAssetHeader header,
                 Writer writer, std::string* error) {
@@ -409,7 +471,8 @@ bool LoadNative(const std::string& path, AssetType expected,
         if (!input) SetError(error, "Could not open native asset: " + path);
         return false;
     }
-    if (header->type != expected || header->assetVersion != version) {
+    if (header->type != expected || header->assetVersion == 0
+        || header->assetVersion > version) {
         SetError(error, "Native asset type or version is unsupported.");
         return false;
     }
@@ -506,6 +569,7 @@ bool ValidateSkeletalMeshPayload(const SkeletalMeshAssetData& asset,
         || asset.subMeshes.empty()
         || asset.materials.size() > kMaximumRecords
         || asset.textures.size() > kMaximumRecords
+        || asset.materialSlots.size() > kMaximumRecords
         || asset.subMeshes.size() > kMaximumRecords) {
         if (error && error->empty())
             *error = "Skeletal mesh identity or payload is invalid.";
@@ -536,11 +600,23 @@ bool ValidateSkeletalMeshPayload(const SkeletalMeshAssetData& asset,
             || !ValidTextureIndex(material.diffuseMap, asset.textures.size())
             || !ValidTextureIndex(material.normalMap, asset.textures.size())
             || !ValidTextureIndex(material.specularMap, asset.textures.size())
-            || !ValidTextureIndex(material.emissiveMap, asset.textures.size())) {
+            || !ValidTextureIndex(material.emissiveMap, asset.textures.size())
+            || !ValidTextureIndex(material.metalRoughMap, asset.textures.size())
+            || !ValidTextureIndex(material.metallicMap, asset.textures.size())
+            || !ValidTextureIndex(material.roughnessMap, asset.textures.size())
+            || !ValidTextureIndex(material.aoMap, asset.textures.size())
+            || !ValidTextureIndex(material.heightMap, asset.textures.size())) {
             SetError(error, "Skeletal mesh contains an invalid material.");
             return false;
         }
     }
+    for (const MeshMaterialSlot& slot : asset.materialSlots)
+        if (slot.name.empty()) {
+            SetError(error, "Skeletal mesh contains an invalid material slot.");
+            return false;
+        }
+    const std::size_t materialCount = asset.materialSlots.empty()
+        ? asset.materials.size() : asset.materialSlots.size();
     for (const auto& subMesh : asset.subMeshes) {
         if (subMesh.vertices.empty()
             || subMesh.vertices.size() % kSkeletalMeshVertexStride != 0
@@ -548,7 +624,7 @@ bool ValidateSkeletalMeshPayload(const SkeletalMeshAssetData& asset,
             || subMesh.material < -1
             || (subMesh.material >= 0
                 && static_cast<std::size_t>(subMesh.material)
-                       >= asset.materials.size())) {
+                       >= materialCount)) {
             SetError(error, "Skeletal mesh contains invalid geometry or material indices.");
             return false;
         }
@@ -831,7 +907,8 @@ bool SaveSkeletalMeshAsset(const std::string& path, SkeletalMeshAssetData asset,
             for (std::uint32_t index : subMesh.indices)
                 if (!WriteU(output, index)) return false;
         }
-        return true;
+        return WriteMaterialSlots(output, asset.materialSlots)
+            && WriteExtendedMaterials(output, asset.materials);
     }, error);
 }
 
@@ -871,9 +948,19 @@ bool LoadSkeletalMeshAsset(const std::string& path, SkeletalMeshAssetData* asset
                     for (std::uint32_t& index : subMesh.indices)
                         if (!ReadU(input, &index)) return false;
                 }
+                if (loaded.header.assetVersion >= 2u) {
+                    if (!ReadMaterialSlots(input, &loaded.materialSlots)
+                        || !ReadExtendedMaterials(input, &loaded.materials)) return false;
+                } else {
+                    for (auto& material : loaded.materials)
+                        material.roughness = std::clamp(std::sqrt(2.0f
+                            / (std::max(0.0f, material.shininess) + 2.0f)),
+                            0.04f, 1.0f);
+                }
                 return true;
             }, error))
         return false;
+    loaded.header.assetVersion = kSkeletalMeshAssetVersion;
     if (!ValidateSkeletalMeshPayload(loaded, error)) return false;
     *asset = std::move(loaded);
     SetError(error, {});
@@ -1028,6 +1115,10 @@ bool ImportSkeletalSource(
         aiColor3D color;
         if (input->Get(AI_MATKEY_COLOR_DIFFUSE, color) == AI_SUCCESS)
             material.diffuse = {{color.r, color.g, color.b}};
+#if ASSIMP_VERSION_MAJOR >= 5
+        if (input->Get(AI_MATKEY_BASE_COLOR, color) == AI_SUCCESS)
+            material.diffuse = {{color.r, color.g, color.b}};
+#endif
         if (input->Get(AI_MATKEY_COLOR_SPECULAR, color) == AI_SUCCESS)
             material.specular = {{color.r, color.g, color.b}};
         if (input->Get(AI_MATKEY_COLOR_EMISSIVE, color) == AI_SUCCESS)
@@ -1035,10 +1126,38 @@ bool ImportSkeletalSource(
         float shine = 0.0f;
         if (input->Get(AI_MATKEY_SHININESS, shine) == AI_SUCCESS && shine > 0.0f)
             material.shininess = shine;
-        material.diffuseMap = loadTexture(input, aiTextureType_DIFFUSE);
+        material.roughness = std::clamp(
+            std::sqrt(2.0f / (material.shininess + 2.0f)), 0.04f, 1.0f);
+        float scalar = 0.0f;
+#if ASSIMP_VERSION_MAJOR >= 5
+        if (input->Get(AI_MATKEY_METALLIC_FACTOR, scalar) == AI_SUCCESS)
+            material.metallic = scalar;
+        if (input->Get(AI_MATKEY_ROUGHNESS_FACTOR, scalar) == AI_SUCCESS)
+            material.roughness = scalar;
+#endif
+        if (input->Get(AI_MATKEY_OPACITY, scalar) == AI_SUCCESS) {
+            material.opacity = scalar;
+            if (scalar < 0.999f) material.alphaMode = 2;
+        }
+#if ASSIMP_VERSION_MAJOR >= 5
+        material.diffuseMap = loadTexture(input, aiTextureType_BASE_COLOR);
+        if (material.diffuseMap < 0)
+#endif
+            material.diffuseMap = loadTexture(input, aiTextureType_DIFFUSE);
         material.normalMap = loadTexture(input, aiTextureType_NORMALS);
+#if ASSIMP_VERSION_MAJOR >= 5
+        if (material.normalMap < 0)
+            material.normalMap = loadTexture(input, aiTextureType_NORMAL_CAMERA);
+        material.metallicMap = loadTexture(input, aiTextureType_METALNESS);
+        material.roughnessMap = loadTexture(input, aiTextureType_DIFFUSE_ROUGHNESS);
+        material.aoMap = loadTexture(input, aiTextureType_AMBIENT_OCCLUSION);
+        if (material.metallicMap >= 0
+            && material.metallicMap == material.roughnessMap)
+            material.metalRoughMap = material.metallicMap;
+#endif
         if (material.normalMap < 0)
             material.normalMap = loadTexture(input, aiTextureType_HEIGHT);
+        material.heightMap = loadTexture(input, aiTextureType_HEIGHT);
         material.specularMap = loadTexture(input, aiTextureType_SPECULAR);
         material.emissiveMap = loadTexture(input, aiTextureType_EMISSIVE);
         importedMesh.materials.push_back(std::move(material));
@@ -1329,13 +1448,43 @@ bool ImportSkeletalAssetsToContent(
             animations[i].header.id = id;
         animationPaths.push_back(path);
     }
+    AssetRegistry updated;
+    if (registry) updated = *registry;
     mesh.header.dependencies.clear();
     mesh.header.dependencies.push_back(skeleton.header.id);
     for (const auto& animation : animations)
         mesh.header.dependencies.push_back(animation.header.id);
 
-    AssetRegistry updated;
-    if (registry) updated = *registry;
+    if (options.importSkeletalMesh && !mesh.subMeshes.empty()) {
+        ImportedMaterialGenerationOptions materialOptions;
+        materialOptions.importMaterials = options.importMaterials;
+        materialOptions.importTextures = options.importTextures;
+        materialOptions.applyImportedMaterials = options.applyImportedMaterials;
+        materialOptions.createMaterialFolder = options.createMaterialFolder;
+        materialOptions.createTextureFolder = options.createTextureFolder;
+        materialOptions.reuseExistingMaterials = options.reuseExistingMaterials;
+        materialOptions.reuseExistingTextures = options.reuseExistingTextures;
+        materialOptions.materialReimportPolicy = options.materialReimportPolicy;
+        ImportedMaterialGenerationStats stats;
+        if (!CreateImportedMaterialAssets(
+                sourcePath, meshPath, contentRoot, materialOptions,
+                mesh.materials, mesh.textures, registry ? &updated : nullptr,
+                &mesh.materialSlots, &mesh.header.dependencies, &stats, error))
+            return false;
+        output.importedMaterialCount = stats.importedMaterials;
+        output.importedTextureCount = stats.importedTextures;
+        output.reusedMaterialCount = stats.reusedMaterials;
+        output.reusedTextureCount = stats.reusedTextures;
+        output.failedTextureCount = stats.failedTextures;
+        output.assignedMaterialSlotCount = stats.assignedSlots;
+        if (!options.keepLegacyEmbeddedFallback) {
+            mesh.materials.clear();
+            mesh.textures.clear();
+            if (mesh.materialSlots.empty())
+                for (SkeletalMeshSubMeshData& subMesh : mesh.subMeshes)
+                    subMesh.material = -1;
+        }
+    }
     auto registerAsset = [&](const std::string& path, AssetHandle id,
                              AssetType type, std::vector<AssetHandle> dependencies) {
         if (!registry) return true;

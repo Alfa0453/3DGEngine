@@ -481,6 +481,13 @@ public:
             float moonIntensity = 0.07f;
             float moonAngularDiameter = 0.52f;
             float moonPhase = 1.0f;
+            float moonGiContribution = 1.0f;
+            float dayEnvironmentIntensity = 1.0f;
+            float twilightEnvironmentIntensity = 0.20f;
+            float nightEnvironmentIntensity = 0.015f;
+            float nightReflectionIntensity = 1.0f;
+            float nightFogScattering = 1.0f;
+            float nightCloudAmbient = 1.0f;
             bool volumetricFog = false;
             float volumetricScattering = 1.0f;
             float volumetricExtinction = 1.0f;
@@ -494,6 +501,8 @@ public:
             float exposureCompensationEV = 0.0f;
             float exposureSpeedUp = 3.0f;
             float exposureSpeedDown = 1.0f;
+            bool preserveNightDarkness = true;
+            float nightExposureLimitEV = 1.0f;
             bool bloom = true;
             float bloomThreshold = 1.0f;
             float bloomKnee = 0.5f;

@@ -29,6 +29,8 @@ struct SkinnedLighting {
     glm::vec3 ambient{0.03f};
     const CascadedShadow* cascade = nullptr;   // sun (cascade) shadows
     const IBL*            ibl     = nullptr;    // image-based ambient
+    float globalIblIntensity = 1.0f;
+    float globalReflectionIntensity = 1.0f;
     float shadowSoftness = 2.5f;
     int shadowBlockerSamples = 16;
     int shadowFilterSamples = 24;

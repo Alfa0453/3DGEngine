@@ -4,12 +4,41 @@
 #include "engine/assets/AssetRegistry.h"
 
 #include <cstdlib>
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <sstream>
 
 namespace engine {
 namespace {
+
+std::string EscapeJson(const std::string& value) {
+    std::string escaped;
+    escaped.reserve(value.size());
+    for (const char c : value) {
+        switch (c) {
+        case '\\': escaped += "\\\\"; break;
+        case '"': escaped += "\\\""; break;
+        case '\n': escaped += "\\n"; break;
+        case '\r': escaped += "\\r"; break;
+        case '\t': escaped += "\\t"; break;
+        default: escaped += c; break;
+        }
+    }
+    return escaped;
+}
+
+std::string StoredMapPath(const std::string& materialPath,
+                          const std::string& mapPath) {
+    if (mapPath.empty()) return {};
+    std::error_code ec;
+    const std::filesystem::path relative = std::filesystem::relative(
+        std::filesystem::path(mapPath),
+        std::filesystem::path(materialPath).parent_path(), ec);
+    return ec ? std::filesystem::path(mapPath).generic_string()
+              : relative.generic_string();
+}
 
 std::string ReadTextFile(const std::string& path, std::string* error) {
     std::ifstream in(path);
@@ -155,6 +184,121 @@ std::string ResolveMapPath(const std::string& materialPath, const std::string& m
 
 } // namespace
 
+bool SaveMaterialAssetFile(const std::string& path,
+                           RuntimeMaterialAsset material,
+                           std::string* error) {
+    if (!material.id.Valid()) material.id = AssetHandle::Generate();
+    const std::filesystem::path destination(path);
+    std::error_code ec;
+    if (destination.has_parent_path())
+        std::filesystem::create_directories(destination.parent_path(), ec);
+    if (ec) {
+        if (error) *error = "Could not create material directory: " + ec.message();
+        return false;
+    }
+    const std::filesystem::path temporary = destination.string() + ".tmp";
+    std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+    if (!output) {
+        if (error) *error = "Could not open material for writing: " + path;
+        return false;
+    }
+    const auto& p = material.material;
+    const auto idText = [](AssetHandle id) {
+        return id.Valid() ? id.ToString()
+                          : std::string("00000000000000000000000000000000");
+    };
+    output << std::fixed << std::setprecision(6);
+    output << "3DG_MATERIAL 5 " << material.id.ToString() << '\n'
+           << "{\n"
+           << "  \"schema\": \"3DGEngine.PbrMaterial\",\n"
+           << "  \"version\": 5,\n"
+           << "  \"assetId\": \"" << material.id.ToString() << "\",\n"
+           << "  \"name\": \"" << EscapeJson(material.name) << "\",\n"
+           << "  \"albedo\": [" << p.albedo.r << ", " << p.albedo.g << ", " << p.albedo.b << "],\n"
+           << "  \"metallic\": " << p.metallic << ",\n"
+           << "  \"roughness\": " << p.roughness << ",\n"
+           << "  \"ao\": " << p.ao << ",\n"
+           << "  \"emissive\": [" << p.emissive.r << ", " << p.emissive.g << ", " << p.emissive.b << "],\n"
+           << "  \"blendMode\": " << static_cast<int>(p.blendMode) << ",\n"
+           << "  \"opacity\": " << p.opacity << ",\n"
+           << "  \"alphaCutoff\": " << p.alphaCutoff << ",\n"
+           << "  \"uvScale\": [" << p.uvScale.x << ", " << p.uvScale.y << "],\n"
+           << "  \"uvOffset\": [" << p.uvOffset.x << ", " << p.uvOffset.y << "],\n"
+           << "  \"uvRotation\": " << p.uvRotation << ",\n"
+           << "  \"worldSpaceUv\": " << (p.worldSpaceUv ? 1 : 0) << ",\n"
+           << "  \"normalStrength\": " << p.normalStrength << ",\n"
+           << "  \"heightScale\": " << p.heightScale << ",\n"
+           << "  \"clearcoat\": " << p.clearcoat << ",\n"
+           << "  \"clearcoatRoughness\": " << p.clearcoatRoughness << ",\n"
+           << "  \"transmission\": " << p.transmission << ",\n"
+           << "  \"ior\": " << p.ior << ",\n"
+           << "  \"thickness\": " << p.thickness << ",\n"
+           << "  \"anisotropy\": " << p.anisotropy << ",\n"
+           << "  \"anisotropyRotation\": " << p.anisotropyRotation << ",\n"
+           << "  \"sheenColor\": [" << p.sheenColor.r << ", " << p.sheenColor.g << ", " << p.sheenColor.b << "],\n"
+           << "  \"sheenRoughness\": " << p.sheenRoughness << ",\n"
+           << "  \"specularLevel\": " << p.specularLevel << ",\n"
+           << "  \"subsurface\": " << p.subsurface << ",\n"
+           << "  \"subsurfaceColor\": [" << p.subsurfaceColor.r << ", " << p.subsurfaceColor.g << ", " << p.subsurfaceColor.b << "],\n"
+           << "  \"shader\": \"" << EscapeJson(material.shaderPath) << "\",\n"
+           << "  \"shaderAssetId\": \"" << idText(material.shaderAssetId) << "\",\n"
+           << "  \"shaderParameters\": [],\n"
+           << "  \"maps\": {\n"
+           << "    \"albedo\": \"" << EscapeJson(StoredMapPath(path, material.albedoMapPath)) << "\",\n"
+           << "    \"normal\": \"" << EscapeJson(StoredMapPath(path, material.normalMapPath)) << "\",\n"
+           << "    \"metalRough\": \"" << EscapeJson(StoredMapPath(path, material.metalRoughMapPath)) << "\",\n"
+           << "    \"height\": \"" << EscapeJson(StoredMapPath(path, material.heightMapPath)) << "\",\n"
+           << "    \"emissive\": \"" << EscapeJson(StoredMapPath(path, material.emissiveMapPath)) << "\"\n"
+           << "  },\n"
+           << "  \"mapAssetIds\": {\n"
+           << "    \"albedoAssetId\": \"" << idText(material.albedoMapAssetId) << "\",\n"
+           << "    \"normalAssetId\": \"" << idText(material.normalMapAssetId) << "\",\n"
+           << "    \"metalRoughAssetId\": \"" << idText(material.metalRoughMapAssetId) << "\",\n"
+           << "    \"heightAssetId\": \"" << idText(material.heightMapAssetId) << "\",\n"
+           << "    \"emissiveAssetId\": \"" << idText(material.emissiveMapAssetId) << "\"\n"
+           << "  }\n"
+           << "}\n";
+    std::vector<AssetHandle> dependencies;
+    for (AssetHandle id : {material.albedoMapAssetId, material.normalMapAssetId,
+                           material.metalRoughMapAssetId, material.heightMapAssetId,
+                           material.emissiveMapAssetId,
+                           material.shaderAssetId})
+        if (id.Valid() && std::find(dependencies.begin(), dependencies.end(), id)
+                              == dependencies.end())
+            dependencies.push_back(id);
+    output << "ASSET_DEPS " << dependencies.size();
+    for (AssetHandle id : dependencies) output << ' ' << id.ToString();
+    output << '\n';
+    output.close();
+    if (!output) {
+        std::filesystem::remove(temporary, ec);
+        if (error) *error = "Could not finish writing material: " + path;
+        return false;
+    }
+    const std::filesystem::path backup = destination.string() + ".bak";
+    std::filesystem::remove(backup, ec);
+    ec.clear();
+    if (std::filesystem::exists(destination, ec)) {
+        std::filesystem::rename(destination, backup, ec);
+        if (ec) {
+            std::filesystem::remove(temporary);
+            if (error) *error = "Could not replace material: " + ec.message();
+            return false;
+        }
+    }
+    std::filesystem::rename(temporary, destination, ec);
+    if (ec) {
+        std::error_code rollback;
+        if (std::filesystem::exists(backup, rollback))
+            std::filesystem::rename(backup, destination, rollback);
+        if (error) *error = "Could not commit material: " + ec.message();
+        return false;
+    }
+    std::filesystem::remove(backup, ec);
+    if (error) error->clear();
+    return true;
+}
+
 bool LoadMaterialAssetFile(const std::string& path, RuntimeMaterialAsset* material, std::string* error) {
     if (!material) {
         if (error) {
@@ -223,17 +367,20 @@ bool LoadMaterialAssetFile(const std::string& path, RuntimeMaterialAsset* materi
     std::string normalMap;
     std::string metalRoughMap;
     std::string heightMap;
+    std::string emissiveMap;
     const std::size_t mapsStart = text.find("\"maps\"");
     if (mapsStart != std::string::npos) {
         FindStringFrom(text, "albedo", mapsStart, &albedoMap);
         FindStringFrom(text, "normal", mapsStart, &normalMap);
         FindStringFrom(text, "metalRough", mapsStart, &metalRoughMap);
         FindStringFrom(text, "height", mapsStart, &heightMap);
+        FindStringFrom(text, "emissive", mapsStart, &emissiveMap);
     }
     loaded.albedoMapPath = ResolveMapPath(path, albedoMap);
     loaded.normalMapPath = ResolveMapPath(path, normalMap);
     loaded.metalRoughMapPath = ResolveMapPath(path, metalRoughMap);
     loaded.heightMapPath = ResolveMapPath(path, heightMap);
+    loaded.emissiveMapPath = ResolveMapPath(path, emissiveMap);
     if (FindString(text, "albedoAssetId", &idText))
         AssetHandle::Parse(idText, &loaded.albedoMapAssetId);
     if (FindString(text, "normalAssetId", &idText))
@@ -242,6 +389,8 @@ bool LoadMaterialAssetFile(const std::string& path, RuntimeMaterialAsset* materi
         AssetHandle::Parse(idText, &loaded.metalRoughMapAssetId);
     if (FindString(text, "heightAssetId", &idText))
         AssetHandle::Parse(idText, &loaded.heightMapAssetId);
+    if (FindString(text, "emissiveAssetId", &idText))
+        AssetHandle::Parse(idText, &loaded.emissiveMapAssetId);
     std::string shaderPath;
     if (FindString(text, "shader", &shaderPath))
         loaded.shaderPath = ResolveMapPath(path, shaderPath);
@@ -289,6 +438,8 @@ bool LoadMaterialAssetFile(const std::string& path, RuntimeMaterialAsset* materi
         resolve(loaded.metalRoughMapAssetId, loaded.metalRoughMapPath,
                 AssetType::Texture);
         resolve(loaded.heightMapAssetId, loaded.heightMapPath,
+                AssetType::Texture);
+        resolve(loaded.emissiveMapAssetId, loaded.emissiveMapPath,
                 AssetType::Texture);
         resolve(loaded.shaderAssetId, loaded.shaderPath, AssetType::Shader);
         for (RuntimeShaderParameter& parameter : loaded.shaderParameters) {

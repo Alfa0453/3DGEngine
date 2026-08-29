@@ -5,6 +5,7 @@
 #include "engine/graphics/SkinnedModel.h"
 
 #include "engine/assets/SkeletalAsset.h"
+#include "engine/assets/ImportedMaterialResolver.h"
 #include "engine/graphics/ImageDecode.h"
 #include "engine/graphics/VertexLayout.h"
 
@@ -105,6 +106,11 @@ SkinnedModel SkinnedModel::FromFile(const std::string& path) {
         model.m_skeleton = std::move(asset.skeleton);
         for (NamedAnimationClipData& clip : asset.embeddedAnimations)
             model.m_animations.push_back(std::move(clip.animation));
+        if (!asset.materialSlots.empty()) {
+            ResolveImportedMaterialSlots(path, asset.materialSlots,
+                &model.m_materials, &model.m_textures, nullptr);
+        }
+        if (model.m_materials.empty()) {
         model.m_materials.reserve(asset.materials.size());
         for (const StaticMeshMaterialData& source : asset.materials) {
             Material material;
@@ -121,6 +127,7 @@ SkinnedModel SkinnedModel::FromFile(const std::string& path) {
             material.specularMap = source.specularMap;
             material.emissiveMap = source.emissiveMap;
             model.m_materials.push_back(std::move(material));
+        }
         }
         model.m_textures.reserve(asset.textures.size());
         for (const StaticMeshTextureData& source : asset.textures) {
