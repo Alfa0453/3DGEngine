@@ -3,6 +3,7 @@
 
 #include "engine/graphics/Shader.h"
 #include "engine/graphics/Mesh.h"
+#include "engine/graphics/Model.h"
 #include "engine/graphics/Camera.h"
 #include "engine/ecs/Registry.h"
 #include "engine/ecs/Components.h"
@@ -23,6 +24,7 @@
 #include <array>
 #include <chrono>
 #include <functional>
+#include <iostream>
 #include <cmath>
 #include <cstdlib>
 
@@ -129,6 +131,7 @@ flat in vec3 vIAlbedo;
 flat in vec3 vIMRA;
 flat in vec3 vIEmissive;
 uniform int  uInstanced;
+uniform int  uMaterialSlotDebug;
 uniform vec3  uViewPos;
 uniform vec3  uAlbedo;
 uniform float uMetallic;
@@ -571,6 +574,13 @@ void main() {
                             * (debugF*debugBrdf.x+debugBrdf.y) * specularOcclusion;
         color = globalDiffuse + globalSpecular;
     }
+    else if (uLightingDebugMode == 24) color = albedo;
+    else if (uLightingDebugMode == 25) color = normalize(baseN) * 0.5 + 0.5;
+    else if (uLightingDebugMode == 26) color = normalize(N) * 0.5 + 0.5;
+    else if (uLightingDebugMode == 27) {
+        float h = fract(float(max(uMaterialSlotDebug, 0)) * 0.61803398875);
+        color = 0.55 + 0.45 * cos(6.2831853 * (h + vec3(0.0, 0.333, 0.667)));
+    }
 
     if (uFogEnabled == 1 && uLightingDebugMode == 0) {
         float dist = length(uViewPos - vWorldPos);
@@ -580,7 +590,11 @@ void main() {
         color = mix(color, uFogColor, fog);
     }
 
-    if (uApplyTonemap == 1 && uLightingDebugMode != 20 && uLightingDebugMode != 21) {
+    if (uApplyTonemap == 1 && uLightingDebugMode == 24) {
+        color = pow(max(color, vec3(0.0)), vec3(1.0/2.2));
+    } else if (uApplyTonemap == 1 && uLightingDebugMode != 20
+               && uLightingDebugMode != 21
+               && (uLightingDebugMode < 24 || uLightingDebugMode > 27)) {
         color = ACES(color);                     // filmic tone map (was Reinhard)
         color = pow(color, vec3(1.0/2.2));       // linear -> sRGB
     }
@@ -947,6 +961,7 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
 
     // Textured entities: per-object (uInstanced = 0).
     m_pbr->SetInt("uInstanced", 0);
+    m_pbr->SetInt("uMaterialSlotDebug", 0);
     std::array<const Texture*, 18> boundMaps{};
     auto bindMap = [&](const Texture* tex, int unit, const char* flag, const char* samp) {
         const std::size_t slot = static_cast<std::size_t>(unit);
@@ -1002,7 +1017,94 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
                   || m.mesh->TwoSided()));
         m.mesh->DrawLod(SelectMeshLod(*m.mesh, t, camera));
     }
+
+    // Imported static models use the very same program and frame-level lighting
+    // bindings as native MeshPBR geometry.  Only their geometry/material-slot
+    // submission differs: one draw is issued per imported submesh.
+    static std::unordered_map<const Model*, std::uint64_t> reportedFallbacks;
+    auto importedView = reg.view<Transform, ecs::LoadedModelAsset>();
+    if (!importedView.empty()) importedView.each(
+        [&](Entity entity, Transform& t, ecs::LoadedModelAsset& loaded) {
+            if (!loaded.model || reg.Has<MeshPBR>(entity)) return;
+            const glm::mat4 model = t.Model();
+            if (opt.frustumCull) {
+                const glm::vec3 center = glm::vec3(
+                    model * glm::vec4(loaded.model->Center(), 1.0f));
+                const glm::vec3 scale = glm::abs(t.scale);
+                const float radius = loaded.model->BoundingRadius()
+                    * std::max({scale.x, scale.y, scale.z});
+                if (!SphereInFrustum(frustum, center, std::max(radius, 0.01f)))
+                    return;
+            }
+            const auto* objectOverride = reg.TryGet<ecs::LoadedMaterialAsset>(entity);
+            m_pbr->SetMat4("uModel", model);
+            m_pbr->SetMat3("uNormalMat",
+                glm::mat3(glm::transpose(glm::inverse(model))));
+            glFrontFace(glm::determinant(glm::mat3(model)) < 0.0f ? GL_CW : GL_CCW);
+            for (const SubMesh& submesh : loaded.model->SubMeshes()) {
+                bool fallback = false;
+                const PbrMaterial material = ResolveModelPbrMaterial(
+                    *loaded.model, submesh.material, objectOverride, &fallback);
+                m_pbr->SetInt("uMaterialSlotDebug", std::max(submesh.material, 0));
+                if (fallback) {
+                    const std::uint64_t bit = submesh.material >= 0
+                        && submesh.material < 63 ? (1ull << submesh.material) : (1ull << 63);
+                    std::uint64_t& reported = reportedFallbacks[loaded.model];
+                    if ((reported & bit) == 0) {
+                        reported |= bit;
+                        std::clog << "[Warn] Shared PBR imported-model material fallback: entity="
+                                  << static_cast<std::uint32_t>(entity)
+                                  << " submeshSlot=" << submesh.material
+                                  << " materialCount=" << loaded.model->Materials().size()
+                                  << " (default material used)\n";
+                    }
+                }
+                m_pbr->SetVec3("uAlbedo", material.albedo);
+                m_pbr->SetFloat("uMetallic", material.metallic);
+                m_pbr->SetFloat("uRoughness", material.roughness);
+                m_pbr->SetFloat("uAO", material.ao);
+                m_pbr->SetVec3("uEmissive", material.emissive);
+                m_pbr->SetInt("uBlendMode", static_cast<int>(material.blendMode));
+                m_pbr->SetFloat("uOpacity", material.opacity);
+                m_pbr->SetFloat("uAlphaCutoff", material.alphaCutoff);
+                m_pbr->SetVec2("uUvScale", material.uvScale);
+                m_pbr->SetVec2("uUvOffset", material.uvOffset);
+                m_pbr->SetFloat("uUvRotation", material.uvRotation);
+                m_pbr->SetInt("uWorldUv", material.worldSpaceUv ? 1 : 0);
+                m_pbr->SetFloat("uNormalStrength", material.normalStrength);
+                m_pbr->SetFloat("uHeightScale", material.heightScale);
+                m_pbr->SetFloat("uClearcoat", material.clearcoat);
+                m_pbr->SetFloat("uClearcoatRoughness", material.clearcoatRoughness);
+                m_pbr->SetFloat("uTransmission", material.transmission);
+                m_pbr->SetFloat("uIor", material.ior);
+                m_pbr->SetFloat("uThickness", material.thickness);
+                m_pbr->SetFloat("uAnisotropy", material.anisotropy);
+                m_pbr->SetFloat("uAnisotropyRotation", material.anisotropyRotation);
+                m_pbr->SetVec3("uSheenColor", material.sheenColor);
+                m_pbr->SetFloat("uSheenRoughness", material.sheenRoughness);
+                m_pbr->SetFloat("uSpecularLevel", material.specularLevel);
+                m_pbr->SetFloat("uSubsurface", material.subsurface);
+                m_pbr->SetVec3("uSubsurfaceColor", material.subsurfaceColor);
+                bindMap(material.albedoMap, 0, "uHasAlbedoMap", "uAlbedoMap");
+                bindMap(material.normalMap, 1, "uHasNormalMap", "uNormalMap");
+                bindMap(material.metalRoughMap, 2, "uHasMetalRoughMap", "uMetalRoughMap");
+                bindMap(material.heightMap, 17, "uHasHeightMap", "uHeightMap");
+                bindMap(material.emissiveMap, 16, "uHasEmissiveMap", "uEmissiveMap");
+                if (material.blendMode == PbrMaterial::BlendMode::Transparent) {
+                    glEnable(GL_BLEND);
+                    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                    glDepthMask(GL_FALSE);
+                    setCull(false);
+                } else {
+                    glDisable(GL_BLEND);
+                    glDepthMask(GL_TRUE);
+                    setCull(!submesh.mesh.TwoSided());
+                }
+                submesh.mesh.DrawLod(SelectMeshLod(submesh.mesh, t, camera));
+            }
+        });
     glDisable(GL_BLEND); glDepthMask(GL_TRUE);
+    m_pbr->SetInt("uMaterialSlotDebug", 0);
     setCull(true);   // batches below are opaque
 
     // Instanced batches (uInstanced = 1, no textures).

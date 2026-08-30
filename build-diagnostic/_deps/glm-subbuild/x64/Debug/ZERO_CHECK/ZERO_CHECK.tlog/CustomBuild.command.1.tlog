@@ -1,0 +1,10 @@
+^D:\C++_PROJECTS\3DGENGINE\BUILD-DIAGNOSTIC\_DEPS\GLM-SUBBUILD\CMAKEFILES\451E0BB508E142A33E3A68ABD8568A31\GENERATE.STAMP.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SD:/C++_Projects/3DGEngine/build-diagnostic/_deps/glm-subbuild -BD:/C++_Projects/3DGEngine/build-diagnostic/_deps/glm-subbuild --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file D:/C++_Projects/3DGEngine/build-diagnostic/_deps/glm-subbuild/glm-populate.slnx
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

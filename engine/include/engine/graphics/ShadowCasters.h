@@ -1,5 +1,7 @@
 #pragma once
 
+#include "engine/ecs/Components.h"
+
 #include <glm/glm.hpp>
 
 #include <cstdint>
@@ -37,7 +39,7 @@ private:
     std::vector<float>                             m_data;      // 16 floats (model) per instance
     std::vector<Record>                           m_records;   // instanced groups
     std::unordered_map<const Mesh*, std::vector<float>> m_groups;
-    struct TexturedRecord { const Mesh* mesh; glm::mat4 model; const ecs::PbrMaterial* material; };
+    struct TexturedRecord { const Mesh* mesh; glm::mat4 model; ecs::PbrMaterial material; };
     std::vector<TexturedRecord> m_textured;  // per-object fallback
 };
 

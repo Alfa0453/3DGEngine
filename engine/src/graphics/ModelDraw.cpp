@@ -1,10 +1,65 @@
 #include "engine/graphics/Model.h"
 #include "engine/graphics/Shader.h"
+#include "engine/ecs/Components.h"
 
 #include <glad/glad.h>
 #include <glm/glm.hpp>
 
+#include <algorithm>
+
 namespace engine {
+
+ecs::PbrMaterial ResolveModelPbrMaterial(
+    const Model& model, int materialSlot,
+    const ecs::LoadedMaterialAsset* objectOverride, bool* usedFallback) {
+    if (usedFallback) *usedFallback = false;
+    if (objectOverride) return objectOverride->material;
+
+    ecs::PbrMaterial result;
+    if (materialSlot < 0
+        || materialSlot >= static_cast<int>(model.Materials().size())) {
+        if (usedFallback) *usedFallback = true;
+        return result;
+    }
+    const Material& source = model.Materials()[static_cast<std::size_t>(materialSlot)];
+    result.albedo = source.diffuse;
+    result.metallic = source.metallic;
+    result.roughness = source.roughness;
+    result.ao = source.ao;
+    result.emissive = source.emissive;
+    result.opacity = source.opacity;
+    result.alphaCutoff = source.alphaCutoff;
+    result.blendMode = static_cast<ecs::PbrMaterial::BlendMode>(
+        std::clamp(source.blendMode, 0, 2));
+    result.uvScale = source.uvScale;
+    result.uvOffset = source.uvOffset;
+    result.uvRotation = source.uvRotation;
+    result.worldSpaceUv = source.worldSpaceUv;
+    result.normalStrength = source.normalStrength;
+    result.heightScale = source.heightScale;
+    result.clearcoat = source.clearcoat;
+    result.clearcoatRoughness = source.clearcoatRoughness;
+    result.transmission = source.transmission;
+    result.ior = source.ior;
+    result.thickness = source.thickness;
+    result.anisotropy = source.anisotropy;
+    result.anisotropyRotation = source.anisotropyRotation;
+    result.sheenColor = source.sheenColor;
+    result.sheenRoughness = source.sheenRoughness;
+    result.specularLevel = source.specularLevel;
+    result.subsurface = source.subsurface;
+    result.subsurfaceColor = source.subsurfaceColor;
+    auto texture = [&](int index) -> const Texture* {
+        return index >= 0 && index < static_cast<int>(model.Textures().size())
+            ? model.Textures()[static_cast<std::size_t>(index)].get() : nullptr;
+    };
+    result.albedoMap = texture(source.diffuseMap);
+    result.normalMap = texture(source.normalMap);
+    result.metalRoughMap = texture(source.metalRoughMap);
+    result.heightMap = texture(source.heightMap);
+    result.emissiveMap = texture(source.emissiveMap);
+    return result;
+}
 
 void DrawModel(const Model& model, Shader& shader,
                const glm::vec3& tint, const Texture* albedoOverride,

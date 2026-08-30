@@ -221,7 +221,8 @@ private:
         bool active = false;
     };
 
-    void DrawEditModeModels(const glm::mat4& viewProj);
+    void DrawEditModeModels(const glm::mat4& viewProj,
+                            bool includeStaticModels = false);
     void DrawSelectionOutline(const glm::mat4& viewProj);
     void DrawEditorOverlay();
     void DrawMaterialMakerPanel();

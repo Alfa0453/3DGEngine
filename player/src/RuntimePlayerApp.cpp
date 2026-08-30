@@ -16,7 +16,7 @@
 #include <engine/ai/AiMovement.h>
 #include <engine/ai/Perception.h>
 #include <engine/ai/Steering.h>
-#include <engine/ecs/Systems.h>          // RenderLoadedModels
+#include <engine/ecs/Systems.h>          // ECS render/update compatibility helpers
 #include <engine/animation/AnimatedModel.h>
 #include <engine/assets/ShaderAsset.h>
 #include <engine/assets/ShaderGraphCompiler.h>
@@ -769,8 +769,22 @@ std::vector<engine::LightingTriangle> RuntimePlayerApp::GatherLightingTriangles(
     };
     auto entityTexture = [&](Entity entity) {
         if (const auto* asset = const_cast<engine::ecs::Registry&>(m_registry)
-                .TryGet<engine::ecs::MaterialAsset>(entity))
-            return cpuTexture(asset->albedoPath);
+                .TryGet<engine::ecs::MaterialAsset>(entity)) {
+            if (!asset->albedoPath.empty()) return cpuTexture(asset->albedoPath);
+            if (!asset->path.empty()) {
+                std::filesystem::path materialPath(asset->path);
+                if (!materialPath.is_absolute())
+                    materialPath = std::filesystem::path(m_sceneDir) / materialPath;
+                engine::RuntimeMaterialAsset material;
+                if (engine::LoadMaterialAssetFile(
+                        materialPath.lexically_normal().string(), &material, nullptr)) {
+                    std::filesystem::path albedo(material.albedoMapPath);
+                    if (!albedo.empty() && !albedo.is_absolute())
+                        albedo = materialPath.parent_path() / albedo;
+                    return cpuTexture(albedo.lexically_normal().string());
+                }
+            }
+        }
         return std::shared_ptr<const engine::LightingTextureData>{};
     };
     auto appendMesh = [&](const engine::Mesh& mesh, const glm::mat4& model,
@@ -841,10 +855,17 @@ std::vector<engine::LightingTriangle> RuntimePlayerApp::GatherLightingTriangles(
                     emissive = overrideMaterial->material.emissive;
                     metallic = overrideMaterial->material.metallic;
                 }
+                const auto baseColorTexture = overrideMaterial ? overrideTexture
+                    : (submesh.material >= 0
+                       && static_cast<std::size_t>(submesh.material)
+                           < loaded.model->Materials().size()
+                        ? cpuTexture(loaded.model->Materials()[
+                              static_cast<std::size_t>(submesh.material)].diffuseMapPath)
+                        : std::shared_ptr<const engine::LightingTextureData>{});
                 appendMesh(submesh.mesh, transform.Model(), albedo, emissive, metallic,
                            static_cast<std::uint64_t>(entity),
                            submesh.material >= 0 ? static_cast<std::uint32_t>(submesh.material) : 0u,
-                           overrideTexture);
+                           baseColorTexture);
             }
         });
     return triangles;
@@ -2923,20 +2944,6 @@ void RuntimePlayerApp::OnRender() {
             EnvironmentKeyRadiance(env,m_sample),
             resolvedEnvironment.ambientRadiance,
             static_cast<float>(glfwGetTime()));   // drives wind sway
-    }
-
-    // Static-model pass: imported models (LoadedModelAsset) via their own shader.
-    if (m_modelShader) {
-        const glm::mat4 viewProj = cam.ProjectionMatrix(aspect) * cam.ViewMatrix();
-        const float lightIntensity =
-            MaxLightComponent(EnvironmentKeyRadiance(env,m_sample));
-        m_modelShader->Bind();
-        m_modelShader->SetMat4("uViewProj", viewProj);
-        m_modelShader->SetVec3("uLightPos", cam.Position() + glm::vec3(-4.0f, 6.0f, 4.0f));
-        m_modelShader->SetVec3("uLightColor", glm::vec3(1.0f));
-        m_modelShader->SetVec3("uViewPos", cam.Position());
-        engine::ecs::RenderLoadedModels(m_registry, *m_modelShader, viewProj,
-                                        m_sample.keyLightDirection, lightIntensity);
     }
 
     // Skinned pass: animated characters (AnimatedModel), lit to match the PBR world.

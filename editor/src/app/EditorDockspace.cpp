@@ -2309,7 +2309,8 @@ void DrawWorldSettings(EditorScene& scene, EditorDockspace::Context& context, bo
             "Direct Environment GI", "GI First Bounce", "Emissive GI",
             "Probe Visibility", "Dynamic Probe Classification", "SSGI", "Indirect Lighting Only",
             "Raw Directional Shadow", "Directional Cascade Index", "Global IBL Only",
-            "GI Higher Bounces"
+            "GI Higher Bounces", "Material Base Color Only", "Geometric Normal",
+            "Shading Normal", "Imported Material Slot"
         };
         changed |= ImGui::Combo("Lighting Debug View", &environment.lightingDebugMode,
                                 kLightingDebugModes, IM_ARRAYSIZE(kLightingDebugModes));
@@ -4711,12 +4712,16 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
     } else if (ImGui::CollapsingHeader("Rendering", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Text("Model: %s", selected->modelAssetPath.empty() ? "-" : selected->modelAssetPath.c_str());
         ImGui::Text("Material: %s", selected->materialAssetPath.empty() ? "-" : selected->materialAssetPath.c_str());
+        if (!selected->modelAssetPath.empty() && !selected->skeletalModel)
+            ImGui::TextColored(ImVec4(0.35f, 0.9f, 0.55f, 1.0f),
+                               "Renderer Path: Shared PBR");
 
         const engine::ecs::MeshRenderer* renderer = context.scene->TryGetMeshRenderer(selected->entity);
         std::size_t vertexCount = 0;
         std::size_t triangleCount = 0;
         std::size_t subMeshCount = 0;
         bool geometryStatsAvailable = false;
+        const engine::Model* inspectedStaticModel = nullptr;
         if (!selected->modelAssetPath.empty() && context.runtimeAssets) {
             std::string geometryError;
             if (selected->skeletalModel) {
@@ -4731,6 +4736,7 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             } else if (const engine::Model* model =
                            context.runtimeAssets->LoadModel(
                                selected->modelAssetPath, &geometryError)) {
+                inspectedStaticModel = model;
                 vertexCount = model->VertexCount();
                 triangleCount = model->TriangleCount();
                 subMeshCount = model->SubMeshCount();
@@ -4747,6 +4753,24 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                         vertexCount, triangleCount);
             if (subMeshCount > 1u)
                 ImGui::TextDisabled("Submeshes: %zu", subMeshCount);
+            if (inspectedStaticModel
+                && ImGui::TreeNode("Imported Material Slots")) {
+                const auto& materials = inspectedStaticModel->Materials();
+                for (std::size_t index = 0; index < materials.size(); ++index) {
+                    ImGui::PushID(static_cast<int>(index));
+                    const engine::Material& material = materials[index];
+                    ImGui::BulletText("Slot %zu: %s", index,
+                        material.name.empty() ? "<unnamed>" : material.name.c_str());
+                    ImGui::TextDisabled("Handle: %s",
+                        material.assetHandle.empty() ? "embedded / unavailable"
+                                                     : material.assetHandle.c_str());
+                    ImGui::TextWrapped("Path: %s",
+                        material.assetPath.empty() ? "embedded / default fallback"
+                                                   : material.assetPath.c_str());
+                    ImGui::PopID();
+                }
+                ImGui::TreePop();
+            }
         } else {
             ImGui::TextDisabled("Geometry statistics unavailable.");
         }

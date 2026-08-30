@@ -94,6 +94,33 @@ std::uint64_t ComputeShadowCasterRevision(ecs::Registry& reg) {
                 HashValue(hash, instance.scale);
             }
         });
+    auto modelView = reg.view<Transform, ecs::LoadedModelAsset>();
+    if (!modelView.empty()) modelView.each(
+        [&](Entity entity, Transform& transform, ecs::LoadedModelAsset& loaded) {
+            if (!loaded.model || reg.Has<MeshPBR>(entity)) return;
+            HashValue(hash, entity);
+            const glm::mat4 model = transform.Model();
+            HashBytes(hash, glm::value_ptr(model), sizeof(glm::mat4));
+            const std::uintptr_t identity =
+                reinterpret_cast<std::uintptr_t>(loaded.model);
+            HashValue(hash, identity);
+            HashValue(hash, loaded.model->Revision());
+            const auto* overrideMaterial = reg.TryGet<ecs::LoadedMaterialAsset>(entity);
+            for (const SubMesh& submesh : loaded.model->SubMeshes()) {
+                const ecs::PbrMaterial material = ResolveModelPbrMaterial(
+                    *loaded.model, submesh.material, overrideMaterial);
+                HashValue(hash, submesh.material);
+                HashValue(hash, material.blendMode);
+                HashValue(hash, material.alphaCutoff);
+                HashValue(hash, material.opacity);
+                HashValue(hash, material.uvScale);
+                HashValue(hash, material.uvOffset);
+                HashValue(hash, material.uvRotation);
+                const std::uintptr_t albedo =
+                    reinterpret_cast<std::uintptr_t>(material.albedoMap);
+                HashValue(hash, albedo);
+            }
+        });
     return hash;
 }
 
@@ -117,8 +144,10 @@ void ShadowCasterBatch::Build(ecs::Registry &reg)
         const glm::mat4 model = t.Model();
         // Textured meshes carry a tangent at location 3, which would clash with the
         // instance attributes -- draw those per-object instead.
-        if (m.material.albedoMap || m.material.normalMap || m.material.metalRoughMap || m.material.heightMap) {
-            m_textured.push_back({m.mesh, model, &m.material});
+        if (m.material.albedoMap || m.material.normalMap || m.material.metalRoughMap
+            || m.material.heightMap
+            || m.material.blendMode == ecs::PbrMaterial::BlendMode::Masked) {
+            m_textured.push_back({m.mesh, model, m.material});
             return;
         }
         std::vector<float>& v = groups[m.mesh];
@@ -142,13 +171,39 @@ void ShadowCasterBatch::Build(ecs::Registry &reg)
                     const glm::mat4 model = FoliageInstanceMatrix(owner, instance);
                     for (const SubMesh& subMesh : type.model->SubMeshes()) {
                         if (textured) {
-                            m_textured.push_back({&subMesh.mesh, model, &type.material});
+                            m_textured.push_back({&subMesh.mesh, model, type.material});
                         } else {
                             std::vector<float>& values = groups[&subMesh.mesh];
                             const float* matrix = glm::value_ptr(model);
                             values.insert(values.end(), matrix, matrix + 16);
                         }
                     }
+                }
+            }
+        });
+
+    // Imported static models are native Model geometry by this point.  Feed
+    // every opaque/masked submesh into the same caster submission used by
+    // MeshPBR so directional, point and spot shadow generators all see it.
+    auto modelView = reg.view<Transform, ecs::LoadedModelAsset>();
+    if (!modelView.empty()) modelView.each(
+        [&](Entity entity, Transform& transform, ecs::LoadedModelAsset& loaded) {
+            if (!loaded.model || reg.Has<MeshPBR>(entity)) return;
+            const glm::mat4 model = transform.Model();
+            const auto* objectOverride = reg.TryGet<ecs::LoadedMaterialAsset>(entity);
+            for (const SubMesh& submesh : loaded.model->SubMeshes()) {
+                ecs::PbrMaterial material = ResolveModelPbrMaterial(
+                    *loaded.model, submesh.material, objectOverride);
+                if (material.blendMode == ecs::PbrMaterial::BlendMode::Transparent)
+                    continue;
+                const bool perObject = material.albedoMap
+                    || material.blendMode == ecs::PbrMaterial::BlendMode::Masked;
+                if (perObject) {
+                    m_textured.push_back({&submesh.mesh, model, material});
+                } else {
+                    std::vector<float>& values = groups[&submesh.mesh];
+                    const float* matrix = glm::value_ptr(model);
+                    values.insert(values.end(), matrix, matrix + 16);
                 }
             }
         });
@@ -212,18 +267,18 @@ void ShadowCasterBatch::Draw(Shader &sh)
         const Texture* boundAlbedo = nullptr;
         for (const auto& pr : m_textured) {
             sh.SetMat4("uModel", pr.model);
-            const bool masked = pr.material && pr.material->blendMode == ecs::PbrMaterial::BlendMode::Masked;
+            const bool masked = pr.material.blendMode == ecs::PbrMaterial::BlendMode::Masked;
             sh.SetInt("uAlphaMasked", masked ? 1 : 0);
-            sh.SetFloat("uAlphaCutoff", pr.material ? pr.material->alphaCutoff : 0.5f);
-            sh.SetFloat("uOpacity", pr.material ? pr.material->opacity : 1.0f);
-            sh.SetVec2("uUvScale", pr.material ? pr.material->uvScale : glm::vec2(1.0f));
-            sh.SetVec2("uUvOffset", pr.material ? pr.material->uvOffset : glm::vec2(0.0f));
-            sh.SetFloat("uUvRotation", pr.material ? pr.material->uvRotation : 0.0f);
-            const bool hasMap = pr.material && pr.material->albedoMap;
+            sh.SetFloat("uAlphaCutoff", pr.material.alphaCutoff);
+            sh.SetFloat("uOpacity", pr.material.opacity);
+            sh.SetVec2("uUvScale", pr.material.uvScale);
+            sh.SetVec2("uUvOffset", pr.material.uvOffset);
+            sh.SetFloat("uUvRotation", pr.material.uvRotation);
+            const bool hasMap = pr.material.albedoMap != nullptr;
             sh.SetInt("uHasAlbedoMap", hasMap ? 1 : 0); sh.SetInt("uAlbedoMap", 0);
-            if (hasMap && pr.material->albedoMap != boundAlbedo) {
-                pr.material->albedoMap->Bind(0);
-                boundAlbedo = pr.material->albedoMap;
+            if (hasMap && pr.material.albedoMap != boundAlbedo) {
+                pr.material.albedoMap->Bind(0);
+                boundAlbedo = pr.material.albedoMap;
             }
             pr.mesh->DrawLod(pr.mesh->LodForTriangleBudget(50000u));
         }

@@ -1499,7 +1499,8 @@ void EditorApp::OnShutdown()
     m_config.Save();
 }
 
-void EditorApp::DrawEditModeModels(const glm::mat4 & viewProj)
+void EditorApp::DrawEditModeModels(const glm::mat4 & viewProj,
+                                   bool includeStaticModels)
 {
     if (!m_modelShader && !m_skinnedRenderer) {
         m_editAnimationPoses.clear();
@@ -1523,6 +1524,9 @@ void EditorApp::DrawEditModeModels(const glm::mat4 & viewProj)
         if (!object.visible || object.modelAssetPath.empty()) {
             continue;
         }
+        // Static imported models now render in DrawEditScene through the shared
+        // PBR path.  This helper remains for skinned previews/attachments only.
+        if (!object.skeletalModel && !includeStaticModels) continue;
 
         const Transform* transform = m_scene.TryGetTransform(object.entity);
         if (!transform) {
@@ -7034,6 +7038,20 @@ void EditorApp::DrawPlayScene(const glm::mat4 & viewProj)
             }
         );
 
+        // Preserve imported native models in the temporary render registry so
+        // PbrRenderer can submit their submeshes through its shared static path.
+        m_playRegistry->view<Transform, engine::ecs::LoadedModelAsset>().each(
+            [&](Entity source, Transform& transform,
+                engine::ecs::LoadedModelAsset& loaded) {
+                if (!loaded.model) return;
+                const Entity entity = pbrRegistry.Create();
+                pbrRegistry.Add<Transform>(entity, transform);
+                pbrRegistry.Add<engine::ecs::LoadedModelAsset>(entity, loaded);
+                if (const auto* material =
+                        m_playRegistry->TryGet<engine::ecs::LoadedMaterialAsset>(source))
+                    pbrRegistry.Add<engine::ecs::LoadedMaterialAsset>(entity, *material);
+            });
+
         m_playRegistry->view<Transform, engine::ecs::Light>().each(
             [&](Entity source, Transform& transform, engine::ecs::Light& light) {
                 if (m_playRegistry->Has<MeshRenderer>(source)) {
@@ -7070,17 +7088,6 @@ void EditorApp::DrawPlayScene(const glm::mat4 & viewProj)
 
         const engine::Window& window = GetWindow();
         m_pbrRenderer->Render(pbrRegistry, m_camera, window.AspectRatio(), m_renderW, m_renderH, options);
-    }
-
-    if (m_modelShader) {
-        m_modelShader->Bind();
-        m_modelShader->SetMat4("uViewProj", viewProj);
-        m_modelShader->SetVec3("uLightPos", m_camera.Position() + glm::vec3(-4.0f, 6.0f, 4.0f));
-        m_modelShader->SetVec3("uLightColor", glm::vec3(1.0f));
-        m_modelShader->SetVec3("uViewPos", m_camera.Position());
-        engine::ecs::RenderLoadedModels(
-            *m_playRegistry, *m_modelShader, viewProj, sky.keyLightDirection,
-            MaxLightComponent(EnvironmentKeyRadiance(environment, sky)));
     }
 
     if (m_skinnedRenderer && m_playRegistry && m_pbrRenderer) {
@@ -7444,6 +7451,24 @@ void EditorApp::DrawEditScene(const glm::mat4 & viewProj)
         bool environmentSunApplied = false;
 
         for (const EditorScene::Object& object : objects) {
+            if (object.visible && !object.skeletalModel
+                && !object.modelAssetPath.empty()) {
+                if (const Transform* transform =
+                        m_scene.TryGetTransform(object.entity)) {
+                    const Entity entity = pbrRegistry.Create();
+                    pbrRegistry.Add<Transform>(entity, *transform);
+                    pbrRegistry.Add<engine::ecs::ModelAsset>(entity,
+                        engine::ecs::ModelAsset{object.modelAssetPath});
+                    if (!object.materialAssetPath.empty()) {
+                        engine::ecs::MaterialAsset material;
+                        material.path = object.materialAssetPath;
+                        material.parameterOverrides = object.materialParameterOverrides;
+                        pbrRegistry.Add<engine::ecs::MaterialAsset>(
+                            entity, std::move(material));
+                    }
+                }
+                continue;
+            }
             if (!object.visible || object.navMeshBoundsVolume || object.isWater
                 || object.primitive == EditorScene::Primitive::Empty
                 || !object.modelAssetPath.empty()) {
@@ -7546,6 +7571,12 @@ void EditorApp::DrawEditScene(const glm::mat4 & viewProj)
 
         AddTerrainMeshes(pbrRegistry);
         AddEnvironmentSunIfNeeded(pbrRegistry, environment, sky, environmentSunApplied);
+        const auto importedReport = m_editAssets.ResolveRegistryAssets(pbrRegistry);
+        for (const std::string& error : importedReport.errors) {
+            if (m_editModelLoadErrors[error]) continue;
+            m_editModelLoadErrors[error] = true;
+            m_log.Error("Imported model PBR resolve failed: " + error);
+        }
 
         engine::PbrRenderer::Options options;
         ConfigureEnvironmentPbrOptions(pbrRegistry, options, environment, sky);
@@ -8239,7 +8270,8 @@ bool EditorApp::CaptureSelectedReflectionProbe(bool clearOnly,bool buildCapture)
                     const Transform* objectTransform=m_scene.TryGetTransform(object.entity);
                     const engine::ecs::MeshRenderer* mesh=m_scene.TryGetMeshRenderer(object.entity);
                     if(objectTransform&&mesh)m_viewport.DrawSceneObject(m_renderer,*m_shader,*objectTransform,*mesh,nullptr,glm::vec3(0));}}
-            DrawEditModeModels(viewProjection);
+            // Reflection captures need imported architecture as capture geometry.
+            DrawEditModeModels(viewProjection, true);
         });
     if(!cubemap){m_log.Error("Reflection probe capture failed.");return false;}
     if(buildCapture&&m_lightingBuildProgressState)

@@ -74,6 +74,9 @@ inline void RenderMeshes(Registry& reg, Renderer& renderer, Shader& shader) {
     );
 }
 
+// Compatibility renderer for isolated previews only. Production scene rendering
+// routes LoadedModelAsset through PbrRenderer so imported and native meshes share
+// lighting, shadows, GI, reflections, atmosphere, and post-processing.
 // Draws every entity that has a Transform + LoadedModelAsset.
 //
 // Convention: `shader` must already be Bound, with `uViewProj` and lighting
@@ -82,7 +85,8 @@ inline void RenderMeshes(Registry& reg, Renderer& renderer, Shader& shader) {
 inline void RenderLoadedModels(
     Registry& reg, Shader& defaultShader, const glm::mat4& viewProjection,
     const glm::vec3& lightDirection = glm::vec3(0.0f, -1.0f, 0.0f),
-    float lightIntensity = 1.0f) {
+    float lightIntensity = 1.0f,
+    const glm::vec3& previewAmbient = glm::vec3(0.0f)) {
     Shader* boundShader = nullptr;
     auto modelView = reg.view<Transform, LoadedModelAsset>();
     if (modelView.empty()) return;
@@ -103,7 +107,7 @@ inline void RenderLoadedModels(
                 shader->SetVec3("uLightDirection", lightDirection);
                 shader->SetFloat("uLightIntensity", lightIntensity);
                 shader->SetVec3("uLightColor", glm::vec3(lightIntensity));  // custom lighting
-                shader->SetVec3("uAmbient", glm::vec3(0.05f));
+                shader->SetVec3("uAmbient", previewAmbient);
                 UploadLoadedMaterialShaderParameters(*shader, *material);
             } else {
                 if (shader != boundShader) {

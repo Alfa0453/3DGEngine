@@ -1,0 +1,150 @@
+^D:\C++_PROJECTS\3DGENGINE\BUILD-DIAGNOSTIC\_DEPS\GLFW-SUBBUILD\CMAKEFILES\9A6835FBE70FADBE11B649D10AC861A4\GLFW-POPULATE-MKDIR.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -Dcfgdir=/Debug -P D:/C++_Projects/3DGEngine/build-diagnostic/_deps/glfw-subbuild/glfw-populate-prefix/tmp/glfw-populate-mkdirs.cmake
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -E touch D:/C++_Projects/3DGEngine/build-diagnostic/_deps/glfw-subbuild/glfw-populate-prefix/src/glfw-populate-stamp/Debug/glfw-populate-mkdir
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^D:\C++_PROJECTS\3DGENGINE\BUILD-DIAGNOSTIC\_DEPS\GLFW-SUBBUILD\CMAKEFILES\9A6835FBE70FADBE11B649D10AC861A4\GLFW-POPULATE-DOWNLOAD.RULE
+setlocal
+cd D:\C++_Projects\3DGEngine\build-diagnostic\_deps
+if %errorlevel% neq 0 goto :cmEnd
+D:
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -DCMAKE_MESSAGE_LOG_LEVEL=VERBOSE -P D:/C++_Projects/3DGEngine/build-diagnostic/_deps/glfw-subbuild/glfw-populate-prefix/tmp/glfw-populate-gitclone.cmake
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -E touch D:/C++_Projects/3DGEngine/build-diagnostic/_deps/glfw-subbuild/glfw-populate-prefix/src/glfw-populate-stamp/Debug/glfw-populate-download
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^D:\C++_PROJECTS\3DGENGINE\BUILD-DIAGNOSTIC\_DEPS\GLFW-SUBBUILD\CMAKEFILES\9A6835FBE70FADBE11B649D10AC861A4\GLFW-POPULATE-UPDATE.RULE
+setlocal
+cd D:\C++_Projects\3DGEngine\build-diagnostic\_deps\glfw-src
+if %errorlevel% neq 0 goto :cmEnd
+D:
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -Dcan_fetch=YES -DCMAKE_MESSAGE_LOG_LEVEL=VERBOSE -P D:/C++_Projects/3DGEngine/build-diagnostic/_deps/glfw-subbuild/glfw-populate-prefix/tmp/glfw-populate-gitupdate.cmake
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^D:\C++_PROJECTS\3DGENGINE\BUILD-DIAGNOSTIC\_DEPS\GLFW-SUBBUILD\CMAKEFILES\9A6835FBE70FADBE11B649D10AC861A4\GLFW-POPULATE-PATCH.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -E echo_append
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -E touch D:/C++_Projects/3DGEngine/build-diagnostic/_deps/glfw-subbuild/glfw-populate-prefix/src/glfw-populate-stamp/Debug/glfw-populate-patch
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^D:\C++_PROJECTS\3DGENGINE\BUILD-DIAGNOSTIC\_DEPS\GLFW-SUBBUILD\CMAKEFILES\9A6835FBE70FADBE11B649D10AC861A4\GLFW-POPULATE-CONFIGURE.RULE
+setlocal
+cd D:\C++_Projects\3DGEngine\build-diagnostic\_deps\glfw-build
+if %errorlevel% neq 0 goto :cmEnd
+D:
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -E echo_append
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -E touch D:/C++_Projects/3DGEngine/build-diagnostic/_deps/glfw-subbuild/glfw-populate-prefix/src/glfw-populate-stamp/Debug/glfw-populate-configure
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^D:\C++_PROJECTS\3DGENGINE\BUILD-DIAGNOSTIC\_DEPS\GLFW-SUBBUILD\CMAKEFILES\9A6835FBE70FADBE11B649D10AC861A4\GLFW-POPULATE-BUILD.RULE
+setlocal
+cd D:\C++_Projects\3DGEngine\build-diagnostic\_deps\glfw-build
+if %errorlevel% neq 0 goto :cmEnd
+D:
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -E echo_append
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -E touch D:/C++_Projects/3DGEngine/build-diagnostic/_deps/glfw-subbuild/glfw-populate-prefix/src/glfw-populate-stamp/Debug/glfw-populate-build
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^D:\C++_PROJECTS\3DGENGINE\BUILD-DIAGNOSTIC\_DEPS\GLFW-SUBBUILD\CMAKEFILES\9A6835FBE70FADBE11B649D10AC861A4\GLFW-POPULATE-INSTALL.RULE
+setlocal
+cd D:\C++_Projects\3DGEngine\build-diagnostic\_deps\glfw-build
+if %errorlevel% neq 0 goto :cmEnd
+D:
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -E echo_append
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -E touch D:/C++_Projects/3DGEngine/build-diagnostic/_deps/glfw-subbuild/glfw-populate-prefix/src/glfw-populate-stamp/Debug/glfw-populate-install
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^D:\C++_PROJECTS\3DGENGINE\BUILD-DIAGNOSTIC\_DEPS\GLFW-SUBBUILD\CMAKEFILES\9A6835FBE70FADBE11B649D10AC861A4\GLFW-POPULATE-TEST.RULE
+setlocal
+cd D:\C++_Projects\3DGEngine\build-diagnostic\_deps\glfw-build
+if %errorlevel% neq 0 goto :cmEnd
+D:
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -E echo_append
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -E touch D:/C++_Projects/3DGEngine/build-diagnostic/_deps/glfw-subbuild/glfw-populate-prefix/src/glfw-populate-stamp/Debug/glfw-populate-test
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^D:\C++_PROJECTS\3DGENGINE\BUILD-DIAGNOSTIC\_DEPS\GLFW-SUBBUILD\CMAKEFILES\C69E7FF1952BEC41C1A347F890AC0516\GLFW-POPULATE-COMPLETE.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -E make_directory D:/C++_Projects/3DGEngine/build-diagnostic/_deps/glfw-subbuild/CMakeFiles/Debug
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -E touch D:/C++_Projects/3DGEngine/build-diagnostic/_deps/glfw-subbuild/CMakeFiles/Debug/glfw-populate-complete
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -E touch D:/C++_Projects/3DGEngine/build-diagnostic/_deps/glfw-subbuild/glfw-populate-prefix/src/glfw-populate-stamp/Debug/glfw-populate-done
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^D:\C++_PROJECTS\3DGENGINE\BUILD-DIAGNOSTIC\_DEPS\GLFW-SUBBUILD\CMAKEFILES\E37BE04C71BA2EF8CFB1139863CC903B\GLFW-POPULATE.RULE
+setlocal
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^D:\C++_PROJECTS\3DGENGINE\BUILD-DIAGNOSTIC\_DEPS\GLFW-SUBBUILD\CMAKELISTS.TXT
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SD:/C++_Projects/3DGEngine/build-diagnostic/_deps/glfw-subbuild -BD:/C++_Projects/3DGEngine/build-diagnostic/_deps/glfw-subbuild --check-stamp-file D:/C++_Projects/3DGEngine/build-diagnostic/_deps/glfw-subbuild/CMakeFiles/generate.stamp
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

@@ -69,6 +69,7 @@ const Model* RuntimeAssetManager::ReloadModel(
     if (existing == m_models.end()) return LoadModel(path, error);
     try {
         Model replacement = Model::FromFile(path);
+        replacement.SetRevision(existing->second->Revision() + 1u);
         *existing->second = std::move(replacement);
         SetError(error, {});
         return existing->second.get();

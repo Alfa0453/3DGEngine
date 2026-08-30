@@ -73,6 +73,13 @@ Model Model::FromFile(const std::string& path) {
             material.emissive = {
                 source.emissive[0], source.emissive[1], source.emissive[2]};
             material.shininess = source.shininess;
+            // Native assets use the metallic/roughness workflow.  Retain those
+            // authored values instead of falling back to the old Phong defaults.
+            material.metallic = std::clamp(source.metallic, 0.0f, 1.0f);
+            material.roughness = std::clamp(source.roughness, 0.04f, 1.0f);
+            material.ao = std::clamp(source.ao, 0.0f, 1.0f);
+            material.opacity = std::clamp(source.opacity, 0.0f, 1.0f);
+            material.blendMode = std::clamp(source.alphaMode, 0, 2);
             material.diffuseMap = source.diffuseMap;
             material.normalMap = source.normalMap;
             material.specularMap = source.specularMap;
@@ -198,7 +205,18 @@ Model Model::FromFile(const std::string& path) {
         if (am->Get(AI_MATKEY_COLOR_SPECULAR, c) == AI_SUCCESS) m.specular = {c.r, c.g, c.b};
         if (am->Get(AI_MATKEY_COLOR_EMISSIVE, c) == AI_SUCCESS) m.emissive = {c.r, c.g, c.b};
         float sh = 0.0f;
-        if (am->Get(AI_MATKEY_SHININESS, sh) == AI_SUCCESS && sh > 0.0f) m.shininess = sh;
+        if (am->Get(AI_MATKEY_SHININESS, sh) == AI_SUCCESS && sh > 0.0f) {
+            m.shininess = sh;
+            // Standard Blinn/Phong exponent to perceptual roughness.  Legacy
+            // specular colour is deliberately not interpreted as metallic.
+            m.roughness = std::clamp(std::sqrt(2.0f / (sh + 2.0f)), 0.04f, 1.0f);
+        }
+        m.metallic = 0.0f;
+        float opacity = 1.0f;
+        if (am->Get(AI_MATKEY_OPACITY, opacity) == AI_SUCCESS) {
+            m.opacity = std::clamp(opacity, 0.0f, 1.0f);
+            if (m.opacity < 0.999f) m.blendMode = 2;
+        }
 
         m.diffuseMap  = loadTexture(am, aiTextureType_DIFFUSE);
         m.specularMap = loadTexture(am, aiTextureType_SPECULAR);
@@ -206,6 +224,13 @@ Model Model::FromFile(const std::string& path) {
         int nmap = loadTexture(am, aiTextureType_NORMALS);
         if (nmap < 0) nmap = loadTexture(am, aiTextureType_HEIGHT);  // OBJ keeps normals in bump/height
         m.normalMap = nmap;
+        if (m.diffuseMap >= 0) {
+            aiString texturePath;
+            if (am->GetTexture(aiTextureType_DIFFUSE, 0, &texturePath) == AI_SUCCESS
+                && !scene->GetEmbeddedTexture(texturePath.C_Str()))
+                m.diffuseMapPath = (std::filesystem::path(dir)
+                    / texturePath.C_Str()).lexically_normal().string();
+        }
         
         model.m_materials.push_back(std::move(m));
     }

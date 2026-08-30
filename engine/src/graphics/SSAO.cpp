@@ -3,6 +3,7 @@
 #include "engine/graphics/VertexLayout.h"
 #include "engine/graphics/Camera.h"
 #include "engine/graphics/Frustum.h"
+#include "engine/graphics/Model.h"
 #include "engine/ecs/Registry.h"
 #include "engine/ecs/Components.h"
 
@@ -302,6 +303,39 @@ void SSAO::Generate(ecs::Registry& reg, const Camera& camera, float aspect, int 
                 m_hasPreviousFrame && previous != m_previousModels.end()
                     ? previous->second : model);
             m.mesh->Draw();
+            m_currentModels[static_cast<std::uint32_t>(entity)] = model;
+        });
+    }
+    auto modelView = reg.view<Transform, ecs::LoadedModelAsset>();
+    if (!modelView.empty()) {
+        m_geom.Bind();
+        m_geom.SetMat4("uView", view);
+        m_geom.SetMat4("uProj", proj);
+        m_geom.SetMat4("uPreviousViewProjection",
+            m_hasPreviousFrame ? m_previousViewProjection : viewProjection);
+        modelView.each([&](Entity entity, Transform& t, ecs::LoadedModelAsset& loaded) {
+            if (!loaded.model || reg.Has<MeshPBR>(entity)) return;
+            const glm::mat4 model = t.Model();
+            const glm::vec3 center = glm::vec3(
+                model * glm::vec4(loaded.model->Center(), 1.0f));
+            const glm::vec3 scale = glm::abs(t.scale);
+            if (!SphereInFrustum(frustum, center,
+                    std::max(loaded.model->BoundingRadius()
+                        * std::max({scale.x, scale.y, scale.z}), 0.01f))) return;
+            const auto previous = m_previousModels.find(
+                static_cast<std::uint32_t>(entity));
+            m_geom.SetMat4("uModel", model);
+            m_geom.SetMat4("uPreviousModel",
+                m_hasPreviousFrame && previous != m_previousModels.end()
+                    ? previous->second : model);
+            const auto* materialOverride = reg.TryGet<ecs::LoadedMaterialAsset>(entity);
+            for (const SubMesh& submesh : loaded.model->SubMeshes()) {
+                const ecs::PbrMaterial material = ResolveModelPbrMaterial(
+                    *loaded.model, submesh.material, materialOverride);
+                if (material.blendMode == ecs::PbrMaterial::BlendMode::Transparent)
+                    continue;
+                submesh.mesh.Draw();
+            }
             m_currentModels[static_cast<std::uint32_t>(entity)] = model;
         });
     }
