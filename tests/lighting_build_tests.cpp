@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 
 namespace {
 int failures=0;
@@ -41,11 +42,24 @@ glm::vec3 EvaluateProbe(const engine::LightingProbe& probe,const glm::vec3& n){
         +probe.irradianceSH[2]*(0.4886025119f*n.z)
         +probe.irradianceSH[3]*(0.4886025119f*n.x),glm::vec3(0.0f));
 }
-float SumContribution(const engine::LightingBuildData& data,bool emissive){
+enum class Contribution { First, Higher, Emissive };
+float SumContribution(const engine::LightingBuildData& data,Contribution contribution){
     float total=0.0f;
-    for(const auto& probe:data.probes)for(const auto& coefficient:(emissive?probe.emissiveSH:probe.bounceSH))
-        total+=coefficient.r+coefficient.g+coefficient.b;
+    for(const auto& probe:data.probes){
+        const auto& values=contribution==Contribution::Emissive?probe.emissiveSH:
+            (contribution==Contribution::Higher?probe.higherBounceSH:probe.bounceSH);
+        for(const auto& coefficient:values)total+=coefficient.r+coefficient.g+coefficient.b;
+    }
     return total;
+}
+float ClosestIrradiance(const engine::LightingBuildData& data,const glm::vec3& target){
+    float best=1e30f,energy=0.0f;
+    for(int z=0;z<data.dimensions.z;++z)for(int y=0;y<data.dimensions.y;++y)for(int x=0;x<data.dimensions.x;++x){
+        const glm::vec3 position=data.boundsMin+glm::vec3(x,y,z)*data.spacing;
+        const glm::vec3 delta=position-target;const float distance=glm::dot(delta,delta);
+        if(distance<best){best=distance;energy=glm::length(EvaluateProbe(data.probes[data.Index(x,y,z)],glm::vec3(0,1,0)));}
+    }
+    return energy;
 }
 }
 
@@ -126,6 +140,9 @@ int main(){
           "dynamic GI never exceeds max rays per frame");
     Check(dynamicGi.ComposedData().IsValid(),
           "dynamic GI produces a shader-compatible SH4 grid");
+    dynamicGi.Update({0.0f, 1.0f, 0.0f}, dynamicSky, {}, 2u);
+    Check(dynamicGi.Stats().raysCast <= dynamicSettings.maxGiRaysPerFrame,
+          "dynamic GI multi-bounce feedback retains the fixed frame budget");
 
     engine::LightingBuildSettings settings;settings.quality=engine::LightingBuildQuality::Preview;
     settings.probeSpacing=1.0f;settings.boundsPadding=0.25f;settings.maxRayDistance=30.0f;settings.raysPerProbe=24;
@@ -146,6 +163,10 @@ int main(){
     Check(loaded.sourceHash==inside.sourceHash&&loaded.probes.size()==inside.probes.size(),"lighting metadata round trips");
     bool shRoundTrip=true;for(std::size_t i=0;i<4;++i)shRoundTrip&=glm::all(glm::epsilonEqual(loaded.probes.front().irradianceSH[i],inside.probes.front().irradianceSH[i],1e-6f));
     Check(shRoundTrip,"directional SH coefficients round trip");
+    Check(loaded.settings.diffuseBounces==inside.settings.diffuseBounces
+          && loaded.settings.useMaterialTextures==inside.settings.useMaterialTextures
+          && loaded.stats.pathSegments==inside.stats.pathSegments,
+          "v5 path settings and build statistics round trip");
     engine::DirectionalSkyRadiance directional;directional.zenith=glm::vec3(2.0f,0.2f,0.1f);directional.horizon=glm::vec3(0.1f);directional.ground=glm::vec3(0.01f);
     engine::LightingBuildData directionalData;
     Check(engine::BuildLightingProbes(open,directional,3,"Directional",settings,&directionalData,nullptr,&error),"directional lighting build succeeds");
@@ -156,7 +177,7 @@ int main(){
     Check(engine::SmoothFiniteLightAttenuation(36.0f,5.0f)==0.0f,"finite attenuation remains zero outside its radius");
 
     // Emissive transport is a separate path: disabling diffuse bounce must not
-    // accidentally disable emissive surfaces. Preview intentionally disables both.
+    // accidentally disable emissive surfaces, including Preview builds.
     std::vector<engine::LightingTriangle> emissiveSurface=open;
     for(auto& triangle:emissiveSurface)triangle.emissive=glm::vec3(8.0f,0.5f,0.1f);
     engine::LightingBuildSettings emissiveSettings=settings;
@@ -167,11 +188,97 @@ int main(){
     emissiveSettings.emissiveContribution=1.0f;
     engine::LightingBuildData emissiveData;
     Check(engine::BuildLightingProbes(emissiveSurface,{0,0,0},4,"Emissive",emissiveSettings,&emissiveData,nullptr,&error),"emissive-only lighting build succeeds");
-    Check(SumContribution(emissiveData,true)>0.01f,"emissive lighting remains active when diffuse bounce is disabled");
+    Check(SumContribution(emissiveData,Contribution::Emissive)>0.01f,"emissive lighting remains active when diffuse bounce is disabled");
     engine::LightingBuildData previewData;
     emissiveSettings.quality=engine::LightingBuildQuality::Preview;
     Check(engine::BuildLightingProbes(emissiveSurface,{0,0,0},5,"Preview",emissiveSettings,&previewData,nullptr,&error),"preview lighting build succeeds");
-    Check(SumContribution(previewData,true)==0.0f&&SumContribution(previewData,false)==0.0f,"preview quality skips bounce and emissive transport");
+    Check(SumContribution(previewData,Contribution::Emissive)>0.01f
+          && SumContribution(previewData,Contribution::First)==0.0f,
+          "preview keeps emissive transport independent from disabled diffuse bounce");
+
+    // CPU material sampling uses UVs and exact sRGB conversion. A red texture
+    // must tint the indirect transport and report that it was sampled.
+    auto redTexture=std::make_shared<engine::LightingTextureData>();
+    redTexture->width=1;redTexture->height=1;redTexture->srgb=true;
+    redTexture->rgba={255,16,8,255};
+    std::vector<engine::LightingTriangle> textured=open;
+    for(auto& triangle:textured){triangle.albedo=glm::vec3(1.0f);triangle.baseColorTexture=redTexture;}
+    engine::LightingBuildSettings textureSettings=settings;
+    textureSettings.quality=engine::LightingBuildQuality::Medium;
+    textureSettings.raysPerProbe=32;textureSettings.diffuseBounces=2;
+    engine::LightingBuildLight point;
+    point.type=engine::LightingBuildLight::Type::Point;point.position={0,3,0};
+    point.color={30,30,30};point.range=12.0f;
+    engine::DirectionalSkyRadiance blackSky;blackSky.zenith=blackSky.horizon=blackSky.ground=glm::vec3(0);
+    blackSky.sunRadiance=glm::vec3(0);
+    engine::LightingBuildData texturedData;
+    Check(engine::BuildLightingProbes(textured,{point},blackSky,7,"Textured",textureSettings,&texturedData,nullptr,&error),
+          "textured material lighting build succeeds");
+    Check(texturedData.stats.materialTextureSamples>0,
+          "material-aware builder samples base-color textures");
+    float redEnergy=0.0f,greenEnergy=0.0f;
+    for(const auto& p:texturedData.probes)for(const auto& c:p.bounceSH){redEnergy+=c.r;greenEnergy+=c.g;}
+    Check(redEnergy>greenEnergy*3.0f,"sampled red albedo produces red indirect color bleed");
+
+    // Metallic surfaces suppress diffuse transport rather than reflecting the
+    // same diffuse energy as dielectrics.
+    std::vector<engine::LightingTriangle> metallic=textured;
+    for(auto& triangle:metallic){triangle.baseColorTexture.reset();triangle.metallic=1.0f;}
+    engine::LightingBuildData metallicData;
+    Check(engine::BuildLightingProbes(metallic,{point},blackSky,8,"Metallic",textureSettings,&metallicData,nullptr,&error),
+          "metallic material lighting build succeeds");
+    Check(SumContribution(metallicData,Contribution::First)
+          < SumContribution(texturedData,Contribution::First)*0.05f,
+          "metallic response does not create diffuse color bleed");
+
+    // A sealed room and finite emitter exercise true continued paths. Higher
+    // bounce SH and path statistics must both become non-zero.
+    std::vector<engine::LightingTriangle> bounceRoom=closed;
+    for(auto& triangle:bounceRoom)triangle.albedo=glm::vec3(0.75f,0.25f,0.12f);
+    engine::LightingBuildSettings bounceSettings=textureSettings;
+    bounceSettings.diffuseBounces=3;bounceSettings.raysPerProbe=64;
+    engine::LightingBuildData bounceData;
+    Check(engine::BuildLightingProbes(bounceRoom,{point},blackSky,9,"MultiBounce",bounceSettings,&bounceData,nullptr,&error),
+          "multi-bounce room lighting build succeeds");
+    Check(SumContribution(bounceData,Contribution::Higher)>0.001f,
+          "continued cosine paths produce higher-bounce irradiance");
+    Check(bounceData.stats.averagePathLength>1.0f
+          && bounceData.stats.shadowRays>0
+          && bounceData.stats.raysTerminatedByMaxBounce>0,
+          "multi-bounce build reports path, shadow, and termination statistics");
+    Check(SumContribution(bounceData,Contribution::Higher)
+          < SumContribution(bounceData,Contribution::First),
+          "higher bounce energy remains weaker than first-bounce energy");
+
+    engine::LightingBuildLight spot=point;
+    spot.type=engine::LightingBuildLight::Type::Spot;
+    spot.direction={0,-1,0};spot.innerCos=std::cos(glm::radians(20.0f));
+    spot.outerCos=std::cos(glm::radians(35.0f));
+    engine::LightingBuildData spotData;
+    Check(engine::BuildLightingProbes(open,{spot},blackSky,10,"Spot",textureSettings,&spotData,nullptr,&error),
+          "spot-light bounce build succeeds");
+    spot.direction={0,1,0};
+    engine::LightingBuildData rejectedSpotData;
+    Check(engine::BuildLightingProbes(open,{spot},blackSky,11,"RejectedSpot",textureSettings,&rejectedSpotData,nullptr,&error),
+          "back-facing spot-light build succeeds");
+    Check(SumContribution(spotData,Contribution::First)
+          > SumContribution(rejectedSpotData,Contribution::First)*10.0f,
+          "spot cone orientation controls bounced illumination");
+
+    engine::LightingBuildData sealedDark;
+    Check(engine::BuildLightingProbes(closed,{},blackSky,12,"SealedDark",bounceSettings,&sealedDark,nullptr,&error),
+          "sealed unlit room build succeeds");
+    Check(ClosestIrradiance(sealedDark,{0,1,0})<0.0001f,
+          "sealed unlit room does not invent multi-bounce energy");
+
+    engine::DirectionalSkyRadiance nightSky=directional;
+    nightSky.zenith*=0.01f;nightSky.horizon*=0.01f;nightSky.ground*=0.01f;
+    engine::LightingBuildData nightData;
+    Check(engine::BuildLightingProbes(open,nightSky,13,"Night",settings,&nightData,nullptr,&error),
+          "night bounce build succeeds");
+    Check(ClosestIrradiance(nightData,{0,1,0})
+          < ClosestIrradiance(directionalData,{0,1,0})*0.1f,
+          "bounce energy follows the darker authoritative night environment");
 
     // Parallel probe ranges must remain deterministic, and cancellation must
     // never replace the caller's last known-good data.

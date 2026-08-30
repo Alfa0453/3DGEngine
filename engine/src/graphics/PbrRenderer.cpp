@@ -551,7 +551,7 @@ void main() {
         if (uReflectionProbeCount > 1) reflectionWeight += ReflectionProbeWeight(1, vWorldPos);
         color = vec3(clamp(reflectionWeight, 0.0, 1.0));
     }
-    else if (uLightingDebugMode >= 13 && uLightingDebugMode <= 15)
+    else if ((uLightingDebugMode >= 13 && uLightingDebugMode <= 15) || uLightingDebugMode == 23)
         color = localProbe.irradiance;
     else if (uLightingDebugMode == 16) color = vec3(localProbe.visibility);
     else if (uLightingDebugMode == 17) color = localProbe.irradiance;
@@ -836,6 +836,7 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
         if(opt.lightingDebugMode==13)contribution=engine::LightingProbeGrid::Contribution::DirectEnvironment;
         else if(opt.lightingDebugMode==14)contribution=engine::LightingProbeGrid::Contribution::Bounce;
         else if(opt.lightingDebugMode==15)contribution=engine::LightingProbeGrid::Contribution::Emissive;
+        else if(opt.lightingDebugMode==23)contribution=engine::LightingProbeGrid::Contribution::HigherBounce;
         opt.lightingGrid->Bind(18,contribution);
         m_pbr->SetVec3("uLightingGridMin", opt.lightingGrid->BoundsMin());
         m_pbr->SetVec3("uLightingGridMax", opt.lightingGrid->BoundsMax());

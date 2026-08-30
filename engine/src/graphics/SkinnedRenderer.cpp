@@ -305,7 +305,7 @@ void main() {
         if(uReflectionProbeCount>0)reflectionWeight+=ReflectionProbeWeight(0,vWorldPos);
         if(uReflectionProbeCount>1)reflectionWeight+=ReflectionProbeWeight(1,vWorldPos);
         color=vec3(clamp(reflectionWeight,0.0,1.0));}
-    else if(uLightingDebugMode>=13&&uLightingDebugMode<=15)color=localProbe.irradiance;
+    else if((uLightingDebugMode>=13&&uLightingDebugMode<=15)||uLightingDebugMode==23)color=localProbe.irradiance;
     else if(uLightingDebugMode==16)color=vec3(localProbe.visibility);
     else if(uLightingDebugMode==17)color=localProbe.irradiance;
     else if(uLightingDebugMode==18)color=vec3(0.0);
@@ -497,6 +497,7 @@ void SkinnedRenderer::DrawScene(ecs::Registry& reg, const Camera& camera, float 
         if(lit.lightingDebugMode==13)contribution=LightingProbeGrid::Contribution::DirectEnvironment;
         else if(lit.lightingDebugMode==14)contribution=LightingProbeGrid::Contribution::Bounce;
         else if(lit.lightingDebugMode==15)contribution=LightingProbeGrid::Contribution::Emissive;
+        else if(lit.lightingDebugMode==23)contribution=LightingProbeGrid::Contribution::HigherBounce;
         lit.lightingGrid->Bind(18,contribution);
         m_pbr->SetVec3("uLightingGridMin",lit.lightingGrid->BoundsMin());
         m_pbr->SetVec3("uLightingGridMax",lit.lightingGrid->BoundsMax());

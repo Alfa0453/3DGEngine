@@ -441,6 +441,8 @@ public:
             bool dynamicGiRelocation = true;
             bool dynamicGiClassification = true;
             bool dynamicGiVisibilityWeighting = true;
+            bool dynamicGiMultiBounce = true;
+            float dynamicGiMultiBounceStrength = 0.75f;
             bool ssgiEnabled = false;
             float ssgiRayLength = 3.0f;
             int ssgiSteps = 12;

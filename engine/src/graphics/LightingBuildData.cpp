@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -16,8 +17,18 @@
 namespace engine {
 namespace {
 
-constexpr char kMagic[8] = {'3','D','G','L','I','T','E','4'};
+constexpr char kMagic[8] = {'3','D','G','L','I','T','E','5'};
 constexpr float kPi = 3.14159265358979323846f;
+
+struct PathCounters {
+    std::uint64_t segments = 0;
+    std::uint64_t misses = 0;
+    std::uint64_t energyTerminations = 0;
+    std::uint64_t maxBounceTerminations = 0;
+    std::uint64_t shadowRays = 0;
+    std::uint64_t textureSamples = 0;
+    std::uint64_t emissiveHits = 0;
+};
 
 std::array<float, 4> EvaluateSH4Basis(const glm::vec3& direction) {
     return {0.2820947918f, 0.4886025119f * direction.y,
@@ -38,6 +49,81 @@ glm::vec3 SphereDirection(std::uint32_t i, std::uint32_t count) {
                                     std::sin(angle) * radius));
 }
 
+float RadicalInverse(std::uint32_t bits) {
+    bits = (bits << 16u) | (bits >> 16u);
+    bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xAAAAAAAAu) >> 1u);
+    bits = ((bits & 0x33333333u) << 2u) | ((bits & 0xCCCCCCCCu) >> 2u);
+    bits = ((bits & 0x0F0F0F0Fu) << 4u) | ((bits & 0xF0F0F0F0u) >> 4u);
+    bits = ((bits & 0x00FF00FFu) << 8u) | ((bits & 0xFF00FF00u) >> 8u);
+    return static_cast<float>(bits) * 2.3283064365386963e-10f;
+}
+
+glm::vec3 CosineHemisphere(const glm::vec3& inputNormal,
+                           std::uint32_t pathIndex,
+                           std::uint32_t pathCount,
+                           std::uint32_t scramble) {
+    const glm::vec3 normal = glm::normalize(inputNormal);
+    const float u = (static_cast<float>(pathIndex) + 0.5f)
+        / static_cast<float>(std::max(pathCount, 1u));
+    const float v = RadicalInverse(pathIndex ^ scramble);
+    const float radius = std::sqrt(u);
+    const float phi = 2.0f * kPi * v;
+    const glm::vec3 local(radius * std::cos(phi), radius * std::sin(phi),
+                          std::sqrt(std::max(0.0f, 1.0f - u)));
+    const glm::vec3 helper = std::abs(normal.z) < 0.999f
+        ? glm::vec3(0.0f, 0.0f, 1.0f) : glm::vec3(0.0f, 1.0f, 0.0f);
+    const glm::vec3 tangent = glm::normalize(glm::cross(helper, normal));
+    const glm::vec3 bitangent = glm::cross(normal, tangent);
+    return glm::normalize(tangent * local.x + bitangent * local.y
+                          + normal * local.z);
+}
+
+float SrgbToLinear(float value) {
+    value = glm::clamp(value, 0.0f, 1.0f);
+    return value <= 0.04045f ? value / 12.92f
+        : std::pow((value + 0.055f) / 1.055f, 2.4f);
+}
+
+glm::vec3 SampleBaseColor(const LightingRayHit& hit, bool useTextures,
+                          PathCounters* counters) {
+    glm::vec3 base = glm::clamp(hit.albedo, glm::vec3(0.0f), glm::vec3(1.0f));
+    const auto& texture = hit.baseColorTexture;
+    if (!useTextures || !texture || texture->width == 0 || texture->height == 0
+        || texture->rgba.size()
+            < static_cast<std::size_t>(texture->width) * texture->height * 4u)
+        return base;
+    auto address = [&](float value) {
+        return texture->repeat ? value - std::floor(value)
+                               : glm::clamp(value, 0.0f, 1.0f);
+    };
+    const float u = address(hit.uv.x);
+    const float v = address(hit.uv.y);
+    const float x = u * static_cast<float>(texture->width - 1u);
+    const float y = v * static_cast<float>(texture->height - 1u);
+    const std::uint32_t x0 = static_cast<std::uint32_t>(std::floor(x));
+    const std::uint32_t y0 = static_cast<std::uint32_t>(std::floor(y));
+    const std::uint32_t x1 = std::min(x0 + 1u, texture->width - 1u);
+    const std::uint32_t y1 = std::min(y0 + 1u, texture->height - 1u);
+    auto pixel = [&](std::uint32_t px, std::uint32_t py) {
+        const std::size_t at = (static_cast<std::size_t>(py) * texture->width + px) * 4u;
+        glm::vec3 color(texture->rgba[at], texture->rgba[at + 1u],
+                        texture->rgba[at + 2u]);
+        color /= 255.0f;
+        if (texture->srgb)
+            color = {SrgbToLinear(color.r), SrgbToLinear(color.g),
+                     SrgbToLinear(color.b)};
+        return color;
+    };
+    const glm::vec3 a = glm::mix(pixel(x0, y0), pixel(x1, y0), x - x0);
+    const glm::vec3 b = glm::mix(pixel(x0, y1), pixel(x1, y1), x - x0);
+    if (counters) ++counters->textureSamples;
+    return base * glm::mix(a, b, y - y0);
+}
+
+float RayBias(const LightingRayHit& hit) {
+    return glm::clamp(std::max(1e-4f, hit.distance * 2e-5f), 1e-4f, 0.01f);
+}
+
 glm::vec3 AdjustSaturation(glm::vec3 color, float saturation) {
     const float luminance = glm::dot(color, glm::vec3(0.2126f, 0.7152f, 0.0722f));
     return glm::max(glm::mix(glm::vec3(luminance), color,
@@ -46,9 +132,13 @@ glm::vec3 AdjustSaturation(glm::vec3 color, float saturation) {
 
 glm::vec3 EvaluateBuildLights(const std::vector<LightingBuildLight>& lights,
                               const LightingSceneBvh& acceleration,
-                              const LightingRayHit& hit, float maximumDistance) {
+                              const LightingRayHit& hit, float maximumDistance,
+                              PathCounters* counters) {
     glm::vec3 incoming(0.0f);
     for (const LightingBuildLight& light : lights) {
+        // The authoritative environment sun is evaluated exactly once by
+        // EvaluateSun. Build-light entries here are finite local emitters.
+        if (light.type == LightingBuildLight::Type::Directional) continue;
         if(light.type==LightingBuildLight::Type::Rectangle){
             const glm::vec3 right=glm::normalize(light.right),up=glm::normalize(light.up);
             const glm::vec3 planeNormal=glm::normalize(glm::cross(right,up));
@@ -61,7 +151,9 @@ glm::vec3 EvaluateBuildLights(const std::vector<LightingBuildLight>& lights,
                 const float distance=std::sqrt(std::max(distanceSquared,1e-6f));if(distance>=light.range)continue;
                 const glm::vec3 L=delta/distance;const float nDotL=glm::max(glm::dot(hit.normal,L),0.0f);
                 const float lightCos=light.twoSided?std::abs(glm::dot(planeNormal,-L)):glm::max(glm::dot(planeNormal,-L),0.0f);
-                if(nDotL<=0.0f||lightCos<=0.0f||acceleration.Occluded(hit.position+hit.normal*0.025f,L,distance-0.025f))continue;
+                if(nDotL<=0.0f||lightCos<=0.0f)continue;
+                const float bias=RayBias(hit);if(counters)++counters->shadowRays;
+                if(acceleration.Occluded(hit.position+hit.geometricNormal*bias,L,distance-bias))continue;
                 const float normalized=distance/std::max(light.range,0.01f);const float window=glm::clamp(1.0f-std::pow(normalized,4.0f),0.0f,1.0f);
                 incoming+=glm::max(light.color,glm::vec3(0.0f))*(area*0.25f)*lightCos*nDotL*window*window/std::max(distanceSquared,0.01f);}
             continue;
@@ -74,7 +166,7 @@ glm::vec3 EvaluateBuildLights(const std::vector<LightingBuildLight>& lights,
             const float distanceSquared = glm::dot(delta, delta);
             const float distance = std::sqrt(std::max(distanceSquared, 1e-6f));
             if (distance >= light.range) continue;
-            L = delta / distance; shadowDistance = distance - 0.025f;
+            L = delta / distance; shadowDistance = distance - RayBias(hit);
             const float normalized = distance / std::max(light.range, 0.01f);
             const float window = glm::clamp(1.0f - normalized * normalized * normalized * normalized, 0.0f, 1.0f);
             attenuation = window * window / std::max(distanceSquared, 0.01f);
@@ -85,10 +177,26 @@ glm::vec3 EvaluateBuildLights(const std::vector<LightingBuildLight>& lights,
         }
         const float nDotL = glm::max(glm::dot(hit.normal, L), 0.0f);
         if (nDotL <= 0.0f) continue;
-        if (acceleration.Occluded(hit.position + hit.normal * 0.025f, L, shadowDistance)) continue;
+        if (counters) ++counters->shadowRays;
+        if (acceleration.Occluded(hit.position + hit.geometricNormal * RayBias(hit),
+                                  L, shadowDistance)) continue;
         incoming += glm::max(light.color, glm::vec3(0.0f)) * attenuation * nDotL;
     }
     return incoming;
+}
+
+glm::vec3 EvaluateSun(const DirectionalSkyRadiance& sky,
+                      const LightingSceneBvh& acceleration,
+                      const LightingRayHit& hit, float maximumDistance,
+                      PathCounters* counters) {
+    const glm::vec3 direction = glm::normalize(sky.sunDirection);
+    const float nDotL = glm::max(glm::dot(hit.normal, direction), 0.0f);
+    if (nDotL <= 0.0f) return glm::vec3(0.0f);
+    if (counters) ++counters->shadowRays;
+    if (acceleration.Occluded(hit.position + hit.geometricNormal * RayBias(hit),
+                              direction, maximumDistance))
+        return glm::vec3(0.0f);
+    return glm::max(sky.sunRadiance, glm::vec3(0.0f)) * nDotL;
 }
 
 template <class T> bool Write(std::ofstream& out, const T& value) {
@@ -127,13 +235,27 @@ std::size_t LightingBuildData::Index(int x, int y, int z) const {
 std::uint64_t HashLightingGeometry(const std::vector<LightingTriangle>& triangles,
                                    const LightingBuildSettings& settings) {
     std::uint64_t hash = 1469598103934665603ull;
-    for (const auto& t : triangles) { HashBytes(hash, t.a); HashBytes(hash, t.b); HashBytes(hash, t.c); HashBytes(hash,t.albedo); HashBytes(hash,t.emissive); }
+    for (const auto& t : triangles) {
+        HashBytes(hash, t.a); HashBytes(hash, t.b); HashBytes(hash, t.c);
+        HashBytes(hash,t.albedo); HashBytes(hash,t.emissive); HashBytes(hash,t.metallic);
+        HashBytes(hash,t.normalA); HashBytes(hash,t.normalB); HashBytes(hash,t.normalC);
+        HashBytes(hash,t.uvA); HashBytes(hash,t.uvB); HashBytes(hash,t.uvC);
+        HashBytes(hash,t.entityId); HashBytes(hash,t.materialSlot);
+        if (t.baseColorTexture) {
+            HashBytes(hash,t.baseColorTexture->width); HashBytes(hash,t.baseColorTexture->height);
+            HashBytes(hash,t.baseColorTexture->srgb); HashBytes(hash,t.baseColorTexture->repeat);
+            for (std::uint8_t value : t.baseColorTexture->rgba) HashBytes(hash,value);
+        }
+    }
     HashBytes(hash, settings.quality); HashBytes(hash, settings.probeSpacing);
     HashBytes(hash, settings.maxRayDistance); HashBytes(hash, settings.boundsPadding);
     HashBytes(hash, settings.minimumVisibility); HashBytes(hash, settings.raysPerProbe);
+    HashBytes(hash, settings.diffuseBounces);
     HashBytes(hash, settings.directionalIrradiance); HashBytes(hash, settings.indirectBounceStrength);
     HashBytes(hash, settings.indirectBounceEnabled); HashBytes(hash, settings.emissiveContribution);
-    HashBytes(hash, settings.indirectSaturation);
+    HashBytes(hash, settings.useMaterialTextures); HashBytes(hash, settings.includeStaticLocalLights);
+    HashBytes(hash, settings.includeEmissive); HashBytes(hash, settings.indirectSaturation);
+    HashBytes(hash, settings.energyThreshold);
     return hash;
 }
 
@@ -166,22 +288,28 @@ bool BuildLightingProbes(const std::vector<LightingTriangle>& triangles,
                          const std::string& sourceScene,
                          const LightingBuildSettings& input, LightingBuildData* output,
                          LightingBuildProgress* progress, std::string* error) {
+    const auto buildStarted = std::chrono::steady_clock::now();
     if (!output) { if (error) *error = "Lighting build output is null."; return false; }
     if (triangles.empty()) { if (error) *error = "Lighting build found no static triangles."; return false; }
     LightingBuildSettings settings = input;
     settings.probeSpacing = std::max(settings.probeSpacing, 0.25f);
     settings.maxRayDistance = std::max(settings.maxRayDistance, settings.probeSpacing);
     settings.raysPerProbe = std::clamp(settings.raysPerProbe, 8u, 1024u);
+    settings.diffuseBounces = std::clamp(settings.diffuseBounces, 1u, 4u);
     settings.indirectBounceStrength = glm::clamp(settings.indirectBounceStrength, 0.0f, 1.0f);
     settings.emissiveContribution = glm::clamp(settings.emissiveContribution, 0.0f, 8.0f);
     settings.indirectSaturation = glm::clamp(settings.indirectSaturation, 0.0f, 2.0f);
+    settings.energyThreshold = glm::clamp(settings.energyThreshold, 0.0001f, 0.1f);
     if (settings.quality == LightingBuildQuality::Preview) {
         settings.raysPerProbe = std::min(settings.raysPerProbe, 32u);
-        settings.indirectBounceEnabled = false;
-        settings.emissiveContribution = 0.0f;
+        settings.diffuseBounces = 1u;
     }
     if (settings.quality == LightingBuildQuality::High) {
         settings.raysPerProbe = std::max(settings.raysPerProbe, 192u);
+        settings.indirectBounceEnabled = true;
+    }
+    if (settings.quality == LightingBuildQuality::Production) {
+        settings.raysPerProbe = std::max(settings.raysPerProbe, 384u);
         settings.indirectBounceEnabled = true;
     }
 
@@ -210,9 +338,16 @@ bool BuildLightingProbes(const std::vector<LightingTriangle>& triangles,
     if (progress) progress->phase = LightingBuildProgress::Phase::BuildingAcceleration;
     const LightingSceneBvh acceleration(triangles);
     if (progress) { progress->completed = 0; progress->total = static_cast<std::uint32_t>(count);
-        progress->raysCast = 0; progress->phase = LightingBuildProgress::Phase::IrradianceProbes; }
+        progress->raysCast = 0; progress->currentBounce = 0; progress->pathSegments = 0;
+        progress->shadowRays = 0; progress->materialTextureSamples = 0;
+        progress->emissiveHits = 0;
+        progress->phase = LightingBuildProgress::Phase::IrradianceProbes; }
 
     std::atomic<bool> cancelled{false};
+    std::atomic<std::uint64_t> totalSegments{0}, totalMisses{0};
+    std::atomic<std::uint64_t> totalEnergyTerminations{0}, totalMaxTerminations{0};
+    std::atomic<std::uint64_t> totalShadowRays{0}, totalTextureSamples{0};
+    std::atomic<std::uint64_t> totalEmissiveHits{0};
     auto buildRange = [&](std::size_t begin, std::size_t end) {
       for (std::size_t flat = begin; flat < end; ++flat) {
         if (progress && progress->cancel.load()) { cancelled = true; return; }
@@ -221,11 +356,33 @@ bool BuildLightingProbes(const std::vector<LightingTriangle>& triangles,
         const int y = static_cast<int>(yz % static_cast<std::size_t>(dimensions.y));
         const int z = static_cast<int>(yz / static_cast<std::size_t>(dimensions.y));
         const glm::vec3 position = lo + glm::vec3(x, y, z) * settings.probeSpacing;
+        // Cull finite emitters once for this probe. Secondary hit points remain
+        // inside maxRayDistance of the probe, so range-expanded culling is safe
+        // while avoiding a full-scene light loop for every path segment.
+        std::vector<LightingBuildLight> relevantLights;
+        if (settings.includeStaticLocalLights) {
+            relevantLights.reserve(std::min<std::size_t>(staticLights.size(), 32u));
+            std::vector<std::pair<float, std::size_t>> candidates;
+            candidates.reserve(staticLights.size());
+            for (std::size_t lightIndex = 0; lightIndex < staticLights.size(); ++lightIndex) {
+                const LightingBuildLight& light = staticLights[lightIndex];
+                if (light.type == LightingBuildLight::Type::Directional) continue;
+                const float distanceSquared = glm::dot(light.position - position,
+                                                       light.position - position);
+                const float reach = settings.maxRayDistance + std::max(light.range, 0.0f);
+                if (distanceSquared <= reach * reach) candidates.emplace_back(distanceSquared, lightIndex);
+            }
+            const std::size_t keep = std::min<std::size_t>(candidates.size(), 32u);
+            std::partial_sort(candidates.begin(), candidates.begin() + keep, candidates.end());
+            for (std::size_t candidate = 0; candidate < keep; ++candidate)
+                relevantLights.push_back(staticLights[candidates[candidate].second]);
+        }
         std::uint32_t visible = 0, skySamples = 0;
-        std::array<glm::vec3, 4> projected{{glm::vec3(0.0f), glm::vec3(0.0f),
-                                            glm::vec3(0.0f), glm::vec3(0.0f)}};
+        std::array<glm::vec3, 4> projected{};
         std::array<glm::vec3, 4> bounceProjected{};
+        std::array<glm::vec3, 4> higherBounceProjected{};
         std::array<glm::vec3, 4> emissiveProjected{};
+        PathCounters counters;
         std::uint32_t nearBlocked = 0;
         static constexpr glm::vec3 axes[6] = {
             {1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
@@ -235,35 +392,104 @@ bool BuildLightingProbes(const std::vector<LightingTriangle>& triangles,
         for (std::uint32_t ray = 0; ray < settings.raysPerProbe; ++ray) {
             const glm::vec3 direction = SphereDirection(ray, settings.raysPerProbe);
             if (direction.y > 0.0f) ++skySamples;
-            LightingRayHit hit;
-            const bool blocked = acceleration.Trace(position, direction, settings.maxRayDistance, &hit);
-            if (progress) ++progress->raysCast;
-            if (!blocked) {
-                if (direction.y > 0.0f) ++visible;
-                const auto basis = EvaluateSH4Basis(direction);
-                const glm::vec3 radiance = sky.Sample(direction);
-                for (std::size_t coefficient = 0; coefficient < projected.size(); ++coefficient)
-                    projected[coefficient] += radiance * basis[coefficient];
-            } else if ((settings.indirectBounceEnabled && settings.indirectBounceStrength > 0.0f)
-                       || settings.emissiveContribution > 0.0f) {
-                const auto basis = EvaluateSH4Basis(direction);
-                glm::vec3 bounced(0.0f);
-                if(settings.indirectBounceEnabled&&settings.indirectBounceStrength>0.0f){
-                    const bool skyOpen=!acceleration.Occluded(hit.position+hit.normal*0.025f,
-                        hit.normal,settings.maxRayDistance);
-                    const glm::vec3 environment=skyOpen?sky.Sample(hit.normal)*0.5f:glm::vec3(0.0f);
-                    const glm::vec3 direct=EvaluateBuildLights(staticLights,acceleration,hit,
-                        settings.maxRayDistance);
-                    bounced=AdjustSaturation(hit.albedo*(environment+direct)/kPi,
-                        settings.indirectSaturation)*settings.indirectBounceStrength;
+            const auto basis = EvaluateSH4Basis(direction);
+            glm::vec3 pathOrigin = position;
+            glm::vec3 pathDirection = direction;
+            glm::vec3 throughput(1.0f);
+            glm::vec3 radiance(0.0f), firstBounce(0.0f), higherBounce(0.0f);
+            glm::vec3 emissiveRadiance(0.0f);
+            std::uint32_t surfaces = 0;
+            for (std::uint32_t bounce = 0; bounce < settings.diffuseBounces; ++bounce) {
+                if (progress && progress->cancel.load()) { cancelled = true; break; }
+                LightingRayHit hit;
+                ++counters.segments;
+                if (progress) {
+                    ++progress->raysCast;
+                    std::uint32_t observed = progress->currentBounce.load();
+                    while (observed < bounce + 1u
+                           && !progress->currentBounce.compare_exchange_weak(observed, bounce + 1u)) {}
                 }
-                const glm::vec3 emissive = glm::max(hit.emissive, glm::vec3(0.0f))
-                                         * settings.emissiveContribution;
-                for (std::size_t coefficient = 0; coefficient < projected.size(); ++coefficient) {
-                    bounceProjected[coefficient] += bounced * basis[coefficient];
-                    emissiveProjected[coefficient] += emissive * basis[coefficient];
-                    projected[coefficient] += (bounced + emissive) * basis[coefficient];
+                if (!acceleration.Trace(pathOrigin, pathDirection,
+                                        settings.maxRayDistance, &hit)) {
+                    if (surfaces == 0 && direction.y > 0.0f) ++visible;
+                    const glm::vec3 miss = throughput * sky.Sample(pathDirection);
+                    radiance += miss;
+                    if (surfaces == 1) firstBounce += miss;
+                    else if (surfaces > 1) higherBounce += miss;
+                    ++counters.misses;
+                    break;
                 }
+                ++surfaces;
+                if (settings.includeEmissive && settings.emissiveContribution > 0.0f) {
+                    const glm::vec3 emitted = throughput
+                        * glm::max(hit.emissive, glm::vec3(0.0f))
+                        * settings.emissiveContribution;
+                    if (glm::dot(emitted, emitted) > 0.0f) {
+                        radiance += emitted; emissiveRadiance += emitted;
+                        ++counters.emissiveHits;
+                    }
+                }
+                if (!settings.indirectBounceEnabled
+                    || settings.indirectBounceStrength <= 0.0f) break;
+                glm::vec3 incoming = EvaluateSun(
+                    sky, acceleration, hit, settings.maxRayDistance, &counters);
+                if (settings.includeStaticLocalLights)
+                    incoming += EvaluateBuildLights(relevantLights, acceleration, hit,
+                                                     settings.maxRayDistance, &counters);
+                glm::vec3 diffuseColor = SampleBaseColor(
+                    hit, settings.useMaterialTextures, &counters)
+                    * (1.0f - glm::clamp(hit.metallic, 0.0f, 1.0f));
+                diffuseColor = glm::clamp(
+                    AdjustSaturation(diffuseColor, settings.indirectSaturation),
+                    glm::vec3(0.0f), glm::vec3(1.0f));
+                const glm::vec3 response = diffuseColor * settings.indirectBounceStrength;
+                const glm::vec3 reflected = throughput * response * incoming / kPi;
+                radiance += reflected;
+                if (surfaces == 1) firstBounce += reflected; else higherBounce += reflected;
+                // Continuation directions use pdf = cos(theta) / PI. The
+                // Lambert BRDF (albedo / PI) * cos(theta) therefore divides by
+                // that PDF to exactly `albedo`; no second cosine or PI belongs
+                // in the path throughput update below.
+                throughput *= response;
+                if (std::max({throughput.r, throughput.g, throughput.b})
+                    < settings.energyThreshold) {
+                    ++counters.energyTerminations; break;
+                }
+                const glm::vec3 nextOrigin = hit.position + hit.geometricNormal * RayBias(hit);
+                const glm::vec3 nextDirection = CosineHemisphere(hit.normal, ray,
+                    settings.raysPerProbe,
+                    static_cast<std::uint32_t>(flat * 9781u + bounce * 6271u));
+                if (bounce + 1u == settings.diffuseBounces) {
+                    // Evaluate the environment at the terminal continuation so
+                    // a one-bounce build still receives hemispherical skylight.
+                    ++counters.segments;
+                    if (progress) ++progress->raysCast;
+                    LightingRayHit terminalHit;
+                    if (!acceleration.Trace(nextOrigin, nextDirection,
+                                            settings.maxRayDistance, &terminalHit)) {
+                        const glm::vec3 terminal = throughput * sky.Sample(nextDirection);
+                        radiance += terminal;
+                        if (surfaces == 1) firstBounce += terminal;
+                        else higherBounce += terminal;
+                        ++counters.misses;
+                    } else if (settings.includeEmissive) {
+                        const glm::vec3 terminalEmission = throughput
+                            * glm::max(terminalHit.emissive, glm::vec3(0.0f))
+                            * settings.emissiveContribution;
+                        radiance += terminalEmission; emissiveRadiance += terminalEmission;
+                        if (glm::dot(terminalEmission, terminalEmission) > 0.0f)
+                            ++counters.emissiveHits;
+                    }
+                    ++counters.maxBounceTerminations; break;
+                }
+                pathOrigin = nextOrigin;
+                pathDirection = nextDirection;
+            }
+            for (std::size_t coefficient = 0; coefficient < projected.size(); ++coefficient) {
+                projected[coefficient] += radiance * basis[coefficient];
+                bounceProjected[coefficient] += firstBounce * basis[coefficient];
+                higherBounceProjected[coefficient] += higherBounce * basis[coefficient];
+                emissiveProjected[coefficient] += emissiveRadiance * basis[coefficient];
             }
         }
         LightingProbe& probe = built.probes[built.Index(x, y, z)];
@@ -276,20 +502,31 @@ bool BuildLightingProbes(const std::vector<LightingTriangle>& triangles,
         for (std::size_t coefficient = 0; coefficient < 4; ++coefficient) {
             const float convolution = coefficient == 0 ? kPi : (2.0f * kPi / 3.0f);
             probe.bounceSH[coefficient] = bounceProjected[coefficient] * projectionWeight * convolution;
+            probe.higherBounceSH[coefficient] = higherBounceProjected[coefficient]
+                * projectionWeight * convolution;
             probe.emissiveSH[coefficient] = emissiveProjected[coefficient] * projectionWeight * convolution;
         }
         const auto up = EvaluateSH4Basis(glm::vec3(0, 1, 0));
         probe.ambient = glm::max(probe.irradianceSH[0] * up[0]
-            + probe.irradianceSH[1] * up[1]
-            + probe.irradianceSH[2] * up[2]
+            + probe.irradianceSH[1] * up[1] + probe.irradianceSH[2] * up[2]
             + probe.irradianceSH[3] * up[3], glm::vec3(0.0f));
         probe.valid = nearBlocked < 6;
         if (!probe.valid) {
             probe.ambient = glm::vec3(0.0f);
-            for (glm::vec3& coefficient : probe.irradianceSH)
-                coefficient = glm::vec3(0.0f);
+            for (glm::vec3& coefficient : probe.irradianceSH) coefficient = glm::vec3(0.0f);
         }
-        if (progress) ++progress->completed;
+        totalSegments += counters.segments; totalMisses += counters.misses;
+        totalEnergyTerminations += counters.energyTerminations;
+        totalMaxTerminations += counters.maxBounceTerminations;
+        totalShadowRays += counters.shadowRays; totalTextureSamples += counters.textureSamples;
+        totalEmissiveHits += counters.emissiveHits;
+        if (progress) {
+            progress->pathSegments += counters.segments;
+            progress->shadowRays += counters.shadowRays;
+            progress->materialTextureSamples += counters.textureSamples;
+            progress->emissiveHits += counters.emissiveHits;
+            ++progress->completed;
+        }
       }
     };
     const std::size_t hardwareThreads = std::max<std::size_t>(1, std::thread::hardware_concurrency());
@@ -303,6 +540,24 @@ bool BuildLightingProbes(const std::vector<LightingTriangle>& triangles,
     }
     for (auto& worker : workers) worker.join();
     if (cancelled.load()) { if (error) *error = "Lighting build cancelled."; return false; }
+    built.stats.pathSegments = totalSegments.load();
+    built.stats.raysTerminatedByMiss = totalMisses.load();
+    built.stats.raysTerminatedByEnergy = totalEnergyTerminations.load();
+    built.stats.raysTerminatedByMaxBounce = totalMaxTerminations.load();
+    built.stats.shadowRays = totalShadowRays.load();
+    built.stats.materialTextureSamples = totalTextureSamples.load();
+    built.stats.emissiveHits = totalEmissiveHits.load();
+    built.stats.averagePathLength = count == 0 || settings.raysPerProbe == 0
+        ? 0.0f : static_cast<float>(built.stats.pathSegments)
+            / static_cast<float>(count * settings.raysPerProbe);
+    built.stats.buildMilliseconds = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - buildStarted).count();
+    if (progress) {
+        progress->pathSegments = built.stats.pathSegments;
+        progress->shadowRays = built.stats.shadowRays;
+        progress->materialTextureSamples = built.stats.materialTextureSamples;
+        progress->emissiveHits = built.stats.emissiveHits;
+    }
     if (progress) progress->phase = LightingBuildProgress::Phase::Complete;
     *output = std::move(built);
     return true;
@@ -322,14 +577,26 @@ bool SaveLightingBuildData(const std::string& path, const LightingBuildData& dat
     Write(out, data.boundsMin); Write(out, data.boundsMax); Write(out, data.dimensions); Write(out, data.spacing);
     Write(out, data.settings.quality); Write(out, data.settings.probeSpacing); Write(out, data.settings.maxRayDistance);
     Write(out, data.settings.boundsPadding); Write(out, data.settings.minimumVisibility); Write(out, data.settings.raysPerProbe);
+    Write(out, data.settings.diffuseBounces);
     const std::uint8_t directional = data.settings.directionalIrradiance ? 1 : 0;
     Write(out, directional); Write(out, data.settings.indirectBounceStrength);
     const std::uint8_t bounceEnabled = data.settings.indirectBounceEnabled ? 1 : 0;
     Write(out, bounceEnabled); Write(out, data.settings.emissiveContribution);
     Write(out, data.settings.indirectSaturation);
+    const std::uint8_t useTextures = data.settings.useMaterialTextures ? 1 : 0;
+    const std::uint8_t localLights = data.settings.includeStaticLocalLights ? 1 : 0;
+    const std::uint8_t includeEmissive = data.settings.includeEmissive ? 1 : 0;
+    Write(out, useTextures); Write(out, localLights); Write(out, includeEmissive);
+    Write(out, data.settings.energyThreshold);
+    Write(out, data.stats.buildMilliseconds); Write(out, data.stats.pathSegments);
+    Write(out, data.stats.raysTerminatedByMiss); Write(out, data.stats.raysTerminatedByEnergy);
+    Write(out, data.stats.raysTerminatedByMaxBounce); Write(out, data.stats.shadowRays);
+    Write(out, data.stats.materialTextureSamples); Write(out, data.stats.emissiveHits);
+    Write(out, data.stats.averagePathLength);
     Write(out, probeCount);
     for (const auto& p : data.probes) { Write(out, p.ambient); for(const auto& sh:p.irradianceSH)Write(out,sh);
-        for(const auto& sh:p.bounceSH)Write(out,sh); for(const auto& sh:p.emissiveSH)Write(out,sh);
+        for(const auto& sh:p.bounceSH)Write(out,sh); for(const auto& sh:p.higherBounceSH)Write(out,sh);
+        for(const auto& sh:p.emissiveSH)Write(out,sh);
         Write(out, p.skyVisibility); const std::uint8_t valid=p.valid?1:0; Write(out,valid); }
     out.flush(); out.close();
     if (!out) { std::filesystem::remove(temporary, ec); if (error) *error = "Failed while writing lighting asset."; return false; }
@@ -353,19 +620,31 @@ bool LoadLightingBuildData(const std::string& path, LightingBuildData* data, std
     if (!Read(in,loaded.boundsMin)||!Read(in,loaded.boundsMax)||!Read(in,loaded.dimensions)||!Read(in,loaded.spacing)
         ||!Read(in,loaded.settings.quality)||!Read(in,loaded.settings.probeSpacing)||!Read(in,loaded.settings.maxRayDistance)
         ||!Read(in,loaded.settings.boundsPadding)||!Read(in,loaded.settings.minimumVisibility)||!Read(in,loaded.settings.raysPerProbe)
-        ) { if(error)*error="Truncated or unsafe lighting asset."; return false; }
+        ||!Read(in,loaded.settings.diffuseBounces)) { if(error)*error="Truncated or unsafe lighting asset."; return false; }
     std::uint8_t directional=0;
     std::uint8_t bounceEnabled=0;
+    std::uint8_t useTextures=0, localLights=0, includeEmissive=0;
     if(!Read(in,directional)||!Read(in,loaded.settings.indirectBounceStrength)
         ||!Read(in,bounceEnabled)||!Read(in,loaded.settings.emissiveContribution)
         ||!Read(in,loaded.settings.indirectSaturation)
+        ||!Read(in,useTextures)||!Read(in,localLights)||!Read(in,includeEmissive)
+        ||!Read(in,loaded.settings.energyThreshold)
+        ||!Read(in,loaded.stats.buildMilliseconds)||!Read(in,loaded.stats.pathSegments)
+        ||!Read(in,loaded.stats.raysTerminatedByMiss)||!Read(in,loaded.stats.raysTerminatedByEnergy)
+        ||!Read(in,loaded.stats.raysTerminatedByMaxBounce)||!Read(in,loaded.stats.shadowRays)
+        ||!Read(in,loaded.stats.materialTextureSamples)||!Read(in,loaded.stats.emissiveHits)
+        ||!Read(in,loaded.stats.averagePathLength)
         ||!Read(in,probeCount) || probeCount>262144) { if(error)*error="Truncated or unsafe lighting asset."; return false; }
     loaded.settings.directionalIrradiance=directional!=0;
     loaded.settings.indirectBounceEnabled=bounceEnabled!=0;
+    loaded.settings.useMaterialTextures=useTextures!=0;
+    loaded.settings.includeStaticLocalLights=localLights!=0;
+    loaded.settings.includeEmissive=includeEmissive!=0;
     loaded.probes.resize(static_cast<std::size_t>(probeCount));
     for(auto& p:loaded.probes){std::uint8_t valid=0;if(!Read(in,p.ambient)){if(error)*error="Truncated lighting probes.";return false;}
         for(auto& sh:p.irradianceSH)if(!Read(in,sh)){if(error)*error="Truncated lighting probes.";return false;}
         for(auto& sh:p.bounceSH)if(!Read(in,sh)){if(error)*error="Truncated lighting probes.";return false;}
+        for(auto& sh:p.higherBounceSH)if(!Read(in,sh)){if(error)*error="Truncated lighting probes.";return false;}
         for(auto& sh:p.emissiveSH)if(!Read(in,sh)){if(error)*error="Truncated lighting probes.";return false;}
         if(!Read(in,p.skyVisibility)||!Read(in,valid)){if(error)*error="Truncated lighting probes.";return false;}p.valid=valid!=0;}
     if(!loaded.IsValid()){if(error)*error="Lighting asset grid is inconsistent.";return false;}
@@ -388,24 +667,26 @@ void LightingProbeGrid::Reset(){
 }
 bool LightingProbeGrid::Upload(const LightingBuildData& data,std::string* error){
     if(!data.IsValid()){if(error)*error="Cannot upload invalid lighting grid.";return false;}
-    std::array<std::vector<float>,13> packed;for(auto& texture:packed)texture.resize(data.probes.size()*4,0.0f);
+    std::array<std::vector<float>,16> packed;for(auto& texture:packed)texture.resize(data.probes.size()*4,0.0f);
     auto packSh=[&](std::size_t base,std::size_t sample,const std::array<glm::vec3,4>& sh,float validity){const std::size_t b=sample*4;
         packed[base][b]=sh[0].r*validity;packed[base][b+1]=sh[0].g*validity;packed[base][b+2]=sh[0].b*validity;packed[base][b+3]=sh[1].r*validity;
         packed[base+1][b]=sh[1].g*validity;packed[base+1][b+1]=sh[1].b*validity;packed[base+1][b+2]=sh[2].r*validity;packed[base+1][b+3]=sh[2].g*validity;
         packed[base+2][b]=sh[2].b*validity;packed[base+2][b+1]=sh[3].r*validity;packed[base+2][b+2]=sh[3].g*validity;packed[base+2][b+3]=sh[3].b*validity;};
     for(std::size_t i=0;i<data.probes.size();++i){const auto&p=data.probes[i];const float v=p.valid?1.0f:0.0f;const std::size_t b=i*4;
-        packSh(0,i,p.irradianceSH,v);packSh(4,i,p.bounceSH,v);packSh(7,i,p.emissiveSH,v);
+        packSh(0,i,p.irradianceSH,v);packSh(4,i,p.bounceSH,v);
+        packSh(7,i,p.higherBounceSH,v);packSh(10,i,p.emissiveSH,v);
         std::array<glm::vec3,4> direct{};for(std::size_t coefficient=0;coefficient<4;++coefficient)
-            direct[coefficient]=glm::max(p.irradianceSH[coefficient]-p.bounceSH[coefficient]-p.emissiveSH[coefficient],glm::vec3(0.0f));
-        packSh(10,i,direct,v);packed[3][b]=p.skyVisibility*v;packed[3][b+1]=v;
+            direct[coefficient]=p.irradianceSH[coefficient]-p.bounceSH[coefficient]
+                -p.higherBounceSH[coefficient]-p.emissiveSH[coefficient];
+        packSh(13,i,direct,v);packed[3][b]=p.skyVisibility*v;packed[3][b+1]=v;
         packed[3][b+2]=p.depthMean*v;packed[3][b+3]=p.depthSecondMoment*v;}
     Reset();glGenTextures(static_cast<GLsizei>(m_textures.size()),m_textures.data());
     for(std::size_t index=0;index<m_textures.size();++index){glBindTexture(GL_TEXTURE_3D,m_textures[index]);glTexParameteri(GL_TEXTURE_3D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);glTexParameteri(GL_TEXTURE_3D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);glTexParameteri(GL_TEXTURE_3D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);glTexParameteri(GL_TEXTURE_3D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);glTexParameteri(GL_TEXTURE_3D,GL_TEXTURE_WRAP_R,GL_CLAMP_TO_EDGE);glTexImage3D(GL_TEXTURE_3D,0,GL_RGBA16F,data.dimensions.x,data.dimensions.y,data.dimensions.z,0,GL_RGBA,GL_FLOAT,packed[index].data());}
     const GLenum status=glGetError();glBindTexture(GL_TEXTURE_3D,0);if(status!=GL_NO_ERROR){Reset();if(error)*error="OpenGL could not create the SH lighting probe textures.";return false;}
     m_boundsMin=data.boundsMin;m_boundsMax=data.boundsMax;m_dimensions=data.dimensions;m_probeCount=data.probes.size();
-    // Thirteen RGBA16F volumes: combined SH (3), metadata (1), bounce SH
-    // (3), emissive SH (3), and direct-environment SH (3) = 104 bytes/probe.
-    m_memoryBytes=static_cast<std::uint64_t>(m_probeCount)*104ull;return true;
+    // Sixteen RGBA16F volumes: combined SH (3), metadata (1), first bounce
+    // (3), higher bounces (3), emissive (3), direct/environment (3).
+    m_memoryBytes=static_cast<std::uint64_t>(m_probeCount)*128ull;return true;
 }
 bool LightingProbeGrid::UpdateCombined(const LightingBuildData& data,
                                        const std::vector<std::size_t>& changedIndices,
@@ -430,8 +711,9 @@ bool LightingProbeGrid::UpdateCombined(const LightingBuildData& data,
 }
 void LightingProbeGrid::Bind(unsigned int unit,Contribution contribution)const{
     std::size_t base=0;if(contribution==Contribution::Bounce)base=4;
-    else if(contribution==Contribution::Emissive)base=7;
-    else if(contribution==Contribution::DirectEnvironment)base=10;
+    else if(contribution==Contribution::HigherBounce)base=7;
+    else if(contribution==Contribution::Emissive)base=10;
+    else if(contribution==Contribution::DirectEnvironment)base=13;
     for(std::size_t i=0;i<3;++i){glActiveTexture(GL_TEXTURE0+unit+static_cast<unsigned int>(i));glBindTexture(GL_TEXTURE_3D,m_textures[base+i]);}
     glActiveTexture(GL_TEXTURE0+unit+3);glBindTexture(GL_TEXTURE_3D,m_textures[3]);
 }

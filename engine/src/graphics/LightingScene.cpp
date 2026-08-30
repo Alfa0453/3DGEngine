@@ -182,12 +182,31 @@ bool LightingSceneBvh::Trace(const glm::vec3& origin,
         result->hit = true;
         result->distance = nearest;
         result->position = origin + direction * nearest;
-        result->normal = glm::normalize(glm::cross(triangle.b - triangle.a,
-                                                   triangle.c - triangle.a));
-        if (glm::dot(result->normal, direction) > 0.0f) result->normal = -result->normal;
+        result->geometricNormal = glm::normalize(glm::cross(
+            triangle.b - triangle.a, triangle.c - triangle.a));
+        if (glm::dot(result->geometricNormal, direction) > 0.0f)
+            result->geometricNormal = -result->geometricNormal;
+        const glm::vec3 interpolated =
+            triangle.normalA * nearestBarycentric.x
+            + triangle.normalB * nearestBarycentric.y
+            + triangle.normalC * nearestBarycentric.z;
+        result->shadingNormal = glm::dot(interpolated, interpolated) > 1e-10f
+            ? glm::normalize(interpolated) : result->geometricNormal;
+        if (glm::dot(result->shadingNormal, result->geometricNormal) < 0.0f)
+            result->shadingNormal = -result->shadingNormal;
+        if (glm::dot(result->shadingNormal, direction) > 0.0f)
+            result->shadingNormal = result->geometricNormal;
+        result->normal = result->shadingNormal;
         result->barycentric = nearestBarycentric;
+        result->uv = triangle.uvA * nearestBarycentric.x
+            + triangle.uvB * nearestBarycentric.y
+            + triangle.uvC * nearestBarycentric.z;
         result->albedo = triangle.albedo;
         result->emissive = triangle.emissive;
+        result->metallic = glm::clamp(triangle.metallic, 0.0f, 1.0f);
+        result->baseColorTexture = triangle.baseColorTexture;
+        result->entityId = triangle.entityId;
+        result->materialSlot = triangle.materialSlot;
         result->triangleIndex = nearestIndex;
     }
     return found;

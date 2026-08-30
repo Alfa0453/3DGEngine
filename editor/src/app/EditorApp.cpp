@@ -66,6 +66,7 @@
 #include <random>
 #include <system_error>
 #include <unordered_set>
+#include <unordered_map>
 #include <utility>
 
 using engine::ecs::Entity;
@@ -2031,6 +2032,11 @@ void EditorApp::DrawEditorOverlay()
             ImGui::Text("  %u probes | %llu rays/frame",
                 dynamicStats.probesUpdated,
                 static_cast<unsigned long long>(dynamicStats.raysCast));
+            ImGui::Text("  %llu hit lights | %llu history samples | %llu emissive hits",
+                static_cast<unsigned long long>(dynamicStats.hitLightEvaluations),
+                static_cast<unsigned long long>(dynamicStats.previousGiSamples),
+                static_cast<unsigned long long>(dynamicStats.emissiveHits));
+            ImGui::Text("  multi-bounce sampling: %.3f ms", dynamicStats.multiBounceMilliseconds);
             ImGui::Text("  active %u | sleeping %u | relocated %u | invalid %u",
                 dynamicStats.activeProbes, dynamicStats.sleepingProbes,
                 dynamicStats.relocatedProbes, dynamicStats.invalidProbes);
@@ -2061,6 +2067,20 @@ void EditorApp::DrawEditorOverlay()
             ImGui::Text("Last reflection capture: %.2f ms",m_lastReflectionCaptureMs);
             ImGui::Text("Last lighting build: %.2f ms  |  %llu rays",m_lastLightingBuildMs,
                 static_cast<unsigned long long>(m_lastLightingBuildRays));
+            if (m_loadedLightingData) {
+                const engine::LightingBuildStats& build = m_loadedLightingData->stats;
+                ImGui::Text("  %.2f average path | %llu segments | %llu shadow rays",
+                    build.averagePathLength,
+                    static_cast<unsigned long long>(build.pathSegments),
+                    static_cast<unsigned long long>(build.shadowRays));
+                ImGui::Text("  misses %llu | energy stops %llu | max-bounce stops %llu",
+                    static_cast<unsigned long long>(build.raysTerminatedByMiss),
+                    static_cast<unsigned long long>(build.raysTerminatedByEnergy),
+                    static_cast<unsigned long long>(build.raysTerminatedByMaxBounce));
+                ImGui::Text("  material samples %llu | emissive hits %llu",
+                    static_cast<unsigned long long>(build.materialTextureSamples),
+                    static_cast<unsigned long long>(build.emissiveHits));
+            }
 
             // Scene counts: what the frame is actually pushing through.
             ImGui::Separator();
@@ -2155,7 +2175,9 @@ void EditorApp::DrawEditorOverlay()
             std::chrono::steady_clock::now()-m_lightingBuildStartedAt).count();
         m_lightingBuildStatus=std::string(phaseName)+" | "+
             std::to_string(m_lightingBuildProgressState->raysCast.load())+
-            " rays | "+std::to_string(elapsed)+" s";
+            " rays | bounce "+std::to_string(m_lightingBuildProgressState->currentBounce.load())+
+            " | "+std::to_string(m_lightingBuildProgressState->shadowRays.load())+
+            " shadow rays | "+std::to_string(elapsed)+" s";
     }
     EditorDockspace::Context dockspaceContext;
     dockspaceContext.panels = &m_panels;
@@ -7926,6 +7948,8 @@ void EditorApp::UpdateDynamicGi(engine::ecs::Registry& registry,
     hashBytes(settingsHash, &environment.dynamicGiRelocation, sizeof(environment.dynamicGiRelocation));
     hashBytes(settingsHash, &environment.dynamicGiClassification, sizeof(environment.dynamicGiClassification));
     hashBytes(settingsHash, &environment.dynamicGiVisibilityWeighting, sizeof(environment.dynamicGiVisibilityWeighting));
+    hashBytes(settingsHash, &environment.dynamicGiMultiBounce, sizeof(environment.dynamicGiMultiBounce));
+    hashBytes(settingsHash, &environment.dynamicGiMultiBounceStrength, sizeof(environment.dynamicGiMultiBounceStrength));
     hashBytes(settingsHash, environment.lightingBuildAsset.data(), environment.lightingBuildAsset.size());
 
     const engine::DirectionalSkyRadiance radiance =
@@ -7947,6 +7971,8 @@ void EditorApp::UpdateDynamicGi(engine::ecs::Registry& registry,
         settings.relocation = environment.dynamicGiRelocation;
         settings.classification = environment.dynamicGiClassification;
         settings.visibilityWeighting = environment.dynamicGiVisibilityWeighting;
+        settings.approximateMultiBounce = environment.dynamicGiMultiBounce;
+        settings.multiBounceStrength = environment.dynamicGiMultiBounceStrength;
         std::vector<engine::LightingTriangle> triangles = GatherLightingTriangles();
         if (!m_loadedLightingData && !triangles.empty()) {
             glm::vec3 minimum(std::numeric_limits<float>::max());
@@ -8078,29 +8104,98 @@ std::uint64_t EditorApp::ComputeLightingStateHash() const {
     bytes(&e.lightingBuildQuality,sizeof(e.lightingBuildQuality)); bytes(&e.lightingProbeSpacing,sizeof(e.lightingProbeSpacing)); bytes(&e.lightingRayDistance,sizeof(e.lightingRayDistance));
     bytes(&e.lightingIndirectBounceStrength,sizeof(e.lightingIndirectBounceStrength));
     bytes(&e.lightingIndirectBounceEnabled,sizeof(e.lightingIndirectBounceEnabled));bytes(&e.lightingEmissiveContribution,sizeof(e.lightingEmissiveContribution));
+    bytes(&e.lightingDiffuseBounces,sizeof(e.lightingDiffuseBounces)); bytes(&e.lightingRaysPerProbe,sizeof(e.lightingRaysPerProbe));
+    bytes(&e.lightingUseMaterialTextures,sizeof(e.lightingUseMaterialTextures));
+    bytes(&e.lightingIncludeStaticLocalLights,sizeof(e.lightingIncludeStaticLocalLights)); bytes(&e.lightingIncludeEmissive,sizeof(e.lightingIncludeEmissive));
+    bytes(&e.lightingEnergyThreshold,sizeof(e.lightingEnergyThreshold));
     bytes(&e.lightingIndirectSaturation,sizeof(e.lightingIndirectSaturation));bytes(&e.timeOfDay,sizeof(e.timeOfDay));bytes(&e.sunIntensity,sizeof(e.sunIntensity));
     return hash;
 }
 
 std::vector<engine::LightingTriangle> EditorApp::GatherLightingTriangles() const {
     std::vector<engine::LightingTriangle> triangles;
+    struct Surface {
+        glm::vec3 albedo{0.8f};
+        glm::vec3 emissive{0.0f};
+        float metallic = 0.0f;
+        std::shared_ptr<const engine::LightingTextureData> baseColor;
+    };
+    std::unordered_map<std::string,
+        std::shared_ptr<const engine::LightingTextureData>> textureCache;
+    auto resolveGamePath = [&](std::string path) {
+        std::replace(path.begin(), path.end(), '\\', '/');
+        if (path.rfind("/Game/", 0) == 0) path.erase(0, 6);
+        else if (path.rfind("Game/", 0) == 0) path.erase(0, 5);
+        const std::filesystem::path input(path);
+        return input.is_absolute() ? input.lexically_normal().string()
+            : (std::filesystem::path(m_project.AssetRoot()) / input)
+                .lexically_normal().string();
+    };
+    auto cpuTexture = [&](const std::string& path) {
+        if (path.empty()) return std::shared_ptr<const engine::LightingTextureData>{};
+        const std::string key = resolveGamePath(path);
+        if (const auto found = textureCache.find(key); found != textureCache.end())
+            return found->second;
+        engine::TextureAssetData source;
+        std::shared_ptr<const engine::LightingTextureData> result;
+        if (engine::LoadTextureAsset(key, &source, nullptr)) {
+            auto loaded = std::make_shared<engine::LightingTextureData>();
+            loaded->width = source.width; loaded->height = source.height;
+            loaded->srgb = source.srgb; loaded->repeat = true;
+            loaded->rgba = std::move(source.rgba);
+            result = std::move(loaded);
+        }
+        textureCache.emplace(key, result);
+        return result;
+    };
+    auto runtimeSurface = [&](const engine::RuntimeMaterialAsset& material,
+                              const glm::vec3& tint) {
+        Surface surface;
+        surface.albedo = glm::clamp(material.material.albedo * tint,
+                                    glm::vec3(0.0f), glm::vec3(1.0f));
+        surface.emissive = glm::max(material.material.emissive, glm::vec3(0.0f));
+        surface.metallic = glm::clamp(material.material.metallic, 0.0f, 1.0f);
+        surface.baseColor = cpuTexture(material.albedoMapPath);
+        return surface;
+    };
     for (const auto& object : m_scene.Objects()) {
         if (!object.visible || object.light || object.skeletalModel || object.isWater || object.isSpline || object.navMeshBoundsVolume) continue;
         const auto* transform=m_scene.TryGetTransform(object.entity);
         const auto* authoredRenderer=m_scene.TryGetMeshRenderer(object.entity);
-        glm::vec3 surfaceAlbedo=authoredRenderer?glm::clamp(authoredRenderer->color,glm::vec3(0.0f),glm::vec3(1.0f)):glm::vec3(0.8f);
-        glm::vec3 surfaceEmissive(0.0f);if(const auto* material=m_editAssets.FindMaterial(object.materialAssetPath)){
-            const glm::vec3 tint=authoredRenderer?authoredRenderer->color:glm::vec3(1.0f);
-            surfaceAlbedo=glm::clamp(material->material.albedo*tint,glm::vec3(0),glm::vec3(1));surfaceEmissive=glm::max(material->material.emissive,glm::vec3(0));}
-        auto appendMesh=[&](const engine::Mesh& source,const glm::mat4& model){
+        const glm::vec3 tint=authoredRenderer?authoredRenderer->color:glm::vec3(1.0f);
+        Surface objectSurface; objectSurface.albedo = glm::clamp(tint,glm::vec3(0),glm::vec3(1));
+        const auto* overrideMaterial=m_editAssets.FindMaterial(object.materialAssetPath);
+        if(overrideMaterial)objectSurface=runtimeSurface(*overrideMaterial,tint);
+        auto appendMesh=[&](const engine::Mesh& source,const glm::mat4& model,
+                            const Surface& surface,std::uint32_t materialSlot){
             const auto vertices=source.ReadbackVertices();const auto indices=source.ReadbackIndices();const std::size_t stride=source.VertexStrideFloats();
-            if(stride<3||indices.size()<3)return;auto point=[&](std::uint32_t index){const std::size_t base=static_cast<std::size_t>(index)*stride;if(base+2>=vertices.size())return glm::vec3(0);return glm::vec3(model*glm::vec4(vertices[base],vertices[base+1],vertices[base+2],1.0f));};
-            triangles.reserve(triangles.size()+indices.size()/3);for(std::size_t i=0;i+2<indices.size();i+=3)triangles.push_back({point(indices[i]),point(indices[i+1]),point(indices[i+2]),surfaceAlbedo,surfaceEmissive});
+            if(stride<3||indices.size()<3)return;
+            const glm::mat3 normalMatrix=glm::transpose(glm::inverse(glm::mat3(model)));
+            auto point=[&](std::uint32_t index){const std::size_t base=static_cast<std::size_t>(index)*stride;if(base+2>=vertices.size())return glm::vec3(0);return glm::vec3(model*glm::vec4(vertices[base],vertices[base+1],vertices[base+2],1.0f));};
+            auto normal=[&](std::uint32_t index){const std::size_t base=static_cast<std::size_t>(index)*stride;if(stride<6||base+5>=vertices.size())return glm::vec3(0);const glm::vec3 n=normalMatrix*glm::vec3(vertices[base+3],vertices[base+4],vertices[base+5]);return glm::dot(n,n)>1e-10f?glm::normalize(n):glm::vec3(0);};
+            auto uv=[&](std::uint32_t index){const std::size_t base=static_cast<std::size_t>(index)*stride;if(stride<8||base+7>=vertices.size())return glm::vec2(0);return glm::vec2(vertices[base+6],vertices[base+7]);};
+            triangles.reserve(triangles.size()+indices.size()/3);
+            for(std::size_t i=0;i+2<indices.size();i+=3){
+                const std::uint32_t ia=indices[i],ib=indices[i+1],ic=indices[i+2];
+                engine::LightingTriangle triangle;
+                triangle.a=point(ia);triangle.b=point(ib);triangle.c=point(ic);
+                triangle.albedo=surface.albedo;triangle.emissive=surface.emissive;
+                triangle.metallic=surface.metallic;triangle.normalA=normal(ia);
+                triangle.normalB=normal(ib);triangle.normalC=normal(ic);
+                triangle.uvA=uv(ia);triangle.uvB=uv(ib);triangle.uvC=uv(ic);
+                triangle.baseColorTexture=surface.baseColor;
+                triangle.entityId=static_cast<std::uint64_t>(object.entity);
+                triangle.materialSlot=materialSlot;triangles.push_back(std::move(triangle));}
         };
         if(transform&&!object.modelAssetPath.empty()&&!object.skeletalModel){
             if(const engine::Model* model=m_editAssets.FindModel(object.modelAssetPath)){
                 const glm::mat4 renderOffset=engine::MakeModelRenderOffset(object.modelOffsetPosition,object.modelOrientationEuler,object.modelOffsetScale,model->Center());
-                for(const auto& submesh:model->SubMeshes())appendMesh(submesh.mesh,transform->Model()*renderOffset);
+                std::vector<Surface> slotSurfaces(model->Materials().size());
+                for(std::size_t i=0;i<slotSurfaces.size();++i){const auto& source=model->Materials()[i];slotSurfaces[i].albedo=glm::clamp(source.diffuse*tint,glm::vec3(0),glm::vec3(1));slotSurfaces[i].emissive=glm::max(source.emissive,glm::vec3(0));slotSurfaces[i].metallic=glm::clamp(source.metallic,0.0f,1.0f);}
+                engine::StaticMeshAssetData nativeMesh;
+                if(!overrideMaterial&&engine::LoadStaticMeshAsset(object.modelAssetPath,&nativeMesh,nullptr)){
+                    for(std::size_t i=0;i<nativeMesh.materialSlots.size()&&i<slotSurfaces.size();++i){engine::RuntimeMaterialAsset material;const std::string path=resolveGamePath(nativeMesh.materialSlots[i].materialPath);if(engine::LoadMaterialAssetFile(path,&material,nullptr))slotSurfaces[i]=runtimeSurface(material,tint);}}
+                for(const auto& submesh:model->SubMeshes()){const std::uint32_t slot=submesh.material>=0?static_cast<std::uint32_t>(submesh.material):0u;const Surface& surface=overrideMaterial?objectSurface:(slot<slotSurfaces.size()?slotSurfaces[slot]:objectSurface);appendMesh(submesh.mesh,transform->Model()*renderOffset,surface,slot);}
                 continue;
             }
         }
@@ -8108,7 +8203,7 @@ std::vector<engine::LightingTriangle> EditorApp::GatherLightingTriangles() const
         if(object.isTerrain){const auto found=m_terrains.find(object.entity);if(found!=m_terrains.end()&&found->second.terrain.HasMesh())mesh=&found->second.terrain.GetMesh();}
         else if(const auto* renderer=m_scene.TryGetMeshRenderer(object.entity))mesh=renderer->mesh;
         if(!transform||!mesh||!mesh->Valid())continue;
-        appendMesh(*mesh,transform->Model());
+        appendMesh(*mesh,transform->Model(),objectSurface,0u);
     }
     return triangles;
 }
@@ -8172,18 +8267,27 @@ void EditorApp::StartLightingBuild() {
     auto triangles=GatherLightingTriangles();
     if(triangles.empty()){m_lightingBuildStatus="Build failed: no static geometry";m_log.Error(m_lightingBuildStatus);return;}
     auto authoredEnvironment=m_scene.GetEnvironment();
-    authoredEnvironment.lightingBuildQuality=std::clamp(m_lightingBuildQuality,0,2);
+    authoredEnvironment.lightingBuildQuality=std::clamp(m_lightingBuildQuality,0,3);
     m_scene.SetEnvironment(authoredEnvironment);
     const auto& environment=m_scene.GetEnvironment();
     engine::LightingBuildSettings settings;
-    settings.quality=static_cast<engine::LightingBuildQuality>(std::clamp(m_lightingBuildQuality,0,2));
+    settings.quality=static_cast<engine::LightingBuildQuality>(std::clamp(m_lightingBuildQuality,0,3));
     settings.probeSpacing=std::clamp(environment.lightingProbeSpacing,0.25f,20.0f);
     settings.maxRayDistance=std::clamp(environment.lightingRayDistance,2.0f,1000.0f);
     settings.indirectBounceStrength=std::clamp(environment.lightingIndirectBounceStrength,0.0f,1.0f);
     settings.indirectBounceEnabled=environment.lightingIndirectBounceEnabled;
+    settings.diffuseBounces=static_cast<std::uint32_t>(std::clamp(environment.lightingDiffuseBounces,1,4));
+    settings.useMaterialTextures=environment.lightingUseMaterialTextures;
+    settings.includeStaticLocalLights=environment.lightingIncludeStaticLocalLights;
+    settings.includeEmissive=environment.lightingIncludeEmissive;
+    settings.energyThreshold=std::clamp(environment.lightingEnergyThreshold,0.0001f,0.1f);
     settings.emissiveContribution=std::clamp(environment.lightingEmissiveContribution,0.0f,4.0f);
     settings.indirectSaturation=std::clamp(environment.lightingIndirectSaturation,0.0f,2.0f);
-    settings.raysPerProbe=settings.quality==engine::LightingBuildQuality::Preview?24u:(settings.quality==engine::LightingBuildQuality::High?192u:72u);
+    settings.raysPerProbe=settings.quality==engine::LightingBuildQuality::Preview?24u:
+        (settings.quality==engine::LightingBuildQuality::Medium?72u:
+        (settings.quality==engine::LightingBuildQuality::High?192u:384u));
+    if (environment.lightingRaysPerProbe > 0)
+        settings.raysPerProbe=static_cast<std::uint32_t>(std::clamp(environment.lightingRaysPerProbe,8,1024));
     const std::uint64_t hash=ComputeLightingStateHash();
     const std::filesystem::path path=std::filesystem::path(m_project.AssetRoot())/"Lighting"/(std::filesystem::path(m_project.ScenePath()).stem().string()+".3dglighting");
     const auto skySample=engine::DayNightCycle::At(environment.timeOfDay);
@@ -8244,7 +8348,7 @@ void EditorApp::PollLightingBuild() {
 
 void EditorApp::LoadSceneLightingAsset() {
     const auto& environment=m_scene.GetEnvironment();
-    m_lightingBuildQuality=std::clamp(environment.lightingBuildQuality,0,2);
+    m_lightingBuildQuality=std::clamp(environment.lightingBuildQuality,0,3);
     m_loadedLightingAsset=environment.lightingBuildAsset;m_lightingProbeGrid.Reset();
     m_loadedLightingData.reset();
     m_dynamicGi.Reset(); m_dynamicGiConfigurationHash=0;

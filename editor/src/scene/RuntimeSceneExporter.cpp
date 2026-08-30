@@ -100,7 +100,7 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         return engine::MakeAssetReference(
             &assetRegistry, contentRoot, assetPath, type).id;
     };
-    out << "3DGRuntimeScene 104 " << sceneId.ToString() << '\n';
+    out << "3DGRuntimeScene 105 " << sceneId.ToString() << '\n';
     out << "# Runtime export from 3DGEditor. Editor-only flags are omitted.\n";
     const EditorScene::Environment& environment = scene.GetEnvironment();
     out << "environment "
@@ -206,7 +206,9 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         << environment.dynamicGiMaxRaysPerFrame << ' ' << environment.dynamicGiMaxRayDistance << ' '
         << environment.dynamicGiHysteresis << ' ' << environment.dynamicGiIntensity << ' '
         << environment.dynamicGiRelocation << ' ' << environment.dynamicGiClassification << ' '
-        << environment.dynamicGiVisibilityWeighting << '\n';
+        << environment.dynamicGiVisibilityWeighting << ' '
+        << environment.dynamicGiMultiBounce << ' '
+        << environment.dynamicGiMultiBounceStrength << '\n';
     out << "ssgi " << environment.ssgiEnabled << ' ' << environment.ssgiRayLength << ' '
         << environment.ssgiSteps << ' ' << environment.ssgiThickness << ' '
         << environment.ssgiIntensity << '\n';

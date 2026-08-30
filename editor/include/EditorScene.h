@@ -602,8 +602,14 @@ public:
         int lightingBuildQuality = 1;
         float lightingProbeSpacing = 2.0f;
         float lightingRayDistance = 80.0f;
-        float lightingIndirectBounceStrength = 0.0f;
+        float lightingIndirectBounceStrength = 1.0f;
         bool lightingIndirectBounceEnabled = true;
+        int lightingDiffuseBounces = 2;
+        int lightingRaysPerProbe = 0; // 0 uses the quality preset
+        bool lightingUseMaterialTextures = true;
+        bool lightingIncludeStaticLocalLights = true;
+        bool lightingIncludeEmissive = true;
+        float lightingEnergyThreshold = 0.01f;
         float lightingEmissiveContribution = 1.0f;
         float lightingIndirectSaturation = 1.0f;
         bool dynamicGiEnabled = false;
@@ -618,6 +624,8 @@ public:
         bool dynamicGiRelocation = true;
         bool dynamicGiClassification = true;
         bool dynamicGiVisibilityWeighting = true;
+        bool dynamicGiMultiBounce = true;
+        float dynamicGiMultiBounceStrength = 0.75f;
         bool ssgiEnabled = false;
         float ssgiRayLength = 3.0f;
         int ssgiSteps = 12;

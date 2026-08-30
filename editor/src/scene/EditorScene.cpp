@@ -479,7 +479,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         return false;
     }
 
-    out << "3DGEditorScene 143 " << m_assetId.ToString() << '\n';
+    out << "3DGEditorScene 144 " << m_assetId.ToString() << '\n';
     out << "environment "
         << m_environment.timeOfDay << ' '
         << m_environment.skyLightIntensity << ' '
@@ -603,14 +603,22 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         << m_environment.lightingIndirectBounceStrength << ' '
         << (m_environment.lightingIndirectBounceEnabled?1:0) << ' '
         << m_environment.lightingEmissiveContribution << ' '
-        << m_environment.lightingIndirectSaturation << '\n';
+        << m_environment.lightingIndirectSaturation << ' '
+        << m_environment.lightingDiffuseBounces << ' '
+        << m_environment.lightingRaysPerProbe << ' '
+        << m_environment.lightingUseMaterialTextures << ' '
+        << m_environment.lightingIncludeStaticLocalLights << ' '
+        << m_environment.lightingIncludeEmissive << ' '
+        << m_environment.lightingEnergyThreshold << '\n';
     out << "dynamic_gi " << m_environment.dynamicGiEnabled << ' '
         << m_environment.dynamicGiQuality << ' ' << m_environment.dynamicGiProbeSpacing << ' '
         << m_environment.dynamicGiRaysPerProbe << ' ' << m_environment.dynamicGiProbesPerFrame << ' '
         << m_environment.dynamicGiMaxRaysPerFrame << ' ' << m_environment.dynamicGiMaxRayDistance << ' '
         << m_environment.dynamicGiHysteresis << ' ' << m_environment.dynamicGiIntensity << ' '
         << m_environment.dynamicGiRelocation << ' ' << m_environment.dynamicGiClassification << ' '
-        << m_environment.dynamicGiVisibilityWeighting << '\n';
+        << m_environment.dynamicGiVisibilityWeighting << ' '
+        << m_environment.dynamicGiMultiBounce << ' '
+        << m_environment.dynamicGiMultiBounceStrength << '\n';
     out << "ssgi " << m_environment.ssgiEnabled << ' ' << m_environment.ssgiRayLength << ' '
         << m_environment.ssgiSteps << ' ' << m_environment.ssgiThickness << ' '
         << m_environment.ssgiIntensity << '\n';
@@ -1483,7 +1491,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             return false;
         }
     }
-    if (magic != "3DGEditorScene" ||(version < 1 || version > 143)) {
+    if (magic != "3DGEditorScene" ||(version < 1 || version > 144)) {
         if (error) *error = "Scene file has an unknown format.";
         return false;
     }
@@ -1697,6 +1705,12 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             if (version >= 138) in >> m_environment.lightingIndirectBounceEnabled
                                    >> m_environment.lightingEmissiveContribution
                                    >> m_environment.lightingIndirectSaturation;
+            if (version >= 144) in >> m_environment.lightingDiffuseBounces
+                                   >> m_environment.lightingRaysPerProbe
+                                   >> m_environment.lightingUseMaterialTextures
+                                   >> m_environment.lightingIncludeStaticLocalLights
+                                   >> m_environment.lightingIncludeEmissive
+                                   >> m_environment.lightingEnergyThreshold;
             if (!in) { if (error) *error = "Scene file contains invalid lighting build settings."; Clear(); return false; }
             continue;
         }
@@ -1707,6 +1721,8 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                >> m_environment.dynamicGiMaxRayDistance >> m_environment.dynamicGiHysteresis
                >> m_environment.dynamicGiIntensity >> m_environment.dynamicGiRelocation
                >> m_environment.dynamicGiClassification >> m_environment.dynamicGiVisibilityWeighting;
+            if (version >= 144) in >> m_environment.dynamicGiMultiBounce
+                                   >> m_environment.dynamicGiMultiBounceStrength;
             if (!in) { if (error) *error = "Scene file contains invalid dynamic GI settings."; Clear(); return false; }
             continue;
         }

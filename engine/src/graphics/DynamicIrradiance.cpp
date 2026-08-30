@@ -41,6 +41,40 @@ float FiniteAttenuation(float distanceSquared, float range) {
     return window * window / std::max(distanceSquared, 0.01f);
 }
 
+float SrgbToLinear(float value) {
+    value = std::clamp(value, 0.0f, 1.0f);
+    return value <= 0.04045f ? value / 12.92f
+        : std::pow((value + 0.055f) / 1.055f, 2.4f);
+}
+
+glm::vec3 SurfaceBaseColor(const LightingRayHit& hit) {
+    glm::vec3 factor = glm::clamp(hit.albedo, glm::vec3(0.0f), glm::vec3(1.0f));
+    const auto& texture = hit.baseColorTexture;
+    if (!texture || texture->width == 0 || texture->height == 0
+        || texture->rgba.size() < static_cast<std::size_t>(texture->width) * texture->height * 4u)
+        return factor;
+    auto address = [&](float coordinate) {
+        return texture->repeat ? coordinate - std::floor(coordinate)
+                               : std::clamp(coordinate, 0.0f, 1.0f);
+    };
+    const float px = address(hit.uv.x) * static_cast<float>(texture->width - 1u);
+    const float py = address(hit.uv.y) * static_cast<float>(texture->height - 1u);
+    const std::uint32_t x0 = static_cast<std::uint32_t>(std::floor(px));
+    const std::uint32_t y0 = static_cast<std::uint32_t>(std::floor(py));
+    const std::uint32_t x1 = std::min(x0 + 1u, texture->width - 1u);
+    const std::uint32_t y1 = std::min(y0 + 1u, texture->height - 1u);
+    auto texel = [&](std::uint32_t x, std::uint32_t y) {
+        const std::size_t index = (static_cast<std::size_t>(y) * texture->width + x) * 4u;
+        glm::vec3 color(texture->rgba[index], texture->rgba[index + 1u], texture->rgba[index + 2u]);
+        color /= 255.0f;
+        if (texture->srgb)
+            color = {SrgbToLinear(color.r), SrgbToLinear(color.g), SrgbToLinear(color.b)};
+        return color;
+    };
+    return factor * glm::mix(glm::mix(texel(x0, y0), texel(x1, y0), px - x0),
+                             glm::mix(texel(x0, y1), texel(x1, y1), px - x0), py - y0);
+}
+
 } // namespace
 
 void DynamicIrradianceSettings::Normalize() {
@@ -52,6 +86,7 @@ void DynamicIrradianceSettings::Normalize() {
     maxRayDistance = std::clamp(maxRayDistance, probeSpacing, 2000.0f);
     hysteresis = std::clamp(hysteresis, 0.0f, 0.995f);
     intensity = std::clamp(intensity, 0.0f, 2.0f);
+    multiBounceStrength = std::clamp(multiBounceStrength, 0.0f, 1.0f);
     activeDistance = std::clamp(activeDistance, probeSpacing * 2.0f, 10000.0f);
 }
 
@@ -136,6 +171,7 @@ bool DynamicIrradianceSystem::Configure(const DynamicIrradianceSettings& input,
         probe.confidence = m_hasBakedBaseline ? 0.0f : 0.15f;
         ComposeProbe(index);
     }
+    m_historyProbes = m_probes;
     RefreshStats();
     if (error) error->clear();
     return true;
@@ -153,6 +189,7 @@ void DynamicIrradianceSystem::Reset() {
     m_baked = {};
     m_composed = {};
     m_probes.clear();
+    m_historyProbes.clear();
     m_dirty.clear();
     m_scheduleCursor = 0;
     m_hasBakedBaseline = false;
@@ -241,16 +278,54 @@ void DynamicIrradianceSystem::ClassifyAndRelocate(
     }
 }
 
+glm::vec3 DynamicIrradianceSystem::SamplePreviousIrradiance(
+    const glm::vec3& position, const glm::vec3& normal,
+    std::size_t writingProbe) const {
+    if (!m_settings.approximateMultiBounce || m_historyProbes.empty())
+        return glm::vec3(0.0f);
+    const glm::vec3 coordinate = (position - m_composed.boundsMin)
+        / std::max(m_composed.spacing, 0.001f);
+    const glm::ivec3 base = glm::clamp(glm::ivec3(glm::floor(coordinate)),
+        glm::ivec3(0), glm::max(m_composed.dimensions - 2, glm::ivec3(0)));
+    const glm::vec3 fraction = glm::clamp(coordinate - glm::vec3(base),
+                                          glm::vec3(0.0f), glm::vec3(1.0f));
+    const auto basis = Sh4Basis(glm::normalize(normal));
+    glm::vec3 irradiance(0.0f);
+    float weightSum = 0.0f;
+    for (int z = 0; z < 2; ++z) for (int y = 0; y < 2; ++y)
+        for (int x = 0; x < 2; ++x) {
+            const glm::ivec3 cell = glm::min(base + glm::ivec3(x, y, z),
+                                              m_composed.dimensions - 1);
+            const std::size_t index = m_composed.Index(cell.x, cell.y, cell.z);
+            if (index >= m_historyProbes.size() || index == writingProbe) continue;
+            const DynamicIrradianceProbe& probe = m_historyProbes[index];
+            if (probe.validity <= 0.01f) continue;
+            const float wx = x ? fraction.x : 1.0f - fraction.x;
+            const float wy = y ? fraction.y : 1.0f - fraction.y;
+            const float wz = z ? fraction.z : 1.0f - fraction.z;
+            const float weight = wx * wy * wz * probe.validity;
+            glm::vec3 sample(0.0f);
+            for (std::size_t coefficient = 0; coefficient < 4; ++coefficient)
+                sample += probe.irradianceSH[coefficient] * basis[coefficient];
+            irradiance += glm::max(sample, glm::vec3(0.0f)) * weight;
+            weightSum += weight;
+        }
+    return weightSum > 1e-5f ? irradiance / weightSum : glm::vec3(0.0f);
+}
+
 glm::vec3 DynamicIrradianceSystem::EvaluateHitRadiance(
     const LightingRayHit& hit, const DirectionalSkyRadiance& environment,
-    const std::vector<DynamicGiLight>& lights) const {
+    const std::vector<DynamicGiLight>& lights, std::size_t writingProbe,
+    ProbeSample* counters) const {
     glm::vec3 incoming(0.0f);
     const glm::vec3 sunDirection = glm::normalize(environment.sunDirection);
     const float sunNdotL = std::max(glm::dot(hit.normal, sunDirection), 0.0f);
     if (sunNdotL > 0.0f
-        && !m_scene.Occluded(hit.position + hit.normal * 0.025f,
+        && !m_scene.Occluded(hit.position + hit.geometricNormal
+                                * std::clamp(hit.distance * 2e-5f, 1e-4f, 0.01f),
                              sunDirection, m_settings.maxRayDistance)) {
         incoming += glm::max(environment.sunRadiance, glm::vec3(0.0f)) * sunNdotL;
+        if (counters) ++counters->hitLightEvaluations;
     }
     for (const DynamicGiLight& light : lights) {
         if (!light.affectDynamicGi || light.type == DynamicGiLight::Type::Directional) continue;
@@ -260,17 +335,31 @@ glm::vec3 DynamicIrradianceSystem::EvaluateHitRadiance(
         const float distance = std::sqrt(distanceSquared);
         const glm::vec3 L = delta / distance;
         const float nDotL = std::max(glm::dot(hit.normal, L), 0.0f);
-        if (nDotL <= 0.0f || m_scene.Occluded(hit.position + hit.normal * 0.025f,
-                                              L, distance - 0.025f)) continue;
+        const float bias = std::clamp(hit.distance * 2e-5f, 1e-4f, 0.01f);
+        if (nDotL <= 0.0f || m_scene.Occluded(
+                hit.position + hit.geometricNormal * bias, L, distance - bias)) continue;
         float attenuation = FiniteAttenuation(distanceSquared, light.range);
         if (light.type == DynamicGiLight::Type::Spot) {
             const float cone = glm::dot(glm::normalize(-light.direction), L);
             attenuation *= glm::smoothstep(light.outerCos, light.innerCos, cone);
         }
         incoming += glm::max(light.radiance, glm::vec3(0.0f)) * attenuation * nDotL;
+        if (counters) ++counters->hitLightEvaluations;
     }
-    const glm::vec3 diffuse = glm::max(hit.albedo, glm::vec3(0.0f)) * incoming / kPi;
-    return diffuse + glm::max(hit.emissive, glm::vec3(0.0f));
+    const auto multiBounceBegin = std::chrono::steady_clock::now();
+    const glm::vec3 previous = SamplePreviousIrradiance(
+        hit.position, hit.normal, writingProbe) * m_settings.multiBounceStrength;
+    if (counters && m_settings.approximateMultiBounce)
+        counters->multiBounceMilliseconds += std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - multiBounceBegin).count();
+    if (counters && glm::dot(previous, previous) > 0.0f)
+        ++counters->previousGiSamples;
+    const glm::vec3 diffuseColor = SurfaceBaseColor(hit)
+        * (1.0f - glm::clamp(hit.metallic, 0.0f, 1.0f));
+    const glm::vec3 emissive = glm::max(hit.emissive, glm::vec3(0.0f));
+    if (counters && glm::dot(emissive, emissive) > 0.0f)
+        ++counters->emissiveHits;
+    return diffuseColor * (incoming + previous) / kPi + emissive;
 }
 
 DynamicIrradianceSystem::ProbeSample DynamicIrradianceSystem::TraceProbe(
@@ -289,7 +378,7 @@ DynamicIrradianceSystem::ProbeSample DynamicIrradianceSystem::TraceProbe(
         LightingRayHit hit;
         glm::vec3 radiance;
         if (m_scene.Trace(origin, direction, m_settings.maxRayDistance, &hit)) {
-            radiance = EvaluateHitRadiance(hit, environment, lights);
+            radiance = EvaluateHitRadiance(hit, environment, lights, index, &result);
             const float normalizedDepth = std::clamp(
                 hit.distance / m_settings.maxRayDistance, 0.0f, 1.0f);
             depthSum += normalizedDepth;
@@ -350,6 +439,12 @@ void DynamicIrradianceSystem::Update(
     const auto begin = std::chrono::steady_clock::now();
     m_stats.raysCast = 0;
     m_stats.probesUpdated = 0;
+    m_stats.hitLightEvaluations = 0;
+    m_stats.previousGiSamples = 0;
+    m_stats.emissiveHits = 0;
+    m_stats.multiBounceMilliseconds = 0.0;
+    // Snapshot once so every probe updated this frame reads the same history.
+    m_historyProbes = m_probes;
 
     // Lighting edits must reach nearby probes immediately rather than waiting
     // for the round-robin cursor to revisit them.  Sun/sky changes affect the
@@ -475,6 +570,10 @@ void DynamicIrradianceSystem::Update(
         ++probe.revision;
         m_dirty[index] = 0;
         m_stats.raysCast += sample.rays;
+        m_stats.hitLightEvaluations += sample.hitLightEvaluations;
+        m_stats.previousGiSamples += sample.previousGiSamples;
+        m_stats.emissiveHits += sample.emissiveHits;
+        m_stats.multiBounceMilliseconds += sample.multiBounceMilliseconds;
         ++m_stats.probesUpdated;
         ComposeProbe(index);
         changed.push_back(index);

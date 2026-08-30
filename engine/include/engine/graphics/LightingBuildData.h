@@ -6,12 +6,15 @@
 #include <array>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
 namespace engine {
 
-enum class LightingBuildQuality : std::uint32_t { Preview = 0, Medium = 1, High = 2 };
+enum class LightingBuildQuality : std::uint32_t {
+    Preview = 0, Medium = 1, High = 2, Production = 3
+};
 
 struct LightingBuildSettings {
     LightingBuildQuality quality = LightingBuildQuality::Medium;
@@ -21,11 +24,16 @@ struct LightingBuildSettings {
     // Physical visibility may legitimately be zero in a sealed volume.
     float minimumVisibility = 0.0f;
     std::uint32_t raysPerProbe = 96;
+    std::uint32_t diffuseBounces = 2;
     bool directionalIrradiance = true;
-    float indirectBounceStrength = 0.0f;
+    float indirectBounceStrength = 1.0f;
     bool indirectBounceEnabled = true;
+    bool useMaterialTextures = true;
+    bool includeStaticLocalLights = true;
+    bool includeEmissive = true;
     float emissiveContribution = 1.0f;
     float indirectSaturation = 1.0f;
+    float energyThreshold = 0.01f;
 };
 
 struct LightingBuildLight {
@@ -43,10 +51,24 @@ struct LightingBuildLight {
     bool twoSided = false;
 };
 
+struct LightingTextureData {
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    bool srgb = true;
+    bool repeat = true;
+    std::vector<std::uint8_t> rgba;
+};
+
 struct LightingTriangle {
     glm::vec3 a{0.0f}, b{0.0f}, c{0.0f};
     glm::vec3 albedo{0.8f};
     glm::vec3 emissive{0.0f};
+    float metallic = 0.0f;
+    glm::vec3 normalA{0.0f}, normalB{0.0f}, normalC{0.0f};
+    glm::vec2 uvA{0.0f}, uvB{0.0f}, uvC{0.0f};
+    std::shared_ptr<const LightingTextureData> baseColorTexture;
+    std::uint64_t entityId = 0;
+    std::uint32_t materialSlot = 0;
 };
 
 // Rich hit information used by the probe baker. Keeping surface data in the
@@ -56,10 +78,18 @@ struct LightingRayHit {
     bool hit = false;
     float distance = 0.0f;
     glm::vec3 position{0.0f};
+    glm::vec3 geometricNormal{0.0f, 1.0f, 0.0f};
+    glm::vec3 shadingNormal{0.0f, 1.0f, 0.0f};
+    // Compatibility alias used by current light evaluators.
     glm::vec3 normal{0.0f, 1.0f, 0.0f};
     glm::vec3 barycentric{1.0f, 0.0f, 0.0f};
+    glm::vec2 uv{0.0f};
     glm::vec3 albedo{0.8f};
     glm::vec3 emissive{0.0f};
+    float metallic = 0.0f;
+    std::shared_ptr<const LightingTextureData> baseColorTexture;
+    std::uint64_t entityId = 0;
+    std::uint32_t materialSlot = 0;
     std::size_t triangleIndex = 0;
 };
 
@@ -70,11 +100,24 @@ struct LightingProbe {
     float skyVisibility = 1.0f;
     bool valid = true;
     std::array<glm::vec3, 4> bounceSH{};
+    std::array<glm::vec3, 4> higherBounceSH{};
     std::array<glm::vec3, 4> emissiveSH{};
     // Runtime dynamic-GI visibility moments. They intentionally are not stored
     // in v3 baked assets; zero means that no directional visibility data exists.
     float depthMean = 0.0f;
     float depthSecondMoment = 0.0f;
+};
+
+struct LightingBuildStats {
+    double buildMilliseconds = 0.0;
+    std::uint64_t pathSegments = 0;
+    std::uint64_t raysTerminatedByMiss = 0;
+    std::uint64_t raysTerminatedByEnergy = 0;
+    std::uint64_t raysTerminatedByMaxBounce = 0;
+    std::uint64_t shadowRays = 0;
+    std::uint64_t materialTextureSamples = 0;
+    std::uint64_t emissiveHits = 0;
+    float averagePathLength = 0.0f;
 };
 
 // Compact directional environment used by the offline probe builder. It is
@@ -90,7 +133,7 @@ struct DirectionalSkyRadiance {
 };
 
 struct LightingBuildData {
-    static constexpr std::uint32_t kVersion = 4;
+    static constexpr std::uint32_t kVersion = 5;
     std::uint32_t version = kVersion;
     std::uint64_t sourceHash = 0;
     std::string sourceScene;
@@ -98,6 +141,7 @@ struct LightingBuildData {
     glm::ivec3 dimensions{0};
     float spacing = 2.0f;
     LightingBuildSettings settings;
+    LightingBuildStats stats;
     std::vector<LightingProbe> probes;
 
     bool IsValid() const;
@@ -115,6 +159,11 @@ struct LightingBuildProgress {
     std::atomic<bool> cancel{false};
     std::atomic<Phase> phase{Phase::PreparingGeometry};
     std::atomic<std::uint64_t> raysCast{0};
+    std::atomic<std::uint32_t> currentBounce{0};
+    std::atomic<std::uint64_t> pathSegments{0};
+    std::atomic<std::uint64_t> shadowRays{0};
+    std::atomic<std::uint64_t> materialTextureSamples{0};
+    std::atomic<std::uint64_t> emissiveHits{0};
 };
 
 std::uint64_t HashLightingGeometry(const std::vector<LightingTriangle>& triangles,
@@ -154,7 +203,9 @@ bool LoadLightingBuildData(const std::string& path, LightingBuildData* data,
 // valid neighbours and GLSL can renormalize by the filtered validity channel.
 class LightingProbeGrid {
 public:
-    enum class Contribution { Combined, DirectEnvironment, Bounce, Emissive };
+    enum class Contribution {
+        Combined, DirectEnvironment, Bounce, HigherBounce, Emissive
+    };
     LightingProbeGrid() = default;
     ~LightingProbeGrid();
     LightingProbeGrid(const LightingProbeGrid&) = delete;
@@ -178,10 +229,11 @@ public:
     std::uint64_t MemoryBytes() const { return m_memoryBytes; }
 
 private:
-    // Combined SH (0..2), metadata (3), bounce (4..6), emissive (7..9),
-    // direct environment (10..12). Debug contributions reuse the normal four
+    // Combined SH (0..2), metadata (3), first bounce (4..6), higher bounce
+    // (7..9), emissive (10..12), direct environment (13..15). Debug
+    // contributions reuse the normal four
     // sampler slots rather than increasing fragment texture-unit pressure.
-    std::array<unsigned int, 13> m_textures{};
+    std::array<unsigned int, 16> m_textures{};
     glm::vec3 m_boundsMin{0.0f}, m_boundsMax{0.0f};
     glm::ivec3 m_dimensions{0};
     std::size_t m_probeCount = 0;

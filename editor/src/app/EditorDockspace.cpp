@@ -2306,17 +2306,23 @@ void DrawWorldSettings(EditorScene& scene, EditorDockspace::Context& context, bo
             "Local Probe Irradiance", "Sky Visibility", "Ambient Occlusion",
             "Specular Occlusion", "Probe Validity", "Bent Normal",
             "Raw GTAO", "Filtered GTAO", "Reflection Probe Weight",
-            "Direct Environment GI", "Bounce GI", "Emissive GI",
+            "Direct Environment GI", "GI First Bounce", "Emissive GI",
             "Probe Visibility", "Dynamic Probe Classification", "SSGI", "Indirect Lighting Only",
-            "Raw Directional Shadow", "Directional Cascade Index", "Global IBL Only"
+            "Raw Directional Shadow", "Directional Cascade Index", "Global IBL Only",
+            "GI Higher Bounces"
         };
         changed |= ImGui::Combo("Lighting Debug View", &environment.lightingDebugMode,
                                 kLightingDebugModes, IM_ARRAYSIZE(kLightingDebugModes));
         ImGui::TextDisabled("Uses rebuilt local sky visibility; old scenes fall back to dynamic AO/orientation clues.");
         ImGui::SeparatorText("Local Lighting Build");
         if (context.lightingBuildQuality) {
-            const char* qualities[] = {"Preview", "Medium", "High"};
-            changed |= ImGui::Combo("Build Quality", context.lightingBuildQuality, qualities, 3);
+            const char* qualities[] = {"Preview", "Medium", "High", "Production"};
+            const int previousQuality = *context.lightingBuildQuality;
+            if (ImGui::Combo("Build Quality", context.lightingBuildQuality, qualities, 4)) {
+                changed = true;
+                if (*context.lightingBuildQuality != previousQuality)
+                    environment.lightingDiffuseBounces = *context.lightingBuildQuality + 1;
+            }
             environment.lightingBuildQuality = *context.lightingBuildQuality;
         }
         changed |= ImGui::DragFloat("Probe Spacing", &environment.lightingProbeSpacing, 0.1f, 0.25f, 20.0f, "%.2f m");
@@ -2324,9 +2330,20 @@ void DrawWorldSettings(EditorScene& scene, EditorDockspace::Context& context, bo
         changed |= ImGui::SliderFloat("Indirect Bounce Strength", &environment.lightingIndirectBounceStrength,
                                       0.0f, 1.0f, "%.2f");
         changed |= ImGui::Checkbox("Indirect Bounce Enabled",&environment.lightingIndirectBounceEnabled);
+        changed |= ImGui::SliderInt("Diffuse Bounces",&environment.lightingDiffuseBounces,1,4);
         changed |= ImGui::SliderFloat("Emissive Contribution",&environment.lightingEmissiveContribution,0.0f,4.0f,"%.2f");
         changed |= ImGui::SliderFloat("Indirect Saturation",&environment.lightingIndirectSaturation,0.0f,2.0f,"%.2f");
-        ImGui::TextDisabled("Optional single-bounce diffuse/emissive approximation; rebuild required.");
+        if (ImGui::TreeNode("Advanced Lighting Build")) {
+            changed |= ImGui::DragInt("Rays Per Probe (0 = Preset)", &environment.lightingRaysPerProbe,
+                                      1.0f, 0, 1024);
+            changed |= ImGui::Checkbox("Sample Material Textures", &environment.lightingUseMaterialTextures);
+            changed |= ImGui::Checkbox("Include Static Local Lights", &environment.lightingIncludeStaticLocalLights);
+            changed |= ImGui::Checkbox("Include Emissive Surfaces", &environment.lightingIncludeEmissive);
+            changed |= ImGui::DragFloat("Path Energy Threshold", &environment.lightingEnergyThreshold,
+                                        0.001f, 0.0001f, 0.1f, "%.4f");
+            ImGui::TreePop();
+        }
+        ImGui::TextDisabled("Cosine-weighted material-aware diffuse transport; rebuild required.");
         ImGui::BeginDisabled(context.lightingBuildRunning || context.playMode);
         if (ImGui::Button("Build Lighting")) context.lightingBuildRequested = true;
         ImGui::EndDisabled();
@@ -2383,6 +2400,11 @@ void DrawWorldSettings(EditorScene& scene, EditorDockspace::Context& context, bo
             changed |= ImGui::Checkbox("Probe Relocation", &environment.dynamicGiRelocation);
             changed |= ImGui::Checkbox("Probe Classification", &environment.dynamicGiClassification);
             changed |= ImGui::Checkbox("Probe Visibility Weighting", &environment.dynamicGiVisibilityWeighting);
+            changed |= ImGui::Checkbox("Approximate Multi-Bounce", &environment.dynamicGiMultiBounce);
+            if (!environment.dynamicGiMultiBounce) ImGui::BeginDisabled();
+            changed |= ImGui::SliderFloat("Multi-Bounce Feedback", &environment.dynamicGiMultiBounceStrength,
+                                          0.0f, 0.95f, "%.2f");
+            if (!environment.dynamicGiMultiBounce) ImGui::EndDisabled();
             ImGui::TreePop();
         }
         if (!environment.dynamicGiEnabled) ImGui::EndDisabled();
@@ -10928,6 +10950,7 @@ bool EditorDockspace::Draw(Context& context) {
                 if (ImGui::MenuItem("Preview Lighting", nullptr, *context.lightingBuildQuality == 0)) *context.lightingBuildQuality = 0;
                 if (ImGui::MenuItem("Medium Lighting", nullptr, *context.lightingBuildQuality == 1)) *context.lightingBuildQuality = 1;
                 if (ImGui::MenuItem("High Lighting", nullptr, *context.lightingBuildQuality == 2)) *context.lightingBuildQuality = 2;
+                if (ImGui::MenuItem("Production Lighting", nullptr, *context.lightingBuildQuality == 3)) *context.lightingBuildQuality = 3;
                 ImGui::Separator();
             }
             ImGui::BeginDisabled(context.lightingBuildRunning || context.playMode);

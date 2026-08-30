@@ -139,11 +139,11 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             return false;
         }
     }
-    if (magic != "3DGRuntimeScene" || version < 1 || version > 104) {
+    if (magic != "3DGRuntimeScene" || version < 1 || version > 105) {
         if (error) {
             *error = "Runtime scene file has an unknown format: "
                 + magic + " " + std::to_string(version)
-                + " (expected 3DGRuntimeScene 1..104).";
+                + " (expected 3DGRuntimeScene 1..105).";
         }
         return false;
     }
@@ -306,6 +306,8 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                    >> loaded.environment.dynamicGiMaxRayDistance >> loaded.environment.dynamicGiHysteresis
                    >> loaded.environment.dynamicGiIntensity >> loaded.environment.dynamicGiRelocation
                    >> loaded.environment.dynamicGiClassification >> loaded.environment.dynamicGiVisibilityWeighting;
+            if (version >= 105) record >> loaded.environment.dynamicGiMultiBounce
+                                      >> loaded.environment.dynamicGiMultiBounceStrength;
             if (!record) { if (error) *error = "Runtime scene contains invalid dynamic GI settings."; return false; }
             continue;
         }

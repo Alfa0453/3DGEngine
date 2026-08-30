@@ -749,8 +749,35 @@ void RuntimePlayerApp::ConfigurePhysics() {
 
 std::vector<engine::LightingTriangle> RuntimePlayerApp::GatherLightingTriangles() const {
     std::vector<engine::LightingTriangle> triangles;
+    std::unordered_map<std::string, std::shared_ptr<const engine::LightingTextureData>> textureCache;
+    auto cpuTexture = [&](const std::string& authoredPath) {
+        if (authoredPath.empty()) return std::shared_ptr<const engine::LightingTextureData>{};
+        std::filesystem::path path(authoredPath);
+        if (!path.is_absolute()) path = std::filesystem::path(m_sceneDir) / path;
+        const std::string key = path.lexically_normal().string();
+        if (const auto found = textureCache.find(key); found != textureCache.end()) return found->second;
+        engine::TextureAssetData source;
+        std::shared_ptr<const engine::LightingTextureData> result;
+        if (engine::LoadTextureAsset(key, &source, nullptr)) {
+            auto loaded = std::make_shared<engine::LightingTextureData>();
+            loaded->width = source.width; loaded->height = source.height;
+            loaded->srgb = source.srgb; loaded->repeat = true;
+            loaded->rgba = std::move(source.rgba); result = std::move(loaded);
+        }
+        textureCache.emplace(key, result);
+        return result;
+    };
+    auto entityTexture = [&](Entity entity) {
+        if (const auto* asset = const_cast<engine::ecs::Registry&>(m_registry)
+                .TryGet<engine::ecs::MaterialAsset>(entity))
+            return cpuTexture(asset->albedoPath);
+        return std::shared_ptr<const engine::LightingTextureData>{};
+    };
     auto appendMesh = [&](const engine::Mesh& mesh, const glm::mat4& model,
-                          const glm::vec3& albedo, const glm::vec3& emissive) {
+                          const glm::vec3& albedo, const glm::vec3& emissive,
+                          float metallic, std::uint64_t entityId,
+                          std::uint32_t materialSlot,
+                          const std::shared_ptr<const engine::LightingTextureData>& baseColorTexture) {
         const auto vertices = mesh.ReadbackVertices();
         const auto indices = mesh.ReadbackIndices();
         const std::size_t stride = mesh.VertexStrideFloats();
@@ -761,28 +788,63 @@ std::vector<engine::LightingTriangle> RuntimePlayerApp::GatherLightingTriangles(
                 ? glm::vec3(model * glm::vec4(vertices[base], vertices[base + 1], vertices[base + 2], 1.0f))
                 : glm::vec3(0.0f);
         };
+        const glm::mat3 normalMatrix = glm::transpose(glm::inverse(glm::mat3(model)));
+        auto normal = [&](std::uint32_t index) {
+            const std::size_t base = static_cast<std::size_t>(index) * stride;
+            if (stride < 6 || base + 5 >= vertices.size()) return glm::vec3(0.0f);
+            const glm::vec3 value = normalMatrix * glm::vec3(vertices[base + 3], vertices[base + 4], vertices[base + 5]);
+            return glm::dot(value, value) > 1e-10f ? glm::normalize(value) : glm::vec3(0.0f);
+        };
+        auto uv = [&](std::uint32_t index) {
+            const std::size_t base = static_cast<std::size_t>(index) * stride;
+            return stride >= 8 && base + 7 < vertices.size()
+                ? glm::vec2(vertices[base + 6], vertices[base + 7]) : glm::vec2(0.0f);
+        };
         triangles.reserve(triangles.size() + indices.size() / 3);
-        for (std::size_t i = 0; i + 2 < indices.size(); i += 3)
-            triangles.push_back({point(indices[i]), point(indices[i + 1]), point(indices[i + 2]),
-                                 glm::clamp(albedo, glm::vec3(0.0f), glm::vec3(1.0f)),
-                                 glm::max(emissive, glm::vec3(0.0f))});
+        for (std::size_t i = 0; i + 2 < indices.size(); i += 3) {
+            const std::uint32_t a = indices[i], b = indices[i + 1], c = indices[i + 2];
+            engine::LightingTriangle triangle;
+            triangle.a = point(a); triangle.b = point(b); triangle.c = point(c);
+            triangle.albedo = glm::clamp(albedo, glm::vec3(0.0f), glm::vec3(1.0f));
+            triangle.emissive = glm::max(emissive, glm::vec3(0.0f));
+            triangle.metallic = glm::clamp(metallic, 0.0f, 1.0f);
+            triangle.normalA = normal(a); triangle.normalB = normal(b); triangle.normalC = normal(c);
+            triangle.uvA = uv(a); triangle.uvB = uv(b); triangle.uvC = uv(c);
+            triangle.baseColorTexture = baseColorTexture;
+            triangle.entityId = entityId; triangle.materialSlot = materialSlot;
+            triangles.push_back(std::move(triangle));
+        }
     };
     const_cast<engine::ecs::Registry&>(m_registry).view<engine::ecs::Transform, engine::ecs::MeshPBR>().each(
-        [&](Entity, engine::ecs::Transform& transform, engine::ecs::MeshPBR& renderer) {
+        [&](Entity entity, engine::ecs::Transform& transform, engine::ecs::MeshPBR& renderer) {
             if (renderer.mesh) appendMesh(*renderer.mesh, transform.Model(),
-                                          renderer.material.albedo, renderer.material.emissive);
+                                          renderer.material.albedo, renderer.material.emissive,
+                                          renderer.material.metallic,
+                                          static_cast<std::uint64_t>(entity), 0u,
+                                          entityTexture(entity));
         });
     const_cast<engine::ecs::Registry&>(m_registry).view<engine::ecs::Transform, engine::ecs::LoadedModelAsset>().each(
-        [&](Entity, engine::ecs::Transform& transform, engine::ecs::LoadedModelAsset& loaded) {
+        [&](Entity entity, engine::ecs::Transform& transform, engine::ecs::LoadedModelAsset& loaded) {
             if (!loaded.model) return;
+            const auto* overrideMaterial = const_cast<engine::ecs::Registry&>(m_registry)
+                .TryGet<engine::ecs::LoadedMaterialAsset>(entity);
+            const auto overrideTexture = entityTexture(entity);
             for (const engine::SubMesh& submesh : loaded.model->SubMeshes()) {
-                glm::vec3 albedo(0.8f), emissive(0.0f);
+                glm::vec3 albedo(0.8f), emissive(0.0f); float metallic = 0.0f;
                 if (submesh.material >= 0
                     && static_cast<std::size_t>(submesh.material) < loaded.model->Materials().size()) {
                     const engine::Material& material = loaded.model->Materials()[submesh.material];
-                    albedo = material.diffuse; emissive = material.emissive;
+                    albedo = material.diffuse; emissive = material.emissive; metallic = material.metallic;
                 }
-                appendMesh(submesh.mesh, transform.Model(), albedo, emissive);
+                if (overrideMaterial) {
+                    albedo = overrideMaterial->material.albedo;
+                    emissive = overrideMaterial->material.emissive;
+                    metallic = overrideMaterial->material.metallic;
+                }
+                appendMesh(submesh.mesh, transform.Model(), albedo, emissive, metallic,
+                           static_cast<std::uint64_t>(entity),
+                           submesh.material >= 0 ? static_cast<std::uint32_t>(submesh.material) : 0u,
+                           overrideTexture);
             }
         });
     return triangles;
@@ -811,6 +873,8 @@ void RuntimePlayerApp::UpdateDynamicGi(const engine::Camera& camera) {
         settings.relocation = env.dynamicGiRelocation;
         settings.classification = env.dynamicGiClassification;
         settings.visibilityWeighting = env.dynamicGiVisibilityWeighting;
+        settings.approximateMultiBounce = env.dynamicGiMultiBounce;
+        settings.multiBounceStrength = env.dynamicGiMultiBounceStrength;
         std::vector<engine::LightingTriangle> geometry = GatherLightingTriangles();
         if (!m_loadedLightingData && !geometry.empty()) {
             glm::vec3 minimum(std::numeric_limits<float>::max());

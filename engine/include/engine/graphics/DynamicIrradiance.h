@@ -33,6 +33,8 @@ struct DynamicIrradianceSettings {
     bool classification = true;
     bool visibilityWeighting = true;
     bool cameraFollowing = false;
+    bool approximateMultiBounce = true;
+    float multiBounceStrength = 0.75f;
 
     void Normalize();
     void ApplyQualityPreset(DynamicGiQuality preset);
@@ -67,6 +69,10 @@ struct DynamicGiStats {
     double updateMilliseconds = 0.0;
     double uploadMilliseconds = 0.0;
     std::uint64_t raysCast = 0;
+    std::uint64_t hitLightEvaluations = 0;
+    std::uint64_t previousGiSamples = 0;
+    std::uint64_t emissiveHits = 0;
+    double multiBounceMilliseconds = 0.0;
     std::uint32_t probesUpdated = 0;
     std::uint32_t activeProbes = 0;
     std::uint32_t sleepingProbes = 0;
@@ -115,6 +121,10 @@ private:
         float depthMean = 1.0f;
         float depthSecondMoment = 1.0f;
         std::uint32_t rays = 0;
+        std::uint32_t hitLightEvaluations = 0;
+        std::uint32_t previousGiSamples = 0;
+        std::uint32_t emissiveHits = 0;
+        double multiBounceMilliseconds = 0.0;
     };
 
     ProbeSample TraceProbe(std::size_t index,
@@ -124,7 +134,12 @@ private:
     void ClassifyAndRelocate(std::size_t index, const glm::vec3& cameraPosition);
     glm::vec3 EvaluateHitRadiance(const LightingRayHit& hit,
                                   const DirectionalSkyRadiance& environment,
-                                  const std::vector<DynamicGiLight>& lights) const;
+                                  const std::vector<DynamicGiLight>& lights,
+                                  std::size_t writingProbe,
+                                  ProbeSample* counters) const;
+    glm::vec3 SamplePreviousIrradiance(const glm::vec3& position,
+                                      const glm::vec3& normal,
+                                      std::size_t writingProbe) const;
     void ComposeProbe(std::size_t index);
     void RefreshStats();
 
@@ -134,6 +149,9 @@ private:
     LightingSceneBvh m_scene;
     LightingProbeGrid m_grid;
     std::vector<DynamicIrradianceProbe> m_probes;
+    // Frozen at the start of Update; hit evaluation never samples probes that
+    // have already been modified during the current frame.
+    std::vector<DynamicIrradianceProbe> m_historyProbes;
     std::vector<std::uint8_t> m_dirty;
     std::size_t m_scheduleCursor = 0;
     bool m_hasBakedBaseline = false;
