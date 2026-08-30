@@ -54,6 +54,11 @@ public:
         Cave,
         FenceWall,
         Destruction,
+        Interaction,
+        Portal,
+        Quest,
+        Dialogue,
+        Item,
         Other
     };
 

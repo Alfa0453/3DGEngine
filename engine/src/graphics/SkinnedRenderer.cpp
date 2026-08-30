@@ -266,8 +266,14 @@ void main() {
     if (uUseIBL == 1) {
         vec3 F = FresnelSchlickRough(max(dot(N,V),0.0), F0, roughness);
         vec3 kD = (vec3(1.0)-F)*(1.0-metallic);
-        vec3 irradiance = texture(uIrradiance, indirectN).rgb * uGlobalIblIntensity;
-        irradiance=mix(irradiance,localProbe.irradiance,localProbe.validity*clamp(uLocalProbeInfluence,0.0,1.0));
+        vec3 globalIrradiance = texture(uIrradiance, indirectN).rgb * uGlobalIblIntensity;
+        // Match the static PBR path: probe validity is CONFIDENCE only; the global sky is
+        // gated by sky visibility before the blend (probe already bakes in enclosure), so
+        // the sky is never double-counted and shadowed enclosed surfaces are not blue.
+        float skyGate=(uSkylightOcclusion==1)?mix(1.0,skyVisibility,clamp(uSkylightOcclusionStrength,0.0,1.0)):1.0;
+        vec3 skyGatedGlobal=globalIrradiance*skyGate;
+        float probeConfidence=localProbe.validity*clamp(uLocalProbeInfluence,0.0,1.0);
+        vec3 irradiance=mix(skyGatedGlobal,localProbe.irradiance,probeConfidence);
         vec3 diffuse = irradiance * albedo;
         vec3 R = reflect(-V, N);
         vec3 globalPrefiltered=textureLod(uPrefilter,R,roughness*uMaxReflectionLod).rgb
@@ -278,8 +284,7 @@ void main() {
         vec3 specular = prefiltered * (F*brdf.x + brdf.y);
         specularOcclusion=PbrSpecularOcclusion(ao*screenAo,max(dot(N,V),0.0),roughness,skyVisibility);
         specular*=mix(specularOcclusion,1.0,reflectionProbeWeight);
-        vec3 diffuseAmbient=kD*diffuse*ao*screenAo;
-        if(uSkylightOcclusion==1)diffuseAmbient*=mix(1.0,skyVisibility,clamp(uSkylightOcclusionStrength,0.0,1.0));
+        vec3 diffuseAmbient=kD*diffuse*ao*screenAo;   // sky visibility already applied above
         diffuseIndirect=diffuseAmbient; specularIndirect=specular;
         ambient = diffuseIndirect + specularIndirect;
     } else {
@@ -446,7 +451,7 @@ void SkinnedRenderer::DrawScene(ecs::Registry& reg, const Camera& camera, float 
     m_pbr->SetInt("uApplyTonemap", lit.tonemap ? 1 : 0);
     m_pbr->SetFloat("uShadowSoftness", lit.shadowSoftness);
     m_pbr->SetInt("uShadowBlockerSamples", std::clamp(lit.shadowBlockerSamples, 4, 16));
-    m_pbr->SetInt("uShadowFilterSamples", std::clamp(lit.shadowFilterSamples, 6, 24));
+    m_pbr->SetInt("uShadowFilterSamples", std::clamp(lit.shadowFilterSamples, 6, 32));
     // Keep optional sampler types off unit 0 even when their feature is disabled.
     m_pbr->SetInt("uLightingSH0",18); m_pbr->SetInt("uLightingSH1",19);
     m_pbr->SetInt("uLightingSH2",20); m_pbr->SetInt("uLightingMeta",21);

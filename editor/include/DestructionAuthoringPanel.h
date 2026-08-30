@@ -30,5 +30,5 @@ private:
     void DrawPreview()const;
     engine::DestructionAssetData m_asset;
     std::string m_path,m_pendingOpen,m_status;
-    bool m_dirty=true;
+    bool m_dirty=false;   // untouched panel has no unsaved changes (born-dirty was a bug)
 };

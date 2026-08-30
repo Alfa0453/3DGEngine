@@ -768,6 +768,7 @@ public:
     bool Load(const std::string& path, const engine::Mesh& cube, const engine::Mesh& plane, const engine::Mesh& sphere, const engine::Mesh& capsule, const engine::Mesh& cylinder, const engine::Mesh& cone, const engine::Mesh& pyramid, const engine::Mesh& torus, const engine::Mesh& staircase, std::string* error);
 
     engine::ecs::Registry& Registry() { return m_registry; }
+    const engine::ecs::Registry& Registry() const { return m_registry; }
     const std::vector<Object>& Objects() const { return m_objects; }
     const std::vector<SceneGroup>& Groups() const { return m_groups; }
     const std::vector<PhysicsJoint>& PhysicsJoints() const { return m_joints; }

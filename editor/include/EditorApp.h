@@ -78,6 +78,11 @@
 #include "CaveTunnelPanel.h"
 #include "FenceWallPainterPanel.h"
 #include "DestructionAuthoringPanel.h"
+#include "InteractionAuthoringPanel.h"
+#include "PortalAuthoringPanel.h"
+#include "QuestEditorPanel.h"
+#include "DialogueEditorPanel.h"
+#include "InventoryItemEditorPanel.h"
 #include "TerrainCreatorPanel.h"
 #include "ModularPlacementPanel.h"
 #include "PrefabPalettePanel.h"
@@ -265,6 +270,11 @@ private:
     void GenerateFenceWall();
     int DeleteGeneratedFenceWall(const std::string& name);
     void DrawDestructionAuthoringPanel();
+    void DrawInteractionAuthoringPanel();
+    void DrawPortalAuthoringPanel();
+    void DrawQuestEditorPanel();
+    void DrawDialogueEditorPanel();
+    void DrawInventoryItemEditorPanel();
     void GenerateDestructionPreview();
     int DeleteDestructionPreview(const std::string& name);
     bool CreatePartitionCellFromSelection(const std::string& path, int cellX, int cellZ);
@@ -726,6 +736,11 @@ private:
     CaveTunnelPanel                       m_caveTunnel;
     FenceWallPainterPanel                m_fenceWallPainter;
     DestructionAuthoringPanel            m_destructionAuthoring;
+    InteractionAuthoringPanel            m_interactionAuthoring;
+    PortalAuthoringPanel                 m_portalAuthoring;
+    QuestEditorPanel                     m_questEditor;
+    DialogueEditorPanel                  m_dialogueEditor;
+    InventoryItemEditorPanel             m_inventoryItemEditor;
     LevelVariantPanel                    m_levelVariants;
     LevelLayersPanel                     m_levelLayers;
     ViewportBookmarksPanel               m_viewportBookmarks;

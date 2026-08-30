@@ -3,6 +3,7 @@
 #include "engine/physics/PhysicsComponents.h"
 #include "engine/physics/ColliderTransform.h"
 #include "engine/physics/CollisionMesh.h"
+#include "engine/physics/ConvexCollision.h"   // Pass-2 GJK/EPA convex narrow phase
 #include "engine/ecs/Registry.h"
 #include "engine/ecs/Components.h"   // Transform
 
@@ -12,6 +13,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -29,6 +31,8 @@ using engine::ecs::ColliderShape;
 
 namespace engine {
 namespace {
+
+namespace convex = physics::convex;
 
 // Gathered per step (defined in the header so PhysicsWorld can cache the list).
 using Body = engine::SolverBody;
@@ -138,7 +142,10 @@ glm::mat3 InertiaFor(const Collider& c, float mass) {
     if (c.shape == ColliderShape::Capsule) return RigidBody::CapsuleInvInertia(mass, c.radius, c.halfHeight);
     if (c.shape == ColliderShape::Cylinder) return RigidBody::CylinderInvInertia(mass, c.radius, c.halfHeight);
     if (c.shape == ColliderShape::Cone || c.shape == ColliderShape::Pyramid || c.shape == ColliderShape::Torus
-        || c.shape == ColliderShape::Staircase)
+        || c.shape == ColliderShape::Staircase || c.shape == ColliderShape::ConvexHull)
+        // ConvexHull: approximate the rotational inertia with its bounding box
+        // (c.halfExtents holds the hull's world-scaled bounds) so dynamic hulls
+        // tumble instead of behaving as rotationally frozen.
         return RigidBody::SolidBoxInvInertia(mass, c.halfExtents);
     return glm::mat3(0.0f);
 }
@@ -524,6 +531,115 @@ void BuildProxies(const Body& body, ProxySet& set) {
     }
 }
 
+// ---- Pass-2: exact convex/convex via GJK + EPA ----------------------------
+//
+// Builds a support-mapped convex::Shape from a world collider. Primitive world
+// colliders already carry world-scaled dimensions with transform.scale == 1
+// (BuildWorldCollider bakes scale into the dims), so dims are used as-is. A
+// ConvexHull's geometry is mesh-local, so its vertices are transformed by the
+// FULL owner transform (position/rotation/scale) into `hullScratch`.
+bool BuildConvexShape(const Body& b, std::vector<glm::vec3>& hullScratch,
+                      convex::Shape& out) {
+    const Collider& c = *b.c;
+    out.center = b.t->position;
+    out.basis  = glm::mat3_cast(b.t->rotation);
+    switch (c.shape) {
+        case ColliderShape::Sphere:
+            out.kind = convex::Kind::Sphere; out.roundRadius = c.radius; return true;
+        case ColliderShape::Box:
+            out.kind = convex::Kind::Box; out.halfExtents = c.halfExtents; return true;
+        case ColliderShape::Capsule:
+            out.kind = convex::Kind::Capsule; out.halfHeight = c.halfHeight;
+            out.roundRadius = c.radius; return true;
+        case ColliderShape::Cylinder:
+            out.kind = convex::Kind::Cylinder; out.radius = c.radius;
+            out.halfHeight = c.halfHeight; return true;
+        case ColliderShape::Cone:
+            out.kind = convex::Kind::Cone; out.radius = c.radius;
+            out.halfHeight = c.halfHeight; return true;
+        case ColliderShape::Pyramid:
+            out.kind = convex::Kind::Pyramid; out.halfExtents = c.halfExtents; return true;
+        case ColliderShape::ConvexHull: {
+            const auto mesh = physics::AcquireCollisionMesh(c.collisionAssetPath);
+            if (!mesh || mesh->triangles.empty()) return false;
+            hullScratch.clear();
+            hullScratch.reserve(mesh->triangles.size() * 3);
+            const glm::vec3 s = b.t->scale;
+            const glm::quat q = b.t->rotation;
+            const glm::vec3 p = b.t->position;
+            const auto push = [&](const glm::vec3& v) {
+                hullScratch.push_back(p + q * (s * v));
+            };
+            for (const auto& tri : mesh->triangles) { push(tri.a); push(tri.b); push(tri.c); }
+            out.kind = convex::Kind::Hull;
+            out.hullPoints = hullScratch.data();
+            out.hullCount  = hullScratch.size();
+            return true;
+        }
+        default: return false;   // Plane / TriangleMesh / Torus / Staircase handled elsewhere
+    }
+}
+
+// Convex/convex contact (normal points from A toward B, matching the dispatch
+// convention). Returns a miss on separation or a degenerate EPA result.
+Contact ConvexGjkEpa(const Body& A, const Body& B) {
+    Contact ct;
+    std::vector<glm::vec3> hullA, hullB;
+    convex::Shape sa, sb;
+    if (!BuildConvexShape(A, hullA, sa) || !BuildConvexShape(B, hullB, sb)) return ct;
+    const convex::GjkResult gjk = convex::Gjk(sa, sb);
+    if (!gjk.intersecting) return ct;
+    const convex::EpaResult epa = convex::Epa(sa, sb, gjk);
+    if (!epa.ok || epa.depth <= 1e-5f) return ct;
+    ct.hit = true;
+    ct.normal = epa.normal;          // A -> B
+    ct.penetration = epa.depth;
+    ct.points[0] = epa.contact;      // on A's surface
+    ct.count = 1;
+    return ct;
+}
+
+// A convex hull (or any support shape) against an infinite plane half-space.
+// Collects up to four deepest vertices for a stable resting manifold (single
+// EPA points make flat-bottomed hulls rock on the floor). Normal points from the
+// hull (A) toward the plane, i.e. -planeNormal, to match A -> B convention with
+// the plane as B.
+Contact ConvexPlane(const Body& hullBody, const glm::vec3& n, float off) {
+    Contact ct;
+    std::vector<glm::vec3> verts;
+    convex::Shape s;
+    if (!BuildConvexShape(hullBody, verts, s)) return ct;
+    // Gather candidate surface points: hull vertices, or the single support point
+    // for smooth/primitive shapes.
+    const glm::vec3* pts = nullptr; std::size_t count = 0;
+    glm::vec3 single;
+    if (s.kind == convex::Kind::Hull) { pts = verts.data(); count = verts.size(); }
+    else { single = convex::Support(s, -n); pts = &single; count = 1; }
+    float deepest = 0.0f;
+    for (std::size_t i = 0; i < count; ++i) {
+        const float sep = glm::dot(n, pts[i]) - off;   // <0 => penetrating
+        if (sep < -deepest) deepest = -sep;
+    }
+    if (deepest <= 1e-5f) return ct;
+    ct.hit = true;
+    ct.normal = -n;                 // hull -> plane
+    ct.penetration = deepest;
+    // Add up to four points within a slop band of the deepest penetration.
+    const float band = 0.02f;
+    for (std::size_t i = 0; i < count && ct.count < 4; ++i) {
+        const float sep = glm::dot(n, pts[i]) - off;
+        if (sep <= -deepest + band) {
+            // Avoid near-duplicate contact points.
+            bool dup = false;
+            for (int k = 0; k < ct.count; ++k)
+                if (glm::dot(ct.points[k] - pts[i], ct.points[k] - pts[i]) < 1e-6f) { dup = true; break; }
+            if (!dup) ct.points[ct.count++] = pts[i];
+        }
+    }
+    if (ct.count == 0) ct.points[ct.count++] = pts[0];
+    return ct;
+}
+
 Contact Detect(const Body& A, const Body& B);
 
 Contact DetectComposite(const Body& A, const Body& B) {
@@ -551,6 +667,22 @@ Contact DetectComposite(const Body& A, const Body& B) {
 // Dispatch by the (canonically ordered) shape pair.
 Contact Detect(const Body& A, const Body& B) {
     const auto sa = A.c->shape, sb = B.c->shape;
+
+    // Pass-2: exact convex collision for ConvexHull pairs the older dispatch could
+    // not handle. Canonical ordering puts the hull in B (higher priority) unless
+    // the other shape is a Plane/TriangleMesh. Sphere/Capsule vs hull deliberately
+    // stay on the tuned sphere/capsule-vs-mesh path below (which also handles
+    // concave meshes); everything else with real volume goes through GJK/EPA.
+    if (sb == ColliderShape::ConvexHull
+        && (sa == ColliderShape::Box || sa == ColliderShape::Cylinder
+            || sa == ColliderShape::Cone || sa == ColliderShape::Pyramid
+            || sa == ColliderShape::ConvexHull)) {
+        return ConvexGjkEpa(A, B);
+    }
+    if (sa == ColliderShape::ConvexHull && sb == ColliderShape::Plane) {
+        return ConvexPlane(A, B.c->planeNormal, B.c->planeOffset);   // normal: hull -> plane
+    }
+
     if (CompositeShape(sa) || CompositeShape(sb)) return DetectComposite(A, B);
     const bool meshB = sb == ColliderShape::TriangleMesh || sb == ColliderShape::ConvexHull;
     if (meshB && !B.c->collisionAssetPath.empty()
@@ -1060,10 +1192,18 @@ float SweptSphereBox(const glm::vec3& A, const glm::vec3& B, float r,
 // Sweep entity 'self' (as a sphere of radius r) from A to B against every other
 // non-trigger collider; return the earliest time-of-impact and its normal.
 float SweepToTOI(ecs::Registry& reg, Entity self, const glm::vec3& A,
-                 const glm::vec3& B, float r, glm::vec3& outN) {
+                 const glm::vec3& B, float r, glm::vec3& outN,
+                 const std::vector<Entity>* candidates = nullptr) {
     float best = 1.0f; glm::vec3 bestN(0.0f);
-    reg.view<Transform, Collider>().each([&](Entity e2, Transform& t2, Collider& c2) {
-        if (e2 == self || c2.isTrigger) return;
+    // Sweep against the CANONICAL world collider (Pass-1) so the collider's local
+    // position/rotation/scale and inherited owner scale are respected exactly like discrete
+    // collision and the scene queries -- previously CCD used the raw owner transform +
+    // unscaled local dimensions and silently ignored those offsets.
+    const auto testCandidate = [&](Entity e2, Transform& ownerT, Collider& localC) {
+        if (e2 == self || localC.isTrigger) return;
+        const physics::WorldCollider world = physics::BuildWorldCollider(ownerT, localC);
+        const Transform& t2 = world.transform;
+        const Collider& c2 = world.collider;
         glm::vec3 n(0.0f); float t = 1.0f;
         if (c2.shape == ColliderShape::Plane) {
             t = SweptSpherePlane(A, B, r, c2.planeNormal, c2.planeOffset, n);
@@ -1077,7 +1217,17 @@ float SweepToTOI(ecs::Registry& reg, Entity self, const glm::vec3& A,
             t = SweptSphereBox(A, B, r, o, n);
         }
         if (t < best) { best = t; bestN = n; }
-    });
+    };
+    // Broad-phase candidates (from the caller) when available; otherwise the full scan.
+    if (candidates) {
+        for (Entity e2 : *candidates) {
+            Transform* t = reg.TryGet<Transform>(e2);
+            Collider* c = reg.TryGet<Collider>(e2);
+            if (t && c) testCandidate(e2, *t, *c);
+        }
+    } else {
+        reg.view<Transform, Collider>().each(testCandidate);
+    }
     outN = bestN;
     return best;
 }
@@ -1093,10 +1243,12 @@ float SweepRadiusOf(const Collider* c) {
 } // namespace
 
 void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
+    const auto kStepStart = std::chrono::steady_clock::now();
     auto bodyView = reg.view<Transform, RigidBody>();
     auto colliderView = reg.view<Transform, Collider>();
     if (bodyView.empty() && colliderView.empty() && m_touching.empty()) {
         m_events.clear();
+        m_stats = PhysicsStats{};   // empty world: zero the simulation counters
         return;
     }
     // 0) Spring joints add forces before integration.
@@ -1130,7 +1282,17 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
         if (rb.ccd) {
             const float r = SweepRadiusOf(reg.TryGet<Collider>(e));
             glm::vec3 n(0.0f);
-            const float toi = SweepToTOI(reg, e, start, end, r, n);
+            // Only test colliders whose cells overlap the swept sphere AABB, using the grid
+            // from the previous step (valid here, before this step rebuilds it). Falls back
+            // to the exact full scan when the grid is unavailable.
+            std::vector<Entity> ccdCandidates;
+            const std::vector<Entity>* ccdPtr = nullptr;
+            if (m_broadphaseValid) {
+                const glm::vec3 mn = glm::min(start, end) - glm::vec3(r);
+                const glm::vec3 mx = glm::max(start, end) + glm::vec3(r);
+                if (GatherBroadphaseCandidates(mn, mx, ccdCandidates)) ccdPtr = &ccdCandidates;
+            }
+            const float toi = SweepToTOI(reg, e, start, end, r, n, ccdPtr);
             if (toi < 1.0f) {
                 end = start + (end - start) * toi + n * 0.001f;
                 const float vn = glm::dot(rb.velocity, n);
@@ -1139,11 +1301,20 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
         }
         t.position    = end;
 
-        // Angular: initialise inertia from the collider once, then integrate the
-        // orientation from angular velocity (dq = 0.5 * omega * q).
-        if (!rb.freezeRotation && rb.invInertiaLocal == glm::mat3(0.0f)) {
-            if (const Collider* col = reg.TryGet<Collider>(e))
-                rb.invInertiaLocal = InertiaFor(*col, 1.0f / rb.invMass);
+        // Angular: (re)compute inertia from the collider whenever the mass properties are
+        // dirty (Phase 34: explicit dirty flag, not the old "is the tensor still zero?"
+        // heuristic), then integrate the orientation from angular velocity (dq = 0.5 * w * q).
+        // Inertia is derived from the CANONICAL scaled world collider so it matches the
+        // collision shape exactly (Phase 36/37): a box with transform scale (4,1,1) gets
+        // 4x1x1 inertia, and absolute scale means negative scale never yields negative
+        // inertia. Static/kinematic bodies never reach here (they return above), so they do
+        // no inertia work (Phase 38).
+        if (!rb.freezeRotation && rb.massPropertiesDirty) {
+            if (const Collider* col = reg.TryGet<Collider>(e)) {
+                const physics::WorldCollider wc = physics::BuildWorldCollider(t, *col);
+                rb.invInertiaLocal = InertiaFor(wc.collider, 1.0f / rb.invMass);
+                rb.massPropertiesDirty = false;
+            }
         }
         if (rb.freezeRotation) {
             rb.angularVelocity = glm::vec3(0.0f);
@@ -1169,23 +1340,73 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
     m_bodies.reserve(colliderCount);
     m_worldColliderTransforms.reserve(colliderCount);
     m_worldColliders.reserve(colliderCount);
+    // Does a cached static entry's cook inputs still match this collider? Compares every
+    // field BuildWorldCollider / the broad phase / the narrow phase reads, so a match
+    // guarantees the cooked world shape is byte-identical to a fresh cook. collisionDirty
+    // forces a re-cook (mesh geometry may have changed under an unchanged path).
+    const auto sameStaticInputs = [](const StaticColliderCache& e,
+                                     const Transform& t, const Collider& c) -> bool {
+        if (!e.valid || c.collisionDirty) return false;
+        const Transform& lt = e.lastOwner; const Collider& lc = e.lastLocal;
+        return lt.position == t.position && lt.rotation == t.rotation && lt.scale == t.scale
+            && lc.shape == c.shape && lc.radius == c.radius && lc.halfExtents == c.halfExtents
+            && lc.planeNormal == c.planeNormal && lc.planeOffset == c.planeOffset
+            && lc.halfHeight == c.halfHeight && lc.majorRadius == c.majorRadius
+            && lc.minorRadius == c.minorRadius && lc.steps == c.steps
+            && lc.isTrigger == c.isTrigger
+            && lc.localPosition == c.localPosition && lc.localRotation == c.localRotation
+            && lc.localScale == c.localScale && lc.inheritTransformScale == c.inheritTransformScale
+            && lc.collisionAssetPath == c.collisionAssetPath
+            && lc.layer == c.layer && lc.mask == c.mask;
+    };
+    int staticRebuilt = 0, staticColliders = 0;
     colliderView.each([&](Entity e, Transform& ownerTransform, Collider& localCollider) {
-        physics::WorldCollider world = physics::BuildWorldCollider(ownerTransform, localCollider);
         RigidBody* rigidBody = reg.TryGet<RigidBody>(e);
-        if (world.collider.shape == ColliderShape::TriangleMesh && rigidBody
-            && rigidBody->invMass > 0.0f && !rigidBody->kinematic) {
-            static std::unordered_set<Entity> warned;
-            if (warned.insert(e).second)
-                std::cerr << "[Physics] Dynamic TriangleMesh collider on entity " << e
-                          << " is unsupported; using its bounds box. Use ConvexHull instead.\n";
-            world.collider.shape = ColliderShape::Box;
-            world.transform.scale = glm::vec3(1.0f);
+        // Static = no dynamic body: never moved by the solver, so its world shape only
+        // changes when the author edits it. Kinematic/dynamic bodies move every step and
+        // are always re-cooked.
+        const bool isStatic = !rigidBody
+            || (rigidBody->invMass <= 0.0f && !rigidBody->kinematic);
+        physics::WorldCollider world;
+        if (isStatic) {
+            ++staticColliders;
+            StaticColliderCache& entry = m_staticCache[e];
+            entry.seen = true;
+            if (sameStaticInputs(entry, ownerTransform, localCollider)) {
+                world.transform = entry.worldTransform;   // reuse -- no re-cook
+                world.collider  = entry.worldCollider;
+            } else {
+                world = physics::BuildWorldCollider(ownerTransform, localCollider);
+                entry.valid = true;
+                entry.lastOwner = ownerTransform; entry.lastLocal = localCollider;
+                entry.worldTransform = world.transform; entry.worldCollider = world.collider;
+                ++staticRebuilt;
+            }
+        } else {
+            world = physics::BuildWorldCollider(ownerTransform, localCollider);
+            if (world.collider.shape == ColliderShape::TriangleMesh
+                && rigidBody->invMass > 0.0f && !rigidBody->kinematic) {
+                static std::unordered_set<Entity> warned;
+                if (warned.insert(e).second)
+                    std::cerr << "[Physics] Dynamic TriangleMesh collider on entity " << e
+                              << " is unsupported; using its bounds box. Use ConvexHull instead.\n";
+                world.collider.shape = ColliderShape::Box;
+                world.transform.scale = glm::vec3(1.0f);
+            }
         }
         m_worldColliderTransforms.push_back(world.transform);
         m_worldColliders.push_back(world.collider);
         m_bodies.push_back(SolverBody{e, &m_worldColliderTransforms.back(),
             &m_worldColliders.back(), rigidBody, &ownerTransform});
     });
+    // Prune cache entries for static colliders that vanished this step (deleted, or turned
+    // dynamic/kinematic), so the map tracks the live set and cannot serve stale shapes.
+    for (auto it = m_staticCache.begin(); it != m_staticCache.end(); ) {
+        if (!it->second.seen) it = m_staticCache.erase(it);
+        else { it->second.seen = false; ++it; }
+    }
+    m_stats.staticColliders    = staticColliders;
+    m_stats.staticRebuiltThisStep = staticRebuilt;
     const int N = static_cast<int>(m_bodies.size());
 
     // 3) Broad phase -> a sorted, de-duplicated list of candidate index pairs
@@ -1388,6 +1609,44 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
             }
         });
     }
+
+    // --- Pass-1 physics instrumentation (transient; never serialized). Populated from the
+    //     step's already-computed persistent buffers so it adds no extra traversals. Note:
+    //     gridRebuiltColliders currently equals the finite-collider count -- i.e. the whole
+    //     static world is re-cooked and re-inserted every step -- which is the headline
+    //     number later passes must drive toward zero for unchanged static scenery.
+    {
+        int staticC = 0, dynC = 0, kinC = 0, awake = 0, sleeping = 0, ccd = 0;
+        for (const SolverBody& b : m_bodies) {
+            const RigidBody* rb = b.rb;
+            if (rb && rb->kinematic) { ++kinC; }
+            else if (!rb || rb->invMass <= 0.0f) { ++staticC; }
+            else {
+                ++dynC;
+                if (rb->sleeping) ++sleeping; else ++awake;
+                if (rb->ccd) ++ccd;
+            }
+        }
+        m_stats.colliders            = static_cast<int>(m_bodies.size());
+        m_stats.staticColliders      = staticC;
+        m_stats.dynamicBodies        = dynC;
+        m_stats.kinematicBodies      = kinC;
+        m_stats.awakeBodies          = awake;
+        m_stats.sleepingBodies       = sleeping;
+        m_stats.ccdBodies            = ccd;
+        m_stats.candidatePairs       = static_cast<int>(m_pairs.size());
+        m_stats.manifolds            = static_cast<int>(m_manifolds.size());
+        m_stats.gridRebuiltColliders = static_cast<int>(m_finite.size());
+        int occupied = 0;
+        for (const auto& cell : m_grid) if (!cell.second.empty()) ++occupied;
+        m_stats.occupiedGridCells = occupied;
+        m_stats.stepMs = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - kStepStart).count();
+    }
+    // The grid + world colliders now describe the current world; scene queries may reuse
+    // them until the next Step (or an editor InvalidateBroadphase()). Only meaningful when
+    // the spatial grid was actually built (broadPhase on, >= 2 finite colliders).
+    m_broadphaseValid = broadPhase && !m_finite.empty();
 }
 
 namespace {
@@ -1508,6 +1767,36 @@ void PhysicsWorld::RecordDebugTrace(const DebugTrace& trace) const {
     m_debugTraces.push_back(trace);
 }
 
+bool PhysicsWorld::GatherBroadphaseCandidates(const glm::vec3& mn, const glm::vec3& mx,
+                                              std::vector<ecs::Entity>& out) const {
+    out.clear();
+    const float cs = (cellSize > 1e-3f) ? cellSize : 1.0f;
+    const int x0 = int(std::floor(mn.x / cs)), x1 = int(std::floor(mx.x / cs));
+    const int y0 = int(std::floor(mn.y / cs)), y1 = int(std::floor(mx.y / cs));
+    const int z0 = int(std::floor(mn.z / cs)), z1 = int(std::floor(mx.z / cs));
+    // Bail on an unbounded / pathologically large region: the caller full-scans instead.
+    const long long cellSpan = static_cast<long long>(x1 - x0 + 1)
+        * static_cast<long long>(y1 - y0 + 1) * static_cast<long long>(z1 - z0 + 1);
+    if (cellSpan < 0 || cellSpan > 200000) return false;
+
+    m_broadphaseScratch.clear();
+    for (int ix = x0; ix <= x1; ++ix)
+        for (int iy = y0; iy <= y1; ++iy)
+            for (int iz = z0; iz <= z1; ++iz) {
+                const auto it = m_grid.find(CellKey(ix, iy, iz));
+                if (it == m_grid.end()) continue;
+                for (int bi : it->second) m_broadphaseScratch.insert(bi);
+            }
+    const int bodyCount = static_cast<int>(m_bodies.size());
+    for (int bi : m_broadphaseScratch)
+        if (bi >= 0 && bi < bodyCount) out.push_back(m_bodies[static_cast<std::size_t>(bi)].e);
+    // Infinite planes have no finite cell footprint and are never inserted into the grid,
+    // so include them unconditionally -- a ray/sphere query can still hit a ground plane.
+    for (int pi : m_planes)
+        if (pi >= 0 && pi < bodyCount) out.push_back(m_bodies[static_cast<std::size_t>(pi)].e);
+    return true;
+}
+
 RaycastHit PhysicsWorld::Raycast(ecs::Registry& reg, const Ray& ray, float maxDistance,
                                  std::uint32_t layerMask, Entity ignored) const {
     RaycastHit best;
@@ -1530,9 +1819,11 @@ RaycastHit PhysicsWorld::Raycast(ecs::Registry& reg, const Ray& ray, float maxDi
     if (layerMask == 0u) return finish(best);
     const glm::vec3 d = ray.direction / std::sqrt(len2);
 
+    ++m_stats.raycasts;
     auto colliderView = reg.view<Transform, Collider>();
     if (colliderView.empty()) return finish(best);
-    colliderView.each([&](Entity e, Transform& ownerTransform, Collider& localCollider) {
+    const auto testCandidate = [&](Entity e, Transform& ownerTransform, Collider& localCollider) {
+        ++m_stats.queryCandidates;
         physics::WorldCollider world = physics::BuildWorldCollider(ownerTransform, localCollider);
         Transform& t = world.transform;
         Collider& c = world.collider;
@@ -1544,6 +1835,7 @@ RaycastHit PhysicsWorld::Raycast(ecs::Registry& reg, const Ray& ray, float maxDi
             const float reach = maxDistance + bound;
             if (glm::dot(offset, offset) > reach * reach) return;
         }
+        ++m_stats.queryExactTests;
         glm::vec3 n(0.0f);
         float hitT = -1.0f;
         if ((c.shape == ColliderShape::TriangleMesh
@@ -1604,7 +1896,25 @@ RaycastHit PhysicsWorld::Raycast(ecs::Registry& reg, const Ray& ray, float maxDi
             best.point = ray.origin + hitT * d;
             best.normal = n;
         }
-    });
+    };
+
+    // Broad-phase: for a bounded ray, gather only colliders whose grid cells overlap the
+    // ray-segment AABB (a complete superset), else fall back to the exact full scan. The
+    // exact test above is identical either way, so results are unchanged.
+    std::vector<Entity> candidates;
+    bool accelerated = false;
+    if (m_broadphaseValid && std::isfinite(maxDistance)) {
+        const glm::vec3 a = ray.origin, b = ray.origin + d * maxDistance;
+        if (GatherBroadphaseCandidates(glm::min(a, b), glm::max(a, b), candidates)) {
+            accelerated = true;
+            for (Entity e : candidates) {
+                Transform* ot = reg.TryGet<Transform>(e);
+                Collider* lc = reg.TryGet<Collider>(e);
+                if (ot && lc) testCandidate(e, *ot, *lc);
+            }
+        }
+    }
+    if (!accelerated) colliderView.each(testCandidate);
 
     if (!best.hit) best.distance = 0.0f;
     return finish(best);
@@ -1641,9 +1951,11 @@ RaycastHit PhysicsWorld::SphereCast(ecs::Registry& reg,
     const float sweepRadius = std::max(radius, 0.0f);
     const float travel2 = glm::dot(travel, travel);
 
+    ++m_stats.sphereCasts;
     auto colliderView = reg.view<Transform, Collider>();
     if (colliderView.empty()) return finish(result);
-    colliderView.each([&](Entity entity, Transform& ownerTransform, Collider& localCollider) {
+    const auto testCandidate = [&](Entity entity, Transform& ownerTransform, Collider& localCollider) {
+        ++m_stats.queryCandidates;
         physics::WorldCollider world = physics::BuildWorldCollider(ownerTransform, localCollider);
         Transform& transform = world.transform;
         Collider& collider = world.collider;
@@ -1728,7 +2040,25 @@ RaycastHit PhysicsWorld::SphereCast(ecs::Registry& reg,
             bestNormal = normal;
             bestEntity = entity;
         }
-    });
+    };
+
+    // Broad-phase: gather colliders whose grid cells overlap the swept-sphere AABB (start
+    // sphere U end sphere) -- a complete superset; otherwise fall back to the full scan.
+    std::vector<Entity> candidates;
+    bool accelerated = false;
+    if (m_broadphaseValid) {
+        const glm::vec3 mn = glm::min(start, end) - glm::vec3(sweepRadius);
+        const glm::vec3 mx = glm::max(start, end) + glm::vec3(sweepRadius);
+        if (GatherBroadphaseCandidates(mn, mx, candidates)) {
+            accelerated = true;
+            for (Entity e : candidates) {
+                Transform* ot = reg.TryGet<Transform>(e);
+                Collider* lc = reg.TryGet<Collider>(e);
+                if (ot && lc) testCandidate(e, *ot, *lc);
+            }
+        }
+    }
+    if (!accelerated) colliderView.each(testCandidate);
 
     if (bestEntity == ecs::kNull) return finish(result);
     result.hit = true;
@@ -1756,9 +2086,11 @@ std::vector<ecs::Entity> PhysicsWorld::OverlapSphere(ecs::Registry& reg,
     };
     if (layerMask == 0u) return finish(std::move(hits));
     const float r = std::max(radius, 0.0f);
+    ++m_stats.overlaps;
     auto colliderView = reg.view<Transform, Collider>();
     if (colliderView.empty()) return finish(std::move(hits));
-    colliderView.each([&](Entity e, Transform& ownerTransform, Collider& localCollider) {
+    const auto testCandidate = [&](Entity e, Transform& ownerTransform, Collider& localCollider) {
+        ++m_stats.queryCandidates;
         physics::WorldCollider world = physics::BuildWorldCollider(ownerTransform, localCollider);
         Transform& t = world.transform;
         Collider& c = world.collider;
@@ -1819,7 +2151,23 @@ std::vector<ecs::Entity> PhysicsWorld::OverlapSphere(ecs::Registry& reg,
             overlap = glm::dot(d, d) <= r * r;
         }
         if (overlap) hits.push_back(e);
-    });
+    };
+
+    // Broad-phase: gather colliders whose grid cells overlap the query-sphere AABB (a
+    // complete superset); otherwise fall back to the exact full scan.
+    std::vector<Entity> candidates;
+    bool accelerated = false;
+    if (m_broadphaseValid) {
+        if (GatherBroadphaseCandidates(center - glm::vec3(r), center + glm::vec3(r), candidates)) {
+            accelerated = true;
+            for (Entity e : candidates) {
+                Transform* ot = reg.TryGet<Transform>(e);
+                Collider* lc = reg.TryGet<Collider>(e);
+                if (ot && lc) testCandidate(e, *ot, *lc);
+            }
+        }
+    }
+    if (!accelerated) colliderView.each(testCandidate);
     return finish(std::move(hits));
 }
 

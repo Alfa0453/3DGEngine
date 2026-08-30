@@ -38,12 +38,12 @@ Status legend:
 | 19 | **COMPLETE** | Cave and Tunnel Tool | Spline-generated cave/tunnel meshes, chambers, entrances, collision, and navigation floors. |
 | 20 | **COMPLETE** | Fence and Wall Painter | Viewport drawing of connected fences and walls with corners, posts, gates, and snapping. |
 | 21 | **COMPLETE** | Destruction Authoring Tool | Fracture pieces, strength, debris, damaged states, sound, particles, and collision. |
-| 22 | **NEXT** | Interactive Door and Lift Tool | Fast setup for doors, gates, elevators, platforms, switches, locks, and access conditions. |
-| 23 | PLANNED | Portal and Teleport Tool | Teleporters, destination previews, seamless doors, and level-transition portals. |
-| 24 | PLANNED | Quest Editor | Objectives, conditions, rewards, state, dialogue triggers, checkpoints, and debugging. |
-| 25 | PLANNED | Dialogue Editor | Branching conversations, conditions, events, voice clips, portraits, and localization keys. |
-| 26 | PLANNED | Inventory and Item Editor | Weapons, armor, consumables, pickups, currencies, statistics, icons, and effects. |
-| 27 | PLANNED | Combat Editor | Damage types, combos, targeting, blocking, parrying, stagger, hit reactions, and immunity windows. |
+| 22 | **COMPLETE** | Interactive Door and Lift Tool | Fast setup for doors, gates, elevators, platforms, switches, locks, and access conditions. |
+| 23 | COMPLETE | Portal and Teleport Tool | Teleporters, destination previews, safe arrivals, scripted activation, and packaged level-transition portals. |
+| 24 | COMPLETE | Quest Editor | Objectives, conditions, rewards, persistent state, dialogue triggers, checkpoints, and live debugging. |
+| 25 | **COMPLETE** | Dialogue Editor | Branching conversations, conditions, events, voice clips, portraits, and localization keys. |
+| 26 | **COMPLETE** | Inventory and Item Editor | Weapons, armor, consumables, pickups, currencies, statistics, icons, and effects. |
+| 27 | **NEXT** | Combat Editor | Damage types, combos, targeting, blocking, parrying, stagger, hit reactions, and immunity windows. |
 | 28 | PLANNED | Spawn Manager | Spawn volumes, weighted groups, waves, pooling, difficulty scaling, and encounter controls. |
 | 29 | PLANNED | Checkpoint and Save Editor | Visual configuration of persisted player, quest, world, and streamed-level state. |
 | 30 | PLANNED | Interaction Editor | Prompts, ranges, inputs, conditions, animation requirements, and interaction events. |
@@ -412,8 +412,53 @@ create physics debris and clean it up after the authored lifetime. Stable asset 
 dependencies, Content double-click, dirty-document handling, focused tests, and the
 Release editor build are verified.
 
-## Next Milestone: Interactive Door and Lift Tool
+## Completed Milestone: Interactive Door and Lift Tool
 
-Planned scope: author hinged/sliding doors, gates, elevators and moving platforms;
-connect switches, locks, access conditions, sounds and animations; preview motion;
-and save reusable interaction assets for scripts and packaged runtime levels.
+Delivered under Level Design with engine-owned `.3dginteraction` assets. Authors can
+start from hinged-door, sliding-door, gate, elevator, or moving-platform presets;
+edit local pivots, axes, travel, timing, easing, looping, auto-close, prompts, access
+tags, locks, sounds, and action clips; and scrub or play an isolated motion preview.
+Applying an asset configures the selected object as a kinematic interactive object.
+That binding persists in editor scenes, exports to runtime scenes, resolves through
+stable asset IDs, and runs in both editor Play mode and packaged games. Native C++
+and Lua can open, close, toggle, lock, and query an interaction. Registry discovery,
+Content double-click, dependency tracking, dirty-document saving, focused regression
+tests, the complete Release build, and all tests are verified.
+
+## Completed Milestone: Portal and Teleport Tool
+
+Implemented as reusable `.3dgportal` assets with same-level, level-transition, and
+seamless-door modes. The editor provides searchable destination objects and levels,
+arrival offset/rotation controls, a destination preview, access tags, cooldowns,
+automatic activation, safe arrival, velocity/facing controls, audio, and transition
+effects. Bindings persist in editor scenes and packaged scenes. Native C++ and Lua
+can activate and query portals, and automatic portals use the configured game-mode
+player. Asset discovery, dependency tracking, tests, Release builds, and startup are
+verified.
+
+## Completed Milestone: Quest Editor
+
+Implemented as reusable `.3dgquest` assets with start conditions, objective
+prerequisites, optional objectives, checkpoints, dialogue triggers, four reward
+types, repeatable quests, serialized runtime state, editor simulation, scene
+binding, packaging, stable dependencies, and native C++/Lua control.
+
+## Completed Milestone: Dialogue Editor
+
+Implemented as reusable `.3dgdialogue` assets with speakers, localized lines and
+choices, conditional branching, portraits, voice clips, camera hooks, script events,
+scene bindings, packaged runtime loading, serialized conversation state, native
+C++/Lua control, flow visualization, and live conversation debugging.
+
+## Completed Milestone: Inventory and Item Editor
+
+Implemented as engine-owned `.3dgitem` assets with searchable icons, meshes,
+pickup prefabs, abilities, animations, audio, particles, statistics, tags, and use
+effects. Runtime inventories support slots, weight, stacking, unique items,
+consumption, equipment, events, saved state, editor starting loadouts, packaged
+scene loading, and native C++/Lua control.
+
+## Next Milestone: Combat Editor
+
+Planned scope: damage types, combo definitions, targeting, blocking, parrying,
+stagger, hit reactions, immunity windows, teams, and combat debugging.

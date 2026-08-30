@@ -6,6 +6,11 @@
 #include <engine/gameplay/GameplayComponents.h>
 #include <engine/gameplay/GameplaySystems.h>
 #include <engine/gameplay/DestructionSystem.h>
+#include <engine/gameplay/InteractionSystem.h>
+#include <engine/gameplay/PortalSystem.h>
+#include <engine/gameplay/QuestSystem.h>
+#include <engine/gameplay/DialogueSystem.h>
+#include <engine/gameplay/InventorySystem.h>
 #include <engine/gameplay/RagdollSystem.h>
 #include <engine/gameplay/GameMode.h>
 #include <engine/gameplay/Script.h>
@@ -975,6 +980,14 @@ void EditorApp::OnUpdate(float dt)
         m_scene.GetGameModeSettings().playerInputEnabled
         && !keyboardCaptured
         && !m_cameraDirector.InputLocked();
+    // Scene queries only trust the physics broad-phase grid within the frame a Step built
+    // it. Outside active, unpaused play (edit mode, paused, or the frame play stops) the
+    // grid may be stale or built from a different registry, so invalidate it and let queries
+    // fall back to the exact full scan. A running Step (below) re-validates it.
+    if (m_mode != EditorMode::Play || m_physicsPaused
+        || !engine::GameMode::Instance().IsPlaying()) {
+        m_playPhysics.InvalidateBroadphase();
+    }
     if (m_mode == EditorMode::Play && m_playRegistry
         && !m_physicsPaused
         && engine::GameMode::Instance().IsPlaying()) {
@@ -2016,6 +2029,37 @@ void EditorApp::DrawEditorOverlay()
             } else {
                 ImGui::TextDisabled("GPU timings warming up...");
             }
+            ImGui::Separator();
+            ImGui::Text("Draw calls: %d", m_gpuProfiler.DrawCalls());
+            // Shadow caster culling policy: closed architecture should be mostly one-sided.
+            ImGui::Text("Shadow draws: %d one-sided / %d two-sided",
+                        m_gpuProfiler.OneSidedShadowDraws(),
+                        m_gpuProfiler.TwoSidedShadowDraws());
+            // --- Physics (Pass-1 instrumentation) ---
+            {
+                const engine::PhysicsStats& ps = m_playPhysics.Stats();
+                ImGui::SeparatorText("Physics");
+                ImGui::Text("Step: %.3f ms   Colliders: %d", ps.stepMs, ps.colliders);
+                ImGui::Text("Static %d  Dynamic %d  Kinematic %d", ps.staticColliders,
+                            ps.dynamicBodies, ps.kinematicBodies);
+                ImGui::Text("Awake %d  Sleeping %d  CCD %d", ps.awakeBodies,
+                            ps.sleepingBodies, ps.ccdBodies);
+                ImGui::Text("Broad phase: %d pairs, %d cells", ps.candidatePairs,
+                            ps.occupiedGridCells);
+                // Headline Pass-1 number: with the persistent static cache, static colliders
+                // are re-cooked (BuildWorldCollider) only when the author edits them, so this
+                // reads 0 for unchanged scenery and spikes only on the step you move something.
+                ImGui::Text("Static re-cooked/step: %d / %d   (0 = fully cached)",
+                            ps.staticRebuiltThisStep, ps.staticColliders);
+                ImGui::Text("Grid inserted colliders/step: %d   Manifolds: %d",
+                            ps.gridRebuiltColliders, ps.manifolds);
+                ImGui::Text("Queries/frame: %d ray, %d sphere, %d overlap",
+                            ps.raycasts, ps.sphereCasts, ps.overlaps);
+                ImGui::Text("Query candidates: %lld   exact tests: %lld",
+                            static_cast<long long>(ps.queryCandidates),
+                            static_cast<long long>(ps.queryExactTests));
+                m_playPhysics.ResetQueryStats();   // per-frame query counters
+            }
             ImGui::SeparatorText("Lighting");
             ImGui::Text("GTAO GPU: %.2f ms",m_ssao?m_ssao->LastGpuMilliseconds():0.0);
             static float lightingGpuBudgetMs = 6.0f;
@@ -2503,6 +2547,11 @@ void EditorApp::DrawEditorOverlay()
     DrawCaveTunnelPanel();
     DrawFenceWallPainterPanel();
     DrawDestructionAuthoringPanel();
+    DrawInteractionAuthoringPanel();
+    DrawPortalAuthoringPanel();
+    DrawQuestEditorPanel();
+    DrawDialogueEditorPanel();
+    DrawInventoryItemEditorPanel();
     DrawLevelVariantPanel();
     DrawLevelLayersPanel();
     DrawViewportBookmarksPanel();
@@ -2779,6 +2828,31 @@ void EditorApp::DrawEditorOverlay()
             m_panels.SetOpen(EditorPanels::Panel::DestructionAuthoring, true);
             m_destructionAuthoring.QueueOpen(path);
             m_log.Info("Opening destruction asset: " + path);
+            break;
+        case EditorAssets::Type::Interaction:
+            m_panels.SetOpen(EditorPanels::Panel::InteractionAuthoring, true);
+            m_interactionAuthoring.QueueOpen(path);
+            m_log.Info("Opening interaction asset: " + path);
+            break;
+        case EditorAssets::Type::Portal:
+            m_panels.SetOpen(EditorPanels::Panel::PortalAuthoring, true);
+            m_portalAuthoring.QueueOpen(path);
+            m_log.Info("Opening portal asset: " + path);
+            break;
+        case EditorAssets::Type::Quest:
+            m_panels.SetOpen(EditorPanels::Panel::QuestEditor, true);
+            m_questEditor.QueueOpen(path);
+            m_log.Info("Opening quest asset: " + path);
+            break;
+        case EditorAssets::Type::Dialogue:
+            m_panels.SetOpen(EditorPanels::Panel::DialogueEditor, true);
+            m_dialogueEditor.QueueOpen(path);
+            m_log.Info("Opening dialogue asset: " + path);
+            break;
+        case EditorAssets::Type::Item:
+            m_panels.SetOpen(EditorPanels::Panel::InventoryItemEditor, true);
+            m_inventoryItemEditor.QueueOpen(path);
+            m_log.Info("Opening item asset: " + path);
             break;
         case EditorAssets::Type::Terrain:
             m_panels.SetOpen(EditorPanels::Panel::TerrainCreator, true);
@@ -4448,6 +4522,115 @@ void EditorApp::DrawDestructionAuthoringPanel() {
     if (!result.message.empty()) m_log.Info(result.message);
 }
 
+void EditorApp::DrawInteractionAuthoringPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::InteractionAuthoring)) return;
+    bool open = true;
+    const auto result = m_interactionAuthoring.Draw(
+        m_assets, m_project.AssetRoot(), ImGui::GetIO().DeltaTime, &open);
+    m_panels.SetOpen(EditorPanels::Panel::InteractionAuthoring, open);
+    if (result.applySelected) {
+        const EditorScene::Object* selected = m_scene.SelectedObject();
+        if (!selected) m_log.Warning("Interaction authoring: select a door, gate, lift, or platform first");
+        else if (selected->locked) m_log.Warning("Interaction authoring: selected object is locked");
+        else {
+            auto& registry = m_scene.Registry();
+            engine::ecs::RigidBody body;
+            body.kinematic = true; body.useGravity = false; body.invMass = 0.0f;
+            m_scene.SetSelectedRigidBody(body);
+            if (engine::ConfigureInteractiveMotion(registry, selected->entity,
+                    m_interactionAuthoring.Asset(), m_interactionAuthoring.Path())) {
+                m_scene.MarkDirty();
+                m_log.Info("Applied interaction '" + m_interactionAuthoring.Asset().name +
+                           "' to " + selected->name);
+            } else m_log.Warning("Interaction authoring: selected object has no transform");
+        }
+    }
+    if (result.saved) {
+        std::string error;
+        if (!m_assets.Refresh(m_project.AssetRoot(), &error)) m_log.Warning(error);
+    }
+    if (!result.message.empty()) m_log.Info(result.message);
+}
+
+void EditorApp::DrawPortalAuthoringPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::PortalAuthoring)) return;
+    std::vector<std::string> names;
+    names.reserve(m_scene.Objects().size());
+    for (const auto& object : m_scene.Objects()) names.push_back(object.name);
+    bool open = true;
+    const auto result = m_portalAuthoring.Draw(m_assets, names, m_project.AssetRoot(), &open);
+    m_panels.SetOpen(EditorPanels::Panel::PortalAuthoring, open);
+    if (result.applySelected) {
+        const EditorScene::Object* selected = m_scene.SelectedObject();
+        if (!selected) m_log.Warning("Portal authoring: select a portal object first");
+        else if (selected->locked) m_log.Warning("Portal authoring: selected object is locked");
+        else if (engine::ConfigurePortal(m_scene.Registry(), selected->entity,
+                     m_portalAuthoring.Asset(), m_portalAuthoring.Path())) {
+            m_scene.MarkDirty();
+            m_log.Info("Applied portal '" + m_portalAuthoring.Asset().name + "' to " + selected->name);
+        } else m_log.Warning("Portal authoring: selected object has no transform");
+    }
+    if (result.saved) { std::string error; if (!m_assets.Refresh(m_project.AssetRoot(), &error)) m_log.Warning(error); }
+    if (!result.message.empty()) m_log.Info(result.message);
+}
+
+void EditorApp::DrawQuestEditorPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::QuestEditor)) return;
+    bool open = true;
+    const auto result = m_questEditor.Draw(m_assets, m_project.AssetRoot(), &open);
+    m_panels.SetOpen(EditorPanels::Panel::QuestEditor, open);
+    if (result.grantSelected) {
+        const EditorScene::Object* selected = m_scene.SelectedObject();
+        if (!selected) m_log.Warning("Quest Editor: select the player, quest giver, or manager object first");
+        else if (selected->locked) m_log.Warning("Quest Editor: selected object is locked");
+        else if (engine::GrantQuest(m_scene.Registry(), selected->entity,
+                     m_questEditor.Asset(), m_questEditor.Path())) {
+            m_scene.MarkDirty();
+            m_log.Info("Granted quest '" + m_questEditor.Asset().name + "' to " + selected->name);
+        } else m_log.Warning("Quest Editor: quest already exists on the selected object");
+    }
+    if (result.saved) { std::string error; if (!m_assets.Refresh(m_project.AssetRoot(), &error)) m_log.Warning(error); }
+    if (!result.message.empty()) m_log.Info(result.message);
+}
+
+void EditorApp::DrawDialogueEditorPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::DialogueEditor)) return;
+    bool open = true;
+    const auto result = m_dialogueEditor.Draw(m_assets, m_project.AssetRoot(), &open);
+    m_panels.SetOpen(EditorPanels::Panel::DialogueEditor, open);
+    if (result.assignSelected) {
+        const EditorScene::Object* selected = m_scene.SelectedObject();
+        if (!selected) m_log.Warning("Dialogue Editor: select a speaker or conversation object first");
+        else if (selected->locked) m_log.Warning("Dialogue Editor: selected object is locked");
+        else { std::string error; if (engine::ConfigureDialogueSource(m_scene.Registry(), selected->entity, m_dialogueEditor.Path(), &error)) { m_scene.MarkDirty(); m_log.Info("Assigned dialogue to " + selected->name); } else m_log.Warning(error); }
+    }
+    if (result.saved) { std::string error; if (!m_assets.Refresh(m_project.AssetRoot(), &error)) m_log.Warning(error); }
+    if (!result.message.empty()) m_log.Info(result.message);
+}
+
+void EditorApp::DrawInventoryItemEditorPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::InventoryItemEditor)) return;
+    bool open = true;
+    const auto result = m_inventoryItemEditor.Draw(m_assets, m_project.AssetRoot(), &open);
+    m_panels.SetOpen(EditorPanels::Panel::InventoryItemEditor, open);
+    if (result.addSelected) {
+        const EditorScene::Object* selected = m_scene.SelectedObject();
+        if (!selected) m_log.Warning("Inventory Editor: select a player, character, chest, or inventory owner first");
+        else if (selected->locked) m_log.Warning("Inventory Editor: selected object is locked");
+        else {
+            auto* inventory = m_scene.Registry().TryGet<engine::InventoryComponent>(selected->entity);
+            if (!inventory) inventory = &m_scene.Registry().Add<engine::InventoryComponent>(selected->entity, {});
+            inventory->maximumSlots = result.maximumSlots;
+            inventory->maximumWeight = result.maximumWeight;
+            if (engine::AddItem(m_scene.Registry(), selected->entity, m_inventoryItemEditor.Asset(), result.count, m_inventoryItemEditor.Path())) {
+                m_scene.MarkDirty();m_log.Info("Added " + m_inventoryItemEditor.Asset().displayName + " to " + selected->name);
+            } else m_log.Warning("Inventory Editor: item could not fit or is already unique");
+        }
+    }
+    if (result.saved) {std::string error;if(!m_assets.Refresh(m_project.AssetRoot(),&error))m_log.Warning(error);}
+    if (!result.message.empty()) m_log.Info(result.message);
+}
+
 int EditorApp::DeleteDestructionPreview(const std::string& name) {
     if(name.empty())return 0;const std::string prefix="DestructionPreview_"+name+"_";
     std::vector<int> indices;for(int i=0;i<static_cast<int>(m_scene.Objects().size());++i)
@@ -5975,6 +6158,31 @@ std::vector<DirtyDocument> EditorApp::CollectDirtyDocuments() {
         m_destructionAuthoring.Path(), "New Destructible",
         [this](std::string* error) {
             return m_destructionAuthoring.SaveForShutdown(m_project.AssetRoot(),error);
+        });
+    if (m_interactionAuthoring.IsDirty()) add(DirtyDocumentType::Asset,
+        m_interactionAuthoring.Path(), "New Interaction",
+        [this](std::string* error) {
+            return m_interactionAuthoring.SaveForShutdown(m_project.AssetRoot(), error);
+        });
+    if (m_portalAuthoring.IsDirty()) add(DirtyDocumentType::Asset,
+        m_portalAuthoring.Path(), "New Portal",
+        [this](std::string* error) {
+            return m_portalAuthoring.SaveForShutdown(m_project.AssetRoot(), error);
+        });
+    if (m_questEditor.IsDirty()) add(DirtyDocumentType::Asset,
+        m_questEditor.Path(), "New Quest",
+        [this](std::string* error) {
+            return m_questEditor.SaveForShutdown(m_project.AssetRoot(), error);
+        });
+    if (m_dialogueEditor.IsDirty()) add(DirtyDocumentType::Asset,
+        m_dialogueEditor.Path(), "New Dialogue",
+        [this](std::string* error) {
+            return m_dialogueEditor.SaveForShutdown(m_project.AssetRoot(), error);
+        });
+    if (m_inventoryItemEditor.IsDirty()) add(DirtyDocumentType::Asset,
+        m_inventoryItemEditor.Path(), "New Item",
+        [this](std::string* error) {
+            return m_inventoryItemEditor.SaveForShutdown(m_project.AssetRoot(), error);
         });
     if (m_weatherEditor.IsDirty()) add(DirtyDocumentType::Asset, m_weatherEditor.Path(),
         "New Weather", [this](std::string* error) { return m_weatherEditor.SaveForShutdown(m_project.AssetRoot(),error); });
@@ -13493,7 +13701,7 @@ void EditorApp::UpdatePlayPlayerController(float dt, bool inputEnabled)
             && m_playPlayerController->body.velocity.y < 0.0f);
     }
 
-    m_playPlayerController->Update(*m_playRegistry, input, dt, !movementLocked);
+    m_playPlayerController->Update(*m_playRegistry, input, dt, !movementLocked, &m_playPhysics);
 
     if (animated) {
         const float moveMagnitude = std::min(
@@ -13639,6 +13847,8 @@ void EditorApp::StepPlayPhysics(float dt, bool inputEnabled)
         UpdateAI(step);
         engine::UpdateAbilities(*m_playRegistry, step);
         engine::UpdateDestruction(*m_playRegistry, step);
+        engine::UpdateInteractions(*m_playRegistry, step);
+        engine::UpdatePortals(*m_playRegistry, step);
         engine::UpdateProjectilesInPlace(*m_playRegistry, step);
         engine::UpdateHealth(*m_playRegistry);
         engine::UpdateRagdollsBeforePhysics(*m_playRegistry, m_playPhysics);
@@ -13678,6 +13888,8 @@ void EditorApp::StepPlayPhysics(float dt, bool inputEnabled)
         UpdateAI(step);
         engine::UpdateAbilities(*m_playRegistry, step);
         engine::UpdateDestruction(*m_playRegistry, step);
+        engine::UpdateInteractions(*m_playRegistry, step);
+        engine::UpdatePortals(*m_playRegistry, step);
         engine::UpdateProjectilesInPlace(*m_playRegistry, step);
         engine::UpdateHealth(*m_playRegistry);
         engine::UpdateRagdollsBeforePhysics(*m_playRegistry, m_playPhysics);

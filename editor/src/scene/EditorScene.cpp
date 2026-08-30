@@ -3,6 +3,11 @@
 #include <engine/assets/AssetReference.h>
 #include <engine/assets/RagdollAsset.h>
 #include <engine/assets/AssetRegistry.h>
+#include <engine/gameplay/InteractionSystem.h>
+#include <engine/gameplay/PortalSystem.h>
+#include <engine/gameplay/QuestSystem.h>
+#include <engine/gameplay/DialogueSystem.h>
+#include <engine/gameplay/InventorySystem.h>
 #include <engine/graphics/Mesh.h>
 
 #include <algorithm>
@@ -479,7 +484,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         return false;
     }
 
-    out << "3DGEditorScene 144 " << m_assetId.ToString() << '\n';
+    out << "3DGEditorScene 149 " << m_assetId.ToString() << '\n';
     out << "environment "
         << m_environment.timeOfDay << ' '
         << m_environment.skyLightIntensity << ' '
@@ -1143,6 +1148,40 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         out << '\n';
     }
 
+    for (const Object& object : m_objects) {
+        const auto* portal = m_registry.TryGet<engine::PortalComponent>(object.entity);
+        if (!portal || portal->assetPath.empty()) continue;
+        out << "portal " << std::quoted(object.name) << ' '
+            << std::quoted(portal->assetPath) << ' '
+            << (portal->asset.header.id.Valid() ? portal->asset.header.id.ToString() : std::string("-")) << '\n';
+    }
+    for (const Object& object : m_objects) {
+        const auto* log = m_registry.TryGet<engine::QuestLogComponent>(object.entity);
+        if (!log) continue;
+        for (const auto& quest : log->quests) if (!quest.assetPath.empty())
+            out << "quest " << std::quoted(object.name) << ' '
+                << std::quoted(quest.assetPath) << ' '
+                << (quest.asset.header.id.Valid() ? quest.asset.header.id.ToString() : std::string("-")) << '\n';
+    }
+    for (const Object& object : m_objects) {
+        const auto* dialogue = m_registry.TryGet<engine::DialogueSourceComponent>(object.entity);
+        if (!dialogue || dialogue->assetPath.empty()) continue;
+        out << "dialogue " << std::quoted(object.name) << ' '
+            << std::quoted(dialogue->assetPath) << ' '
+            << (dialogue->asset.header.id.Valid() ? dialogue->asset.header.id.ToString() : std::string("-")) << '\n';
+    }
+    for (const Object& object : m_objects) {
+        const auto* inventory = m_registry.TryGet<engine::InventoryComponent>(object.entity);
+        if (!inventory) continue;
+        out << "inventory " << std::quoted(object.name) << ' '
+            << inventory->maximumSlots << ' ' << inventory->maximumWeight << '\n';
+        for (const auto& stack : inventory->items) if (!stack.assetPath.empty())
+            out << "inventory_item " << std::quoted(object.name) << ' '
+                << std::quoted(stack.assetPath) << ' '
+                << (stack.asset.header.id.Valid()?stack.asset.header.id.ToString():std::string("-")) << ' '
+                << stack.count << ' ' << stack.equipped << '\n';
+    }
+
     // Editor-only hierarchy organization. Runtime export intentionally ignores these.
     for (const SceneGroup& group : m_groups) {
         out << "scene_group " << group.id << ' ' << group.parentId << ' '
@@ -1395,6 +1434,17 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
             << object.decalOpacity << ' ' << object.decalSurfaceOffset << '\n';
     }
 
+    for (const Object& object : m_objects) {
+        const auto* interaction =
+            m_registry.TryGet<engine::InteractiveMotionComponent>(object.entity);
+        if (!interaction || interaction->assetPath.empty()) continue;
+        out << "interaction " << std::quoted(object.name) << ' '
+            << std::quoted(interaction->assetPath) << ' '
+            << (interaction->asset.header.id.Valid()
+                ? interaction->asset.header.id.ToString() : std::string("-"))
+            << '\n';
+    }
+
     // Editor layer membership is kept on separate keyed records so the runtime object
     // record remains compact and older scenes naturally fall back to Default.
     for (std::size_t objectIndex = 0; objectIndex < m_objects.size(); ++objectIndex) {
@@ -1425,6 +1475,17 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         addDependency(object.audioAssetId);
         addDependency(object.navAgentBrainAssetId);
         addDependency(object.reflectionProbe.bakedCubemapId);
+        if (const auto* interaction =
+                m_registry.TryGet<engine::InteractiveMotionComponent>(object.entity))
+            addDependency(interaction->asset.header.id);
+        if (const auto* portal = m_registry.TryGet<engine::PortalComponent>(object.entity))
+            addDependency(portal->asset.header.id);
+        if (const auto* log = m_registry.TryGet<engine::QuestLogComponent>(object.entity))
+            for (const auto& quest : log->quests) addDependency(quest.asset.header.id);
+        if (const auto* dialogue = m_registry.TryGet<engine::DialogueSourceComponent>(object.entity))
+            addDependency(dialogue->asset.header.id);
+        if (const auto* inventory = m_registry.TryGet<engine::InventoryComponent>(object.entity))
+            for (const auto& stack : inventory->items) addDependency(stack.asset.header.id);
         for (const engine::ParticleEffectLayer& layer :
              object.particleEffectLayers)
             addDependency(layer.assetId);
@@ -1491,7 +1552,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             return false;
         }
     }
-    if (magic != "3DGEditorScene" ||(version < 1 || version > 144)) {
+    if (magic != "3DGEditorScene" ||(version < 1 || version > 149)) {
         if (error) *error = "Scene file has an unknown format.";
         return false;
     }
@@ -2515,6 +2576,79 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                     std::clamp(surfaceOffset, 0.001f, 0.08f);
             }
             continue;
+        }
+
+        if (recordType == "interaction" && version >= 145) {
+            std::string objectName, assetPath, idText;
+            in >> std::quoted(objectName) >> std::quoted(assetPath) >> idText;
+            auto found = std::find_if(m_objects.begin(), m_objects.end(),
+                [&](const Object& object) { return object.name == objectName; });
+            std::string interactionError;
+            if (!in || found == m_objects.end() ||
+                !engine::ConfigureInteractiveMotion(m_registry, found->entity,
+                                                     assetPath, &interactionError)) {
+                if (error) *error = !interactionError.empty() ? interactionError
+                    : "Scene contains an invalid interaction record.";
+                Clear();
+                return false;
+            }
+            continue;
+        }
+        if (recordType == "portal" && version >= 146) {
+            std::string objectName, assetPath, idText;
+            in >> std::quoted(objectName) >> std::quoted(assetPath) >> idText;
+            auto found = std::find_if(m_objects.begin(), m_objects.end(),
+                [&](const Object& object) { return object.name == objectName; });
+            std::string portalError;
+            if (!in || found == m_objects.end() ||
+                !engine::ConfigurePortal(m_registry, found->entity, assetPath, &portalError)) {
+                if (error) *error = !portalError.empty() ? portalError
+                    : "Scene contains an invalid portal record.";
+                Clear(); return false;
+            }
+            continue;
+        }
+        if (recordType == "quest" && version >= 147) {
+            std::string objectName, assetPath, idText;
+            in >> std::quoted(objectName) >> std::quoted(assetPath) >> idText;
+            auto found = std::find_if(m_objects.begin(), m_objects.end(),
+                [&](const Object& object) { return object.name == objectName; });
+            std::string questError;
+            if (!in || found == m_objects.end() ||
+                !engine::GrantQuest(m_registry, found->entity, assetPath, &questError)) {
+                if (error) *error = !questError.empty() ? questError
+                    : "Scene contains an invalid quest record.";
+                Clear(); return false;
+            }
+            continue;
+        }
+        if (recordType == "dialogue" && version >= 148) {
+            std::string objectName, assetPath, idText;
+            in >> std::quoted(objectName) >> std::quoted(assetPath) >> idText;
+            auto found = std::find_if(m_objects.begin(), m_objects.end(),
+                [&](const Object& object) { return object.name == objectName; });
+            std::string dialogueError;
+            if (!in || found == m_objects.end() ||
+                !engine::ConfigureDialogueSource(m_registry, found->entity, assetPath, &dialogueError)) {
+                if (error) *error = !dialogueError.empty() ? dialogueError
+                    : "Scene contains an invalid dialogue record.";
+                Clear(); return false;
+            }
+            continue;
+        }
+        if (recordType == "inventory" && version >= 149) {
+            std::string objectName;int slots=24;float weight=100.0f;
+            in >> std::quoted(objectName) >> slots >> weight;
+            auto found=std::find_if(m_objects.begin(),m_objects.end(),[&](const Object& object){return object.name==objectName;});
+            if(!in||found==m_objects.end()){if(error)*error="Scene contains an invalid inventory record.";Clear();return false;}
+            auto* inventory=m_registry.TryGet<engine::InventoryComponent>(found->entity);if(!inventory)inventory=&m_registry.Add<engine::InventoryComponent>(found->entity,{});inventory->maximumSlots=std::max(slots,1);inventory->maximumWeight=std::max(weight,0.0f);continue;
+        }
+        if (recordType == "inventory_item" && version >= 149) {
+            std::string objectName,assetPath,idText;int count=0;bool equipped=false;
+            in>>std::quoted(objectName)>>std::quoted(assetPath)>>idText>>count>>equipped;
+            auto found=std::find_if(m_objects.begin(),m_objects.end(),[&](const Object& object){return object.name==objectName;});std::string itemError;
+            if(!in||found==m_objects.end()||!engine::AddItem(m_registry,found->entity,assetPath,count,&itemError)){if(error)*error=!itemError.empty()?itemError:"Scene contains an invalid inventory item record.";Clear();return false;}
+            if(equipped)engine::EquipItem(m_registry,found->entity,assetPath);continue;
         }
 
         if (recordType != "object") {

@@ -7,6 +7,8 @@
 #include <engine/gameplay/LuaScript.h>
 #include <engine/gameplay/GameplaySystems.h>
 #include <engine/gameplay/RagdollSystem.h>
+#include <engine/gameplay/InteractionSystem.h>
+#include <engine/gameplay/PortalSystem.h>
 #include <engine/gameplay/GameplayComponents.h>
 #include <engine/gameplay/GameMode.h>
 #include <engine/ai/BtScript.h>
@@ -2775,6 +2777,8 @@ void RuntimePlayerApp::OnFixedUpdate(float h) {
     engine::UpdateProjectilesInPlace(m_registry, gameStep);
     engine::ecs::UpdateGameplay(
         m_registry, gameStep);                         // rotators + movers
+    engine::UpdateInteractions(m_registry, gameStep); // doors, gates, lifts + platforms
+    engine::UpdatePortals(m_registry, gameStep);
     engine::UpdateHealth(m_registry);
     engine::UpdateRagdollsBeforePhysics(m_registry, m_physics);
     engine::ecs::UpdateRuntimeMotion(

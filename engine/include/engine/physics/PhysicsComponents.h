@@ -69,13 +69,16 @@ struct RigidBody {
     bool      ccd = false;
 
     // Angular dynamics. invInertiaLocal is the body-space inverse inertia tensor;
-    // it is initialized from the collider on the first step (unless freezeRotation
-    // is set, which locks the body against spinning). Orientation lives on the
-    // entity's Transform.rotation.
+    // it is (re)computed from the collider's canonical scaled world dimensions whenever
+    // massPropertiesDirty is set (unless freezeRotation locks the body against spinning).
+    // Set massPropertiesDirty = true after changing mass, collider shape/dimensions, or
+    // any transform/collider scale so the inertia is regenerated to match collision.
+    // Orientation lives on the entity's Transform.rotation.
     glm::vec3 angularVelocity{0.0f};
     glm::vec3 accumTorque{0.0f};
     glm::mat3 invInertiaLocal{0.0f};
     bool      freezeRotation = false;
+    bool      massPropertiesDirty = true;   // recompute inertia next step (default: on create)
 
     void AddForce(const glm::vec3& f) { accumForce += f; }
     void AddTorque(const glm::vec3& tq) { accumTorque += tq; }

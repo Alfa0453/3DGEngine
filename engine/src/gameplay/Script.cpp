@@ -7,6 +7,12 @@
 #include "engine/gameplay/RagdollSystem.h"
 #include "engine/gameplay/AbilitySystem.h"
 #include "engine/gameplay/DestructionSystem.h"
+#include "engine/gameplay/InteractionSystem.h"
+#include "engine/gameplay/PortalSystem.h"
+#include "engine/gameplay/QuestSystem.h"
+#include "engine/gameplay/DialogueSystem.h"
+#include "engine/gameplay/InventorySystem.h"
+#include "engine/gameplay/QuestSystem.h"
 
 #include "engine/animation/AnimatedModel.h"
 #include "engine/animation/Animator.h"
@@ -456,6 +462,70 @@ bool Script::WasDestructionEvent(const std::string& name) {
     const auto match=[&](const DestructionRuntimeEvent& event){return (name=="Broken"&&event.type==DestructionRuntimeEvent::Type::Broken)||(name=="Damaged"&&event.type==DestructionRuntimeEvent::Type::DamagedState);};
     const auto it=std::find_if(component->events.begin(),component->events.end(),match);if(it==component->events.end())return false;component->events.erase(it);return true;
 }
+bool Script::OpenInteraction(ecs::Entity target,const std::string& accessTag) {
+    if(!m_context.registry)return false;if(target==ecs::kNull)target=m_context.entity;
+    return engine::OpenInteraction(*m_context.registry,target,accessTag);
+}
+bool Script::CloseInteraction(ecs::Entity target) {
+    if(!m_context.registry)return false;if(target==ecs::kNull)target=m_context.entity;
+    return engine::CloseInteraction(*m_context.registry,target);
+}
+bool Script::ToggleInteraction(ecs::Entity target,const std::string& accessTag) {
+    if(!m_context.registry)return false;if(target==ecs::kNull)target=m_context.entity;
+    return engine::ToggleInteraction(*m_context.registry,target,accessTag);
+}
+bool Script::SetInteractionLocked(bool locked,ecs::Entity target) {
+    if(!m_context.registry)return false;if(target==ecs::kNull)target=m_context.entity;
+    return engine::SetInteractionLocked(*m_context.registry,target,locked);
+}
+std::string Script::InteractionState(ecs::Entity target) const {
+    if(!m_context.registry)return "Disabled";if(target==ecs::kNull)target=m_context.entity;
+    return engine::InteractionStateName(engine::GetInteractionState(*m_context.registry,target));
+}
+bool Script::UsePortal(ecs::Entity portal, const std::string& accessTag) {
+    if (!m_context.registry || portal == ecs::kNull) return false;
+    if (!engine::ActivatePortal(*m_context.registry, portal, m_context.entity, accessTag)) return false;
+    for (const auto& event : engine::ConsumePortalEvents(*m_context.registry, portal)) {
+        if (event.type == engine::PortalEventType::LevelTransitionRequested &&
+            !event.levelPath.empty()) RequestSceneLoad(event.levelPath);
+    }
+    return true;
+}
+bool Script::IsPortalReady(ecs::Entity portal) const {
+    return m_context.registry && portal != ecs::kNull &&
+        engine::PortalReady(*m_context.registry, portal);
+}
+bool Script::GrantQuest(const std::string& path){return m_context.registry&&engine::GrantQuest(*m_context.registry,m_context.entity,path);}
+bool Script::StartQuest(const std::string& name){return m_context.registry&&engine::StartQuest(*m_context.registry,m_context.entity,name);}
+bool Script::AdvanceQuest(const std::string& name,const std::string& objective,int amount){return m_context.registry&&engine::AdvanceQuest(*m_context.registry,m_context.entity,name,objective,amount);}
+bool Script::FailQuest(const std::string& name){return m_context.registry&&engine::FailQuest(*m_context.registry,m_context.entity,name);}
+bool Script::SetQuestFlag(const std::string& flag,bool value){return m_context.registry&&engine::SetQuestFlag(*m_context.registry,m_context.entity,flag,value);}
+std::string Script::QuestState(const std::string& name)const{return m_context.registry?engine::QuestStateName(engine::GetQuestState(*m_context.registry,m_context.entity,name)):"Inactive";}
+int Script::QuestProgress(const std::string& name,const std::string& objective)const{return m_context.registry?engine::GetQuestProgress(*m_context.registry,m_context.entity,name,objective):0;}
+std::string Script::SaveQuestState()const{return m_context.registry?engine::SerializeQuestState(*m_context.registry,m_context.entity):std::string{};}
+bool Script::LoadQuestState(const std::string& data){return m_context.registry&&engine::RestoreQuestState(*m_context.registry,m_context.entity,data);}
+bool Script::StartDialogue(const std::string& path){return m_context.registry&&engine::StartDialogue(*m_context.registry,m_context.entity,path);}
+bool Script::StartDialogue(ecs::Entity source){return m_context.registry&&engine::StartDialogue(*m_context.registry,m_context.entity,source);}
+bool Script::ChooseDialogue(int choice){return m_context.registry&&engine::ChooseDialogueOption(*m_context.registry,m_context.entity,choice);}
+bool Script::ContinueDialogue(){return m_context.registry&&engine::ContinueDialogue(*m_context.registry,m_context.entity);}
+bool Script::CancelDialogue(){return m_context.registry&&engine::CancelDialogue(*m_context.registry,m_context.entity);}
+bool Script::SetDialogueFlag(const std::string& flag,bool value){return m_context.registry&&engine::SetDialogueFlag(*m_context.registry,m_context.entity,flag,value);}
+bool Script::IsDialogueActive()const{return m_context.registry&&engine::IsDialogueActive(*m_context.registry,m_context.entity);}
+std::string Script::DialogueNode()const{const auto* n=m_context.registry?engine::CurrentDialogueNode(*m_context.registry,m_context.entity):nullptr;return n?n->id:std::string{};}
+std::string Script::DialogueText()const{const auto* n=m_context.registry?engine::CurrentDialogueNode(*m_context.registry,m_context.entity):nullptr;return n?n->text:std::string{};}
+std::string Script::DialogueSpeaker()const{const auto* n=m_context.registry?engine::CurrentDialogueNode(*m_context.registry,m_context.entity):nullptr;return n?n->speaker:std::string{};}
+std::string Script::SaveDialogueState()const{return m_context.registry?engine::SerializeDialogueState(*m_context.registry,m_context.entity):std::string{};}
+bool Script::LoadDialogueState(const std::string& data){return m_context.registry&&engine::RestoreDialogueState(*m_context.registry,m_context.entity,data);}
+bool Script::AddItem(const std::string& path,int count){return m_context.registry&&engine::AddItem(*m_context.registry,m_context.entity,path,count);}
+int Script::RemoveItem(const std::string& name,int count){return m_context.registry?engine::RemoveItem(*m_context.registry,m_context.entity,name,count):0;}
+bool Script::UseItem(const std::string& name){return m_context.registry&&engine::UseItem(*m_context.registry,m_context.entity,name);}
+bool Script::EquipItem(const std::string& name){return m_context.registry&&engine::EquipItem(*m_context.registry,m_context.entity,name);}
+bool Script::UnequipItemSlot(int slot){return m_context.registry&&engine::UnequipSlot(*m_context.registry,m_context.entity,static_cast<engine::EquipmentSlot>(std::clamp(slot,0,8)));}
+int Script::ItemCount(const std::string& name)const{return m_context.registry?engine::ItemCount(*m_context.registry,m_context.entity,name):0;}
+bool Script::HasItem(const std::string& name,int count)const{return m_context.registry&&engine::HasItem(*m_context.registry,m_context.entity,name,count);}
+float Script::InventoryWeight()const{return m_context.registry?engine::InventoryWeight(*m_context.registry,m_context.entity):0.0f;}
+std::string Script::SaveInventory()const{return m_context.registry?engine::SerializeInventory(*m_context.registry,m_context.entity):std::string{};}
+bool Script::LoadInventory(const std::string& data){return m_context.registry&&engine::RestoreInventory(*m_context.registry,m_context.entity,data);}
 
 RaycastHit Script::TraceLine(const glm::vec3& start, const glm::vec3& end,
                              std::uint32_t layerMask) const {
@@ -2733,6 +2803,10 @@ std::string ConsumeScriptSceneLoadRequest() {
     std::string request = std::move(g_scriptSceneLoadRequest);
     g_scriptSceneLoadRequest.clear();
     return request;
+}
+
+void QueueScriptSceneLoadRequest(const std::string& runtimeScenePath) {
+    if (!runtimeScenePath.empty()) g_scriptSceneLoadRequest = runtimeScenePath;
 }
 
 std::vector<ScriptLevelStreamRequest> ConsumeScriptLevelStreamRequests() {

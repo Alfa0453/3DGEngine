@@ -2310,7 +2310,7 @@ void DrawWorldSettings(EditorScene& scene, EditorDockspace::Context& context, bo
             "Probe Visibility", "Dynamic Probe Classification", "SSGI", "Indirect Lighting Only",
             "Raw Directional Shadow", "Directional Cascade Index", "Global IBL Only",
             "GI Higher Bounces", "Material Base Color Only", "Geometric Normal",
-            "Shading Normal", "Imported Material Slot"
+            "Shading Normal", "Imported Material Slot", "PCSS Filter Radius"
         };
         changed |= ImGui::Combo("Lighting Debug View", &environment.lightingDebugMode,
                                 kLightingDebugModes, IM_ARRAYSIZE(kLightingDebugModes));

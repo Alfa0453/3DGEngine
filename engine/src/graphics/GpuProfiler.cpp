@@ -39,6 +39,8 @@ void GpuProfiler::BeginFrame() {
 
     f.used = 0;        // reuse this slot for the new frame
     f.drawCalls = 0;
+    f.shadowDrawsOneSided = 0;
+    f.shadowDrawsTwoSided = 0;
     m_inScope = false;
     s_active = this;
 }
@@ -68,6 +70,12 @@ void GpuProfiler::End() {
 void GpuProfiler::RecordDrawCall() {
     if (s_active && s_active->m_enabled)
         ++s_active->m_frames[s_active->m_current].drawCalls;
+}
+
+void GpuProfiler::RecordShadowDraw(bool twoSided) {
+    if (!s_active || !s_active->m_enabled) return;
+    Frame& f = s_active->m_frames[s_active->m_current];
+    if (twoSided) ++f.shadowDrawsTwoSided; else ++f.shadowDrawsOneSided;
 }
 
 } // namespace engine

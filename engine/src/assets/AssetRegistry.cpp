@@ -52,6 +52,11 @@ AssetType AuthoredAssetType(const std::filesystem::path& path) {
     if (extension == ".3dgroad") return AssetType::Road;
     if (extension == ".3dgfence") return AssetType::FenceWall;
     if (extension == ".3dgdestruction") return AssetType::Destruction;
+    if (extension == ".3dginteraction") return AssetType::Interaction;
+    if (extension == ".3dgportal") return AssetType::Portal;
+    if (extension == ".3dgquest") return AssetType::Quest;
+    if (extension == ".3dgdialogue") return AssetType::Dialogue;
+    if (extension == ".3dgitem") return AssetType::Item;
     return AssetType::Unknown;
 }
 
@@ -93,7 +98,12 @@ bool ReadAuthoredMetadata(const std::filesystem::path& path,
         || (type == AssetType::Building && magic == "3DG_BUILDING")
         || (type == AssetType::Road && magic == "3DG_ROAD")
         || (type == AssetType::FenceWall && magic == "3DGFenceWall")
-        || (type == AssetType::Destruction && magic == "3DG_DESTRUCTION");
+        || (type == AssetType::Destruction && magic == "3DG_DESTRUCTION")
+        || (type == AssetType::Interaction && magic == "3DG_INTERACTION")
+        || (type == AssetType::Portal && magic == "3DG_PORTAL")
+        || (type == AssetType::Quest && magic == "3DG_QUEST")
+        || (type == AssetType::Dialogue && magic == "3DG_DIALOGUE")
+        || (type == AssetType::Item && magic == "3DG_ITEM");
     if (!validMagic || version < 1) {
         SetError(error, "Authored asset metadata is invalid.");
         return false;

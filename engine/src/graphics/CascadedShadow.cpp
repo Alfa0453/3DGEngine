@@ -139,13 +139,17 @@ void CascadedShadow::Generate(ecs::Registry& reg, const Camera& camera, float as
     const glm::mat4 camView = camera.ViewMatrix();
     const float near = camera.nearPlane;
 
-    // Practical split scheme: blend of logarithmic and uniform.
+    // Practical split scheme: blend of logarithmic and uniform. Weighted toward the
+    // logarithmic term (0.75) so the near cascades cover a much smaller depth slice and
+    // pack their texels onto close geometry -- this is what puts enough resolution on a
+    // nearby caster's silhouette to stop it looking stair-stepped. The uniform term is
+    // retained (0.25) so the far cascades don't collapse to nothing.
     float splitFar[kCascades];
     for (int i = 0; i < kCascades; ++i) {
         const float si = static_cast<float>(i + 1) / static_cast<float>(kCascades);
         const float logd = near * std::pow(shadowFar / near, si);
         const float lind = near + (shadowFar - near) * si;
-        splitFar[i] = 0.5f * logd + 0.5f * lind;
+        splitFar[i] = 0.75f * logd + 0.25f * lind;
         m_splits[i] = splitFar[i];
     }
 
@@ -201,13 +205,24 @@ void CascadedShadow::Generate(ecs::Registry& reg, const Camera& camera, float as
     // Without this, large coplanar receivers repeatedly shadow themselves and
     // expose the individual PCF levels as broad bands (shadow acne).
     glEnable(GL_POLYGON_OFFSET_FILL);
-    // Receiver bias is cascade/world-texel aware; keep caster offset modest so
-    // contact shadows are not detached from walls and floors.
-    glPolygonOffset(1.1f, 1.5f);
-    // Depth-only shadow casting is deliberately two-sided. Thin authored walls
-    // and ceilings must block the sun regardless of winding; normal material
-    // rendering keeps its existing back-face culling policy.
-    glDisable(GL_CULL_FACE);
+    // Slope-scaled offset (factor, units) pushes the front-face occluder just far
+    // enough from the light to kill self-shadow acne on lit surfaces without
+    // detaching contact shadows. Front-face rendering needs a touch more than the
+    // old second-depth path did, so the offset is a little firmer here.
+    glPolygonOffset(2.5f, 4.0f);
+    // Render the NEAR ("first depth") caster surface: cull back faces, keep front.
+    // The previous second-depth approach (culling FRONT to record the far surface)
+    // hid self-shadow acne on big flat architecture, but for small/thin solid casters
+    // -- a prop cube, a character, anything sitting ON the ground -- it recorded the
+    // caster's far side as the occluder, which detaches the shadow from the object's
+    // base and warps its silhouette (the "shadow with a gap, broken into blobs" bug).
+    // Front-face rendering attaches the contact shadow correctly at every scale; the
+    // cascade/world-texel-aware receiver bias + the offset above handle acne. The
+    // caster batch still re-enables two-sided rendering per-draw for meshes flagged
+    // two-sided (planes) and alpha-masked cutouts (foliage, fences, grilles).
+    glEnable(GL_CULL_FACE);
+    glFrontFace(GL_CCW);
+    glCullFace(GL_BACK);
     m_shader.Bind();
     m_batch.Build(reg);
 
@@ -222,12 +237,17 @@ void CascadedShadow::Generate(ecs::Registry& reg, const Camera& camera, float as
         glClear(GL_DEPTH_BUFFER_BIT);
         m_shader.SetMat4("uLightVP", m_vp[i]);
         m_batch.Draw(m_shader);
+        // Skinned / non-ECS casters render their near face (cull back), same as the ECS
+        // batch, so character contact shadows attach to the feet instead of detaching.
+        glEnable(GL_CULL_FACE);
+        glCullFace(GL_BACK);
         if (drawExtraCasters) drawExtraCasters(m_vp[i]);   // skinned / non-ECS casters
         m_lastUpdateFrame[static_cast<std::size_t>(i)] = m_frameIndex;
     }
 
     glPolygonOffset(previousPolygonOffsetFactor, previousPolygonOffsetUnits);
     if (!polygonOffsetWasEnabled) glDisable(GL_POLYGON_OFFSET_FILL);
+    glCullFace(GL_BACK);   // restore the engine-wide default cull direction
     if (cullFaceWasEnabled) glEnable(GL_CULL_FACE); else glDisable(GL_CULL_FACE);
     glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prevFbo));
 }

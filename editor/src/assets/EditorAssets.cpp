@@ -1249,6 +1249,11 @@ const char *EditorAssets::TypeName(Type type)
         case Type::Cave: return "Cave";
         case Type::FenceWall: return "Fence / Wall";
         case Type::Destruction: return "Destruction";
+        case Type::Interaction: return "Interaction";
+        case Type::Portal: return "Portal";
+        case Type::Quest: return "Quest";
+        case Type::Dialogue: return "Dialogue";
+        case Type::Item: return "Item";
         case Type::Other: return "Other";
     }
     return "Other";
@@ -1364,6 +1369,21 @@ EditorAssets::Type EditorAssets::ClassifyExtension(const std::string &extension)
     }
     if (extension == ".3dgdestruction") {
         return Type::Destruction;
+    }
+    if (extension == ".3dginteraction") {
+        return Type::Interaction;
+    }
+    if (extension == ".3dgportal") {
+        return Type::Portal;
+    }
+    if (extension == ".3dgquest") {
+        return Type::Quest;
+    }
+    if (extension == ".3dgdialogue") {
+        return Type::Dialogue;
+    }
+    if (extension == ".3dgitem") {
+        return Type::Item;
     }
     if (extension == ".h" || extension == ".hpp" || extension == ".lua"
         || extension == ".cpp" || extension == ".cc") {

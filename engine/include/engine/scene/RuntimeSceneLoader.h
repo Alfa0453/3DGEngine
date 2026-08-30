@@ -290,6 +290,20 @@ public:
             int priority = 0;
             float returnBlend = 0.35f;
         };
+        struct InteractionDesc {
+            std::string entityName;
+            std::string assetPath;
+            AssetHandle assetId;
+        };
+        struct PortalDesc {
+            std::string entityName;
+            std::string assetPath;
+            AssetHandle assetId;
+        };
+        struct QuestDesc { std::string entityName,assetPath;AssetHandle assetId; };
+        struct DialogueDesc { std::string entityName,assetPath;AssetHandle assetId; };
+        struct InventoryDesc { std::string entityName;int maximumSlots=24;float maximumWeight=100.0f; };
+        struct InventoryItemDesc { std::string entityName,assetPath;AssetHandle assetId;int count=1;bool equipped=false; };
         struct PhysicsJointDesc {
             int type = 0;
             std::string objectA, objectB;
@@ -550,6 +564,12 @@ public:
         std::vector<NavAgentDesc> navAgents;
         std::vector<TriggerActionDesc> triggerActions;
         std::vector<CameraZoneDesc> cameraZones;
+        std::vector<InteractionDesc> interactions;
+        std::vector<PortalDesc> portals;
+        std::vector<QuestDesc> quests;
+        std::vector<DialogueDesc> dialogues;
+        std::vector<InventoryDesc> inventories;
+        std::vector<InventoryItemDesc> inventoryItems;
         std::vector<PhysicsJointDesc> physicsJoints;
         std::vector<TerrainDesc> terrains;
         std::vector<WaterDesc> waters;

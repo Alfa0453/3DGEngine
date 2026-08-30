@@ -5,6 +5,11 @@
 #include <engine/ecs/Components.h>
 #include <engine/physics/PhysicsComponents.h>
 #include <engine/math/Spline.h>
+#include <engine/gameplay/InteractionSystem.h>
+#include <engine/gameplay/PortalSystem.h>
+#include <engine/gameplay/QuestSystem.h>
+#include <engine/gameplay/DialogueSystem.h>
+#include <engine/gameplay/InventorySystem.h>
 
 #include <algorithm>
 #include <fstream>
@@ -100,7 +105,7 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         return engine::MakeAssetReference(
             &assetRegistry, contentRoot, assetPath, type).id;
     };
-    out << "3DGRuntimeScene 105 " << sceneId.ToString() << '\n';
+    out << "3DGRuntimeScene 110 " << sceneId.ToString() << '\n';
     out << "# Runtime export from 3DGEditor. Editor-only flags are omitted.\n";
     const EditorScene::Environment& environment = scene.GetEnvironment();
     out << "environment "
@@ -947,6 +952,37 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
                 << object.cameraZonePriority << ' '
                 << object.cameraZoneReturnBlend << '\n';
         }
+        if (object.visible) {
+            const auto* interaction = scene.Registry().TryGet<engine::InteractiveMotionComponent>(object.entity);
+            if (interaction && !interaction->assetPath.empty()) {
+                out << "interaction " << std::quoted(object.name) << ' '
+                    << std::quoted(interaction->assetPath) << ' '
+                    << (interaction->asset.header.id.Valid()
+                        ? interaction->asset.header.id.ToString() : std::string("-")) << '\n';
+            }
+            const auto* portal = scene.Registry().TryGet<engine::PortalComponent>(object.entity);
+            if (portal && !portal->assetPath.empty()) {
+                out << "portal " << std::quoted(object.name) << ' '
+                    << std::quoted(portal->assetPath) << ' '
+                    << (portal->asset.header.id.Valid() ? portal->asset.header.id.ToString() : std::string("-")) << '\n';
+            }
+            if (const auto* log = scene.Registry().TryGet<engine::QuestLogComponent>(object.entity))
+                for (const auto& quest : log->quests) if (!quest.assetPath.empty())
+                    out << "quest " << std::quoted(object.name) << ' '
+                        << std::quoted(quest.assetPath) << ' '
+                        << (quest.asset.header.id.Valid() ? quest.asset.header.id.ToString() : std::string("-")) << '\n';
+            if (const auto* dialogue = scene.Registry().TryGet<engine::DialogueSourceComponent>(object.entity))
+                if (!dialogue->assetPath.empty())
+                    out << "dialogue " << std::quoted(object.name) << ' '
+                        << std::quoted(dialogue->assetPath) << ' '
+                        << (dialogue->asset.header.id.Valid() ? dialogue->asset.header.id.ToString() : std::string("-")) << '\n';
+            if (const auto* inventory = scene.Registry().TryGet<engine::InventoryComponent>(object.entity)) {
+                out << "inventory " << std::quoted(object.name) << ' ' << inventory->maximumSlots << ' ' << inventory->maximumWeight << '\n';
+                for (const auto& stack : inventory->items) if (!stack.assetPath.empty())
+                    out << "inventory_item " << std::quoted(object.name) << ' ' << std::quoted(stack.assetPath) << ' '
+                        << (stack.asset.header.id.Valid()?stack.asset.header.id.ToString():std::string("-")) << ' ' << stack.count << ' ' << stack.equipped << '\n';
+            }
+        }
         if (object.visible && object.isTerrain) {
             out << "terrain " << std::quoted(object.name) << ' '
                 << object.terrainRes << ' ' << object.terrainSize << ' '
@@ -995,6 +1031,17 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
     };
     for (const EditorScene::Object& object : scene.Objects()) {
         addDependency(object.modelAssetId);
+        if (const auto* interaction =
+                scene.Registry().TryGet<engine::InteractiveMotionComponent>(object.entity))
+            addDependency(interaction->asset.header.id);
+        if (const auto* portal = scene.Registry().TryGet<engine::PortalComponent>(object.entity))
+            addDependency(portal->asset.header.id);
+        if (const auto* log = scene.Registry().TryGet<engine::QuestLogComponent>(object.entity))
+            for (const auto& quest : log->quests) addDependency(quest.asset.header.id);
+        if (const auto* dialogue = scene.Registry().TryGet<engine::DialogueSourceComponent>(object.entity))
+            addDependency(dialogue->asset.header.id);
+        if (const auto* inventory = scene.Registry().TryGet<engine::InventoryComponent>(object.entity))
+            for (const auto& stack : inventory->items) addDependency(stack.asset.header.id);
         addDependency(assetIdFor(
             object.collider.collisionAssetPath, {},
             engine::AssetType::StaticMesh));

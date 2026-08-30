@@ -70,7 +70,12 @@ enum class AssetType : std::uint32_t {
     DayNightTimeline, // environment timeline (.3dgdaynight)
     Cave, // spline cave/tunnel definition (.3dgcave)
     FenceWall, // connected fence/wall run definition (.3dgfence)
-    Destruction // fracture and damaged-state definition (.3dgdestruction)
+    Destruction, // fracture and damaged-state definition (.3dgdestruction)
+    Interaction, // reusable doors, gates, lifts and moving platforms (.3dginteraction)
+    Portal, // teleporters and level-transition portals (.3dgportal)
+    Quest, // objectives, conditions and rewards (.3dgquest)
+    Dialogue, // branching conversations (.3dgdialogue)
+    Item // inventory, equipment and pickups (.3dgitem)
 };
 
 const char* AssetTypeName(AssetType type);

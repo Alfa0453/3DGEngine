@@ -74,6 +74,11 @@ add_executable(3DGEditor
     src/panels/CaveTunnelPanel.cpp
     src/panels/FenceWallPainterPanel.cpp
     src/panels/DestructionAuthoringPanel.cpp
+    src/panels/InteractionAuthoringPanel.cpp
+    src/panels/PortalAuthoringPanel.cpp
+    src/panels/QuestEditorPanel.cpp
+    src/panels/DialogueEditorPanel.cpp
+    src/panels/InventoryItemEditorPanel.cpp
     src/panels/TerrainCreatorPanel.cpp
     src/panels/ModularPlacementPanel.cpp
     src/panels/PrefabPalettePanel.cpp

@@ -8,6 +8,11 @@
 #include "engine/ecs/Registry.h"
 #include "engine/gameplay/GameplayComponents.h"
 #include "engine/gameplay/Script.h"
+#include "engine/gameplay/InteractionSystem.h"
+#include "engine/gameplay/PortalSystem.h"
+#include "engine/gameplay/QuestSystem.h"
+#include "engine/gameplay/DialogueSystem.h"
+#include "engine/gameplay/InventorySystem.h"
 #include "engine/graphics/DayNightCycle.h"
 #include "engine/graphics/Mesh.h"
 #include "engine/physics/PhysicsComponents.h"
@@ -139,11 +144,11 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             return false;
         }
     }
-    if (magic != "3DGRuntimeScene" || version < 1 || version > 105) {
+    if (magic != "3DGRuntimeScene" || version < 1 || version > 110) {
         if (error) {
             *error = "Runtime scene file has an unknown format: "
                 + magic + " " + std::to_string(version)
-                + " (expected 3DGRuntimeScene 1..105).";
+                + " (expected 3DGRuntimeScene 1..110).";
         }
         return false;
     }
@@ -751,6 +756,36 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             }
             continue;
         }
+        if (recordType == "interaction" && version >= 106) {
+            Scene::InteractionDesc interaction;
+            std::string idText;
+            record >> std::quoted(interaction.entityName)
+                   >> std::quoted(interaction.assetPath) >> idText;
+            if (!record || interaction.entityName.empty() || interaction.assetPath.empty() ||
+                (idText != "-" && !AssetHandle::Parse(idText, &interaction.assetId))) {
+                if (error) *error = "Runtime scene contains an invalid interaction record.";
+                return false;
+            }
+            loaded.interactions.push_back(std::move(interaction));
+            continue;
+        }
+        if (recordType == "portal" && version >= 107) {
+            Scene::PortalDesc portal; std::string idText;
+            record >> std::quoted(portal.entityName) >> std::quoted(portal.assetPath) >> idText;
+            if (!record || portal.entityName.empty() || portal.assetPath.empty() ||
+                (idText != "-" && !AssetHandle::Parse(idText, &portal.assetId))) {
+                if (error) *error = "Runtime scene contains an invalid portal record.";
+                return false;
+            }
+            loaded.portals.push_back(std::move(portal));
+            continue;
+        }
+        if (recordType == "quest" && version >= 108) {
+            Scene::QuestDesc quest;std::string idText;
+            record>>std::quoted(quest.entityName)>>std::quoted(quest.assetPath)>>idText;
+            if(!record||quest.entityName.empty()||quest.assetPath.empty()||(idText!="-"&&!AssetHandle::Parse(idText,&quest.assetId))){if(error)*error="Runtime scene contains an invalid quest record.";return false;}
+            loaded.quests.push_back(std::move(quest));continue;
+        }
         if (recordType == "reflection_probe" && version >= 98) {
             std::string entityName, stableIdText, cubemapPath, cubemapIdText;
             int shape = 0;
@@ -803,6 +838,16 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             }
             continue;
         }
+        if (recordType == "dialogue" && version >= 109) {
+            Scene::DialogueDesc dialogue; std::string idText;
+            in >> std::quoted(dialogue.entityName) >> std::quoted(dialogue.assetPath) >> idText;
+            if (!in || (idText != "-" && !AssetHandle::Parse(idText, &dialogue.assetId))) {
+                if(error)*error="Runtime scene contains an invalid dialogue record.";return false;
+            }
+            loaded.dialogues.push_back(std::move(dialogue));continue;
+        }
+        if(recordType=="inventory"&&version>=110){Scene::InventoryDesc inventory;in>>std::quoted(inventory.entityName)>>inventory.maximumSlots>>inventory.maximumWeight;if(!in){if(error)*error="Runtime scene contains an invalid inventory record.";return false;}loaded.inventories.push_back(std::move(inventory));continue;}
+        if(recordType=="inventory_item"&&version>=110){Scene::InventoryItemDesc item;std::string idText;in>>std::quoted(item.entityName)>>std::quoted(item.assetPath)>>idText>>item.count>>item.equipped;if(!in||(idText!="-"&&!AssetHandle::Parse(idText,&item.assetId))){if(error)*error="Runtime scene contains an invalid inventory item record.";return false;}loaded.inventoryItems.push_back(std::move(item));continue;}
         if(recordType=="post_process_volume"&&version>=102){
             EntityDesc desc;desc.primitive="Empty";ecs::PostProcessVolume v;std::string id;
             record>>std::quoted(desc.name)>>desc.position.x>>desc.position.y>>desc.position.z
@@ -1955,6 +2000,26 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                 }
             }
         }
+        for (Scene::InteractionDesc& interaction : loaded.interactions) {
+            if (!interaction.assetId.Valid()) continue;
+            const std::string resolved = ResolveAssetReference(
+                &assetRegistry, contentRoot,
+                {interaction.assetId, interaction.assetPath}, AssetType::Interaction);
+            if (!resolved.empty()) interaction.assetPath = resolved;
+        }
+        for (Scene::PortalDesc& portal : loaded.portals) {
+            if (!portal.assetId.Valid()) continue;
+            const std::string resolved = ResolveAssetReference(
+                &assetRegistry, contentRoot, {portal.assetId, portal.assetPath}, AssetType::Portal);
+            if (!resolved.empty()) portal.assetPath = resolved;
+        }
+        for (Scene::QuestDesc& quest : loaded.quests) {
+            if(!quest.assetId.Valid())continue;const std::string resolved=ResolveAssetReference(&assetRegistry,contentRoot,{quest.assetId,quest.assetPath},AssetType::Quest);if(!resolved.empty())quest.assetPath=resolved;
+        }
+        for (Scene::DialogueDesc& dialogue : loaded.dialogues) {
+            if(!dialogue.assetId.Valid())continue;const std::string resolved=ResolveAssetReference(&assetRegistry,contentRoot,{dialogue.assetId,dialogue.assetPath},AssetType::Dialogue);if(!resolved.empty())dialogue.assetPath=resolved;
+        }
+        for(Scene::InventoryItemDesc& item:loaded.inventoryItems){if(!item.assetId.Valid())continue;const std::string resolved=ResolveAssetReference(&assetRegistry,contentRoot,{item.assetId,item.assetPath},AssetType::Item);if(!resolved.empty())item.assetPath=resolved;}
     }
 
     *scene = loaded;
@@ -2255,6 +2320,49 @@ bool RuntimeSceneLoader::Instantiate(const Scene &scene, ecs::Registry &registry
             created->push_back(entity);
         }
     }
+
+    if (!scene.gameMode.playerObjectName.empty()) {
+        registry.view<ecs::RuntimeName>().each([&](ecs::Entity entity, ecs::RuntimeName& name) {
+            if (name.value == scene.gameMode.playerObjectName)
+                registry.Add<PortalTravelerComponent>(entity, {});
+        });
+    }
+
+    for (const Scene::InteractionDesc& desc : scene.interactions) {
+        ecs::Entity target = ecs::kNull;
+        registry.view<ecs::RuntimeName>().each(
+            [&](ecs::Entity entity, ecs::RuntimeName& name) {
+                if (target == ecs::kNull && name.value == desc.entityName) target = entity;
+            });
+        if (target == ecs::kNull) {
+            if (error) *error = "Interaction target was not found: " + desc.entityName;
+            return false;
+        }
+        std::string interactionError;
+        if (!ConfigureInteractiveMotion(registry, target, desc.assetPath, &interactionError)) {
+            if (error) *error = "Could not configure interaction '" + desc.entityName + "': " + interactionError;
+            return false;
+        }
+    }
+    for (const Scene::PortalDesc& desc : scene.portals) {
+        ecs::Entity target = ecs::kNull;
+        registry.view<ecs::RuntimeName>().each([&](ecs::Entity entity, ecs::RuntimeName& name) {
+            if (target == ecs::kNull && name.value == desc.entityName) target = entity;
+        });
+        if (target == ecs::kNull) {
+            if (error) *error = "Portal target was not found: " + desc.entityName;
+            return false;
+        }
+        std::string portalError;
+        if (!ConfigurePortal(registry, target, desc.assetPath, &portalError)) {
+            if (error) *error = "Could not configure portal '" + desc.entityName + "': " + portalError;
+            return false;
+        }
+    }
+    for(const Scene::QuestDesc& desc:scene.quests){ecs::Entity target=ecs::kNull;registry.view<ecs::RuntimeName>().each([&](ecs::Entity entity,ecs::RuntimeName& name){if(target==ecs::kNull&&name.value==desc.entityName)target=entity;});if(target==ecs::kNull){if(error)*error="Quest owner was not found: "+desc.entityName;return false;}std::string questError;if(!GrantQuest(registry,target,desc.assetPath,&questError)){if(error)*error="Could not grant quest to '"+desc.entityName+"': "+questError;return false;}}
+    for(const Scene::DialogueDesc& desc:scene.dialogues){ecs::Entity target=ecs::kNull;registry.view<ecs::RuntimeName>().each([&](ecs::Entity entity,ecs::RuntimeName& name){if(target==ecs::kNull&&name.value==desc.entityName)target=entity;});if(target==ecs::kNull){if(error)*error="Dialogue source was not found: "+desc.entityName;return false;}std::string dialogueError;if(!ConfigureDialogueSource(registry,target,desc.assetPath,&dialogueError)){if(error)*error="Could not configure dialogue on '"+desc.entityName+"': "+dialogueError;return false;}}
+    for(const Scene::InventoryDesc& desc:scene.inventories){ecs::Entity target=ecs::kNull;registry.view<ecs::RuntimeName>().each([&](ecs::Entity entity,ecs::RuntimeName& name){if(target==ecs::kNull&&name.value==desc.entityName)target=entity;});if(target==ecs::kNull){if(error)*error="Inventory owner was not found: "+desc.entityName;return false;}auto* inventory=registry.TryGet<InventoryComponent>(target);if(!inventory)inventory=&registry.Add<InventoryComponent>(target,{});inventory->maximumSlots=std::max(desc.maximumSlots,1);inventory->maximumWeight=std::max(desc.maximumWeight,0.0f);}
+    for(const Scene::InventoryItemDesc& desc:scene.inventoryItems){ecs::Entity target=ecs::kNull;registry.view<ecs::RuntimeName>().each([&](ecs::Entity entity,ecs::RuntimeName& name){if(target==ecs::kNull&&name.value==desc.entityName)target=entity;});std::string itemError;if(target==ecs::kNull||!AddItem(registry,target,desc.assetPath,desc.count,&itemError)){if(error)*error=!itemError.empty()?itemError:"Could not load inventory item on '"+desc.entityName+"'.";return false;}if(desc.equipped)EquipItem(registry,target,desc.assetPath);}
 
     for (const Scene::FoliageDesc& desc : scene.foliage) {
         const ecs::Entity entity = registry.Create();

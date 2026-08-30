@@ -488,9 +488,18 @@ void main() {
         vec3 F = FresnelSchlickRough(max(dot(N,V),0.0), F0, roughness);
         vec3 kD = (vec3(1.0)-F)*(1.0-metallic);
         vec3 globalIrradiance = texture(uIrradiance, indirectN).rgb * uGlobalIblIntensity;
-        vec3 irradiance = globalIrradiance;
-        irradiance = mix(irradiance, localProbe.irradiance,
-                         localProbe.validity * clamp(uLocalProbeInfluence, 0.0, 1.0));
+        // Global sky reaches a surface only where the sky is actually visible. The local
+        // probe SH already integrates bounced light AND sky-through-openings (enclosure is
+        // baked in by the probe's miss-ray environment sampling), so probe validity is
+        // treated as CONFIDENCE in the probe, never as an indoor/outdoor factor. Where the
+        // probe is confident we use it directly; elsewhere we fall back to the
+        // sky-visibility-gated global term. The sky is thus never counted twice, and
+        // shadowed enclosed surfaces stop being dominated by the blue outdoor environment.
+        float skyGate = (uSkylightOcclusion == 1)
+            ? mix(1.0, skyVisibility, clamp(uSkylightOcclusionStrength, 0.0, 1.0)) : 1.0;
+        vec3 skyGatedGlobal = globalIrradiance * skyGate;
+        float probeConfidence = localProbe.validity * clamp(uLocalProbeInfluence, 0.0, 1.0);
+        vec3 irradiance = mix(skyGatedGlobal, localProbe.irradiance, probeConfidence);
         vec3 diffuse = irradiance * albedo;
         vec3 R = reflect(-V, N);
         vec3 globalPrefiltered = textureLod(uPrefilter, R, roughness*uMaxReflectionLod).rgb
@@ -503,10 +512,11 @@ void main() {
         // Global sky reflections are visibility-limited; valid local probes
         // remain usable as the indoor reflection source.
         specular *= mix(specularOcclusion, 1.0, reflectionProbeWeight);
+        // Sky visibility is already applied to the global term (skyGatedGlobal) above and
+        // the probe bakes in enclosure, so there is no second occlusion multiply here —
+        // that previously double-darkened valid probes and left the blue global term as the
+        // dominant fill in shadow.
         vec3 diffuseAmbient = kD * diffuse * ao * screenAo;
-        if (uSkylightOcclusion == 1)
-            diffuseAmbient *= mix(1.0, skyVisibility,
-                                  clamp(uSkylightOcclusionStrength, 0.0, 1.0));
         diffuseIndirect = diffuseAmbient;
         specularIndirect = specular;
         ambient = diffuseIndirect + specularIndirect;
@@ -580,6 +590,14 @@ void main() {
     else if (uLightingDebugMode == 27) {
         float h = fract(float(max(uMaterialSlotDebug, 0)) * 0.61803398875);
         color = 0.55 + 0.45 * cos(6.2831853 * (h + vec3(0.0, 0.333, 0.667)));
+    }
+    else if (uLightingDebugMode == 28) {
+        // PCSS filter-radius heat map: blue = contact (near-zero penumbra),
+        // green = mid, red = wide penumbra. Verifies contact shadows stay tight.
+        float fr = (uSunShadow == 1) ? DirectionalFilterRadiusDebug(sunNdotL, N) : 0.0;
+        color = vec3(clamp(fr * 2.0, 0.0, 1.0),
+                     clamp(1.0 - abs(fr - 0.5) * 2.0, 0.0, 1.0),
+                     clamp(1.0 - fr * 2.0, 0.0, 1.0));
     }
 
     if (uFogEnabled == 1 && uLightingDebugMode == 0) {
@@ -745,7 +763,7 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
     m_pbr->SetMat4("uView", view);
     m_pbr->SetFloat("uShadowSoftness", opt.shadowSoftness);
     m_pbr->SetInt("uShadowBlockerSamples", std::clamp(opt.shadowBlockerSamples, 4, 16));
-    m_pbr->SetInt("uShadowFilterSamples", std::clamp(opt.shadowFilterSamples, 6, 24));
+    m_pbr->SetInt("uShadowFilterSamples", std::clamp(opt.shadowFilterSamples, 6, 32));
     m_pbr->SetInt("uSunShadow", sunShadowEnabled ? 1 : 0);
     static constexpr const char* kCascadeVpNames[] = {"uCascadeVP[0]", "uCascadeVP[1]", "uCascadeVP[2]", "uCascadeVP[3]"};
     static constexpr const char* kCascadeSplitNames[] = {"uCascadeSplits[0]", "uCascadeSplits[1]", "uCascadeSplits[2]", "uCascadeSplits[3]"};

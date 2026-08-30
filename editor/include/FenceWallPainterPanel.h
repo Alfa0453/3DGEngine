@@ -38,5 +38,5 @@ private:
     std::string m_pendingOpen;
     std::string m_splineName;
     std::string m_status;
-    bool m_dirty = true;
+    bool m_dirty = false;   // untouched panel has no unsaved changes (born-dirty was a bug)
 };

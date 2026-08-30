@@ -152,12 +152,17 @@ const char* AssetTypeName(AssetType type) {
         case AssetType::Cave: return "Cave / Tunnel";
         case AssetType::FenceWall: return "Fence / Wall";
         case AssetType::Destruction: return "Destruction";
+        case AssetType::Interaction: return "Interaction";
+        case AssetType::Portal: return "Portal";
+        case AssetType::Quest: return "Quest";
+        case AssetType::Dialogue: return "Dialogue";
+        case AssetType::Item: return "Item";
     }
     return "Unknown";
 }
 
 bool IsKnownAssetType(AssetType type) {
-    return type > AssetType::Unknown && type <= AssetType::Destruction;
+    return type > AssetType::Unknown && type <= AssetType::Item;
 }
 
 const char* NativeAssetExtension(AssetType type) {

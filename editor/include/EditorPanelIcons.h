@@ -68,6 +68,11 @@ inline const char* ForPanel(EditorPanels::Panel panel) {
     case P::CaveTunnel: return Link;
     case P::FenceWallPainter: return Edit;
     case P::DestructionAuthoring: return Settings;
+    case P::InteractionAuthoring: return Link;
+    case P::PortalAuthoring: return World;
+    case P::QuestEditor: return Document;
+    case P::DialogueEditor: return Document;
+    case P::InventoryItemEditor: return Star;
     case P::Count: break;
     }
     return Document;

@@ -71,6 +71,11 @@ add_library(engine STATIC
     src/assets/CaveAsset.cpp
     src/assets/FenceWallAsset.cpp
     src/assets/DestructionAsset.cpp
+    src/assets/InteractionAsset.cpp
+    src/assets/PortalAsset.cpp
+    src/assets/QuestAsset.cpp
+    src/assets/DialogueAsset.cpp
+    src/assets/ItemAsset.cpp
     src/assets/TerrainAsset.cpp
     src/assets/TextureAsset.cpp
     src/assets/ForgeMaterialImporter.cpp
@@ -118,6 +123,11 @@ add_library(engine STATIC
     src/gameplay/RagdollSystem.cpp
     src/gameplay/AbilitySystem.cpp
     src/gameplay/DestructionSystem.cpp
+    src/gameplay/InteractionSystem.cpp
+    src/gameplay/PortalSystem.cpp
+    src/gameplay/QuestSystem.cpp
+    src/gameplay/DialogueSystem.cpp
+    src/gameplay/InventorySystem.cpp
     src/gameplay/GameMode.cpp
     src/gameplay/Script.cpp
     src/gameplay/LuaScript.cpp

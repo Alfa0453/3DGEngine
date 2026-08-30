@@ -324,6 +324,46 @@ protected:
     float DestructibleHealth() const;
     bool IsDestructibleBroken() const;
     bool WasDestructionEvent(const std::string& eventName);
+    bool OpenInteraction(ecs::Entity target = ecs::kNull,
+                         const std::string& accessTag = {});
+    bool CloseInteraction(ecs::Entity target = ecs::kNull);
+    bool ToggleInteraction(ecs::Entity target = ecs::kNull,
+                           const std::string& accessTag = {});
+    bool SetInteractionLocked(bool locked, ecs::Entity target = ecs::kNull);
+    std::string InteractionState(ecs::Entity target = ecs::kNull) const;
+    bool UsePortal(ecs::Entity portal, const std::string& accessTag = {});
+    bool IsPortalReady(ecs::Entity portal) const;
+    bool GrantQuest(const std::string& assetPath);
+    bool StartQuest(const std::string& questName);
+    bool AdvanceQuest(const std::string& questName,const std::string& objectiveId,int amount=1);
+    bool FailQuest(const std::string& questName);
+    bool SetQuestFlag(const std::string& flag,bool value);
+    std::string QuestState(const std::string& questName) const;
+    int QuestProgress(const std::string& questName,const std::string& objectiveId) const;
+    std::string SaveQuestState() const;
+    bool LoadQuestState(const std::string& data);
+    bool StartDialogue(const std::string& assetPath);
+    bool StartDialogue(ecs::Entity source);
+    bool ChooseDialogue(int choiceIndex);
+    bool ContinueDialogue();
+    bool CancelDialogue();
+    bool SetDialogueFlag(const std::string& flag,bool value);
+    bool IsDialogueActive() const;
+    std::string DialogueNode() const;
+    std::string DialogueText() const;
+    std::string DialogueSpeaker() const;
+    std::string SaveDialogueState() const;
+    bool LoadDialogueState(const std::string& data);
+    bool AddItem(const std::string& assetPath,int count=1);
+    int RemoveItem(const std::string& itemName,int count=1);
+    bool UseItem(const std::string& itemName);
+    bool EquipItem(const std::string& itemName);
+    bool UnequipItemSlot(int slot);
+    int ItemCount(const std::string& itemName) const;
+    bool HasItem(const std::string& itemName,int count=1) const;
+    float InventoryWeight() const;
+    std::string SaveInventory() const;
+    bool LoadInventory(const std::string& data);
     int SplinePointCount(ecs::Entity spline) const;
     bool IsSplineClosed(ecs::Entity spline) const;
     bool SetSplineClosed(ecs::Entity spline, bool closed);
@@ -987,6 +1027,7 @@ void SetScriptErrorHandler(std::function<void(const std::string&)> handler);
 // Scene requests are queued by scripts and consumed by the runtime host after the
 // current script update, avoiding registry destruction from inside a callback.
 std::string ConsumeScriptSceneLoadRequest();
+void QueueScriptSceneLoadRequest(const std::string& runtimeScenePath);
 
 struct ScriptLevelStreamRequest {
     std::string level;

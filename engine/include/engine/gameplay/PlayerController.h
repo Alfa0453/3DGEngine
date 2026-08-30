@@ -8,6 +8,7 @@
 #include <optional>
 
 namespace engine {
+class PhysicsWorld;
 namespace ecs { class Registry; }
 
 // Per-frame intent for the player, filled by the caller from whatever input
@@ -147,7 +148,7 @@ public:
     // capsule against the scene colliders in `reg`. Set movementEnabled=false while
     // a full-body animation action is active; look/view controls and gravity remain.
     void Update(ecs::Registry& reg, const PlayerInput& in, float dt,
-                bool movementEnabled = true);
+                bool movementEnabled = true, const PhysicsWorld* physicsWorld = nullptr);
 
     // --- Queries for rendering -------------------------------------------
     float Yaw()   const { return m_yaw; }

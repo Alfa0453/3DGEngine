@@ -23,7 +23,11 @@ class CascadedShadow {
 public:
     static constexpr int kCascades = 4;
 
-    explicit CascadedShadow(int size = 2048);
+    // 4096 per-cascade: at 2048 a close caster's silhouette only spanned a few hundred
+    // texels, so its shadow edge was visibly stair-stepped. Quadrupling texel density
+    // (~256 MB for the 4-layer 32F array) is the single biggest reduction in silhouette
+    // jaggedness short of virtual shadow maps.
+    explicit CascadedShadow(int size = 4096);
     ~CascadedShadow();
 
     CascadedShadow(const CascadedShadow&)            = delete;

@@ -73,7 +73,7 @@ public:
         bool        forceDirectionalShadowUpdate = false; // editor diagnostic
         float       shadowSoftness = 2.5f; // PCSS sun-shadow softness (light size)
         int         shadowBlockerSamples = 16;
-        int         shadowFilterSamples = 24;
+        int         shadowFilterSamples = 32;
         int         maxShadowedLocalLights = 4;
         // How far from the camera the sun's cascaded shadows reach (view units).
         // Beyond this, geometry no longer casts/receives sun shadows -- raise it if

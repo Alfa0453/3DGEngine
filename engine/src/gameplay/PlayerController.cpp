@@ -59,7 +59,7 @@ glm::quat PlayerController::Facing() const {
 }
 
 void PlayerController::Update(ecs::Registry& reg, const PlayerInput& in, float dt,
-                              bool movementEnabled) {
+                              bool movementEnabled, const PhysicsWorld* physicsWorld) {
     if (in.toggleShoulder && !m_prevShoulderToggle && view == View::ThirdPerson) {
         ToggleShoulder();
     }
@@ -75,15 +75,15 @@ void PlayerController::Update(ecs::Registry& reg, const PlayerInput& in, float d
     m_swimming = m_overWater && feetY <= (m_swimming
         ? swimExitHeight : m_waterSurfaceY + 0.05f);
     if (m_swimming) {
-        if (body.height < m_standingHeight) body.TrySetHeight(reg, m_standingHeight);
+        if (body.height < m_standingHeight) body.TrySetHeight(reg, m_standingHeight, physicsWorld);
         m_crouching = false;
     } else if (in.crouch) {
         const float target = glm::clamp(crouchedHeight,
             body.radius * 2.0f, m_standingHeight);
-        body.TrySetHeight(reg, target);
+        body.TrySetHeight(reg, target, physicsWorld);
         m_crouching = body.height < m_standingHeight - 0.001f;
     } else if (m_crouching) {
-        if (body.TrySetHeight(reg, m_standingHeight)) m_crouching = false;
+        if (body.TrySetHeight(reg, m_standingHeight, physicsWorld)) m_crouching = false;
     }
     const float desiredShoulder = shoulderCamera
         ? (rightShoulder ? 1.0f : -1.0f) * std::max(shoulderOffset, 0.0f)
@@ -197,7 +197,7 @@ void PlayerController::Update(ecs::Registry& reg, const PlayerInput& in, float d
     const glm::vec3 preMovePosition = body.position;
     const bool preMoveGrounded = body.grounded;
     if (m_swimming) {
-        body.MoveFree(reg, wishVel, dt);
+        body.MoveFree(reg, wishVel, dt, physicsWorld);
         // Keep the character close enough to the surface to remain visibly in
         // the water without allowing repeated Space input to fly above it.
         const float maxCentre = m_waterSurfaceY
@@ -207,7 +207,7 @@ void PlayerController::Update(ecs::Registry& reg, const PlayerInput& in, float d
             body.velocity.y = std::min(body.velocity.y, 0.0f);
         }
     } else {
-        body.Move(reg, wishVel, dt);
+        body.Move(reg, wishVel, dt, physicsWorld);
     }
     const float stepRise = body.position.y - preMovePosition.y;
     if (preMoveGrounded && body.grounded

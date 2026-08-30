@@ -53,6 +53,9 @@
       <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\destruction_asset_tests.exe</FullPath>
     </ProjectOutput>
     <ProjectOutput>
+      <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\dialogue_system_tests.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
       <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\directional_shadow_shader_tests.exe</FullPath>
     </ProjectOutput>
     <ProjectOutput>
@@ -80,6 +83,12 @@
       <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\image_decode_tests.exe</FullPath>
     </ProjectOutput>
     <ProjectOutput>
+      <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\interaction_asset_tests.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\inventory_system_tests.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
       <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\level_instance_tests.exe</FullPath>
     </ProjectOutput>
     <ProjectOutput>
@@ -104,10 +113,16 @@
       <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\player.exe</FullPath>
     </ProjectOutput>
     <ProjectOutput>
+      <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\portal_asset_tests.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
       <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\procedural_building_tests.exe</FullPath>
     </ProjectOutput>
     <ProjectOutput>
       <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\project_script_tools_tests.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\quest_system_tests.exe</FullPath>
     </ProjectOutput>
     <ProjectOutput>
       <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\ragdoll_asset_tests.exe</FullPath>

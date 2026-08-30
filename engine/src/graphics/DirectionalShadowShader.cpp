@@ -10,38 +10,25 @@ constexpr std::string_view kMarker = "//__DIRECTIONAL_SHADOW_IMPLEMENTATION__";
 
 constexpr std::string_view kDirectionalShadowGlsl = R"GLSL(
 const int DIRECTIONAL_BLOCKER_SAMPLES = 16;
-const int DIRECTIONAL_FILTER_SAMPLES = 24;
+const int DIRECTIONAL_FILTER_SAMPLES = 32;
 
-// Irregular unit-disk samples. The centre sample preserves contact detail and
-// the remaining points avoid the repeated square clusters of the former 5x5 grid.
-const vec2 DIRECTIONAL_POISSON[24] = vec2[](
-    vec2( 0.000000,  0.000000), vec2(-0.613392,  0.617481),
-    vec2( 0.170019, -0.040254), vec2(-0.299417,  0.791925),
-    vec2( 0.645680,  0.493210), vec2(-0.651784,  0.717887),
-    vec2( 0.421003,  0.027070), vec2(-0.817194, -0.271096),
-    vec2(-0.705374, -0.668203), vec2( 0.977050, -0.108615),
-    vec2( 0.063326,  0.142369), vec2( 0.203528,  0.214331),
-    vec2(-0.667531,  0.326090), vec2(-0.098422, -0.295755),
-    vec2(-0.885922,  0.215369), vec2( 0.566637,  0.605213),
-    vec2( 0.039766, -0.396100), vec2( 0.751946,  0.453352),
-    vec2( 0.078707, -0.715323), vec2(-0.075838, -0.529344),
-    vec2( 0.724479, -0.580798), vec2( 0.222999, -0.215125),
-    vec2(-0.467574, -0.405438), vec2(-0.248268, -0.814753)
-);
-
-float DirectionalShadowHash(vec2 p) {
-    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+// Interleaved gradient noise (Jimenez 2014): a per-SCREEN-PIXEL value in [0,1). The old
+// kernel rotated its sample disk per shadow-map texel, so the rotation was constant across
+// every screen pixel a magnified shadow texel covered and its jumps read as coarse blocks.
+// Rotating per screen pixel instead turns that into a fine, even grain -- far less
+// objectionable, and exactly the residual a temporal (TAA) pass would later resolve to
+// perfectly smooth.
+float DirectionalIGN(vec2 pixel) {
+    return fract(52.9829189 * fract(dot(pixel, vec2(0.06711056, 0.00583715))));
 }
 
-mat2 DirectionalShadowRotation(vec2 uv, int layer) {
-    // Hash the stabilized shadow-map texel, not the frame number. The pattern
-    // therefore remains fixed in light space while the camera moves.
-    vec2 mapSize = vec2(textureSize(uCascadeMaps, 0).xy);
-    vec2 stableCell = floor(uv * mapSize);
-    float angle = DirectionalShadowHash(stableCell + vec2(37.0, 101.0) * float(layer))
-                * 6.28318530718;
-    float c = cos(angle), s = sin(angle);
-    return mat2(c, -s, s, c);
+// Vogel disk: `count` points spiralling out on the golden angle for a near-uniform,
+// blue-noise-like distribution at ANY sample count -- much smoother penumbrae than a fixed
+// Poisson set of the same size. `phi` rotates the whole spiral (per-pixel, from IGN above).
+vec2 DirectionalDiskSample(int i, int count, float phi) {
+    float r = sqrt((float(i) + 0.5) / float(count));
+    float theta = float(i) * 2.39996323 + phi;   // 2.39996323 = golden angle (radians)
+    return r * vec2(cos(theta), sin(theta));
 }
 
 vec2 ClampDirectionalShadowUv(vec2 uv) {
@@ -70,16 +57,23 @@ float BilinearShadowCompare(vec2 uv, int layer, float receiverDepth) {
 
 float DirectionalReceiverBias(int layer, float NdotL) {
     float slope = clamp(1.0 - NdotL, 0.0, 1.0);
+    // Slope-scaled depth bias. Faces nearly parallel to the sun (grazing, slope->1 --
+    // the cube's vertical sides) have a huge depth gradient across one shadow texel, so
+    // they self-shadow into vertical acne streaks unless the bias grows steeply. The
+    // grazing multiplier and ceiling are raised so those faces stop striping; flat faces
+    // (slope->0) keep a tight bias so contact shadows stay attached.
     float worldBias = max(uCascadeWorldTexelSize[layer], 0.000001)
-                    * mix(0.35, 1.25, slope);
-    worldBias = clamp(worldBias, 0.00025, 0.025);
+                    * mix(0.4, 2.75, slope);
+    worldBias = clamp(worldBias, 0.00025, 0.05);
     return worldBias / max(uCascadeDepthRange[layer], 0.000001);
 }
 
 float DirectionalNormalOffset(int layer, float NdotL) {
     float slope = clamp(1.0 - NdotL, 0.0, 1.0);
+    // Push the receiver sample off the surface along its normal, more at grazing angles.
+    // Kept more modest than the depth bias above so contact edges do not light-leak.
     return clamp(max(uCascadeWorldTexelSize[layer], 0.000001)
-                 * mix(0.45, 1.35, slope), 0.00025, 0.025);
+                 * mix(0.5, 1.8, slope), 0.00025, 0.035);
 }
 
 float SampleDirectionalCascade(vec3 worldPosition, vec3 normal, float NdotL,
@@ -96,14 +90,18 @@ float SampleDirectionalCascade(vec3 worldPosition, vec3 normal, float NdotL,
     float receiverDepth = projected.z;
     float bias = DirectionalReceiverBias(layer, NdotL);
     vec2 texel = 1.0 / vec2(textureSize(uCascadeMaps, 0).xy);
-    mat2 rotation = DirectionalShadowRotation(projected.xy, layer);
+    // Per-pixel spiral rotation; +layer decorrelates the cascades at their overlap.
+    float sampleAngle = DirectionalIGN(gl_FragCoord.xy) * 6.28318530718 + float(layer);
 
     // Keep the blocker footprint approximately constant in world space. A
     // minimum sub-texel footprint is retained for the coarser far cascades.
     float softness = clamp(uShadowSoftness, 0.1, 12.0);
     float worldTexel = max(uCascadeWorldTexelSize[layer], 0.000001);
     float referenceWorldTexel = max(uCascadeWorldTexelSize[0], 0.000001);
-    float searchRadius = clamp(softness * referenceWorldTexel / worldTexel, 0.75, 4.0);
+    // No forced-large minimum: near-contact receivers search a tight footprint so the
+    // penumbra estimate can collapse toward zero. A small floor keeps the blocker estimate
+    // stable on the coarse far cascades without inflating contact shadows.
+    float searchRadius = clamp(softness * referenceWorldTexel / worldTexel, 0.35, 4.0);
 
     float blockerSum = 0.0;
     int blockerCount = 0;
@@ -111,7 +109,7 @@ float SampleDirectionalCascade(vec3 worldPosition, vec3 normal, float NdotL,
                                DIRECTIONAL_BLOCKER_SAMPLES);
     for (int i = 0; i < DIRECTIONAL_BLOCKER_SAMPLES; ++i) {
         if (i >= blockerSamples) break;
-        vec2 offset = rotation * DIRECTIONAL_POISSON[i] * texel * searchRadius;
+        vec2 offset = DirectionalDiskSample(i, blockerSamples, sampleAngle) * texel * searchRadius;
         vec2 sampleUv = ClampDirectionalShadowUv(projected.xy + offset);
         float sampleDepth = texture(uCascadeMaps, vec3(sampleUv, float(layer))).r;
         if (sampleDepth < receiverDepth - bias) {
@@ -124,19 +122,28 @@ float SampleDirectionalCascade(vec3 worldPosition, vec3 normal, float NdotL,
     float averageBlockerDepth = blockerSum / float(blockerCount);
     // Orthographic cascade depth is linear. Convert the normalized separation
     // back into world units before expressing the penumbra in cascade texels.
-    // 0.010 is the directional light angular-size mapping for the existing
-    // 0.1..12 softness control; it replaces the aggressive arbitrary x300 step.
+    // 0.014 is the directional light angular-size mapping for the existing 0.1..12
+    // softness control. Raised from 0.010 so the penumbra widens a little faster with
+    // blocker/receiver separation: the shadow's outer edge (large separation) gets soft
+    // enough to hide shadow-texel silhouette stair-stepping, while the contact line
+    // (separation ~0) is unaffected and stays crisp.
     float receiverDistanceWorld = max(receiverDepth - averageBlockerDepth, 0.0)
                                 * max(uCascadeDepthRange[layer], 0.000001);
-    float penumbraWorld = receiverDistanceWorld * softness * 0.010;
-    float filterRadius = clamp(penumbraWorld / worldTexel, 0.75, 10.0);
+    float penumbraWorld = receiverDistanceWorld * softness * 0.014;
+    // A small minimum radius (~1 texel) keeps the Vogel taps spread over at least a 2x2
+    // texel area so the per-tap BilinearShadowCompare has something to anti-alias, giving a
+    // clean contact line instead of a single hard-compared texel. Penumbra grows physically
+    // above the floor with blocker/receiver separation up to the cap.
+    float filterRadius = clamp(penumbraWorld / worldTexel, 1.0, 10.0);
 
     float shadow = 0.0;
-    int filterSamples = clamp(uShadowFilterSamples - layer * 3, 6,
+    // Full per-cascade sample budget (up to 32) so the Vogel disk resolves smoothly; the
+    // farther cascades step down a little since their penumbrae cover fewer screen pixels.
+    int filterSamples = clamp(uShadowFilterSamples - layer * 3, 8,
                               DIRECTIONAL_FILTER_SAMPLES);
     for (int i = 0; i < DIRECTIONAL_FILTER_SAMPLES; ++i) {
         if (i >= filterSamples) break;
-        vec2 offset = rotation * DIRECTIONAL_POISSON[i] * texel * filterRadius;
+        vec2 offset = DirectionalDiskSample(i, filterSamples, sampleAngle) * texel * filterRadius;
         shadow += BilinearShadowCompare(projected.xy + offset, layer,
                                         receiverDepth - bias);
     }
@@ -176,6 +183,45 @@ float ShadowFactor(float NdotL, vec3 N) {
         }
     }
     return shadow;
+}
+
+// Debug: the PCSS filter radius at this fragment, normalized over the 10-texel cap so it
+// can be drawn as a heat map. Contact regions read ~0 (small), distant receivers ~1 (wide).
+float DirectionalFilterRadiusDebug(float NdotL, vec3 N) {
+    float viewDepth = abs((uView * vec4(vWorldPos, 1.0)).z);
+    if (viewDepth > uCascadeSplits[3]) return 0.0;
+    int layer = 3;
+    for (int i = 0; i < 4; ++i) if (viewDepth < uCascadeSplits[i]) { layer = i; break; }
+    vec3 shadowWorldPos = vWorldPos + N * DirectionalNormalOffset(layer, NdotL);
+    vec4 lp = uCascadeVP[layer] * vec4(shadowWorldPos, 1.0);
+    if (abs(lp.w) < 1e-6) return 0.0;
+    vec3 projected = lp.xyz / lp.w * 0.5 + 0.5;
+    if (projected.z <= 0.0 || projected.z > 1.0
+        || any(lessThan(projected.xy, vec2(0.0)))
+        || any(greaterThan(projected.xy, vec2(1.0)))) return 0.0;
+    float receiverDepth = projected.z;
+    float bias = DirectionalReceiverBias(layer, NdotL);
+    vec2 texel = 1.0 / vec2(textureSize(uCascadeMaps, 0).xy);
+    float sampleAngle = DirectionalIGN(gl_FragCoord.xy) * 6.28318530718 + float(layer);
+    float softness = clamp(uShadowSoftness, 0.1, 12.0);
+    float worldTexel = max(uCascadeWorldTexelSize[layer], 0.000001);
+    float referenceWorldTexel = max(uCascadeWorldTexelSize[0], 0.000001);
+    float searchRadius = clamp(softness * referenceWorldTexel / worldTexel, 0.35, 4.0);
+    float blockerSum = 0.0; int blockerCount = 0;
+    int blockerSamples = clamp(uShadowBlockerSamples - layer * 2, 4, DIRECTIONAL_BLOCKER_SAMPLES);
+    for (int i = 0; i < DIRECTIONAL_BLOCKER_SAMPLES; ++i) {
+        if (i >= blockerSamples) break;
+        vec2 offset = DirectionalDiskSample(i, blockerSamples, sampleAngle) * texel * searchRadius;
+        float d = texture(uCascadeMaps,
+            vec3(ClampDirectionalShadowUv(projected.xy + offset), float(layer))).r;
+        if (d < receiverDepth - bias) { blockerSum += d; ++blockerCount; }
+    }
+    if (blockerCount == 0) return 0.0;
+    float avgBlocker = blockerSum / float(blockerCount);
+    float receiverDistanceWorld = max(receiverDepth - avgBlocker, 0.0)
+                                * max(uCascadeDepthRange[layer], 0.000001);
+    float penumbraWorld = receiverDistanceWorld * softness * 0.010;
+    return clamp(penumbraWorld / worldTexel, 0.0, 10.0) / 10.0;
 }
 
 int DirectionalCascadeIndex(vec3 worldPosition) {

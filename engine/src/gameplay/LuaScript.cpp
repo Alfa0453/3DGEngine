@@ -464,6 +464,43 @@ void LuaScript::RegisterEngineApi() {
         {"SetScale", ApiSetScale},
         {"GetForward", ApiGetForward},
         {"FindObject", ApiFindObject},
+        {"OpenInteraction", ApiOpenInteraction},
+        {"CloseInteraction", ApiCloseInteraction},
+        {"ToggleInteraction", ApiToggleInteraction},
+        {"SetInteractionLocked", ApiSetInteractionLocked},
+        {"InteractionState", ApiInteractionState},
+        {"UsePortal", ApiUsePortal},
+        {"IsPortalReady", ApiIsPortalReady},
+        {"GrantQuest", ApiGrantQuest},
+        {"StartQuest", ApiStartQuest},
+        {"AdvanceQuest", ApiAdvanceQuest},
+        {"FailQuest", ApiFailQuest},
+        {"SetQuestFlag", ApiSetQuestFlag},
+        {"QuestState", ApiQuestState},
+        {"QuestProgress", ApiQuestProgress},
+        {"SaveQuestState", ApiSaveQuestState},
+        {"LoadQuestState", ApiLoadQuestState},
+        {"StartDialogue", ApiStartDialogue},
+        {"ChooseDialogue", ApiChooseDialogue},
+        {"ContinueDialogue", ApiContinueDialogue},
+        {"CancelDialogue", ApiCancelDialogue},
+        {"SetDialogueFlag", ApiSetDialogueFlag},
+        {"IsDialogueActive", ApiIsDialogueActive},
+        {"DialogueNode", ApiDialogueNode},
+        {"DialogueText", ApiDialogueText},
+        {"DialogueSpeaker", ApiDialogueSpeaker},
+        {"SaveDialogueState", ApiSaveDialogueState},
+        {"LoadDialogueState", ApiLoadDialogueState},
+        {"AddItem", ApiAddItem},
+        {"RemoveItem", ApiRemoveItem},
+        {"UseItem", ApiUseItem},
+        {"EquipItem", ApiEquipItem},
+        {"UnequipItemSlot", ApiUnequipItemSlot},
+        {"ItemCount", ApiItemCount},
+        {"HasItem", ApiHasItem},
+        {"InventoryWeight", ApiInventoryWeight},
+        {"SaveInventory", ApiSaveInventory},
+        {"LoadInventory", ApiLoadInventory},
         {"SplinePointCount", ApiSplinePointCount},
         {"GetSplinePoint", ApiGetSplinePoint},
         {"SetSplinePoint", ApiSetSplinePoint},
@@ -809,6 +846,76 @@ int LuaScript::ApiFindObject(lua_State* state) {
     else lua_pushinteger(state, static_cast<lua_Integer>(entity));
     return 1;
 }
+
+int LuaScript::ApiOpenInteraction(lua_State* state) {
+    LuaScript* script=Current(state);ecs::Entity target=script->Self();
+    if(lua_gettop(state)>=1&&!lua_isnil(state,1))target=script->FindObject(luaL_checkstring(state,1));
+    const char* tag=lua_gettop(state)>=2?luaL_checkstring(state,2):"";
+    lua_pushboolean(state,script->OpenInteraction(target,tag));return 1;
+}
+int LuaScript::ApiCloseInteraction(lua_State* state) {
+    LuaScript* script=Current(state);ecs::Entity target=script->Self();
+    if(lua_gettop(state)>=1&&!lua_isnil(state,1))target=script->FindObject(luaL_checkstring(state,1));
+    lua_pushboolean(state,script->CloseInteraction(target));return 1;
+}
+int LuaScript::ApiToggleInteraction(lua_State* state) {
+    LuaScript* script=Current(state);ecs::Entity target=script->Self();
+    if(lua_gettop(state)>=1&&!lua_isnil(state,1))target=script->FindObject(luaL_checkstring(state,1));
+    const char* tag=lua_gettop(state)>=2?luaL_checkstring(state,2):"";
+    lua_pushboolean(state,script->ToggleInteraction(target,tag));return 1;
+}
+int LuaScript::ApiSetInteractionLocked(lua_State* state) {
+    LuaScript* script=Current(state);ecs::Entity target=script->Self();
+    if(lua_gettop(state)>=1&&!lua_isnil(state,1))target=script->FindObject(luaL_checkstring(state,1));
+    const bool locked=lua_toboolean(state,2)!=0;
+    lua_pushboolean(state,script->SetInteractionLocked(locked,target));return 1;
+}
+int LuaScript::ApiInteractionState(lua_State* state) {
+    LuaScript* script=Current(state);ecs::Entity target=script->Self();
+    if(lua_gettop(state)>=1&&!lua_isnil(state,1))target=script->FindObject(luaL_checkstring(state,1));
+    const std::string value=script->InteractionState(target);lua_pushlstring(state,value.c_str(),value.size());return 1;
+}
+int LuaScript::ApiUsePortal(lua_State* state) {
+    LuaScript* script = Current(state);
+    const ecs::Entity portal = script->FindObject(luaL_checkstring(state, 1));
+    const char* tag = lua_gettop(state) >= 2 ? luaL_checkstring(state, 2) : "";
+    lua_pushboolean(state, script->UsePortal(portal, tag)); return 1;
+}
+int LuaScript::ApiIsPortalReady(lua_State* state) {
+    LuaScript* script = Current(state);
+    lua_pushboolean(state, script->IsPortalReady(script->FindObject(luaL_checkstring(state, 1))));
+    return 1;
+}
+int LuaScript::ApiGrantQuest(lua_State* s){lua_pushboolean(s,Current(s)->GrantQuest(luaL_checkstring(s,1)));return 1;}
+int LuaScript::ApiStartQuest(lua_State* s){lua_pushboolean(s,Current(s)->StartQuest(luaL_checkstring(s,1)));return 1;}
+int LuaScript::ApiAdvanceQuest(lua_State* s){lua_pushboolean(s,Current(s)->AdvanceQuest(luaL_checkstring(s,1),luaL_checkstring(s,2),static_cast<int>(luaL_optinteger(s,3,1))));return 1;}
+int LuaScript::ApiFailQuest(lua_State* s){lua_pushboolean(s,Current(s)->FailQuest(luaL_checkstring(s,1)));return 1;}
+int LuaScript::ApiSetQuestFlag(lua_State* s){lua_pushboolean(s,Current(s)->SetQuestFlag(luaL_checkstring(s,1),lua_toboolean(s,2)!=0));return 1;}
+int LuaScript::ApiQuestState(lua_State* s){const std::string v=Current(s)->QuestState(luaL_checkstring(s,1));lua_pushlstring(s,v.c_str(),v.size());return 1;}
+int LuaScript::ApiQuestProgress(lua_State* s){lua_pushinteger(s,Current(s)->QuestProgress(luaL_checkstring(s,1),luaL_checkstring(s,2)));return 1;}
+int LuaScript::ApiSaveQuestState(lua_State* s){const std::string v=Current(s)->SaveQuestState();lua_pushlstring(s,v.c_str(),v.size());return 1;}
+int LuaScript::ApiLoadQuestState(lua_State* s){lua_pushboolean(s,Current(s)->LoadQuestState(luaL_checkstring(s,1)));return 1;}
+int LuaScript::ApiStartDialogue(lua_State* s){bool ok=false;if(lua_type(s,1)==LUA_TNUMBER)ok=Current(s)->StartDialogue(static_cast<ecs::Entity>(lua_tointeger(s,1)));else ok=Current(s)->StartDialogue(luaL_checkstring(s,1));lua_pushboolean(s,ok);return 1;}
+int LuaScript::ApiChooseDialogue(lua_State* s){lua_pushboolean(s,Current(s)->ChooseDialogue(static_cast<int>(luaL_checkinteger(s,1))));return 1;}
+int LuaScript::ApiContinueDialogue(lua_State* s){lua_pushboolean(s,Current(s)->ContinueDialogue());return 1;}
+int LuaScript::ApiCancelDialogue(lua_State* s){lua_pushboolean(s,Current(s)->CancelDialogue());return 1;}
+int LuaScript::ApiSetDialogueFlag(lua_State* s){lua_pushboolean(s,Current(s)->SetDialogueFlag(luaL_checkstring(s,1),lua_toboolean(s,2)!=0));return 1;}
+int LuaScript::ApiIsDialogueActive(lua_State* s){lua_pushboolean(s,Current(s)->IsDialogueActive());return 1;}
+int LuaScript::ApiDialogueNode(lua_State* s){const auto v=Current(s)->DialogueNode();lua_pushlstring(s,v.data(),v.size());return 1;}
+int LuaScript::ApiDialogueText(lua_State* s){const auto v=Current(s)->DialogueText();lua_pushlstring(s,v.data(),v.size());return 1;}
+int LuaScript::ApiDialogueSpeaker(lua_State* s){const auto v=Current(s)->DialogueSpeaker();lua_pushlstring(s,v.data(),v.size());return 1;}
+int LuaScript::ApiSaveDialogueState(lua_State* s){const auto v=Current(s)->SaveDialogueState();lua_pushlstring(s,v.data(),v.size());return 1;}
+int LuaScript::ApiLoadDialogueState(lua_State* s){lua_pushboolean(s,Current(s)->LoadDialogueState(luaL_checkstring(s,1)));return 1;}
+int LuaScript::ApiAddItem(lua_State* s){lua_pushboolean(s,Current(s)->AddItem(luaL_checkstring(s,1),static_cast<int>(luaL_optinteger(s,2,1))));return 1;}
+int LuaScript::ApiRemoveItem(lua_State* s){lua_pushinteger(s,Current(s)->RemoveItem(luaL_checkstring(s,1),static_cast<int>(luaL_optinteger(s,2,1))));return 1;}
+int LuaScript::ApiUseItem(lua_State* s){lua_pushboolean(s,Current(s)->UseItem(luaL_checkstring(s,1)));return 1;}
+int LuaScript::ApiEquipItem(lua_State* s){lua_pushboolean(s,Current(s)->EquipItem(luaL_checkstring(s,1)));return 1;}
+int LuaScript::ApiUnequipItemSlot(lua_State* s){lua_pushboolean(s,Current(s)->UnequipItemSlot(static_cast<int>(luaL_checkinteger(s,1))));return 1;}
+int LuaScript::ApiItemCount(lua_State* s){lua_pushinteger(s,Current(s)->ItemCount(luaL_checkstring(s,1)));return 1;}
+int LuaScript::ApiHasItem(lua_State* s){lua_pushboolean(s,Current(s)->HasItem(luaL_checkstring(s,1),static_cast<int>(luaL_optinteger(s,2,1))));return 1;}
+int LuaScript::ApiInventoryWeight(lua_State* s){lua_pushnumber(s,Current(s)->InventoryWeight());return 1;}
+int LuaScript::ApiSaveInventory(lua_State* s){const auto v=Current(s)->SaveInventory();lua_pushlstring(s,v.data(),v.size());return 1;}
+int LuaScript::ApiLoadInventory(lua_State* s){lua_pushboolean(s,Current(s)->LoadInventory(luaL_checkstring(s,1)));return 1;}
 
 int LuaScript::ApiSplinePointCount(lua_State* state) {
     lua_pushinteger(state, Current(state)->SplinePointCount(

@@ -238,6 +238,14 @@ void ShadowCasterBatch::Draw(Shader &sh)
         sh.SetInt("uHasAlbedoMap", 0);
         const GLsizei stride = 16 * static_cast<GLsizei>(sizeof(float));
         for (const Record& r : m_records) {
+            // Closed meshes render their NEAR face (cull back) so contact shadows attach to
+            // the caster; flagged two-sided geometry (planes) renders both faces so thin
+            // authored surfaces still block the sun. Must match the CascadedShadow depth-pass
+            // cull (GL_BACK) -- see the second-depth/detachment note there.
+            const bool twoSided = r.mesh->TwoSided();
+            if (twoSided) glDisable(GL_CULL_FACE);
+            else { glEnable(GL_CULL_FACE); glCullFace(GL_BACK); }
+            GpuProfiler::RecordShadowDraw(twoSided);
             const int lod = r.mesh->LodForTriangleBudget(50000u);
             r.mesh->BindLod(lod);
             glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
@@ -268,6 +276,13 @@ void ShadowCasterBatch::Draw(Shader &sh)
         for (const auto& pr : m_textured) {
             sh.SetMat4("uModel", pr.model);
             const bool masked = pr.material.blendMode == ecs::PbrMaterial::BlendMode::Masked;
+            // Alpha-masked cutouts (foliage/fences/grilles) and flagged two-sided meshes
+            // must cast from both faces; other textured casters render their near face
+            // (cull back) to keep contact shadows attached -- matches CascadedShadow.
+            const bool twoSidedCaster = masked || pr.mesh->TwoSided();
+            if (twoSidedCaster) glDisable(GL_CULL_FACE);
+            else { glEnable(GL_CULL_FACE); glCullFace(GL_BACK); }
+            GpuProfiler::RecordShadowDraw(twoSidedCaster);
             sh.SetInt("uAlphaMasked", masked ? 1 : 0);
             sh.SetFloat("uAlphaCutoff", pr.material.alphaCutoff);
             sh.SetFloat("uOpacity", pr.material.opacity);

@@ -16,5 +16,5 @@ public:
 private:
     bool AssetCombo(const char*,std::string&,engine::AssetHandle&,EditorAssets&);
     void New(const std::string&root);void Preview()const;
-    engine::CaveAssetData m_cave;std::string m_path,m_pendingOpen,m_splineName,m_status;bool m_dirty=true;
+    engine::CaveAssetData m_cave;std::string m_path,m_pendingOpen,m_splineName,m_status;bool m_dirty=false;
 };

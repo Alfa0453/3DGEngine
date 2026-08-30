@@ -1,6 +1,8 @@
 #include "engine/physics/CharacterController.h"
 
 #include "engine/physics/PhysicsComponents.h"
+#include "engine/physics/PhysicsWorld.h"
+#include "engine/physics/ColliderTransform.h"
 #include "engine/ecs/Registry.h"
 #include "engine/ecs/Components.h"
 
@@ -9,6 +11,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
+#include <vector>
 
 using engine::ecs::Entity;
 using engine::ecs::Transform;
@@ -163,6 +167,37 @@ Pen CapsuleVsCollider(const glm::vec3& p0, const glm::vec3& p1, float r, const T
 
 } // namespace
 
+void CharacterController::GatherCandidates(
+    ecs::Registry& reg, const glm::vec3& p0, const glm::vec3& p1,
+    std::vector<std::pair<Transform, Collider>>& out) const {
+    out.clear();
+    // World AABB of the capsule (segment +/- radius, small margin for the step/probe slack).
+    const glm::vec3 pad(radius + 0.05f);
+    const glm::vec3 mn = glm::min(p0, p1) - pad;
+    const glm::vec3 mx = glm::max(p0, p1) + pad;
+    const auto accept = [&](Transform& t, Collider& c) {
+        if (c.isTrigger || (c.layer & collisionMask) == 0u) return;
+        // Canonical world collider (Pass-1): respect the collider's local
+        // position/rotation/scale + inherited owner scale, exactly like the solver/queries.
+        const physics::WorldCollider w = physics::BuildWorldCollider(t, c);
+        out.emplace_back(w.transform, w.collider);
+    };
+    // Broad phase: only nearby candidates when the physics grid is fresh (during play).
+    if (m_world && m_world->BroadphaseValid()) {
+        std::vector<ecs::Entity> ents;
+        if (m_world->GatherBroadphaseCandidates(mn, mx, ents)) {
+            for (ecs::Entity e : ents) {
+                Transform* t = reg.TryGet<Transform>(e);
+                Collider* c = reg.TryGet<Collider>(e);
+                if (t && c) accept(*t, *c);
+            }
+            return;
+        }
+    }
+    // Fallback: exact full scan (editor / no valid grid).
+    reg.view<Transform, Collider>().each([&](Entity, Transform& t, Collider& c) { accept(t, c); });
+}
+
 bool CharacterController::ResolvePenetrations(ecs::Registry& reg) {
     const float halfSeg = std::max(0.0f, height * 0.5f - radius);
     bool touchedWall = false;
@@ -170,11 +205,12 @@ bool CharacterController::ResolvePenetrations(ecs::Registry& reg) {
         Pen best;
         const glm::vec3 p0 = position - glm::vec3(0, halfSeg, 0);
         const glm::vec3 p1 = position + glm::vec3(0, halfSeg, 0);
-        reg.view<Transform, Collider>().each([&](Entity, Transform& t, Collider& c) {
-            if (c.isTrigger || (c.layer & collisionMask) == 0u) return;
-            const Pen p = CapsuleVsCollider(p0, p1, radius, t, c);
+        std::vector<std::pair<Transform, Collider>> candidates;
+        GatherCandidates(reg, p0, p1, candidates);
+        for (const auto& wc : candidates) {
+            const Pen p = CapsuleVsCollider(p0, p1, radius, wc.first, wc.second);
             if (p.hit && p.depth > best.depth) best = p;
-        });
+        }
         if (!best.hit) break;
         position += best.normal * best.depth;            // push out
         const float vn = glm::dot(velocity, best.normal);
@@ -185,7 +221,9 @@ bool CharacterController::ResolvePenetrations(ecs::Registry& reg) {
     return touchedWall;
 }
 
-void CharacterController::Move(ecs::Registry& reg, const glm::vec3& wishVel, float dt) {
+void CharacterController::Move(ecs::Registry& reg, const glm::vec3& wishVel, float dt,
+                              const PhysicsWorld* world) {
+    m_world = world;
     velocity.y += gravity.y * dt;
     const bool wasGrounded = grounded;
     grounded = false;
@@ -226,18 +264,21 @@ void CharacterController::Move(ecs::Registry& reg, const glm::vec3& wishVel, flo
         const float halfSeg = std::max(0.0f, height * 0.5f - radius);
         const glm::vec3 p0 = position - glm::vec3(0, halfSeg, 0);
         const glm::vec3 p1 = position + glm::vec3(0, halfSeg, 0);
-        reg.view<Transform, Collider>().each([&](Entity, Transform& t, Collider& c) {
-            if (c.isTrigger || (c.layer & collisionMask) == 0u) return;
-            const Pen p = CapsuleVsCollider(p0, p1, radius, t, c);
+        std::vector<std::pair<Transform, Collider>> candidates;
+        GatherCandidates(reg, p0, p1, candidates);
+        for (const auto& wc : candidates) {
+            const Pen p = CapsuleVsCollider(p0, p1, radius, wc.first, wc.second);
             if (p.hit && p.normal.y > maxSlopeCos) { grounded = true; groundNormal = p.normal; }
-        });
+        }
         position = save;
     }
 
     if (grounded && velocity.y < 0.0f) velocity.y = 0.0f;
 }
 
-void CharacterController::MoveFree(ecs::Registry& reg, const glm::vec3& wishVel, float dt) {
+void CharacterController::MoveFree(ecs::Registry& reg, const glm::vec3& wishVel, float dt,
+                                  const PhysicsWorld* world) {
+    m_world = world;
     const float safeDt = std::max(dt, 0.0f);
     velocity = wishVel;
     grounded = false;
@@ -249,7 +290,9 @@ void CharacterController::MoveFree(ecs::Registry& reg, const glm::vec3& wishVel,
     grounded = false;
 }
 
-bool CharacterController::TrySetHeight(ecs::Registry& reg, float newHeight) {
+bool CharacterController::TrySetHeight(ecs::Registry& reg, float newHeight,
+                                      const PhysicsWorld* world) {
+    m_world = world;
     newHeight = std::max(newHeight, radius * 2.0f);
     if (std::abs(newHeight - height) <= 0.00001f) return true;
 
@@ -265,13 +308,15 @@ bool CharacterController::TrySetHeight(ecs::Registry& reg, float newHeight) {
     const glm::vec3 p0 = position - glm::vec3(0.0f, halfSeg, 0.0f);
     const glm::vec3 p1 = position + glm::vec3(0.0f, halfSeg, 0.0f);
     bool blocked = false;
-    reg.view<Transform, Collider>().each([&](Entity, Transform& t, Collider& c) {
-        if (blocked || c.isTrigger || (c.layer & collisionMask) == 0u) return;
-        const Pen penetration = CapsuleVsCollider(p0, p1, radius, t, c);
+    std::vector<std::pair<Transform, Collider>> candidates;
+    GatherCandidates(reg, p0, p1, candidates);
+    for (const auto& wc : candidates) {
+        if (blocked) break;
+        const Pen penetration = CapsuleVsCollider(p0, p1, radius, wc.first, wc.second);
         // Ignore tiny contact noise at the feet, but reject actual overlap in the
         // additional standing volume.
         if (penetration.hit && penetration.depth > 0.001f) blocked = true;
-    });
+    }
     if (blocked) {
         height = oldHeight;
         position = oldPosition;

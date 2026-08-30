@@ -30,17 +30,28 @@ public:
     int DrawCalls() const {
         return m_enabled ? m_frames[m_current].drawCalls : 0;
     }
+    // Directional shadow-map caster draws this frame, split by culling policy — lets the
+    // profiler confirm closed architecture uses the one-sided (front-face) solid policy.
+    int OneSidedShadowDraws() const {
+        return m_enabled ? m_frames[m_current].shadowDrawsOneSided : 0;
+    }
+    int TwoSidedShadowDraws() const {
+        return m_enabled ? m_frames[m_current].shadowDrawsTwoSided : 0;
+    }
 
     // Render backends call this once for every glDraw* submission. The active
     // profiler is optional, so player builds can use the same renderers without
     // paying for counters when no profiler is installed.
     static void RecordDrawCall();
+    // Called per shadow-map caster draw with its culling policy (twoSided = no cull).
+    static void RecordShadowDraw(bool twoSided);
 
 private:
     static constexpr int kFrames = 3;   // frames in flight before a query is read
 
     struct Scope { std::string name; unsigned int query = 0; };
-    struct Frame { std::vector<Scope> scopes; int used = 0; int drawCalls = 0; };
+    struct Frame { std::vector<Scope> scopes; int used = 0; int drawCalls = 0;
+                  int shadowDrawsOneSided = 0; int shadowDrawsTwoSided = 0; };
 
     Frame m_frames[kFrames];
     int   m_current = 0;
