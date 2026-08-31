@@ -726,7 +726,7 @@ public:
         int physicsSolverIterations = 10;   // Pass-3: 4 was too few to converge stacks
         bool physicsBroadPhase = true;
         float physicsCellSize = 2.0f;
-        float physicsRestitutionThreshold = 0.5f;
+        float physicsRestitutionThreshold = 1.0f;   // m/s (was 0.5; too low -> resting jitter)
         bool physicsAllowSleeping = true;
         float physicsSleepLinearVelocity = 0.06f;
         float physicsSleepAngularVelocity = 0.15f;

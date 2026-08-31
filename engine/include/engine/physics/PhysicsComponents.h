@@ -166,7 +166,11 @@ struct Collider {
     float         majorRadius = 0.35f;            // Torus: centre to tube centre
     float         minorRadius = 0.15f;            // Torus: tube radius
     int           steps       = 6;                // Staircase: number of collision steps
-    float         restitution = 0.4f;             // material: bounciness
+    float         restitution = 0.0f;             // material: bounciness. Default 0 (non-bouncy),
+                                                  // matching Unity/Unreal/Box2D/PhysX: a bouncy
+                                                  // default makes stacked/dropped boxes scatter
+                                                  // (restitution re-injects energy on every
+                                                  // successive impact). Opt into bounce per body.
     float         friction    = 0.5f;             // material: Coulomb coefficient
     bool          isTrigger   = false;            // overlap-only: detected but never resolved
 

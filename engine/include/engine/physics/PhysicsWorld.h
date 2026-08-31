@@ -46,6 +46,8 @@ struct ContactManifold {
     float     posApplied[4]{};                  // Pass-3 split-impulse: normal separation already
                                                 // resolved by the position solver this step
     std::uint64_t key = 0;                      // entity-pair key (warm-start lookup)
+    bool      restingContact = false;           // pair has been touching for several steps ->
+                                                // restitution is suppressed (Pass-3 anti-jitter)
 
     // Constants precomputed ONCE per step (positions/inertia are frozen during the
     // velocity solve), so the per-iteration loop does only dot products + impulse
@@ -56,6 +58,13 @@ struct ContactManifold {
     float     invMassA = 0.0f, invMassB = 0.0f;  // cached inverse masses
     glm::mat3 invIA{0.0f}, invIB{0.0f};          // cached world inverse inertia
     float     friction = 0.0f;                   // combined Coulomb coefficient
+
+    // Pass-3 block solver: when count == 2, the two normal constraints are solved as one
+    // coupled 2x2 system (Box2D-style) instead of sequentially, so their impulses stay
+    // balanced and no net toppling torque accumulates. blockK is the symmetric 2x2 coupled
+    // effective-mass matrix [k11, k12; k12, k22]; useBlockSolver is set in PrepareManifold.
+    bool      useBlockSolver = false;
+    float     blockK11 = 0.0f, blockK12 = 0.0f, blockK22 = 0.0f;
 };
 
 // Persistent per-pair contact impulses, matched to this step's points by nearest
@@ -188,11 +197,20 @@ struct PhysicsStats {
 class PhysicsWorld {
 public:
     glm::vec3 gravity{0.0f, -9.81f, 0.0f};
+    // Substeps per fixed step (TGS-style). >1 splits each Step into smaller solves, which is
+    // what keeps MISALIGNED / hand-placed stacks from slowly blowing apart (contacts stay
+    // coherent within each small solve; headless tests: a 5-box tilted stack drift 3.3 -> 0.05).
+    // 4 handles ~5-box tilted stacks; raise for taller. Physics is a tiny fraction of frame
+    // time, so the ~linear cost is cheap. Guarded against recursion by m_inSubstep.
+    int       substeps = 4;
     // Pass-3 solver: velocity and position solves use SEPARATE iteration counts.
     // solverIterations is the velocity-iteration count (name kept so existing callers and
     // serialized settings still apply); positionIterations drives the new position solve.
-    int       solverIterations = 10;     // velocity (sequential-impulse) passes per step
-    int       positionIterations = 3;    // split-impulse position-correction passes per step
+    int       solverIterations = 14;     // velocity (sequential-impulse) passes per step
+                                         // (headless stack tests: ~6 iters/box for the current
+                                         // sequential solver; 14 holds a 3-box stack solidly.
+                                         // Taller stacks need the coupled/block contact solve.)
+    int       positionIterations = 4;    // split-impulse position-correction passes per step
     // Split-impulse position correction (velocity-free): keeps a small penetration slop,
     // corrects a Baumgarte fraction per pass, and clamps the per-step correction so deep
     // overlaps separate smoothly instead of teleporting. Tuned in world units (engine ~1u = 1m).
@@ -212,7 +230,12 @@ public:
 
     // Below this closing speed a contact does not bounce (restitution slop) --
     // stops resting stacks from micro-bouncing so they can settle and sleep.
-    float     restitutionThreshold = 0.5f;
+    float     restitutionThreshold = 1.0f;   // m/s. Below this closing speed a contact does NOT
+                                             // bounce. Was 0.5 -- too low: the tiny per-step
+                                             // penetration recovery produced ~1 m/s closing speeds
+                                             // that tripped restitution, so resting bouncy boxes
+                                             // (restitution > 0) jittered forever. 1.0 matches the
+                                             // Box2D default and lets them settle.
 
     // Sleeping: a body moving slower than sleepLinearVelocity for timeToSleep
     // seconds is put to sleep; a fast contact wakes it.
@@ -402,6 +425,9 @@ private:
     std::unordered_map<std::int64_t, std::vector<int>> m_grid;
     std::unordered_map<std::uint64_t, bool> m_touchingNow;
     std::unordered_map<std::uint64_t, ContactCache> m_contactCache;  // warm-start impulses
+    std::unordered_map<std::uint64_t, int> m_contactAge;  // pair key -> consecutive-ish contact
+                                                          // frames; drives restitution suppression
+    bool m_inSubstep = false;                             // recursion guard for substepping
     std::unordered_map<std::uint64_t, int> m_manifoldOf;
     std::unordered_map<std::uint64_t, int> m_eventOf;
 };

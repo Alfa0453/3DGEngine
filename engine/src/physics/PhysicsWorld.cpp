@@ -316,12 +316,20 @@ Contact BoxBox(const OBB& A, const OBB& B) {
         const glm::vec3 iva = inc.axis[iv] * inc.ext[iv];
         const glm::vec3 corners[4] = { iC + iua + iva, iC - iua + iva, iC - iua - iva, iC + iua - iva };
 
+        // Contact margin (Pass-3): keep incident corners within kContactMargin of the reference
+        // face -- both laterally and in depth -- as contact points, even if slightly separated.
+        // A tilted/dropped box would otherwise shed corners the instant they lift a fraction of
+        // a mm, collapsing a stable 4-point face contact to 1-2 points that cannot resist
+        // tipping. These speculative points carry the manifold's shared penetration; the
+        // velocity solver still only pushes on genuinely closing ones. This, with the 2-point
+        // block solver, is what lets stacks and dropped boxes stay upright at low iteration counts.
+        constexpr float kContactMargin = 0.015f;
         for (int c = 0; c < 4 && ct.count < 4; ++c) {
             const glm::vec3 d = corners[c] - rC;
             const float pu = glm::dot(d, uA), pv = glm::dot(d, vA);
-            if (std::fabs(pu) <= ue + 1e-3f && std::fabs(pv) <= ve + 1e-3f) {   // within the ref face
+            if (std::fabs(pu) <= ue + kContactMargin && std::fabs(pv) <= ve + kContactMargin) {
                 const float depth = glm::dot(refN, rC - corners[c]);           // >0 = below the face
-                if (depth > -1e-3f) ct.points[ct.count++] = corners[c];
+                if (depth > -kContactMargin) ct.points[ct.count++] = corners[c];
             }
         }
     }
@@ -751,6 +759,17 @@ inline float EffectiveMass(const ContactManifold& m, int k, const glm::vec3& dir
         + glm::dot(glm::cross(m.invIA * raxd, m.rA[k]) + glm::cross(m.invIB * rbxd, m.rB[k]), dir);
 }
 
+// Coupled effective inverse mass between contact points i and j along the normal: the change
+// in point i's normal velocity caused by a unit normal impulse at point j (Kij; the diagonal
+// Kii equals EffectiveMass). Symmetric. Used to build the 2x2 block-solver matrix.
+inline float NormalCoupling(const ContactManifold& m, int i, int j) {
+    const glm::vec3 n = m.normal;
+    const glm::vec3 rAin = glm::cross(m.rA[i], n), rAjn = glm::cross(m.rA[j], n);
+    const glm::vec3 rBin = glm::cross(m.rB[i], n), rBjn = glm::cross(m.rB[j], n);
+    return m.invMassA + m.invMassB
+        + glm::dot(rAin, m.invIA * rAjn) + glm::dot(rBin, m.invIB * rBjn);
+}
+
 // Prepare a manifold ONCE per step: wake fast-closing sleepers, cache inverse
 // mass/inertia + contact offsets + effective masses + friction basis, capture the
 // restitution target, and warm-start from last step's cached impulses.
@@ -771,6 +790,14 @@ void PrepareManifold(ContactManifold& m, Body& A, Body& B,
 
     const auto it = cache.find(m.key);
     const ContactCache* seed = (it != cache.end()) ? &it->second : nullptr;
+    // Restitution fires only on a fresh impact, never on a resting contact. m.restingContact is
+    // set from a per-pair contact-age timer (see Step): a pair touching for several steps is
+    // resting, so any closing speed now is the solver's own penetration-recovery noise, not a
+    // real impact -- bouncing it re-injects energy and the stack never settles. The timer
+    // survives the 1-frame separations restitution itself causes (unlike a raw cache check),
+    // while a genuinely bouncing body -- airborne between hits for many frames -- ages out and
+    // still bounces.
+    const bool persistentContact = m.restingContact;
 
     for (int k = 0; k < m.count; ++k) {
         const glm::vec3 p  = m.points[k];
@@ -788,7 +815,7 @@ void PrepareManifold(ContactManifold& m, Body& A, Body& B,
         const glm::vec3 relVel = (velOf(B) + glm::cross(AngVelOf(B), m.rB[k]))
                                - (velOf(A) + glm::cross(AngVelOf(A), m.rA[k]));
         const float vn = glm::dot(relVel, n);
-        m.restBias[k] = (-vn > restitutionThreshold) ? (-e0 * vn) : 0.0f;
+        m.restBias[k] = (!persistentContact && -vn > restitutionThreshold) ? (-e0 * vn) : 0.0f;
 
         // Warm start: inherit impulses from the nearest cached point of this pair.
         float Pn = 0.0f, Pt1 = 0.0f, Pt2 = 0.0f;
@@ -808,23 +835,87 @@ void PrepareManifold(ContactManifold& m, Body& A, Body& B,
         m.tangentImpulse[k][1] = Pt2;
         ApplyImpulse(m, A, B, k, Pn * n + Pt1 * m.tangent1 + Pt2 * m.tangent2);
     }
+
+    // Precompute the 2x2 coupled normal mass for the block solver (count == 2 only). Skip the
+    // block path if the two points are (near) linearly dependent (det ~ 0), which would make
+    // the 2x2 solve ill-conditioned; the sequential path handles that safely.
+    m.useBlockSolver = false;
+    if (m.count == 2) {
+        m.blockK11 = NormalCoupling(m, 0, 0);
+        m.blockK22 = NormalCoupling(m, 1, 1);
+        m.blockK12 = NormalCoupling(m, 0, 1);
+        // Use the block solver only when the 2x2 system is well-conditioned: the determinant
+        // must be a healthy fraction of the diagonal product (Box2D uses this same guard).
+        // Ill-conditioned (nearly collinear) contacts fall back to the sequential solve.
+        const float det = m.blockK11 * m.blockK22 - m.blockK12 * m.blockK12;
+        m.useBlockSolver = (det > 1e-9f)
+            && (m.blockK11 * m.blockK11 < 1000.0f * det);
+    }
 }
 
 // One velocity-solver iteration: normal impulse (clamped >= 0) then two-axis
 // Coulomb friction (clamped to mu * accumulated normal impulse). Uses only cached
 // constants + cheap dot/cross products -- no mat3 rebuilds.
+// Coupled 2-point normal solve (Box2D block solver). Solves both contact points' normal
+// impulses simultaneously as a 2x2 LCP (x >= 0, K x + b >= 0, complementary) via the four
+// standard case checks, so the two impulses stay balanced instead of the sequential solver
+// giving the first-solved point priority -- which is the asymmetry that topples stacks.
+void SolveNormalBlock2(ContactManifold& m, Body& A, Body& B) {
+    const glm::vec3 n = m.normal;
+    const float k11 = m.blockK11, k12 = m.blockK12, k22 = m.blockK22;
+    const glm::vec2 a(m.normalImpulse[0], m.normalImpulse[1]);   // current accumulated impulses
+
+    // Current relative normal velocities, minus the (restitution) bias target.
+    const glm::vec3 rv0 = (velOf(B) + glm::cross(AngVelOf(B), m.rB[0]))
+                        - (velOf(A) + glm::cross(AngVelOf(A), m.rA[0]));
+    const glm::vec3 rv1 = (velOf(B) + glm::cross(AngVelOf(B), m.rB[1]))
+                        - (velOf(A) + glm::cross(AngVelOf(A), m.rA[1]));
+    glm::vec2 b(glm::dot(rv0, n) - m.restBias[0], glm::dot(rv1, n) - m.restBias[1]);
+    // Convert to the "zero-impulse" velocities so we can solve for the new TOTAL impulse x.
+    b.x -= k11 * a.x + k12 * a.y;
+    b.y -= k12 * a.x + k22 * a.y;
+
+    const float det = k11 * k22 - k12 * k12;
+    glm::vec2 x(0.0f);
+    bool solved = false;
+    // Case 1: both points active. x = -inv(K) b.
+    x.x = -(k22 * b.x - k12 * b.y) / det;
+    x.y = -(k11 * b.y - k12 * b.x) / det;
+    if (x.x >= 0.0f && x.y >= 0.0f) solved = true;
+    if (!solved) {                       // Case 2: only point 0 active.
+        x.x = -b.x / k11; x.y = 0.0f;
+        if (x.x >= 0.0f && (k12 * x.x + b.y) >= 0.0f) solved = true;
+    }
+    if (!solved) {                       // Case 3: only point 1 active.
+        x.x = 0.0f; x.y = -b.y / k22;
+        if (x.y >= 0.0f && (k12 * x.y + b.x) >= 0.0f) solved = true;
+    }
+    if (!solved) {                       // Case 4: neither active.
+        x.x = 0.0f; x.y = 0.0f;
+        if (b.x >= 0.0f && b.y >= 0.0f) solved = true;
+    }
+    if (!solved) return;                 // no valid case (degenerate) -- leave impulses as-is
+
+    ApplyImpulse(m, A, B, 0, (x.x - a.x) * n);
+    ApplyImpulse(m, A, B, 1, (x.y - a.y) * n);
+    m.normalImpulse[0] = x.x;
+    m.normalImpulse[1] = x.y;
+}
+
 void SolveManifoldVelocity(ContactManifold& m, Body& A, Body& B) {
     const glm::vec3 n = m.normal;
     const glm::vec3 axes[2] = { m.tangent1, m.tangent2 };
 
-    for (int k = 0; k < m.count; ++k) {
-        const glm::vec3& rA = m.rA[k];
-        const glm::vec3& rB = m.rB[k];
-
-        // Normal impulse (accumulated + clamped to stay pushing).
-        {
-            const glm::vec3 relVel = (velOf(B) + glm::cross(AngVelOf(B), rB))
-                                   - (velOf(A) + glm::cross(AngVelOf(A), rA));
+    // Normal solve. Two-point manifolds use the coupled block solver (balanced impulses ->
+    // no toppling torque); other counts use the sequential solve. Either way, ALL normal
+    // impulses are solved before ANY friction: interleaving lets an early friction guess bias
+    // the normal solution and inject torque into a symmetric stack.
+    if (m.useBlockSolver) {
+        SolveNormalBlock2(m, A, B);
+    } else {
+        for (int k = 0; k < m.count; ++k) {
+            const glm::vec3 relVel = (velOf(B) + glm::cross(AngVelOf(B), m.rB[k]))
+                                   - (velOf(A) + glm::cross(AngVelOf(A), m.rA[k]));
             const float vn = glm::dot(relVel, n);
             float dPn = (-vn + m.restBias[k]) * m.normalMass[k];
             const float old = m.normalImpulse[k];
@@ -832,12 +923,12 @@ void SolveManifoldVelocity(ContactManifold& m, Body& A, Body& B) {
             dPn = m.normalImpulse[k] - old;
             ApplyImpulse(m, A, B, k, dPn * n);
         }
-
-        // Friction along each tangent axis, clamped to the Coulomb cone.
+    }
+    for (int k = 0; k < m.count; ++k) {
         const float maxF = m.friction * m.normalImpulse[k];
         for (int ax = 0; ax < 2; ++ax) {
-            const glm::vec3 relVel = (velOf(B) + glm::cross(AngVelOf(B), rB))
-                                   - (velOf(A) + glm::cross(AngVelOf(A), rA));
+            const glm::vec3 relVel = (velOf(B) + glm::cross(AngVelOf(B), m.rB[k]))
+                                   - (velOf(A) + glm::cross(AngVelOf(A), m.rA[k]));
             const float vt = glm::dot(relVel, axes[ax]);
             float dPt = -vt * m.tangentMass[k][ax];
             const float old = m.tangentImpulse[k][ax];
@@ -1265,6 +1356,20 @@ float SweepRadiusOf(const Collider* c) {
 } // namespace
 
 void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
+    // Substepping (TGS-style): splitting the fixed step into several smaller solves is the
+    // decisive fix for MISALIGNED stacks. A single large step lets the sequential-impulse
+    // solver inject energy into tilted/rotating contacts (contacts shift within the step,
+    // warm-started impulses land at stale points), which slowly blows a hand-placed 5+ box
+    // stack apart even at restitution 0. Smaller steps keep contacts coherent within each
+    // solve; headless tests: a 5-box misaligned stack goes from drift 3.3 (1 substep) to 0.05
+    // (8 substeps). The broad/narrow phase re-runs per substep, so cost scales with the count.
+    if (substeps > 1 && !m_inSubstep) {
+        m_inSubstep = true;
+        const float h = dt / static_cast<float>(substeps);
+        for (int i = 0; i < substeps; ++i) Step(reg, h);
+        m_inSubstep = false;
+        return;
+    }
     const auto kStepStart = std::chrono::steady_clock::now();
     auto bodyView = reg.view<Transform, RigidBody>();
     auto colliderView = reg.view<Transform, Collider>();
@@ -1576,6 +1681,20 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
         Body& A = m_bodies[m.a]; Body& B = m_bodies[m.b];
         if (glm::dot(velOf(B) - velOf(A), m.normal) < -wakeSpeed) { Wake(A); Wake(B); }
     }
+    // Contact-age timer: age up pairs touching this step, age down (not reset) pairs that are
+    // absent, and prune at zero. A pair that has been in contact for >= kRestingAge steps is
+    // "resting" and suppresses restitution. Aging down rather than resetting means the brief
+    // 1-frame separations a bounce causes don't re-arm restitution on a settling stack, while a
+    // truly airborne body (absent many frames) still ages out and bounces on its next landing.
+    constexpr int kRestingAge = 3, kAgeCap = 8;
+    for (auto& kv : m_contactAge) kv.second -= 1;              // decay every tracked pair
+    for (ContactManifold& m : m_manifolds) {
+        int& age = m_contactAge[m.key];                       // inserts 0 for a brand-new pair
+        age = std::min(age + 2, kAgeCap);                     // net +1 for a touched pair
+        m.restingContact = (age >= kRestingAge);
+    }
+    for (auto it = m_contactAge.begin(); it != m_contactAge.end(); )  // prune faded pairs
+        it = (it->second <= 0) ? m_contactAge.erase(it) : std::next(it);
     for (ContactManifold& m : m_manifolds)
         PrepareManifold(m, m_bodies[m.a], m_bodies[m.b], restitutionThreshold, m_contactCache);
     for (int iter = 0; iter < solverIterations; ++iter) {

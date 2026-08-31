@@ -969,7 +969,7 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                     loaded.environment.physicsSolverIterations = 10;   // Pass-3 default (was 4)
                     physicsBroadPhase = 1;
                     loaded.environment.physicsCellSize = 2.0f;
-                    loaded.environment.physicsRestitutionThreshold = 0.5f;
+                    loaded.environment.physicsRestitutionThreshold = 1.0f;   // was 0.5 (resting jitter)
                     physicsAllowSleeping = 1;
                     loaded.environment.physicsSleepLinearVelocity = 0.06f;
                     loaded.environment.physicsSleepAngularVelocity = 0.15f;

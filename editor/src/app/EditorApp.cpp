@@ -13875,10 +13875,11 @@ void EditorApp::StepPlayPhysics(float dt, bool inputEnabled)
     // far too few for the Pass-3 solver to converge a stack, so friction under-clamps and
     // boxes slide off. positionIterations/split-impulse params keep their PhysicsWorld
     // defaults (not overwritten here), so they stay consistent with the runtime.
-    m_playPhysics.solverIterations = std::max(environment.physicsSolverIterations, 8);
+    m_playPhysics.solverIterations = std::max(environment.physicsSolverIterations, 12);
     m_playPhysics.broadPhase = environment.physicsBroadPhase;
     m_playPhysics.cellSize = environment.physicsCellSize;
-    m_playPhysics.restitutionThreshold = environment.physicsRestitutionThreshold;
+    // Floor at 1.0 m/s: a lower threshold lets resting bouncy contacts jitter (see PhysicsWorld).
+    m_playPhysics.restitutionThreshold = std::max(environment.physicsRestitutionThreshold, 1.0f);
     m_playPhysics.allowSleeping = environment.physicsAllowSleeping;
     m_playPhysics.sleepLinearVelocity = environment.physicsSleepLinearVelocity;
     m_playPhysics.sleepAngularVelocity = environment.physicsSleepAngularVelocity;
