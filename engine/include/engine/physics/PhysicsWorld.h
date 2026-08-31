@@ -43,6 +43,8 @@ struct ContactManifold {
     float     normalImpulse[4]{};               // accumulated normal impulse per point
     float     tangentImpulse[4][2]{};           // accumulated friction impulse per point/axis
     float     restBias[4]{};                    // restitution velocity target per point
+    float     posApplied[4]{};                  // Pass-3 split-impulse: normal separation already
+                                                // resolved by the position solver this step
     std::uint64_t key = 0;                      // entity-pair key (warm-start lookup)
 
     // Constants precomputed ONCE per step (positions/inertia are frozen during the
@@ -164,6 +166,13 @@ struct PhysicsStats {
     int    ccdBodies          = 0;   // bodies that ran a CCD sweep this step
     double stepMs             = 0.0; // wall-clock of the last Step()
 
+    // Pass-3 solver instrumentation.
+    int    velocityIterations = 0;   // velocity passes actually run this step
+    int    positionIterations = 0;   // position (split-impulse) passes actually run this step
+    int    contactsSolved     = 0;   // manifold points fed to the velocity solver
+    float  maxPenetrationBefore = 0.0f;  // deepest manifold penetration pre-position-solve
+    float  maxPenetrationAfter  = 0.0f;  // deepest residual after the position solve
+
     // Queries (accumulate across a frame; cleared by ResetQueryStats)
     int          raycasts        = 0;
     int          sphereCasts     = 0;
@@ -179,7 +188,22 @@ struct PhysicsStats {
 class PhysicsWorld {
 public:
     glm::vec3 gravity{0.0f, -9.81f, 0.0f};
-    int       solverIterations = 4;      // sequential-impulse passes per step
+    // Pass-3 solver: velocity and position solves use SEPARATE iteration counts.
+    // solverIterations is the velocity-iteration count (name kept so existing callers and
+    // serialized settings still apply); positionIterations drives the new position solve.
+    int       solverIterations = 10;     // velocity (sequential-impulse) passes per step
+    int       positionIterations = 3;    // split-impulse position-correction passes per step
+    // Split-impulse position correction (velocity-free): keeps a small penetration slop,
+    // corrects a Baumgarte fraction per pass, and clamps the per-step correction so deep
+    // overlaps separate smoothly instead of teleporting. Tuned in world units (engine ~1u = 1m).
+    // beta must be firm enough to actually reach equilibrium each rest step -- a gentle value
+    // leaves resting boxes penetrating, so the velocity solver keeps fighting gravity and the
+    // contact limit-cycles (visible jitter even on a single resting box). 0.8 removes the
+    // penetration (down to the slop) and lets contacts settle; the per-manifold, once-per-step
+    // application (not per-point) keeps it from over-shooting.
+    float     contactSlop           = 0.005f;  // penetration left uncorrected (anti-jitter)
+    float     positionCorrectionBeta = 0.8f;   // fraction of remaining error resolved per pass
+    float     maxPositionCorrection = 0.2f;    // max normal separation applied per step (m)
 
     // Broad phase: a uniform spatial hash culls the O(n^2) pair test. Disable to
     // fall back to brute-force all-pairs (identical results; used for testing).

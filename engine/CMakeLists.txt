@@ -77,6 +77,7 @@ add_library(engine STATIC
     src/assets/DialogueAsset.cpp
     src/assets/ItemAsset.cpp
     src/assets/CombatAsset.cpp
+    src/assets/SpawnAsset.cpp
     src/assets/TerrainAsset.cpp
     src/assets/TextureAsset.cpp
     src/assets/ForgeMaterialImporter.cpp
@@ -130,6 +131,7 @@ add_library(engine STATIC
     src/gameplay/DialogueSystem.cpp
     src/gameplay/InventorySystem.cpp
     src/gameplay/CombatSystem.cpp
+    src/gameplay/SpawnSystem.cpp
     src/gameplay/GameMode.cpp
     src/gameplay/Script.cpp
     src/gameplay/LuaScript.cpp

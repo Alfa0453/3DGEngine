@@ -12,6 +12,7 @@
 #include <engine/gameplay/DialogueSystem.h>
 #include <engine/gameplay/InventorySystem.h>
 #include <engine/gameplay/CombatSystem.h>
+#include <engine/gameplay/SpawnSystem.h>
 #include <engine/gameplay/RagdollSystem.h>
 #include <engine/gameplay/GameMode.h>
 #include <engine/gameplay/Script.h>
@@ -2055,6 +2056,12 @@ void EditorApp::DrawEditorOverlay()
                             ps.staticRebuiltThisStep, ps.staticColliders);
                 ImGui::Text("Grid inserted colliders/step: %d   Manifolds: %d",
                             ps.gridRebuiltColliders, ps.manifolds);
+                // Pass-3 solver: separate velocity/position iterations + split-impulse
+                // penetration recovery. maxPen after should sit near the contact slop.
+                ImGui::Text("Solver: %d vel / %d pos iters   contacts %d",
+                            ps.velocityIterations, ps.positionIterations, ps.contactsSolved);
+                ImGui::Text("Penetration: %.4f -> %.4f m", ps.maxPenetrationBefore,
+                            ps.maxPenetrationAfter);
                 ImGui::Text("Queries/frame: %d ray, %d sphere, %d overlap",
                             ps.raycasts, ps.sphereCasts, ps.overlaps);
                 ImGui::Text("Query candidates: %lld   exact tests: %lld",
@@ -2555,6 +2562,7 @@ void EditorApp::DrawEditorOverlay()
     DrawDialogueEditorPanel();
     DrawInventoryItemEditorPanel();
     DrawCombatEditorPanel();
+    DrawSpawnManagerPanel();
     DrawLevelVariantPanel();
     DrawLevelLayersPanel();
     DrawViewportBookmarksPanel();
@@ -2861,6 +2869,11 @@ void EditorApp::DrawEditorOverlay()
             m_panels.SetOpen(EditorPanels::Panel::CombatEditor, true);
             m_combatEditor.QueueOpen(path);
             m_log.Info("Opening combat profile: " + path);
+            break;
+        case EditorAssets::Type::Spawn:
+            m_panels.SetOpen(EditorPanels::Panel::SpawnManager, true);
+            m_spawnManager.QueueOpen(path);
+            m_log.Info("Opening spawn encounter: " + path);
             break;
         case EditorAssets::Type::Terrain:
             m_panels.SetOpen(EditorPanels::Panel::TerrainCreator, true);
@@ -4646,6 +4659,13 @@ void EditorApp::DrawCombatEditorPanel() {
     if(result.saved){std::string error;if(!m_assets.Refresh(m_project.AssetRoot(),&error))m_log.Warning(error);}if(!result.message.empty())m_log.Info(result.message);
 }
 
+void EditorApp::DrawSpawnManagerPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::SpawnManager)) return;
+    bool open=true;const auto result=m_spawnManager.Draw(m_assets,m_project.AssetRoot(),&open);m_panels.SetOpen(EditorPanels::Panel::SpawnManager,open);
+    if(result.applySelected){const auto*selected=m_scene.SelectedObject();if(!selected)m_log.Warning("Spawn Manager: select an encounter controller object first");else if(selected->locked)m_log.Warning("Spawn Manager: selected object is locked");else if(engine::ConfigureSpawnManager(m_scene.Registry(),selected->entity,m_spawnManager.Asset(),m_spawnManager.Path())){m_scene.MarkDirty();m_log.Info("Applied spawn encounter to "+selected->name);}else m_log.Warning("Spawn Manager: encounter could not be applied");}
+    if(result.saved){std::string error;if(!m_assets.Refresh(m_project.AssetRoot(),&error))m_log.Warning(error);}if(!result.message.empty())m_log.Info(result.message);
+}
+
 int EditorApp::DeleteDestructionPreview(const std::string& name) {
     if(name.empty())return 0;const std::string prefix="DestructionPreview_"+name+"_";
     std::vector<int> indices;for(int i=0;i<static_cast<int>(m_scene.Objects().size());++i)
@@ -6203,6 +6223,11 @@ std::vector<DirtyDocument> EditorApp::CollectDirtyDocuments() {
         m_combatEditor.Path(), "New Combat Profile",
         [this](std::string* error) {
             return m_combatEditor.SaveForShutdown(m_project.AssetRoot(), error);
+        });
+    if (m_spawnManager.IsDirty()) add(DirtyDocumentType::Asset,
+        m_spawnManager.Path(), "New Spawn Encounter",
+        [this](std::string* error) {
+            return m_spawnManager.SaveForShutdown(m_project.AssetRoot(), error);
         });
     if (m_weatherEditor.IsDirty()) add(DirtyDocumentType::Asset, m_weatherEditor.Path(),
         "New Weather", [this](std::string* error) { return m_weatherEditor.SaveForShutdown(m_project.AssetRoot(),error); });
@@ -13846,7 +13871,11 @@ void EditorApp::StepPlayPhysics(float dt, bool inputEnabled)
 
     const EditorScene::Environment& environment = m_scene.GetEnvironment();
     m_playPhysics.gravity = environment.physicsGravity;
-    m_playPhysics.solverIterations = environment.physicsSolverIterations;
+    // Velocity iterations: honour the authored value but floor it -- 4 (the old default) is
+    // far too few for the Pass-3 solver to converge a stack, so friction under-clamps and
+    // boxes slide off. positionIterations/split-impulse params keep their PhysicsWorld
+    // defaults (not overwritten here), so they stay consistent with the runtime.
+    m_playPhysics.solverIterations = std::max(environment.physicsSolverIterations, 8);
     m_playPhysics.broadPhase = environment.physicsBroadPhase;
     m_playPhysics.cellSize = environment.physicsCellSize;
     m_playPhysics.restitutionThreshold = environment.physicsRestitutionThreshold;
@@ -13870,6 +13899,7 @@ void EditorApp::StepPlayPhysics(float dt, bool inputEnabled)
         UpdateAI(step);
         engine::UpdateAbilities(*m_playRegistry, step);
         engine::UpdateCombat(*m_playRegistry, step);
+        engine::UpdateSpawnManagers(*m_playRegistry, step, m_playPlayerEntity);
         engine::UpdateDestruction(*m_playRegistry, step);
         engine::UpdateInteractions(*m_playRegistry, step);
         engine::UpdatePortals(*m_playRegistry, step);
@@ -13912,6 +13942,7 @@ void EditorApp::StepPlayPhysics(float dt, bool inputEnabled)
         UpdateAI(step);
         engine::UpdateAbilities(*m_playRegistry, step);
         engine::UpdateCombat(*m_playRegistry, step);
+        engine::UpdateSpawnManagers(*m_playRegistry, step, m_playPlayerEntity);
         engine::UpdateDestruction(*m_playRegistry, step);
         engine::UpdateInteractions(*m_playRegistry, step);
         engine::UpdatePortals(*m_playRegistry, step);

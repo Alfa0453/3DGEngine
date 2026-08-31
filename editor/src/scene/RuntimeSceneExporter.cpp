@@ -11,6 +11,7 @@
 #include <engine/gameplay/DialogueSystem.h>
 #include <engine/gameplay/InventorySystem.h>
 #include <engine/gameplay/CombatSystem.h>
+#include <engine/gameplay/SpawnSystem.h>
 
 #include <algorithm>
 #include <fstream>
@@ -106,7 +107,7 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         return engine::MakeAssetReference(
             &assetRegistry, contentRoot, assetPath, type).id;
     };
-    out << "3DGRuntimeScene 111 " << sceneId.ToString() << '\n';
+    out << "3DGRuntimeScene 112 " << sceneId.ToString() << '\n';
     out << "# Runtime export from 3DGEditor. Editor-only flags are omitted.\n";
     const EditorScene::Environment& environment = scene.GetEnvironment();
     out << "environment "
@@ -987,6 +988,10 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
                 if (!combat->assetPath.empty())
                     out << "combat " << std::quoted(object.name) << ' ' << std::quoted(combat->assetPath) << ' '
                         << (combat->asset.header.id.Valid()?combat->asset.header.id.ToString():std::string("-")) << '\n';
+            if (const auto* spawn = scene.Registry().TryGet<engine::SpawnManagerComponent>(object.entity))
+                if (!spawn->assetPath.empty())
+                    out << "spawn_manager " << std::quoted(object.name) << ' ' << std::quoted(spawn->assetPath) << ' '
+                        << (spawn->asset.header.id.Valid()?spawn->asset.header.id.ToString():std::string("-")) << '\n';
         }
         if (object.visible && object.isTerrain) {
             out << "terrain " << std::quoted(object.name) << ' '
@@ -1049,6 +1054,8 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
             for (const auto& stack : inventory->items) addDependency(stack.asset.header.id);
         if (const auto* combat = scene.Registry().TryGet<engine::CombatComponent>(object.entity))
             addDependency(combat->asset.header.id);
+        if (const auto* spawn = scene.Registry().TryGet<engine::SpawnManagerComponent>(object.entity))
+            addDependency(spawn->asset.header.id);
         addDependency(assetIdFor(
             object.collider.collisionAssetPath, {},
             engine::AssetType::StaticMesh));

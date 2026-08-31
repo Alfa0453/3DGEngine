@@ -373,6 +373,14 @@ protected:
                                  const std::string& damageType="Physical");
     bool IsCombatStaggered() const;
     int CombatStep() const;
+    bool ConfigureSpawnManager(const std::string& assetPath);
+    bool StartSpawn(float difficulty=1.0f,ecs::Entity manager=ecs::kNull);
+    void StopSpawn(ecs::Entity manager=ecs::kNull);
+    void ResetSpawn(ecs::Entity manager=ecs::kNull);
+    bool TriggerSpawnWave(int wave=-1,ecs::Entity manager=ecs::kNull);
+    void SetSpawnDifficulty(float difficulty,ecs::Entity manager=ecs::kNull);
+    int SpawnAlive(ecs::Entity manager=ecs::kNull) const;
+    bool IsSpawnRunning(ecs::Entity manager=ecs::kNull) const;
     int SplinePointCount(ecs::Entity spline) const;
     bool IsSplineClosed(ecs::Entity spline) const;
     bool SetSplineClosed(ecs::Entity spline, bool closed);

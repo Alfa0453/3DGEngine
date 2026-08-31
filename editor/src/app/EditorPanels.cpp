@@ -105,6 +105,7 @@ const char* PlainPanelName(EditorPanels::Panel panel)
     case Panel::DialogueEditor: return "Dialogue Editor";
     case Panel::InventoryItemEditor: return "Inventory and Item Editor";
     case Panel::CombatEditor: return "Combat Editor";
+    case Panel::SpawnManager: return "Spawn Manager";
     case Panel::Count:     break;
     }
     return "Panel";
@@ -170,6 +171,7 @@ EditorPanels::Group EditorPanels::GroupOf(Panel panel)
     case Panel::DayNightTimeline:
     case Panel::InventoryItemEditor:
     case Panel::CombatEditor:
+    case Panel::SpawnManager:
         return Group::WorldGameplay;
 
     case Panel::MaterialMaker:

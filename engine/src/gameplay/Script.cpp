@@ -13,6 +13,7 @@
 #include "engine/gameplay/DialogueSystem.h"
 #include "engine/gameplay/InventorySystem.h"
 #include "engine/gameplay/CombatSystem.h"
+#include "engine/gameplay/SpawnSystem.h"
 #include "engine/gameplay/QuestSystem.h"
 
 #include "engine/animation/AnimatedModel.h"
@@ -535,6 +536,14 @@ std::string Script::CombatHit(ecs::Entity target){return m_context.registry?engi
 std::string Script::DealCombatDamage(ecs::Entity target,float damage,const std::string& type){return m_context.registry?engine::CombatResultName(engine::ApplyCombatDamage(*m_context.registry,m_context.entity,target,damage,type)):"Miss";}
 bool Script::IsCombatStaggered()const{return m_context.registry&&engine::IsCombatStaggered(*m_context.registry,m_context.entity);}
 int Script::CombatStep()const{return m_context.registry?engine::CombatComboStep(*m_context.registry,m_context.entity):-1;}
+bool Script::ConfigureSpawnManager(const std::string&path){return m_context.registry&&engine::ConfigureSpawnManager(*m_context.registry,m_context.entity,path);}
+bool Script::StartSpawn(float difficulty,ecs::Entity manager){if(manager==ecs::kNull)manager=m_context.entity;return m_context.registry&&engine::StartSpawnEncounter(*m_context.registry,manager,difficulty);}
+void Script::StopSpawn(ecs::Entity manager){if(manager==ecs::kNull)manager=m_context.entity;if(m_context.registry)engine::StopSpawnEncounter(*m_context.registry,manager);}
+void Script::ResetSpawn(ecs::Entity manager){if(manager==ecs::kNull)manager=m_context.entity;if(m_context.registry)engine::ResetSpawnEncounter(*m_context.registry,manager);}
+bool Script::TriggerSpawnWave(int wave,ecs::Entity manager){if(manager==ecs::kNull)manager=m_context.entity;return m_context.registry&&engine::TriggerSpawnWave(*m_context.registry,manager,wave);}
+void Script::SetSpawnDifficulty(float difficulty,ecs::Entity manager){if(manager==ecs::kNull)manager=m_context.entity;if(m_context.registry)engine::SetSpawnDifficulty(*m_context.registry,manager,difficulty);}
+int Script::SpawnAlive(ecs::Entity manager)const{if(manager==ecs::kNull)manager=m_context.entity;return m_context.registry?engine::SpawnAliveCount(*m_context.registry,manager):0;}
+bool Script::IsSpawnRunning(ecs::Entity manager)const{if(manager==ecs::kNull)manager=m_context.entity;return m_context.registry&&engine::SpawnEncounterRunning(*m_context.registry,manager);}
 
 RaycastHit Script::TraceLine(const glm::vec3& start, const glm::vec3& end,
                              std::uint32_t layerMask) const {

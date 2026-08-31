@@ -222,6 +222,14 @@ private:
     static int ApiDealCombatDamage(lua_State* state);
     static int ApiIsCombatStaggered(lua_State* state);
     static int ApiCombatStep(lua_State* state);
+    static int ApiConfigureSpawnManager(lua_State* state);
+    static int ApiStartSpawn(lua_State* state);
+    static int ApiStopSpawn(lua_State* state);
+    static int ApiResetSpawn(lua_State* state);
+    static int ApiTriggerSpawnWave(lua_State* state);
+    static int ApiSetSpawnDifficulty(lua_State* state);
+    static int ApiSpawnAlive(lua_State* state);
+    static int ApiIsSpawnRunning(lua_State* state);
     static int ApiSetTimerByFunctionName(lua_State* state);
     static int ApiClearTimer(lua_State* state);
     static int ApiClearTimerByFunctionName(lua_State* state);

@@ -76,7 +76,8 @@ enum class AssetType : std::uint32_t {
     Quest, // objectives, conditions and rewards (.3dgquest)
     Dialogue, // branching conversations (.3dgdialogue)
     Item, // inventory, equipment and pickups (.3dgitem)
-    Combat // damage, combos, block and reactions (.3dgcombat)
+    Combat, // damage, combos, block and reactions (.3dgcombat)
+    Spawn // weighted wave encounter definition (.3dgspawn)
 };
 
 const char* AssetTypeName(AssetType type);

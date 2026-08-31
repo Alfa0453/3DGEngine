@@ -305,6 +305,7 @@ public:
         struct InventoryDesc { std::string entityName;int maximumSlots=24;float maximumWeight=100.0f; };
         struct InventoryItemDesc { std::string entityName,assetPath;AssetHandle assetId;int count=1;bool equipped=false; };
         struct CombatDesc { std::string entityName,assetPath;AssetHandle assetId; };
+        struct SpawnManagerDesc { std::string entityName,assetPath;AssetHandle assetId; };
         struct PhysicsJointDesc {
             int type = 0;
             std::string objectA, objectB;
@@ -534,7 +535,7 @@ public:
             float colorLutIntensity = 1.0f;
             std::string colorLutPath;
             glm::vec3 physicsGravity{0.0f, -9.81f, 0.0f};
-            int physicsSolverIterations = 4;
+            int physicsSolverIterations = 10;   // Pass-3: 4 was too few to converge stacks
             bool physicsBroadPhase = true;
             float physicsCellSize = 2.0f;
             float physicsRestitutionThreshold = 0.5f;
@@ -572,6 +573,7 @@ public:
         std::vector<InventoryDesc> inventories;
         std::vector<InventoryItemDesc> inventoryItems;
         std::vector<CombatDesc> combats;
+        std::vector<SpawnManagerDesc> spawnManagers;
         std::vector<PhysicsJointDesc> physicsJoints;
         std::vector<TerrainDesc> terrains;
         std::vector<WaterDesc> waters;

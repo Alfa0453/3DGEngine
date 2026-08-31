@@ -80,6 +80,7 @@ add_executable(3DGEditor
     src/panels/DialogueEditorPanel.cpp
     src/panels/InventoryItemEditorPanel.cpp
     src/panels/CombatEditorPanel.cpp
+    src/panels/SpawnManagerPanel.cpp
     src/panels/TerrainCreatorPanel.cpp
     src/panels/ModularPlacementPanel.cpp
     src/panels/PrefabPalettePanel.cpp

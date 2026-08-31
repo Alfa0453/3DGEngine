@@ -60,6 +60,7 @@ public:
         Dialogue,
         Item,
         Combat,
+        Spawn,
         Other
     };
 

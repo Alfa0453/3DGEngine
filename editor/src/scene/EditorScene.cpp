@@ -9,6 +9,7 @@
 #include <engine/gameplay/DialogueSystem.h>
 #include <engine/gameplay/InventorySystem.h>
 #include <engine/gameplay/CombatSystem.h>
+#include <engine/gameplay/SpawnSystem.h>
 #include <engine/graphics/Mesh.h>
 
 #include <algorithm>
@@ -485,7 +486,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         return false;
     }
 
-    out << "3DGEditorScene 150 " << m_assetId.ToString() << '\n';
+    out << "3DGEditorScene 151 " << m_assetId.ToString() << '\n';
     out << "environment "
         << m_environment.timeOfDay << ' '
         << m_environment.skyLightIntensity << ' '
@@ -1189,6 +1190,12 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
             << std::quoted(combat->assetPath) << ' '
             << (combat->asset.header.id.Valid() ? combat->asset.header.id.ToString() : std::string("-")) << '\n';
     }
+    for (const Object& object : m_objects) {
+        const auto* spawn = m_registry.TryGet<engine::SpawnManagerComponent>(object.entity);
+        if (!spawn || spawn->assetPath.empty()) continue;
+        out << "spawn_manager " << std::quoted(object.name) << ' ' << std::quoted(spawn->assetPath) << ' '
+            << (spawn->asset.header.id.Valid()?spawn->asset.header.id.ToString():std::string("-")) << '\n';
+    }
 
     // Editor-only hierarchy organization. Runtime export intentionally ignores these.
     for (const SceneGroup& group : m_groups) {
@@ -1496,6 +1503,8 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
             for (const auto& stack : inventory->items) addDependency(stack.asset.header.id);
         if (const auto* combat = m_registry.TryGet<engine::CombatComponent>(object.entity))
             addDependency(combat->asset.header.id);
+        if (const auto* spawn = m_registry.TryGet<engine::SpawnManagerComponent>(object.entity))
+            addDependency(spawn->asset.header.id);
         for (const engine::ParticleEffectLayer& layer :
              object.particleEffectLayers)
             addDependency(layer.assetId);
@@ -1562,7 +1571,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             return false;
         }
     }
-    if (magic != "3DGEditorScene" ||(version < 1 || version > 150)) {
+    if (magic != "3DGEditorScene" ||(version < 1 || version > 151)) {
         if (error) *error = "Scene file has an unknown format.";
         return false;
     }
@@ -2669,6 +2678,11 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                 if(error)*error=!combatError.empty()?combatError:"Scene contains an invalid combat record.";Clear();return false;
             }
             continue;
+        }
+        if (recordType == "spawn_manager" && version >= 151) {
+            std::string objectName,assetPath,idText;in>>std::quoted(objectName)>>std::quoted(assetPath)>>idText;
+            const auto found=std::find_if(m_objects.begin(),m_objects.end(),[&](const Object&o){return o.name==objectName;});std::string spawnError;
+            if(!in||found==m_objects.end()||!engine::ConfigureSpawnManager(m_registry,found->entity,assetPath,&spawnError)){if(error)*error=!spawnError.empty()?spawnError:"Scene contains an invalid spawn manager record.";Clear();return false;}continue;
         }
 
         if (recordType != "object") {

@@ -848,21 +848,43 @@ void SolveManifoldVelocity(ContactManifold& m, Body& A, Body& B) {
     }
 }
 
-// One Baumgarte positional correction from the cached penetration.
-void CorrectPosition(Body& A, Body& B, const glm::vec3& n, float penetration) {
-    const float imA = invMassOf(A), imB = invMassOf(B);
+// Pass-3 position solve for one manifold: a velocity-free, LINEAR, per-manifold Baumgarte
+// correction. It translates the two bodies apart along the contact normal to remove
+// penetration beyond the slop, WITHOUT touching linear/angular velocity -- so deep or
+// freshly-spawned overlaps separate smoothly instead of injecting kinetic energy.
+//
+// Deliberately NOT rotating the bodies here: an angular pseudo-correction needs the contact
+// arms recomputed from the updated transform each pass (Box2D does this), and reusing stale
+// arms accumulates a tiny per-frame rotation that slowly topples stacks. Rotational settling
+// is the velocity solver's job -- its per-point normal impulses already resist tipping using
+// live relative velocities. Applied once per manifold (not per point) so a 4-point face
+// contact, which shares a single penetration value, is not over-corrected 4x.
+//
+// `posApplied[0]` accumulates the separation resolved this step so repeated passes converge
+// on (penetration - slop) instead of re-applying the full correction each pass. Returns the
+// residual penetration so the caller can early-out.
+float SolveManifoldPosition(ContactManifold& m, Body& A, Body& B,
+                            float slop, float beta, float maxCorrection) {
+    const float imA = m.invMassA, imB = m.invMassB;
     const float imSum = imA + imB;
-    if (imSum <= 0.0f) return;
-    const float percent = 0.8f, slop = 0.001f;
-    const glm::vec3 corr = (std::max(penetration - slop, 0.0f) / imSum) * percent * n;
+    const float residual = m.penetration - m.posApplied[0];   // still-overlapping amount
+    if (imSum <= 0.0f) return std::max(residual, 0.0f);
+    // Push apart by a Baumgarte fraction of the residual beyond the slop, clamped per pass.
+    const float moveMag = glm::clamp(beta * (residual - slop), 0.0f, maxCorrection);
+    if (moveMag <= 0.0f) return std::max(residual, 0.0f);
+    const glm::vec3 push = moveMag * m.normal;
     if (A.rb) {
-        A.t->position -= corr * imA;
-        if (A.owner && A.owner != A.t) A.owner->position -= corr * imA;
+        const glm::vec3 d = push * (imA / imSum);
+        A.t->position -= d;
+        if (A.owner && A.owner != A.t) A.owner->position -= d;
     }
     if (B.rb) {
-        B.t->position += corr * imB;
-        if (B.owner && B.owner != B.t) B.owner->position += corr * imB;
+        const glm::vec3 d = push * (imB / imSum);
+        B.t->position += d;
+        if (B.owner && B.owner != B.t) B.owner->position += d;
     }
+    m.posApplied[0] += moveMag;
+    return std::max(residual - moveMag, 0.0f);
 }
 
 } // namespace
@@ -1585,9 +1607,32 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
         if (eit != m_eventOf.end()) m_events[eit->second].impulse = total;
     }
 
-    // 7) One positional-correction pass from the cached penetrations.
-    for (const ContactManifold& m : m_manifolds)
-        CorrectPosition(m_bodies[m.a], m_bodies[m.b], m.normal, m.penetration);
+    // 7) Split-impulse position solve: iterate a velocity-free position correction so
+    //    penetration is removed without injecting kinetic energy. Early-outs once the
+    //    deepest residual overlap is within the slop.
+    float maxPenBefore = 0.0f;
+    for (ContactManifold& m : m_manifolds) {
+        maxPenBefore = std::max(maxPenBefore, m.penetration);
+        for (int k = 0; k < m.count; ++k) m.posApplied[k] = 0.0f;   // reset per-step accumulator
+    }
+    int posItersRun = 0;
+    float maxPenAfter = maxPenBefore;
+    for (int it = 0; it < positionIterations; ++it) {
+        float worst = 0.0f;
+        for (ContactManifold& m : m_manifolds)
+            worst = std::max(worst, SolveManifoldPosition(
+                m, m_bodies[m.a], m_bodies[m.b], contactSlop,
+                positionCorrectionBeta, maxPositionCorrection));
+        ++posItersRun;
+        maxPenAfter = worst;
+        if (worst < contactSlop) break;   // stable scene -> skip remaining passes
+    }
+    m_stats.velocityIterations   = solverIterations;
+    m_stats.positionIterations   = posItersRun;
+    m_stats.maxPenetrationBefore = maxPenBefore;
+    m_stats.maxPenetrationAfter  = maxPenAfter;
+    { int cs = 0; for (const ContactManifold& m : m_manifolds) cs += m.count;
+      m_stats.contactsSolved = cs; }
 
     // 8) Update sleep state: bodies that stayed slow long enough go to sleep.
     if (allowSleeping) {

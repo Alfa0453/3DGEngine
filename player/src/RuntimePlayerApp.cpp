@@ -10,6 +10,7 @@
 #include <engine/gameplay/InteractionSystem.h>
 #include <engine/gameplay/PortalSystem.h>
 #include <engine/gameplay/CombatSystem.h>
+#include <engine/gameplay/SpawnSystem.h>
 #include <engine/gameplay/GameplayComponents.h>
 #include <engine/gameplay/GameMode.h>
 #include <engine/ai/BtScript.h>
@@ -740,7 +741,7 @@ unsigned int RuntimePlayerApp::HudTextureId(const std::string& relPath) {
 void RuntimePlayerApp::ConfigurePhysics() {
     const RuntimeSceneLoader::Scene::Environment& env = m_scene.environment;
     m_physics.gravity                = env.physicsGravity;
-    m_physics.solverIterations       = env.physicsSolverIterations;
+    m_physics.solverIterations       = std::max(env.physicsSolverIterations, 8);   // floor for solver convergence (Pass-3)
     m_physics.broadPhase             = env.physicsBroadPhase;
     m_physics.cellSize               = env.physicsCellSize;
     m_physics.restitutionThreshold   = env.physicsRestitutionThreshold;
@@ -2776,6 +2777,7 @@ void RuntimePlayerApp::OnFixedUpdate(float h) {
     UpdateAI(gameStep);
     engine::UpdateAbilities(m_registry, gameStep);
     engine::UpdateCombat(m_registry, gameStep);
+    engine::UpdateSpawnManagers(m_registry, gameStep, m_playerEntity);
     engine::UpdateProjectilesInPlace(m_registry, gameStep);
     engine::ecs::UpdateGameplay(
         m_registry, gameStep);                         // rotators + movers

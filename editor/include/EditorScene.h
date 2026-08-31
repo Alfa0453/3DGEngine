@@ -723,7 +723,7 @@ public:
         float colorLutIntensity = 1.0f;
         std::string colorLutPath;
         glm::vec3 physicsGravity{0.0f, -9.81f, 0.0f};
-        int physicsSolverIterations = 4;
+        int physicsSolverIterations = 10;   // Pass-3: 4 was too few to converge stacks
         bool physicsBroadPhase = true;
         float physicsCellSize = 2.0f;
         float physicsRestitutionThreshold = 0.5f;

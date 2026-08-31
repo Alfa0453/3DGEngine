@@ -14,6 +14,7 @@
 #include "engine/gameplay/DialogueSystem.h"
 #include "engine/gameplay/InventorySystem.h"
 #include "engine/gameplay/CombatSystem.h"
+#include "engine/gameplay/SpawnSystem.h"
 #include "engine/graphics/DayNightCycle.h"
 #include "engine/graphics/Mesh.h"
 #include "engine/physics/PhysicsComponents.h"
@@ -145,7 +146,7 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             return false;
         }
     }
-    if (magic != "3DGRuntimeScene" || version < 1 || version > 111) {
+    if (magic != "3DGRuntimeScene" || version < 1 || version > 112) {
         if (error) {
             *error = "Runtime scene file has an unknown format: "
                 + magic + " " + std::to_string(version)
@@ -850,6 +851,7 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
         if(recordType=="inventory"&&version>=110){Scene::InventoryDesc inventory;in>>std::quoted(inventory.entityName)>>inventory.maximumSlots>>inventory.maximumWeight;if(!in){if(error)*error="Runtime scene contains an invalid inventory record.";return false;}loaded.inventories.push_back(std::move(inventory));continue;}
         if(recordType=="inventory_item"&&version>=110){Scene::InventoryItemDesc item;std::string idText;in>>std::quoted(item.entityName)>>std::quoted(item.assetPath)>>idText>>item.count>>item.equipped;if(!in||(idText!="-"&&!AssetHandle::Parse(idText,&item.assetId))){if(error)*error="Runtime scene contains an invalid inventory item record.";return false;}loaded.inventoryItems.push_back(std::move(item));continue;}
         if(recordType=="combat"&&version>=111){Scene::CombatDesc combat;std::string idText;in>>std::quoted(combat.entityName)>>std::quoted(combat.assetPath)>>idText;if(!in||(idText!="-"&&!AssetHandle::Parse(idText,&combat.assetId))){if(error)*error="Runtime scene contains an invalid combat record.";return false;}loaded.combats.push_back(std::move(combat));continue;}
+        if(recordType=="spawn_manager"&&version>=112){Scene::SpawnManagerDesc spawn;std::string idText;in>>std::quoted(spawn.entityName)>>std::quoted(spawn.assetPath)>>idText;if(!in||(idText!="-"&&!AssetHandle::Parse(idText,&spawn.assetId))){if(error)*error="Runtime scene contains an invalid spawn manager record.";return false;}loaded.spawnManagers.push_back(std::move(spawn));continue;}
         if(recordType=="post_process_volume"&&version>=102){
             EntityDesc desc;desc.primitive="Empty";ecs::PostProcessVolume v;std::string id;
             record>>std::quoted(desc.name)>>desc.position.x>>desc.position.y>>desc.position.z
@@ -964,7 +966,7 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                 if (!record) {
                     record.clear();
                     loaded.environment.physicsGravity = glm::vec3(0.0f, -9.81f, 0.0f);
-                    loaded.environment.physicsSolverIterations = 4;
+                    loaded.environment.physicsSolverIterations = 10;   // Pass-3 default (was 4)
                     physicsBroadPhase = 1;
                     loaded.environment.physicsCellSize = 2.0f;
                     loaded.environment.physicsRestitutionThreshold = 0.5f;
@@ -2023,6 +2025,7 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
         }
         for(Scene::InventoryItemDesc& item:loaded.inventoryItems){if(!item.assetId.Valid())continue;const std::string resolved=ResolveAssetReference(&assetRegistry,contentRoot,{item.assetId,item.assetPath},AssetType::Item);if(!resolved.empty())item.assetPath=resolved;}
         for(Scene::CombatDesc& combat:loaded.combats){if(!combat.assetId.Valid())continue;const std::string resolved=ResolveAssetReference(&assetRegistry,contentRoot,{combat.assetId,combat.assetPath},AssetType::Combat);if(!resolved.empty())combat.assetPath=resolved;}
+        for(Scene::SpawnManagerDesc& spawn:loaded.spawnManagers){if(!spawn.assetId.Valid())continue;const std::string resolved=ResolveAssetReference(&assetRegistry,contentRoot,{spawn.assetId,spawn.assetPath},AssetType::Spawn);if(!resolved.empty())spawn.assetPath=resolved;}
     }
 
     *scene = loaded;
@@ -2367,6 +2370,7 @@ bool RuntimeSceneLoader::Instantiate(const Scene &scene, ecs::Registry &registry
     for(const Scene::InventoryDesc& desc:scene.inventories){ecs::Entity target=ecs::kNull;registry.view<ecs::RuntimeName>().each([&](ecs::Entity entity,ecs::RuntimeName& name){if(target==ecs::kNull&&name.value==desc.entityName)target=entity;});if(target==ecs::kNull){if(error)*error="Inventory owner was not found: "+desc.entityName;return false;}auto* inventory=registry.TryGet<InventoryComponent>(target);if(!inventory)inventory=&registry.Add<InventoryComponent>(target,{});inventory->maximumSlots=std::max(desc.maximumSlots,1);inventory->maximumWeight=std::max(desc.maximumWeight,0.0f);}
     for(const Scene::InventoryItemDesc& desc:scene.inventoryItems){ecs::Entity target=ecs::kNull;registry.view<ecs::RuntimeName>().each([&](ecs::Entity entity,ecs::RuntimeName& name){if(target==ecs::kNull&&name.value==desc.entityName)target=entity;});std::string itemError;if(target==ecs::kNull||!AddItem(registry,target,desc.assetPath,desc.count,&itemError)){if(error)*error=!itemError.empty()?itemError:"Could not load inventory item on '"+desc.entityName+"'.";return false;}if(desc.equipped)EquipItem(registry,target,desc.assetPath);}
     for(const Scene::CombatDesc& desc:scene.combats){ecs::Entity target=ecs::kNull;registry.view<ecs::RuntimeName>().each([&](ecs::Entity entity,ecs::RuntimeName& name){if(target==ecs::kNull&&name.value==desc.entityName)target=entity;});std::string combatError;if(target==ecs::kNull||!ConfigureCombat(registry,target,desc.assetPath,&combatError)){if(error)*error=!combatError.empty()?combatError:"Could not configure combat on '"+desc.entityName+"'.";return false;}}
+    for(const Scene::SpawnManagerDesc& desc:scene.spawnManagers){ecs::Entity target=ecs::kNull;registry.view<ecs::RuntimeName>().each([&](ecs::Entity entity,ecs::RuntimeName& name){if(target==ecs::kNull&&name.value==desc.entityName)target=entity;});std::string spawnError;if(target==ecs::kNull||!ConfigureSpawnManager(registry,target,desc.assetPath,&spawnError)){if(error)*error=!spawnError.empty()?spawnError:"Could not configure spawn manager on '"+desc.entityName+"'.";return false;}}
 
     for (const Scene::FoliageDesc& desc : scene.foliage) {
         const ecs::Entity entity = registry.Create();

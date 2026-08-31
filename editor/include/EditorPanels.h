@@ -83,6 +83,7 @@ public:
         DialogueEditor,
         InventoryItemEditor,
         CombatEditor,
+        SpawnManager,
         Count
     };
 

@@ -1255,6 +1255,7 @@ const char *EditorAssets::TypeName(Type type)
         case Type::Dialogue: return "Dialogue";
         case Type::Item: return "Item";
         case Type::Combat: return "Combat Profile";
+        case Type::Spawn: return "Spawn Encounter";
         case Type::Other: return "Other";
     }
     return "Other";
@@ -1388,6 +1389,9 @@ EditorAssets::Type EditorAssets::ClassifyExtension(const std::string &extension)
     }
     if (extension == ".3dgcombat") {
         return Type::Combat;
+    }
+    if (extension == ".3dgspawn") {
+        return Type::Spawn;
     }
     if (extension == ".h" || extension == ".hpp" || extension == ".lua"
         || extension == ".cpp" || extension == ".cc") {

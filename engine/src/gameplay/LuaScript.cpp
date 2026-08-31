@@ -509,6 +509,14 @@ void LuaScript::RegisterEngineApi() {
         {"DealCombatDamage", ApiDealCombatDamage},
         {"IsCombatStaggered", ApiIsCombatStaggered},
         {"CombatStep", ApiCombatStep},
+        {"ConfigureSpawnManager", ApiConfigureSpawnManager},
+        {"StartSpawn", ApiStartSpawn},
+        {"StopSpawn", ApiStopSpawn},
+        {"ResetSpawn", ApiResetSpawn},
+        {"TriggerSpawnWave", ApiTriggerSpawnWave},
+        {"SetSpawnDifficulty", ApiSetSpawnDifficulty},
+        {"SpawnAlive", ApiSpawnAlive},
+        {"IsSpawnRunning", ApiIsSpawnRunning},
         {"SplinePointCount", ApiSplinePointCount},
         {"GetSplinePoint", ApiGetSplinePoint},
         {"SetSplinePoint", ApiSetSplinePoint},
@@ -932,6 +940,14 @@ int LuaScript::ApiCombatHit(lua_State* s){const auto v=Current(s)->CombatHit(sta
 int LuaScript::ApiDealCombatDamage(lua_State* s){const auto v=Current(s)->DealCombatDamage(static_cast<ecs::Entity>(luaL_checkinteger(s,1)),static_cast<float>(luaL_checknumber(s,2)),luaL_optstring(s,3,"Physical"));lua_pushlstring(s,v.data(),v.size());return 1;}
 int LuaScript::ApiIsCombatStaggered(lua_State* s){lua_pushboolean(s,Current(s)->IsCombatStaggered());return 1;}
 int LuaScript::ApiCombatStep(lua_State* s){lua_pushinteger(s,Current(s)->CombatStep());return 1;}
+int LuaScript::ApiConfigureSpawnManager(lua_State*s){lua_pushboolean(s,Current(s)->ConfigureSpawnManager(luaL_checkstring(s,1)));return 1;}
+int LuaScript::ApiStartSpawn(lua_State*s){lua_pushboolean(s,Current(s)->StartSpawn(static_cast<float>(luaL_optnumber(s,1,1.0)),static_cast<ecs::Entity>(luaL_optinteger(s,2,ecs::kNull))));return 1;}
+int LuaScript::ApiStopSpawn(lua_State*s){Current(s)->StopSpawn(static_cast<ecs::Entity>(luaL_optinteger(s,1,ecs::kNull)));return 0;}
+int LuaScript::ApiResetSpawn(lua_State*s){Current(s)->ResetSpawn(static_cast<ecs::Entity>(luaL_optinteger(s,1,ecs::kNull)));return 0;}
+int LuaScript::ApiTriggerSpawnWave(lua_State*s){lua_pushboolean(s,Current(s)->TriggerSpawnWave(static_cast<int>(luaL_optinteger(s,1,-1)),static_cast<ecs::Entity>(luaL_optinteger(s,2,ecs::kNull))));return 1;}
+int LuaScript::ApiSetSpawnDifficulty(lua_State*s){Current(s)->SetSpawnDifficulty(static_cast<float>(luaL_checknumber(s,1)),static_cast<ecs::Entity>(luaL_optinteger(s,2,ecs::kNull)));return 0;}
+int LuaScript::ApiSpawnAlive(lua_State*s){lua_pushinteger(s,Current(s)->SpawnAlive(static_cast<ecs::Entity>(luaL_optinteger(s,1,ecs::kNull))));return 1;}
+int LuaScript::ApiIsSpawnRunning(lua_State*s){lua_pushboolean(s,Current(s)->IsSpawnRunning(static_cast<ecs::Entity>(luaL_optinteger(s,1,ecs::kNull))));return 1;}
 
 int LuaScript::ApiSplinePointCount(lua_State* state) {
     lua_pushinteger(state, Current(state)->SplinePointCount(

@@ -44,8 +44,8 @@ Status legend:
 | 25 | **COMPLETE** | Dialogue Editor | Branching conversations, conditions, events, voice clips, portraits, and localization keys. |
 | 26 | **COMPLETE** | Inventory and Item Editor | Weapons, armor, consumables, pickups, currencies, statistics, icons, and effects. |
 | 27 | **COMPLETE** | Combat Editor | Damage types, combos, targeting, blocking, parrying, stagger, hit reactions, and immunity windows. |
-| 28 | **NEXT** | Spawn Manager | Spawn volumes, weighted groups, waves, pooling, difficulty scaling, and encounter controls. |
-| 29 | PLANNED | Checkpoint and Save Editor | Visual configuration of persisted player, quest, world, and streamed-level state. |
+| 28 | **COMPLETE** | Spawn Manager | Spawn volumes, weighted groups, waves, pooling, difficulty scaling, and encounter controls. |
+| 29 | **NEXT** | Checkpoint and Save Editor | Visual configuration of persisted player, quest, world, and streamed-level state. |
 | 30 | PLANNED | Interaction Editor | Prompts, ranges, inputs, conditions, animation requirements, and interaction events. |
 | 31 | PLANNED | IK Rig Editor | Foot placement, hand targets, look-at, weapon alignment, aiming, and terrain adaptation. |
 | 32 | PLANNED | Animation Timeline Editor | Clip trimming, looping, root motion, curves, events, additive setup, and playback ranges. |
@@ -466,7 +466,15 @@ blocking, parrying, immunity, poise, stagger, hit reactions, particles, audio,
 scene binding, packaged runtime loading, native C++/Lua control, dependency
 tracking, timeline authoring, and live combat debugging.
 
-## Next Milestone: Spawn Manager
+## Completed Milestone: Spawn Manager
 
-Planned scope: spawn volumes, weighted spawn groups, waves, pooling, encounter
-controls, difficulty scaling, and live spawn debugging.
+Implemented as engine-owned `.3dgspawn` encounters with point, box, and sphere
+volumes, deterministic weighted groups, difficulty gates, ordered waves, delays,
+clear conditions, player-entry and automatic triggers, concurrent/total limits,
+dead-entity recycling, prefab cooking dependencies, scene binding, packaged
+runtime loading, native C++/Lua control, preview statistics, and lifecycle events.
+
+## Next Milestone: Checkpoint and Save Editor
+
+Planned scope: visual save checkpoints, persisted component selection, player and
+quest state, streamed-level state, respawn rules, slots, and live save debugging.
