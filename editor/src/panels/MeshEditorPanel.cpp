@@ -6,6 +6,8 @@
 
 #include <imgui.h>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/constants.hpp>
+#include <glm/gtx/quaternion.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -71,6 +73,87 @@ glm::vec3 ReadPosition(const std::vector<float>& vertices,
     return {vertices[offset], vertices[offset + 1], vertices[offset + 2]};
 }
 
+const char* ColliderShapeName(engine::ecs::ColliderShape shape) {
+    static const char* names[] = {"Sphere", "Plane", "Box", "Capsule", "Cylinder",
+        "Cone", "Pyramid", "Torus", "Staircase", "Convex Hull", "Triangle Mesh"};
+    const int index = static_cast<int>(shape);
+    return index >= 0 && index < IM_ARRAYSIZE(names) ? names[index] : "Collider";
+}
+
+engine::ecs::Collider BoundsCollider(engine::ecs::ColliderShape shape,
+                                     const glm::vec3& minimum,
+                                     const glm::vec3& maximum,
+                                     const std::string& meshPath) {
+    const glm::vec3 half = glm::max((maximum - minimum) * 0.5f, glm::vec3(0.001f));
+    const glm::vec3 center = (minimum + maximum) * 0.5f;
+    engine::ecs::Collider collider = engine::ecs::Collider::MakeBox(half);
+    collider.localPosition = center;
+    if (shape == engine::ecs::ColliderShape::Sphere) {
+        collider = engine::ecs::Collider::MakeSphere(std::max({half.x, half.y, half.z}));
+        collider.localPosition = center;
+    } else if (shape == engine::ecs::ColliderShape::Capsule) {
+        const float radius = std::max(half.x, half.z);
+        collider = engine::ecs::Collider::MakeCapsule(radius, std::max(half.y - radius, 0.0f));
+        collider.localPosition = center;
+    } else if (shape == engine::ecs::ColliderShape::ConvexHull
+               || shape == engine::ecs::ColliderShape::TriangleMesh) {
+        collider.shape = shape;
+        collider.localPosition = glm::vec3(0.0f);
+        collider.collisionAssetPath = meshPath;
+    } else collider.shape = shape;
+    return collider;
+}
+
+bool DrawColliderControls(engine::ecs::Collider& collider,
+                          const std::string& meshPath,
+                          const glm::vec3& minimum,
+                          const glm::vec3& maximum) {
+    bool changed = false;
+    int shape = static_cast<int>(collider.shape);
+    static const char* names[] = {"Sphere", "Plane", "Box", "Capsule", "Cylinder",
+        "Cone", "Pyramid", "Torus", "Staircase", "Convex Hull", "Triangle Mesh"};
+    if (ImGui::Combo("Shape", &shape, names, IM_ARRAYSIZE(names))) {
+        collider.shape = static_cast<engine::ecs::ColliderShape>(shape);
+        if (collider.shape == engine::ecs::ColliderShape::ConvexHull
+            || collider.shape == engine::ecs::ColliderShape::TriangleMesh) {
+            collider.collisionAssetPath = meshPath;
+            collider.halfExtents = glm::max((maximum - minimum) * 0.5f,
+                                             glm::vec3(0.001f));
+        }
+        changed = true;
+    }
+    if ((collider.shape == engine::ecs::ColliderShape::ConvexHull
+         || collider.shape == engine::ecs::ColliderShape::TriangleMesh)
+        && collider.collisionAssetPath.empty()) {
+        collider.collisionAssetPath = meshPath;
+        changed = true;
+    }
+    if (collider.shape == engine::ecs::ColliderShape::Sphere)
+        changed |= ImGui::DragFloat("Radius", &collider.radius, 0.01f, 0.001f, 10000.0f);
+    else if (collider.shape == engine::ecs::ColliderShape::Capsule
+             || collider.shape == engine::ecs::ColliderShape::Cylinder
+             || collider.shape == engine::ecs::ColliderShape::Cone) {
+        changed |= ImGui::DragFloat("Radius", &collider.radius, 0.01f, 0.001f, 10000.0f);
+        changed |= ImGui::DragFloat("Half Height", &collider.halfHeight, 0.01f, 0.0f, 10000.0f);
+    } else if (collider.shape != engine::ecs::ColliderShape::Plane) {
+        changed |= ImGui::DragFloat3("Half Extents", &collider.halfExtents.x,
+                                     0.01f, 0.001f, 10000.0f);
+    }
+    changed |= ImGui::DragFloat3("Local Position", &collider.localPosition.x, 0.01f);
+    glm::vec3 euler = glm::degrees(glm::eulerAngles(collider.localRotation));
+    if (ImGui::DragFloat3("Local Rotation", &euler.x, 0.5f, -360.0f, 360.0f)) {
+        collider.localRotation = glm::quat(glm::radians(euler));
+        changed = true;
+    }
+    changed |= ImGui::DragFloat3("Local Scale", &collider.localScale.x,
+                                 0.01f, 0.001f, 10000.0f);
+    changed |= ImGui::Checkbox("Inherit Object Scale", &collider.inheritTransformScale);
+    changed |= ImGui::Checkbox("Trigger", &collider.isTrigger);
+    changed |= ImGui::DragFloat("Restitution", &collider.restitution, 0.01f, 0.0f, 1.0f);
+    changed |= ImGui::DragFloat("Friction", &collider.friction, 0.01f, 0.0f, 2.0f);
+    return changed;
+}
+
 } // namespace
 
 void MeshEditorPanel::QueueOpen(const std::string& path) {
@@ -88,6 +171,19 @@ bool MeshEditorPanel::Load(const std::string& path, std::string* error) {
         m_minimum = Vec3(m_staticAsset.minimum);
         m_maximum = Vec3(m_staticAsset.maximum);
         m_collisionType = static_cast<int>(m_staticAsset.collisionType);
+        if (m_staticAsset.colliders.empty()
+            && m_staticAsset.collisionType != engine::StaticMeshCollisionType::None) {
+            engine::ecs::ColliderShape shape = engine::ecs::ColliderShape::Box;
+            if (m_staticAsset.collisionType == engine::StaticMeshCollisionType::Sphere)
+                shape = engine::ecs::ColliderShape::Sphere;
+            else if (m_staticAsset.collisionType == engine::StaticMeshCollisionType::Capsule)
+                shape = engine::ecs::ColliderShape::Capsule;
+            else if (m_staticAsset.collisionType == engine::StaticMeshCollisionType::ConvexHull)
+                shape = engine::ecs::ColliderShape::ConvexHull;
+            else if (m_staticAsset.collisionType == engine::StaticMeshCollisionType::TriangleMesh)
+                shape = engine::ecs::ColliderShape::TriangleMesh;
+            m_staticAsset.colliders.push_back(BoundsCollider(shape, m_minimum, m_maximum, path));
+        }
     } else if (extension == ".3dgskmesh") {
         engine::SkeletalMeshAssetData asset;
         if (!engine::LoadSkeletalMeshAsset(path, &asset, error)) return false;
@@ -102,6 +198,17 @@ bool MeshEditorPanel::Load(const std::string& path, std::string* error) {
     }
 
     m_path = path;
+    bool repairedCollisionSource = false;
+    if (m_kind == Kind::Static) {
+        for (engine::ecs::Collider& collider : m_staticAsset.colliders) {
+            if ((collider.shape == engine::ecs::ColliderShape::ConvexHull
+                 || collider.shape == engine::ecs::ColliderShape::TriangleMesh)
+                && collider.collisionAssetPath.empty()) {
+                collider.collisionAssetPath = path;
+                repairedCollisionSource = true;
+            }
+        }
+    }
     m_pivot = glm::vec3(0.0f);
     m_dirty = false;
     m_paintDirty = false;
@@ -112,7 +219,8 @@ bool MeshEditorPanel::Load(const std::string& path, std::string* error) {
     m_geometryOriginal = m_staticAsset;
     m_undoGeometry.clear(); m_redoGeometry.clear(); m_selectedFaces.clear();
     m_selectedVertices.clear(); m_geometryDirty = false;
-    m_collisionDirty = false;
+    m_collisionDirty = repairedCollisionSource;
+    m_selectedCollider = 0;
     m_materialDirty = false;
     m_previewYaw = -0.55f;
     m_previewPitch = 0.30f;
@@ -262,6 +370,8 @@ bool MeshEditorPanel::BakePivot(std::string* error) {
                 subMesh.vertices[i + 2] -= m_pivot.z;
             }
         }
+        for (engine::ecs::Collider& collider : m_staticAsset.colliders)
+            collider.localPosition -= m_pivot;
         m_staticAsset.minimum = Array3(m_minimum - m_pivot);
         m_staticAsset.maximum = Array3(m_maximum - m_pivot);
         if (!engine::SaveStaticMeshAsset(m_path, m_staticAsset, error)) return false;
@@ -404,6 +514,73 @@ void MeshEditorPanel::DrawPreview() {
         draw->AddLine(a, b, IM_COL32(117, 157, 198, 115), 1.0f);
         draw->AddLine(b, c, IM_COL32(117, 157, 198, 115), 1.0f);
         draw->AddLine(c, a, IM_COL32(117, 157, 198, 115), 1.0f);
+    }
+
+    if (m_editMode == 3 && m_kind == Kind::Static && m_showCollision) {
+        for (std::size_t colliderIndex = 0; colliderIndex < m_staticAsset.colliders.size(); ++colliderIndex) {
+            const engine::ecs::Collider& collider = m_staticAsset.colliders[colliderIndex];
+            const ImU32 color = colliderIndex == static_cast<std::size_t>(m_selectedCollider)
+                ? IM_COL32(255, 178, 35, 255) : IM_COL32(64, 235, 155, 210);
+            const auto point = [&](const glm::vec3& local) {
+                return collider.localPosition + collider.localRotation * (local * collider.localScale);
+            };
+            const auto box = [&]() {
+                const glm::vec3 e = collider.halfExtents;
+                glm::vec3 corners[8];
+                for (int i = 0; i < 8; ++i) corners[i] = point({(i&1)?e.x:-e.x,
+                    (i&2)?e.y:-e.y, (i&4)?e.z:-e.z});
+                const int edges[][2] = {{0,1},{2,3},{4,5},{6,7},{0,2},{1,3},
+                                        {4,6},{5,7},{0,4},{1,5},{2,6},{3,7}};
+                for (const auto& edge : edges)
+                    draw->AddLine(project(corners[edge[0]]), project(corners[edge[1]]), color, 2.0f);
+            };
+            auto circle = [&](const glm::vec3& centerPoint, const glm::vec3& axisA,
+                              const glm::vec3& axisB, float radiusValue) {
+                constexpr int segments = 32;
+                for (int i = 0; i < segments; ++i) {
+                    const float a0 = glm::two_pi<float>() * static_cast<float>(i) / segments;
+                    const float a1 = glm::two_pi<float>() * static_cast<float>(i + 1) / segments;
+                    draw->AddLine(project(point(centerPoint + axisA * (std::cos(a0) * radiusValue)
+                        + axisB * (std::sin(a0) * radiusValue))),
+                        project(point(centerPoint + axisA * (std::cos(a1) * radiusValue)
+                        + axisB * (std::sin(a1) * radiusValue))), color, 2.0f);
+                }
+            };
+            if (collider.shape == engine::ecs::ColliderShape::Sphere) {
+                circle({}, {1,0,0}, {0,1,0}, collider.radius);
+                circle({}, {1,0,0}, {0,0,1}, collider.radius);
+                circle({}, {0,1,0}, {0,0,1}, collider.radius);
+            } else if (collider.shape == engine::ecs::ColliderShape::Capsule) {
+                const glm::vec3 top(0, collider.halfHeight, 0), bottom(0, -collider.halfHeight, 0);
+                circle(top, {1,0,0}, {0,0,1}, collider.radius);
+                circle(bottom, {1,0,0}, {0,0,1}, collider.radius);
+                for (const glm::vec3 side : {glm::vec3(collider.radius,0,0), glm::vec3(-collider.radius,0,0),
+                                             glm::vec3(0,0,collider.radius), glm::vec3(0,0,-collider.radius)})
+                    draw->AddLine(project(point(bottom + side)), project(point(top + side)), color, 2.0f);
+            } else if (collider.shape == engine::ecs::ColliderShape::ConvexHull
+                       || collider.shape == engine::ecs::ColliderShape::TriangleMesh) {
+                const std::string source = collider.collisionAssetPath.empty()
+                    ? m_path : collider.collisionAssetPath;
+                const auto collisionMesh = engine::physics::AcquireCollisionMesh(source);
+                bool drewGeometry = false;
+                if (collisionMesh && collider.shape == engine::ecs::ColliderShape::ConvexHull) {
+                    for (const engine::physics::CollisionEdge& edge : collisionMesh->convexHullEdges) {
+                        draw->AddLine(project(point(edge.a)), project(point(edge.b)), color, 2.5f);
+                        drewGeometry = true;
+                    }
+                } else if (collisionMesh) {
+                    for (const engine::physics::CollisionTriangle& triangle : collisionMesh->triangles) {
+                        draw->AddLine(project(point(triangle.a)), project(point(triangle.b)), color, 2.0f);
+                        draw->AddLine(project(point(triangle.b)), project(point(triangle.c)), color, 2.0f);
+                        draw->AddLine(project(point(triangle.c)), project(point(triangle.a)), color, 2.0f);
+                        drewGeometry = true;
+                    }
+                }
+                if (!drewGeometry) box();
+            } else {
+                box();
+            }
+        }
     }
 
     if(m_editMode==2&&m_componentMode==0)for(const std::uint64_t encoded:m_selectedVertices){const std::size_t sub=static_cast<std::size_t>(encoded>>32);const std::uint32_t vertex=static_cast<std::uint32_t>(encoded);if(sub<m_staticAsset.subMeshes.size()&&vertex<m_staticAsset.subMeshes[sub].vertices.size()/engine::kStaticMeshVertexStride)draw->AddCircleFilled(project(ReadPosition(m_staticAsset.subMeshes[sub].vertices,vertex,engine::kStaticMeshVertexStride)),5,IM_COL32(255,178,35,255));}
@@ -693,63 +870,87 @@ void MeshEditorPanel::Draw(bool* open, bool* assetSaved, std::string* message) {
             ImGui::TextColored(m_geometryDirty?ImVec4(1,.72f,.25f,1):ImVec4(.35f,.85f,.45f,1),m_geometryDirty?"Unsaved geometry":"Geometry saved");
         } else if (m_editMode == 3) {
             ImGui::TextUnformatted("COLLISION");
-            ImGui::TextWrapped("Collision geometry is cooked once from this engine-owned mesh and shared by every instance.");
-            const char* types[] = {"None", "Box", "Sphere", "Capsule",
-                                   "Convex Hull (dynamic-safe)", "Triangle Mesh (static only)"};
-            if (ImGui::Combo("Collision Type", &m_collisionType, types, IM_ARRAYSIZE(types))) {
-                m_collisionDirty = true;
-                m_staticAsset.collisionType = static_cast<engine::StaticMeshCollisionType>(m_collisionType);
-            }
+            ImGui::TextWrapped("Add several local shapes to fit this mesh. Every placed instance inherits the set, and each shape remains editable in the scene Inspector.");
             ImGui::Checkbox("Show Collision", &m_showCollision);
-            ImGui::TextDisabled("Triangle Mesh is intended for static architecture. Dynamic objects use the convex option.");
             ImGui::Separator();
-            if (m_collisionType == 0) {
-                ImGui::TextUnformatted("Collision disabled for newly authored instances.");
-            } else {
-                std::string cookError;
-                const bool meshCollision = m_collisionType == 4 || m_collisionType == 5;
-                const auto cooked = meshCollision
-                    ? engine::physics::AcquireCollisionMesh(m_path, &cookError) : nullptr;
-                if (cooked) {
-                    ImGui::Text("Source triangles: %zu", cooked->triangles.size());
-                    ImGui::Text("BVH nodes: %zu", cooked->nodes.size());
-                    ImGui::Text("Cooked memory: %.2f KiB", cooked->CookedBytes() / 1024.0f);
-                    ImGui::Text("Last cook: %.3f ms", cooked->cookMilliseconds);
-                    ImGui::TextColored(ImVec4(.35f,.85f,.45f,1), "Collision data ready (shared cache)");
-                } else if (meshCollision) {
-                    ImGui::TextColored(ImVec4(1,.35f,.25f,1), "%s", cookError.c_str());
-                } else {
-                    const glm::vec3 size = m_maximum - m_minimum;
-                    ImGui::Text("Bounds: %.3f x %.3f x %.3f", size.x, size.y, size.z);
-                }
-                if (ImGui::Button("Rebuild Collision", ImVec2(-1.0f, 0.0f))) {
-                    engine::physics::InvalidateCollisionMesh(m_path);
-                    std::string rebuildError;
-                    const bool rebuilt = !meshCollision
-                        || static_cast<bool>(engine::physics::AcquireCollisionMesh(m_path, &rebuildError));
-                    m_staticAsset.collisionType = static_cast<engine::StaticMeshCollisionType>(m_collisionType);
-                    if (rebuilt && engine::SaveStaticMeshAsset(m_path, m_staticAsset, &rebuildError)) {
-                        m_collisionDirty = false;
-                        if (message) *message = "Rebuilt mesh collision: " + m_path;
-                    } else if (message) {
-                        *message = "Collision rebuild failed: " + rebuildError;
-                    }
-                }
+            if (ImGui::Button("+ Box")) {
+                m_staticAsset.colliders.push_back(BoundsCollider(engine::ecs::ColliderShape::Box, m_minimum, m_maximum, m_path));
+                m_selectedCollider = static_cast<int>(m_staticAsset.colliders.size()) - 1; m_collisionDirty = true;
             }
-            if (ImGui::Button("Clear Collision", ImVec2(-1.0f, 0.0f))) {
-                m_collisionType = 0;
-                m_staticAsset.collisionType = engine::StaticMeshCollisionType::None;
-                std::string clearError;
-                if (engine::SaveStaticMeshAsset(m_path, m_staticAsset, &clearError)) {
-                    engine::physics::InvalidateCollisionMesh(m_path);
+            ImGui::SameLine();
+            if (ImGui::Button("+ Sphere")) {
+                m_staticAsset.colliders.push_back(BoundsCollider(engine::ecs::ColliderShape::Sphere, m_minimum, m_maximum, m_path));
+                m_selectedCollider = static_cast<int>(m_staticAsset.colliders.size()) - 1; m_collisionDirty = true;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("+ Capsule")) {
+                m_staticAsset.colliders.push_back(BoundsCollider(engine::ecs::ColliderShape::Capsule, m_minimum, m_maximum, m_path));
+                m_selectedCollider = static_cast<int>(m_staticAsset.colliders.size()) - 1; m_collisionDirty = true;
+            }
+            if (ImGui::Button("+ Convex Hull")) {
+                m_staticAsset.colliders.push_back(BoundsCollider(engine::ecs::ColliderShape::ConvexHull, m_minimum, m_maximum, m_path));
+                m_selectedCollider = static_cast<int>(m_staticAsset.colliders.size()) - 1; m_collisionDirty = true;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("+ Triangle Mesh")) {
+                m_staticAsset.colliders.push_back(BoundsCollider(engine::ecs::ColliderShape::TriangleMesh, m_minimum, m_maximum, m_path));
+                m_selectedCollider = static_cast<int>(m_staticAsset.colliders.size()) - 1; m_collisionDirty = true;
+            }
+            for (int i = 0; i < static_cast<int>(m_staticAsset.colliders.size()); ++i) {
+                ImGui::PushID(i);
+                const auto& collider = m_staticAsset.colliders[static_cast<std::size_t>(i)];
+                const std::string label = std::to_string(i + 1) + ". " + ColliderShapeName(collider.shape);
+                if (ImGui::Selectable(label.c_str(), m_selectedCollider == i)) m_selectedCollider = i;
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Duplicate")) {
+                    m_staticAsset.colliders.insert(m_staticAsset.colliders.begin() + i + 1, collider);
+                    m_selectedCollider = i + 1; m_collisionDirty = true; ImGui::PopID(); break;
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("X")) {
+                    m_staticAsset.colliders.erase(m_staticAsset.colliders.begin() + i);
+                    m_selectedCollider = std::clamp(m_selectedCollider, 0,
+                        std::max(0, static_cast<int>(m_staticAsset.colliders.size()) - 1));
+                    m_collisionDirty = true; ImGui::PopID(); break;
+                }
+                ImGui::PopID();
+            }
+            if (!m_staticAsset.colliders.empty()) {
+                m_selectedCollider = std::clamp(m_selectedCollider, 0,
+                    static_cast<int>(m_staticAsset.colliders.size()) - 1);
+                ImGui::SeparatorText("Selected Shape");
+                ImGui::PushID("MeshColliderDetails");
+                if (DrawColliderControls(m_staticAsset.colliders[static_cast<std::size_t>(m_selectedCollider)],
+                                         m_path, m_minimum, m_maximum))
+                    m_collisionDirty = true;
+                ImGui::PopID();
+            } else ImGui::TextDisabled("No authored colliders. Instances will have no collision by default.");
+            if (ImGui::Button("Fit Selected To Mesh Bounds", ImVec2(-1.0f, 0.0f))
+                && !m_staticAsset.colliders.empty()) {
+                auto& selectedCollider = m_staticAsset.colliders[static_cast<std::size_t>(m_selectedCollider)];
+                selectedCollider = BoundsCollider(selectedCollider.shape, m_minimum, m_maximum, m_path);
+                m_collisionDirty = true;
+            }
+            if (ImGui::Button("Save Collider Set", ImVec2(-1.0f, 0.0f))) {
+                m_staticAsset.collisionType = m_staticAsset.colliders.empty()
+                    ? engine::StaticMeshCollisionType::None
+                    : engine::StaticMeshCollisionType::Box;
+                engine::physics::InvalidateCollisionMesh(m_path);
+                std::string saveError;
+                if (engine::SaveStaticMeshAsset(m_path, m_staticAsset, &saveError)) {
                     m_collisionDirty = false;
-                    if (message) *message = "Cleared mesh collision: " + m_path;
-                } else if (message) *message = "Clear collision failed: " + clearError;
+                    if (assetSaved) *assetSaved = true;
+                    if (message) *message = "Saved mesh collider set: " + m_path;
+                } else if (message) *message = "Collider save failed: " + saveError;
+            }
+            if (ImGui::Button("Clear All Colliders", ImVec2(-1.0f, 0.0f))) {
+                m_staticAsset.colliders.clear(); m_staticAsset.collisionType = engine::StaticMeshCollisionType::None;
+                m_selectedCollider = 0; m_collisionDirty = true;
             }
             ImGui::TextColored(m_collisionDirty ? ImVec4(1,.72f,.25f,1)
                                                  : ImVec4(.35f,.85f,.45f,1),
-                               m_collisionDirty ? "Collision needs rebuild"
-                                                : "Collision is current");
+                               m_collisionDirty ? "Unsaved collider changes"
+                                                : "Collider set saved");
         } else {
             ImGui::TextUnformatted("MATERIAL SLOTS");
             ImGui::TextWrapped("Slots resolve saved engine materials by stable asset ID, "

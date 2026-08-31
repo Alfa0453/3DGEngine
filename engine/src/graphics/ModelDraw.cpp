@@ -66,9 +66,9 @@ void DrawModel(const Model& model, Shader& shader,
                const ModelMaterialOverride* materialOverride) {
     const auto& mats = model.Materials();
 
-    // Backface culling: imported models are closed solids, so never rasterize their
-    // inside faces (front faces are CCW). Restored to the default (off) at the end so
-    // callers/other passes keep their expected state.
+    // Closed imported submeshes cull their inside faces. Open imported geometry
+    // (planes/cards/cloth) is flagged two-sided during import and disables culling
+    // only for that submesh.
     glEnable(GL_CULL_FACE);
     glCullFace(GL_BACK);
     glFrontFace(GL_CCW);
@@ -148,6 +148,8 @@ void DrawModel(const Model& model, Shader& shader,
             bind(m.heightMap, 5, "uHasHeightMap");
         }
 
+        if (sm.mesh.TwoSided()) glDisable(GL_CULL_FACE);
+        else glEnable(GL_CULL_FACE);
         sm.mesh.Draw();
     }
 

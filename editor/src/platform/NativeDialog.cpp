@@ -107,6 +107,38 @@ std::string OpenFileDialog(const std::string& title, const std::string& filterNa
     return {};
 }
 
+std::string SaveFileDialog(const std::string& title, const std::string& filterName,
+                           const std::string& filterExt) {
+    wchar_t file[1024] = L"";
+
+    const std::wstring wname = Utf8ToWide(filterName.empty() ? std::string("File") : filterName);
+    const std::wstring wext  = Utf8ToWide(filterExt.empty()  ? std::string("*")    : filterExt);
+    std::wstring filter;
+    filter += wname + L" (*." + wext + L")"; filter.push_back(L'\0');
+    filter += L"*." + wext;                   filter.push_back(L'\0');
+    filter += L"All Files (*.*)";             filter.push_back(L'\0');
+    filter += L"*.*";                          filter.push_back(L'\0');
+    filter.push_back(L'\0');
+
+    const std::wstring wtitle = Utf8ToWide(title);
+
+    OPENFILENAMEW ofn;
+    ZeroMemory(&ofn, sizeof(ofn));
+    ofn.lStructSize  = sizeof(ofn);
+    ofn.lpstrFile    = file;
+    ofn.nMaxFile     = static_cast<DWORD>(sizeof(file) / sizeof(file[0]));
+    ofn.lpstrFilter  = filter.c_str();
+    ofn.nFilterIndex = 1;
+    ofn.lpstrTitle   = title.empty() ? nullptr : wtitle.c_str();
+    ofn.lpstrDefExt  = wext.c_str();   // append the extension if the user omits it
+    ofn.Flags        = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_EXPLORER;
+
+    if (GetSaveFileNameW(&ofn)) {
+        return WideToUtf8(file);
+    }
+    return {};
+}
+
 std::string OpenAssetImportDialog(const std::string& title) {
     wchar_t file[4096] = L"";
     std::wstring filter;
@@ -152,6 +184,7 @@ namespace editor {
 
 std::string PickFolderDialog(const std::string&) { return {}; }
 std::string OpenFileDialog(const std::string&, const std::string&, const std::string&) { return {}; }
+std::string SaveFileDialog(const std::string&, const std::string&, const std::string&) { return {}; }
 std::string OpenAssetImportDialog(const std::string&) { return {}; }
 
 } // namespace editor

@@ -3,6 +3,7 @@
 #include <engine/assets/AssetReference.h>
 #include <engine/assets/RagdollAsset.h>
 #include <engine/assets/AssetRegistry.h>
+#include <engine/assets/StaticMeshAsset.h>
 #include <engine/gameplay/InteractionSystem.h>
 #include <engine/gameplay/PortalSystem.h>
 #include <engine/gameplay/QuestSystem.h>
@@ -79,6 +80,11 @@ void NormalizeColliderValues(Collider& collider) {
     collider.steps = std::clamp(collider.steps, 1, 64);
     collider.restitution = FiniteClamp(collider.restitution, 0.4f, 0.0f, 1.0f);
     collider.friction = FiniteClamp(collider.friction, 0.5f, 0.0f, 2.0f);
+    // Pass-4 material fields. 0 is a legal sentinel for static/dynamic friction ("derive from
+    // friction"), so the lower bound is 0; density must be positive for the Density mass mode.
+    collider.staticFriction  = FiniteClamp(collider.staticFriction,  0.0f, 0.0f, 4.0f);
+    collider.dynamicFriction = FiniteClamp(collider.dynamicFriction, 0.0f, 0.0f, 4.0f);
+    collider.density         = FiniteClamp(collider.density,      1000.0f, 0.0f, 100000.0f);
     collider.localPosition.x = FiniteClamp(collider.localPosition.x, 0.0f, -kMaxSceneCoordinate, kMaxSceneCoordinate);
     collider.localPosition.y = FiniteClamp(collider.localPosition.y, 0.0f, -kMaxSceneCoordinate, kMaxSceneCoordinate);
     collider.localPosition.z = FiniteClamp(collider.localPosition.z, 0.0f, -kMaxSceneCoordinate, kMaxSceneCoordinate);
@@ -87,6 +93,14 @@ void NormalizeColliderValues(Collider& collider) {
         ? glm::quat(1.0f, 0.0f, 0.0f, 0.0f) : glm::normalize(collider.localRotation);
     collider.localScale = glm::clamp(glm::abs(collider.localScale), glm::vec3(0.0001f),
                                      glm::vec3(kMaxSceneScale));
+}
+
+void ResolveMeshColliderSource(Collider& collider, const std::string& modelAssetPath) {
+    if ((collider.shape == engine::ecs::ColliderShape::ConvexHull
+         || collider.shape == engine::ecs::ColliderShape::TriangleMesh)
+        && collider.collisionAssetPath.empty()) {
+        collider.collisionAssetPath = modelAssetPath;
+    }
 }
 
 void NormalizeControllerValues(EditorScene::PlayerControllerSettings& settings) {
@@ -228,6 +242,8 @@ const char* PhysicsJointTypeName(EditorScene::PhysicsJoint::Type type) {
     switch (type) {
     case EditorScene::PhysicsJoint::Type::Distance: return "Distance";
     case EditorScene::PhysicsJoint::Type::Spring: return "Spring";
+    case EditorScene::PhysicsJoint::Type::Ball: return "Ball";
+    case EditorScene::PhysicsJoint::Type::Hinge: return "Hinge";
     }
     return "Distance";
 }
@@ -239,6 +255,14 @@ bool ParsePhysicsJointType(const std::string& value, EditorScene::PhysicsJoint::
     }
     if (value == "Spring") {
         *type = EditorScene::PhysicsJoint::Type::Spring;
+        return true;
+    }
+    if (value == "Ball") {
+        *type = EditorScene::PhysicsJoint::Type::Ball;
+        return true;
+    }
+    if (value == "Hinge") {
+        *type = EditorScene::PhysicsJoint::Type::Hinge;
         return true;
     }
     return false;
@@ -290,6 +314,55 @@ std::string StoredPath(const std::string& path) {
     std::ostringstream out;
     out << std::quoted(path.empty() ? std::string("-") : path);
     return out.str();
+}
+
+void WriteColliderFields(std::ostream& out, const Collider& c) {
+    out << static_cast<int>(c.shape) << ' ' << c.radius << ' ' << c.halfHeight << ' '
+        << c.majorRadius << ' ' << c.minorRadius << ' ' << c.steps << ' '
+        << c.halfExtents.x << ' ' << c.halfExtents.y << ' ' << c.halfExtents.z << ' '
+        << c.planeNormal.x << ' ' << c.planeNormal.y << ' ' << c.planeNormal.z << ' '
+        << c.planeOffset << ' ' << c.restitution << ' ' << c.friction << ' '
+        << c.isTrigger << ' ' << c.layer << ' ' << c.mask << ' '
+        << c.localPosition.x << ' ' << c.localPosition.y << ' ' << c.localPosition.z << ' '
+        << c.localRotation.w << ' ' << c.localRotation.x << ' '
+        << c.localRotation.y << ' ' << c.localRotation.z << ' '
+        << c.localScale.x << ' ' << c.localScale.y << ' ' << c.localScale.z << ' '
+        << c.inheritTransformScale << ' ' << std::quoted(c.collisionAssetPath) << ' '
+        << c.collisionDirty << ' '
+        // Pass-4 material tail (scene version 153+). Appended after the existing fields so older
+        // readers that stop here are unaffected; readers pass their scene version to gate these.
+        << c.staticFriction << ' ' << c.dynamicFriction << ' ' << c.density << ' '
+        << static_cast<int>(c.frictionCombine) << ' '
+        << static_cast<int>(c.restitutionCombine) << ' '
+        << std::quoted(c.physicsMaterialPath.empty() ? std::string("-") : c.physicsMaterialPath) << ' ';
+}
+
+bool ReadColliderFields(std::istream& in, Collider* c, int version = 0) {
+    int shape = 0, trigger = 0, inherit = 0, dirty = 0;
+    in >> shape >> c->radius >> c->halfHeight >> c->majorRadius >> c->minorRadius
+       >> c->steps >> c->halfExtents.x >> c->halfExtents.y >> c->halfExtents.z
+       >> c->planeNormal.x >> c->planeNormal.y >> c->planeNormal.z >> c->planeOffset
+       >> c->restitution >> c->friction >> trigger >> c->layer >> c->mask
+       >> c->localPosition.x >> c->localPosition.y >> c->localPosition.z
+       >> c->localRotation.w >> c->localRotation.x >> c->localRotation.y
+       >> c->localRotation.z >> c->localScale.x >> c->localScale.y >> c->localScale.z
+       >> inherit >> std::quoted(c->collisionAssetPath) >> dirty;
+    if (!in || shape < static_cast<int>(engine::ecs::ColliderShape::Sphere)
+        || shape > static_cast<int>(engine::ecs::ColliderShape::TriangleMesh)) return false;
+    c->shape = static_cast<engine::ecs::ColliderShape>(shape);
+    c->isTrigger = trigger != 0;
+    c->inheritTransformScale = inherit != 0;
+    c->collisionDirty = dirty != 0;
+    if (version >= 153) {
+        int fricCombine = 0, restCombine = 0;
+        std::string matPath;
+        in >> c->staticFriction >> c->dynamicFriction >> c->density
+           >> fricCombine >> restCombine >> std::quoted(matPath);
+        c->frictionCombine    = static_cast<engine::ecs::MaterialCombine>(fricCombine);
+        c->restitutionCombine = static_cast<engine::ecs::MaterialCombine>(restCombine);
+        c->physicsMaterialPath = (matPath == "-") ? std::string() : matPath;
+    }
+    return true;
 }
 
 std::string TrimHierarchyName(std::string value) {
@@ -486,7 +559,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         return false;
     }
 
-    out << "3DGEditorScene 151 " << m_assetId.ToString() << '\n';
+    out << "3DGEditorScene 153 " << m_assetId.ToString() << '\n';
     out << "environment "
         << m_environment.timeOfDay << ' '
         << m_environment.skyLightIntensity << ' '
@@ -656,6 +729,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         }
         out << '\n';
     }
+
     for (const CameraPreset& camera : m_cameraPresets) {
         out << "camera "
             << std::quoted(camera.name) << ' '
@@ -1147,6 +1221,29 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
             << ' ' << object.navAgentSquadForgetTime;
         // Platformer camera axis (scene version 112+).
         out << ' ' << object.playerController.platformerYaw;
+        // Physics material + mass mode (scene version 153+). Tail of the object record so older
+        // readers are unaffected; read behind `if (version >= 153)` in Load.
+        out << ' ' << object.collider.staticFriction
+            << ' ' << object.collider.dynamicFriction
+            << ' ' << object.collider.density
+            << ' ' << static_cast<int>(object.collider.frictionCombine)
+            << ' ' << static_cast<int>(object.collider.restitutionCombine)
+            << ' ' << StoredPath(object.collider.physicsMaterialPath)
+            << ' ' << static_cast<int>(object.rigidBody.massMode)
+            // Center of mass (Pass-3, serialized version 153+).
+            << ' ' << (object.rigidBody.autoCenterOfMass ? 1 : 0)
+            << ' ' << object.rigidBody.centerOfMassLocal.x
+            << ' ' << object.rigidBody.centerOfMassLocal.y
+            << ' ' << object.rigidBody.centerOfMassLocal.z;
+        out << '\n';
+    }
+
+    for (const Object& object : m_objects) {
+        if (object.additionalColliders.empty()) continue;
+        out << "compound_colliders " << std::quoted(object.name) << ' '
+            << object.additionalColliders.size() << ' ';
+        for (const Collider& collider : object.additionalColliders)
+            WriteColliderFields(out, collider);
         out << '\n';
     }
 
@@ -1425,7 +1522,15 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
             << joint.restLength << ' '
             << (joint.rope ? 1 : 0) << ' '
             << joint.stiffness << ' '
-            << joint.damping << '\n';
+            << joint.damping << ' '
+            // Ball/Hinge authoring (scene version 153+).
+            << joint.axis.x << ' ' << joint.axis.y << ' ' << joint.axis.z << ' '
+            << (joint.collideConnected ? 1 : 0) << ' '
+            << (joint.angularLimit ? 1 : 0) << ' '
+            << joint.minAngle << ' ' << joint.maxAngle << ' '
+            << (joint.motorEnabled ? 1 : 0) << ' '
+            << joint.motorTargetVelocity << ' ' << joint.motorMaxTorque << ' '
+            << joint.breakImpulse << '\n';
     }
 
     for (const Object& object : m_objects) {
@@ -1571,7 +1676,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             return false;
         }
     }
-    if (magic != "3DGEditorScene" ||(version < 1 || version > 151)) {
+    if (magic != "3DGEditorScene" ||(version < 1 || version > 153)) {
         if (error) *error = "Scene file has an unknown format.";
         return false;
     }
@@ -1582,6 +1687,22 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
     std::string recordType;
     bool resolvedDuplicateNames = false;
     while (in >> recordType) {
+        if (recordType == "compound_colliders" && version >= 152) {
+            std::string objectName;
+            std::size_t count = 0;
+            in >> std::quoted(objectName) >> count;
+            if (!in || count > 4096) { if (error) *error = "Scene contains invalid compound colliders."; Clear(); return false; }
+            auto object = std::find_if(m_objects.begin(), m_objects.end(),
+                [&](const Object& candidate) { return candidate.name == objectName; });
+            std::vector<Collider> colliders(count);
+            for (Collider& collider : colliders)
+                if (!ReadColliderFields(in, &collider, version)) { if (error) *error = "Scene contains invalid compound collider data."; Clear(); return false; }
+            if (object != m_objects.end()) {
+                object->additionalColliders = std::move(colliders);
+                for (Collider& collider : object->additionalColliders) NormalizeColliderValues(collider);
+            }
+            continue;
+        }
         if (recordType == "atmosphere" && version >= 140) {
             in >> m_environment.atmosphereRayleigh >> m_environment.atmosphereRayleighHeight
                >> m_environment.atmosphereMie >> m_environment.atmosphereMieHeight
@@ -2232,6 +2353,18 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                 if (error) *error = "Scene file contains an invalid joint record.";
                 Clear();
                 return false;
+            }
+
+            // Ball/Hinge authoring (scene version 153+).
+            if (version >= 153) {
+                int collide = 1, limit = 0, motor = 0;
+                in >> joint.axis.x >> joint.axis.y >> joint.axis.z
+                   >> collide >> limit >> joint.minAngle >> joint.maxAngle
+                   >> motor >> joint.motorTargetVelocity >> joint.motorMaxTorque
+                   >> joint.breakImpulse;
+                joint.collideConnected = collide != 0;
+                joint.angularLimit = limit != 0;
+                joint.motorEnabled = motor != 0;
             }
 
             joint.enabled = enabled != 0;
@@ -3708,6 +3841,24 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             if (version >= 112) {
                 in >> playerController.platformerYaw;
             }
+            // Physics material + mass mode (scene version 153+). Read into the local collider /
+            // rigidBody, which are copied wholesale onto the object below (so the Duplicate path,
+            // which copies the whole structs, carries these automatically).
+            if (version >= 153) {
+                int fricCombine = 0, restCombine = 0, massMode = 0;
+                std::string matPath;
+                in >> collider.staticFriction >> collider.dynamicFriction >> collider.density
+                   >> fricCombine >> restCombine >> std::quoted(matPath) >> massMode;
+                collider.frictionCombine    = static_cast<engine::ecs::MaterialCombine>(fricCombine);
+                collider.restitutionCombine = static_cast<engine::ecs::MaterialCombine>(restCombine);
+                collider.physicsMaterialPath = (matPath == "-") ? std::string() : matPath;
+                rigidBody.massMode = static_cast<engine::ecs::RigidBody::MassMode>(massMode);
+                // Center of mass (serialized version 153+).
+                int autoCom = 1;
+                in >> autoCom >> rigidBody.centerOfMassLocal.x
+                   >> rigidBody.centerOfMassLocal.y >> rigidBody.centerOfMassLocal.z;
+                rigidBody.autoCenterOfMass = autoCom != 0;
+            }
             particleShape = std::clamp(particleShape,
                 static_cast<int>(engine::EmitShape::Point), static_cast<int>(engine::EmitShape::Cone));
             particleBlend = std::clamp(particleBlend,
@@ -4021,8 +4172,12 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
     }
     // Repair invalid memberships and parent links without rejecting older/corrupt
     // editor organization data. Runtime object data remains untouched.
-    for (Object& object : m_objects)
+    for (Object& object : m_objects) {
         if (!GroupExists(object.editorGroupId)) object.editorGroupId = kRootGroupId;
+        ResolveMeshColliderSource(object.collider, object.modelAssetPath);
+        for (Collider& collider : object.additionalColliders)
+            ResolveMeshColliderSource(collider, object.modelAssetPath);
+    }
     for (SceneGroup& group : m_groups) {
         if (group.parentId == group.id || !GroupExists(group.parentId))
             group.parentId = kRootGroupId;
@@ -4971,6 +5126,41 @@ bool EditorScene::AddModel(const std::string &path, const engine::Mesh &placehol
 
     CreateObject(name, Primitive::Cube, placeholderMesh, transform, glm::vec3(0.78f, 0.78f, 0.82f));
     m_objects.back().modelAssetPath = path;
+    engine::StaticMeshAssetData meshAsset;
+    std::string ignored;
+    if (engine::LoadStaticMeshAsset(path, &meshAsset, &ignored)) {
+        std::vector<Collider> authored = meshAsset.colliders;
+        for (Collider& collider : authored)
+            ResolveMeshColliderSource(collider, path);
+        if (authored.empty() && meshAsset.collisionType != engine::StaticMeshCollisionType::None) {
+            const glm::vec3 minimum(meshAsset.minimum[0], meshAsset.minimum[1], meshAsset.minimum[2]);
+            const glm::vec3 maximum(meshAsset.maximum[0], meshAsset.maximum[1], meshAsset.maximum[2]);
+            const glm::vec3 half = glm::max((maximum - minimum) * 0.5f, glm::vec3(0.001f));
+            Collider legacy = Collider::MakeBox(half);
+            legacy.localPosition = (minimum + maximum) * 0.5f;
+            if (meshAsset.collisionType == engine::StaticMeshCollisionType::Sphere) {
+                legacy = Collider::MakeSphere(std::max({half.x, half.y, half.z}));
+                legacy.localPosition = (minimum + maximum) * 0.5f;
+            } else if (meshAsset.collisionType == engine::StaticMeshCollisionType::Capsule) {
+                const float radius = std::max(half.x, half.z);
+                legacy = Collider::MakeCapsule(radius, std::max(half.y - radius, 0.0f));
+                legacy.localPosition = (minimum + maximum) * 0.5f;
+            } else if (meshAsset.collisionType == engine::StaticMeshCollisionType::ConvexHull
+                       || meshAsset.collisionType == engine::StaticMeshCollisionType::TriangleMesh) {
+                legacy.shape = meshAsset.collisionType == engine::StaticMeshCollisionType::ConvexHull
+                    ? engine::ecs::ColliderShape::ConvexHull
+                    : engine::ecs::ColliderShape::TriangleMesh;
+                legacy.localPosition = glm::vec3(0.0f);
+                legacy.collisionAssetPath = path;
+            }
+            authored.push_back(std::move(legacy));
+        }
+        if (!authored.empty()) {
+            m_objects.back().colliderEnabled = true;
+            m_objects.back().collider = authored.front();
+            m_objects.back().additionalColliders.assign(authored.begin() + 1, authored.end());
+        }
+    }
     m_selectedIndex = static_cast<int>(m_objects.size()) - 1;
     m_dirty = true;
     return true;
@@ -5617,6 +5807,7 @@ bool EditorScene::SetSelectedColliderEnabled(bool enabled)
 
     PushUndoSnapshot();
     selected.colliderEnabled = enabled;
+    if (!enabled) selected.additionalColliders.clear();
     if (enabled) {
         const Transform* transform = m_registry.TryGet<Transform>(selected.entity);
         if (selected.primitive == Primitive::Plane && selected.modelAssetPath.empty()) {
@@ -5659,6 +5850,7 @@ bool EditorScene::SetSelectedCollider(const engine::ecs::Collider &collider)
     selected.colliderEnabled = true;
     selected.collider = collider;
     NormalizeColliderValues(selected.collider);
+    ResolveMeshColliderSource(selected.collider, selected.modelAssetPath);
     m_dirty = true;
     return true;
 }
@@ -7371,6 +7563,7 @@ bool EditorScene::DuplicateSelected(const engine::Mesh & cube, const engine::Mes
     m_objects.back().rigidBody = selectedCopy.rigidBody;
     m_objects.back().colliderEnabled = selectedCopy.colliderEnabled;
     m_objects.back().collider = selectedCopy.collider;
+    m_objects.back().additionalColliders = selectedCopy.additionalColliders;
     m_objects.back().rotatorEnabled = selectedCopy.rotatorEnabled;
     m_objects.back().rotator = selectedCopy.rotator;
     m_objects.back().moverEnabled = selectedCopy.moverEnabled;
@@ -7566,6 +7759,83 @@ engine::ecs::Entity EditorScene::CreateObject(const std::string & name, Primitiv
     m_registry.Add<MeshRenderer>(entity, MeshRenderer{&mesh, color});
     m_objects.push_back({entity, MakeUniqueHierarchyName(name), primitive});
     return entity;
+}
+
+bool EditorScene::SetSelectedColliderAt(std::size_t index,
+                                        const engine::ecs::Collider& collider) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) return false;
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked || !selected.colliderEnabled
+        || index > selected.additionalColliders.size()) return false;
+    PushUndoSnapshot();
+    if (index == 0) {
+        selected.collider = collider;
+        NormalizeColliderValues(selected.collider);
+        ResolveMeshColliderSource(selected.collider, selected.modelAssetPath);
+    } else {
+        selected.additionalColliders[index - 1] = collider;
+        NormalizeColliderValues(selected.additionalColliders[index - 1]);
+        ResolveMeshColliderSource(selected.additionalColliders[index - 1], selected.modelAssetPath);
+    }
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::AddSelectedCollider(const engine::ecs::Collider& collider) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) return false;
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) return false;
+    PushUndoSnapshot();
+    Collider value = collider;
+    NormalizeColliderValues(value);
+    ResolveMeshColliderSource(value, selected.modelAssetPath);
+    if (!selected.colliderEnabled) {
+        selected.colliderEnabled = true;
+        selected.collider = value;
+    } else {
+        selected.additionalColliders.push_back(value);
+    }
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::RemoveSelectedCollider(std::size_t index) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) return false;
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked || !selected.colliderEnabled
+        || index > selected.additionalColliders.size()) return false;
+    PushUndoSnapshot();
+    if (index == 0) {
+        if (selected.additionalColliders.empty()) selected.colliderEnabled = false;
+        else {
+            selected.collider = selected.additionalColliders.front();
+            selected.additionalColliders.erase(selected.additionalColliders.begin());
+        }
+    } else selected.additionalColliders.erase(selected.additionalColliders.begin() +
+                                               static_cast<std::ptrdiff_t>(index - 1));
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedColliders(const std::vector<engine::ecs::Collider>& colliders) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) return false;
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) return false;
+    PushUndoSnapshot();
+    selected.colliderEnabled = !colliders.empty();
+    selected.additionalColliders.clear();
+    if (!colliders.empty()) {
+        selected.collider = colliders.front();
+        NormalizeColliderValues(selected.collider);
+        ResolveMeshColliderSource(selected.collider, selected.modelAssetPath);
+        selected.additionalColliders.assign(colliders.begin() + 1, colliders.end());
+        for (Collider& collider : selected.additionalColliders) {
+            NormalizeColliderValues(collider);
+            ResolveMeshColliderSource(collider, selected.modelAssetPath);
+        }
+    }
+    m_dirty = true;
+    return true;
 }
 
 EditorScene::Snapshot EditorScene::CaptureSnapshot()

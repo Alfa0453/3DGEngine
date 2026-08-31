@@ -288,6 +288,7 @@ public:
         bool colliderEnabled = false;
         engine::ecs::RigidBody rigidBody;
         engine::ecs::Collider collider;
+        std::vector<engine::ecs::Collider> additionalColliders;
         bool rotatorEnabled = false;
         engine::ecs::Rotator rotator;
         bool moverEnabled = false;
@@ -499,7 +500,9 @@ public:
     struct PhysicsJoint {
         enum class Type {
             Distance,
-            Spring
+            Spring,
+            Ball,     // point-to-point pin (3 translational DOF removed), optional cone limit
+            Hinge     // pin + axis alignment (1 rotational DOF), optional angle limit + motor
         };
 
         Type type = Type::Distance;
@@ -507,11 +510,23 @@ public:
         std::string objectA;
         std::string objectB;
         bool worldAnchor = false;
-        glm::vec3 anchor{0.0f};
+        glm::vec3 anchor{0.0f};          // Ball/Hinge: the world pivot point; Distance/Spring: world anchor when worldAnchor
         float restLength = 1.0f;
         bool rope = false;
         float stiffness = 100.0f;
         float damping = 1.0f;
+
+        // Ball / Hinge authoring (Pass-3). axis is the world-space hinge axis at bind time; the
+        // local anchors/axes for the solver are captured from the bodies' bind poses at play start.
+        glm::vec3 axis{0.0f, 1.0f, 0.0f};
+        bool  collideConnected = true;    // let the two jointed bodies still collide
+        bool  angularLimit = false;       // clamp the swing (Hinge: [minAngle,maxAngle]; Ball: cone maxAngle)
+        float minAngle = -180.0f;         // degrees (authoring unit; converted to radians at build)
+        float maxAngle =  180.0f;         // degrees
+        bool  motorEnabled = false;       // Hinge motor: drive rotation about the axis
+        float motorTargetVelocity = 0.0f; // deg/s target (converted to rad/s at build)
+        float motorMaxTorque = 0.0f;      // N*m ceiling
+        float breakImpulse = 0.0f;        // 0 = unbreakable; else the joint snaps past this impulse
     };
 
     struct CameraPreset {
@@ -953,6 +968,10 @@ public:
     bool SetSelectedRigidBody(const engine::ecs::RigidBody& rigidBody);
     bool SetSelectedColliderEnabled(bool enabled);
     bool SetSelectedCollider(const engine::ecs::Collider& collider);
+    bool SetSelectedColliderAt(std::size_t index, const engine::ecs::Collider& collider);
+    bool AddSelectedCollider(const engine::ecs::Collider& collider);
+    bool RemoveSelectedCollider(std::size_t index);
+    bool SetSelectedColliders(const std::vector<engine::ecs::Collider>& colliders);
     bool SetSelectedRotatorEnabled(bool enabled);
     bool SetSelectedRotator(const engine::ecs::Rotator& rotator);
     bool SetSelectedMoverEnabled(bool enabled);

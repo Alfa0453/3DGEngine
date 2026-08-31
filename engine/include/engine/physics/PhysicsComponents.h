@@ -4,8 +4,10 @@
 #include <glm/gtc/quaternion.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace engine {
 namespace ecs {
@@ -76,9 +78,25 @@ struct RigidBody {
     // Orientation lives on the entity's Transform.rotation.
     glm::vec3 angularVelocity{0.0f};
     glm::vec3 accumTorque{0.0f};
-    glm::mat3 invInertiaLocal{0.0f};
+    glm::mat3 invInertiaLocal{0.0f};        // body-space inverse inertia ABOUT THE COM
     bool      freezeRotation = false;
     bool      massPropertiesDirty = true;   // recompute inertia next step (default: on create)
+
+    // Local center of mass, in the entity's local frame (Pass-3). The entity origin need not
+    // be the physical COM -- required for asymmetric colliders, offset shapes, and compounds.
+    // The body rotates about its COM and contact/impulse arms are measured from it. When
+    // autoCenterOfMass is set it is derived from the collider (a single primitive's centre =
+    // its localPosition); clear it to author an explicit COM. Default {0} keeps the COM at the
+    // entity origin, so existing bodies are byte-for-byte unchanged.
+    glm::vec3 centerOfMassLocal{0.0f};
+    bool      autoCenterOfMass = true;
+
+    // Mass source (Pass-4 Phase 55). Manual = invMass is authored directly (legacy behaviour,
+    // the default so existing bodies are unchanged). Density = mass is derived from the
+    // collider's material density * its scaled world volume whenever massPropertiesDirty is set,
+    // so scaling a body or swapping its collider keeps a physically-plausible mass automatically.
+    enum class MassMode { Manual, Density };
+    MassMode  massMode = MassMode::Manual;
 
     void AddForce(const glm::vec3& f) { accumForce += f; }
     void AddTorque(const glm::vec3& tq) { accumTorque += tq; }
@@ -135,6 +153,21 @@ struct RigidBody {
     }
 };
 
+// How two colliders' material values (friction, restitution) combine at a contact (Pass-4
+// Phase 57). GeometricMean (sqrt(a*b)) is the legacy default so existing scenes are unchanged.
+enum class MaterialCombine { GeometricMean, Average, Minimum, Maximum, Multiply };
+
+inline float CombineMaterial(float a, float b, MaterialCombine mode) {
+    switch (mode) {
+        case MaterialCombine::Average:  return 0.5f * (a + b);
+        case MaterialCombine::Minimum:  return std::min(a, b);
+        case MaterialCombine::Maximum:  return std::max(a, b);
+        case MaterialCombine::Multiply: return a * b;
+        case MaterialCombine::GeometricMean:
+        default:                        return std::sqrt(std::max(a * b, 0.0f));
+    }
+}
+
 enum class ColliderShape {
     Sphere,
     Plane,
@@ -171,8 +204,28 @@ struct Collider {
                                                   // default makes stacked/dropped boxes scatter
                                                   // (restitution re-injects energy on every
                                                   // successive impact). Opt into bounce per body.
-    float         friction    = 0.5f;             // material: Coulomb coefficient
+    float         friction    = 0.5f;             // material: Coulomb coefficient (legacy single value)
     bool          isTrigger   = false;            // overlap-only: detected but never resolved
+
+    // Pass-4 material model. staticFriction/dynamicFriction default to 0, meaning "derive from the
+    // legacy `friction` field" (static = friction, dynamic = 0.8*friction) so existing colliders
+    // behave exactly as before. Set them (>0) to author a true stick/slip pair: static is the
+    // higher coefficient that resists the onset of sliding, dynamic the lower one once sliding.
+    // density (kg/m^3, ~1000 = water) feeds RigidBody::MassMode::Density. The combine modes select
+    // how this collider's friction/restitution mix with the other collider's at a shared contact.
+    float           staticFriction   = 0.0f;      // 0 => use `friction`
+    float           dynamicFriction  = 0.0f;      // 0 => use 0.8 * `friction`
+    float           density          = 1000.0f;   // kg/m^3, only used in Density mass mode
+    MaterialCombine frictionCombine    = MaterialCombine::GeometricMean;
+    MaterialCombine restitutionCombine = MaterialCombine::GeometricMean;
+
+    // Optional PhysicsMaterial asset (.3dgphysmat). When set, the editor/runtime resolves it and
+    // stamps its values onto the fields above; empty keeps the inline per-collider values.
+    std::string     physicsMaterialPath;
+
+    // Resolved static/dynamic coefficients honouring the legacy-derivation defaults above.
+    float ResolvedStaticFriction()  const { return staticFriction  > 0.0f ? staticFriction  : friction; }
+    float ResolvedDynamicFriction() const { return dynamicFriction > 0.0f ? dynamicFriction : 0.8f * friction; }
 
     // Shape-local transform. The owning entity transform is inherited first,
     // then this offset/orientation/scale is applied. Collision dimensions stay
@@ -230,6 +283,13 @@ struct Collider {
         Collider c = MakeBox(halfExtents); c.shape = ColliderShape::Staircase;
         c.steps = std::max(stepCount, 1); return c;
     }
+};
+
+// Extra shapes owned by the same entity/rigid body as its primary Collider.
+// Keeping the primary Collider component preserves compatibility with existing
+// gameplay code while allowing imported meshes to use an authored compound fit.
+struct AdditionalColliders {
+    std::vector<Collider> values;
 };
 
 } // namespace ecs

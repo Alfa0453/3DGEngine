@@ -2062,6 +2062,14 @@ void EditorApp::DrawEditorOverlay()
                             ps.velocityIterations, ps.positionIterations, ps.contactsSolved);
                 ImGui::Text("Penetration: %.4f -> %.4f m", ps.maxPenetrationBefore,
                             ps.maxPenetrationAfter);
+                // Pass-3 islands: connected groups of dynamic bodies solved/slept independently.
+                ImGui::Text("Islands: %d  (awake %d, sleeping %d)  largest %d",
+                            ps.islandCount, ps.awakeIslands, ps.sleepingIslands,
+                            ps.largestIslandBodies);
+                if (ps.distanceJoints + ps.ballJoints + ps.hingeJoints + ps.brokenJoints > 0)
+                    ImGui::Text("Joints: %d dist, %d ball, %d hinge  (motors %d, limits %d, broken %d)",
+                                ps.distanceJoints, ps.ballJoints, ps.hingeJoints,
+                                ps.motorsActive, ps.limitsActive, ps.brokenJoints);
                 ImGui::Text("Queries/frame: %d ray, %d sphere, %d overlap",
                             ps.raycasts, ps.sphereCasts, ps.overlaps);
                 ImGui::Text("Query candidates: %lld   exact tests: %lld",
@@ -8017,9 +8025,21 @@ void EditorApp::DrawEditScene(const glm::mat4 & viewProj)
             EditorViewport::PhysicsJointGuide guide;
             guide.a = transformA->position;
             guide.b = joint.worldAnchor ? joint.anchor : transformB->position;
-            guide.type = joint.type == EditorScene::PhysicsJoint::Type::Spring ? 1 : 0;
+            using JT = EditorScene::PhysicsJoint::Type;
+            switch (joint.type) {
+                case JT::Spring: guide.type = 1; break;
+                case JT::Ball:   guide.type = 2; break;
+                case JT::Hinge:  guide.type = 3; break;
+                default:         guide.type = 0; break;
+            }
             guide.rope = joint.rope;
             guide.enabled = joint.enabled;
+            // Ball/Hinge draw a pin at the pivot (+ the hinge axis) instead of a plain A<->B line.
+            if (joint.type == JT::Ball || joint.type == JT::Hinge) {
+                guide.hasPivot = true;
+                guide.pivot = joint.anchor;
+                guide.axis  = joint.axis;
+            }
             jointGuides.push_back(guide);
         }
         m_viewport.DrawPhysicsJointGuides(m_renderer, *m_shader, *m_cube, jointGuides, viewProj);
@@ -12336,6 +12356,30 @@ bool EditorApp::BuildPlayRuntimePreview(std::string * error)
     );
 
     m_playPhysics.ClearJoints();
+    // Ball/Hinge bind helpers: transform the world pivot / hinge axis into a body's local frame at
+    // play start (the bind pose), matching how RagdollSystem builds its joints. Rotation-only so an
+    // authored pivot maps cleanly regardless of the body's spawn orientation.
+    const auto localPointOf = [this](engine::ecs::Entity e, const glm::vec3& worldPoint) {
+        if (const auto* t = m_playRegistry->TryGet<engine::ecs::Transform>(e))
+            return glm::inverse(t->rotation) * (worldPoint - t->position);
+        return worldPoint;
+    };
+    const auto localAxisOf = [this](engine::ecs::Entity e, const glm::vec3& worldAxis) {
+        if (const auto* t = m_playRegistry->TryGet<engine::ecs::Transform>(e))
+            return glm::inverse(t->rotation) * worldAxis;
+        return worldAxis;
+    };
+    const auto applyMotorAndBreak = [this](const EditorScene::PhysicsJoint& j) {
+        if (!m_playPhysics.HasJoints()) return;
+        engine::Joint& created = m_playPhysics.LastJoint();
+        created.breakImpulse = std::max(j.breakImpulse, 0.0f);
+        if (j.type == EditorScene::PhysicsJoint::Type::Hinge && j.motorEnabled) {
+            created.motorEnabled = true;
+            created.motorTargetVelocity = glm::radians(j.motorTargetVelocity);
+            created.motorMaxTorque = std::max(j.motorMaxTorque, 0.0f);
+        }
+    };
+
     for (const EditorScene::PhysicsJoint& joint : m_scene.PhysicsJoints()) {
         if (!joint.enabled) {
             continue;
@@ -12345,10 +12389,20 @@ bool EditorApp::BuildPlayRuntimePreview(std::string * error)
         if (a == playEntitiesByName.end()) {
             continue;
         }
+        using JT = EditorScene::PhysicsJoint::Type;
+        const glm::vec3 worldAxis = (glm::dot(joint.axis, joint.axis) > 1.0e-6f)
+            ? glm::normalize(joint.axis) : glm::vec3(0.0f, 1.0f, 0.0f);
 
         if (joint.worldAnchor) {
-            if (joint.type == EditorScene::PhysicsJoint::Type::Spring) {
+            if (joint.type == JT::Spring) {
                 m_playPhysics.AddSpringJointToWorld(a->second, joint.anchor, joint.restLength, joint.stiffness, joint.damping);
+            } else if (joint.type == JT::Ball) {
+                m_playPhysics.AddBallJointToWorld(a->second, joint.anchor, localPointOf(a->second, joint.anchor));
+                applyMotorAndBreak(joint);
+            } else if (joint.type == JT::Hinge) {
+                m_playPhysics.AddHingeJointToWorld(a->second, joint.anchor, localPointOf(a->second, joint.anchor),
+                                                   localAxisOf(a->second, worldAxis), worldAxis);
+                applyMotorAndBreak(joint);
             } else {
                 m_playPhysics.AddDistanceJointToWorld(a->second, joint.anchor, joint.restLength, joint.rope);
             }
@@ -12360,8 +12414,21 @@ bool EditorApp::BuildPlayRuntimePreview(std::string * error)
             continue;
         }
 
-        if (joint.type == EditorScene::PhysicsJoint::Type::Spring) {
+        if (joint.type == JT::Spring) {
             m_playPhysics.AddSpringJoint(a->second, b->second, joint.restLength, joint.stiffness, joint.damping);
+        } else if (joint.type == JT::Ball) {
+            m_playPhysics.AddBallJoint(a->second, b->second,
+                                       localPointOf(a->second, joint.anchor), localPointOf(b->second, joint.anchor),
+                                       joint.collideConnected, joint.angularLimit,
+                                       glm::radians(joint.maxAngle));
+            applyMotorAndBreak(joint);
+        } else if (joint.type == JT::Hinge) {
+            m_playPhysics.AddHingeJoint(a->second, b->second,
+                                        localPointOf(a->second, joint.anchor), localPointOf(b->second, joint.anchor),
+                                        localAxisOf(a->second, worldAxis), localAxisOf(b->second, worldAxis),
+                                        joint.collideConnected, joint.angularLimit,
+                                        glm::radians(joint.minAngle), glm::radians(joint.maxAngle));
+            applyMotorAndBreak(joint);
         } else {
             m_playPhysics.AddDistanceJoint(a->second, b->second, joint.restLength, joint.rope);
         }

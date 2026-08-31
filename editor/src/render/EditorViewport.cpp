@@ -368,7 +368,13 @@ glm::vec3 PhysicsJointGuideColor(const EditorViewport::PhysicsJointGuide& guide)
         return glm::vec3(0.34f, 0.36f, 0.40f);
     }
     if (guide.type == 1) {
-        return glm::vec3(0.36f, 0.92f, 0.48f);
+        return glm::vec3(0.36f, 0.92f, 0.48f);   // spring: green
+    }
+    if (guide.type == 2) {
+        return glm::vec3(1.0f, 0.32f, 0.90f);    // ball: magenta
+    }
+    if (guide.type == 3) {
+        return glm::vec3(1.0f, 0.55f, 0.12f);    // hinge: orange
     }
     return guide.rope
         ? glm::vec3(0.30f, 0.78f, 1.0f)
@@ -1215,14 +1221,36 @@ void EditorViewport::DrawPhysicsColliderGuides(const EditorScene& scene,
             continue;
         }
 
+        std::vector<const engine::ecs::Collider*> colliderSet{&object.collider};
+        for (const engine::ecs::Collider& extra : object.additionalColliders)
+            colliderSet.push_back(&extra);
+        for (const engine::ecs::Collider* localCollider : colliderSet) {
         const engine::physics::WorldCollider world =
-            engine::physics::BuildWorldCollider(*transform, object.collider);
+            engine::physics::BuildWorldCollider(*transform, *localCollider);
         const engine::ecs::Transform& colliderTransform = world.transform;
         const engine::ecs::Collider& collider = world.collider;
         const glm::vec3 baseColor = PhysicsGuideColor(object);
         const glm::vec3 color = selectedCollider
             ? baseColor
             : glm::mix(glm::vec3(0.30f), baseColor, 0.48f);
+
+        // Center-of-mass debug marker (Pass-3, Phase 68): draw the physical COM (yellow cross)
+        // and the entity origin (cyan cross) distinctly, once per rigid-body object, so an
+        // offset COM is visible. COM local = collider offset (auto) or the authored offset.
+        if (localCollider == &object.collider && object.rigidBodyEnabled
+            && object.rigidBody.invMass > 0.0f) {
+            const glm::vec3 comLocal = object.rigidBody.autoCenterOfMass
+                ? object.collider.localPosition : object.rigidBody.centerOfMassLocal;
+            const glm::vec3 comW = transform->position + transform->rotation * comLocal;
+            const auto cross = [&](const glm::vec3& c, const glm::vec3& col, float s) {
+                m_colliderLines->AddLine(c - glm::vec3(s, 0, 0), c + glm::vec3(s, 0, 0), col);
+                m_colliderLines->AddLine(c - glm::vec3(0, s, 0), c + glm::vec3(0, s, 0), col);
+                m_colliderLines->AddLine(c - glm::vec3(0, 0, s), c + glm::vec3(0, 0, s), col);
+            };
+            cross(comW, glm::vec3(1.0f, 0.85f, 0.1f), 0.13f);          // COM: yellow
+            if (glm::dot(comLocal, comLocal) > 1e-6f)
+                cross(transform->position, glm::vec3(0.2f, 0.8f, 1.0f), 0.07f);  // origin: cyan
+        }
 
         switch (collider.shape) {
         case engine::ecs::ColliderShape::Sphere:
@@ -1233,8 +1261,10 @@ void EditorViewport::DrawPhysicsColliderGuides(const EditorScene& scene,
             break;
         case engine::ecs::ColliderShape::ConvexHull:
         case engine::ecs::ColliderShape::TriangleMesh: {
+            const std::string source = collider.collisionAssetPath.empty()
+                ? object.modelAssetPath : collider.collisionAssetPath;
             const auto mesh = engine::physics::AcquireCollisionMesh(
-                collider.collisionAssetPath);
+                source);
             if (!mesh) {
                 DrawBoxColliderGuide(*m_colliderLines, colliderTransform, collider, color);
                 break;
@@ -1243,14 +1273,25 @@ void EditorViewport::DrawPhysicsColliderGuides(const EditorScene& scene,
                 return colliderTransform.position + colliderTransform.rotation
                     * (colliderTransform.scale * local);
             };
-            for (const engine::physics::CollisionTriangle& triangle : mesh->triangles) {
-                const glm::vec3 a = worldPoint(triangle.a);
-                const glm::vec3 b = worldPoint(triangle.b);
-                const glm::vec3 c = worldPoint(triangle.c);
-                m_colliderLines->AddLine(a, b, color);
-                m_colliderLines->AddLine(b, c, color);
-                m_colliderLines->AddLine(c, a, color);
+            bool drewGeometry = false;
+            if (collider.shape == engine::ecs::ColliderShape::ConvexHull) {
+                for (const engine::physics::CollisionEdge& edge : mesh->convexHullEdges) {
+                    m_colliderLines->AddLine(worldPoint(edge.a), worldPoint(edge.b), color);
+                    drewGeometry = true;
+                }
+            } else {
+                for (const engine::physics::CollisionTriangle& triangle : mesh->triangles) {
+                    const glm::vec3 a = worldPoint(triangle.a);
+                    const glm::vec3 b = worldPoint(triangle.b);
+                    const glm::vec3 c = worldPoint(triangle.c);
+                    m_colliderLines->AddLine(a, b, color);
+                    m_colliderLines->AddLine(b, c, color);
+                    m_colliderLines->AddLine(c, a, color);
+                    drewGeometry = true;
+                }
             }
+            if (!drewGeometry)
+                DrawBoxColliderGuide(*m_colliderLines, colliderTransform, collider, color);
             break;
         }
         case engine::ecs::ColliderShape::Plane:
@@ -1286,6 +1327,7 @@ void EditorViewport::DrawPhysicsColliderGuides(const EditorScene& scene,
                     engine::ecs::Collider::MakeBox(ext), color);
             }
             break;
+        }
         }
         }
     }
@@ -1527,12 +1569,31 @@ void EditorViewport::DrawPhysicsJointGuides(engine::Renderer& renderer,
     shader.SetInt("uHasDiffuse", 0);
 
     for (const PhysicsJointGuide& guide : guides) {
-        if (glm::length(guide.b - guide.a) <= 0.001f) {
+        const glm::vec3 color = PhysicsJointGuideColor(guide);
+        shader.SetVec3("uEmissive", color * (guide.enabled ? 0.32f : 0.10f));
+
+        if (guide.hasPivot) {
+            // Ball/Hinge: draw both bodies tied to the pivot pin, a slightly larger pivot box, and
+            // (hinge) the rotation axis through the pivot.
+            if (glm::length(guide.a - guide.pivot) > 0.001f)
+                DrawGuideSegment(renderer, shader, cube, guide.a, guide.pivot, 0.030f, color);
+            if (glm::length(guide.b - guide.pivot) > 0.001f)
+                DrawGuideSegment(renderer, shader, cube, guide.b, guide.pivot, 0.030f, color);
+            DrawGizmoBox(renderer, shader, cube, guide.pivot, glm::vec3(0.075f), color);
+            if (guide.type == 3) {
+                const glm::vec3 ax = (glm::dot(guide.axis, guide.axis) > 1e-6f)
+                    ? glm::normalize(guide.axis) : glm::vec3(0.0f, 1.0f, 0.0f);
+                const glm::vec3 axisCol(1.0f, 0.92f, 0.45f);
+                shader.SetVec3("uEmissive", axisCol * 0.4f);
+                DrawGuideSegment(renderer, shader, cube, guide.pivot - ax * 0.45f,
+                                 guide.pivot + ax * 0.45f, 0.022f, axisCol);
+            }
             continue;
         }
 
-        const glm::vec3 color = PhysicsJointGuideColor(guide);
-        shader.SetVec3("uEmissive", color * (guide.enabled ? 0.32f : 0.10f));
+        if (glm::length(guide.b - guide.a) <= 0.001f) {
+            continue;
+        }
         DrawGuideSegment(renderer, shader, cube, guide.a, guide.b, guide.rope ? 0.030f : 0.038f, color);
         DrawGizmoBox(renderer, shader, cube, guide.a, glm::vec3(0.055f), color);
         DrawGizmoBox(renderer, shader, cube, guide.b, glm::vec3(0.055f), color);

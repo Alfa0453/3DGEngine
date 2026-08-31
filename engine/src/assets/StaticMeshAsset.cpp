@@ -22,6 +22,7 @@
 #include <limits>
 #include <map>
 #include <type_traits>
+#include <unordered_map>
 #include <utility>
 
 namespace engine {
@@ -79,6 +80,66 @@ bool ReadFloat(std::istream& input, float* value) {
     std::uint32_t raw = 0;
     if (!value || !ReadUnsigned(input, &raw)) return false;
     std::memcpy(value, &raw, sizeof(raw));
+    return true;
+}
+
+bool WriteString(std::ostream& output, const std::string& value);
+bool ReadString(std::istream& input, std::string* value);
+
+bool WriteCollider(std::ostream& output, const ecs::Collider& collider) {
+    if (!WriteUnsigned(output, static_cast<std::uint32_t>(collider.shape))
+        || !WriteFloat(output, collider.radius)) return false;
+    for (float value : {collider.halfExtents.x, collider.halfExtents.y, collider.halfExtents.z,
+                        collider.planeNormal.x, collider.planeNormal.y, collider.planeNormal.z,
+                        collider.planeOffset, collider.halfHeight, collider.majorRadius,
+                        collider.minorRadius})
+        if (!WriteFloat(output, value)) return false;
+    if (!WriteUnsigned(output, static_cast<std::uint32_t>(collider.steps))
+        || !WriteFloat(output, collider.restitution)
+        || !WriteFloat(output, collider.friction)
+        || !WriteUnsigned(output, collider.isTrigger ? 1u : 0u)) return false;
+    for (float value : {collider.localPosition.x, collider.localPosition.y, collider.localPosition.z,
+                        collider.localRotation.w, collider.localRotation.x,
+                        collider.localRotation.y, collider.localRotation.z,
+                        collider.localScale.x, collider.localScale.y, collider.localScale.z})
+        if (!WriteFloat(output, value)) return false;
+    return WriteUnsigned(output, collider.inheritTransformScale ? 1u : 0u)
+        && WriteString(output, collider.collisionAssetPath)
+        && WriteUnsigned(output, collider.collisionDirty ? 1u : 0u)
+        && WriteUnsigned(output, collider.layer)
+        && WriteUnsigned(output, collider.mask);
+}
+
+bool ReadCollider(std::istream& input, ecs::Collider* collider) {
+    if (!collider) return false;
+    std::uint32_t shape = 0, steps = 0, trigger = 0, inherit = 0, dirty = 0;
+    if (!ReadUnsigned(input, &shape)
+        || shape > static_cast<std::uint32_t>(ecs::ColliderShape::TriangleMesh)
+        || !ReadFloat(input, &collider->radius)) return false;
+    for (float* value : {&collider->halfExtents.x, &collider->halfExtents.y, &collider->halfExtents.z,
+                         &collider->planeNormal.x, &collider->planeNormal.y, &collider->planeNormal.z,
+                         &collider->planeOffset, &collider->halfHeight, &collider->majorRadius,
+                         &collider->minorRadius})
+        if (!ReadFloat(input, value)) return false;
+    if (!ReadUnsigned(input, &steps)
+        || !ReadFloat(input, &collider->restitution)
+        || !ReadFloat(input, &collider->friction)
+        || !ReadUnsigned(input, &trigger)) return false;
+    for (float* value : {&collider->localPosition.x, &collider->localPosition.y, &collider->localPosition.z,
+                         &collider->localRotation.w, &collider->localRotation.x,
+                         &collider->localRotation.y, &collider->localRotation.z,
+                         &collider->localScale.x, &collider->localScale.y, &collider->localScale.z})
+        if (!ReadFloat(input, value)) return false;
+    if (!ReadUnsigned(input, &inherit)
+        || !ReadString(input, &collider->collisionAssetPath)
+        || !ReadUnsigned(input, &dirty)
+        || !ReadUnsigned(input, &collider->layer)
+        || !ReadUnsigned(input, &collider->mask)) return false;
+    collider->shape = static_cast<ecs::ColliderShape>(shape);
+    collider->steps = static_cast<int>(steps);
+    collider->isTrigger = trigger != 0;
+    collider->inheritTransformScale = inherit != 0;
+    collider->collisionDirty = dirty != 0;
     return true;
 }
 
@@ -142,6 +203,11 @@ bool PayloadSize(const StaticMeshAssetData& asset, std::uint64_t* size) {
     if (!AddSize(&total, sizeof(std::uint32_t)
         + asset.materials.size() * (4u * sizeof(float)
             + 6u * sizeof(std::int32_t)))) return false;
+    if (!AddSize(&total, sizeof(std::uint32_t))) return false;
+    for (const ecs::Collider& collider : asset.colliders)
+        if (!AddSize(&total, 30u * sizeof(std::uint32_t))
+            || !AddStringSize(&total, collider.collisionAssetPath)) return false;
+    if (!AddSize(&total, asset.subMeshes.size() * sizeof(std::uint32_t))) return false;
     *size = total;
     return true;
 }
@@ -213,6 +279,11 @@ bool WritePayload(std::ostream& output, const StaticMeshAssetData& asset) {
             || !WriteSigned32(output, material.roughnessMap)
             || !WriteSigned32(output, material.aoMap)
             || !WriteSigned32(output, material.heightMap)) return false;
+    if (!WriteUnsigned(output, static_cast<std::uint32_t>(asset.colliders.size()))) return false;
+    for (const ecs::Collider& collider : asset.colliders)
+        if (!WriteCollider(output, collider)) return false;
+    for (const StaticMeshSubMeshData& subMesh : asset.subMeshes)
+        if (!WriteUnsigned(output, subMesh.twoSided ? 1u : 0u)) return false;
     return true;
 }
 
@@ -330,6 +401,21 @@ bool ReadPayload(std::istream& input, StaticMeshAssetData* asset,
             material.roughness = std::clamp(
                 std::sqrt(2.0f / (std::max(0.0f, material.shininess) + 2.0f)),
                 0.04f, 1.0f);
+    }
+    if (assetVersion >= 5u) {
+        std::uint32_t colliderCount = 0;
+        if (!ReadUnsigned(input, &colliderCount)
+            || colliderCount > kMaximumCollectionEntries) return false;
+        asset->colliders.resize(colliderCount);
+        for (ecs::Collider& collider : asset->colliders)
+            if (!ReadCollider(input, &collider)) return false;
+    }
+    if (assetVersion >= 6u) {
+        for (StaticMeshSubMeshData& subMesh : asset->subMeshes) {
+            std::uint32_t twoSided = 0;
+            if (!ReadUnsigned(input, &twoSided) || twoSided > 1u) return false;
+            subMesh.twoSided = twoSided != 0u;
+        }
     }
     return true;
 }
@@ -476,6 +562,69 @@ bool ValidMaterialSlot(const MeshMaterialSlot& slot) {
 
 } // namespace
 
+bool StaticMeshSubMeshIsOpen(const StaticMeshSubMeshData& subMesh) {
+    const std::size_t vertexCount = subMesh.vertices.size() / kStaticMeshVertexStride;
+    if (vertexCount == 0u || subMesh.indices.size() < 3u) return false;
+
+    glm::vec3 minimum(std::numeric_limits<float>::max());
+    glm::vec3 maximum(std::numeric_limits<float>::lowest());
+    for (std::size_t vertex = 0; vertex < vertexCount; ++vertex) {
+        const std::size_t at = vertex * kStaticMeshVertexStride;
+        const glm::vec3 position(subMesh.vertices[at], subMesh.vertices[at + 1u],
+                                 subMesh.vertices[at + 2u]);
+        minimum = glm::min(minimum, position);
+        maximum = glm::max(maximum, position);
+    }
+    const double epsilon = std::max(static_cast<double>(glm::length(maximum - minimum))
+                                    * 1.0e-5, 1.0e-6);
+    struct PositionKey {
+        std::int64_t x = 0, y = 0, z = 0;
+        bool operator==(const PositionKey& other) const {
+            return x == other.x && y == other.y && z == other.z;
+        }
+    };
+    struct PositionHash {
+        std::size_t operator()(const PositionKey& key) const {
+            std::size_t value = std::hash<std::int64_t>{}(key.x);
+            value ^= std::hash<std::int64_t>{}(key.y) + 0x9e3779b9u + (value << 6u) + (value >> 2u);
+            value ^= std::hash<std::int64_t>{}(key.z) + 0x9e3779b9u + (value << 6u) + (value >> 2u);
+            return value;
+        }
+    };
+    std::unordered_map<PositionKey, std::uint32_t, PositionHash> welded;
+    std::vector<std::uint32_t> canonical(vertexCount);
+    std::uint32_t nextVertex = 0;
+    for (std::size_t vertex = 0; vertex < vertexCount; ++vertex) {
+        const std::size_t at = vertex * kStaticMeshVertexStride;
+        const PositionKey key{
+            static_cast<std::int64_t>(std::llround((subMesh.vertices[at] - minimum.x) / epsilon)),
+            static_cast<std::int64_t>(std::llround((subMesh.vertices[at + 1u] - minimum.y) / epsilon)),
+            static_cast<std::int64_t>(std::llround((subMesh.vertices[at + 2u] - minimum.z) / epsilon))};
+        const auto [found, inserted] = welded.emplace(key, nextVertex);
+        canonical[vertex] = found->second;
+        if (inserted) ++nextVertex;
+    }
+
+    std::unordered_map<std::uint64_t, std::uint32_t> edgeUse;
+    bool hasTriangle = false;
+    const auto addEdge = [&edgeUse](std::uint32_t a, std::uint32_t b) {
+        if (a > b) std::swap(a, b);
+        const std::uint64_t key = (static_cast<std::uint64_t>(a) << 32u) | b;
+        ++edgeUse[key];
+    };
+    for (std::size_t index = 0; index + 2u < subMesh.indices.size(); index += 3u) {
+        const std::uint32_t a = canonical[subMesh.indices[index]];
+        const std::uint32_t b = canonical[subMesh.indices[index + 1u]];
+        const std::uint32_t c = canonical[subMesh.indices[index + 2u]];
+        if (a == b || b == c || c == a) continue;
+        addEdge(a, b); addEdge(b, c); addEdge(c, a);
+        hasTriangle = true;
+    }
+    if (!hasTriangle) return false;
+    return std::any_of(edgeUse.begin(), edgeUse.end(),
+        [](const auto& edge) { return edge.second != 2u; });
+}
+
 bool ValidateStaticMeshAsset(const StaticMeshAssetData& asset, std::string* error) {
     if (asset.header.type != AssetType::StaticMesh || !asset.header.id.Valid()
         || asset.header.assetVersion != kStaticMeshAssetVersion) {
@@ -499,9 +648,23 @@ bool ValidateStaticMeshAsset(const StaticMeshAssetData& asset, std::string* erro
     if (asset.materials.size() > kMaximumCollectionEntries
         || asset.textures.size() > kMaximumCollectionEntries
         || asset.materialSlots.size() > kMaximumCollectionEntries
+        || asset.colliders.size() > kMaximumCollectionEntries
         || asset.subMeshes.size() > kMaximumCollectionEntries) {
         SetError(error, "Static mesh contains too many records.");
         return false;
+    }
+    for (const ecs::Collider& collider : asset.colliders) {
+        const float values[] = {collider.radius, collider.halfHeight,
+            collider.halfExtents.x, collider.halfExtents.y, collider.halfExtents.z,
+            collider.localPosition.x, collider.localPosition.y, collider.localPosition.z,
+            collider.localScale.x, collider.localScale.y, collider.localScale.z,
+            collider.localRotation.w, collider.localRotation.x,
+            collider.localRotation.y, collider.localRotation.z};
+        if (std::any_of(std::begin(values), std::end(values),
+                [](float value) { return !std::isfinite(value); })) {
+            SetError(error, "Static mesh contains an invalid authored collider.");
+            return false;
+        }
     }
 
     for (const StaticMeshTextureData& texture : asset.textures) {
@@ -653,8 +816,9 @@ bool LoadStaticMeshAsset(const std::string& path, StaticMeshAssetData* asset,
         SetError(error, "Native asset is not a supported static mesh.");
         return false;
     }
+    const std::uint32_t sourceVersion = loaded.header.assetVersion;
     const std::streampos payloadStart = input.tellg();
-    if (!ReadPayload(input, &loaded, loaded.header.assetVersion)) {
+    if (!ReadPayload(input, &loaded, sourceVersion)) {
         SetError(error, "Static mesh payload is invalid or truncated.");
         return false;
     }
@@ -665,8 +829,11 @@ bool LoadStaticMeshAsset(const std::string& path, StaticMeshAssetData* asset,
         SetError(error, "Static mesh payload size does not match its header.");
         return false;
     }
-    // Version 1 had the same geometry payload but no vertex-paint array.
-    // Upgrade it in memory; the next explicit save writes the version-2 form.
+    if (sourceVersion < 6u)
+        for (StaticMeshSubMeshData& subMesh : loaded.subMeshes)
+            subMesh.twoSided = StaticMeshSubMeshIsOpen(subMesh);
+    // Upgrade older payloads in memory; the next explicit save persists the
+    // latest vertex paint, materials, compound collision and culling metadata.
     loaded.header.assetVersion = kStaticMeshAssetVersion;
     if (!ValidateStaticMeshAsset(loaded, error)) return false;
     *asset = std::move(loaded);
@@ -891,6 +1058,8 @@ bool ImportStaticMeshSource(const std::string& sourcePath,
                         face.mIndices[0], face.mIndices[1], face.mIndices[2]});
                 }
                 if (!subMesh.vertices.empty() && !subMesh.indices.empty()) {
+                    subMesh.twoSided = options.detectOpenMeshesAsTwoSided
+                        && StaticMeshSubMeshIsOpen(subMesh);
                     vertexTotal += source->mNumVertices;
                     triangleTotal += subMesh.indices.size() / 3u;
                     imported.subMeshes.push_back(std::move(subMesh));
@@ -936,6 +1105,7 @@ bool ImportStaticMeshToAsset(const std::string& sourcePath,
         return false;
 
     NativeAssetHeader existing;
+    StaticMeshAssetData existingAsset;
     std::error_code ec;
     if (std::filesystem::is_regular_file(destinationPath, ec)) {
         std::string headerError;
@@ -947,6 +1117,13 @@ bool ImportStaticMeshToAsset(const std::string& sourcePath,
         }
         imported.header.id = existing.id;
         importResult.id = existing.id;
+        // Reimport replaces source geometry and imported materials, but colliders are
+        // editor-authored asset metadata and must survive that operation.
+        std::string loadError;
+        if (LoadStaticMeshAsset(destinationPath, &existingAsset, &loadError)) {
+            imported.collisionType = existingAsset.collisionType;
+            imported.colliders = std::move(existingAsset.colliders);
+        }
     }
 
     AssetRegistry updated;

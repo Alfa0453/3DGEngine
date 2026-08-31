@@ -51,6 +51,15 @@ int main() {
     Require(applyTarget.Resolve(scene) == nullptr,
             "deleted apply targets must resolve as unavailable");
 
+    scene.SelectIndex(1);
+    engine::ecs::Collider torso = engine::ecs::Collider::MakeBox(
+        glm::vec3(0.35f, 0.6f, 0.2f));
+    torso.localPosition = glm::vec3(0.0f, 0.65f, 0.0f);
+    engine::ecs::Collider head = engine::ecs::Collider::MakeSphere(0.24f);
+    head.localPosition = glm::vec3(0.0f, 1.45f, 0.0f);
+    Require(scene.SetSelectedColliders({torso, head}),
+            "scene object should accept an authored collider set");
+
     const std::filesystem::path path =
         std::filesystem::temp_directory_path() / "3dg_hierarchy_groups.scene";
     std::string error;
@@ -61,6 +70,14 @@ int main() {
     Require(loaded.Groups().size() == scene.Groups().size(), "groups must persist");
     Require(loaded.Objects()[1].editorGroupId == environment,
             "object group membership must persist");
+    Require(loaded.Objects()[1].colliderEnabled
+            && loaded.Objects()[1].collider.shape == engine::ecs::ColliderShape::Box
+            && loaded.Objects()[1].additionalColliders.size() == 1
+            && loaded.Objects()[1].additionalColliders[0].shape
+                == engine::ecs::ColliderShape::Sphere
+            && loaded.Objects()[1].additionalColliders[0].localPosition
+                == head.localPosition,
+            "compound colliders must persist with the scene object");
     std::error_code ec;
     std::filesystem::remove(path, ec);
     std::cout << "Editor scene hierarchy tests passed\n";

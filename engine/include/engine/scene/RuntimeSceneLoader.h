@@ -210,6 +210,7 @@ public:
         bool colliderEnabled = false;
         engine::ecs::RigidBody rigidBody;
         engine::ecs::Collider collider;
+        std::vector<engine::ecs::Collider> additionalColliders;
         bool rotatorEnabled = false;
         engine::ecs::Rotator rotator;
         bool moverEnabled = false;
@@ -307,7 +308,7 @@ public:
         struct CombatDesc { std::string entityName,assetPath;AssetHandle assetId; };
         struct SpawnManagerDesc { std::string entityName,assetPath;AssetHandle assetId; };
         struct PhysicsJointDesc {
-            int type = 0;
+            int type = 0;                 // 0 Distance, 1 Spring, 2 Ball, 3 Hinge
             std::string objectA, objectB;
             bool worldAnchor = false;
             glm::vec3 anchor{0.0f};
@@ -315,6 +316,17 @@ public:
             bool rope = false;
             float stiffness = 100.0f;
             float damping = 1.0f;
+            // Ball/Hinge authoring (runtime scene 114+). Angles/velocity are stored in degrees here
+            // (the authoring unit) and converted to radians where the joint is built.
+            glm::vec3 axis{0.0f, 1.0f, 0.0f};
+            bool  collideConnected = true;
+            bool  angularLimit = false;
+            float minAngle = -180.0f;
+            float maxAngle =  180.0f;
+            bool  motorEnabled = false;
+            float motorTargetVelocity = 0.0f;
+            float motorMaxTorque = 0.0f;
+            float breakImpulse = 0.0f;
         };
         struct TerrainDesc {
             std::string entityName;

@@ -77,7 +77,7 @@ bool PrefabAsset::Save(const std::string& path, std::string* error) {
     }
 
     if (!assetId.Valid()) assetId = engine::AssetHandle::Generate();
-    version = 4;
+    version = 5;
     const EditorScene::Object& o = object;
     out << "3DG_PREFAB " << version << ' ' << assetId.ToString() << '\n';
     out << std::quoted(name) << '\n';
@@ -115,13 +115,22 @@ bool PrefabAsset::Save(const std::string& path, std::string* error) {
     WriteVec3(out, o.collider.localScale) << ' '
         << o.collider.inheritTransformScale << ' '
         << std::quoted(OrDash(o.collider.collisionAssetPath)) << ' '
-        << o.collider.collisionDirty << '\n';
+        << o.collider.collisionDirty << ' '
+        // Pass-4 material tail (prefab version 5+).
+        << o.collider.staticFriction << ' ' << o.collider.dynamicFriction << ' '
+        << o.collider.density << ' '
+        << static_cast<int>(o.collider.frictionCombine) << ' '
+        << static_cast<int>(o.collider.restitutionCombine) << ' '
+        << std::quoted(OrDash(o.collider.physicsMaterialPath)) << '\n';
 
     out << o.rigidBodyEnabled << ' ' << o.rigidBody.invMass << ' '
         << o.rigidBody.useGravity << ' ' << o.rigidBody.kinematic << ' '
         << o.rigidBody.allowSleep << ' ' << o.rigidBody.linearDamping << ' '
         << o.rigidBody.angularDamping << ' ' << o.rigidBody.ccd << ' ';
-    WriteVec3(out, o.rigidBody.velocity) << '\n';
+    WriteVec3(out, o.rigidBody.velocity)
+        << ' ' << static_cast<int>(o.rigidBody.massMode)            // massMode: prefab version 5+
+        << ' ' << (o.rigidBody.autoCenterOfMass ? 1 : 0) << ' ';    // COM: prefab version 5+
+    WriteVec3(out, o.rigidBody.centerOfMassLocal) << '\n';
 
     out << o.healthEnabled << ' ' << o.health.hp << ' ' << o.health.maxHp << ' '
         << o.health.alive << '\n';
@@ -234,11 +243,27 @@ bool PrefabAsset::Load(const std::string& path, std::string* error) {
         // multiplied by the instance scale a second time.
         o.collider.inheritTransformScale = false;
     }
+    // Pass-4 material tail (prefab version 5+).
+    if (loadedVersion >= 5) {
+        int fricCombine = 0, restCombine = 0;
+        in >> o.collider.staticFriction >> o.collider.dynamicFriction >> o.collider.density
+           >> fricCombine >> restCombine >> std::quoted(o.collider.physicsMaterialPath);
+        o.collider.frictionCombine    = static_cast<engine::ecs::MaterialCombine>(fricCombine);
+        o.collider.restitutionCombine = static_cast<engine::ecs::MaterialCombine>(restCombine);
+        Undash(o.collider.physicsMaterialPath);
+    }
 
     in >> o.rigidBodyEnabled >> o.rigidBody.invMass >> o.rigidBody.useGravity
        >> o.rigidBody.kinematic >> o.rigidBody.allowSleep >> o.rigidBody.linearDamping
        >> o.rigidBody.angularDamping >> o.rigidBody.ccd;
     ReadVec3(in, o.rigidBody.velocity);
+    if (loadedVersion >= 5) {
+        int massMode = 0, autoCom = 1;
+        in >> massMode >> autoCom;
+        o.rigidBody.massMode = static_cast<engine::ecs::RigidBody::MassMode>(massMode);
+        ReadVec3(in, o.rigidBody.centerOfMassLocal);
+        o.rigidBody.autoCenterOfMass = autoCom != 0;
+    }
 
     in >> o.healthEnabled >> o.health.hp >> o.health.maxHp >> o.health.alive;
 

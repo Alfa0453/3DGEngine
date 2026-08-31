@@ -49,6 +49,26 @@ std::string StoredPath(const std::string& path) {
     return out.str();
 }
 
+void WriteColliderFields(std::ostream& out, const engine::ecs::Collider& c) {
+    out << static_cast<int>(c.shape) << ' ' << c.radius << ' ' << c.halfHeight << ' '
+        << c.majorRadius << ' ' << c.minorRadius << ' ' << c.steps << ' '
+        << c.halfExtents.x << ' ' << c.halfExtents.y << ' ' << c.halfExtents.z << ' '
+        << c.planeNormal.x << ' ' << c.planeNormal.y << ' ' << c.planeNormal.z << ' '
+        << c.planeOffset << ' ' << c.restitution << ' ' << c.friction << ' '
+        << c.isTrigger << ' ' << c.layer << ' ' << c.mask << ' '
+        << c.localPosition.x << ' ' << c.localPosition.y << ' ' << c.localPosition.z << ' '
+        << c.localRotation.w << ' ' << c.localRotation.x << ' '
+        << c.localRotation.y << ' ' << c.localRotation.z << ' '
+        << c.localScale.x << ' ' << c.localScale.y << ' ' << c.localScale.z << ' '
+        << c.inheritTransformScale << ' ' << std::quoted(c.collisionAssetPath) << ' '
+        << c.collisionDirty << ' '
+        // Pass-4 material tail (runtime scene 114+).
+        << c.staticFriction << ' ' << c.dynamicFriction << ' ' << c.density << ' '
+        << static_cast<int>(c.frictionCombine) << ' '
+        << static_cast<int>(c.restitutionCombine) << ' '
+        << std::quoted(c.physicsMaterialPath.empty() ? std::string("-") : c.physicsMaterialPath) << ' ';
+}
+
 const char* LightTypeName(Light::Type type) {
     switch (type) {
     case Light::Type::Directional: return "Directional";
@@ -107,7 +127,7 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         return engine::MakeAssetReference(
             &assetRegistry, contentRoot, assetPath, type).id;
     };
-    out << "3DGRuntimeScene 112 " << sceneId.ToString() << '\n';
+    out << "3DGRuntimeScene 114 " << sceneId.ToString() << '\n';
     out << "# Runtime export from 3DGEditor. Editor-only flags are omitted.\n";
     const EditorScene::Environment& environment = scene.GetEnvironment();
     out << "environment "
@@ -781,6 +801,27 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         out << ' ' << particleIdText(assetIdFor(
                 object.audioAssetPath, object.audioAssetId,
                 engine::AssetType::Audio));
+        // Physics material + mass mode (runtime scene 114+). Tail of the object record.
+        out << ' ' << object.collider.staticFriction
+            << ' ' << object.collider.dynamicFriction
+            << ' ' << object.collider.density
+            << ' ' << static_cast<int>(object.collider.frictionCombine)
+            << ' ' << static_cast<int>(object.collider.restitutionCombine)
+            << ' ' << static_cast<int>(object.rigidBody.massMode)
+            // Center of mass (runtime scene 114+); the runtime solver rotates bodies about it.
+            << ' ' << (object.rigidBody.autoCenterOfMass ? 1 : 0)
+            << ' ' << object.rigidBody.centerOfMassLocal.x
+            << ' ' << object.rigidBody.centerOfMassLocal.y
+            << ' ' << object.rigidBody.centerOfMassLocal.z;
+        out << '\n';
+    }
+
+    for (const EditorScene::Object& object : scene.Objects()) {
+        if (object.additionalColliders.empty()) continue;
+        out << "compound_colliders " << std::quoted(object.name) << ' '
+            << object.additionalColliders.size() << ' ';
+        for (const engine::ecs::Collider& collider : object.additionalColliders)
+            WriteColliderFields(out, collider);
         out << '\n';
     }
 
@@ -1015,7 +1056,15 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
             << (joint.worldAnchor ? 1 : 0) << ' '
             << joint.anchor.x << ' ' << joint.anchor.y << ' ' << joint.anchor.z << ' '
             << joint.restLength << ' ' << (joint.rope ? 1 : 0) << ' '
-            << joint.stiffness << ' ' << joint.damping << '\n';
+            << joint.stiffness << ' ' << joint.damping << ' '
+            // Ball/Hinge authoring (runtime scene 114+).
+            << joint.axis.x << ' ' << joint.axis.y << ' ' << joint.axis.z << ' '
+            << (joint.collideConnected ? 1 : 0) << ' '
+            << (joint.angularLimit ? 1 : 0) << ' '
+            << joint.minAngle << ' ' << joint.maxAngle << ' '
+            << (joint.motorEnabled ? 1 : 0) << ' '
+            << joint.motorTargetVelocity << ' ' << joint.motorMaxTorque << ' '
+            << joint.breakImpulse << '\n';
     }
 
     std::vector<engine::AssetHandle> dependencies;

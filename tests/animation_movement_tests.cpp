@@ -620,6 +620,31 @@ void TestRagdollRecoveryCanBeRequested() {
           "recovery request starts animation blending");
 }
 
+void TestCompoundColliderQueries() {
+    engine::ecs::Registry registry;
+    const engine::ecs::Entity object = registry.Create();
+    registry.Add<engine::ecs::Transform>(object, {});
+    registry.Add<engine::ecs::Collider>(
+        object, engine::ecs::Collider::MakeBox(glm::vec3(0.5f)));
+    engine::ecs::AdditionalColliders compound;
+    engine::ecs::Collider offsetSphere = engine::ecs::Collider::MakeSphere(0.75f);
+    offsetSphere.localPosition = glm::vec3(5.0f, 0.0f, 0.0f);
+    compound.values.push_back(offsetSphere);
+    registry.Add<engine::ecs::AdditionalColliders>(object, compound);
+
+    engine::PhysicsWorld physics;
+    engine::Ray ray;
+    ray.origin = glm::vec3(5.0f, 0.0f, -4.0f);
+    ray.direction = glm::vec3(0.0f, 0.0f, 1.0f);
+    const engine::RaycastHit hit = physics.Raycast(registry, ray, 10.0f);
+    const auto overlaps = physics.OverlapSphere(
+        registry, glm::vec3(5.0f, 0.0f, 0.0f), 0.2f);
+    Check(hit.hit && hit.entity == object && hit.distance > 3.0f,
+          "raycasts test additional collider shapes");
+    Check(overlaps.size() == 1 && overlaps.front() == object,
+          "overlap queries report a compound object only once");
+}
+
 } // namespace
 
 int main() {
@@ -648,6 +673,7 @@ int main() {
     TestRagdollActivatesOnDeathWithoutSkeleton();
     TestDisabledRagdollDoesNotActivate();
     TestRagdollRecoveryCanBeRequested();
+    TestCompoundColliderQueries();
 
     if (g_failures != 0) {
         std::cerr << g_failures << " animation movement test(s) failed\n";

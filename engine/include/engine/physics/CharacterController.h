@@ -1,6 +1,7 @@
 #pragma once
 
 #include "engine/physics/PhysicsComponents.h"
+#include "engine/ecs/Entity.h"
 
 #include <glm/glm.hpp>
 #include <glm/gtc/constants.hpp>
@@ -10,6 +11,7 @@
 
 namespace engine {
 class PhysicsWorld;
+struct RaycastHit;
 namespace ecs { class Registry; struct Transform; struct Collider; }
 
 // A kinematic capsule character controller. It does NOT participate in the rigid-
@@ -33,6 +35,28 @@ public:
     float     stepHeight  = 0.35f;          // ledges up to this are stepped over
     int       depenetrationIters = 4;
     std::uint32_t collisionMask = ecs::CollisionLayer::CharacterBlockers;
+
+    // Pass-4 sweep-and-slide tunables. Normal movement now sweeps the capsule (CapsuleCast)
+    // and slides along hits; depenetration is only initial-overlap recovery, not the mover.
+    float     contactOffset = 0.02f;        // skin kept between the capsule and geometry
+    int       maxSlideIterations = 5;       // sweep/slide passes per Move (anti-infinite-loop)
+    float     groundProbeDistance = 0.10f;  // short downward cast that detects ground each move
+    float     groundSnapDistance = 0.35f;   // max downward snap to stay attached down slopes/stairs
+    bool      slideOnSteep = true;          // slide down surfaces steeper than the walkable limit
+
+    // Pushing dynamic rigid bodies (Phases 32-34). When enabled, sweeping into a dynamic body
+    // imparts a bounded impulse: light bodies are shoved to ~character speed, heavy bodies barely
+    // move (the impulse is clamped so a small character can't launch a massive crate).
+    bool      pushDynamicBodies = true;
+    float     pushStrength = 1.0f;          // 0..1 fraction of the matched-speed impulse
+    float     maxPushImpulse = 8.0f;        // N*s cap
+
+    // Populated by Move each step: what the character is standing on and the contact point /
+    // inherited platform velocity there (for moving platforms + platform-relative jumping).
+    ecs::Entity groundEntity = ecs::kNull;
+    glm::vec3   groundPoint{0.0f};       // world contact point under the feet
+    glm::vec3   groundVelocity{0.0f};    // platform velocity at that point (0 for static ground)
+    float       maxPlatformSpeed = 50.0f;// carry velocities above this are treated as a teleport
 
     void SetMaxSlopeDegrees(float deg) { maxSlopeCos = std::cos(glm::radians(deg)); }
 
@@ -67,6 +91,12 @@ private:
     // m_world is set and valid, otherwise the exact full ECS scan.
     void GatherCandidates(ecs::Registry& registry, const glm::vec3& p0, const glm::vec3& p1,
                           std::vector<std::pair<ecs::Transform, ecs::Collider>>& out) const;
+    // Pass-4 sweep helpers (built on the accelerated PhysicsWorld::CapsuleCast).
+    RaycastHit SweepCapsule(ecs::Registry& registry, const glm::vec3& from, const glm::vec3& to,
+                            float r, float segHalf, const glm::vec3& up) const;
+    // Up / forward / down stair step (Phases 20-26). Modifies position/ground state on success.
+    void TryStep(ecs::Registry& registry, const glm::vec3& startPos, const glm::vec3& wantHoriz,
+                 float segHalf, const glm::vec3& up);
     const PhysicsWorld* m_world = nullptr;   // set for the duration of a Move/TrySetHeight call
 };
 

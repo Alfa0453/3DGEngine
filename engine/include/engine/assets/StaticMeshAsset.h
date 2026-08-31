@@ -1,6 +1,7 @@
 #pragma once
 
 #include "engine/assets/AssetIdentity.h"
+#include "engine/physics/PhysicsComponents.h"
 
 #include <array>
 #include <cstdint>
@@ -11,7 +12,7 @@ namespace engine {
 
 class AssetRegistry;
 
-inline constexpr std::uint32_t kStaticMeshAssetVersion = 4;
+inline constexpr std::uint32_t kStaticMeshAssetVersion = 6;
 inline constexpr std::uint32_t kStaticMeshImporterVersion = 2;
 inline constexpr std::uint32_t kStaticMeshVertexStride = 11;
 
@@ -68,6 +69,10 @@ struct StaticMeshSubMeshData {
     // Optional normalized RGBA paint, four floats per vertex. Empty means
     // unpainted white and keeps newly imported assets compact.
     std::vector<float> vertexColors;
+    // Open surfaces such as planes, cards, leaves and cloth must remain visible
+    // from either side. Import detects geometric boundary edges and persists the
+    // result so every renderer and shadow pass uses the same culling policy.
+    bool twoSided = false;
 };
 
 enum class StaticMeshCollisionType : std::uint32_t {
@@ -83,6 +88,9 @@ struct StaticMeshAssetData {
     std::vector<MeshMaterialSlot> materialSlots;
     std::vector<StaticMeshSubMeshData> subMeshes;
     StaticMeshCollisionType collisionType = StaticMeshCollisionType::None;
+    // Authored compound collision. The first shape becomes the instance's
+    // primary Collider; remaining shapes become AdditionalColliders.
+    std::vector<ecs::Collider> colliders;
 };
 
 struct StaticMeshImportOptions {
@@ -91,6 +99,7 @@ struct StaticMeshImportOptions {
     bool generateTangents = true;
     bool joinIdenticalVertices = true;
     bool flipUVs = false;
+    bool detectOpenMeshesAsTwoSided = true;
     bool importMaterials = true;
     bool importTextures = true;
     bool applyImportedMaterials = true;
@@ -107,6 +116,10 @@ struct StaticMeshImportOptions {
     MaterialReimportPolicy materialReimportPolicy =
         MaterialReimportPolicy::PreserveExisting;
 };
+
+// Uses position-welded triangle edges, so UV/normal seams on a closed solid do
+// not incorrectly classify it as open geometry.
+bool StaticMeshSubMeshIsOpen(const StaticMeshSubMeshData& subMesh);
 
 struct StaticMeshImportResult {
     AssetHandle id;

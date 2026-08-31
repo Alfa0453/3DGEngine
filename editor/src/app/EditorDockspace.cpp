@@ -15,8 +15,11 @@
 #include <engine/graphics/DayNightCycle.h>
 #include <engine/assets/ShaderAsset.h>
 #include <engine/assets/FoliageAsset.h>
+#include <engine/assets/StaticMeshAsset.h>
 #include <engine/math/Spline.h>
 #include <engine/physics/PhysicsComponents.h>
+#include <engine/physics/PhysicsMaterial.h>
+#include <engine/physics/PhysicsMaterialAsset.h>
 
 #include <glm/gtc/quaternion.hpp>
 #include <imgui.h>
@@ -1487,8 +1490,11 @@ ScenePhysicsStatus CollectScenePhysicsStatus(const EditorScene& scene) {
 }
 
 const char* PhysicsJointTypeName(EditorScene::PhysicsJoint::Type type, bool rope) {
-    if (type == EditorScene::PhysicsJoint::Type::Spring) {
-        return "Spring";
+    switch (type) {
+    case EditorScene::PhysicsJoint::Type::Spring: return "Spring";
+    case EditorScene::PhysicsJoint::Type::Ball:   return "Ball";
+    case EditorScene::PhysicsJoint::Type::Hinge:  return "Hinge";
+    default: break;
     }
     return rope ? "Rope" : "Distance";
 }
@@ -5688,6 +5694,37 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             if (rigidBody.kinematic && ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("Moved by its velocity only (script/animation). Pushes dynamics; never pushed, never sleeps.");
             }
+            // Center of mass (Pass-3). Auto = derived from the collider; uncheck to author an
+            // explicit local offset (the body then rotates about that point).
+            if (ImGui::Checkbox("Auto Center of Mass", &rigidBody.autoCenterOfMass)) {
+                rigidBody.massPropertiesDirty = true;
+                context.scene->SetSelectedRigidBody(rigidBody);
+            }
+            if (!rigidBody.autoCenterOfMass) {
+                if (ImGui::DragFloat3("COM Offset", &rigidBody.centerOfMassLocal.x, 0.01f)) {
+                    rigidBody.massPropertiesDirty = true;
+                    context.scene->SetSelectedRigidBody(rigidBody);
+                }
+            }
+            // Mass mode (Pass-4). Manual = author 1/mass directly; Density = derive mass from the
+            // collider's material density * its world volume (recomputed when the shape changes).
+            const char* massModes[] = { "Manual (mass)", "Density (kg/m^3)" };
+            int massMode = static_cast<int>(rigidBody.massMode);
+            if (ImGui::Combo("Mass Mode", &massMode, massModes, IM_ARRAYSIZE(massModes))) {
+                rigidBody.massMode = static_cast<engine::ecs::RigidBody::MassMode>(massMode);
+                rigidBody.massPropertiesDirty = true;
+                context.scene->SetSelectedRigidBody(rigidBody);
+            }
+            if (rigidBody.massMode == engine::ecs::RigidBody::MassMode::Manual) {
+                float mass = (rigidBody.invMass > 0.0f) ? 1.0f / rigidBody.invMass : 0.0f;
+                if (ImGui::DragFloat("Mass (kg)", &mass, 0.1f, 0.0f, 100000.0f, "%.2f")) {
+                    rigidBody.invMass = (mass > 0.0f) ? 1.0f / mass : 0.0f;
+                    rigidBody.massPropertiesDirty = true;
+                    context.scene->SetSelectedRigidBody(rigidBody);
+                }
+            } else {
+                ImGui::TextDisabled("Mass = density x collider volume (set density in the Collider's Physics Material).");
+            }
         }
 
     if (!isCharacter && selected->colliderEnabled
@@ -5782,6 +5819,70 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             if (ImGui::DragFloat("Friction", &collider.friction, 0.02f, 0.0f, 10.0f)) {
                 context.scene->SetSelectedCollider(collider);
             }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Legacy single Coulomb coefficient. Left at 0, the static/dynamic\n"
+                                  "values below fall back to it (static = this, dynamic = 0.8 x this).");
+            }
+            // ---- Pass-4 physics material (static/dynamic friction, density, combine modes) ----
+            if (ImGui::TreeNode("Physics Material (Advanced)")) {
+                const char* combineNames[] = { "Geometric Mean", "Average", "Minimum", "Maximum", "Multiply" };
+                bool matChanged = false;
+
+                // Static/dynamic friction. 0 = "derive from Friction above" (shown as a hint).
+                matChanged |= ImGui::DragFloat("Static Friction", &collider.staticFriction, 0.01f, 0.0f, 4.0f,
+                                               collider.staticFriction > 0.0f ? "%.3f" : "0 (use Friction)");
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Resists the onset of sliding (the stick limit). 0 = use the Friction value.");
+                matChanged |= ImGui::DragFloat("Dynamic Friction", &collider.dynamicFriction, 0.01f, 0.0f, 4.0f,
+                                               collider.dynamicFriction > 0.0f ? "%.3f" : "0 (use 0.8xFriction)");
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Applies once sliding (the slip limit). 0 = use 0.8 x the Friction value.");
+                ImGui::TextDisabled("Resolved: static %.2f  dynamic %.2f",
+                                    collider.ResolvedStaticFriction(), collider.ResolvedDynamicFriction());
+
+                int fricCombine = static_cast<int>(collider.frictionCombine);
+                if (ImGui::Combo("Friction Combine", &fricCombine, combineNames, IM_ARRAYSIZE(combineNames))) {
+                    collider.frictionCombine = static_cast<engine::ecs::MaterialCombine>(fricCombine); matChanged = true;
+                }
+                int restCombine = static_cast<int>(collider.restitutionCombine);
+                if (ImGui::Combo("Restitution Combine", &restCombine, combineNames, IM_ARRAYSIZE(combineNames))) {
+                    collider.restitutionCombine = static_cast<engine::ecs::MaterialCombine>(restCombine); matChanged = true;
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("How this collider's value mixes with the other collider's at a shared contact.");
+
+                matChanged |= ImGui::DragFloat("Density (kg/m^3)", &collider.density, 5.0f, 0.0f, 100000.0f, "%.0f");
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Used only when the Rigid Body mass mode is Density.");
+
+                // Load / save a shared .3dgphysmat preset via the native dialog.
+                if (ImGui::Button("Load .3dgphysmat")) {
+                    const std::string picked = editor::OpenFileDialog(
+                        "Load Physics Material", "Physics Material", "3dgphysmat");
+                    std::string matErr;
+                    if (!picked.empty() && engine::PhysicsMaterialAsset::Apply(picked, collider, &matErr)) {
+                        collider.physicsMaterialPath = picked;
+                        matChanged = true;
+                    }
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Save .3dgphysmat")) {
+                    const std::string picked = editor::SaveFileDialog(
+                        "Save Physics Material", "Physics Material", "3dgphysmat");
+                    if (!picked.empty()) {
+                        engine::PhysicsMaterial m = engine::PhysicsMaterial::Capture(collider);
+                        std::filesystem::path p(picked);
+                        m.name = p.stem().string();
+                        std::string matErr;
+                        if (engine::PhysicsMaterialAsset::Save(picked, m, &matErr))
+                            collider.physicsMaterialPath = picked;
+                    }
+                }
+                if (!collider.physicsMaterialPath.empty()) {
+                    ImGui::TextDisabled("Preset: %s", collider.physicsMaterialPath.c_str());
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("Clear##physmat")) { collider.physicsMaterialPath.clear(); matChanged = true; }
+                }
+
+                if (matChanged) context.scene->SetSelectedCollider(collider);
+                ImGui::TreePop();
+            }
             if (ImGui::Checkbox("Overlap Only (Trigger)", &collider.isTrigger)) {
                 context.scene->SetSelectedCollider(collider);
             }
@@ -5856,6 +5957,64 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                 }
                 ImGui::TreePop();
             }
+
+            ImGui::SeparatorText("Compound Shapes");
+            ImGui::TextDisabled("Extra shapes share this object's transform and rigid body.");
+            if (!selected->modelAssetPath.empty()
+                && std::filesystem::path(selected->modelAssetPath).extension() == ".3dgmesh") {
+                if (ImGui::Button("Reload Colliders From Mesh Asset", ImVec2(-1.0f, 0.0f))) {
+                    engine::StaticMeshAssetData meshAsset;
+                    if (engine::LoadStaticMeshAsset(selected->modelAssetPath, &meshAsset, nullptr))
+                        context.scene->SetSelectedColliders(meshAsset.colliders);
+                }
+            }
+            if (ImGui::Button("Add Box##Compound"))
+                context.scene->AddSelectedCollider(engine::ecs::Collider::MakeBox(glm::vec3(0.5f)));
+            ImGui::SameLine();
+            if (ImGui::Button("Add Sphere##Compound"))
+                context.scene->AddSelectedCollider(engine::ecs::Collider::MakeSphere(0.5f));
+            ImGui::SameLine();
+            if (ImGui::Button("Add Capsule##Compound"))
+                context.scene->AddSelectedCollider(engine::ecs::Collider::MakeCapsuleFromHeight(0.4f, 1.8f));
+            for (std::size_t i = 0; i < selected->additionalColliders.size(); ++i) {
+                ImGui::PushID(static_cast<int>(i));
+                engine::ecs::Collider extra = selected->additionalColliders[i];
+                const std::string title = "Collider " + std::to_string(i + 2);
+                if (ImGui::TreeNodeEx(title.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
+                    bool changed = false;
+                    int extraShape = ColliderShapeIndex(extra.shape);
+                    const char* extraShapes[] = {"Sphere", "Box", "Plane", "Capsule", "Cylinder", "Cone", "Pyramid", "Torus", "Staircase", "Convex Hull", "Triangle Mesh"};
+                    if (ImGui::Combo("Shape", &extraShape, extraShapes, IM_ARRAYSIZE(extraShapes))) {
+                        extra.shape = ColliderShapeFromIndex(extraShape); changed = true;
+                    }
+                    if (extra.shape == engine::ecs::ColliderShape::Sphere)
+                        changed |= ImGui::DragFloat("Radius", &extra.radius, 0.02f, 0.001f, 1000.0f);
+                    else if (extra.shape == engine::ecs::ColliderShape::Capsule
+                             || extra.shape == engine::ecs::ColliderShape::Cylinder
+                             || extra.shape == engine::ecs::ColliderShape::Cone) {
+                        changed |= ImGui::DragFloat("Radius", &extra.radius, 0.02f, 0.001f, 1000.0f);
+                        changed |= ImGui::DragFloat("Half Height", &extra.halfHeight, 0.02f, 0.0f, 1000.0f);
+                    } else if (extra.shape != engine::ecs::ColliderShape::Plane)
+                        changed |= ImGui::DragFloat3("Half Extents", &extra.halfExtents.x, 0.02f, 0.001f, 1000.0f);
+                    changed |= ImGui::DragFloat3("Local Position", &extra.localPosition.x, 0.01f);
+                    glm::vec3 extraEuler = glm::degrees(glm::eulerAngles(extra.localRotation));
+                    if (ImGui::DragFloat3("Local Rotation", &extraEuler.x, 0.5f, -360.0f, 360.0f)) {
+                        extra.localRotation = glm::quat(glm::radians(extraEuler)); changed = true;
+                    }
+                    changed |= ImGui::DragFloat3("Local Scale", &extra.localScale.x, 0.01f, 0.001f, 1000.0f);
+                    changed |= ImGui::Checkbox("Inherit Object Scale", &extra.inheritTransformScale);
+                    changed |= ImGui::Checkbox("Overlap Only", &extra.isTrigger);
+                    changed |= ImGui::DragFloat("Restitution", &extra.restitution, 0.02f, 0.0f, 1.0f);
+                    changed |= ImGui::DragFloat("Friction", &extra.friction, 0.02f, 0.0f, 2.0f);
+                    if (changed) context.scene->SetSelectedColliderAt(i + 1, extra);
+                    if (ImGui::Button("Remove This Collider")) {
+                        context.scene->RemoveSelectedCollider(i + 1);
+                        ImGui::TreePop(); ImGui::PopID(); break;
+                    }
+                    ImGui::TreePop();
+                }
+                ImGui::PopID();
+            }
         }
 
         // Physics joints connect rigid bodies, so only surface this section when the
@@ -5914,6 +6073,9 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                 const engine::ecs::Transform* targetTransform = context.scene->TryGetTransform(target.entity);
                 if (selectedJointTransform && targetTransform) {
                     joint.restLength = glm::length(targetTransform->position - selectedJointTransform->position);
+                    // Ball/Hinge pivot: default to the midpoint between the two bodies (a sensible
+                    // hinge/pin location the user can then nudge).
+                    joint.anchor = 0.5f * (targetTransform->position + selectedJointTransform->position);
                 }
                 if (joint.restLength <= 0.001f) {
                     joint.restLength = 1.0f;
@@ -5931,6 +6093,13 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             ImGui::SameLine();
             if (ImGui::Button("Add Spring")) {
                 addJoint(EditorScene::PhysicsJoint::Type::Spring, false);
+            }
+            if (ImGui::Button("Add Ball")) {
+                addJoint(EditorScene::PhysicsJoint::Type::Ball, false);
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Add Hinge")) {
+                addJoint(EditorScene::PhysicsJoint::Type::Hinge, false);
             }
 
             const std::vector<EditorScene::PhysicsJoint>& joints = context.scene->PhysicsJoints();
@@ -5951,16 +6120,44 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                     PhysicsJointTypeName(joint.type, joint.rope),
                     joint.objectA.c_str(),
                     joint.worldAnchor ? "World" : joint.objectB.c_str());
-                if (ImGui::DragFloat("Rest Length", &edited.restLength, 0.05f, 0.001f, 10000.0f)) {
+                using JT = EditorScene::PhysicsJoint::Type;
+                const bool isBallOrHinge = edited.type == JT::Ball || edited.type == JT::Hinge;
+                if ((edited.type == JT::Distance || edited.type == JT::Spring)
+                    && ImGui::DragFloat("Rest Length", &edited.restLength, 0.05f, 0.001f, 10000.0f)) {
                     context.scene->SetPhysicsJoint(i, edited);
                 }
-                if (edited.type == EditorScene::PhysicsJoint::Type::Spring) {
+                if (edited.type == JT::Spring) {
                     bool changed = false;
                     changed |= ImGui::DragFloat("Stiffness", &edited.stiffness, 1.0f, 0.0f, 100000.0f);
                     changed |= ImGui::DragFloat("Damping", &edited.damping, 0.05f, 0.0f, 10000.0f);
                     if (changed) {
                         context.scene->SetPhysicsJoint(i, edited);
                     }
+                }
+                if (isBallOrHinge) {
+                    bool changed = false;
+                    // Pivot point (world) and, for a hinge, its rotation axis.
+                    changed |= ImGui::DragFloat3("Pivot (world)", &edited.anchor.x, 0.02f);
+                    if (edited.type == JT::Hinge)
+                        changed |= ImGui::DragFloat3("Axis (world)", &edited.axis.x, 0.02f);
+                    changed |= ImGui::Checkbox("Bodies Collide", &edited.collideConnected);
+                    changed |= ImGui::Checkbox("Angular Limit", &edited.angularLimit);
+                    if (edited.angularLimit) {
+                        if (edited.type == JT::Hinge)
+                            changed |= ImGui::DragFloatRange2("Angle Min/Max (deg)",
+                                &edited.minAngle, &edited.maxAngle, 0.5f, -180.0f, 180.0f, "%.0f");
+                        else
+                            changed |= ImGui::DragFloat("Swing Limit (deg)", &edited.maxAngle, 0.5f, 0.0f, 180.0f, "%.0f");
+                    }
+                    if (edited.type == JT::Hinge) {
+                        changed |= ImGui::Checkbox("Motor", &edited.motorEnabled);
+                        if (edited.motorEnabled) {
+                            changed |= ImGui::DragFloat("Target Speed (deg/s)", &edited.motorTargetVelocity, 1.0f, -3600.0f, 3600.0f, "%.0f");
+                            changed |= ImGui::DragFloat("Max Torque (N.m)", &edited.motorMaxTorque, 1.0f, 0.0f, 100000.0f, "%.1f");
+                        }
+                    }
+                    changed |= ImGui::DragFloat("Break Impulse (0=never)", &edited.breakImpulse, 0.5f, 0.0f, 100000.0f, "%.1f");
+                    if (changed) context.scene->SetPhysicsJoint(i, edited);
                 }
                 if (ImGui::Button("Delete Joint")) {
                     context.scene->RemovePhysicsJoint(i);
@@ -8388,6 +8585,10 @@ void DrawAssets(EditorDockspace::Context& context, bool* open) {
                 ImGui::Checkbox("Join Identical Vertices",
                                 &settings.joinIdenticalVertices);
                 ImGui::Checkbox("Flip UVs", &settings.flipUVs);
+                ImGui::Checkbox("Two-Sided Open Surfaces",
+                                &settings.detectOpenMeshesAsTwoSided);
+                ImGui::TextDisabled(
+                    "Keeps imported planes, cards and other open surfaces visible from both sides.");
                 ImGui::SeparatorText("Materials and Textures");
                 ImGui::Checkbox("Import Materials", &settings.importMaterials);
                 if (!settings.importMaterials) ImGui::BeginDisabled();

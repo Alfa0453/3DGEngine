@@ -94,6 +94,34 @@ ecs::Light EnvironmentSunLight(const RuntimeSceneLoader::Scene::Environment& env
     return light;
 }
 
+bool ReadColliderFields(std::istream& in, ecs::Collider* c, int version = 0) {
+    int shape = 0, trigger = 0, inherit = 0, dirty = 0;
+    in >> shape >> c->radius >> c->halfHeight >> c->majorRadius >> c->minorRadius
+       >> c->steps >> c->halfExtents.x >> c->halfExtents.y >> c->halfExtents.z
+       >> c->planeNormal.x >> c->planeNormal.y >> c->planeNormal.z >> c->planeOffset
+       >> c->restitution >> c->friction >> trigger >> c->layer >> c->mask
+       >> c->localPosition.x >> c->localPosition.y >> c->localPosition.z
+       >> c->localRotation.w >> c->localRotation.x >> c->localRotation.y
+       >> c->localRotation.z >> c->localScale.x >> c->localScale.y >> c->localScale.z
+       >> inherit >> std::quoted(c->collisionAssetPath) >> dirty;
+    if (!in || shape < static_cast<int>(ecs::ColliderShape::Sphere)
+        || shape > static_cast<int>(ecs::ColliderShape::TriangleMesh)) return false;
+    c->shape = static_cast<ecs::ColliderShape>(shape);
+    c->isTrigger = trigger != 0;
+    c->inheritTransformScale = inherit != 0;
+    c->collisionDirty = dirty != 0;
+    if (version >= 114) {   // Pass-4 material tail
+        int fricCombine = 0, restCombine = 0;
+        std::string matPath;
+        in >> c->staticFriction >> c->dynamicFriction >> c->density
+           >> fricCombine >> restCombine >> std::quoted(matPath);
+        c->frictionCombine    = static_cast<ecs::MaterialCombine>(fricCombine);
+        c->restitutionCombine = static_cast<ecs::MaterialCombine>(restCombine);
+        c->physicsMaterialPath = (matPath == "-") ? std::string() : matPath;
+    }
+    return true;
+}
+
 } // namespace
 
 bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string *error)
@@ -146,11 +174,11 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             return false;
         }
     }
-    if (magic != "3DGRuntimeScene" || version < 1 || version > 112) {
+    if (magic != "3DGRuntimeScene" || version < 1 || version > 114) {
         if (error) {
             *error = "Runtime scene file has an unknown format: "
                 + magic + " " + std::to_string(version)
-                + " (expected 3DGRuntimeScene 1..110).";
+                + " (expected 3DGRuntimeScene 1..114).";
         }
         return false;
     }
@@ -166,6 +194,19 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
         std::istringstream record(line);
         std::string recordType;
         record >> recordType;
+        if (recordType == "compound_colliders" && version >= 113) {
+            std::string objectName;
+            std::size_t count = 0;
+            record >> std::quoted(objectName) >> count;
+            if (!record || count > 4096) { if (error) *error = "Runtime scene has invalid compound colliders."; return false; }
+            auto entity = std::find_if(loaded.entities.begin(), loaded.entities.end(),
+                [&](const EntityDesc& candidate) { return candidate.name == objectName; });
+            std::vector<ecs::Collider> colliders(count);
+            for (ecs::Collider& collider : colliders)
+                if (!ReadColliderFields(record, &collider, version)) { if (error) *error = "Runtime scene has invalid compound collider data."; return false; }
+            if (entity != loaded.entities.end()) entity->additionalColliders = std::move(colliders);
+            continue;
+        }
         if (recordType == "atmosphere" && version >= 101) {
             record >> loaded.environment.atmosphereRayleigh >> loaded.environment.atmosphereRayleighHeight
                    >> loaded.environment.atmosphereMie >> loaded.environment.atmosphereMieHeight
@@ -407,11 +448,22 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                    >> worldAnchor
                    >> joint.anchor.x >> joint.anchor.y >> joint.anchor.z
                    >> joint.restLength >> rope >> joint.stiffness >> joint.damping;
+            // Ball/Hinge authoring (runtime scene 114+).
+            if (version >= 114) {
+                int collide = 1, limit = 0, motor = 0;
+                record >> joint.axis.x >> joint.axis.y >> joint.axis.z
+                       >> collide >> limit >> joint.minAngle >> joint.maxAngle
+                       >> motor >> joint.motorTargetVelocity >> joint.motorMaxTorque
+                       >> joint.breakImpulse;
+                joint.collideConnected = collide != 0;
+                joint.angularLimit = limit != 0;
+                joint.motorEnabled = motor != 0;
+            }
             if (!record || joint.objectA.empty()) {
                 if (error) *error = "Runtime scene contains an invalid physics joint.";
                 return false;
             }
-            joint.type = std::clamp(joint.type, 0, 1);
+            joint.type = std::clamp(joint.type, 0, 3);   // Distance, Spring, Ball, Hinge
             joint.worldAnchor = worldAnchor != 0;
             joint.rope = rope != 0;
             joint.restLength = std::max(joint.restLength, 0.0f);
@@ -1889,6 +1941,23 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             entity.particleSystem.burstInterval = std::max(entity.particleSystem.burstInterval, 0.0f);
         }
 
+        // Physics material + mass mode (runtime scene 114+). Tail of the object record, matching
+        // the exporter. Read into entity.collider / entity.rigidBody, which become the ecs
+        // components verbatim below.
+        if (version >= 114) {
+            int fricCombine = 0, restCombine = 0, massMode = 0;
+            record >> entity.collider.staticFriction >> entity.collider.dynamicFriction
+                   >> entity.collider.density >> fricCombine >> restCombine >> massMode;
+            entity.collider.frictionCombine    = static_cast<ecs::MaterialCombine>(fricCombine);
+            entity.collider.restitutionCombine = static_cast<ecs::MaterialCombine>(restCombine);
+            entity.rigidBody.massMode          = static_cast<ecs::RigidBody::MassMode>(massMode);
+            // Center of mass (runtime scene 114+).
+            int autoCom = 1;
+            record >> autoCom >> entity.rigidBody.centerOfMassLocal.x
+                   >> entity.rigidBody.centerOfMassLocal.y >> entity.rigidBody.centerOfMassLocal.z;
+            entity.rigidBody.autoCenterOfMass = autoCom != 0;
+        }
+
         if (!record) {
             if (error) {
                 *error = "Runtime scene contains an invalid entity record.";
@@ -2236,6 +2305,9 @@ bool RuntimeSceneLoader::Instantiate(const Scene &scene, ecs::Registry &registry
         }
         if (desc.colliderEnabled) {
             registry.Add<ecs::Collider>(entity, desc.collider);
+            if (!desc.additionalColliders.empty())
+                registry.Add<ecs::AdditionalColliders>(entity,
+                    ecs::AdditionalColliders{desc.additionalColliders});
         }
         if (desc.reflectionProbeEnabled) {
             registry.Add<ecs::ReflectionProbe>(entity, desc.reflectionProbe);

@@ -3,6 +3,8 @@
 #include <engine/assets/StaticMeshAsset.h>
 #include <engine/assets/TextureAsset.h>
 #include <engine/physics/CollisionMesh.h>
+#include <engine/physics/PhysicsWorld.h>
+#include <engine/ecs/Registry.h>
 
 #include <array>
 #include <cstdint>
@@ -34,6 +36,46 @@ void WriteTriangleObj(const std::filesystem::path& path, float width) {
            << "vn 0 0 1\n"
            << "usemtl Red\n"
            << "f 1/1/1 2/2/1 3/3/1\n";
+}
+
+void WriteCubeObj(const std::filesystem::path& path) {
+    std::ofstream output(path, std::ios::trunc);
+    output << "o Cube\n"
+           << "v -1 -1 -1\nv 1 -1 -1\nv 1 1 -1\nv -1 1 -1\n"
+           << "v -1 -1 1\nv 1 -1 1\nv 1 1 1\nv -1 1 1\n"
+           << "f 1 3 2\nf 1 4 3\nf 5 6 7\nf 5 7 8\n"
+           << "f 1 5 8\nf 1 8 4\nf 2 3 7\nf 2 7 6\n"
+           << "f 1 2 6\nf 1 6 5\nf 4 8 7\nf 4 7 3\n";
+}
+
+void CheckHullCollision(const std::string& meshPath,
+                        const engine::ecs::Collider& movingCollider,
+                        const char* message) {
+    engine::ecs::Registry world;
+    const engine::ecs::Entity hullEntity = world.Create();
+    world.Add<engine::ecs::Transform>(hullEntity, {});
+    engine::ecs::Collider hull = engine::ecs::Collider::MakeBox(glm::vec3(1.0f));
+    hull.shape = engine::ecs::ColliderShape::ConvexHull;
+    hull.collisionAssetPath = meshPath;
+    world.Add<engine::ecs::Collider>(hullEntity, hull);
+
+    const engine::ecs::Entity movingEntity = world.Create();
+    engine::ecs::Transform transform;
+    transform.position = glm::vec3(1.25f, 0.0f, 0.0f);
+    world.Add<engine::ecs::Transform>(movingEntity, transform);
+    world.Add<engine::ecs::Collider>(movingEntity, movingCollider);
+    engine::ecs::RigidBody body;
+    body.useGravity = false;
+    body.allowSleep = false;
+    world.Add<engine::ecs::RigidBody>(movingEntity, body);
+
+    engine::PhysicsWorld physics;
+    physics.Step(world, 1.0f / 60.0f);
+    Check(std::any_of(physics.Events().begin(), physics.Events().end(),
+        [=](const engine::CollisionEvent& event) {
+            return (event.a == hullEntity && event.b == movingEntity)
+                || (event.a == movingEntity && event.b == hullEntity);
+        }), message);
 }
 
 } // namespace
@@ -81,6 +123,7 @@ int main() {
               && imported.header.id.Valid()
               && imported.header.sourceHash != 0
               && imported.subMeshes.size() == 1
+              && imported.subMeshes[0].twoSided
               && imported.subMeshes[0].vertices.size()
                      == 3 * engine::kStaticMeshVertexStride
               && imported.subMeshes[0].indices.size() == 3
@@ -100,6 +143,13 @@ int main() {
         0.0f, 1.0f, 0.0f, 0.5f,
         0.0f, 0.0f, 1.0f, 0.0f};
     imported.collisionType = engine::StaticMeshCollisionType::TriangleMesh;
+    engine::ecs::Collider authoredBody = engine::ecs::Collider::MakeBox(
+        glm::vec3(0.45f, 0.5f, 0.12f));
+    authoredBody.localPosition = glm::vec3(0.35f, 0.5f, 0.0f);
+    engine::ecs::Collider authoredCap = engine::ecs::Collider::MakeSphere(0.22f);
+    authoredCap.localPosition = glm::vec3(0.0f, 0.9f, 0.0f);
+    authoredCap.isTrigger = true;
+    imported.colliders = {authoredBody, authoredCap};
     engine::MeshMaterialSlot roundTripSlot;
     roundTripSlot.name = "Red";
     roundTripSlot.materialId = engine::AssetHandle::Generate();
@@ -122,7 +172,13 @@ int main() {
               && loaded.subMeshes[0].vertices == imported.subMeshes[0].vertices
               && loaded.subMeshes[0].indices == imported.subMeshes[0].indices
               && loaded.subMeshes[0].vertexColors == imported.subMeshes[0].vertexColors
+              && loaded.subMeshes[0].twoSided
               && loaded.collisionType == engine::StaticMeshCollisionType::TriangleMesh
+              && loaded.colliders.size() == 2
+              && loaded.colliders[0].shape == engine::ecs::ColliderShape::Box
+              && loaded.colliders[0].localPosition == authoredBody.localPosition
+              && loaded.colliders[1].shape == engine::ecs::ColliderShape::Sphere
+              && loaded.colliders[1].isTrigger
               && loaded.materialSlots.size() == imported.materials.size()
               && loaded.materialSlots[static_cast<std::size_t>(importedMaterial)].materialId
                      == roundTripSlot.materialId
@@ -139,6 +195,38 @@ int main() {
               && collisionA->triangles.size() == 1,
           "collision mesh cooking is cached and shared across instances");
     engine::physics::InvalidateCollisionMesh(destination.string());
+
+    const fs::path cubeSource = sourceRoot / "Cube.obj";
+    const fs::path cubeAssetPath = contentRoot / "Meshes" / "Cube.3dgmesh";
+    WriteCubeObj(cubeSource);
+    engine::StaticMeshAssetData cubeAsset;
+    Check(engine::ImportStaticMeshSource(cubeSource.string(), {}, &cubeAsset,
+              nullptr, &error)
+              && !cubeAsset.subMeshes.empty()
+              && !cubeAsset.subMeshes[0].twoSided
+              && engine::SaveStaticMeshAsset(cubeAssetPath.string(), cubeAsset, &error),
+          "create a closed mesh for convex-hull collision tests");
+    const auto cubeCollision = engine::physics::AcquireCollisionMesh(
+        cubeAssetPath.string(), &error);
+    Check(cubeCollision && cubeCollision->convexHullEdges.size() == 12u,
+          "cooked convex hull exposes its twelve visible cube boundary edges");
+    CheckHullCollision(cubeAssetPath.string(), engine::ecs::Collider::MakeSphere(0.5f),
+                       "convex hull collides with sphere colliders");
+    CheckHullCollision(cubeAssetPath.string(),
+                       engine::ecs::Collider::MakeCapsule(0.5f, 0.5f),
+                       "convex hull collides with capsule colliders");
+    CheckHullCollision(cubeAssetPath.string(),
+                       engine::ecs::Collider::MakeBox(glm::vec3(0.5f)),
+                       "convex hull collides with box colliders");
+    engine::physics::InvalidateCollisionMesh(cubeAssetPath.string());
+
+    engine::StaticMeshImportOptions singleSidedImport;
+    singleSidedImport.detectOpenMeshesAsTwoSided = false;
+    engine::StaticMeshAssetData singleSidedPlane;
+    Check(engine::ImportStaticMeshSource(source.string(), singleSidedImport,
+              &singleSidedPlane, nullptr, &error)
+              && !singleSidedPlane.subMeshes[0].twoSided,
+          "static mesh import can explicitly retain one-sided open surfaces");
 
     engine::StaticMeshAssetData invalidPaint = imported;
     invalidPaint.subMeshes[0].vertexColors.pop_back();
@@ -173,6 +261,9 @@ int main() {
                     == generatedMesh.materialSlots.size()
               && !generatedMesh.materialSlots.empty(),
           "complete import generates standalone material and texture slots");
+    generatedMesh.colliders = {authoredBody, authoredCap};
+    Check(engine::SaveStaticMeshAsset(destination.string(), generatedMesh, &error),
+          "mesh editor collider metadata can be saved on an imported mesh");
     const engine::MeshMaterialSlot generatedSlot = generatedMesh.materialSlots[0];
     std::string generatedMaterialRelative = generatedSlot.materialPath;
     if (generatedMaterialRelative.rfind("/Game/", 0) == 0)
@@ -212,9 +303,12 @@ int main() {
               && preservedMaterial.material.albedo == artistMaterial.material.albedo
               && !reimportedMesh.materialSlots.empty()
               && reimportedMesh.materialSlots[0].materialId == generatedSlot.materialId
+              && reimportedMesh.colliders.size() == 2
+              && reimportedMesh.colliders[0].localPosition == authoredBody.localPosition
+              && reimportedMesh.colliders[1].isTrigger
               && reimport.reusedMaterialCount >= 1
               && reimport.reusedTextureCount == 1,
-          "default reimport updates textures while preserving artist material edits and IDs");
+          "default reimport preserves artist materials and authored compound colliders");
 
     engine::StaticMeshAssetData reloaded;
     Check(engine::LoadStaticMeshAsset(destination.string(), &reloaded, &error)

@@ -118,8 +118,9 @@ Model Model::FromFile(const std::string& path) {
                         {1.0f, 1.0f, 1.0f, 1.0f});
                 }
             }
-            model.m_subMeshes.push_back(
-                SubMesh{Mesh(paintedVertices, source.indices, layout), source.material});
+            Mesh mesh(paintedVertices, source.indices, layout);
+            mesh.SetTwoSided(source.twoSided);
+            model.m_subMeshes.push_back(SubMesh{std::move(mesh), source.material});
         }
         model.m_min = {
             asset.minimum[0], asset.minimum[1], asset.minimum[2]};

@@ -3,12 +3,14 @@
 #include "engine/assets/StaticMeshAsset.h"
 
 #include <glm/gtc/quaternion.hpp>
+#include <glm/gtx/norm.hpp>
 
 #include <algorithm>
 #include <cmath>
 #include <chrono>
 #include <filesystem>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <numeric>
 #include <unordered_map>
@@ -74,6 +76,134 @@ int BuildNode(CollisionMeshData& mesh, std::uint32_t first, std::uint32_t count)
     return index;
 }
 
+struct HullFace {
+    int a = 0, b = 0, c = 0;
+    glm::vec3 normal{0.0f};
+};
+
+HullFace MakeHullFace(int a, int b, int c, const std::vector<glm::vec3>& points,
+                      const glm::vec3& interior) {
+    HullFace face{a, b, c};
+    glm::vec3 normal = glm::cross(points[b] - points[a], points[c] - points[a]);
+    const float length = glm::length(normal);
+    if (length > 1.0e-8f) normal /= length;
+    if (glm::dot(normal, interior - points[a]) > 0.0f) {
+        std::swap(face.b, face.c);
+        normal = -normal;
+    }
+    face.normal = normal;
+    return face;
+}
+
+void BuildConvexHullEdges(CollisionMeshData& mesh) {
+    std::vector<glm::vec3> points;
+    points.reserve(mesh.triangles.size() * 3u);
+    for (const CollisionTriangle& triangle : mesh.triangles) {
+        points.push_back(triangle.a);
+        points.push_back(triangle.b);
+        points.push_back(triangle.c);
+    }
+    std::sort(points.begin(), points.end(), [](const glm::vec3& a, const glm::vec3& b) {
+        if (a.x != b.x) return a.x < b.x;
+        if (a.y != b.y) return a.y < b.y;
+        return a.z < b.z;
+    });
+    points.erase(std::unique(points.begin(), points.end()), points.end());
+    if (points.size() < 4u) return;
+
+    int i0 = 0;
+    int i1 = 1;
+    float farthest = 0.0f;
+    for (int i = 1; i < static_cast<int>(points.size()); ++i) {
+        const float distance = glm::length2(points[i] - points[i0]);
+        if (distance > farthest) { farthest = distance; i1 = i; }
+    }
+    int i2 = -1;
+    float lineDistance = 0.0f;
+    const glm::vec3 line = points[i1] - points[i0];
+    for (int i = 0; i < static_cast<int>(points.size()); ++i) {
+        const float distance = glm::length2(glm::cross(line, points[i] - points[i0]));
+        if (distance > lineDistance) { lineDistance = distance; i2 = i; }
+    }
+    if (i2 < 0 || lineDistance < 1.0e-14f) return;
+    const glm::vec3 plane = glm::normalize(glm::cross(
+        points[i1] - points[i0], points[i2] - points[i0]));
+    int i3 = -1;
+    float planeDistance = 0.0f;
+    for (int i = 0; i < static_cast<int>(points.size()); ++i) {
+        const float distance = std::abs(glm::dot(plane, points[i] - points[i0]));
+        if (distance > planeDistance) { planeDistance = distance; i3 = i; }
+    }
+    if (i3 < 0 || planeDistance < 1.0e-7f) return;
+
+    const glm::vec3 interior = (points[i0] + points[i1] + points[i2] + points[i3]) * 0.25f;
+    std::vector<HullFace> faces;
+    faces.reserve(points.size() * 2u);
+    faces.push_back(MakeHullFace(i0, i1, i2, points, interior));
+    faces.push_back(MakeHullFace(i0, i3, i1, points, interior));
+    faces.push_back(MakeHullFace(i0, i2, i3, points, interior));
+    faces.push_back(MakeHullFace(i1, i3, i2, points, interior));
+    const float epsilon = std::max(glm::length(mesh.maximum - mesh.minimum) * 1.0e-5f,
+                                   1.0e-6f);
+
+    for (int pointIndex = 0; pointIndex < static_cast<int>(points.size()); ++pointIndex) {
+        if (pointIndex == i0 || pointIndex == i1 || pointIndex == i2 || pointIndex == i3)
+            continue;
+        std::vector<bool> visible(faces.size(), false);
+        bool anyVisible = false;
+        for (std::size_t faceIndex = 0; faceIndex < faces.size(); ++faceIndex) {
+            visible[faceIndex] = glm::dot(faces[faceIndex].normal,
+                points[pointIndex] - points[faces[faceIndex].a]) > epsilon;
+            anyVisible |= visible[faceIndex];
+        }
+        if (!anyVisible) continue;
+
+        std::vector<std::pair<int, int>> horizon;
+        const auto addHorizon = [&horizon](int a, int b) {
+            const auto reverse = std::find(horizon.begin(), horizon.end(), std::pair<int,int>{b, a});
+            if (reverse != horizon.end()) horizon.erase(reverse);
+            else horizon.emplace_back(a, b);
+        };
+        std::vector<HullFace> kept;
+        kept.reserve(faces.size() + 8u);
+        for (std::size_t faceIndex = 0; faceIndex < faces.size(); ++faceIndex) {
+            if (!visible[faceIndex]) { kept.push_back(faces[faceIndex]); continue; }
+            const HullFace& face = faces[faceIndex];
+            addHorizon(face.a, face.b);
+            addHorizon(face.b, face.c);
+            addHorizon(face.c, face.a);
+        }
+        faces.swap(kept);
+        for (const auto& edge : horizon) {
+            HullFace face = MakeHullFace(edge.first, edge.second, pointIndex, points, interior);
+            if (glm::dot(face.normal, face.normal) > 0.5f) faces.push_back(face);
+        }
+    }
+
+    // Do not draw triangulation diagonals across a flat hull face. Retain outer
+    // boundaries and genuine creases where adjacent face normals differ.
+    std::map<std::pair<int, int>, std::vector<glm::vec3>> edgeNormals;
+    for (const HullFace& face : faces) {
+        const int edge[3][2] = {{face.a, face.b}, {face.b, face.c}, {face.c, face.a}};
+        for (const auto& endpoints : edge) {
+            const std::pair<int, int> key{
+                std::min(endpoints[0], endpoints[1]),
+                std::max(endpoints[0], endpoints[1])};
+            edgeNormals[key].push_back(face.normal);
+        }
+    }
+    mesh.convexHullEdges.clear();
+    mesh.convexHullEdges.reserve(edgeNormals.size());
+    for (const auto& entry : edgeNormals) {
+        const auto& normals = entry.second;
+        bool crease = normals.size() == 1u;
+        for (std::size_t i = 1; i < normals.size() && !crease; ++i)
+            crease = glm::dot(normals[0], normals[i]) < 0.9995f;
+        if (crease) mesh.convexHullEdges.push_back(
+            {points[entry.first.first], points[entry.first.second]});
+    }
+}
+
 bool RayAabb(const glm::vec3& o, const glm::vec3& d,
              const glm::vec3& mn, const glm::vec3& mx, float limit) {
     float nearT = 0.0f, farT = limit;
@@ -117,7 +247,8 @@ std::size_t CollisionMeshData::SourceBytes() const {
 }
 std::size_t CollisionMeshData::CookedBytes() const {
     return SourceBytes() + order.size() * sizeof(std::uint32_t)
-        + nodes.size() * sizeof(CollisionBvhNode);
+        + nodes.size() * sizeof(CollisionBvhNode)
+        + convexHullEdges.size() * sizeof(CollisionEdge);
 }
 
 std::shared_ptr<const CollisionMeshData> AcquireCollisionMesh(
@@ -160,6 +291,7 @@ std::shared_ptr<const CollisionMeshData> AcquireCollisionMesh(
     std::iota(cooked->order.begin(), cooked->order.end(), 0u);
     cooked->nodes.reserve(cooked->triangles.size() / 4u + 1u);
     BuildNode(*cooked, 0u, static_cast<std::uint32_t>(cooked->triangles.size()));
+    BuildConvexHullEdges(*cooked);
     cooked->cookMilliseconds = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - cookStart).count();
     {

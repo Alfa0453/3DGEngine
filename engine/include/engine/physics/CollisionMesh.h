@@ -17,6 +17,11 @@ struct CollisionTriangle {
     glm::vec3 c{0.0f};
 };
 
+struct CollisionEdge {
+    glm::vec3 a{0.0f};
+    glm::vec3 b{0.0f};
+};
+
 struct CollisionBvhNode {
     glm::vec3 minimum{0.0f};
     glm::vec3 maximum{0.0f};
@@ -33,6 +38,9 @@ struct CollisionMeshData {
     std::vector<CollisionTriangle> triangles;
     std::vector<std::uint32_t> order;
     std::vector<CollisionBvhNode> nodes;
+    // Crease/boundary edges of the convex envelope. Cached with the triangle BVH
+    // so both editor previews draw the same hull that support-mapped physics uses.
+    std::vector<CollisionEdge> convexHullEdges;
     glm::vec3 minimum{0.0f};
     glm::vec3 maximum{0.0f};
     double cookMilliseconds = 0.0;

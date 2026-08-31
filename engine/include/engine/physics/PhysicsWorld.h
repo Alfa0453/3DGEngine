@@ -57,7 +57,9 @@ struct ContactManifold {
     float     tangentMass[4][2]{};               // 1 / effective mass along each tangent
     float     invMassA = 0.0f, invMassB = 0.0f;  // cached inverse masses
     glm::mat3 invIA{0.0f}, invIB{0.0f};          // cached world inverse inertia
-    float     friction = 0.0f;                   // combined Coulomb coefficient
+    float     friction = 0.0f;                   // combined Coulomb coefficient (legacy / block box)
+    float     staticFriction  = 0.0f;            // Pass-4: combined static coefficient (stick limit)
+    float     dynamicFriction = 0.0f;            // Pass-4: combined dynamic coefficient (slip limit)
 
     // Pass-3 block solver: when count == 2, the two normal constraints are solved as one
     // coupled 2x2 system (Box2D-style) instead of sequentially, so their impulses stay
@@ -150,6 +152,26 @@ struct Joint {
     float       minAngle = -3.14159265f;
     float       maxAngle = 3.14159265f;
     glm::quat   referenceRelative{1.0f, 0.0f, 0.0f, 0.0f};
+
+    // Hinge motor (Pass-3): drive rotation about the hinge axis toward a target angular speed,
+    // limited by a maximum torque (the per-step impulse is clamped to maxTorque * dt).
+    bool        motorEnabled = false;
+    float       motorTargetVelocity = 0.0f;   // rad/s about the hinge axis (B relative to A)
+    float       motorMaxTorque = 0.0f;        // N*m
+
+    // Optional break threshold (Pass-3). When the accumulated constraint impulse over a step
+    // exceeds breakImpulse the joint is flagged broken (removed safely after the solve). 0 = off.
+    float       breakImpulse = 0.0f;
+    bool        broken = false;
+
+    // --- Transient solver state: accumulated impulses for warm starting. Never serialized;
+    //     reset when a joint is (re)created. Persisting them across frames is what makes
+    //     jointed chains settle without stretching. ---
+    glm::vec3   pointImpulse{0.0f};       // point-to-point (ball / hinge anchor) accumulated impulse
+    float       distanceImpulse = 0.0f;   // distance-joint scalar accumulated impulse
+    glm::vec2   axisImpulse{0.0f};        // hinge axis-alignment impulses (two perpendicular axes)
+    float       limitImpulse = 0.0f;      // hinge angular-limit accumulated impulse
+    float       motorImpulse = 0.0f;      // hinge motor accumulated impulse
 };
 
 // Per-step + per-frame physics instrumentation (Pass-1 profiling foundation). The
@@ -182,9 +204,24 @@ struct PhysicsStats {
     float  maxPenetrationBefore = 0.0f;  // deepest manifold penetration pre-position-solve
     float  maxPenetrationAfter  = 0.0f;  // deepest residual after the position solve
 
+    // Islands (Pass-3).
+    int    islandCount        = 0;   // total simulation islands this step
+    int    awakeIslands       = 0;   // islands with at least one awake body (solved)
+    int    sleepingIslands    = 0;   // fully-asleep islands (skipped)
+    int    largestIslandBodies = 0;  // body count of the biggest island
+
+    // Joints (Pass-3).
+    int    distanceJoints = 0;
+    int    ballJoints     = 0;
+    int    hingeJoints    = 0;
+    int    motorsActive   = 0;
+    int    limitsActive   = 0;
+    int    brokenJoints   = 0;
+
     // Queries (accumulate across a frame; cleared by ResetQueryStats)
     int          raycasts        = 0;
     int          sphereCasts     = 0;
+    int          capsuleCasts    = 0;   // Pass-4 shape cast
     int          overlaps        = 0;
     std::int64_t queryCandidates = 0;  // colliders considered by queries
     std::int64_t queryExactTests = 0;  // exact shape tests queries performed
@@ -270,6 +307,64 @@ public:
     std::vector<ecs::Entity> OverlapSphere(ecs::Registry& registry,
                                            const glm::vec3& center, float radius,
                                            std::uint32_t layerMask = 0xFFFFFFFFu) const;
+
+    // Pass-4: sweep an upright capsule (segment 2*halfHeight along `up`, given radius) from
+    // start to end and return the earliest solid hit. Built on the accelerated SphereCast
+    // (bottom-cap / centre / top-cap sphere paths), so it inherits broad-phase acceleration and
+    // shape/mesh handling. This is the canonical sweep the CharacterController moves with.
+    RaycastHit CapsuleCast(ecs::Registry& registry,
+                           const glm::vec3& start, const glm::vec3& end,
+                           float radius, float halfHeight,
+                           const glm::vec3& up = glm::vec3(0.0f, 1.0f, 0.0f),
+                           ecs::Entity ignored = ecs::kNull,
+                           std::uint32_t layerMask = 0xFFFFFFFFu,
+                           std::uint32_t queryLayer = 0u,
+                           ecs::Entity alsoIgnored = ecs::kNull) const;
+
+    // Collect every collider overlapping an upright capsule (segment + radius). Trigger volumes
+    // included; filtered by layerMask. Used for character initial-overlap recovery.
+    std::vector<ecs::Entity> OverlapCapsule(ecs::Registry& registry,
+                                            const glm::vec3& center, float radius, float halfHeight,
+                                            const glm::vec3& up = glm::vec3(0.0f, 1.0f, 0.0f),
+                                            std::uint32_t layerMask = 0xFFFFFFFFu) const;
+
+    // Pass-4 gameplay query suite. RaycastAny early-outs at the first solid hit (AI line-of-sight
+    // / occlusion). RaycastAll returns every hit sorted nearest-first (respecting filters).
+    bool RaycastAny(ecs::Registry& registry, const Ray& ray, float maxDistance = 1.0e30f,
+                    std::uint32_t layerMask = 0xFFFFFFFFu, ecs::Entity ignored = ecs::kNull) const;
+    std::vector<RaycastHit> RaycastAll(ecs::Registry& registry, const Ray& ray,
+                                       float maxDistance = 1.0e30f,
+                                       std::uint32_t layerMask = 0xFFFFFFFFu) const;
+
+    // Sweep an axis-aligned-in-`rotation` box. NOTE: currently a CONSERVATIVE bounding-sphere
+    // sweep (over-reports near corners) -- an exact OBB sweep is a later refinement; the sphere
+    // sweep is accelerated and safe for "is the path clear" gameplay checks.
+    RaycastHit BoxCast(ecs::Registry& registry, const glm::vec3& start, const glm::vec3& end,
+                       const glm::vec3& halfExtents,
+                       const glm::quat& rotation = glm::quat(1, 0, 0, 0),
+                       ecs::Entity ignored = ecs::kNull,
+                       std::uint32_t layerMask = 0xFFFFFFFFu) const;
+
+    // Collider entities overlapping a world box (OBB). Broad-phase accelerated with an exact
+    // OBB-vs-collider AABB overlap refine.
+    std::vector<ecs::Entity> OverlapBox(ecs::Registry& registry, const glm::vec3& center,
+                                        const glm::vec3& halfExtents,
+                                        const glm::quat& rotation = glm::quat(1, 0, 0, 0),
+                                        std::uint32_t layerMask = 0xFFFFFFFFu) const;
+
+    // Penetration of a query collider (at queryTransform) against another entity's collider,
+    // via the full narrow phase (all shape pairs, incl. GJK/EPA + mesh). outNormal points FROM
+    // the other collider TOWARD the query -- i.e. move the query by outNormal*outDepth to
+    // separate. Returns false when not overlapping.
+    bool ComputePenetration(ecs::Registry& registry, const ecs::Transform& queryTransform,
+                            const ecs::Collider& queryCollider, ecs::Entity other,
+                            glm::vec3& outNormal, float& outDepth) const;
+
+    // Closest point on an entity's collider to a world point. Exact for sphere/box/capsule/plane;
+    // approximate (bounding OBB) for cylinder/cone/hull/mesh. Returns the point itself when it is
+    // inside a solid convex shape.
+    glm::vec3 ClosestPoint(ecs::Registry& registry, const glm::vec3& point,
+                           ecs::Entity entity) const;
 
     void SetDebugTracing(bool enabled) const { m_debugTracing = enabled; }
     bool DebugTracing() const { return m_debugTracing; }
@@ -387,6 +482,12 @@ public:
         m_joints.push_back(j);
     }
 
+    // Access the joint most recently added, so authoring code can set fields not covered by the
+    // Add* signatures (hinge motor parameters, the break-impulse threshold). Valid only right
+    // after an Add*Joint call. Returns a reference into the joint list.
+    Joint& LastJoint() { return m_joints.back(); }
+    bool   HasJoints() const { return !m_joints.empty(); }
+
 private:
     void RecordDebugTrace(const DebugTrace& trace) const;
     mutable PhysicsStats                    m_stats;     // transient instrumentation (never serialized)
@@ -428,6 +529,16 @@ private:
     std::unordered_map<std::uint64_t, int> m_contactAge;  // pair key -> consecutive-ish contact
                                                           // frames; drives restitution suppression
     bool m_inSubstep = false;                             // recursion guard for substepping
+
+    // Simulation-island scratch (rebuilt every step; never serialized). Union-find groups the
+    // dynamic bodies connected by contacts/joints into islands so each solves and sleeps
+    // independently; static/kinematic bodies are boundaries and never merge two islands.
+    std::vector<int> m_ufParent;                          // union-find parent per body index
+    std::vector<int> m_ufRank;                            // union-find rank
+    std::vector<std::vector<int>> m_islandManifolds;      // manifold indices per island
+    std::vector<std::vector<int>> m_islandJoints;         // joint indices per island
+    std::vector<std::vector<int>> m_islandBodies;         // dynamic body indices per island
+    std::unordered_map<int, int> m_rootToIsland;          // union-find root -> island slot
     std::unordered_map<std::uint64_t, int> m_manifoldOf;
     std::unordered_map<std::uint64_t, int> m_eventOf;
 };

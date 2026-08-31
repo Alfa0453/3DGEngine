@@ -221,56 +221,175 @@ bool CharacterController::ResolvePenetrations(ecs::Registry& reg) {
     return touchedWall;
 }
 
+RaycastHit CharacterController::SweepCapsule(ecs::Registry& reg, const glm::vec3& from,
+                                            const glm::vec3& to, float r, float segHalf,
+                                            const glm::vec3& up) const {
+    if (!m_world) return RaycastHit{};
+    // collisionMask filters which collider layers block the character (excludes triggers/etc).
+    return m_world->CapsuleCast(reg, from, to, r, segHalf, up, ecs::kNull, collisionMask);
+}
+
+void CharacterController::TryStep(ecs::Registry& reg, const glm::vec3& startPos,
+                                  const glm::vec3& wantHoriz, float segHalf, const glm::vec3& up) {
+    const float skin = contactOffset;
+    const glm::vec3 dir = glm::normalize(wantHoriz);
+    const float horizLen = glm::length(wantHoriz);
+
+    // UP: how far can we rise (capped at stepHeight)? If blocked immediately, no headroom.
+    const RaycastHit u = SweepCapsule(reg, startPos, startPos + up * stepHeight, radius, segHalf, up);
+    const float rise = u.hit ? std::max(u.distance - skin, 0.0f) : stepHeight;
+    if (rise < 0.02f) return;
+    const glm::vec3 raised = startPos + up * rise;
+
+    // FORWARD from the raised position. Blocked immediately -> it's a wall, not a step.
+    const RaycastHit f = SweepCapsule(reg, raised, raised + dir * horizLen, radius, segHalf, up);
+    const float fwd = f.hit ? std::max(f.distance - skin, 0.0f) : horizLen;
+    if (fwd < 0.02f) return;
+    const glm::vec3 fore = raised + dir * fwd;
+
+    // DOWN onto the step; accept only a walkable landing that actually rose us.
+    const RaycastHit d = SweepCapsule(reg, fore, fore - up * (rise + groundProbeDistance),
+                                      radius, segHalf, up);
+    if (!d.hit || d.normal.y < maxSlopeCos) return;
+    const glm::vec3 landed = fore - up * std::max(d.distance - skin, 0.0f);
+    if (landed.y > startPos.y + 0.02f) {
+        position = landed;
+        grounded = true; groundNormal = d.normal; groundEntity = d.entity;
+    }
+}
+
+namespace {
+// Velocity of a platform at a world contact point: linear + omega x (point - COM). A platform
+// with no RigidBody is static (zero). Works for kinematic and dynamic ground bodies.
+glm::vec3 PlatformPointVelocity(engine::ecs::Registry& reg, engine::ecs::Entity e,
+                                const glm::vec3& contactPoint) {
+    using namespace engine;
+    if (e == ecs::kNull) return glm::vec3(0.0f);
+    ecs::RigidBody* rb = reg.TryGet<ecs::RigidBody>(e);
+    ecs::Transform* t  = reg.TryGet<ecs::Transform>(e);
+    if (!rb || !t) return glm::vec3(0.0f);
+    const glm::vec3 com = t->position + t->rotation * rb->centerOfMassLocal;
+    return rb->velocity + glm::cross(rb->angularVelocity, contactPoint - com);
+}
+
+// Push a dynamic body the character swept into. pushDir points from the character into the body
+// (unit). The impulse is what would bring the body up to the character's into-speed, clamped so a
+// heavy body barely moves and a light one is shoved to ~character speed.
+void PushDynamicBody(engine::ecs::Registry& reg, engine::ecs::Entity e, const glm::vec3& pushDir,
+                     const glm::vec3& charVel, float strength, float maxImpulse) {
+    using namespace engine;
+    ecs::RigidBody* rb = reg.TryGet<ecs::RigidBody>(e);
+    if (!rb || rb->invMass <= 0.0f || rb->kinematic) return;   // only movable dynamic bodies
+    const float vInto = glm::dot(charVel, pushDir);
+    if (vInto <= 0.0f) return;                                 // not moving into it
+    const float J = std::min(strength * vInto / rb->invMass, maxImpulse);
+    rb->velocity += pushDir * (J * rb->invMass);
+    if (rb->sleeping) { rb->sleeping = false; rb->sleepTimer = 0.0f; }
+}
+} // namespace
+
 void CharacterController::Move(ecs::Registry& reg, const glm::vec3& wishVel, float dt,
                               const PhysicsWorld* world) {
     m_world = world;
+    const glm::vec3 up(0.0f, 1.0f, 0.0f);
+    const float segHalf = std::max(0.0f, height * 0.5f - radius);
+    const float skin = contactOffset;
+
+    // (0) Moving-platform carry (Phases 35-41): if we were standing on something last step, move
+    //     with its contact-point velocity this step (before applying gravity / input). A
+    //     teleporting platform reports an absurd velocity, which is clamped out (no inherited
+    //     teleport speed). The carry is swept so a platform can't shove us through a wall.
+    groundVelocity = PlatformPointVelocity(reg, groundEntity, groundPoint);
+    if (m_world && glm::length(groundVelocity) > 1e-4f
+        && glm::length(groundVelocity) < maxPlatformSpeed) {
+        const glm::vec3 carry = groundVelocity * dt;
+        const float cdist = glm::length(carry);
+        const RaycastHit h = SweepCapsule(reg, position, position + carry, radius, segHalf, up);
+        position += carry * (h.hit ? glm::clamp((h.distance - skin) / cdist, 0.0f, 1.0f) : 1.0f);
+    }
+
     velocity.y += gravity.y * dt;
     const bool wasGrounded = grounded;
     grounded = false;
+    groundNormal = glm::vec3(0.0f, 1.0f, 0.0f);
+    groundEntity = ecs::kNull;
 
-    const glm::vec3 disp(wishVel.x * dt, velocity.y * dt, wishVel.z * dt);
+    // (1) Initial-overlap recovery ONLY (bounded). Normal movement is the sweep below -- the
+    //     old full-move-then-depenetrate is gone (Pass-4 Phase 3).
+    ResolvePenetrations(reg);
+
     const glm::vec3 startPos = position;
+    const glm::vec3 wantHoriz(wishVel.x * dt, 0.0f, wishVel.z * dt);
 
-    position += disp;
-    const bool blockedByWall = ResolvePenetrations(reg);
-
-    // Step-up: if we were on the ground but an obstacle blocked our horizontal
-    // motion, try to climb it. Lift by stepHeight, clear the ledge by the capsule
-    // radius, then drop back down. Sharp box treads require this clearance before
-    // the downward capsule test can resolve onto their top instead of their front
-    // edge. PlayerController retains the pre-step presentation and eases toward
-    // this authoritative collision position, so the clearance is not a camera pop.
-    const glm::vec3 horizWanted(disp.x, 0.0f, disp.z);
-    const glm::vec3 horizGot(position.x - startPos.x, 0.0f, position.z - startPos.z);
-    if (wasGrounded && blockedByWall && glm::length(horizWanted) > 1e-5f &&
-        glm::length(horizGot) < glm::length(horizWanted) * 0.9f) {
-        const glm::vec3 plainPos = position;
-        const glm::vec3 plainVel = velocity;
-        const glm::vec3 dir = glm::normalize(horizWanted);
-        position = startPos + glm::vec3(0, stepHeight, 0);
+    if (!m_world) {                    // no accelerated caster: legacy fallback (editor/no grid)
+        position += glm::vec3(wishVel.x * dt, velocity.y * dt, wishVel.z * dt);
         ResolvePenetrations(reg);
-        position += dir * (radius + 0.005f);            // clear the sharp ledge edge
-        ResolvePenetrations(reg);
-        position += glm::vec3(0, -(stepHeight + 0.02f), 0);     // drop onto the step
-        ResolvePenetrations(reg);
-        const bool rose = position.y > plainPos.y + 0.05f;
-        if (!(grounded && rose)) { position = plainPos; velocity = plainVel; }  // no step: revert
+        if (grounded && velocity.y < 0.0f) velocity.y = 0.0f;
+        return;
     }
 
-    // Stable ground probe: count as grounded if a walkable surface is just below.
-    {
-        const glm::vec3 save = position;
-        position.y -= 0.05f;
-        const float halfSeg = std::max(0.0f, height * 0.5f - radius);
-        const glm::vec3 p0 = position - glm::vec3(0, halfSeg, 0);
-        const glm::vec3 p1 = position + glm::vec3(0, halfSeg, 0);
-        std::vector<std::pair<Transform, Collider>> candidates;
-        GatherCandidates(reg, p0, p1, candidates);
-        for (const auto& wc : candidates) {
-            const Pen p = CapsuleVsCollider(p0, p1, radius, wc.first, wc.second);
-            if (p.hit && p.normal.y > maxSlopeCos) { grounded = true; groundNormal = p.normal; }
+    // (2) Iterative sweep-and-slide (Phases 6-11). A surface only blocks when motion points INTO
+    //     it (dot < 0); a surface we are moving along/away from (e.g. the floor while walking or
+    //     jumping) does not stop or reproject us -- otherwise a resting capsule could never jump.
+    glm::vec3 remaining(wishVel.x * dt, velocity.y * dt, wishVel.z * dt);
+    glm::vec3 planes[4]; int nplanes = 0;
+    bool ceilingHit = false;
+    for (int iter = 0; iter < maxSlideIterations; ++iter) {
+        const float dist = glm::length(remaining);
+        if (dist < 1e-5f) break;
+        const RaycastHit hit = SweepCapsule(reg, position, position + remaining, radius, segHalf, up);
+        if (!hit.hit) { position += remaining; break; }                 // free path: move all
+        const glm::vec3 n = hit.normal;
+        if (glm::dot(remaining, n) >= 0.0f) { position += remaining; break; }  // not blocking
+        // Push a dynamic body we're moving into (Phases 32-34), before sliding off it.
+        if (pushDynamicBodies && dt > 0.0f)
+            PushDynamicBody(reg, hit.entity, -n, remaining / dt, pushStrength, maxPushImpulse);
+        const float advance = glm::clamp((hit.distance - skin) / dist, 0.0f, 1.0f);
+        position += remaining * advance;                                // move to TOI - skin
+        remaining -= remaining * advance;
+
+        if (n.y >= maxSlopeCos) { grounded = true; groundNormal = n; groundEntity = hit.entity; }
+        else if (n.y < -0.2f)   { ceilingHit = true; }
+
+        if (nplanes < 4) planes[nplanes++] = n;
+        remaining = remaining - n * glm::dot(remaining, n);             // slide along the plane
+        // Two-plane crease (Phase 10): if sliding now drives back into an earlier plane, constrain
+        // motion to the crease direction so inside corners don't oscillate.
+        for (int p = 0; p < nplanes - 1; ++p) {
+            if (glm::dot(remaining, planes[p]) < 0.0f) {
+                glm::vec3 crease = glm::cross(planes[p], n);
+                const float cl = glm::length(crease);
+                remaining = (cl > 1e-5f) ? (crease / cl) * glm::dot(remaining, crease / cl)
+                                         : glm::vec3(0.0f);
+            }
         }
-        position = save;
+    }
+
+    // (3) Ceiling: stop upward motion, do NOT mark grounded (Phase 11).
+    if (ceilingHit && velocity.y > 0.0f) velocity.y = 0.0f;
+
+    // (4) Step-up/forward/down (Phases 20-26): if a wall clipped horizontal motion while grounded
+    //     and we are not rising. Sweep-based, not depenetration.
+    const glm::vec3 gotHoriz(position.x - startPos.x, 0.0f, position.z - startPos.z);
+    if (wasGrounded && velocity.y <= 0.05f && glm::length(wantHoriz) > 1e-4f
+        && glm::length(gotHoriz) < glm::length(wantHoriz) * 0.85f) {
+        TryStep(reg, startPos, wantHoriz, segHalf, up);
+    }
+
+    // (5) Ground detect + snap (Phases 13/14). One downward cast: snaps the feet to a skin height
+    //     above a walkable surface within range, keeping the capsule slightly separated so the
+    //     horizontal sweeps above never self-hit the floor. Uses the larger snap range when we
+    //     were grounded (to hug descending slopes/stairs), the short probe otherwise, and never
+    //     runs while moving upward -- so a jumping character is not glued to the floor.
+    if (velocity.y <= 0.05f) {
+        const float range = (wasGrounded ? groundSnapDistance : groundProbeDistance) + skin;
+        const RaycastHit down = SweepCapsule(reg, position, position - up * range,
+                                             radius, segHalf, up);
+        if (down.hit && down.normal.y >= maxSlopeCos) {
+            position -= up * std::max(down.distance - skin, 0.0f);
+            grounded = true; groundNormal = down.normal; groundEntity = down.entity;
+            groundPoint = down.point;   // remembered for next step's platform carry
+        }
     }
 
     if (grounded && velocity.y < 0.0f) velocity.y = 0.0f;

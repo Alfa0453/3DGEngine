@@ -61,9 +61,14 @@ public:
     struct PhysicsJointGuide {
         glm::vec3 a{0.0f};
         glm::vec3 b{0.0f};
-        int type = 0; // 0 distance, 1 spring
+        int type = 0; // 0 distance, 1 spring, 2 ball, 3 hinge
         bool rope = false;
         bool enabled = true;
+        // Ball/Hinge: the pivot point and (hinge only) the world rotation axis, so the guide can
+        // draw a pin marker and the hinge axis rather than just an A<->B segment.
+        glm::vec3 pivot{0.0f};
+        glm::vec3 axis{0.0f, 1.0f, 0.0f};
+        bool hasPivot = false;
     };
 
     struct AiAgentGuide {

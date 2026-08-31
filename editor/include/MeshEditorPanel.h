@@ -88,6 +88,7 @@ private:
     float m_weldTolerance = 0.001f;
     bool m_geometryDirty = false;
     int m_collisionType = 0;  // engine::StaticMeshCollisionType numeric value
+    int m_selectedCollider = 0;
     bool m_collisionDirty = false;
     bool m_showCollision = true;
     bool m_materialDirty = false;

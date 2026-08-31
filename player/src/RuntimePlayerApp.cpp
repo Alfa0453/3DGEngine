@@ -1618,19 +1618,63 @@ void RuntimePlayerApp::BuildRuntimeLevelFeatures() {
             trigger, RuntimeCameraZone{
                 desc.presetName, desc.restoreOnExit, desc.priority, desc.returnBlend});
     }
+    // Bind helpers: map an authored world pivot / hinge axis into a body's local frame at load
+    // (rotation-only), matching the editor's play-start joint build and RagdollSystem.
+    const auto localPointOf = [this](Entity e, const glm::vec3& worldPoint) {
+        if (const auto* t = m_registry.TryGet<engine::ecs::Transform>(e))
+            return glm::inverse(t->rotation) * (worldPoint - t->position);
+        return worldPoint;
+    };
+    const auto localAxisOf = [this](Entity e, const glm::vec3& worldAxis) {
+        if (const auto* t = m_registry.TryGet<engine::ecs::Transform>(e))
+            return glm::inverse(t->rotation) * worldAxis;
+        return worldAxis;
+    };
+    const auto applyMotorAndBreak = [this](const auto& j) {
+        if (!m_physics.HasJoints()) return;
+        engine::Joint& created = m_physics.LastJoint();
+        created.breakImpulse = std::max(j.breakImpulse, 0.0f);
+        if (j.type == 3 && j.motorEnabled) {   // Hinge
+            created.motorEnabled = true;
+            created.motorTargetVelocity = glm::radians(j.motorTargetVelocity);
+            created.motorMaxTorque = std::max(j.motorMaxTorque, 0.0f);
+        }
+    };
+
     for (const auto& joint : m_scene.physicsJoints) {
         const Entity a = FindNamedEntity(joint.objectA);
         const Entity b = FindNamedEntity(joint.objectB);
         if (a == engine::ecs::kNull || (!joint.worldAnchor && b == engine::ecs::kNull))
             continue;
-        if (joint.type == 1) {
+        const glm::vec3 worldAxis = (glm::dot(joint.axis, joint.axis) > 1.0e-6f)
+            ? glm::normalize(joint.axis) : glm::vec3(0.0f, 1.0f, 0.0f);
+        if (joint.type == 1) {           // Spring
             if (joint.worldAnchor)
                 m_physics.AddSpringJointToWorld(
                     a, joint.anchor, joint.restLength, joint.stiffness, joint.damping);
             else
                 m_physics.AddSpringJoint(
                     a, b, joint.restLength, joint.stiffness, joint.damping);
-        } else if (joint.worldAnchor) {
+        } else if (joint.type == 2) {    // Ball
+            if (joint.worldAnchor) {
+                m_physics.AddBallJointToWorld(a, joint.anchor, localPointOf(a, joint.anchor));
+            } else {
+                m_physics.AddBallJoint(a, b, localPointOf(a, joint.anchor), localPointOf(b, joint.anchor),
+                                       joint.collideConnected, joint.angularLimit, glm::radians(joint.maxAngle));
+            }
+            applyMotorAndBreak(joint);
+        } else if (joint.type == 3) {    // Hinge
+            if (joint.worldAnchor) {
+                m_physics.AddHingeJointToWorld(a, joint.anchor, localPointOf(a, joint.anchor),
+                                               localAxisOf(a, worldAxis), worldAxis);
+            } else {
+                m_physics.AddHingeJoint(a, b, localPointOf(a, joint.anchor), localPointOf(b, joint.anchor),
+                                        localAxisOf(a, worldAxis), localAxisOf(b, worldAxis),
+                                        joint.collideConnected, joint.angularLimit,
+                                        glm::radians(joint.minAngle), glm::radians(joint.maxAngle));
+            }
+            applyMotorAndBreak(joint);
+        } else if (joint.worldAnchor) {  // Distance
             m_physics.AddDistanceJointToWorld(
                 a, joint.anchor, joint.restLength, joint.rope);
         } else {
