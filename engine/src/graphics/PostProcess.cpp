@@ -380,6 +380,40 @@ void main() {
 }
 )GLSL";
 
+// Temporal AA resolve. Exponential history accumulation with velocity reprojection and a
+// 3x3 neighbourhood colour clamp (the standard ghosting suppressor). Paired with the per-
+// frame advance of the sun-shadow sample rotation, this averages the shadow's residual
+// sample grain -- and any other per-frame noise -- into a smooth result over a handful of
+// frames, while the velocity reprojection + clamp keep moving objects from smearing.
+const char* kTaaFrag = R"GLSL(
+#version 330 core
+in vec2 vUV; out vec4 FragColor;
+uniform sampler2D uCurrent;
+uniform sampler2D uHistory;
+uniform sampler2D uVelocity;
+uniform vec2 uTexel;
+uniform int uHistoryValid;
+uniform float uBlend;
+void main() {
+    vec3 current = texture(uCurrent, vUV).rgb;
+    if (uHistoryValid == 0) { FragColor = vec4(current, 1.0); return; }
+    // Local neighbourhood colour AABB of the current frame.
+    vec3 lo = current, hi = current;
+    for (int y = -1; y <= 1; ++y)
+        for (int x = -1; x <= 1; ++x) {
+            vec3 c = texture(uCurrent, vUV + vec2(float(x), float(y)) * uTexel).rgb;
+            lo = min(lo, c); hi = max(hi, c);
+        }
+    // SSAO velocity stores this frame's screen-space motion (current - previous), so the
+    // matching history texel is one motion vector back.
+    vec2 histUV = vUV - texture(uVelocity, vUV).xy;
+    vec3 history = clamp(texture(uHistory, histUV).rgb, lo, hi);  // clamp -> no ghosting
+    float onScreen = (any(lessThan(histUV, vec2(0.0)))
+                   || any(greaterThan(histUV, vec2(1.0)))) ? 0.0 : 1.0;
+    FragColor = vec4(mix(current, history, uBlend * onScreen), 1.0);
+}
+)GLSL";
+
 Mesh MakeFullscreenQuad() {
     const std::vector<float> verts = {
     // x,    y,    u,   v
@@ -422,6 +456,9 @@ PostProcess::PostProcess(int width, int height)
       m_luminance(kFullscreenVert, kLuminanceFrag),
       m_fxaa(kFullscreenVert, kFxaaFrag),
       m_volumetricShader(kFullscreenVert, kVolumetricFrag),
+      m_taaA(width, height, GL_RGBA16F, false),
+      m_taaB(width, height, GL_RGBA16F, false),
+      m_taaResolve(kFullscreenVert, kTaaFrag),
       m_volumetricA(std::max(width / 4, 1), std::max(height / 4, 1), GL_RGBA16F, false),
       m_volumetricB(std::max(width / 4, 1), std::max(height / 4, 1), GL_RGBA16F, false),
       m_quad(MakeFullscreenQuad()) {
@@ -502,6 +539,9 @@ void PostProcess::Resize(int width, int height) {
         m_effectA.Resize(width, height);
         m_effectB.Resize(width, height);
         m_ldr.Resize(width, height);
+        m_taaA.Resize(width, height);
+        m_taaB.Resize(width, height);
+        m_taaHistoryValid = false;   // reprojection history is size-dependent
     }
     m_volumeDownsample = volumeDownsample;
     m_volumetricA.Resize(std::max(width / volumeDownsample, 1),
@@ -595,10 +635,36 @@ void PostProcess::RenderComposite(int screenWidth, int screenHeight, float dt,
         m_volumeHistoryValid=true;
     }
 
+    // --- Temporal AA resolve. Accumulate the linear HDR scene into a history buffer via
+    // screen-space velocity reprojection + a neighbourhood colour clamp. Runs before the
+    // graph effects / exposure / composite so everything downstream sees the denoised,
+    // temporally stable image. Together with the per-frame sun-shadow rotation advance it
+    // resolves the shadow's residual grain into a smooth gradient. ---
+    const Framebuffer* taaScene = &m_hdr;
+    if (settings.taa) {
+        Framebuffer& dst  = m_taaWriteA ? m_taaA : m_taaB;
+        Framebuffer& hist = m_taaWriteA ? m_taaB : m_taaA;
+        dst.Bind();
+        m_taaResolve.Bind();
+        m_hdr.BindColorTexture(0);  m_taaResolve.SetInt("uCurrent", 0);
+        hist.BindColorTexture(1);   m_taaResolve.SetInt("uHistory", 1);
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(GL_TEXTURE_2D, m_sceneVelocity ? m_sceneVelocity : m_fallbackVelocity);
+        m_taaResolve.SetInt("uVelocity", 2);
+        m_taaResolve.SetVec2("uTexel", glm::vec2(1.0f / static_cast<float>(std::max(m_width, 1)),
+                                                 1.0f / static_cast<float>(std::max(m_height, 1))));
+        m_taaResolve.SetInt("uHistoryValid", m_taaHistoryValid ? 1 : 0);
+        m_taaResolve.SetFloat("uBlend", std::clamp(settings.taaBlend, 0.0f, 0.98f));
+        m_quad.Draw();
+        taaScene = &dst;
+        m_taaWriteA = !m_taaWriteA;
+        m_taaHistoryValid = true;
+    }
+
     // Graph-authored effects run in author-defined order on the linear HDR
     // scene. All effects sample the original scene depth while colour
     // ping-pongs between full-resolution buffers.
-    const Framebuffer* scene = &m_hdr;
+    const Framebuffer* scene = taaScene;
     bool writeA = true;
     for (const Effect& effect : m_effects) {
         if (!effect.enabled || !effect.shader) continue;

@@ -9,6 +9,7 @@
 #include <engine/gameplay/RagdollSystem.h>
 #include <engine/gameplay/InteractionSystem.h>
 #include <engine/gameplay/PortalSystem.h>
+#include <engine/gameplay/CombatSystem.h>
 #include <engine/gameplay/GameplayComponents.h>
 #include <engine/gameplay/GameMode.h>
 #include <engine/ai/BtScript.h>
@@ -2774,6 +2775,7 @@ void RuntimePlayerApp::OnFixedUpdate(float h) {
         &m_physics);
     UpdateAI(gameStep);
     engine::UpdateAbilities(m_registry, gameStep);
+    engine::UpdateCombat(m_registry, gameStep);
     engine::UpdateProjectilesInPlace(m_registry, gameStep);
     engine::ecs::UpdateGameplay(
         m_registry, gameStep);                         // rotators + movers

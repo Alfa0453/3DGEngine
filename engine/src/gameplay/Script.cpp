@@ -12,6 +12,7 @@
 #include "engine/gameplay/QuestSystem.h"
 #include "engine/gameplay/DialogueSystem.h"
 #include "engine/gameplay/InventorySystem.h"
+#include "engine/gameplay/CombatSystem.h"
 #include "engine/gameplay/QuestSystem.h"
 
 #include "engine/animation/AnimatedModel.h"
@@ -526,6 +527,14 @@ bool Script::HasItem(const std::string& name,int count)const{return m_context.re
 float Script::InventoryWeight()const{return m_context.registry?engine::InventoryWeight(*m_context.registry,m_context.entity):0.0f;}
 std::string Script::SaveInventory()const{return m_context.registry?engine::SerializeInventory(*m_context.registry,m_context.entity):std::string{};}
 bool Script::LoadInventory(const std::string& data){return m_context.registry&&engine::RestoreInventory(*m_context.registry,m_context.entity,data);}
+bool Script::ConfigureCombat(const std::string& path){return m_context.registry&&engine::ConfigureCombat(*m_context.registry,m_context.entity,path);}
+void Script::SetCombatBlocking(bool blocking){if(m_context.registry)engine::SetCombatBlocking(*m_context.registry,m_context.entity,blocking);}
+bool Script::StartCombat(ecs::Entity target){return m_context.registry&&engine::StartCombatCombo(*m_context.registry,m_context.entity,target);}
+bool Script::AdvanceCombat(){return m_context.registry&&engine::AdvanceCombatCombo(*m_context.registry,m_context.entity);}
+std::string Script::CombatHit(ecs::Entity target){return m_context.registry?engine::CombatResultName(engine::ExecuteCombatHit(*m_context.registry,m_context.entity,target)):"Miss";}
+std::string Script::DealCombatDamage(ecs::Entity target,float damage,const std::string& type){return m_context.registry?engine::CombatResultName(engine::ApplyCombatDamage(*m_context.registry,m_context.entity,target,damage,type)):"Miss";}
+bool Script::IsCombatStaggered()const{return m_context.registry&&engine::IsCombatStaggered(*m_context.registry,m_context.entity);}
+int Script::CombatStep()const{return m_context.registry?engine::CombatComboStep(*m_context.registry,m_context.entity):-1;}
 
 RaycastHit Script::TraceLine(const glm::vec3& start, const glm::vec3& end,
                              std::uint32_t layerMask) const {

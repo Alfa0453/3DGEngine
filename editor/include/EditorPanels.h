@@ -82,6 +82,7 @@ public:
         QuestEditor,
         DialogueEditor,
         InventoryItemEditor,
+        CombatEditor,
         Count
     };
 

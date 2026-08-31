@@ -8,6 +8,7 @@
 #include <engine/gameplay/QuestSystem.h>
 #include <engine/gameplay/DialogueSystem.h>
 #include <engine/gameplay/InventorySystem.h>
+#include <engine/gameplay/CombatSystem.h>
 #include <engine/graphics/Mesh.h>
 
 #include <algorithm>
@@ -484,7 +485,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         return false;
     }
 
-    out << "3DGEditorScene 149 " << m_assetId.ToString() << '\n';
+    out << "3DGEditorScene 150 " << m_assetId.ToString() << '\n';
     out << "environment "
         << m_environment.timeOfDay << ' '
         << m_environment.skyLightIntensity << ' '
@@ -1181,6 +1182,13 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
                 << (stack.asset.header.id.Valid()?stack.asset.header.id.ToString():std::string("-")) << ' '
                 << stack.count << ' ' << stack.equipped << '\n';
     }
+    for (const Object& object : m_objects) {
+        const auto* combat = m_registry.TryGet<engine::CombatComponent>(object.entity);
+        if (!combat || combat->assetPath.empty()) continue;
+        out << "combat " << std::quoted(object.name) << ' '
+            << std::quoted(combat->assetPath) << ' '
+            << (combat->asset.header.id.Valid() ? combat->asset.header.id.ToString() : std::string("-")) << '\n';
+    }
 
     // Editor-only hierarchy organization. Runtime export intentionally ignores these.
     for (const SceneGroup& group : m_groups) {
@@ -1486,6 +1494,8 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
             addDependency(dialogue->asset.header.id);
         if (const auto* inventory = m_registry.TryGet<engine::InventoryComponent>(object.entity))
             for (const auto& stack : inventory->items) addDependency(stack.asset.header.id);
+        if (const auto* combat = m_registry.TryGet<engine::CombatComponent>(object.entity))
+            addDependency(combat->asset.header.id);
         for (const engine::ParticleEffectLayer& layer :
              object.particleEffectLayers)
             addDependency(layer.assetId);
@@ -1552,7 +1562,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             return false;
         }
     }
-    if (magic != "3DGEditorScene" ||(version < 1 || version > 149)) {
+    if (magic != "3DGEditorScene" ||(version < 1 || version > 150)) {
         if (error) *error = "Scene file has an unknown format.";
         return false;
     }
@@ -2649,6 +2659,16 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             auto found=std::find_if(m_objects.begin(),m_objects.end(),[&](const Object& object){return object.name==objectName;});std::string itemError;
             if(!in||found==m_objects.end()||!engine::AddItem(m_registry,found->entity,assetPath,count,&itemError)){if(error)*error=!itemError.empty()?itemError:"Scene contains an invalid inventory item record.";Clear();return false;}
             if(equipped)engine::EquipItem(m_registry,found->entity,assetPath);continue;
+        }
+        if (recordType == "combat" && version >= 150) {
+            std::string objectName, assetPath, idText;
+            in >> std::quoted(objectName) >> std::quoted(assetPath) >> idText;
+            const auto found=std::find_if(m_objects.begin(),m_objects.end(),[&](const Object& object){return object.name==objectName;});
+            std::string combatError;
+            if(!in||found==m_objects.end()||!engine::ConfigureCombat(m_registry,found->entity,assetPath,&combatError)){
+                if(error)*error=!combatError.empty()?combatError:"Scene contains an invalid combat record.";Clear();return false;
+            }
+            continue;
         }
 
         if (recordType != "object") {

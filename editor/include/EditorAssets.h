@@ -59,6 +59,7 @@ public:
         Quest,
         Dialogue,
         Item,
+        Combat,
         Other
     };
 

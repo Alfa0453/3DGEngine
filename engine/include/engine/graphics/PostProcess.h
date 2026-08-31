@@ -44,6 +44,8 @@ public:
 
     struct Settings {
         bool  fxaa           = true;  // edge anti-aliasing on the composited result
+        bool  taa            = true;  // temporal accumulation (denoises shadow grain, etc.)
+        float taaBlend       = 0.9f;  // history weight; higher = smoother but more latency
         bool  bloom          = true;
         float bloomThreshold = 1.0f;  // HDR luminance above which a pixel blooms
         float bloomStrength  = 0.6f;
@@ -138,6 +140,7 @@ public:
         m_resetExposure = true;
         m_volumeHistoryValid = false;
         m_volumetricCameraValid = false;
+        m_taaHistoryValid = false;   // a teleport must not reproject unrelated history
     }
     void SetVolumetricCamera(const glm::mat4& inverseViewProjection,
                              const glm::vec3& cameraPosition,
@@ -226,6 +229,10 @@ private:
     Framebuffer m_effectA, m_effectB; // full-res graph-effect ping-pong
     Framebuffer m_ldr;               // composited LDR result (FXAA input)
     Shader m_bright, m_blur, m_composite, m_luminance, m_fxaa, m_volumetricShader;
+    Framebuffer m_taaA, m_taaB;      // full-res HDR temporal history ping-pong
+    Shader m_taaResolve;
+    bool m_taaWriteA = true;
+    bool m_taaHistoryValid = false;
     Framebuffer m_volumetricA, m_volumetricB;
     Mesh   m_quad;
     unsigned int m_lumFbo = 0, m_lumTex = 0;

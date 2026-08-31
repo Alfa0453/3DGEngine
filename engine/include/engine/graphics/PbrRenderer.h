@@ -74,6 +74,10 @@ public:
         float       shadowSoftness = 2.5f; // PCSS sun-shadow softness (light size)
         int         shadowBlockerSamples = 16;
         int         shadowFilterSamples = 32;
+        // Advance the PCSS sample rotation per frame so the temporal-AA pass can average the
+        // shadow's residual grain to smooth. Set this to match PostProcess::Settings::taa;
+        // leave it false when temporal accumulation is off or the shadow will flicker.
+        bool        temporalAccumulation = false;
         int         maxShadowedLocalLights = 4;
         // How far from the camera the sun's cascaded shadows reach (view units).
         // Beyond this, geometry no longer casts/receives sun shadows -- raise it if
@@ -132,6 +136,7 @@ public:
 
 private:
     CascadedShadow          m_cascade;
+    unsigned int            m_frameCounter = 0;   // drives the per-frame PCSS rotation advance
     PointShadow             m_pointShadow;
     SpotShadow              m_spotShadow;
     ClusteredLights         m_clustered;

@@ -91,7 +91,11 @@ float SampleDirectionalCascade(vec3 worldPosition, vec3 normal, float NdotL,
     float bias = DirectionalReceiverBias(layer, NdotL);
     vec2 texel = 1.0 / vec2(textureSize(uCascadeMaps, 0).xy);
     // Per-pixel spiral rotation; +layer decorrelates the cascades at their overlap.
-    float sampleAngle = DirectionalIGN(gl_FragCoord.xy) * 6.28318530718 + float(layer);
+    // Advancing the spiral by the golden ratio each frame (uShadowFrame) makes the residual
+    // grain differ every frame so the temporal-AA pass averages it to smooth. uShadowFrame is
+    // held at 0 when temporal accumulation is off, so the shadow stays flicker-free there.
+    float sampleAngle = (DirectionalIGN(gl_FragCoord.xy)
+                        + float(uShadowFrame) * 0.61803398875) * 6.28318530718 + float(layer);
 
     // Keep the blocker footprint approximately constant in world space. A
     // minimum sub-texel footprint is retained for the coarser far cascades.
@@ -202,7 +206,11 @@ float DirectionalFilterRadiusDebug(float NdotL, vec3 N) {
     float receiverDepth = projected.z;
     float bias = DirectionalReceiverBias(layer, NdotL);
     vec2 texel = 1.0 / vec2(textureSize(uCascadeMaps, 0).xy);
-    float sampleAngle = DirectionalIGN(gl_FragCoord.xy) * 6.28318530718 + float(layer);
+    // Advancing the spiral by the golden ratio each frame (uShadowFrame) makes the residual
+    // grain differ every frame so the temporal-AA pass averages it to smooth. uShadowFrame is
+    // held at 0 when temporal accumulation is off, so the shadow stays flicker-free there.
+    float sampleAngle = (DirectionalIGN(gl_FragCoord.xy)
+                        + float(uShadowFrame) * 0.61803398875) * 6.28318530718 + float(layer);
     float softness = clamp(uShadowSoftness, 0.1, 12.0);
     float worldTexel = max(uCascadeWorldTexelSize[layer], 0.000001);
     float referenceWorldTexel = max(uCascadeWorldTexelSize[0], 0.000001);

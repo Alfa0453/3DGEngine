@@ -83,6 +83,7 @@
 #include "QuestEditorPanel.h"
 #include "DialogueEditorPanel.h"
 #include "InventoryItemEditorPanel.h"
+#include "CombatEditorPanel.h"
 #include "TerrainCreatorPanel.h"
 #include "ModularPlacementPanel.h"
 #include "PrefabPalettePanel.h"
@@ -275,6 +276,7 @@ private:
     void DrawQuestEditorPanel();
     void DrawDialogueEditorPanel();
     void DrawInventoryItemEditorPanel();
+    void DrawCombatEditorPanel();
     void GenerateDestructionPreview();
     int DeleteDestructionPreview(const std::string& name);
     bool CreatePartitionCellFromSelection(const std::string& path, int cellX, int cellZ);
@@ -741,6 +743,7 @@ private:
     QuestEditorPanel                     m_questEditor;
     DialogueEditorPanel                  m_dialogueEditor;
     InventoryItemEditorPanel             m_inventoryItemEditor;
+    CombatEditorPanel                    m_combatEditor;
     LevelVariantPanel                    m_levelVariants;
     LevelLayersPanel                     m_levelLayers;
     ViewportBookmarksPanel               m_viewportBookmarks;

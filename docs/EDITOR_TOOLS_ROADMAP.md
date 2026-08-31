@@ -43,8 +43,8 @@ Status legend:
 | 24 | COMPLETE | Quest Editor | Objectives, conditions, rewards, persistent state, dialogue triggers, checkpoints, and live debugging. |
 | 25 | **COMPLETE** | Dialogue Editor | Branching conversations, conditions, events, voice clips, portraits, and localization keys. |
 | 26 | **COMPLETE** | Inventory and Item Editor | Weapons, armor, consumables, pickups, currencies, statistics, icons, and effects. |
-| 27 | **NEXT** | Combat Editor | Damage types, combos, targeting, blocking, parrying, stagger, hit reactions, and immunity windows. |
-| 28 | PLANNED | Spawn Manager | Spawn volumes, weighted groups, waves, pooling, difficulty scaling, and encounter controls. |
+| 27 | **COMPLETE** | Combat Editor | Damage types, combos, targeting, blocking, parrying, stagger, hit reactions, and immunity windows. |
+| 28 | **NEXT** | Spawn Manager | Spawn volumes, weighted groups, waves, pooling, difficulty scaling, and encounter controls. |
 | 29 | PLANNED | Checkpoint and Save Editor | Visual configuration of persisted player, quest, world, and streamed-level state. |
 | 30 | PLANNED | Interaction Editor | Prompts, ranges, inputs, conditions, animation requirements, and interaction events. |
 | 31 | PLANNED | IK Rig Editor | Foot placement, hand targets, look-at, weapon alignment, aiming, and terrain adaptation. |
@@ -458,7 +458,15 @@ effects. Runtime inventories support slots, weight, stacking, unique items,
 consumption, equipment, events, saved state, editor starting loadouts, packaged
 scene loading, and native C++/Lua control.
 
-## Next Milestone: Combat Editor
+## Completed Milestone: Combat Editor
 
-Planned scope: damage types, combo definitions, targeting, blocking, parrying,
-stagger, hit reactions, immunity windows, teams, and combat debugging.
+Implemented as engine-owned `.3dgcombat` profiles with teams, friendly-fire rules,
+damage types, resistances, ordered combos, action clips, input and hit windows,
+blocking, parrying, immunity, poise, stagger, hit reactions, particles, audio,
+scene binding, packaged runtime loading, native C++/Lua control, dependency
+tracking, timeline authoring, and live combat debugging.
+
+## Next Milestone: Spawn Manager
+
+Planned scope: spawn volumes, weighted spawn groups, waves, pooling, encounter
+controls, difficulty scaling, and live spawn debugging.

@@ -214,6 +214,14 @@ private:
     static int ApiInventoryWeight(lua_State* state);
     static int ApiSaveInventory(lua_State* state);
     static int ApiLoadInventory(lua_State* state);
+    static int ApiConfigureCombat(lua_State* state);
+    static int ApiSetCombatBlocking(lua_State* state);
+    static int ApiStartCombat(lua_State* state);
+    static int ApiAdvanceCombat(lua_State* state);
+    static int ApiCombatHit(lua_State* state);
+    static int ApiDealCombatDamage(lua_State* state);
+    static int ApiIsCombatStaggered(lua_State* state);
+    static int ApiCombatStep(lua_State* state);
     static int ApiSetTimerByFunctionName(lua_State* state);
     static int ApiClearTimer(lua_State* state);
     static int ApiClearTimerByFunctionName(lua_State* state);

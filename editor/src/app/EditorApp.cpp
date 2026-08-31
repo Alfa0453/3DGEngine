@@ -11,6 +11,7 @@
 #include <engine/gameplay/QuestSystem.h>
 #include <engine/gameplay/DialogueSystem.h>
 #include <engine/gameplay/InventorySystem.h>
+#include <engine/gameplay/CombatSystem.h>
 #include <engine/gameplay/RagdollSystem.h>
 #include <engine/gameplay/GameMode.h>
 #include <engine/gameplay/Script.h>
@@ -1745,6 +1746,7 @@ void EditorApp::DrawEditModeModels(const glm::mat4 & viewProj,
                         static_cast<engine::LightingQuality>(std::clamp(environment.environmentQuality,0,3)));
                     lighting.shadowBlockerSamples = profile.shadowBlockerSamples;
                     lighting.shadowFilterSamples = profile.shadowFilterSamples;
+                    lighting.temporalAccumulation = m_postProcess ? m_postProcess->settings.taa : false;
                     lighting.skylightOcclusion = environment.skylightOcclusion;
                     lighting.skylightOcclusionStrength = environment.skylightOcclusionStrength;
                     lighting.minimumSkylight = environment.minimumSkylight;
@@ -2552,6 +2554,7 @@ void EditorApp::DrawEditorOverlay()
     DrawQuestEditorPanel();
     DrawDialogueEditorPanel();
     DrawInventoryItemEditorPanel();
+    DrawCombatEditorPanel();
     DrawLevelVariantPanel();
     DrawLevelLayersPanel();
     DrawViewportBookmarksPanel();
@@ -2853,6 +2856,11 @@ void EditorApp::DrawEditorOverlay()
             m_panels.SetOpen(EditorPanels::Panel::InventoryItemEditor, true);
             m_inventoryItemEditor.QueueOpen(path);
             m_log.Info("Opening item asset: " + path);
+            break;
+        case EditorAssets::Type::Combat:
+            m_panels.SetOpen(EditorPanels::Panel::CombatEditor, true);
+            m_combatEditor.QueueOpen(path);
+            m_log.Info("Opening combat profile: " + path);
             break;
         case EditorAssets::Type::Terrain:
             m_panels.SetOpen(EditorPanels::Panel::TerrainCreator, true);
@@ -4631,6 +4639,13 @@ void EditorApp::DrawInventoryItemEditorPanel() {
     if (!result.message.empty()) m_log.Info(result.message);
 }
 
+void EditorApp::DrawCombatEditorPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::CombatEditor)) return;
+    bool open=true;const auto result=m_combatEditor.Draw(m_assets,m_project.AssetRoot(),&open);m_panels.SetOpen(EditorPanels::Panel::CombatEditor,open);
+    if(result.applySelected){const auto*selected=m_scene.SelectedObject();if(!selected)m_log.Warning("Combat Editor: select a character first");else if(selected->locked)m_log.Warning("Combat Editor: selected object is locked");else if(engine::ConfigureCombat(m_scene.Registry(),selected->entity,m_combatEditor.Asset(),m_combatEditor.Path())){m_scene.MarkDirty();m_log.Info("Applied combat profile to "+selected->name);}else m_log.Warning("Combat Editor: profile could not be applied");}
+    if(result.saved){std::string error;if(!m_assets.Refresh(m_project.AssetRoot(),&error))m_log.Warning(error);}if(!result.message.empty())m_log.Info(result.message);
+}
+
 int EditorApp::DeleteDestructionPreview(const std::string& name) {
     if(name.empty())return 0;const std::string prefix="DestructionPreview_"+name+"_";
     std::vector<int> indices;for(int i=0;i<static_cast<int>(m_scene.Objects().size());++i)
@@ -6184,6 +6199,11 @@ std::vector<DirtyDocument> EditorApp::CollectDirtyDocuments() {
         [this](std::string* error) {
             return m_inventoryItemEditor.SaveForShutdown(m_project.AssetRoot(), error);
         });
+    if (m_combatEditor.IsDirty()) add(DirtyDocumentType::Asset,
+        m_combatEditor.Path(), "New Combat Profile",
+        [this](std::string* error) {
+            return m_combatEditor.SaveForShutdown(m_project.AssetRoot(), error);
+        });
     if (m_weatherEditor.IsDirty()) add(DirtyDocumentType::Asset, m_weatherEditor.Path(),
         "New Weather", [this](std::string* error) { return m_weatherEditor.SaveForShutdown(m_project.AssetRoot(),error); });
     if (m_animationRetargeting.IsDirty()) add(DirtyDocumentType::Asset,
@@ -7315,6 +7335,7 @@ void EditorApp::DrawPlayScene(const glm::mat4 & viewProj)
             static_cast<engine::LightingQuality>(std::clamp(environment.environmentQuality,0,3)));
         lighting.shadowBlockerSamples = profile.shadowBlockerSamples;
         lighting.shadowFilterSamples = profile.shadowFilterSamples;
+        lighting.temporalAccumulation = m_postProcess ? m_postProcess->settings.taa : false;
         lighting.skylightOcclusion = environment.skylightOcclusion;
         lighting.skylightOcclusionStrength = environment.skylightOcclusionStrength;
         lighting.minimumSkylight = environment.minimumSkylight;
@@ -8118,6 +8139,8 @@ void EditorApp::ConfigureEnvironmentPbrOptions(engine::ecs::Registry& registry,
     options.spotShadows = environment.spotShadows;
     options.directionalShadows = environment.directionalShadows;
     options.forceDirectionalShadowUpdate = m_forceDirectionalShadowUpdate;
+    // Advance the PCSS rotation per frame only while temporal AA is on to resolve it.
+    options.temporalAccumulation = m_postProcess ? m_postProcess->settings.taa : false;
     options.shadowSoftness = environment.shadowSoftness;
     const auto& lightingProfile = engine::GetLightingQualityProfile(
         static_cast<engine::LightingQuality>(std::clamp(environment.environmentQuality, 0, 3)));
@@ -13846,6 +13869,7 @@ void EditorApp::StepPlayPhysics(float dt, bool inputEnabled)
         m_playAnimationEvents.clear();
         UpdateAI(step);
         engine::UpdateAbilities(*m_playRegistry, step);
+        engine::UpdateCombat(*m_playRegistry, step);
         engine::UpdateDestruction(*m_playRegistry, step);
         engine::UpdateInteractions(*m_playRegistry, step);
         engine::UpdatePortals(*m_playRegistry, step);
@@ -13887,6 +13911,7 @@ void EditorApp::StepPlayPhysics(float dt, bool inputEnabled)
         engine::ecs::UpdateRuntimeMotion(*m_playRegistry, step);
         UpdateAI(step);
         engine::UpdateAbilities(*m_playRegistry, step);
+        engine::UpdateCombat(*m_playRegistry, step);
         engine::UpdateDestruction(*m_playRegistry, step);
         engine::UpdateInteractions(*m_playRegistry, step);
         engine::UpdatePortals(*m_playRegistry, step);

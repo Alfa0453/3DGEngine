@@ -501,6 +501,14 @@ void LuaScript::RegisterEngineApi() {
         {"InventoryWeight", ApiInventoryWeight},
         {"SaveInventory", ApiSaveInventory},
         {"LoadInventory", ApiLoadInventory},
+        {"ConfigureCombat", ApiConfigureCombat},
+        {"SetCombatBlocking", ApiSetCombatBlocking},
+        {"StartCombat", ApiStartCombat},
+        {"AdvanceCombat", ApiAdvanceCombat},
+        {"CombatHit", ApiCombatHit},
+        {"DealCombatDamage", ApiDealCombatDamage},
+        {"IsCombatStaggered", ApiIsCombatStaggered},
+        {"CombatStep", ApiCombatStep},
         {"SplinePointCount", ApiSplinePointCount},
         {"GetSplinePoint", ApiGetSplinePoint},
         {"SetSplinePoint", ApiSetSplinePoint},
@@ -916,6 +924,14 @@ int LuaScript::ApiHasItem(lua_State* s){lua_pushboolean(s,Current(s)->HasItem(lu
 int LuaScript::ApiInventoryWeight(lua_State* s){lua_pushnumber(s,Current(s)->InventoryWeight());return 1;}
 int LuaScript::ApiSaveInventory(lua_State* s){const auto v=Current(s)->SaveInventory();lua_pushlstring(s,v.data(),v.size());return 1;}
 int LuaScript::ApiLoadInventory(lua_State* s){lua_pushboolean(s,Current(s)->LoadInventory(luaL_checkstring(s,1)));return 1;}
+int LuaScript::ApiConfigureCombat(lua_State* s){lua_pushboolean(s,Current(s)->ConfigureCombat(luaL_checkstring(s,1)));return 1;}
+int LuaScript::ApiSetCombatBlocking(lua_State* s){Current(s)->SetCombatBlocking(lua_toboolean(s,1)!=0);return 0;}
+int LuaScript::ApiStartCombat(lua_State* s){lua_pushboolean(s,Current(s)->StartCombat(static_cast<ecs::Entity>(luaL_optinteger(s,1,ecs::kNull))));return 1;}
+int LuaScript::ApiAdvanceCombat(lua_State* s){lua_pushboolean(s,Current(s)->AdvanceCombat());return 1;}
+int LuaScript::ApiCombatHit(lua_State* s){const auto v=Current(s)->CombatHit(static_cast<ecs::Entity>(luaL_optinteger(s,1,ecs::kNull)));lua_pushlstring(s,v.data(),v.size());return 1;}
+int LuaScript::ApiDealCombatDamage(lua_State* s){const auto v=Current(s)->DealCombatDamage(static_cast<ecs::Entity>(luaL_checkinteger(s,1)),static_cast<float>(luaL_checknumber(s,2)),luaL_optstring(s,3,"Physical"));lua_pushlstring(s,v.data(),v.size());return 1;}
+int LuaScript::ApiIsCombatStaggered(lua_State* s){lua_pushboolean(s,Current(s)->IsCombatStaggered());return 1;}
+int LuaScript::ApiCombatStep(lua_State* s){lua_pushinteger(s,Current(s)->CombatStep());return 1;}
 
 int LuaScript::ApiSplinePointCount(lua_State* state) {
     lua_pushinteger(state, Current(state)->SplinePointCount(

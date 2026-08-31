@@ -73,6 +73,7 @@ inline const char* ForPanel(EditorPanels::Panel panel) {
     case P::QuestEditor: return Document;
     case P::DialogueEditor: return Document;
     case P::InventoryItemEditor: return Star;
+    case P::CombatEditor: return Settings;
     case P::Count: break;
     }
     return Document;

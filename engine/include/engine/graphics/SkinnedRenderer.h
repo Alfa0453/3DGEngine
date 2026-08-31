@@ -34,6 +34,7 @@ struct SkinnedLighting {
     float shadowSoftness = 2.5f;
     int shadowBlockerSamples = 16;
     int shadowFilterSamples = 32;
+    bool temporalAccumulation = false;   // advance PCSS rotation per frame (match PostProcess TAA)
     bool skylightOcclusion = false;
     float skylightOcclusionStrength = 1.0f, minimumSkylight = 0.0f;
     const LightingProbeGrid* lightingGrid = nullptr;
@@ -95,6 +96,7 @@ public:
     void DrawSceneDepth(ecs::Registry& registry, const glm::mat4& lightVP);
 
 private:
+    unsigned int m_frameCounter = 0;    // drives the per-frame PCSS rotation advance
     std::unique_ptr<Shader> m_shader;   // Phong
     std::unique_ptr<Shader> m_pbr;      // Cook-Torrance (scene)
     std::unique_ptr<Shader> m_depth;    // depth-only (shadows)

@@ -304,6 +304,7 @@ public:
         struct DialogueDesc { std::string entityName,assetPath;AssetHandle assetId; };
         struct InventoryDesc { std::string entityName;int maximumSlots=24;float maximumWeight=100.0f; };
         struct InventoryItemDesc { std::string entityName,assetPath;AssetHandle assetId;int count=1;bool equipped=false; };
+        struct CombatDesc { std::string entityName,assetPath;AssetHandle assetId; };
         struct PhysicsJointDesc {
             int type = 0;
             std::string objectA, objectB;
@@ -570,6 +571,7 @@ public:
         std::vector<DialogueDesc> dialogues;
         std::vector<InventoryDesc> inventories;
         std::vector<InventoryItemDesc> inventoryItems;
+        std::vector<CombatDesc> combats;
         std::vector<PhysicsJointDesc> physicsJoints;
         std::vector<TerrainDesc> terrains;
         std::vector<WaterDesc> waters;

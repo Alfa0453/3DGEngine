@@ -75,7 +75,8 @@ enum class AssetType : std::uint32_t {
     Portal, // teleporters and level-transition portals (.3dgportal)
     Quest, // objectives, conditions and rewards (.3dgquest)
     Dialogue, // branching conversations (.3dgdialogue)
-    Item // inventory, equipment and pickups (.3dgitem)
+    Item, // inventory, equipment and pickups (.3dgitem)
+    Combat // damage, combos, block and reactions (.3dgcombat)
 };
 
 const char* AssetTypeName(AssetType type);

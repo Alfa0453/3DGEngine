@@ -364,6 +364,15 @@ protected:
     float InventoryWeight() const;
     std::string SaveInventory() const;
     bool LoadInventory(const std::string& data);
+    bool ConfigureCombat(const std::string& assetPath);
+    void SetCombatBlocking(bool blocking);
+    bool StartCombat(ecs::Entity target=ecs::kNull);
+    bool AdvanceCombat();
+    std::string CombatHit(ecs::Entity target=ecs::kNull);
+    std::string DealCombatDamage(ecs::Entity target,float damage,
+                                 const std::string& damageType="Physical");
+    bool IsCombatStaggered() const;
+    int CombatStep() const;
     int SplinePointCount(ecs::Entity spline) const;
     bool IsSplineClosed(ecs::Entity spline) const;
     bool SetSplineClosed(ecs::Entity spline, bool closed);

@@ -47,6 +47,9 @@
       <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\cave_asset_tests.exe</FullPath>
     </ProjectOutput>
     <ProjectOutput>
+      <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\combat_system_tests.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
       <FullPath>D:\C++_Projects\3DGEngine\build-release\bin\Release\day_night_timeline_tests.exe</FullPath>
     </ProjectOutput>
     <ProjectOutput>

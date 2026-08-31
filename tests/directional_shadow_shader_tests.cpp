@@ -23,12 +23,14 @@ int main() {
                   "composition must consume the insertion marker");
     ok &= Require(composed.find("DIRECTIONAL_BLOCKER_SAMPLES = 16") != std::string::npos,
                   "blocker search must use 16 disk samples");
-    ok &= Require(composed.find("DIRECTIONAL_FILTER_SAMPLES = 24") != std::string::npos,
-                  "final filtering must use 24 disk samples");
-    ok &= Require(composed.find("DIRECTIONAL_POISSON") != std::string::npos,
-                  "shared shader must contain the irregular disk distribution");
-    ok &= Require(composed.find("stableCell") != std::string::npos,
-                  "sample rotation must be stable in shadow-map texel space");
+    ok &= Require(composed.find("DIRECTIONAL_FILTER_SAMPLES = 32") != std::string::npos,
+                  "final filtering must use 32 disk samples");
+    ok &= Require(composed.find("DirectionalDiskSample") != std::string::npos,
+                  "shared shader must contain the Vogel disk distribution");
+    ok &= Require(composed.find("DirectionalIGN(gl_FragCoord.xy)") != std::string::npos,
+                  "sample rotation must use fine screen-pixel noise");
+    ok &= Require(composed.find("float(uShadowFrame) * 0.61803398875") != std::string::npos,
+                  "temporal accumulation must advance the disk rotation");
     ok &= Require(composed.find("uCascadeWorldTexelSize") != std::string::npos,
                   "filter radius must be normalized by cascade world texel size");
     ok &= Require(composed.find("cascadeLength * 0.08") != std::string::npos,

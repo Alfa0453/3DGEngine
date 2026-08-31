@@ -206,6 +206,7 @@ uniform mat4  uView;
 uniform float uShadowSoftness;
 uniform int uShadowBlockerSamples;
 uniform int uShadowFilterSamples;
+uniform int uShadowFrame;   // per-frame PCSS rotation advance (0 = temporal accumulation off)
 uniform int   uSunShadow;   // 0 disables the directional (sun) shadow
 uniform samplerCube uPointCube[4];
 uniform int uNumPointShadows;
@@ -764,6 +765,11 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
     m_pbr->SetFloat("uShadowSoftness", opt.shadowSoftness);
     m_pbr->SetInt("uShadowBlockerSamples", std::clamp(opt.shadowBlockerSamples, 4, 16));
     m_pbr->SetInt("uShadowFilterSamples", std::clamp(opt.shadowFilterSamples, 6, 32));
+    // Per-frame rotation advance for temporal accumulation (0 keeps the shadow stable when
+    // temporal AA is off). Wrapped to a small period so the int stays exact as a float.
+    ++m_frameCounter;
+    m_pbr->SetInt("uShadowFrame",
+                  opt.temporalAccumulation ? static_cast<int>(m_frameCounter % 64u) : 0);
     m_pbr->SetInt("uSunShadow", sunShadowEnabled ? 1 : 0);
     static constexpr const char* kCascadeVpNames[] = {"uCascadeVP[0]", "uCascadeVP[1]", "uCascadeVP[2]", "uCascadeVP[3]"};
     static constexpr const char* kCascadeSplitNames[] = {"uCascadeSplits[0]", "uCascadeSplits[1]", "uCascadeSplits[2]", "uCascadeSplits[3]"};

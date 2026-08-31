@@ -1,26 +1,26 @@
-Start testing: Aug 30 23:27 E. Africa Standard Time
+Start testing: Aug 31 07:11 E. Africa Standard Time
 ----------------------------------------------------------
-1/49 Testing: particle_regression
-1/49 Test: particle_regression
+1/50 Testing: particle_regression
+1/50 Test: particle_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/particle_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"particle_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"particle_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 All particle regression checks passed.
 <end of output>
-Test time =   0.04 sec
+Test time =   0.03 sec
 ----------------------------------------------------------
 Test Passed.
-"particle_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"particle_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "particle_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-2/49 Testing: animation_movement_regression
-2/49 Test: animation_movement_regression
+2/50 Testing: animation_movement_regression
+2/50 Test: animation_movement_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/animation_movement_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"animation_movement_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"animation_movement_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 animation movement tests passed
@@ -28,15 +28,15 @@ animation movement tests passed
 Test time =   0.01 sec
 ----------------------------------------------------------
 Test Passed.
-"animation_movement_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"animation_movement_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "animation_movement_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-3/49 Testing: terrain_regression
-3/49 Test: terrain_regression
+3/50 Testing: terrain_regression
+3/50 Test: terrain_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/terrain_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"terrain_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"terrain_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 terrain tests passed
@@ -44,15 +44,15 @@ terrain tests passed
 Test time =   0.01 sec
 ----------------------------------------------------------
 Test Passed.
-"terrain_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"terrain_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "terrain_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-4/49 Testing: spline_regression
-4/49 Test: spline_regression
+4/50 Testing: spline_regression
+4/50 Test: spline_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/spline_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"spline_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"spline_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 Spline tests passed
@@ -60,15 +60,15 @@ Spline tests passed
 Test time =   0.01 sec
 ----------------------------------------------------------
 Test Passed.
-"spline_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"spline_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "spline_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-5/49 Testing: camera_manager_regression
-5/49 Test: camera_manager_regression
+5/50 Testing: camera_manager_regression
+5/50 Test: camera_manager_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/camera_manager_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"camera_manager_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"camera_manager_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 camera manager tests passed
@@ -76,176 +76,176 @@ camera manager tests passed
 Test time =   0.02 sec
 ----------------------------------------------------------
 Test Passed.
-"camera_manager_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"camera_manager_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "camera_manager_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-6/49 Testing: optimization_auditor_regression
-6/49 Test: optimization_auditor_regression
+6/50 Testing: optimization_auditor_regression
+6/50 Test: optimization_auditor_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/optimization_auditor_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"optimization_auditor_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"optimization_auditor_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 optimization auditor tests passed
 <end of output>
-Test time =   0.02 sec
+Test time =   0.01 sec
 ----------------------------------------------------------
 Test Passed.
-"optimization_auditor_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"optimization_auditor_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "optimization_auditor_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-7/49 Testing: audio_system_regression
-7/49 Test: audio_system_regression
+7/50 Testing: audio_system_regression
+7/50 Test: audio_system_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/audio_system_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"audio_system_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"audio_system_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 Audio system regression tests passed.
 <end of output>
-Test time =   0.02 sec
+Test time =   0.01 sec
 ----------------------------------------------------------
 Test Passed.
-"audio_system_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"audio_system_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "audio_system_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-8/49 Testing: shader_asset_regression
-8/49 Test: shader_asset_regression
+8/50 Testing: shader_asset_regression
+8/50 Test: shader_asset_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/shader_asset_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"shader_asset_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"shader_asset_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 Shader asset regression tests passed.
 <end of output>
-Test time =   0.26 sec
+Test time =   0.23 sec
 ----------------------------------------------------------
 Test Passed.
-"shader_asset_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"shader_asset_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "shader_asset_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-9/49 Testing: material_shader_regression
-9/49 Test: material_shader_regression
+9/50 Testing: material_shader_regression
+9/50 Test: material_shader_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/material_shader_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"material_shader_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"material_shader_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 Material shader regression tests passed.
 <end of output>
-Test time =   0.04 sec
+Test time =   0.03 sec
 ----------------------------------------------------------
 Test Passed.
-"material_shader_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"material_shader_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "material_shader_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-10/49 Testing: directional_shadow_shader_regression
-10/49 Test: directional_shadow_shader_regression
+10/50 Testing: directional_shadow_shader_regression
+10/50 Test: directional_shadow_shader_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/directional_shadow_shader_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"directional_shadow_shader_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"directional_shadow_shader_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 <end of output>
 Test time =   0.01 sec
 ----------------------------------------------------------
 Test Passed.
-"directional_shadow_shader_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"directional_shadow_shader_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "directional_shadow_shader_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-11/49 Testing: lighting_build_regression
-11/49 Test: lighting_build_regression
+11/50 Testing: lighting_build_regression
+11/50 Test: lighting_build_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/lighting_build_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"lighting_build_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"lighting_build_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 Lighting build tests passed
 <end of output>
-Test time =   0.08 sec
+Test time =   0.06 sec
 ----------------------------------------------------------
 Test Passed.
-"lighting_build_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"lighting_build_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "lighting_build_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-12/49 Testing: script_system_regression
-12/49 Test: script_system_regression
+12/50 Testing: script_system_regression
+12/50 Test: script_system_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/script_system_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"script_system_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"script_system_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 [Script] 'ThrowingRegressionScript' disabled after exception: expected regression-test exception
 [Script] 'OrderConsumerRegressionScript' dependency error: missing MissingRegressionScript
 All scripting regression checks passed
 <end of output>
-Test time =   0.02 sec
+Test time =   0.01 sec
 ----------------------------------------------------------
 Test Passed.
-"script_system_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"script_system_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "script_system_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-13/49 Testing: project_script_tools_regression
-13/49 Test: project_script_tools_regression
+13/50 Testing: project_script_tools_regression
+13/50 Test: project_script_tools_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/project_script_tools_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"project_script_tools_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"project_script_tools_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 project script tools tests passed
 <end of output>
-Test time =   0.02 sec
+Test time =   0.01 sec
 ----------------------------------------------------------
 Test Passed.
-"project_script_tools_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"project_script_tools_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "project_script_tools_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-14/49 Testing: script_reload_safety_regression
-14/49 Test: script_reload_safety_regression
+14/50 Testing: script_reload_safety_regression
+14/50 Test: script_reload_safety_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/script_reload_safety_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"script_reload_safety_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"script_reload_safety_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 script reload safety tests passed
 <end of output>
-Test time =   0.02 sec
+Test time =   0.01 sec
 ----------------------------------------------------------
 Test Passed.
-"script_reload_safety_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"script_reload_safety_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "script_reload_safety_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-15/49 Testing: runtime_ai_regression
-15/49 Test: runtime_ai_regression
+15/50 Testing: runtime_ai_regression
+15/50 Test: runtime_ai_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/runtime_ai_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"runtime_ai_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"runtime_ai_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 runtime AI tests passed
 <end of output>
-Test time =   0.02 sec
+Test time =   0.01 sec
 ----------------------------------------------------------
 Test Passed.
-"runtime_ai_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"runtime_ai_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "runtime_ai_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-16/49 Testing: image_decode_regression
-16/49 Test: image_decode_regression
+16/50 Testing: image_decode_regression
+16/50 Test: image_decode_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/image_decode_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"image_decode_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"image_decode_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 image decode tests passed
@@ -253,159 +253,159 @@ image decode tests passed
 Test time =   0.01 sec
 ----------------------------------------------------------
 Test Passed.
-"image_decode_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"image_decode_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "image_decode_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-17/49 Testing: editor_assets_regression
-17/49 Test: editor_assets_regression
+17/50 Testing: editor_assets_regression
+17/50 Test: editor_assets_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/editor_assets_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"editor_assets_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"editor_assets_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 editor assets tests passed
 <end of output>
-Test time =   0.12 sec
+Test time =   0.11 sec
 ----------------------------------------------------------
 Test Passed.
-"editor_assets_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"editor_assets_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "editor_assets_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-18/49 Testing: asset_registry_regression
-18/49 Test: asset_registry_regression
+18/50 Testing: asset_registry_regression
+18/50 Test: asset_registry_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/asset_registry_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"asset_registry_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"asset_registry_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 asset registry tests passed
 <end of output>
-Test time =   0.02 sec
+Test time =   0.01 sec
 ----------------------------------------------------------
 Test Passed.
-"asset_registry_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"asset_registry_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "asset_registry_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-19/49 Testing: asset_cooker_regression
-19/49 Test: asset_cooker_regression
+19/50 Testing: asset_cooker_regression
+19/50 Test: asset_cooker_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/asset_cooker_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"asset_cooker_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"asset_cooker_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 asset cooker tests passed
 <end of output>
-Test time =   0.08 sec
+Test time =   0.07 sec
 ----------------------------------------------------------
 Test Passed.
-"asset_cooker_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"asset_cooker_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "asset_cooker_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-20/49 Testing: world_streaming_regression
-20/49 Test: world_streaming_regression
+20/50 Testing: world_streaming_regression
+20/50 Test: world_streaming_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/world_streaming_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"world_streaming_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"world_streaming_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 world streaming tests passed
 <end of output>
-Test time =   0.02 sec
+Test time =   0.01 sec
 ----------------------------------------------------------
 Test Passed.
-"world_streaming_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"world_streaming_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "world_streaming_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-21/49 Testing: static_mesh_asset_regression
-21/49 Test: static_mesh_asset_regression
+21/50 Testing: static_mesh_asset_regression
+21/50 Test: static_mesh_asset_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/static_mesh_asset_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"static_mesh_asset_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"static_mesh_asset_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 static mesh asset tests passed
 <end of output>
-Test time =   0.09 sec
+Test time =   0.08 sec
 ----------------------------------------------------------
 Test Passed.
-"static_mesh_asset_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"static_mesh_asset_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "static_mesh_asset_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-22/49 Testing: foliage_asset_regression
-22/49 Test: foliage_asset_regression
+22/50 Testing: foliage_asset_regression
+22/50 Test: foliage_asset_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/foliage_asset_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"foliage_asset_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"foliage_asset_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 foliage asset tests passed
 <end of output>
-Test time =   0.02 sec
+Test time =   0.01 sec
 ----------------------------------------------------------
 Test Passed.
-"foliage_asset_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"foliage_asset_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "foliage_asset_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-23/49 Testing: ragdoll_asset_regression
-23/49 Test: ragdoll_asset_regression
+23/50 Testing: ragdoll_asset_regression
+23/50 Test: ragdoll_asset_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/ragdoll_asset_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"ragdoll_asset_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"ragdoll_asset_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 ragdoll asset tests passed
 <end of output>
-Test time =   0.02 sec
+Test time =   0.01 sec
 ----------------------------------------------------------
 Test Passed.
-"ragdoll_asset_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"ragdoll_asset_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "ragdoll_asset_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-24/49 Testing: animation_retarget_regression
-24/49 Test: animation_retarget_regression
+24/50 Testing: animation_retarget_regression
+24/50 Test: animation_retarget_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/animation_retarget_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"animation_retarget_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"animation_retarget_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 animation retarget tests passed
 <end of output>
-Test time =   0.02 sec
+Test time =   0.01 sec
 ----------------------------------------------------------
 Test Passed.
-"animation_retarget_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"animation_retarget_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "animation_retarget_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-25/49 Testing: ability_system_regression
-25/49 Test: ability_system_regression
+25/50 Testing: ability_system_regression
+25/50 Test: ability_system_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/ability_system_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"ability_system_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"ability_system_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 ability system tests passed
 <end of output>
-Test time =   0.02 sec
+Test time =   0.01 sec
 ----------------------------------------------------------
 Test Passed.
-"ability_system_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"ability_system_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "ability_system_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-26/49 Testing: runtime_property_snapshot_regression
-26/49 Test: runtime_property_snapshot_regression
+26/50 Testing: runtime_property_snapshot_regression
+26/50 Test: runtime_property_snapshot_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/runtime_property_snapshot_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"runtime_property_snapshot_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"runtime_property_snapshot_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 runtime property snapshot tests passed
@@ -413,15 +413,15 @@ runtime property snapshot tests passed
 Test time =   0.01 sec
 ----------------------------------------------------------
 Test Passed.
-"runtime_property_snapshot_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"runtime_property_snapshot_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "runtime_property_snapshot_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-27/49 Testing: asset_dependency_graph_regression
-27/49 Test: asset_dependency_graph_regression
+27/50 Testing: asset_dependency_graph_regression
+27/50 Test: asset_dependency_graph_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/asset_dependency_graph_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"asset_dependency_graph_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"asset_dependency_graph_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 asset dependency graph tests passed
@@ -429,31 +429,31 @@ asset dependency graph tests passed
 Test time =   0.01 sec
 ----------------------------------------------------------
 Test Passed.
-"asset_dependency_graph_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"asset_dependency_graph_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "asset_dependency_graph_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-28/49 Testing: weather_asset_regression
-28/49 Test: weather_asset_regression
+28/50 Testing: weather_asset_regression
+28/50 Test: weather_asset_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/weather_asset_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"weather_asset_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"weather_asset_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 weather asset tests passed
 <end of output>
-Test time =   0.02 sec
+Test time =   0.01 sec
 ----------------------------------------------------------
 Test Passed.
-"weather_asset_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"weather_asset_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "weather_asset_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-29/49 Testing: procedural_building_regression
-29/49 Test: procedural_building_regression
+29/50 Testing: procedural_building_regression
+29/50 Test: procedural_building_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/procedural_building_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"procedural_building_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"procedural_building_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 Procedural building tests passed
@@ -461,15 +461,15 @@ Procedural building tests passed
 Test time =   0.01 sec
 ----------------------------------------------------------
 Test Passed.
-"procedural_building_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"procedural_building_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "procedural_building_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-30/49 Testing: road_generator_regression
-30/49 Test: road_generator_regression
+30/50 Testing: road_generator_regression
+30/50 Test: road_generator_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/road_generator_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"road_generator_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"road_generator_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 Road generator tests passed
@@ -477,77 +477,77 @@ Road generator tests passed
 Test time =   0.01 sec
 ----------------------------------------------------------
 Test Passed.
-"road_generator_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"road_generator_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "road_generator_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-31/49 Testing: level_instance_regression
-31/49 Test: level_instance_regression
+31/50 Testing: level_instance_regression
+31/50 Test: level_instance_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/level_instance_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"level_instance_regression" start time: Aug 30 23:27 E. Africa Standard Time
-Output:
-----------------------------------------------------------
-<end of output>
-Test time =   0.02 sec
-----------------------------------------------------------
-Test Passed.
-"level_instance_regression" end time: Aug 30 23:27 E. Africa Standard Time
-"level_instance_regression" time elapsed: 00:00:00
-----------------------------------------------------------
-
-32/49 Testing: world_partition_regression
-32/49 Test: world_partition_regression
-Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/world_partition_tests.exe"
-Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"world_partition_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"level_instance_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 <end of output>
 Test time =   0.01 sec
 ----------------------------------------------------------
 Test Passed.
-"world_partition_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"level_instance_regression" end time: Aug 31 07:11 E. Africa Standard Time
+"level_instance_regression" time elapsed: 00:00:00
+----------------------------------------------------------
+
+32/50 Testing: world_partition_regression
+32/50 Test: world_partition_regression
+Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/world_partition_tests.exe"
+Directory: D:/C++_Projects/3DGEngine/build-release/tests
+"world_partition_regression" start time: Aug 31 07:11 E. Africa Standard Time
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"world_partition_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "world_partition_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-33/49 Testing: skeletal_asset_regression
-33/49 Test: skeletal_asset_regression
+33/50 Testing: skeletal_asset_regression
+33/50 Test: skeletal_asset_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/skeletal_asset_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"skeletal_asset_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"skeletal_asset_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 skeletal asset tests passed
 <end of output>
-Test time =   0.31 sec
+Test time =   0.27 sec
 ----------------------------------------------------------
 Test Passed.
-"skeletal_asset_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"skeletal_asset_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "skeletal_asset_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-34/49 Testing: forge_material_importer_regression
-34/49 Test: forge_material_importer_regression
+34/50 Testing: forge_material_importer_regression
+34/50 Test: forge_material_importer_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/forge_material_importer_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"forge_material_importer_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"forge_material_importer_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 forge material importer tests passed
 <end of output>
-Test time =   0.04 sec
+Test time =   0.03 sec
 ----------------------------------------------------------
 Test Passed.
-"forge_material_importer_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"forge_material_importer_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "forge_material_importer_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-35/49 Testing: mesh_geometry_operations_regression
-35/49 Test: mesh_geometry_operations_regression
+35/50 Testing: mesh_geometry_operations_regression
+35/50 Test: mesh_geometry_operations_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/mesh_geometry_operations_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"mesh_geometry_operations_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"mesh_geometry_operations_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 mesh geometry operation tests passed
@@ -555,219 +555,235 @@ mesh geometry operation tests passed
 Test time =   0.01 sec
 ----------------------------------------------------------
 Test Passed.
-"mesh_geometry_operations_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"mesh_geometry_operations_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "mesh_geometry_operations_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-36/49 Testing: scatter_graph_regression
-36/49 Test: scatter_graph_regression
+36/50 Testing: scatter_graph_regression
+36/50 Test: scatter_graph_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/scatter_graph_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"scatter_graph_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"scatter_graph_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 scatter graph tests passed
 <end of output>
-Test time =   0.02 sec
+Test time =   0.01 sec
 ----------------------------------------------------------
 Test Passed.
-"scatter_graph_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"scatter_graph_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "scatter_graph_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-37/49 Testing: lighting_analysis_regression
-37/49 Test: lighting_analysis_regression
+37/50 Testing: lighting_analysis_regression
+37/50 Test: lighting_analysis_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/lighting_analysis_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"lighting_analysis_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"lighting_analysis_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 <end of output>
 Test time =   0.01 sec
 ----------------------------------------------------------
 Test Passed.
-"lighting_analysis_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"lighting_analysis_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "lighting_analysis_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-38/49 Testing: biome_asset_regression
-38/49 Test: biome_asset_regression
+38/50 Testing: biome_asset_regression
+38/50 Test: biome_asset_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/biome_asset_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"biome_asset_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"biome_asset_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 <end of output>
-Test time =   0.02 sec
+Test time =   0.01 sec
 ----------------------------------------------------------
 Test Passed.
-"biome_asset_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"biome_asset_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "biome_asset_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-39/49 Testing: day_night_timeline_regression
-39/49 Test: day_night_timeline_regression
+39/50 Testing: day_night_timeline_regression
+39/50 Test: day_night_timeline_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/day_night_timeline_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"day_night_timeline_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"day_night_timeline_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 <end of output>
-Test time =   0.02 sec
+Test time =   0.01 sec
 ----------------------------------------------------------
 Test Passed.
-"day_night_timeline_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"day_night_timeline_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "day_night_timeline_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-40/49 Testing: cave_asset_regression
-40/49 Test: cave_asset_regression
+40/50 Testing: cave_asset_regression
+40/50 Test: cave_asset_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/cave_asset_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"cave_asset_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"cave_asset_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 <end of output>
-Test time =   0.02 sec
+Test time =   0.01 sec
 ----------------------------------------------------------
 Test Passed.
-"cave_asset_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"cave_asset_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "cave_asset_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-41/49 Testing: fence_wall_asset_regression
-41/49 Test: fence_wall_asset_regression
+41/50 Testing: fence_wall_asset_regression
+41/50 Test: fence_wall_asset_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/fence_wall_asset_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"fence_wall_asset_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"fence_wall_asset_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 fence/wall asset tests passed
 <end of output>
-Test time =   0.02 sec
+Test time =   0.01 sec
 ----------------------------------------------------------
 Test Passed.
-"fence_wall_asset_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"fence_wall_asset_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "fence_wall_asset_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-42/49 Testing: destruction_asset_regression
-42/49 Test: destruction_asset_regression
+42/50 Testing: destruction_asset_regression
+42/50 Test: destruction_asset_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/destruction_asset_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"destruction_asset_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"destruction_asset_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 Destruction asset tests passed
 <end of output>
-Test time =   0.02 sec
+Test time =   0.01 sec
 ----------------------------------------------------------
 Test Passed.
-"destruction_asset_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"destruction_asset_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "destruction_asset_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-43/49 Testing: interaction_asset_regression
-43/49 Test: interaction_asset_regression
+43/50 Testing: interaction_asset_regression
+43/50 Test: interaction_asset_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/interaction_asset_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"interaction_asset_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"interaction_asset_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 Interaction asset tests passed
 <end of output>
-Test time =   0.02 sec
+Test time =   0.01 sec
 ----------------------------------------------------------
 Test Passed.
-"interaction_asset_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"interaction_asset_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "interaction_asset_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-44/49 Testing: portal_asset_regression
-44/49 Test: portal_asset_regression
+44/50 Testing: portal_asset_regression
+44/50 Test: portal_asset_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/portal_asset_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"portal_asset_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"portal_asset_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 Portal asset tests passed
 <end of output>
-Test time =   0.02 sec
+Test time =   0.01 sec
 ----------------------------------------------------------
 Test Passed.
-"portal_asset_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"portal_asset_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "portal_asset_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-45/49 Testing: quest_system_regression
-45/49 Test: quest_system_regression
+45/50 Testing: quest_system_regression
+45/50 Test: quest_system_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/quest_system_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"quest_system_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"quest_system_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 Quest system tests passed
 <end of output>
-Test time =   0.02 sec
+Test time =   0.01 sec
 ----------------------------------------------------------
 Test Passed.
-"quest_system_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"quest_system_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "quest_system_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-46/49 Testing: dialogue_system_regression
-46/49 Test: dialogue_system_regression
+46/50 Testing: dialogue_system_regression
+46/50 Test: dialogue_system_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/dialogue_system_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"dialogue_system_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"dialogue_system_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 Dialogue system regression tests passed
 <end of output>
-Test time =   0.02 sec
+Test time =   0.01 sec
 ----------------------------------------------------------
 Test Passed.
-"dialogue_system_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"dialogue_system_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "dialogue_system_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-47/49 Testing: inventory_system_regression
-47/49 Test: inventory_system_regression
+47/50 Testing: inventory_system_regression
+47/50 Test: inventory_system_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/inventory_system_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"inventory_system_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"inventory_system_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 Inventory system regression tests passed
 <end of output>
-Test time =   0.02 sec
+Test time =   0.01 sec
 ----------------------------------------------------------
 Test Passed.
-"inventory_system_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"inventory_system_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "inventory_system_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-48/49 Testing: editor_scene_hierarchy_regression
-48/49 Test: editor_scene_hierarchy_regression
+48/50 Testing: combat_system_regression
+48/50 Test: combat_system_regression
+Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/combat_system_tests.exe"
+Directory: D:/C++_Projects/3DGEngine/build-release/tests
+"combat_system_regression" start time: Aug 31 07:11 E. Africa Standard Time
+Output:
+----------------------------------------------------------
+Combat system regression tests passed
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"combat_system_regression" end time: Aug 31 07:11 E. Africa Standard Time
+"combat_system_regression" time elapsed: 00:00:00
+----------------------------------------------------------
+
+49/50 Testing: editor_scene_hierarchy_regression
+49/50 Test: editor_scene_hierarchy_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/editor_scene_hierarchy_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"editor_scene_hierarchy_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"editor_scene_hierarchy_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 Editor scene hierarchy tests passed
 <end of output>
-Test time =   0.02 sec
+Test time =   0.01 sec
 ----------------------------------------------------------
 Test Passed.
-"editor_scene_hierarchy_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"editor_scene_hierarchy_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "editor_scene_hierarchy_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-49/49 Testing: editor_dirty_document_regression
-49/49 Test: editor_dirty_document_regression
+50/50 Testing: editor_dirty_document_regression
+50/50 Test: editor_dirty_document_regression
 Command: "D:/C++_Projects/3DGEngine/build-release/bin/Release/editor_dirty_document_tests.exe"
 Directory: D:/C++_Projects/3DGEngine/build-release/tests
-"editor_dirty_document_regression" start time: Aug 30 23:27 E. Africa Standard Time
+"editor_dirty_document_regression" start time: Aug 31 07:11 E. Africa Standard Time
 Output:
 ----------------------------------------------------------
 editor dirty-document save ordering passed
@@ -775,8 +791,8 @@ editor dirty-document save ordering passed
 Test time =   0.01 sec
 ----------------------------------------------------------
 Test Passed.
-"editor_dirty_document_regression" end time: Aug 30 23:27 E. Africa Standard Time
+"editor_dirty_document_regression" end time: Aug 31 07:11 E. Africa Standard Time
 "editor_dirty_document_regression" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-End testing: Aug 30 23:27 E. Africa Standard Time
+End testing: Aug 31 07:11 E. Africa Standard Time

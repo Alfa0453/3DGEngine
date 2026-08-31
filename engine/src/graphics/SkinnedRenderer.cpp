@@ -152,6 +152,7 @@ uniform mat4  uView;
 uniform float uShadowSoftness;
 uniform int uShadowBlockerSamples;
 uniform int uShadowFilterSamples;
+uniform int uShadowFrame;   // per-frame PCSS rotation advance (0 = temporal accumulation off)
 uniform int   uHasShadow;
 uniform int   uUseIBL;
 uniform samplerCube uIrradiance;
@@ -452,6 +453,9 @@ void SkinnedRenderer::DrawScene(ecs::Registry& reg, const Camera& camera, float 
     m_pbr->SetFloat("uShadowSoftness", lit.shadowSoftness);
     m_pbr->SetInt("uShadowBlockerSamples", std::clamp(lit.shadowBlockerSamples, 4, 16));
     m_pbr->SetInt("uShadowFilterSamples", std::clamp(lit.shadowFilterSamples, 6, 32));
+    ++m_frameCounter;
+    m_pbr->SetInt("uShadowFrame",
+                  lit.temporalAccumulation ? static_cast<int>(m_frameCounter % 64u) : 0);
     // Keep optional sampler types off unit 0 even when their feature is disabled.
     m_pbr->SetInt("uLightingSH0",18); m_pbr->SetInt("uLightingSH1",19);
     m_pbr->SetInt("uLightingSH2",20); m_pbr->SetInt("uLightingMeta",21);

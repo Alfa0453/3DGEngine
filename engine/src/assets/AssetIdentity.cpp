@@ -157,12 +157,13 @@ const char* AssetTypeName(AssetType type) {
         case AssetType::Quest: return "Quest";
         case AssetType::Dialogue: return "Dialogue";
         case AssetType::Item: return "Item";
+        case AssetType::Combat: return "Combat Profile";
     }
     return "Unknown";
 }
 
 bool IsKnownAssetType(AssetType type) {
-    return type > AssetType::Unknown && type <= AssetType::Item;
+    return type > AssetType::Unknown && type <= AssetType::Combat;
 }
 
 const char* NativeAssetExtension(AssetType type) {

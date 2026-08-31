@@ -10,6 +10,7 @@
 #include <engine/gameplay/QuestSystem.h>
 #include <engine/gameplay/DialogueSystem.h>
 #include <engine/gameplay/InventorySystem.h>
+#include <engine/gameplay/CombatSystem.h>
 
 #include <algorithm>
 #include <fstream>
@@ -105,7 +106,7 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         return engine::MakeAssetReference(
             &assetRegistry, contentRoot, assetPath, type).id;
     };
-    out << "3DGRuntimeScene 110 " << sceneId.ToString() << '\n';
+    out << "3DGRuntimeScene 111 " << sceneId.ToString() << '\n';
     out << "# Runtime export from 3DGEditor. Editor-only flags are omitted.\n";
     const EditorScene::Environment& environment = scene.GetEnvironment();
     out << "environment "
@@ -982,6 +983,10 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
                     out << "inventory_item " << std::quoted(object.name) << ' ' << std::quoted(stack.assetPath) << ' '
                         << (stack.asset.header.id.Valid()?stack.asset.header.id.ToString():std::string("-")) << ' ' << stack.count << ' ' << stack.equipped << '\n';
             }
+            if (const auto* combat = scene.Registry().TryGet<engine::CombatComponent>(object.entity))
+                if (!combat->assetPath.empty())
+                    out << "combat " << std::quoted(object.name) << ' ' << std::quoted(combat->assetPath) << ' '
+                        << (combat->asset.header.id.Valid()?combat->asset.header.id.ToString():std::string("-")) << '\n';
         }
         if (object.visible && object.isTerrain) {
             out << "terrain " << std::quoted(object.name) << ' '
@@ -1042,6 +1047,8 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
             addDependency(dialogue->asset.header.id);
         if (const auto* inventory = scene.Registry().TryGet<engine::InventoryComponent>(object.entity))
             for (const auto& stack : inventory->items) addDependency(stack.asset.header.id);
+        if (const auto* combat = scene.Registry().TryGet<engine::CombatComponent>(object.entity))
+            addDependency(combat->asset.header.id);
         addDependency(assetIdFor(
             object.collider.collisionAssetPath, {},
             engine::AssetType::StaticMesh));
