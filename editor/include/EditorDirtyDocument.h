@@ -17,6 +17,13 @@ struct DirtyDocument {
     std::string displayName;
     std::string identifier;
     bool canSave = true;
+    // True when this represents real content: a scene, or an asset already written to the Content
+    // folder (it has a file path). False for a still-open editor panel whose asset was never saved
+    // to Content ("New Material", etc.) -- those should not force a save prompt on their own.
+    bool existsInContent = false;
+    // Per-item choice in the save prompt (checkbox). Defaults to on for content, off for unsaved
+    // editor panels, so closing doesn't nag you to save a panel you only opened to look at.
+    bool selectedToSave = true;
     std::function<bool(std::string*)> save;
 };
 

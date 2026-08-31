@@ -14,6 +14,7 @@
 #include "engine/gameplay/InventorySystem.h"
 #include "engine/gameplay/CombatSystem.h"
 #include "engine/gameplay/SpawnSystem.h"
+#include "engine/gameplay/SaveProfileSystem.h"
 #include "engine/gameplay/QuestSystem.h"
 
 #include "engine/animation/AnimatedModel.h"
@@ -32,6 +33,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <sstream>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
@@ -483,6 +485,63 @@ bool Script::SetInteractionLocked(bool locked,ecs::Entity target) {
 std::string Script::InteractionState(ecs::Entity target) const {
     if(!m_context.registry)return "Disabled";if(target==ecs::kNull)target=m_context.entity;
     return engine::InteractionStateName(engine::GetInteractionState(*m_context.registry,target));
+}
+namespace {
+std::vector<std::string> ParseInteractionTags(const std::string& value) {
+    std::vector<std::string> tags; std::stringstream stream(value); std::string tag;
+    while (std::getline(stream, tag, ',')) {
+        const auto first=tag.find_first_not_of(" \t");const auto last=tag.find_last_not_of(" \t");
+        if(first!=std::string::npos)tags.push_back(tag.substr(first,last-first+1));
+    }
+    return tags;
+}
+InteractionQuery ScriptInteractionQuery(const ecs::Registry& registry,ecs::Entity interactor,
+                                        const std::string& access,const std::string& tags,bool sight) {
+    InteractionQuery query;query.accessTag=access;query.conditionTags=ParseInteractionTags(tags);
+    query.hasLineOfSight=sight;
+    if(const auto* transform=registry.TryGet<ecs::Transform>(interactor)) {
+        query.interactorPosition=transform->position;
+        query.interactorForward=transform->rotation*glm::vec3(0.0f,0.0f,-1.0f);
+    }
+    return query;
+}
+}
+bool Script::CanInteract(ecs::Entity target,const std::string& access,const std::string& tags,bool sight) const {
+    if(!m_context.registry||target==ecs::kNull)return false;
+    return engine::QueryInteraction(*m_context.registry,target,
+        ScriptInteractionQuery(*m_context.registry,m_context.entity,access,tags,sight)).available;
+}
+std::string Script::InteractionPrompt(ecs::Entity target,const std::string& access,const std::string& tags,bool sight) const {
+    if(!m_context.registry||target==ecs::kNull)return "Unavailable";
+    return engine::QueryInteraction(*m_context.registry,target,
+        ScriptInteractionQuery(*m_context.registry,m_context.entity,access,tags,sight)).prompt;
+}
+bool Script::RequestInteraction(ecs::Entity target,float held,const std::string& access,
+                                const std::string& tags,bool sight) {
+    if(!m_context.registry||target==ecs::kNull)return false;
+    return engine::RequestInteraction(*m_context.registry,target,
+        ScriptInteractionQuery(*m_context.registry,m_context.entity,access,tags,sight),held);
+}
+bool Script::SignalInteractionEvent(ecs::Entity target,const std::string& eventName) {
+    return m_context.registry&&target!=ecs::kNull&&
+        engine::SignalInteractionAnimationEvent(*m_context.registry,target,eventName);
+}
+void Script::CancelInteractionInput(ecs::Entity target) {
+    if(m_context.registry&&target!=ecs::kNull)
+        engine::CancelInteractionRequest(*m_context.registry,target);
+}
+bool Script::WasInteractionEvent(const std::string& eventName,ecs::Entity target) {
+    if(!m_context.registry)return false;if(target==ecs::kNull)target=m_context.entity;
+    auto* component=m_context.registry->TryGet<InteractiveMotionComponent>(target);
+    if(!component)return false;
+    const auto it=std::find_if(component->events.begin(),component->events.end(),
+        [&](const InteractionRuntimeEvent& event){return event.eventName==eventName;});
+    if(it==component->events.end())return false;
+    const auto index=static_cast<std::size_t>(std::distance(component->events.begin(),it));
+    component->events.erase(it);
+    if(component->processedEventCount>index&&component->processedEventCount>0)
+        --component->processedEventCount;
+    return true;
 }
 bool Script::UsePortal(ecs::Entity portal, const std::string& accessTag) {
     if (!m_context.registry || portal == ecs::kNull) return false;
@@ -1219,6 +1278,13 @@ void Script::SaveGameToSlot(int slot, const std::string& displayName) {
     request.load = false;
     request.displayName = displayName;
     g_scriptSaveGameRequests.push_back(std::move(request));
+}
+bool Script::ConfigureSaveProfile(const std::string& assetPath) {
+    return engine::ConfigureSaveProfile(assetPath);
+}
+bool Script::RespawnFromCheckpoint() {
+    return m_context.registry
+        && engine::RespawnFromLastCheckpoint(*m_context.registry, m_context.entity);
 }
 void Script::LoadGameFromSlot(int slot) {
     ScriptSaveGameRequest request;

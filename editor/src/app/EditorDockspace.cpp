@@ -20,6 +20,7 @@
 #include <engine/physics/PhysicsComponents.h>
 #include <engine/physics/PhysicsMaterial.h>
 #include <engine/physics/PhysicsMaterialAsset.h>
+#include <engine/physics/PhysicsDiagnostics.h>
 
 #include <glm/gtc/quaternion.hpp>
 #include <imgui.h>
@@ -67,6 +68,14 @@ ImGuiTextFilter g_hierarchyFilter;
 bool g_hierarchyLockSelection = false;
 EditorScene::GroupId g_renameGroupId = EditorScene::kRootGroupId;
 std::array<char, 128> g_groupNameBuffer{};
+// Rename dialogs must be opened at the Hierarchy window's ID scope, but the menu items that trigger
+// them run inside a per-row/per-group PushID. Opening the popup there gives it a mismatched ID, so
+// BeginPopupModal (at window scope) never sees it and the dialog silently fails to appear. These
+// deferred flags move the OpenPopup call out to window scope after the tree is drawn.
+bool g_openRenameGroupPopup = false;
+bool g_openRenameObjectPopup = false;
+int  g_renameObjectIndex = -1;
+std::array<char, 128> g_hierarchyRenameBuffer{};
 std::array<char, 96> g_componentSearch{};
 bool g_componentPopupOpenRequested = false;
 int g_cameraPresetSelection = -1;
@@ -2700,7 +2709,7 @@ void DrawWorldSettings(EditorScene& scene, EditorDockspace::Context& context, bo
         changed |= ImGui::SliderFloat("Mie Anisotropy", &environment.atmosphereMieAnisotropy, -0.94f, 0.94f);
         changed |= ImGui::SliderFloat("Ozone", &environment.atmosphereOzone, 0.0f, 4.0f);
         changed |= ImGui::SliderFloat("Atmosphere Intensity", &environment.atmosphereIntensity, 0.0f, 8.0f);
-        changed |= ImGui::SliderFloat("Sun Angular Diameter", &environment.sunAngularDiameter, 0.05f, 5.0f, "%.2f deg");
+        changed |= ImGui::SliderFloat("Sun Angular Diameter", &environment.sunAngularDiameter, 0.05f, 30.0f, "%.2f deg");
         changed |= ImGui::SliderFloat("Sun Disk Intensity", &environment.sunDiskIntensity, 0.0f, 40.0f);
         ImGui::SeparatorText("Night Sky");
         changed |= ImGui::Checkbox("Stars", &environment.stars);
@@ -2806,6 +2815,104 @@ void DrawWorldSettings(EditorScene& scene, EditorDockspace::Context& context, bo
         changed |= ImGui::DragFloat("Sleep Linear Velocity", &environment.physicsSleepLinearVelocity, 0.005f, 0.0f, 10.0f, "%.3f");
         changed |= ImGui::DragFloat("Sleep Angular Velocity", &environment.physicsSleepAngularVelocity, 0.005f, 0.0f, 10.0f, "%.3f");
         changed |= ImGui::DragFloat("Sleep Time", &environment.physicsTimeToSleep, 0.02f, 0.0f, 10.0f, "%.2f");
+
+        // Pass-5 collision matrix (Phases 35/66). A global layer-vs-layer interaction grid: uncheck
+        // a cell to stop those two layers from ever colliding, without editing every collider's
+        // mask. Symmetric (toggling [i][j] also toggles [j][i]). Compiled onto the play world at
+        // play start; when disabled the world filters exactly as before.
+        ImGui::SeparatorText("Collision Matrix");
+        changed |= ImGui::Checkbox("Enable Collision Matrix", &environment.physicsLayerMatrixEnabled);
+        if (environment.physicsLayerMatrixEnabled) {
+            static const char* kLayerNames[9] = {
+                "Default", "WorldStatic", "WorldDynamic", "Player", "Enemy",
+                "Collectible", "Projectile", "CameraBlocker", "Trigger" };
+            if (ImGui::BeginTable("collision_matrix", 10,
+                                  ImGuiTableFlags_Borders | ImGuiTableFlags_SizingFixedFit)) {
+                ImGui::TableNextColumn();   // top-left corner blank
+                for (int j = 0; j < 9; ++j) { ImGui::TableNextColumn(); ImGui::TextUnformatted(kLayerNames[j]); }
+                for (int i = 0; i < 9; ++i) {
+                    ImGui::TableNextRow();
+                    ImGui::TableNextColumn(); ImGui::TextUnformatted(kLayerNames[i]);
+                    for (int j = 0; j < 9; ++j) {
+                        ImGui::TableNextColumn();
+                        if (j < i) continue;   // upper triangle only (matrix is symmetric)
+                        bool on = ((environment.physicsLayerMasks[i] >> j) & 1u) != 0u;
+                        ImGui::PushID(i * 9 + j);
+                        if (ImGui::Checkbox("##c", &on)) {
+                            const std::uint32_t bj = 1u << j, bi = 1u << i;
+                            if (on) { environment.physicsLayerMasks[i] |= bj; environment.physicsLayerMasks[j] |= bi; }
+                            else    { environment.physicsLayerMasks[i] &= ~bj; environment.physicsLayerMasks[j] &= ~bi; }
+                            changed = true;
+                        }
+                        ImGui::PopID();
+                    }
+                }
+                ImGui::EndTable();
+            }
+            if (ImGui::SmallButton("All On")) {
+                environment.physicsLayerMasks.fill(0xFFFFFFFFu); changed = true;
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("Unchecked = those two layers never collide.");
+        }
+
+        // Pass-5 "Validate Physics" (Phase 67): scan the authored scene for the common
+        // configuration mistakes that silently break simulation. Reuses the engine's shape-dimension
+        // checks (engine::detail::CheckColliderDims) plus transform / rigid-body / material checks,
+        // keyed by object name. Read-only -- it never changes the scene. Click a result to select it.
+        ImGui::SeparatorText("Validate");
+        struct ValidationRow { std::string object; std::string message; bool error; };
+        static std::vector<ValidationRow> s_validation;
+        static bool s_validationRan = false;
+        if (ImGui::Button("Validate Physics")) {
+            s_validation.clear();
+            s_validationRan = true;
+            const auto finite3 = [](const glm::vec3& v) {
+                return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); };
+            for (const EditorScene::Object& obj : context.scene->Objects()) {
+                if (!obj.colliderEnabled) continue;
+                // Shape dimensions / degenerate rotation / empty filter (shared engine logic).
+                std::vector<engine::PhysicsIssue> issues;
+                engine::detail::CheckColliderDims(obj.entity, obj.collider, issues);
+                if (const engine::ecs::Transform* t = context.scene->TryGetTransform(obj.entity)) {
+                    if (!finite3(t->position)) issues.push_back({obj.entity, engine::PhysicsIssue::Severity::Error, "Transform position is NaN/inf"});
+                    if (!finite3(t->scale))    issues.push_back({obj.entity, engine::PhysicsIssue::Severity::Error, "Transform scale is NaN/inf"});
+                }
+                if (obj.rigidBodyEnabled) {
+                    const engine::ecs::RigidBody& rb = obj.rigidBody;
+                    const bool dynamic = rb.invMass > 0.0f && !rb.kinematic;
+                    if (rb.invMass < 0.0f) issues.push_back({obj.entity, engine::PhysicsIssue::Severity::Error, "RigidBody has negative inverse mass"});
+                    if (dynamic && obj.collider.shape == engine::ecs::ColliderShape::TriangleMesh)
+                        issues.push_back({obj.entity, engine::PhysicsIssue::Severity::Error,
+                            "Dynamic body + TriangleMesh collider is unsupported -- use Convex Hull"});
+                    if (rb.massMode == engine::ecs::RigidBody::MassMode::Density && dynamic && !(obj.collider.density > 0.0f))
+                        issues.push_back({obj.entity, engine::PhysicsIssue::Severity::Error, "Density mass mode needs a positive collider density"});
+                }
+                for (const engine::PhysicsIssue& is : issues)
+                    s_validation.push_back({obj.name, is.message, is.severity == engine::PhysicsIssue::Severity::Error});
+            }
+        }
+        if (s_validationRan) {
+            if (s_validation.empty()) {
+                ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.4f, 1.0f), "No physics issues found.");
+            } else {
+                int errs = 0; for (const ValidationRow& r : s_validation) if (r.error) ++errs;
+                ImGui::Text("%d issue(s): %d error, %d warning", (int)s_validation.size(), errs, (int)s_validation.size() - errs);
+                for (std::size_t i = 0; i < s_validation.size(); ++i) {
+                    const ValidationRow& r = s_validation[i];
+                    ImGui::PushID(static_cast<int>(i));
+                    ImGui::PushStyleColor(ImGuiCol_Text, r.error ? ImVec4(1.0f, 0.45f, 0.3f, 1.0f) : ImVec4(1.0f, 0.85f, 0.3f, 1.0f));
+                    const std::string label = std::string(r.error ? "[ERR] " : "[warn] ") + r.object + ": " + r.message;
+                    if (ImGui::Selectable(label.c_str())) {
+                        const std::vector<EditorScene::Object>& objs = context.scene->Objects();
+                        for (int oi = 0; oi < static_cast<int>(objs.size()); ++oi)
+                            if (objs[oi].name == r.object) { context.scene->SelectIndex(oi); break; }
+                    }
+                    ImGui::PopStyleColor();
+                    ImGui::PopID();
+                }
+            }
+        }
     }
 
     if (ImGui::CollapsingHeader("Editor Guides")) {
@@ -4412,6 +4519,11 @@ void DrawHierarchy(EditorDockspace::Context& context, bool* open) {
             // is already selected keeps the (possibly multi-) selection so Duplicate/Delete
             // act on the whole group. While locked, the selection is left untouched.
             if (!selectionLocked && !isRowSelected(i)) context.scene->SelectIndex(i);
+            if (ImGui::MenuItem("Rename", nullptr, false, !object.locked)) {
+                g_renameObjectIndex = i;
+                std::snprintf(g_hierarchyRenameBuffer.data(), g_hierarchyRenameBuffer.size(), "%s", object.name.c_str());
+                g_openRenameObjectPopup = true;   // opened at window scope below (correct ID)
+            }
             if (ImGui::MenuItem("Duplicate", nullptr, false, !object.locked)) {
                 context.duplicateSelectedRequested = true;
             }
@@ -4501,7 +4613,7 @@ void DrawHierarchy(EditorDockspace::Context& context, bool* open) {
                 if (ImGui::MenuItem("Rename Group")) {
                     g_renameGroupId = group.id;
                     std::snprintf(g_groupNameBuffer.data(), g_groupNameBuffer.size(), "%s", group.name.c_str());
-                    ImGui::OpenPopup("Rename Hierarchy Group");
+                    g_openRenameGroupPopup = true;   // opened at window scope below (correct ID)
                 }
                 if (ImGui::MenuItem("Delete Group")) context.scene->DeleteGroup(group.id);
                 ImGui::TextDisabled("Deleting moves contents to the parent.");
@@ -4529,10 +4641,18 @@ void DrawHierarchy(EditorDockspace::Context& context, bool* open) {
             context.scene->MoveGroupToGroup(*static_cast<const EditorScene::GroupId*>(payload->Data), EditorScene::kRootGroupId);
         ImGui::EndDragDropTarget();
     }
-    if (ImGui::BeginPopupContextWindow("HierarchyRootContext", ImGuiPopupFlags_MouseButtonRight)) {
+    // NoOpenOverItems: this empty-space menu must NOT open when right-clicking an object or group
+    // row -- otherwise it steals the right-click and the user only ever sees "Create Group" instead
+    // of the row's own Delete / Rename / Move to Group menu.
+    if (ImGui::BeginPopupContextWindow("HierarchyRootContext",
+            ImGuiPopupFlags_MouseButtonRight | ImGuiPopupFlags_NoOpenOverItems)) {
         if (ImGui::MenuItem("Create Group")) context.scene->CreateGroup("Group");
         ImGui::EndPopup();
     }
+    // Deferred opens: now at the Hierarchy window's ID scope, matching the BeginPopupModal below.
+    if (g_openRenameGroupPopup)  { ImGui::OpenPopup("Rename Hierarchy Group");  g_openRenameGroupPopup = false; }
+    if (g_openRenameObjectPopup) { ImGui::OpenPopup("Rename Hierarchy Object"); g_openRenameObjectPopup = false; }
+
     if (ImGui::BeginPopupModal("Rename Hierarchy Group", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::InputText("Name", g_groupNameBuffer.data(), g_groupNameBuffer.size());
         const bool valid = context.scene->IsHierarchyNameAvailable(
@@ -4541,6 +4661,26 @@ void DrawHierarchy(EditorDockspace::Context& context, bool* open) {
         ImGui::BeginDisabled(!valid);
         if (ImGui::Button("Rename")) {
             context.scene->RenameGroup(g_renameGroupId, g_groupNameBuffer.data());
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndDisabled(); ImGui::SameLine();
+        if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+
+    if (ImGui::BeginPopupModal("Rename Hierarchy Object", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::InputText("Name", g_hierarchyRenameBuffer.data(), g_hierarchyRenameBuffer.size());
+        const std::vector<EditorScene::Object>& objs = context.scene->Objects();
+        const bool inRange = g_renameObjectIndex >= 0 && g_renameObjectIndex < static_cast<int>(objs.size());
+        const engine::ecs::Entity renameEntity =
+            inRange ? objs[static_cast<std::size_t>(g_renameObjectIndex)].entity : engine::ecs::kNull;
+        const bool valid = inRange && context.scene->IsHierarchyNameAvailable(
+            g_hierarchyRenameBuffer.data(), renameEntity, EditorScene::kRootGroupId);
+        if (!valid) ImGui::TextColored(ImVec4(1, .45f, .3f, 1), "Name is empty or already in use.");
+        ImGui::BeginDisabled(!valid);
+        if (ImGui::Button("Rename")) {
+            context.scene->SelectIndex(g_renameObjectIndex);
+            context.scene->SetSelectedName(g_hierarchyRenameBuffer.data());
             ImGui::CloseCurrentPopup();
         }
         ImGui::EndDisabled(); ImGui::SameLine();
@@ -5643,6 +5783,49 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
         }
 
     }   // end Physics Setup
+
+    // Pass-5 Physics inspector (Phase 60): a read-only summary of the selected object's resolved
+    // physics state -- mobility, mass, COM, collider shape, material, and collision filter -- so a
+    // designer can see at a glance how a body will simulate without opening several sub-sections.
+    if (!isCharacter && (selected->colliderEnabled || selected->rigidBodyEnabled)
+        && ImGui::CollapsingHeader("Physics State")) {
+        const engine::ecs::RigidBody& rb = selected->rigidBody;
+        const engine::ecs::Collider& col = selected->collider;
+        const bool hasBody = selected->rigidBodyEnabled;
+        const char* mobility = !hasBody ? "Static (collider only)"
+            : rb.kinematic ? "Kinematic"
+            : (rb.invMass > 0.0f ? "Dynamic" : "Static (body)");
+        ImGui::Text("Mobility: %s", mobility);
+        if (hasBody) {
+            if (rb.invMass > 0.0f && !rb.kinematic) ImGui::Text("Mass: %.3f kg", 1.0f / rb.invMass);
+            else ImGui::TextUnformatted("Mass: infinite (immovable)");
+            ImGui::Text("Mass mode: %s",
+                rb.massMode == engine::ecs::RigidBody::MassMode::Density ? "Density" : "Manual");
+            const glm::vec3 com = rb.autoCenterOfMass ? col.localPosition : rb.centerOfMassLocal;
+            ImGui::Text("Center of mass (local): %.2f, %.2f, %.2f", com.x, com.y, com.z);
+        }
+        if (selected->colliderEnabled) {
+            static const char* kShapeNames[] = {"Sphere","Box","Plane","Capsule","Cylinder","Cone",
+                "Pyramid","Torus","Staircase","Convex Hull","Triangle Mesh"};
+            const int si = ColliderShapeIndex(col.shape);
+            ImGui::Text("Collider: %s%s", (si >= 0 && si < IM_ARRAYSIZE(kShapeNames)) ? kShapeNames[si] : "?",
+                        col.isTrigger ? " (trigger)" : "");
+            ImGui::Text("Friction: static %.2f / dynamic %.2f   Restitution %.2f",
+                        col.ResolvedStaticFriction(), col.ResolvedDynamicFriction(), col.restitution);
+            ImGui::Text("Density: %.0f kg/m^3", col.density);
+            if (!col.physicsMaterialPath.empty())
+                ImGui::TextDisabled("Material: %s", col.physicsMaterialPath.c_str());
+            static const char* kLayerNames[9] = {"Default","WorldStatic","WorldDynamic","Player",
+                "Enemy","Collectible","Projectile","CameraBlocker","Trigger"};
+            const int layerIdx = [&]{ for (int i = 0; i < 9; ++i) if (col.layer & (1u << i)) return i; return -1; }();
+            ImGui::Text("Layer: %s", (layerIdx >= 0) ? kLayerNames[layerIdx] : "(custom)");
+            std::string collidesWith;
+            for (int i = 0; i < 9; ++i)
+                if (col.mask & (1u << i)) { if (!collidesWith.empty()) collidesWith += ", "; collidesWith += kLayerNames[i]; }
+            ImGui::TextWrapped("Mask hits: %s", collidesWith.empty() ? "(none)"
+                               : (col.mask == engine::ecs::CollisionLayer::All ? "All layers" : collidesWith.c_str()));
+        }
+    }
 
     if (!isCharacter && selected->rigidBodyEnabled
         && ImGui::CollapsingHeader("Rigid Body", ImGuiTreeNodeFlags_DefaultOpen)) {

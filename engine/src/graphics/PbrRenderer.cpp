@@ -678,8 +678,16 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
         if (l.type == Light::Type::Directional) { sunDir = glm::normalize(l.direction); sunColor = c; }
         else if (l.type == Light::Type::Point) {
             if (glm::dot(c, c) <= 1.0e-8f) return;
-            const float radius = std::sqrt(std::max(std::max(c.r, c.g), c.b) / 0.03f);
-            if (!SphereInFrustum(frustum, t.position, std::max(radius, 0.01f))) return;
+            // Reach = the intensity-derived radius, now at a 1% cutoff (softer/~1.7x larger than
+            // the old 3%). (`range` is intentionally NOT used here: it defaults to 40 as the SPOT
+            // shadow far-plane, so honouring it would make every point light balloon to 40 units.)
+            const float radius = std::sqrt(std::max(std::max(c.r, c.g), c.b) / 0.01f);
+            // Cull only when the light genuinely cannot reach the view: its influence sphere misses
+            // the frustum AND the camera is outside its radius. Keeping any light the camera sits
+            // inside stops the "scene goes black when I rotate away from the lamp" flicker in
+            // enclosed rooms -- a light behind the camera still lights what's in front of it.
+            if (!SphereInFrustum(frustum, t.position, std::max(radius, 0.01f))
+                && glm::distance(camera.Position(), t.position) > radius) return;
             clusterLights.push_back({t.position, c, radius});
             if (ppos.size() < static_cast<std::size_t>(std::clamp(opt.maxShadowedLocalLights,0,PointShadow::kMax)))
                 ppos.push_back(t.position);
@@ -688,7 +696,10 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
             if (glm::dot(c, c) <= 1.0e-8f) return;
             const glm::vec3 dir = glm::normalize(l.direction);
             const float range = std::max(l.range, 0.01f);
-            if (!SphereInFrustum(frustum, t.position + dir * (range * 0.5f), range * 0.5f)) return;
+            // Keep the spot if its cone-bounding sphere is visible OR the camera is within range
+            // (avoids popping the light off when standing next to it and looking away).
+            if (!SphereInFrustum(frustum, t.position + dir * (range * 0.5f), range * 0.5f)
+                && glm::distance(camera.Position(), t.position) > range) return;
             spotPos.push_back(t.position);
             spotDir.push_back(dir);
             spotCol.push_back(c);
@@ -700,7 +711,13 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
         }
         else {  // Area (sphere)
             if (glm::dot(c, c) <= 1.0e-8f) return;
-            if (!SphereInFrustum(frustum, t.position, std::max(l.sourceRadius, 0.01f))) return;
+            // Cull by the light's illumination REACH (intensity-derived), not its tiny physical
+            // sourceRadius -- otherwise an area light pops off the moment its ~1-unit body leaves
+            // the view, exactly like the old point-light bug. Keep it if the camera is inside reach.
+            const float areaReach = std::max(std::sqrt(std::max(std::max(c.r, c.g), c.b) / 0.01f),
+                                             l.sourceRadius);
+            if (!SphereInFrustum(frustum, t.position, std::max(areaReach, 0.01f))
+                && glm::distance(camera.Position(), t.position) > areaReach) return;
             areaPos.push_back(t.position);
             areaCol.push_back(c);
             areaRad.push_back(l.sourceRadius);

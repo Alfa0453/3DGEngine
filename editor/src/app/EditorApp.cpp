@@ -1058,6 +1058,13 @@ void EditorApp::OnUpdate(float dt)
     if (m_mode == EditorMode::Play)
         playDt = engine::GameMode::Instance().ScaleDelta(dt);
     StepPlayPhysics(playDt, playInputEnabled);
+    if (m_mode == EditorMode::Play && m_playRegistry
+        && m_playPlayerEntity != engine::ecs::kNull) {
+        std::string saveEvent;
+        engine::UpdateSaveProfile(*m_playRegistry, m_playPlayerEntity,
+            m_project.ScenePath(), playDt, m_elapsed, &saveEvent);
+        if (!saveEvent.empty()) m_log.Info(saveEvent);
+    }
     ProcessCameraDirectorCommands();
     if (m_mode == EditorMode::Play) {
         if (m_cameraBlend.Active()) UpdateCameraBlend(playDt);
@@ -1918,10 +1925,14 @@ void EditorApp::DrawSelectionOutline(const glm::mat4 & viewProj)
         }
 
         const bool isPrimary = (index == primaryIndex);
+        // Blender-style selection edge: bright orange for the active object, a muted darker orange
+        // for other selected objects, red for locked. (This is now a thin silhouette outline, not a
+        // fill -- see DrawStencilSelectionOutline; the earlier fill made the orange look like a
+        // yellow shade over the whole object.)
         const glm::vec3 color = object.locked
-            ? glm::vec3(1.0f, 0.28f, 0.08f)                     // locked: red
-            : (isPrimary ? glm::vec3(1.0f, 0.55f, 0.05f)       // active: orange
-                         : glm::vec3(1.0f, 0.82f, 0.30f));      // also-selected: amber
+            ? glm::vec3(1.0f, 0.28f, 0.08f)                     // locked: red (semantic warning)
+            : (isPrimary ? glm::vec3(1.0f, 0.60f, 0.12f)       // active: Blender orange
+                         : glm::vec3(0.80f, 0.38f, 0.06f));      // also-selected: muted dark orange
 
         // River geometry has a dedicated boundary highlight (scene-selection based, so
         // only the primary draws it); other objects use the generic outline.
@@ -2047,6 +2058,17 @@ void EditorApp::DrawEditorOverlay()
                             ps.dynamicBodies, ps.kinematicBodies);
                 ImGui::Text("Awake %d  Sleeping %d  CCD %d", ps.awakeBodies,
                             ps.sleepingBodies, ps.ccdBodies);
+                // Pass-5 CCD budgeting: how many CCD-flagged bodies actually ran the expensive
+                // sweep vs were early-rejected (too slow to tunnel).
+                if (ps.ccdBodies > 0)
+                    ImGui::Text("CCD sweeps: %d run / %d skipped (early-out)", ps.ccdSweeps, ps.ccdSkipped);
+                // Pass-5 numerical safety: non-finite bodies caught and reset this step. Should be
+                // 0 in a healthy scene; a non-zero value flags a script/data bug worth investigating.
+                if (ps.quarantinedBodies > 0) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.45f, 0.2f, 1.0f));
+                    ImGui::Text("! Quarantined %d non-finite (NaN) bodies this step", ps.quarantinedBodies);
+                    ImGui::PopStyleColor();
+                }
                 ImGui::Text("Broad phase: %d pairs, %d cells", ps.candidatePairs,
                             ps.occupiedGridCells);
                 // Headline Pass-1 number: with the persistent static cache, static colliders
@@ -2070,8 +2092,8 @@ void EditorApp::DrawEditorOverlay()
                     ImGui::Text("Joints: %d dist, %d ball, %d hinge  (motors %d, limits %d, broken %d)",
                                 ps.distanceJoints, ps.ballJoints, ps.hingeJoints,
                                 ps.motorsActive, ps.limitsActive, ps.brokenJoints);
-                ImGui::Text("Queries/frame: %d ray, %d sphere, %d overlap",
-                            ps.raycasts, ps.sphereCasts, ps.overlaps);
+                ImGui::Text("Queries/frame: %d ray, %d sphere, %d capsule, %d overlap",
+                            ps.raycasts, ps.sphereCasts, ps.capsuleCasts, ps.overlaps);
                 ImGui::Text("Query candidates: %lld   exact tests: %lld",
                             static_cast<long long>(ps.queryCandidates),
                             static_cast<long long>(ps.queryExactTests));
@@ -2571,6 +2593,7 @@ void EditorApp::DrawEditorOverlay()
     DrawInventoryItemEditorPanel();
     DrawCombatEditorPanel();
     DrawSpawnManagerPanel();
+    DrawCheckpointSaveEditorPanel();
     DrawLevelVariantPanel();
     DrawLevelLayersPanel();
     DrawViewportBookmarksPanel();
@@ -2688,7 +2711,7 @@ void EditorApp::DrawEditorOverlay()
         PersistPackagingSettings();
     }
     if (dockspaceContext.saveSceneRequested) {
-        SaveScene();
+        RequestSaveDocuments();
     }
     if (dockspaceContext.saveAsSceneRequested) {
         SaveSceneAs(m_scenePathDraft.data());
@@ -2882,6 +2905,11 @@ void EditorApp::DrawEditorOverlay()
             m_panels.SetOpen(EditorPanels::Panel::SpawnManager, true);
             m_spawnManager.QueueOpen(path);
             m_log.Info("Opening spawn encounter: " + path);
+            break;
+        case EditorAssets::Type::SaveProfile:
+            m_panels.SetOpen(EditorPanels::Panel::CheckpointSave, true);
+            m_checkpointSaveEditor.QueueOpen(path);
+            m_log.Info("Opening save profile: " + path);
             break;
         case EditorAssets::Type::Terrain:
             m_panels.SetOpen(EditorPanels::Panel::TerrainCreator, true);
@@ -4674,6 +4702,24 @@ void EditorApp::DrawSpawnManagerPanel() {
     if(result.saved){std::string error;if(!m_assets.Refresh(m_project.AssetRoot(),&error))m_log.Warning(error);}if(!result.message.empty())m_log.Info(result.message);
 }
 
+void EditorApp::DrawCheckpointSaveEditorPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::CheckpointSave)) return;
+    const auto* selected = m_scene.SelectedObject();
+    const auto* selectedTransform = selected
+        ? m_scene.Registry().TryGet<engine::ecs::Transform>(selected->entity) : nullptr;
+    bool open = true;
+    const auto result = m_checkpointSaveEditor.Draw(m_assets, m_project.AssetRoot(),
+        m_mode == EditorMode::Play && m_playRegistry ? &*m_playRegistry : nullptr,
+        m_project.ScenePath(), m_elapsed, selected ? selected->name : std::string{},
+        selectedTransform, &open);
+    m_panels.SetOpen(EditorPanels::Panel::CheckpointSave, open);
+    if (result.saved) {
+        std::string error;
+        if (!m_assets.Refresh(m_project.AssetRoot(), &error)) m_log.Warning(error);
+    }
+    if (!result.message.empty()) m_log.Info(result.message);
+}
+
 int EditorApp::DeleteDestructionPreview(const std::string& name) {
     if(name.empty())return 0;const std::string prefix="DestructionPreview_"+name+"_";
     std::vector<int> indices;for(int i=0;i<static_cast<int>(m_scene.Objects().size());++i)
@@ -6158,8 +6204,11 @@ std::vector<DirtyDocument> EditorApp::CollectDirtyDocuments() {
     };
     auto add = [&](DirtyDocumentType type, const std::string& path, const char* fallback,
                    std::function<bool(std::string*)> save) {
+        const bool inContent = !path.empty();                 // has a real Content-folder file path
+        const bool contentWorthy = inContent || type == DirtyDocumentType::Scene;
         documents.push_back({type, nameOf(path, fallback), path.empty() ? fallback : path,
-                             static_cast<bool>(save), std::move(save)});
+                             static_cast<bool>(save), inContent, /*selectedToSave=*/contentWorthy,
+                             std::move(save)});
     };
 
     if (m_materialMaker.IsDirty()) add(DirtyDocumentType::Asset,
@@ -6237,6 +6286,11 @@ std::vector<DirtyDocument> EditorApp::CollectDirtyDocuments() {
         [this](std::string* error) {
             return m_spawnManager.SaveForShutdown(m_project.AssetRoot(), error);
         });
+    if (m_checkpointSaveEditor.IsDirty()) add(DirtyDocumentType::Asset,
+        m_checkpointSaveEditor.Path(), "New Save Profile",
+        [this](std::string* error) {
+            return m_checkpointSaveEditor.SaveForShutdown(m_project.AssetRoot(), error);
+        });
     if (m_weatherEditor.IsDirty()) add(DirtyDocumentType::Asset, m_weatherEditor.Path(),
         "New Weather", [this](std::string* error) { return m_weatherEditor.SaveForShutdown(m_project.AssetRoot(),error); });
     if (m_animationRetargeting.IsDirty()) add(DirtyDocumentType::Asset,
@@ -6291,11 +6345,24 @@ void EditorApp::DrawDirtyScenePrompt() {
 
     const ImGuiWindowFlags flags = ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings;
     if (ImGui::BeginPopupModal("Unsaved Changes", nullptr, flags)) {
-        ImGui::TextUnformatted("The following items have unsaved changes:");
-        ImGui::BeginChild("##DirtyDocuments", ImVec2(520.0f, std::min(220.0f,
-            28.0f * static_cast<float>(std::max<std::size_t>(m_pendingDirtyDocuments.size(),1)))), true);
-        for (const DirtyDocument& document : m_pendingDirtyDocuments)
-            ImGui::BulletText("%s", document.displayName.c_str());
+        ImGui::TextUnformatted("Choose what to save:");
+        ImGui::BeginChild("##DirtyDocuments", ImVec2(560.0f, std::min(260.0f,
+            30.0f * static_cast<float>(std::max<std::size_t>(m_pendingDirtyDocuments.size(),1)))), true);
+        // A checkbox per item so you save exactly what you want. Assets not yet added to the Content
+        // folder default to OFF (and are labelled) so they aren't saved unless you opt in.
+        for (DirtyDocument& document : m_pendingDirtyDocuments) {
+            ImGui::PushID(&document);
+            ImGui::Checkbox("##save", &document.selectedToSave);
+            ImGui::SameLine();
+            ImGui::TextUnformatted(document.displayName.c_str());
+            if (!document.existsInContent && document.type != DirtyDocumentType::Scene) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("(not in Content)");
+            } else if (!document.identifier.empty()) {
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", document.identifier.c_str());
+            }
+            ImGui::PopID();
+        }
         ImGui::EndChild();
         if (m_pendingSceneAction == PendingSceneAction::LoadScene && !m_pendingScenePath.empty()) {
             ImGui::Text("Next scene: %s", m_pendingScenePath.c_str());
@@ -6306,17 +6373,29 @@ void EditorApp::DrawDirtyScenePrompt() {
             ImGui::TextColored(ImVec4(1.0f,.35f,.25f,1.0f), "%s", m_dirtyDocumentSaveError.c_str());
 
         const bool restart = m_pendingSceneAction == PendingSceneAction::RestartScripts;
-        if (ImGui::Button(restart ? "Save All and Restart" : "Save All and Continue", ImVec2(170.0f, 0.0f))) {
-            std::string error;
-            if (SaveAllDirtyDocuments(&error)) {
+        const bool saveOnly = m_pendingSceneAction == PendingSceneAction::SaveDocuments;
+        const char* saveLabel = saveOnly ? "Save Checked"
+                              : (restart ? "Save Checked and Restart" : "Save Checked and Continue");
+        if (ImGui::Button(saveLabel, ImVec2(190.0f, 0.0f))) {
+            std::vector<DirtyDocument> selected;
+            for (DirtyDocument& document : m_pendingDirtyDocuments)
+                if (document.selectedToSave) selected.push_back(document);
+            std::string failed, detail;
+            if (selected.empty() || SaveDirtyDocuments(selected, &failed, &detail)) {
                 ImGui::CloseCurrentPopup();
                 CompletePendingSceneAction();
-            } else m_dirtyDocumentSaveError = error;
+            } else {
+                m_dirtyDocumentSaveError = "Could not save " + failed
+                    + (detail.empty() ? std::string(".") : ": " + detail);
+            }
         }
-        ImGui::SameLine();
-        if (ImGui::Button(restart ? "Restart Without Saving" : "Discard and Continue", ImVec2(170.0f, 0.0f))) {
-            ImGui::CloseCurrentPopup();
-            CompletePendingSceneAction();
+        // An explicit Save has nothing to transition to, so no "discard and continue" -- just Cancel.
+        if (!saveOnly) {
+            ImGui::SameLine();
+            if (ImGui::Button(restart ? "Restart Without Saving" : "Discard and Continue", ImVec2(170.0f, 0.0f))) {
+                ImGui::CloseCurrentPopup();
+                CompletePendingSceneAction();
+            }
         }
         ImGui::SameLine();
         if (ImGui::Button("Cancel", ImVec2(92.0f, 0.0f))) {
@@ -11680,6 +11759,26 @@ void EditorApp::RequestNewScene()
     PerformNewScene();
 }
 
+void EditorApp::RequestSaveDocuments()
+{
+    // Explicit File > Save. Fire the same checkbox picker so you can choose scene + which unsaved
+    // Content assets to write. If nothing is dirty, or only the scene is, just save the scene
+    // directly (no need to show a one-item dialog).
+    std::vector<DirtyDocument> documents = CollectDirtyDocuments();
+    const bool onlyScene = documents.size() == 1
+        && documents.front().type == DirtyDocumentType::Scene;
+    if (documents.empty() || onlyScene) {
+        SaveScene();
+        return;
+    }
+    m_pendingSceneAction = PendingSceneAction::SaveDocuments;
+    m_pendingScenePath.clear();
+    m_pendingActionArgument.clear();
+    m_pendingDirtyDocuments = std::move(documents);
+    m_dirtyDocumentSaveError.clear();
+    m_dirtyScenePromptQueued = true;
+}
+
 void EditorApp::RequestLoadSceneFromPath(const std::string& path) {
     if (!CollectDirtyDocuments().empty()) {
         QueueDirtySceneAction(PendingSceneAction::LoadScene, path);
@@ -11788,6 +11887,17 @@ void EditorApp::QueueDirtySceneAction(PendingSceneAction action, const std::stri
     m_pendingScenePath = path;
     m_pendingDirtyDocuments = CollectDirtyDocuments();
     m_dirtyDocumentSaveError.clear();
+    // Only genuine content (the scene, or assets already written to the Content folder) should
+    // raise the save prompt. If the only unsaved things are still-open editor panels whose asset
+    // was never added to Content, don't nag -- just carry out the action. (The panels keep their
+    // in-memory state; nothing on disk is touched.)
+    const bool anyContent = std::any_of(
+        m_pendingDirtyDocuments.begin(), m_pendingDirtyDocuments.end(),
+        [](const DirtyDocument& d) { return d.existsInContent || d.type == DirtyDocumentType::Scene; });
+    if (!anyContent) {
+        CompletePendingSceneAction();
+        return;
+    }
     m_dirtyScenePromptQueued = true;
 }
 
@@ -11815,6 +11925,10 @@ void EditorApp::CompletePendingSceneAction() {
         break;
     case PendingSceneAction::RestartScripts:
         PerformScriptCompileRestart();
+        break;
+    case PendingSceneAction::SaveDocuments:
+        // Explicit save: the chosen documents were already written by "Save Checked". Nothing to
+        // transition to -- stay in the current scene.
         break;
     case PendingSceneAction::None:
         break;
@@ -13951,6 +14065,14 @@ void EditorApp::StepPlayPhysics(float dt, bool inputEnabled)
     m_playPhysics.sleepLinearVelocity = environment.physicsSleepLinearVelocity;
     m_playPhysics.sleepAngularVelocity = environment.physicsSleepAngularVelocity;
     m_playPhysics.timeToSleep = environment.physicsTimeToSleep;
+    // Pass-5 collision matrix: compile the authored per-layer masks onto the play world, or reset
+    // to "all collide" when disabled so a toggled-off matrix behaves exactly like no matrix.
+    if (environment.physicsLayerMatrixEnabled) {
+        for (int i = 0; i < 32; ++i) m_playPhysics.SetLayerCollisionMask(i, environment.physicsLayerMasks[i]);
+        m_playPhysics.SetLayerMatrixActive(true);
+    } else {
+        m_playPhysics.ResetLayerMatrix();
+    }
 
     const float step = std::max(m_physicsFixedTimestep, 0.0001f);
     if (m_physicsStepRequested) {

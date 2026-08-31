@@ -441,6 +441,13 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             loaded.cameraZones.push_back(std::move(zone));
             continue;
         }
+        if (recordType == "physics_matrix" && version >= 114) {
+            int enabled = 0;
+            record >> enabled;
+            for (int i = 0; i < 9; ++i) record >> loaded.physicsLayerMasks[i];
+            loaded.physicsLayerMatrixEnabled = enabled != 0;
+            continue;
+        }
         if (recordType == "physics_joint" && version >= 51) {
             Scene::PhysicsJointDesc joint;
             int worldAnchor = 0, rope = 0;

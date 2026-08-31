@@ -45,9 +45,9 @@ Status legend:
 | 26 | **COMPLETE** | Inventory and Item Editor | Weapons, armor, consumables, pickups, currencies, statistics, icons, and effects. |
 | 27 | **COMPLETE** | Combat Editor | Damage types, combos, targeting, blocking, parrying, stagger, hit reactions, and immunity windows. |
 | 28 | **COMPLETE** | Spawn Manager | Spawn volumes, weighted groups, waves, pooling, difficulty scaling, and encounter controls. |
-| 29 | **NEXT** | Checkpoint and Save Editor | Visual configuration of persisted player, quest, world, and streamed-level state. |
-| 30 | PLANNED | Interaction Editor | Prompts, ranges, inputs, conditions, animation requirements, and interaction events. |
-| 31 | PLANNED | IK Rig Editor | Foot placement, hand targets, look-at, weapon alignment, aiming, and terrain adaptation. |
+| 29 | **COMPLETE** | Checkpoint and Save Editor | Visual configuration of persisted player, quest, world, and streamed-level state. |
+| 30 | **COMPLETE** | Interaction Editor | Prompts, ranges, inputs, conditions, animation requirements, and interaction events. |
+| 31 | **NEXT** | IK Rig Editor | Foot placement, hand targets, look-at, weapon alignment, aiming, and terrain adaptation. |
 | 32 | PLANNED | Animation Timeline Editor | Clip trimming, looping, root motion, curves, events, additive setup, and playback ranges. |
 | 33 | PLANNED | Pose Library | Saves, previews, mirrors, blends, tags, and reuses skeletal poses. |
 | 34 | PLANNED | Character Equipment Editor | Equips weapons, armor, staffs, props, audio, and effects through sockets. |
@@ -474,7 +474,26 @@ clear conditions, player-entry and automatic triggers, concurrent/total limits,
 dead-entity recycling, prefab cooking dependencies, scene binding, packaged
 runtime loading, native C++/Lua control, preview statistics, and lifecycle events.
 
-## Next Milestone: Checkpoint and Save Editor
+## Completed Milestone: Checkpoint and Save Editor
 
-Planned scope: visual save checkpoints, persisted component selection, player and
-quest state, streamed-level state, respawn rules, slots, and live save debugging.
+Delivered as the **Checkpoint and Save Editor** panel and engine-owned
+`.3dgsaveprofile` asset. Profiles author scene-space checkpoint volumes, slot and
+autosave policy, component-level persistence, inventory/quest/script state, world
+scene identity, and respawn behavior. The editor provides selected-object checkpoint
+placement plus live Play-mode capture/load/delete diagnostics. The same profile runs
+in editor Play and the packaged player, supports latest-save startup, and is exposed
+to native C++ and Lua scripts.
+
+## Completed Milestone: Interaction Editor
+
+Upgraded reusable `.3dginteraction` assets with press/hold input contracts, prompt and
+unavailable text, range/facing/line-of-sight checks, all-required gameplay tags, access
+locks, interactor action clips, optional animation-event commits, movement-lock intent,
+named started/completed/failed events, and an editor availability debugger. The same
+rules are evaluated by the runtime, native C++ scripts, and Lua scripts. Version-1 assets
+remain loadable and are resaved as version 2.
+
+## Next Milestone: IK Rig Editor
+
+Planned scope: reusable IK rigs for feet, hands, look-at, weapon alignment, aiming,
+terrain adaptation, preview, runtime solving, and character integration.

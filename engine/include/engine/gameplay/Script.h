@@ -331,6 +331,19 @@ protected:
                            const std::string& accessTag = {});
     bool SetInteractionLocked(bool locked, ecs::Entity target = ecs::kNull);
     std::string InteractionState(ecs::Entity target = ecs::kNull) const;
+    bool CanInteract(ecs::Entity target, const std::string& accessTag = {},
+                     const std::string& conditionTags = {}, bool hasLineOfSight = true) const;
+    std::string InteractionPrompt(ecs::Entity target, const std::string& accessTag = {},
+                                  const std::string& conditionTags = {},
+                                  bool hasLineOfSight = true) const;
+    bool RequestInteraction(ecs::Entity target, float heldSeconds = 0.0f,
+                            const std::string& accessTag = {},
+                            const std::string& conditionTags = {},
+                            bool hasLineOfSight = true);
+    bool SignalInteractionEvent(ecs::Entity target, const std::string& eventName);
+    void CancelInteractionInput(ecs::Entity target);
+    bool WasInteractionEvent(const std::string& eventName,
+                             ecs::Entity target = ecs::kNull);
     bool UsePortal(ecs::Entity portal, const std::string& accessTag = {});
     bool IsPortalReady(ecs::Entity portal) const;
     bool GrantQuest(const std::string& assetPath);
@@ -457,6 +470,8 @@ protected:
     // Request a full game save/load to a numbered slot. Queued and processed by the
     // host after this script update (a load reloads the saved scene, then restores state).
     void SaveGameToSlot(int slot, const std::string& displayName = {});
+    bool ConfigureSaveProfile(const std::string& assetPath);
+    bool RespawnFromCheckpoint();
     void LoadGameFromSlot(int slot);
     int SetTimer(float seconds, std::function<void()> callback, bool repeat = false);
     int SetTimerByEvent(float seconds, std::function<void()> event,

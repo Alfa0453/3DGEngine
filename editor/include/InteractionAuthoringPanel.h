@@ -34,5 +34,10 @@ private:
     float m_previewAlpha = 0.0f;
     bool m_previewPlaying = false;
     bool m_previewOpening = true;
+    float m_debugDistance = 1.5f;
+    float m_debugFacingAngle = 0.0f;
+    bool m_debugLineOfSight = true;
+    std::string m_debugAccessTag;
+    std::string m_debugConditionTags;
     bool m_dirty = false;   // untouched panel has no unsaved changes (born-dirty was a bug)
 };

@@ -544,7 +544,7 @@ void SkinnedRenderer::DrawScene(ecs::Registry& reg, const Camera& camera, float 
     auto lights=reg.view<ecs::Transform,ecs::Light>();
     if(!lights.empty())lights.each([&](ecs::Entity,ecs::Transform&t,ecs::Light&light){
         const glm::vec3 color=light.color*light.intensity;if(glm::dot(color,color)<=1e-8f)return;
-        if(light.type==ecs::Light::Type::Point&&points.size()<32){const float radius=std::sqrt(std::max({color.r,color.g,color.b})/0.03f);points.push_back({t.position,color,radius});}
+        if(light.type==ecs::Light::Type::Point&&points.size()<32){const float radius=std::sqrt(std::max({color.r,color.g,color.b})/0.01f);points.push_back({t.position,color,radius});}  // 1% cutoff: matches PbrRenderer reach
         else if(light.type==ecs::Light::Type::Spot&&spots.size()<4)spots.push_back({t.position,glm::normalize(light.direction),color,glm::cos(glm::radians(light.innerAngle)),glm::cos(glm::radians(light.outerAngle)),std::max(light.range,0.01f)});
         else if(light.type==ecs::Light::Type::Area&&areas.size()<4)areas.push_back({t.position,color,glm::normalize(t.rotation*glm::vec3(1,0,0)),glm::normalize(t.rotation*glm::vec3(0,1,0)),glm::vec2(std::max(light.areaWidth,0.01f),std::max(light.areaHeight,0.01f))*0.5f,std::max(light.sourceRadius,0.01f),light.areaShape==ecs::Light::AreaShape::Rectangle?1:0,light.areaTwoSided?1:0});
     });

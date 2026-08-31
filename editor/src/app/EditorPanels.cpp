@@ -99,13 +99,14 @@ const char* PlainPanelName(EditorPanels::Panel panel)
     case Panel::CaveTunnel: return "Cave and Tunnel Tool";
     case Panel::FenceWallPainter: return "Fence and Wall Painter";
     case Panel::DestructionAuthoring: return "Destruction Authoring Tool";
-    case Panel::InteractionAuthoring: return "Interactive Door and Lift Tool";
+    case Panel::InteractionAuthoring: return "Interaction Editor";
     case Panel::PortalAuthoring: return "Portal and Teleport Tool";
     case Panel::QuestEditor: return "Quest Editor";
     case Panel::DialogueEditor: return "Dialogue Editor";
     case Panel::InventoryItemEditor: return "Inventory and Item Editor";
     case Panel::CombatEditor: return "Combat Editor";
     case Panel::SpawnManager: return "Spawn Manager";
+    case Panel::CheckpointSave: return "Checkpoint and Save Editor";
     case Panel::Count:     break;
     }
     return "Panel";
@@ -172,6 +173,7 @@ EditorPanels::Group EditorPanels::GroupOf(Panel panel)
     case Panel::InventoryItemEditor:
     case Panel::CombatEditor:
     case Panel::SpawnManager:
+    case Panel::CheckpointSave:
         return Group::WorldGameplay;
 
     case Panel::MaterialMaker:

@@ -1247,6 +1247,12 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         out << '\n';
     }
 
+    // Pass-5 collision matrix (scene version 153+): the enabled flag + the 9 named-layer masks.
+    // Written as a singleton record; absence on load leaves the default (all layers collide, off).
+    out << "physics_matrix " << (m_environment.physicsLayerMatrixEnabled ? 1 : 0);
+    for (int i = 0; i < 9; ++i) out << ' ' << m_environment.physicsLayerMasks[i];
+    out << '\n';
+
     for (const Object& object : m_objects) {
         const auto* portal = m_registry.TryGet<engine::PortalComponent>(object.entity);
         if (!portal || portal->assetPath.empty()) continue;
@@ -1687,6 +1693,13 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
     std::string recordType;
     bool resolvedDuplicateNames = false;
     while (in >> recordType) {
+        if (recordType == "physics_matrix" && version >= 153) {
+            int enabled = 0;
+            in >> enabled;
+            for (int i = 0; i < 9; ++i) in >> m_environment.physicsLayerMasks[i];
+            m_environment.physicsLayerMatrixEnabled = enabled != 0;
+            continue;
+        }
         if (recordType == "compound_colliders" && version >= 152) {
             std::string objectName;
             std::size_t count = 0;
@@ -4435,9 +4448,35 @@ bool EditorScene::IsHierarchyNameAvailable(const std::string& requested,
 std::string EditorScene::MakeUniqueHierarchyName(const std::string& requested,
                                                   Entity ignoreObject,
                                                   GroupId ignoreGroup) const {
-    std::string base = TrimHierarchyName(requested);
+    std::string trimmed = TrimHierarchyName(requested);
+    if (trimmed.empty()) trimmed = "Object";
+    // Exact name free (first-time creation, e.g. "Cube") -> use it as-is.
+    if (IsHierarchyNameAvailable(trimmed, ignoreObject, ignoreGroup)) return trimmed;
+
+    // Otherwise number the BASE name rather than stacking suffixes. Strip a single trailing
+    // "_<digits>" so duplicating "Cube_1" yields "Cube_2" (the next free number for base "Cube"),
+    // not "Cube_1_1" -- duplicates share the same numbering as new items and never chain. A
+    // trailing " Copy"/"_copy" left by older paths is stripped too, so "Cube Copy" also normalizes.
+    std::string base = trimmed;
+    const auto stripSuffix = [](std::string& s) {
+        // " Copy" / "_copy" (case-insensitive) left by older duplicate paths.
+        for (const std::string tag : {std::string(" copy"), std::string("_copy")}) {
+            if (s.size() > tag.size()) {
+                std::string tail = s.substr(s.size() - tag.size());
+                std::transform(tail.begin(), tail.end(), tail.begin(),
+                               [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
+                if (tail == tag) { s.erase(s.size() - tag.size()); return true; }
+            }
+        }
+        // trailing "_<digits>"
+        std::size_t i = s.size();
+        while (i > 0 && std::isdigit(static_cast<unsigned char>(s[i - 1]))) --i;
+        if (i < s.size() && i > 0 && s[i - 1] == '_') { s.erase(i - 1); return true; }
+        return false;
+    };
+    stripSuffix(base);
     if (base.empty()) base = "Object";
-    if (IsHierarchyNameAvailable(base, ignoreObject, ignoreGroup)) return base;
+
     for (std::uint64_t suffix = 1;; ++suffix) {
         const std::string candidate = base + "_" + std::to_string(suffix);
         if (IsHierarchyNameAvailable(candidate, ignoreObject, ignoreGroup)) return candidate;
@@ -7483,6 +7522,11 @@ bool EditorScene::DuplicateSelected(const engine::Mesh & cube, const engine::Mes
     }
 
     const Object selectedCopy = *selected;
+    // The live Light component (edited in the inspector) is the source of truth; object.lightData
+    // is only a cache and can be stale (e.g. area shape / size). Capture the live light now, before
+    // CreateObject below can invalidate `selected`, so the duplicate keeps the ACTUAL light shape.
+    const Light* liveLight = m_registry.TryGet<Light>(selected->entity);
+    const Light liveLightData = liveLight ? *liveLight : selectedCopy.lightData;
     const Transform* transform = m_registry.TryGet<Transform>(selected->entity);
     const MeshRenderer* renderer = m_registry.TryGet<MeshRenderer>(selected->entity);
     if (!transform || !renderer || selectedCopy.locked) {
@@ -7496,7 +7540,12 @@ bool EditorScene::DuplicateSelected(const engine::Mesh & cube, const engine::Mes
 
     duplicateTransform.position += glm::vec3(0.8f, 0.0f, 0.8f);
 
-    const engine::Mesh& mesh = MeshFor(selectedCopy.primitive, cube, plane, sphere, capsule, cylinder, cone, pyramid, torus, staircase);
+    // Lights render with a gizmo mesh (sphere for directional/point/spot, cube for area), not their
+    // stored primitive (always Cube) -- so pick the same mesh AddXLight/snapshot-restore use.
+    // Otherwise duplicating a point/spot light (round gizmo) produced a plain cube (square).
+    const engine::Mesh& mesh = selectedCopy.light
+        ? (liveLightData.type == Light::Type::Area ? cube : sphere)
+        : MeshFor(selectedCopy.primitive, cube, plane, sphere, capsule, cylinder, cone, pyramid, torus, staircase);
     CreateObject(selectedCopy.name, selectedCopy.primitive, mesh, duplicateTransform, duplicateColor);
     m_objects.back().editorGroupId = selectedCopy.editorGroupId;
     m_objects.back().modelAssetPath = selectedCopy.modelAssetPath;
@@ -7550,9 +7599,11 @@ bool EditorScene::DuplicateSelected(const engine::Mesh & cube, const engine::Mes
     m_objects.back().localFogVolumeEnabled=selectedCopy.localFogVolumeEnabled;
     m_objects.back().localFogVolume=selectedCopy.localFogVolume;
     if(selectedCopy.localFogVolumeEnabled){m_objects.back().localFogVolume.stableId=engine::AssetHandle::Generate();m_registry.Add<engine::ecs::LocalFogVolume>(m_objects.back().entity,m_objects.back().localFogVolume);}
-    m_objects.back().lightData = selectedCopy.lightData;
+    // Duplicate the LIVE light data (captured above) so the copy keeps the source's real type,
+    // area shape, size, etc. -- not the possibly-stale object.lightData cache.
+    m_objects.back().lightData = liveLightData;
     if (selectedCopy.light) {
-        m_registry.Add<Light>(m_objects.back().entity, selectedCopy.lightData);
+        m_registry.Add<Light>(m_objects.back().entity, liveLightData);
     }
     m_objects.back().linearVelocityEnabled = selectedCopy.linearVelocityEnabled;
     m_objects.back().angularVelocityEnabled = selectedCopy.angularVelocityEnabled;

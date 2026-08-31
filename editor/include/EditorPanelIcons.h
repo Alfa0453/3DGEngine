@@ -75,6 +75,7 @@ inline const char* ForPanel(EditorPanels::Panel panel) {
     case P::InventoryItemEditor: return Star;
     case P::CombatEditor: return Settings;
     case P::SpawnManager: return World;
+    case P::CheckpointSave: return Archive;
     case P::Count: break;
     }
     return Document;

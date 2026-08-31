@@ -45,6 +45,7 @@
 #include <engine/graphics/ReflectionProbeSystem.h>
 #include <engine/gameplay/PlayerController.h>
 #include <engine/gameplay/CameraDirector.h>
+#include <engine/gameplay/SaveProfileSystem.h>
 #include <engine/physics/PhysicsComponents.h>
 #include "EditorDirtyDocument.h"
 #include <engine/gameplay/Script.h>
@@ -85,6 +86,7 @@
 #include "InventoryItemEditorPanel.h"
 #include "CombatEditorPanel.h"
 #include "SpawnManagerPanel.h"
+#include "CheckpointSaveEditorPanel.h"
 #include "TerrainCreatorPanel.h"
 #include "ModularPlacementPanel.h"
 #include "PrefabPalettePanel.h"
@@ -159,7 +161,8 @@ private:
         LoadScene,
         OpenProject,
         NewProject,
-        RestartScripts
+        RestartScripts,
+        SaveDocuments   // explicit File > Save: pick what to save, then stay in the current scene
     };
 
     struct PlayTriggerAction {
@@ -279,6 +282,7 @@ private:
     void DrawInventoryItemEditorPanel();
     void DrawCombatEditorPanel();
     void DrawSpawnManagerPanel();
+    void DrawCheckpointSaveEditorPanel();
     void GenerateDestructionPreview();
     int DeleteDestructionPreview(const std::string& name);
     bool CreatePartitionCellFromSelection(const std::string& path, int cellX, int cellZ);
@@ -465,6 +469,7 @@ private:
     void LoadScene();
     void RequestCloseEditor();
     void RequestNewScene();
+    void RequestSaveDocuments();   // explicit File > Save via the checkbox picker
     void RequestLoadSceneFromPath(const std::string& path);
     void PerformNewScene();
     void PerformLoadSceneFromPath(const std::string& path);
@@ -747,6 +752,7 @@ private:
     InventoryItemEditorPanel             m_inventoryItemEditor;
     CombatEditorPanel                    m_combatEditor;
     SpawnManagerPanel                    m_spawnManager;
+    CheckpointSaveEditorPanel            m_checkpointSaveEditor;
     LevelVariantPanel                    m_levelVariants;
     LevelLayersPanel                     m_levelLayers;
     ViewportBookmarksPanel               m_viewportBookmarks;

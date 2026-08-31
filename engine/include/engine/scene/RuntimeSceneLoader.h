@@ -587,6 +587,11 @@ public:
         std::vector<CombatDesc> combats;
         std::vector<SpawnManagerDesc> spawnManagers;
         std::vector<PhysicsJointDesc> physicsJoints;
+        // Pass-5 collision matrix (runtime scene 114+). physicsLayerMasks[i] = layer i's
+        // collides-with bits; default all-ones. Applied to the PhysicsWorld when enabled.
+        std::array<std::uint32_t, 32> physicsLayerMasks =
+            []{ std::array<std::uint32_t, 32> a; a.fill(0xFFFFFFFFu); return a; }();
+        bool physicsLayerMatrixEnabled = false;
         std::vector<TerrainDesc> terrains;
         std::vector<WaterDesc> waters;
         std::vector<SplineDesc> splines;

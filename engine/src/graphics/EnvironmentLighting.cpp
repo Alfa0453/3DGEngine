@@ -78,7 +78,7 @@ void AtmosphereParameters::Normalize() {
     planetRadiusKm = std::clamp(planetRadiusKm, 100.0f, 100000.0f);
     atmosphereHeightKm = std::clamp(atmosphereHeightKm, 1.0f, 1000.0f);
     intensity = std::clamp(intensity, 0.0f, 20.0f);
-    sunAngularDiameterDegrees = std::clamp(sunAngularDiameterDegrees, 0.05f, 10.0f);
+    sunAngularDiameterDegrees = std::clamp(sunAngularDiameterDegrees, 0.05f, 30.0f);
     sunDiskIntensity = std::clamp(sunDiskIntensity, 0.0f, 100.0f);
 }
 

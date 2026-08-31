@@ -84,6 +84,7 @@ public:
         InventoryItemEditor,
         CombatEditor,
         SpawnManager,
+        CheckpointSave,
         Count
     };
 

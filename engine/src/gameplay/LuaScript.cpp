@@ -469,6 +469,12 @@ void LuaScript::RegisterEngineApi() {
         {"ToggleInteraction", ApiToggleInteraction},
         {"SetInteractionLocked", ApiSetInteractionLocked},
         {"InteractionState", ApiInteractionState},
+        {"CanInteract", ApiCanInteract},
+        {"InteractionPrompt", ApiInteractionPrompt},
+        {"RequestInteraction", ApiRequestInteraction},
+        {"SignalInteractionEvent", ApiSignalInteractionEvent},
+        {"CancelInteractionInput", ApiCancelInteractionInput},
+        {"WasInteractionEvent", ApiWasInteractionEvent},
         {"UsePortal", ApiUsePortal},
         {"IsPortalReady", ApiIsPortalReady},
         {"GrantQuest", ApiGrantQuest},
@@ -510,6 +516,8 @@ void LuaScript::RegisterEngineApi() {
         {"IsCombatStaggered", ApiIsCombatStaggered},
         {"CombatStep", ApiCombatStep},
         {"ConfigureSpawnManager", ApiConfigureSpawnManager},
+        {"ConfigureSaveProfile", ApiConfigureSaveProfile},
+        {"RespawnFromCheckpoint", ApiRespawnFromCheckpoint},
         {"StartSpawn", ApiStartSpawn},
         {"StopSpawn", ApiStopSpawn},
         {"ResetSpawn", ApiResetSpawn},
@@ -891,6 +899,40 @@ int LuaScript::ApiInteractionState(lua_State* state) {
     if(lua_gettop(state)>=1&&!lua_isnil(state,1))target=script->FindObject(luaL_checkstring(state,1));
     const std::string value=script->InteractionState(target);lua_pushlstring(state,value.c_str(),value.size());return 1;
 }
+int LuaScript::ApiCanInteract(lua_State* state) {
+    LuaScript* script=Current(state);const auto target=script->FindObject(luaL_checkstring(state,1));
+    const char* access=luaL_optstring(state,2,"");const char* tags=luaL_optstring(state,3,"");
+    const bool sight=lua_gettop(state)<4||lua_toboolean(state,4)!=0;
+    lua_pushboolean(state,script->CanInteract(target,access,tags,sight));return 1;
+}
+int LuaScript::ApiInteractionPrompt(lua_State* state) {
+    LuaScript* script=Current(state);const auto target=script->FindObject(luaL_checkstring(state,1));
+    const char* access=luaL_optstring(state,2,"");const char* tags=luaL_optstring(state,3,"");
+    const bool sight=lua_gettop(state)<4||lua_toboolean(state,4)!=0;
+    const std::string value=script->InteractionPrompt(target,access,tags,sight);
+    lua_pushlstring(state,value.c_str(),value.size());return 1;
+}
+int LuaScript::ApiRequestInteraction(lua_State* state) {
+    LuaScript* script=Current(state);const auto target=script->FindObject(luaL_checkstring(state,1));
+    const float held=static_cast<float>(luaL_optnumber(state,2,0.0));
+    const char* access=luaL_optstring(state,3,"");const char* tags=luaL_optstring(state,4,"");
+    const bool sight=lua_gettop(state)<5||lua_toboolean(state,5)!=0;
+    lua_pushboolean(state,script->RequestInteraction(target,held,access,tags,sight));return 1;
+}
+int LuaScript::ApiSignalInteractionEvent(lua_State* state) {
+    LuaScript* script=Current(state);const auto target=script->FindObject(luaL_checkstring(state,1));
+    lua_pushboolean(state,script->SignalInteractionEvent(target,luaL_checkstring(state,2)));return 1;
+}
+int LuaScript::ApiCancelInteractionInput(lua_State* state) {
+    LuaScript* script=Current(state);const auto target=script->FindObject(luaL_checkstring(state,1));
+    script->CancelInteractionInput(target);return 0;
+}
+int LuaScript::ApiWasInteractionEvent(lua_State* state) {
+    LuaScript* script=Current(state);const char* eventName=luaL_checkstring(state,1);
+    ecs::Entity target=script->Self();if(lua_gettop(state)>=2&&!lua_isnil(state,2))
+        target=script->FindObject(luaL_checkstring(state,2));
+    lua_pushboolean(state,script->WasInteractionEvent(eventName,target));return 1;
+}
 int LuaScript::ApiUsePortal(lua_State* state) {
     LuaScript* script = Current(state);
     const ecs::Entity portal = script->FindObject(luaL_checkstring(state, 1));
@@ -941,6 +983,8 @@ int LuaScript::ApiDealCombatDamage(lua_State* s){const auto v=Current(s)->DealCo
 int LuaScript::ApiIsCombatStaggered(lua_State* s){lua_pushboolean(s,Current(s)->IsCombatStaggered());return 1;}
 int LuaScript::ApiCombatStep(lua_State* s){lua_pushinteger(s,Current(s)->CombatStep());return 1;}
 int LuaScript::ApiConfigureSpawnManager(lua_State*s){lua_pushboolean(s,Current(s)->ConfigureSpawnManager(luaL_checkstring(s,1)));return 1;}
+int LuaScript::ApiConfigureSaveProfile(lua_State*s){lua_pushboolean(s,Current(s)->ConfigureSaveProfile(luaL_checkstring(s,1)));return 1;}
+int LuaScript::ApiRespawnFromCheckpoint(lua_State*s){lua_pushboolean(s,Current(s)->RespawnFromCheckpoint());return 1;}
 int LuaScript::ApiStartSpawn(lua_State*s){lua_pushboolean(s,Current(s)->StartSpawn(static_cast<float>(luaL_optnumber(s,1,1.0)),static_cast<ecs::Entity>(luaL_optinteger(s,2,ecs::kNull))));return 1;}
 int LuaScript::ApiStopSpawn(lua_State*s){Current(s)->StopSpawn(static_cast<ecs::Entity>(luaL_optinteger(s,1,ecs::kNull)));return 0;}
 int LuaScript::ApiResetSpawn(lua_State*s){Current(s)->ResetSpawn(static_cast<ecs::Entity>(luaL_optinteger(s,1,ecs::kNull)));return 0;}

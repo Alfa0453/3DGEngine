@@ -22,6 +22,11 @@ int main() {
     asset.localTranslation = {3.0f, 0.0f, 0.0f};
     asset.openDuration = 1.0f; asset.closeDuration = 0.5f;
     asset.autoClose = false; asset.locked = true; asset.accessTag = "BlueKey";
+    asset.inputMode = engine::InteractionInputMode::Hold; asset.holdDuration = 0.4f;
+    asset.facingAngleDegrees = 45.0f; asset.requireFacing = true; asset.requireLineOfSight = true;
+    asset.requiredConditionTags = {"PowerOn", "QuestReady"};
+    asset.interactorAnimationPath = "Animations/PullLever.3dgclip";
+    asset.waitForAnimationEvent = true; asset.animationCommitEvent = "LeverCommit";
     asset.openAudioId = engine::AssetHandle::Generate();
     engine::NormalizeInteractionAsset(asset);
     std::string error;
@@ -36,6 +41,8 @@ int main() {
     Check(engine::LoadInteractionAsset(path.string(), &loaded, &error), "load interaction asset");
     Check(loaded.header.id == asset.header.id && loaded.header.dependencies.size() == 1, "identity and dependencies round trip");
     Check(loaded.motion == engine::InteractionMotionType::SlidingDoor && Near(loaded.localTranslation.x, 3.0f), "motion round trip");
+    Check(loaded.inputMode == engine::InteractionInputMode::Hold && Near(loaded.holdDuration, 0.4f), "input contract round trip");
+    Check(loaded.requiredConditionTags.size() == 2 && loaded.waitForAnimationEvent, "conditions and animation requirements round trip");
     engine::AssetRegistry assets;
     Check(assets.RebuildFromContent(root.string(), &error), "scan interaction registry");
     const auto* entry = assets.Find(asset.header.id);
@@ -58,6 +65,26 @@ int main() {
     Check(Near(registry.Get<engine::ecs::Transform>(door).position.x, 0.0f), "closed pose restored");
     const auto events = engine::ConsumeInteractionEvents(registry, door);
     Check(events.size() >= 5 && events.front().type == engine::InteractionEventType::AccessDenied, "runtime events emitted");
+
+    const auto lever = registry.Create();
+    engine::ecs::Transform leverTransform; leverTransform.position = {0.0f, 0.0f, -1.0f};
+    registry.Add<engine::ecs::Transform>(lever, leverTransform);
+    Check(engine::ConfigureInteractiveMotion(registry, lever, loaded), "configure authored interaction contract");
+    engine::InteractionQuery query;
+    query.interactorPosition = {0.0f, 0.0f, 0.0f}; query.interactorForward = {0.0f, 0.0f, -1.0f};
+    query.accessTag = "BlueKey"; query.conditionTags = {"PowerOn", "QuestReady"};
+    Check(engine::QueryInteraction(registry, lever, query).available, "complete interaction query is available");
+    query.hasLineOfSight = false;
+    Check(!engine::QueryInteraction(registry, lever, query).available, "blocked line of sight rejects interaction");
+    query.hasLineOfSight = true; query.conditionTags.pop_back();
+    Check(!engine::QueryInteraction(registry, lever, query).available, "missing required condition rejects interaction");
+    query.conditionTags.push_back("QuestReady");
+    Check(!engine::RequestInteraction(registry, lever, query, 0.2f), "hold interaction waits for full duration");
+    Check(engine::RequestInteraction(registry, lever, query, 0.2f), "hold interaction reaches animation gate");
+    Check(engine::GetInteractionState(registry, lever) == engine::InteractionState::Closed, "animation gate delays motion");
+    Check(!engine::SignalInteractionAnimationEvent(registry, lever, "WrongEvent"), "wrong animation event is ignored");
+    Check(engine::SignalInteractionAnimationEvent(registry, lever, "LeverCommit"), "matching animation event commits interaction");
+    Check(engine::GetInteractionState(registry, lever) == engine::InteractionState::Opening, "committed interaction starts motion");
 
     engine::InteractionAssetData hinge;
     hinge.motion = engine::InteractionMotionType::HingedDoor;

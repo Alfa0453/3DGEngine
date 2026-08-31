@@ -7,17 +7,36 @@
 #include <string>
 #include <cstddef>
 #include <vector>
+#include <glm/glm.hpp>
 
 namespace engine {
 namespace ecs { class Registry; }
 
 enum class InteractionState : std::uint8_t { Closed, Opening, Open, Closing, Disabled };
-enum class InteractionEventType : std::uint8_t { Opening, Opened, Closing, Closed, AccessDenied };
+enum class InteractionEventType : std::uint8_t {
+    Started, Opening, Opened, Closing, Closed, Completed, AccessDenied, ConditionFailed
+};
 
 struct InteractionRuntimeEvent {
     InteractionEventType type = InteractionEventType::Opening;
     std::string audioPath;
     std::string animationPath;
+    std::string eventName;
+};
+
+struct InteractionQuery {
+    glm::vec3 interactorPosition{0.0f};
+    glm::vec3 interactorForward{0.0f, 0.0f, -1.0f};
+    glm::vec3 targetPosition{0.0f};
+    std::string accessTag;
+    std::vector<std::string> conditionTags;
+    bool hasLineOfSight = true;
+};
+
+struct InteractionAvailability {
+    bool available = false;
+    std::string prompt;
+    std::string reason;
 };
 
 struct InteractiveMotionComponent {
@@ -31,7 +50,21 @@ struct InteractiveMotionComponent {
     bool activatedOnce = false;
     std::size_t processedEventCount = 0;
     std::vector<InteractionRuntimeEvent> events;
+    float inputHoldProgress = 0.0f;
+    std::string lastFailureReason;
+    bool awaitingAnimationCommit = false;
 };
+
+InteractionAvailability EvaluateInteraction(const InteractionAssetData& asset,
+                                            bool runtimeLocked,
+                                            const InteractionQuery& query);
+InteractionAvailability QueryInteraction(const ecs::Registry& registry, ecs::Entity entity,
+                                         const InteractionQuery& query);
+bool RequestInteraction(ecs::Registry& registry, ecs::Entity entity,
+                        const InteractionQuery& query, float heldSeconds = 0.0f);
+void CancelInteractionRequest(ecs::Registry& registry, ecs::Entity entity);
+bool SignalInteractionAnimationEvent(ecs::Registry& registry, ecs::Entity entity,
+                                     const std::string& eventName);
 
 bool ConfigureInteractiveMotion(ecs::Registry& registry, ecs::Entity entity,
                                 const std::string& assetPath,

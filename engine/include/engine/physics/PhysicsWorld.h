@@ -5,8 +5,10 @@
 #include "engine/ecs/Entity.h"
 #include "engine/ecs/Components.h"
 #include "engine/physics/PhysicsComponents.h"
+#include "engine/physics/FlatU64Map.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <unordered_map>
 #include <unordered_set>
@@ -194,7 +196,10 @@ struct PhysicsStats {
     int    gridRebuiltColliders = 0; // colliders re-inserted into the grid this step
     int    staticRebuiltThisStep = 0;// static colliders re-cooked this step (0 == fully cached)
     int    manifolds          = 0;   // contacts generated
-    int    ccdBodies          = 0;   // bodies that ran a CCD sweep this step
+    int    ccdBodies          = 0;   // CCD-enabled bodies present this step
+    int    ccdSweeps          = 0;   // Pass-5: CCD bodies that actually ran the expensive sweep
+    int    ccdSkipped         = 0;   // Pass-5: CCD bodies early-rejected (too slow to tunnel)
+    int    quarantinedBodies  = 0;   // Pass-5: bodies whose non-finite state was reset this step
     double stepMs             = 0.0; // wall-clock of the last Step()
 
     // Pass-3 solver instrumentation.
@@ -264,6 +269,21 @@ public:
     // fall back to brute-force all-pairs (identical results; used for testing).
     bool      broadPhase = true;
     float     cellSize   = 2.0f;         // grid cell edge length (world units)
+
+    // Pass-5 numerical safety (Phase 69). Each step, quarantine any body whose state has gone
+    // non-finite: zero its velocities and reset a NaN position/rotation, so a single poisoned body
+    // (a divide-by-zero in a script, a bad impulse) cannot spread NaN through contacts/islands and
+    // corrupt the whole solve. Cheap (one view pass) and on by default; stats.quarantinedBodies
+    // reports how many were caught. Turn off only if a profiler shows it matters.
+    bool      sanitizeState = true;
+
+    // Pass-5 CCD budgeting (Phases 30-31). CCD is opt-in per body (RigidBody::ccd), but a body that
+    // moves less than this fraction of its own sweep radius in one step CANNOT tunnel through solid
+    // geometry -- the discrete narrow phase already resolves it -- so the expensive continuous sweep
+    // is skipped. This bounds CCD cost by the number of genuinely fast movers rather than the number
+    // of CCD-flagged bodies, WITHOUT ever skipping a body that could tunnel (unlike a hard per-step
+    // cap). 0 forces every CCD body to sweep (legacy behaviour). Lower = safer (sweeps more often).
+    float     ccdMotionThreshold = 0.5f;
 
     // Below this closing speed a contact does not bounce (restitution slop) --
     // stops resting stacks from micro-bouncing so they can settle and sleep.
@@ -390,6 +410,62 @@ public:
         m_stats.queryCandidates = 0; m_stats.queryExactTests = 0;
     }
 
+    // Pass-5 determinism validation (Phases 46-48). Hash the stable dynamic-body state at the end
+    // of a fixed step so two runs of the same scene+inputs can be compared frame-by-frame. Bodies
+    // are gathered and sorted by entity id first, so the hash never depends on ECS iteration order
+    // (Phase 44). Floats are quantized to 1e-4 units so the comparison tolerates only true noise.
+    // A development tool (allocates a small scratch vector) -- not for the hot path. Returns an
+    // FNV-1a digest of (entity, position, orientation, linear vel, angular vel, sleeping).
+    std::uint64_t StateHash(ecs::Registry& registry) const;
+
+    // Pass-5 live inspection (Phases 61/63). These read the LAST step's cached solver state, valid
+    // until the next Step(). Editor-tool helpers, not for the hot path.
+    //
+    // Simulation island a dynamic entity belongs to this step, or -1 if it has no dynamic body /
+    // isn't in the world. Two entities sharing an id are in the same constraint network.
+    int IslandOfEntity(ecs::Entity e) const {
+        const int* p = m_entityIsland.find(static_cast<std::uint64_t>(e));
+        return p ? *p : -1;
+    }
+    // One resolved contact touching the queried entity: the other collider, the world contact
+    // point/normal, penetration, and the impulses the solver applied (impact force ~ normalImpulse).
+    struct ContactInfo {
+        ecs::Entity other = ecs::kNull;
+        glm::vec3   point{0.0f};
+        glm::vec3   normal{0.0f};
+        float       penetration = 0.0f;
+        float       normalImpulse = 0.0f;
+        float       frictionImpulse = 0.0f;
+    };
+    std::vector<ContactInfo> ContactsForEntity(ecs::Entity e) const;
+
+    // Pass-5 collision matrix (Phases 35-36). A global, symmetric layer-vs-layer interaction table
+    // that gates the broad-phase pair filter on top of the existing per-collider layer/mask. It is
+    // INACTIVE by default, so an untouched world filters exactly as before (byte-identical). The
+    // editor compiles its authored grid into these per-layer masks and calls SetLayerMatrixActive.
+    // m_layerCollisionMask[i] is the set of layer bits that layer i is allowed to collide with;
+    // symmetry is the caller's responsibility (SetLayerCollides keeps both halves in sync).
+    void SetLayerMatrixActive(bool active) { m_layerMatrixActive = active; }
+    bool LayerMatrixActive() const { return m_layerMatrixActive; }
+    void ResetLayerMatrix() { m_layerCollisionMask.fill(0xFFFFFFFFu); m_layerMatrixActive = false; }
+    // Enable/disable collision between two layer indices (0..31); keeps the table symmetric.
+    void SetLayerCollides(int a, int b, bool enabled) {
+        if (a < 0 || a > 31 || b < 0 || b > 31) return;
+        const std::uint32_t bitB = 1u << b, bitA = 1u << a;
+        if (enabled) { m_layerCollisionMask[a] |= bitB; m_layerCollisionMask[b] |= bitA; }
+        else         { m_layerCollisionMask[a] &= ~bitB; m_layerCollisionMask[b] &= ~bitA; }
+    }
+    bool LayerCollides(int a, int b) const {
+        if (a < 0 || a > 31 || b < 0 || b > 31) return true;
+        return (m_layerCollisionMask[a] & (1u << b)) != 0u;
+    }
+    std::uint32_t LayerCollisionMask(int layer) const {
+        return (layer >= 0 && layer <= 31) ? m_layerCollisionMask[layer] : 0xFFFFFFFFu;
+    }
+    void SetLayerCollisionMask(int layer, std::uint32_t mask) {
+        if (layer >= 0 && layer <= 31) m_layerCollisionMask[layer] = mask;
+    }
+
     // Broad-phase reuse for scene queries. Step() builds the world colliders + spatial
     // grid every step and marks the broad phase valid; Raycast/SphereCast/OverlapSphere
     // then gather only the colliders whose grid cells overlap the query region (a provably
@@ -492,7 +568,31 @@ private:
     void RecordDebugTrace(const DebugTrace& trace) const;
     mutable PhysicsStats                    m_stats;     // transient instrumentation (never serialized)
     mutable bool m_broadphaseValid = false;              // grid reflects current world (set by Step)
-    mutable std::unordered_set<int> m_broadphaseScratch; // dedup buffer for candidate gather
+    // Pass-5: generation-stamp dedup for candidate gather (replaces an unordered_set whose
+    // clear()+insert() allocated one node per body every query). m_seenGen[bodyIndex] == m_queryGen
+    // means "already added this query"; a bump of m_queryGen is an O(1) clear.
+    mutable std::vector<std::uint32_t> m_seenGen;
+    mutable std::uint32_t m_queryGen = 0;
+
+    // Collision matrix (Pass-5). Per-layer "collides-with" masks; default all-ones (everything
+    // collides) and inactive, so the filter is unchanged until the editor authors a matrix.
+    static std::array<std::uint32_t, 32> AllLayersMask() { std::array<std::uint32_t, 32> a; a.fill(0xFFFFFFFFu); return a; }
+    std::array<std::uint32_t, 32> m_layerCollisionMask = AllLayersMask();
+    bool m_layerMatrixActive = false;
+    // OR of the collides-with masks for every layer bit set in `layer` (usually one bit).
+    std::uint32_t MatrixMaskOf(std::uint32_t layer) const {
+        std::uint32_t m = 0u;
+        for (int i = 0; i < 32 && layer; ++i)
+            if (layer & (1u << i)) { m |= m_layerCollisionMask[i]; layer &= ~(1u << i); }
+        return m;
+    }
+    // Pass-5: reused candidate buffer for the base scene queries (Raycast / SphereCast /
+    // OverlapSphere), so a heavy per-frame query load allocates nothing. SAFE because the engine's
+    // queries are already single-threaded (they share m_broadphaseScratch) and no query holds this
+    // buffer across a call to another query -- the composite casts (CapsuleCast/BoxCast/OverlapBox/
+    // RaycastAll) invoke the base queries strictly sequentially. A future parallel query API must
+    // give each worker its own scratch (see the batch-query note).
+    mutable std::vector<ecs::Entity> m_queryScratch;
 
     // Persistent per-static-collider world-shape cache. A static collider (no dynamic body)
     // is expensive to re-cook via BuildWorldCollider every step; here we keep the last owner
@@ -510,7 +610,7 @@ private:
     };
     std::unordered_map<ecs::Entity, StaticColliderCache> m_staticCache;
     std::vector<CollisionEvent>             m_events;    // events from the last step
-    std::unordered_map<std::uint64_t, bool> m_touching;  // pair key -> wasTrigger (persists)
+    FlatU64Map<bool> m_touching;  // pair key -> wasTrigger (persists; Pass-5: alloc-free clear)
     mutable bool m_debugTracing = false;
     mutable std::vector<DebugTrace> m_debugTraces;
     std::vector<Joint>                      m_joints;
@@ -524,10 +624,15 @@ private:
     std::vector<int>                        m_planes, m_finite;
     std::vector<std::int64_t>               m_keys;
     std::unordered_map<std::int64_t, std::vector<int>> m_grid;
-    std::unordered_map<std::uint64_t, bool> m_touchingNow;
-    std::unordered_map<std::uint64_t, ContactCache> m_contactCache;  // warm-start impulses
-    std::unordered_map<std::uint64_t, int> m_contactAge;  // pair key -> consecutive-ish contact
+    FlatU64Map<bool> m_touchingNow;
+    FlatU64Map<ContactCache> m_contactCache;  // warm-start impulses (Pass-5: alloc-free clear)
+    FlatU64Map<int> m_contactAge;  // pair key -> consecutive-ish contact (Pass-5: alloc-free)
                                                           // frames; drives restitution suppression
+    std::vector<std::uint64_t> m_ageScratch;             // reused prune buffer (no per-step alloc)
+    std::vector<ecs::Entity>   m_ccdCandidates;          // reused CCD broad-phase gather buffer
+    // Substep event-aggregation scratch (reused across frames; alloc-free after warmup).
+    FlatU64Map<bool> m_touchingBeforeFrame;
+    FlatU64Map<CollisionEvent> m_finalContactEvents;
     bool m_inSubstep = false;                             // recursion guard for substepping
 
     // Simulation-island scratch (rebuilt every step; never serialized). Union-find groups the
@@ -539,8 +644,13 @@ private:
     std::vector<std::vector<int>> m_islandJoints;         // joint indices per island
     std::vector<std::vector<int>> m_islandBodies;         // dynamic body indices per island
     std::unordered_map<int, int> m_rootToIsland;          // union-find root -> island slot
-    std::unordered_map<std::uint64_t, int> m_manifoldOf;
-    std::unordered_map<std::uint64_t, int> m_eventOf;
+    FlatU64Map<int> m_entityIsland;                        // Pass-5: entity -> island id (inspection)
+    // Pass-5: reused island-build scratch, so a settled scene allocates nothing per step.
+    FlatU64Map<int>   m_entToIdx;                          // entity id -> body index (joints)
+    FlatU64Map<char>  m_noCollisionJoints;                // pair key -> present (collideConnected=false)
+    std::vector<char> m_islandAwake;                       // per-island awake flag
+    FlatU64Map<int> m_manifoldOf;   // Pass-5: alloc-free clear (was std::unordered_map)
+    FlatU64Map<int> m_eventOf;
 };
 
 } // namespace engine

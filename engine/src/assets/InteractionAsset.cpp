@@ -34,6 +34,10 @@ const char* InteractionEasingName(InteractionEasing easing) {
     return "Smooth Step";
 }
 
+const char* InteractionInputModeName(InteractionInputMode mode) {
+    return mode == InteractionInputMode::Hold ? "Hold" : "Press";
+}
+
 void NormalizeInteractionAsset(InteractionAssetData& asset) {
     if (asset.name.empty()) asset.name = "InteractiveObject";
     asset.motion = static_cast<InteractionMotionType>(std::clamp(static_cast<int>(asset.motion), 0, 4));
@@ -49,7 +53,26 @@ void NormalizeInteractionAsset(InteractionAssetData& asset) {
     asset.closeDuration = std::clamp(asset.closeDuration, 0.01f, 3600.0f);
     asset.holdOpenTime = std::clamp(asset.holdOpenTime, 0.0f, 3600.0f);
     asset.interactionRange = std::clamp(asset.interactionRange, 0.01f, 10000.0f);
+    asset.facingAngleDegrees = std::clamp(asset.facingAngleDegrees, 1.0f, 180.0f);
+    asset.holdDuration = std::clamp(asset.holdDuration, 0.0f, 60.0f);
+    asset.inputMode = static_cast<InteractionInputMode>(
+        std::clamp(static_cast<int>(asset.inputMode), 0, 1));
+    if (asset.inputMode == InteractionInputMode::Press) asset.holdDuration = 0.0f;
     if (asset.prompt.empty()) asset.prompt = "Interact";
+    if (asset.unavailablePrompt.empty()) asset.unavailablePrompt = "Unavailable";
+    if (asset.inputAction.empty()) asset.inputAction = "Interact";
+    if (asset.animationCommitEvent.empty()) asset.animationCommitEvent = "InteractionCommit";
+    if (asset.startedEvent.empty()) asset.startedEvent = "InteractionStarted";
+    if (asset.completedEvent.empty()) asset.completedEvent = "InteractionCompleted";
+    if (asset.failedEvent.empty()) asset.failedEvent = "InteractionFailed";
+    asset.requiredConditionTags.erase(
+        std::remove_if(asset.requiredConditionTags.begin(), asset.requiredConditionTags.end(),
+                       [](const std::string& tag) { return tag.empty(); }),
+        asset.requiredConditionTags.end());
+    std::sort(asset.requiredConditionTags.begin(), asset.requiredConditionTags.end());
+    asset.requiredConditionTags.erase(
+        std::unique(asset.requiredConditionTags.begin(), asset.requiredConditionTags.end()),
+        asset.requiredConditionTags.end());
     if (asset.motion == InteractionMotionType::MovingPlatform) asset.loop = true;
 }
 
@@ -85,6 +108,7 @@ bool SaveInteractionAsset(const std::string& path, InteractionAssetData asset, s
     AddDependency(asset.header.dependencies, asset.lockedAudioId);
     AddDependency(asset.header.dependencies, asset.openAnimationId);
     AddDependency(asset.header.dependencies, asset.closeAnimationId);
+    AddDependency(asset.header.dependencies, asset.interactorAnimationId);
     std::error_code ec;
     std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
     std::ofstream out(path);
@@ -107,6 +131,17 @@ bool SaveInteractionAsset(const std::string& path, InteractionAssetData asset, s
     auto writeId = [&](AssetHandle id) { out << (id.Valid() ? id.ToString() : std::string("-")) << ' '; };
     writeId(asset.openAudioId); writeId(asset.closeAudioId); writeId(asset.lockedAudioId);
     writeId(asset.openAnimationId); writeId(asset.closeAnimationId); out << '\n';
+    out << static_cast<int>(asset.inputMode) << ' ' << asset.holdDuration << ' '
+        << asset.facingAngleDegrees << ' ' << asset.requireFacing << ' '
+        << asset.requireLineOfSight << ' ' << asset.lockInteractorMovement << ' '
+        << asset.waitForAnimationEvent << '\n';
+    out << std::quoted(asset.inputAction) << ' ' << std::quoted(asset.unavailablePrompt) << ' '
+        << std::quoted(asset.animationCommitEvent) << ' ' << std::quoted(asset.startedEvent) << ' '
+        << std::quoted(asset.completedEvent) << ' ' << std::quoted(asset.failedEvent) << '\n';
+    out << asset.requiredConditionTags.size();
+    for (const auto& tag : asset.requiredConditionTags) out << ' ' << std::quoted(tag);
+    out << '\n' << std::quoted(asset.interactorAnimationPath) << ' ';
+    writeId(asset.interactorAnimationId); out << '\n';
     if (!out) { Error(error, "Failed while writing interaction asset."); return false; }
     return true;
 }
@@ -119,7 +154,7 @@ bool LoadInteractionAsset(const std::string& path, InteractionAssetData* output,
     std::string magic, text;
     std::uint32_t version = 0;
     if (!(in >> magic >> version >> text) || magic != "3DG_INTERACTION" ||
-        version != kInteractionAssetVersion || !AssetHandle::Parse(text, &asset.header.id)) {
+        (version < 1 || version > kInteractionAssetVersion) || !AssetHandle::Parse(text, &asset.header.id)) {
         Error(error, "Invalid interaction asset header."); return false;
     }
     std::string deps;
@@ -149,6 +184,23 @@ bool LoadInteractionAsset(const std::string& path, InteractionAssetData* output,
     auto readId = [&](AssetHandle& id) { in >> text; if (text != "-" && !AssetHandle::Parse(text, &id)) in.setstate(std::ios::failbit); };
     readId(asset.openAudioId); readId(asset.closeAudioId); readId(asset.lockedAudioId);
     readId(asset.openAnimationId); readId(asset.closeAnimationId);
+    if (version >= 2) {
+        int inputMode = 0;
+        in >> inputMode >> asset.holdDuration >> asset.facingAngleDegrees
+           >> asset.requireFacing >> asset.requireLineOfSight >> asset.lockInteractorMovement
+           >> asset.waitForAnimationEvent;
+        asset.inputMode = static_cast<InteractionInputMode>(inputMode);
+        in >> std::quoted(asset.inputAction) >> std::quoted(asset.unavailablePrompt)
+           >> std::quoted(asset.animationCommitEvent) >> std::quoted(asset.startedEvent)
+           >> std::quoted(asset.completedEvent) >> std::quoted(asset.failedEvent);
+        std::size_t conditionCount = 0;
+        in >> conditionCount;
+        if (conditionCount > 64) { Error(error, "Interaction condition metadata is invalid."); return false; }
+        asset.requiredConditionTags.resize(conditionCount);
+        for (auto& tag : asset.requiredConditionTags) in >> std::quoted(tag);
+        in >> std::quoted(asset.interactorAnimationPath);
+        readId(asset.interactorAnimationId);
+    }
     if (!in) { Error(error, "Interaction asset is truncated or corrupt."); return false; }
     asset.header.type = AssetType::Interaction;
     asset.header.assetVersion = version;

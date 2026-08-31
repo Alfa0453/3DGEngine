@@ -4,6 +4,7 @@
 #include <engine/graphics/Primitives.h>
 #include <engine/gameplay/Script.h>
 #include <engine/gameplay/SaveGame.h>
+#include <engine/gameplay/SaveProfileSystem.h>
 #include <engine/gameplay/LuaScript.h>
 #include <engine/gameplay/GameplaySystems.h>
 #include <engine/gameplay/RagdollSystem.h>
@@ -749,6 +750,13 @@ void RuntimePlayerApp::ConfigurePhysics() {
     m_physics.sleepLinearVelocity    = env.physicsSleepLinearVelocity;
     m_physics.sleepAngularVelocity   = env.physicsSleepAngularVelocity;
     m_physics.timeToSleep            = env.physicsTimeToSleep;
+    // Pass-5 collision matrix: compile the loaded per-layer masks onto the world when enabled.
+    if (m_scene.physicsLayerMatrixEnabled) {
+        for (int i = 0; i < 32; ++i) m_physics.SetLayerCollisionMask(i, m_scene.physicsLayerMasks[i]);
+        m_physics.SetLayerMatrixActive(true);
+    } else {
+        m_physics.ResetLayerMatrix();
+    }
 }
 
 std::vector<engine::LightingTriangle> RuntimePlayerApp::GatherLightingTriangles() const {
@@ -2652,6 +2660,12 @@ void RuntimePlayerApp::OnUpdate(float dt) {
                     "Level streaming request failed: " + request.level
                     + " (" + m_streaming.LastError() + ")");
             }
+        }
+        if (HasPlayer()) {
+            std::string saveEvent;
+            if (engine::UpdateSaveProfile(m_registry, m_playerEntity, m_scenePath,
+                    gameDt, gameMode.Elapsed(), &saveEvent) && !saveEvent.empty())
+                m_runtimeWarnings.push_back(saveEvent);
         }
         // Script callbacks may have changed dilation or started a hit stop.
         gameDt = gameMode.ScaleDelta(dt);

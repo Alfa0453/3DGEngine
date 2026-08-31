@@ -825,6 +825,14 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         out << '\n';
     }
 
+    // Pass-5 collision matrix (runtime scene 114+): enabled flag + the 9 named-layer masks.
+    {
+        const EditorScene::Environment& env = scene.GetEnvironment();
+        out << "physics_matrix " << (env.physicsLayerMatrixEnabled ? 1 : 0);
+        for (int i = 0; i < 9; ++i) out << ' ' << env.physicsLayerMasks[i];
+        out << '\n';
+    }
+
     for (const EditorScene::Object& object : scene.Objects()) {
         if (object.materialParameterOverrides.empty() && !object.decal) continue;
         const bool hasAuthoredOpacity =

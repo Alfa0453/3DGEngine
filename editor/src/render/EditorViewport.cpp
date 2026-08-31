@@ -65,15 +65,23 @@ void DrawStencilSelectionOutline(engine::Shader& shader,
     glGetIntegerv(GL_STENCIL_PASS_DEPTH_FAIL, &stencilDepthFail);
     glGetIntegerv(GL_STENCIL_PASS_DEPTH_PASS, &stencilDepthPass);
 
-    glClearStencil(0);
-    glClear(GL_STENCIL_BUFFER_BIT);
+    const GLboolean depthTestEnabled = glIsEnabled(GL_DEPTH_TEST);
+
+    // --- Pass 1: mark the object's visible silhouette in the stencil buffer (no colour). ---
+    // Enable stencil test AND set the write mask to 0xFF BEFORE clearing: glClear obeys the current
+    // stencil write mask, so clearing while an inherited mask of 0 is bound silently does nothing --
+    // the buffer then holds stale values and the "border" pass below floods the whole object. The
+    // depth test must also be ON so REPLACE marks only the object's front-most (visible) fragments.
     glEnable(GL_STENCIL_TEST);
     glStencilMask(0xFF);
+    glClearStencil(0);
+    glClear(GL_STENCIL_BUFFER_BIT);
     glStencilFunc(GL_ALWAYS, 1, 0xFF);
     glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
-    glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
-    glDepthMask(GL_FALSE);
+    glEnable(GL_DEPTH_TEST);
     glDepthFunc(GL_LEQUAL);
+    glDepthMask(GL_FALSE);
+    glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
     glDisable(GL_CULL_FACE);
 
     shader.SetMat4("uModel", transform.Model() * modelOffset);
@@ -81,20 +89,24 @@ void DrawStencilSelectionOutline(engine::Shader& shader,
     shader.SetFloat("uThickness", 0.0f);
     drawGeometry();
 
+    // --- Pass 2: draw the shell expanded along normals, but ONLY where stencil != 1 (outside the
+    // silhouette) and with depth OFF so the rim isn't clipped by nearby geometry -> a clean edge. ---
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     glStencilMask(0x00);
     glStencilFunc(GL_NOTEQUAL, 1, 0xFF);
     glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
-    glEnable(GL_CULL_FACE);
-    glCullFace(GL_FRONT);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
     shader.SetFloat("uThickness", std::max(thickness, 1.0f));
     drawGeometry();
 
+    // --- Restore all touched state. ---
     glColorMask(colorMask[0], colorMask[1], colorMask[2], colorMask[3]);
     glDepthMask(depthWrite);
     glDepthFunc(depthFunc);
+    if (depthTestEnabled) glEnable(GL_DEPTH_TEST); else glDisable(GL_DEPTH_TEST);
     glCullFace(cullFace);
-    if (!cullEnabled) glDisable(GL_CULL_FACE);
+    if (cullEnabled) glEnable(GL_CULL_FACE); else glDisable(GL_CULL_FACE);
     glStencilMask(static_cast<GLuint>(stencilWriteMask));
     glStencilFunc(stencilFunc, stencilRef, static_cast<GLuint>(stencilValueMask));
     glStencilOp(stencilFail, stencilDepthFail, stencilDepthPass);

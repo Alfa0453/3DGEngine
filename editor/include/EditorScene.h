@@ -748,6 +748,12 @@ public:
         float physicsTimeToSleep = 0.5f;
         bool showPhysicsGuides = true;
         bool selectedPhysicsGuideOnly = false;
+        // Pass-5 collision matrix. physicsLayerMasks[i] = the layer bits layer i collides with
+        // (default all-ones). Only enforced when physicsLayerMatrixEnabled; kept symmetric by the
+        // editor grid. Compiled onto the PhysicsWorld at play start.
+        std::array<std::uint32_t, 32> physicsLayerMasks =
+            []{ std::array<std::uint32_t, 32> a; a.fill(0xFFFFFFFFu); return a; }();
+        bool physicsLayerMatrixEnabled = false;
     };
 
     struct GameModeSettings {

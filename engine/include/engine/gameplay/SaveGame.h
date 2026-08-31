@@ -24,6 +24,8 @@
 #include "engine/ecs/Components.h"
 #include "engine/gameplay/GameplayComponents.h"
 #include "engine/gameplay/AbilitySystem.h"
+#include "engine/gameplay/InventorySystem.h"
+#include "engine/gameplay/QuestSystem.h"
 #include "engine/gameplay/Script.h"
 
 #include <glm/glm.hpp>
@@ -77,10 +79,22 @@ struct EntitySaveState {
         int charges = 0;
     };
     std::vector<AbilityState> abilities;
+    std::string inventoryState;
+    std::string questState;
+};
+
+struct SaveCapturePolicy {
+    bool transforms = true;
+    bool health = true;
+    bool velocity = true;
+    bool abilities = true;
+    bool inventory = true;
+    bool quests = true;
+    bool scriptValues = true;
 };
 
 struct SaveGame {
-    static constexpr int kVersion = 2;
+    static constexpr int kVersion = 3;
 
     int          version = kVersion;
     std::string  displayName;                 // shown in the load menu
@@ -128,6 +142,7 @@ struct SaveGame {
                 out << ' ' << std::quoted(ability.path) << ' '
                     << std::quoted(ability.name) << ' ' << ability.cooldown << ' '
                     << ability.recharge << ' ' << ability.charges;
+            out << ' ' << std::quoted(e.inventoryState) << ' ' << std::quoted(e.questState);
             out << '\n';
         }
         return static_cast<bool>(out);
@@ -195,6 +210,9 @@ struct SaveGame {
                        >> ability.cooldown >> ability.recharge >> ability.charges;
                 if (!in) break;
             }
+            if (fileVersion >= 3)
+                in >> std::quoted(e.inventoryState) >> std::quoted(e.questState);
+            if (!in) break;
             out.entities.push_back(std::move(e));
         }
         return true;
@@ -218,43 +236,48 @@ inline void WriteSaveKeyValues(const std::unordered_map<std::string, std::string
 
 // Snapshot the persistent runtime state of every NAMED entity plus metadata + KV store.
 inline SaveGame CaptureSaveGame(ecs::Registry& registry, const std::string& scenePath,
-                                const std::string& displayName, float playtimeSeconds) {
+                                const std::string& displayName, float playtimeSeconds,
+                                const SaveCapturePolicy& policy = {}) {
     SaveGame save;
     save.displayName = displayName;
     save.scenePath = scenePath;
     save.playtimeSeconds = playtimeSeconds;
     save.timestamp = static_cast<std::int64_t>(std::time(nullptr));
-    save.values = ReadSaveKeyValues();
-    CaptureScriptPersistentStates(registry, save.values);
+    if (policy.scriptValues) {
+        save.values = ReadSaveKeyValues();
+        CaptureScriptPersistentStates(registry, save.values);
+    }
 
     registry.view<ecs::RuntimeName>().each(
         [&](ecs::Entity entity, ecs::RuntimeName& runtimeName) {
             if (runtimeName.value.empty()) return;
             EntitySaveState e;
             e.name = runtimeName.value;
-            if (const ecs::Transform* t = registry.TryGet<ecs::Transform>(entity)) {
+            if (policy.transforms) if (const ecs::Transform* t = registry.TryGet<ecs::Transform>(entity)) {
                 e.hasTransform = true;
                 e.position = t->position; e.scale = t->scale; e.rotation = t->rotation;
             }
-            if (const Health* h = registry.TryGet<Health>(entity)) {
+            if (policy.health) if (const Health* h = registry.TryGet<Health>(entity)) {
                 e.hasHealth = true; e.hp = h->hp; e.maxHp = h->maxHp; e.alive = h->alive;
             }
-            if (const ecs::LinearVelocity* lv = registry.TryGet<ecs::LinearVelocity>(entity)) {
+            if (policy.velocity) if (const ecs::LinearVelocity* lv = registry.TryGet<ecs::LinearVelocity>(entity)) {
                 e.hasLinearVelocity = true; e.linearVelocity = lv->velocity;
             }
-            if (const ecs::AngularVelocity* av = registry.TryGet<ecs::AngularVelocity>(entity)) {
+            if (policy.velocity) if (const ecs::AngularVelocity* av = registry.TryGet<ecs::AngularVelocity>(entity)) {
                 e.hasAngularVelocity = true; e.angularAxis = av->axis; e.angularRadians = av->radiansPerSecond;
             }
-            if (const AbilityResource* resource = registry.TryGet<AbilityResource>(entity)) {
+            if (policy.abilities) if (const AbilityResource* resource = registry.TryGet<AbilityResource>(entity)) {
                 e.hasAbilityResource = true;
                 e.mana = resource->mana; e.maxMana = resource->maxMana;
                 e.stamina = resource->stamina; e.maxStamina = resource->maxStamina;
             }
-            if (const AbilityComponent* abilities = registry.TryGet<AbilityComponent>(entity)) {
+            if (policy.abilities) if (const AbilityComponent* abilities = registry.TryGet<AbilityComponent>(entity)) {
                 for (const AbilitySlot& slot : abilities->abilities)
                     e.abilities.push_back({slot.assetPath, slot.asset.name,
                         slot.cooldownRemaining, slot.rechargeRemaining, slot.charges});
             }
+            if (policy.inventory) e.inventoryState = SerializeInventory(registry, entity);
+            if (policy.quests) e.questState = SerializeQuestState(registry, entity);
             save.entities.push_back(std::move(e));
         });
     return save;
@@ -317,6 +340,8 @@ inline void ApplySaveGame(ecs::Registry& registry, const SaveGame& save) {
                     slot->charges = savedAbility.charges;
                 }
             }
+            if (!e.inventoryState.empty()) RestoreInventory(registry, entity, e.inventoryState);
+            if (!e.questState.empty()) RestoreQuestState(registry, entity, e.questState);
         });
     RestoreScriptPersistentStates(registry, save.values);
 }

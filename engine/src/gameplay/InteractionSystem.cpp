@@ -21,9 +21,112 @@ std::string Resolve(const std::string& path) {
 }
 
 void Push(InteractiveMotionComponent& component, InteractionEventType type,
-          const std::string& audio = {}, const std::string& animation = {}) {
-    component.events.push_back({type, audio, animation});
+          const std::string& audio = {}, const std::string& animation = {},
+          const std::string& eventName = {}) {
+    component.events.push_back({type, audio, animation, eventName});
 }
+
+bool HasTag(const std::vector<std::string>& tags, const std::string& wanted) {
+    return std::find(tags.begin(), tags.end(), wanted) != tags.end();
+}
+}
+
+InteractionAvailability EvaluateInteraction(const InteractionAssetData& source,
+                                            bool runtimeLocked,
+                                            const InteractionQuery& query) {
+    InteractionAssetData asset = source;
+    NormalizeInteractionAsset(asset);
+    InteractionAvailability result;
+    result.prompt = asset.prompt;
+    const auto deny = [&](const std::string& reason) {
+        result.available = false; result.reason = reason;
+        result.prompt = asset.unavailablePrompt;
+    };
+    if (runtimeLocked && (asset.accessTag.empty() || query.accessTag != asset.accessTag)) {
+        deny("Required access tag is missing."); return result;
+    }
+    for (const auto& tag : asset.requiredConditionTags) {
+        if (!HasTag(query.conditionTags, tag)) {
+            deny("Missing condition: " + tag); return result;
+        }
+    }
+    const glm::vec3 toTarget = query.targetPosition - query.interactorPosition;
+    const float distance = glm::length(toTarget);
+    if (distance > asset.interactionRange) {
+        deny("Out of range."); return result;
+    }
+    if (asset.requireFacing && distance > 0.0001f) {
+        const glm::vec3 forward = glm::dot(query.interactorForward, query.interactorForward) > 0.000001f
+            ? glm::normalize(query.interactorForward) : glm::vec3(0.0f, 0.0f, -1.0f);
+        const float cosine = glm::dot(forward, toTarget / distance);
+        if (cosine < std::cos(glm::radians(asset.facingAngleDegrees))) {
+            deny("Interactor is not facing the target."); return result;
+        }
+    }
+    if (asset.requireLineOfSight && !query.hasLineOfSight) {
+        deny("Line of sight is blocked."); return result;
+    }
+    result.available = true;
+    return result;
+}
+
+InteractionAvailability QueryInteraction(const ecs::Registry& registry, ecs::Entity entity,
+                                         const InteractionQuery& source) {
+    const auto* c = registry.TryGet<InteractiveMotionComponent>(entity);
+    if (!c) return {false, "Unavailable", "Target has no interaction component."};
+    InteractionQuery query = source;
+    if (const auto* transform = registry.TryGet<ecs::Transform>(entity))
+        query.targetPosition = transform->position;
+    if (c->state == InteractionState::Disabled)
+        return {false, c->asset.unavailablePrompt, "Interaction is disabled."};
+    if (c->asset.oneShot && c->activatedOnce)
+        return {false, c->asset.unavailablePrompt, "Interaction was already used."};
+    return EvaluateInteraction(c->asset, c->locked, query);
+}
+
+bool RequestInteraction(ecs::Registry& registry, ecs::Entity entity,
+                        const InteractionQuery& query, float heldSeconds) {
+    auto* c = registry.TryGet<InteractiveMotionComponent>(entity);
+    if (!c) return false;
+    const InteractionAvailability availability = QueryInteraction(registry, entity, query);
+    if (!availability.available) {
+        c->inputHoldProgress = 0.0f;
+        c->lastFailureReason = availability.reason;
+        const bool accessDenied = availability.reason == "Required access tag is missing.";
+        Push(*c, accessDenied ? InteractionEventType::AccessDenied : InteractionEventType::ConditionFailed,
+             accessDenied ? c->asset.lockedAudioPath : std::string{}, {}, c->asset.failedEvent);
+        return false;
+    }
+    c->lastFailureReason.clear();
+    if (c->inputHoldProgress <= 0.0f)
+        Push(*c, InteractionEventType::Started, {}, c->asset.interactorAnimationPath,
+             c->asset.startedEvent);
+    if (c->asset.inputMode == InteractionInputMode::Hold) {
+        c->inputHoldProgress += std::max(0.0f, heldSeconds);
+        if (c->inputHoldProgress + 0.0001f < c->asset.holdDuration) return false;
+    }
+    c->inputHoldProgress = 0.0f;
+    if (c->asset.waitForAnimationEvent) {
+        c->awaitingAnimationCommit = true;
+        return true;
+    }
+    return OpenInteraction(registry, entity, query.accessTag);
+}
+
+void CancelInteractionRequest(ecs::Registry& registry, ecs::Entity entity) {
+    if (auto* c = registry.TryGet<InteractiveMotionComponent>(entity)) {
+        c->inputHoldProgress = 0.0f;
+        c->awaitingAnimationCommit = false;
+    }
+}
+
+bool SignalInteractionAnimationEvent(ecs::Registry& registry, ecs::Entity entity,
+                                     const std::string& eventName) {
+    auto* c = registry.TryGet<InteractiveMotionComponent>(entity);
+    if (!c || !c->awaitingAnimationCommit || eventName != c->asset.animationCommitEvent)
+        return false;
+    c->awaitingAnimationCommit = false;
+    return OpenInteraction(registry, entity, c->asset.accessTag);
 }
 
 const char* InteractionStateName(InteractionState state) {
@@ -89,7 +192,8 @@ bool OpenInteraction(ecs::Registry& registry, ecs::Entity entity, const std::str
     auto* c = registry.TryGet<InteractiveMotionComponent>(entity);
     if (!c || c->state == InteractionState::Disabled) return false;
     if (c->locked && (c->asset.accessTag.empty() || accessTag != c->asset.accessTag)) {
-        Push(*c, InteractionEventType::AccessDenied, c->asset.lockedAudioPath); return false;
+        Push(*c, InteractionEventType::AccessDenied, c->asset.lockedAudioPath, {},
+             c->asset.failedEvent); return false;
     }
     if (c->asset.oneShot && c->activatedOnce) return false;
     if (c->state == InteractionState::Open || c->state == InteractionState::Opening) return true;
@@ -151,6 +255,7 @@ void UpdateInteractions(ecs::Registry& registry, float deltaSeconds) {
                 if (c.alpha >= 1.0f) {
                     c.state = InteractionState::Open; c.holdRemaining = c.asset.holdOpenTime;
                     Push(c, InteractionEventType::Opened);
+                    Push(c, InteractionEventType::Completed, {}, {}, c.asset.completedEvent);
                 }
             } else if (c.state == InteractionState::Open && c.asset.autoClose && !c.asset.oneShot) {
                 c.holdRemaining -= dt;

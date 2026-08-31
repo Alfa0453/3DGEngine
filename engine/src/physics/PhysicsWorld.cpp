@@ -819,7 +819,7 @@ inline float NormalCoupling(const ContactManifold& m, int i, int j) {
 // restitution target, and warm-start from last step's cached impulses.
 void PrepareManifold(ContactManifold& m, Body& A, Body& B,
                      float restitutionThreshold,
-                     const std::unordered_map<std::uint64_t, ContactCache>& cache) {
+                     const FlatU64Map<ContactCache>& cache) {
     const glm::vec3 n = m.normal;
     BuildTangents(n, m.tangent1, m.tangent2);
 
@@ -851,8 +851,7 @@ void PrepareManifold(ContactManifold& m, Body& A, Body& B,
     // common non-bouncy case; Maximum lets a single bouncy surface dominate (Unity's default).
     const float e0 = ecs::CombineMaterial(A.c->restitution, B.c->restitution, restMode);
 
-    const auto it = cache.find(m.key);
-    const ContactCache* seed = (it != cache.end()) ? &it->second : nullptr;
+    const ContactCache* seed = cache.find(m.key);   // FlatU64Map::find returns ptr or nullptr
     // Restitution fires only on a fresh impact, never on a resting contact. m.restingContact is
     // set from a per-pair contact-age timer (see Step): a pair touching for several steps is
     // resting, so any closing speed now is the solver's own penetration-recovery noise, not a
@@ -1520,49 +1519,78 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
         // the contact set seen by gameplay last frame, then classify the final contact
         // set against it. Otherwise an overlap first found in substep 1 is incorrectly
         // exposed as Stay by the final substep and OnTriggerEnter never fires.
-        const auto touchingBeforeFrame = m_touching;
+        m_touchingBeforeFrame = m_touching;   // reuses the member's slab (no alloc after warmup)
         m_inSubstep = true;
         const float h = dt / static_cast<float>(substeps);
         for (int i = 0; i < substeps; ++i) Step(reg, h);
         m_inSubstep = false;
 
-        std::unordered_map<std::uint64_t, CollisionEvent> finalContactEvents;
-        finalContactEvents.reserve(m_events.size());
+        m_finalContactEvents.clear();
+        m_finalContactEvents.reserve(m_events.size());
         for (const CollisionEvent& event : m_events) {
             const std::uint64_t key = PairKey(event.a, event.b);
-            if (m_touching.find(key) != m_touching.end())
-                finalContactEvents[key] = event;
+            if (m_touching.contains(key)) m_finalContactEvents[key] = event;
         }
         m_events.clear();
-        m_events.reserve(m_touching.size() + touchingBeforeFrame.size());
-        for (const auto& contact : m_touching) {
+        m_events.reserve(m_touching.size() + m_touchingBeforeFrame.size());
+        m_touching.for_each([&](std::uint64_t key, bool& trigger) {
             CollisionEvent event;
-            const auto found = finalContactEvents.find(contact.first);
-            if (found != finalContactEvents.end()) event = found->second;
-            else {
-                event.a = Entity(contact.first >> 32);
-                event.b = Entity(contact.first & 0xFFFFFFFFu);
-            }
-            event.phase = touchingBeforeFrame.find(contact.first) != touchingBeforeFrame.end()
+            if (const CollisionEvent* found = m_finalContactEvents.find(key)) event = *found;
+            else { event.a = Entity(key >> 32); event.b = Entity(key & 0xFFFFFFFFu); }
+            event.phase = m_touchingBeforeFrame.contains(key)
                 ? CollisionEvent::Phase::Stay : CollisionEvent::Phase::Enter;
-            event.trigger = contact.second;
+            event.trigger = trigger;
             m_events.push_back(event);
-        }
-        for (const auto& oldContact : touchingBeforeFrame) {
-            if (m_touching.find(oldContact.first) != m_touching.end()) continue;
+        });
+        m_touchingBeforeFrame.for_each([&](std::uint64_t key, bool& trigger) {
+            if (m_touching.contains(key)) return;
             CollisionEvent event;
-            event.a = Entity(oldContact.first >> 32);
-            event.b = Entity(oldContact.first & 0xFFFFFFFFu);
+            event.a = Entity(key >> 32);
+            event.b = Entity(key & 0xFFFFFFFFu);
             event.phase = CollisionEvent::Phase::Exit;
-            event.trigger = oldContact.second;
+            event.trigger = trigger;
             m_events.push_back(event);
-        }
+        });
+        // Deterministic dispatch order (Phase 44): this per-frame aggregation path also built
+        // events from hash-map iteration; stable-sort by (a, b, phase) like the single-step path.
+        std::sort(m_events.begin(), m_events.end(), [](const CollisionEvent& x, const CollisionEvent& y) {
+            if (x.a != y.a) return x.a < y.a;
+            if (x.b != y.b) return x.b < y.b;
+            return static_cast<int>(x.phase) < static_cast<int>(y.phase);
+        });
         return;
     }
     const auto kStepStart = std::chrono::steady_clock::now();
     auto bodyView = reg.view<Transform, RigidBody>();
     auto colliderView = reg.view<Transform, Collider>();
     auto compoundView = reg.view<Transform, AdditionalColliders>();
+
+    // Pass-5 numerical safety (Phase 69): quarantine non-finite bodies BEFORE they reach the broad
+    // phase (a NaN position would make the grid's floor(pos/cell) undefined) or the solver (a NaN
+    // velocity propagates through every contact it touches). Zero the velocities, and reset a
+    // corrupted position/rotation to a safe value so the body is merely dropped in place rather than
+    // poisoning the whole simulation. Runs once per (sub)step; cheap single view pass.
+    if (sanitizeState) {
+        int quarantined = 0;
+        const auto finite3 = [](const glm::vec3& v) {
+            return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); };
+        bodyView.each([&](Entity, Transform& t, RigidBody& rb) {
+            bool bad = false;
+            if (!finite3(rb.velocity))        { rb.velocity = glm::vec3(0.0f); bad = true; }
+            if (!finite3(rb.angularVelocity)) { rb.angularVelocity = glm::vec3(0.0f); bad = true; }
+            if (!finite3(rb.accumForce))      { rb.accumForce = glm::vec3(0.0f); bad = true; }
+            if (!finite3(rb.accumTorque))     { rb.accumTorque = glm::vec3(0.0f); bad = true; }
+            const float ql = glm::length(t.rotation);
+            if (!std::isfinite(ql) || ql < 1e-6f) { t.rotation = glm::quat(1,0,0,0); bad = true; }
+            if (!finite3(t.position)) {           // unrecoverable -- drop it at the origin, stop it dead
+                t.position = glm::vec3(0.0f);
+                rb.velocity = glm::vec3(0.0f); rb.angularVelocity = glm::vec3(0.0f);
+                bad = true;
+            }
+            if (bad) ++quarantined;
+        });
+        m_stats.quarantinedBodies = quarantined;
+    }
     if (bodyView.empty() && colliderView.empty() && m_touching.empty()) {
         m_events.clear();
         m_stats = PhysicsStats{};   // empty world: zero the simulation counters
@@ -1574,6 +1602,7 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
 
     // 1) Integrate (semi-implicit Euler): velocity first, then position. A body
     //    with CCD enabled sweeps its motion and clamps to the first impact.
+    m_stats.ccdSweeps = 0; m_stats.ccdSkipped = 0;   // per-(sub)step CCD budget counters
     bodyView.each([&](Entity e, Transform& t, RigidBody& rb) {
         if (rb.kinematic) {
             // Driven purely by its own (scripted/animated) velocity: no gravity,
@@ -1607,22 +1636,33 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
                         + SweepRadiusOf(&collider));
                 }
             }
-            glm::vec3 n(0.0f);
-            // Only test colliders whose cells overlap the swept sphere AABB, using the grid
-            // from the previous step (valid here, before this step rebuilds it). Falls back
-            // to the exact full scan when the grid is unavailable.
-            std::vector<Entity> ccdCandidates;
-            const std::vector<Entity>* ccdPtr = nullptr;
-            if (m_broadphaseValid) {
-                const glm::vec3 mn = glm::min(start, end) - glm::vec3(r);
-                const glm::vec3 mx = glm::max(start, end) + glm::vec3(r);
-                if (GatherBroadphaseCandidates(mn, mx, ccdCandidates)) ccdPtr = &ccdCandidates;
-            }
-            const float toi = SweepToTOI(reg, e, start, end, r, n, ccdPtr);
-            if (toi < 1.0f) {
-                end = start + (end - start) * toi + n * 0.001f;
-                const float vn = glm::dot(rb.velocity, n);
-                if (vn < 0.0f) rb.velocity -= n * vn;
+            // Pass-5 early rejection (Phase 31): only sweep when the body moves far enough this step
+            // to risk tunnelling (> ccdMotionThreshold * its sweep radius). Slow CCD bodies -- a
+            // flagged crate sitting on the floor, a bullet at rest -- are resolved by the discrete
+            // narrow phase and skip the expensive continuous sweep. Fast movers still get exact CCD,
+            // so the tunnelling guarantee is preserved for the bodies that actually need it.
+            const float sweepDist = glm::length(end - start);
+            if (ccdMotionThreshold <= 0.0f || sweepDist > r * ccdMotionThreshold) {
+                glm::vec3 n(0.0f);
+                // Only test colliders whose cells overlap the swept sphere AABB, using the grid
+                // from the previous step (valid here, before this step rebuilds it). Falls back
+                // to the exact full scan when the grid is unavailable. m_ccdCandidates is reused
+                // across bodies/steps so a fast-mover scene allocates nothing here.
+                const std::vector<Entity>* ccdPtr = nullptr;
+                if (m_broadphaseValid) {
+                    const glm::vec3 mn = glm::min(start, end) - glm::vec3(r);
+                    const glm::vec3 mx = glm::max(start, end) + glm::vec3(r);
+                    if (GatherBroadphaseCandidates(mn, mx, m_ccdCandidates)) ccdPtr = &m_ccdCandidates;
+                }
+                const float toi = SweepToTOI(reg, e, start, end, r, n, ccdPtr);
+                ++m_stats.ccdSweeps;
+                if (toi < 1.0f) {
+                    end = start + (end - start) * toi + n * 0.001f;
+                    const float vn = glm::dot(rb.velocity, n);
+                    if (vn < 0.0f) rb.velocity -= n * vn;
+                }
+            } else {
+                ++m_stats.ccdSkipped;
             }
         }
         t.position    = end;
@@ -1830,20 +1870,27 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
     //    event is preserved without re-detecting.
     m_manifolds.clear();
     m_touchingNow.clear();
-    if (m_touchingNow.bucket_count() < m_pairs.size())
-        m_touchingNow.reserve(m_pairs.size());
+    m_touchingNow.reserve(m_pairs.size());
     SolverBody* base = m_bodies.data();
-    std::unordered_set<std::uint64_t> noCollisionJoints;
+    m_noCollisionJoints.clear();
     for (const Joint& joint : m_joints)
         if (!joint.collideConnected && joint.a != ecs::kNull && joint.b != ecs::kNull)
-            noCollisionJoints.insert(PairKey(joint.a, joint.b));
+            m_noCollisionJoints[PairKey(joint.a, joint.b)] = 1;
     for (const auto& pr : m_pairs) {
         SolverBody* A = &m_bodies[pr.first];
         SolverBody* B = &m_bodies[pr.second];
         if (A->e == B->e) continue; // shapes in one compound never collide together
         if (priority(A->c->shape) > priority(B->c->shape)) std::swap(A, B);
-        if (noCollisionJoints.find(PairKey(A->e, B->e)) != noCollisionJoints.end()) continue;
-        if (!LayersCollide(*A->c, *B->c)) continue;    // collision layer/mask filter
+        if (m_noCollisionJoints.contains(PairKey(A->e, B->e))) continue;
+        // Collision layer/mask filter, gated by the global collision matrix (Pass-5) when active.
+        // Inactive -> the original per-collider layer/mask test, byte-identical to before.
+        if (m_layerMatrixActive) {
+            const Collider& ca = *A->c; const Collider& cb = *B->c;
+            if ((ca.mask & MatrixMaskOf(ca.layer) & cb.layer) == 0u
+                || (cb.mask & MatrixMaskOf(cb.layer) & ca.layer) == 0u) continue;
+        } else if (!LayersCollide(*A->c, *B->c)) {
+            continue;
+        }
         // Trigger volumes are often moved directly by gameplay systems (for example
         // the character-controller proxy) and therefore do not need a RigidBody.
         // They still require overlap detection even when both participants would
@@ -1851,7 +1898,7 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
         const bool triggerPair = A->c->isTrigger || B->c->isTrigger;
         if (!triggerPair && Inactive(*A) && Inactive(*B)) {
             const std::uint64_t key = PairKey(A->e, B->e);
-            if (m_touching.find(key) != m_touching.end())
+            if (m_touching.contains(key))
                 m_touchingNow[key] = false;
             continue;
         }
@@ -1875,44 +1922,62 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
     // 5) Emit Enter/Stay/Exit events by diffing against last step. Solid contacts
     //    carry contact point + normal now; the impulse is filled in after the solve.
     m_manifoldOf.clear();    // pair key -> manifold index
-    if (m_manifoldOf.bucket_count() < m_manifolds.size())
-        m_manifoldOf.reserve(m_manifolds.size());
+    m_manifoldOf.reserve(m_manifolds.size());
     for (int mi = 0; mi < static_cast<int>(m_manifolds.size()); ++mi)
         m_manifoldOf[m_manifolds[mi].key] = mi;
     m_eventOf.clear();       // pair key -> event index (solids)
-    if (m_eventOf.bucket_count() < m_touchingNow.size())
-        m_eventOf.reserve(m_touchingNow.size());
+    m_eventOf.reserve(m_touchingNow.size());
 
     m_events.clear();
-    for (const auto& kv : m_touchingNow) {
-        const bool was = (m_touching.find(kv.first) != m_touching.end());
+    // Enter/Stay for every pair touching this step. Iteration order here is irrelevant -- the whole
+    // event list is stable-sorted below, which is what makes dispatch deterministic (Phase 44).
+    m_touchingNow.for_each([&](std::uint64_t key, bool& trigger) {
+        const bool was = m_touching.contains(key);
         CollisionEvent ev;
-        ev.a = Entity(kv.first >> 32);
-        ev.b = Entity(kv.first & 0xFFFFFFFFu);
+        ev.a = Entity(key >> 32);
+        ev.b = Entity(key & 0xFFFFFFFFu);
         ev.phase = was ? CollisionEvent::Phase::Stay : CollisionEvent::Phase::Enter;
-        ev.trigger = kv.second;
-        const auto mit = m_manifoldOf.find(kv.first);
-        if (mit != m_manifoldOf.end()) {
-            const ContactManifold& m = m_manifolds[mit->second];
+        ev.trigger = trigger;
+        const int* mit = m_manifoldOf.find(key);
+        if (mit) {
+            const ContactManifold& m = m_manifolds[*mit];
             ev.normal = m.normal;
             glm::vec3 avg(0.0f);
             for (int k = 0; k < m.count; ++k) avg += m.points[k];
             if (m.count > 0) avg /= static_cast<float>(m.count);
             ev.point = avg;
-            m_eventOf[kv.first] = static_cast<int>(m_events.size());   // impulse filled after solve
         }
         m_events.push_back(ev);
-    }
-    for (const auto& kv : m_touching) {
-        if (m_touchingNow.find(kv.first) == m_touchingNow.end()) {
+    });
+    // Exit for every pair that was touching last step but not this one.
+    m_touching.for_each([&](std::uint64_t key, bool& trigger) {
+        if (!m_touchingNow.contains(key)) {
             CollisionEvent ev;
-            ev.a = Entity(kv.first >> 32);
-            ev.b = Entity(kv.first & 0xFFFFFFFFu);
+            ev.a = Entity(key >> 32);
+            ev.b = Entity(key & 0xFFFFFFFFu);
             ev.phase = CollisionEvent::Phase::Exit;
-            ev.trigger = kv.second;
+            ev.trigger = trigger;
             m_events.push_back(ev);
         }
+    });
+    // Pass-5 determinism (Phase 44): the two loops above build m_events by iterating
+    // unordered_maps, so delivery order depends on hash-bucket layout -- non-deterministic across
+    // runs/platforms. Events are pure outputs (they never feed the solver), so a stable sort by
+    // (a, b, phase) makes gameplay event dispatch order deterministic without touching simulation
+    // results. m_eventOf (pair key -> event index, used to back-fill the impulse after the solve)
+    // is rebuilt to match the new order.
+    std::sort(m_events.begin(), m_events.end(), [](const CollisionEvent& x, const CollisionEvent& y) {
+        if (x.a != y.a) return x.a < y.a;
+        if (x.b != y.b) return x.b < y.b;
+        return static_cast<int>(x.phase) < static_cast<int>(y.phase);
+    });
+    m_eventOf.clear();
+    for (int ei = 0; ei < static_cast<int>(m_events.size()); ++ei) {
+        const CollisionEvent& ev = m_events[ei];
+        if (ev.phase != CollisionEvent::Phase::Exit && !ev.trigger)
+            m_eventOf[PairKey(ev.a, ev.b)] = ei;   // solids: impulse back-filled after the solve
     }
+
     m_touching.swap(m_touchingNow);   // m_touching = this step; old cleared next step
 
     // 6) Velocity solve: warm-started, accumulating sequential impulses over the
@@ -1930,14 +1995,17 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
     // 1-frame separations a bounce causes don't re-arm restitution on a settling stack, while a
     // truly airborne body (absent many frames) still ages out and bounces on its next landing.
     constexpr int kRestingAge = 3, kAgeCap = 8;
-    for (auto& kv : m_contactAge) kv.second -= 1;              // decay every tracked pair
+    m_contactAge.for_each([](std::uint64_t, int& v){ v -= 1; });   // decay every tracked pair
     for (ContactManifold& m : m_manifolds) {
         int& age = m_contactAge[m.key];                       // inserts 0 for a brand-new pair
         age = std::min(age + 2, kAgeCap);                     // net +1 for a touched pair
         m.restingContact = (age >= kRestingAge);
     }
-    for (auto it = m_contactAge.begin(); it != m_contactAge.end(); )  // prune faded pairs
-        it = (it->second <= 0) ? m_contactAge.erase(it) : std::next(it);
+    // Prune faded pairs. Collect keys first (a member scratch, so no per-step allocation), then
+    // erase -- erasing during for_each would backward-shift slots mid-iteration.
+    m_ageScratch.clear();
+    m_contactAge.for_each([&](std::uint64_t key, int& v){ if (v <= 0) m_ageScratch.push_back(key); });
+    for (std::uint64_t key : m_ageScratch) m_contactAge.erase(key);
     // --- Build simulation islands. Union-find over dynamic bodies connected by contacts and
     //     joints; static / kinematic bodies are boundaries and are never merged, so a shared
     //     static floor cannot join two unrelated stacks into one island. Sleeping dynamic
@@ -1966,12 +2034,11 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
         if (isDyn(pr.first) && isDyn(pr.second)
             && m_bodies[pr.first].rb->sleeping && m_bodies[pr.second].rb->sleeping)
             ufUnite(pr.first, pr.second);
-    std::unordered_map<Entity, int> entToIdx; entToIdx.reserve(static_cast<std::size_t>(numBodies));
-    for (int i = 0; i < numBodies; ++i) entToIdx[m_bodies[i].e] = i;
+    m_entToIdx.clear(); m_entToIdx.reserve(static_cast<std::size_t>(numBodies));
+    for (int i = 0; i < numBodies; ++i) m_entToIdx[m_bodies[i].e] = i;
     for (const Joint& j : m_joints) {
-        auto ia = entToIdx.find(j.a), ib = entToIdx.find(j.b);
-        if (ia != entToIdx.end() && ib != entToIdx.end() && isDyn(ia->second) && isDyn(ib->second))
-            ufUnite(ia->second, ib->second);
+        const int* ia = m_entToIdx.find(j.a); const int* ib = m_entToIdx.find(j.b);
+        if (ia && ib && isDyn(*ia) && isDyn(*ib)) ufUnite(*ia, *ib);
     }
 
     // Group into island slots (root -> slot); assign dynamic bodies, then their manifolds/joints.
@@ -1989,28 +2056,34 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
         m_islandBodies[id].clear(); m_islandManifolds[id].clear(); m_islandJoints[id].clear();
         return id;
     };
-    for (int i = 0; i < N; ++i) if (isDyn(i)) m_islandBodies[islandOf(i)].push_back(i);
+    m_entityIsland.clear();   // Pass-5: rebuild entity -> island map for the inspection accessors
+    for (int i = 0; i < N; ++i)
+        if (isDyn(i)) {
+            const int isl = islandOf(i);
+            m_islandBodies[isl].push_back(i);
+            m_entityIsland[static_cast<std::uint64_t>(m_bodies[i].e)] = isl;
+        }
     for (int mi = 0; mi < static_cast<int>(m_manifolds.size()); ++mi) {
         const ContactManifold& m = m_manifolds[mi];
         const int di = isDyn(m.a) ? m.a : (isDyn(m.b) ? m.b : -1);   // static-static skipped
         if (di >= 0) m_islandManifolds[islandOf(di)].push_back(mi);
     }
     for (int ji = 0; ji < static_cast<int>(m_joints.size()); ++ji) {
-        auto ia = entToIdx.find(m_joints[ji].a), ib = entToIdx.find(m_joints[ji].b);
+        const int* ia = m_entToIdx.find(m_joints[ji].a); const int* ib = m_entToIdx.find(m_joints[ji].b);
         int di = -1;
-        if (ia != entToIdx.end() && isDyn(ia->second)) di = ia->second;
-        else if (ib != entToIdx.end() && isDyn(ib->second)) di = ib->second;
+        if (ia && isDyn(*ia)) di = *ia;
+        else if (ib && isDyn(*ib)) di = *ib;
         if (di >= 0) m_islandJoints[islandOf(di)].push_back(ji);
     }
 
     // Wake propagation: if ANY body in an island is awake, wake the whole island (so an impulse
     // or a new contact on one body wakes every body constrained to it). Islands with no awake
     // body stay asleep and are skipped below.
-    std::vector<char> islandAwake(static_cast<std::size_t>(islandN), 0);
+    m_islandAwake.assign(static_cast<std::size_t>(islandN), 0);   // reuses capacity (no per-step alloc)
     for (int isl = 0; isl < islandN; ++isl) {
         bool anyAwake = false;
         for (int bi : m_islandBodies[isl]) if (!m_bodies[bi].rb->sleeping) { anyAwake = true; break; }
-        islandAwake[isl] = anyAwake ? 1 : 0;
+        m_islandAwake[isl] = anyAwake ? 1 : 0;
         if (anyAwake) for (int bi : m_islandBodies[isl]) Wake(m_bodies[bi]);
     }
 
@@ -2018,7 +2091,7 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
     // a static body live in the dynamic side's island; a manifold whose only dynamic side is in
     // a sleeping island is skipped with it.
     for (int isl = 0; isl < islandN; ++isl) {
-        if (!islandAwake[isl]) continue;
+        if (!m_islandAwake[isl]) continue;
         for (int mi : m_islandManifolds[isl])
             PrepareManifold(m_manifolds[mi], m_bodies[m_manifolds[mi].a], m_bodies[m_manifolds[mi].b],
                             restitutionThreshold, m_contactCache);
@@ -2027,7 +2100,7 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
     // Per-island velocity solve: each awake island is solved independently (structural
     // separation -- unrelated stacks never appear in the same constraint network).
     for (int isl = 0; isl < islandN; ++isl) {
-        if (!islandAwake[isl]) continue;
+        if (!m_islandAwake[isl]) continue;
         const auto& mans = m_islandManifolds[isl];
         const auto& jnts = m_islandJoints[isl];
         for (int ji : jnts) WarmStartJoint(reg, m_joints[ji]);   // apply last step's impulses once
@@ -2052,8 +2125,8 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
             total += m.normalImpulse[k];
         }
         m_contactCache[m.key] = cc;
-        const auto eit = m_eventOf.find(m.key);        // O(1) instead of scanning m_events
-        if (eit != m_eventOf.end()) m_events[eit->second].impulse = total;
+        const int* eit = m_eventOf.find(m.key);        // O(1) instead of scanning m_events
+        if (eit) m_events[*eit].impulse = total;
     }
 
     // 7) Split-impulse position solve: iterate a velocity-free position correction so
@@ -2061,7 +2134,7 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
     //    deepest residual overlap is within the slop.
     float maxPenBefore = 0.0f;
     for (int isl = 0; isl < islandN; ++isl) {
-        if (!islandAwake[isl]) continue;
+        if (!m_islandAwake[isl]) continue;
         for (int mi : m_islandManifolds[isl]) {
             ContactManifold& m = m_manifolds[mi];
             maxPenBefore = std::max(maxPenBefore, m.penetration);
@@ -2073,7 +2146,7 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
     // Each awake island runs its own position passes (with its own early-out), so a settled
     // island stops iterating while an active one keeps correcting.
     for (int isl = 0; isl < islandN; ++isl) {
-        if (!islandAwake[isl]) continue;
+        if (!m_islandAwake[isl]) continue;
         const auto& mans = m_islandManifolds[isl];
         const auto& jnts = m_islandJoints[isl];
         int run = 0;
@@ -2133,7 +2206,7 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
         const float thresh2  = sleepLinearVelocity * sleepLinearVelocity;
         const float aThresh2 = sleepAngularVelocity * sleepAngularVelocity;
         for (int isl = 0; isl < islandN; ++isl) {
-            if (!islandAwake[isl]) continue;               // already-asleep islands stay asleep
+            if (!m_islandAwake[isl]) continue;               // already-asleep islands stay asleep
             const auto& bodies = m_islandBodies[isl];
             bool allSlow = true;
             for (int bi : bodies) {
@@ -2158,7 +2231,7 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
     m_stats.islandCount = islandN;
     m_stats.awakeIslands = 0; m_stats.sleepingIslands = 0; m_stats.largestIslandBodies = 0;
     for (int isl = 0; isl < islandN; ++isl) {
-        if (islandAwake[isl]) ++m_stats.awakeIslands; else ++m_stats.sleepingIslands;
+        if (m_islandAwake[isl]) ++m_stats.awakeIslands; else ++m_stats.sleepingIslands;
         m_stats.largestIslandBodies = std::max(m_stats.largestIslandBodies,
                                                static_cast<int>(m_islandBodies[isl].size()));
     }
@@ -2332,17 +2405,24 @@ bool PhysicsWorld::GatherBroadphaseCandidates(const glm::vec3& mn, const glm::ve
         * static_cast<long long>(y1 - y0 + 1) * static_cast<long long>(z1 - z0 + 1);
     if (cellSpan < 0 || cellSpan > 200000) return false;
 
-    m_broadphaseScratch.clear();
+    // Pass-5: dedup body indices with a generation-stamp array instead of an unordered_set, whose
+    // clear() frees every node and whose insert() re-allocates one per body -- ~one heap alloc per
+    // body in the query region, on every query. The stamp vector is sized once to the body count
+    // and "cleared" in O(1) by bumping m_queryGen, so a warmed-up query allocates nothing here.
+    const int bodyCount = static_cast<int>(m_bodies.size());
+    if (static_cast<int>(m_seenGen.size()) < bodyCount) m_seenGen.assign(bodyCount, 0);
+    if (++m_queryGen == 0) { std::fill(m_seenGen.begin(), m_seenGen.end(), 0); m_queryGen = 1; }
     for (int ix = x0; ix <= x1; ++ix)
         for (int iy = y0; iy <= y1; ++iy)
             for (int iz = z0; iz <= z1; ++iz) {
                 const auto it = m_grid.find(CellKey(ix, iy, iz));
                 if (it == m_grid.end()) continue;
-                for (int bi : it->second) m_broadphaseScratch.insert(bi);
+                for (int bi : it->second)
+                    if (bi >= 0 && bi < bodyCount && m_seenGen[bi] != m_queryGen) {
+                        m_seenGen[bi] = m_queryGen;
+                        out.push_back(m_bodies[static_cast<std::size_t>(bi)].e);
+                    }
             }
-    const int bodyCount = static_cast<int>(m_bodies.size());
-    for (int bi : m_broadphaseScratch)
-        if (bi >= 0 && bi < bodyCount) out.push_back(m_bodies[static_cast<std::size_t>(bi)].e);
     // Infinite planes have no finite cell footprint and are never inserted into the grid,
     // so include them unconditionally -- a ray/sphere query can still hit a ground plane.
     for (int pi : m_planes)
@@ -2464,7 +2544,7 @@ RaycastHit PhysicsWorld::Raycast(ecs::Registry& reg, const Ray& ray, float maxDi
     // Broad-phase: for a bounded ray, gather only colliders whose grid cells overlap the
     // ray-segment AABB (a complete superset), else fall back to the exact full scan. The
     // exact test above is identical either way, so results are unchanged.
-    std::vector<Entity> candidates;
+    std::vector<Entity>& candidates = m_queryScratch;   // Pass-5: reused (see m_queryScratch note)
     bool accelerated = false;
     if (m_broadphaseValid && std::isfinite(maxDistance)) {
         const glm::vec3 a = ray.origin, b = ray.origin + d * maxDistance;
@@ -2621,7 +2701,7 @@ RaycastHit PhysicsWorld::SphereCast(ecs::Registry& reg,
 
     // Broad-phase: gather colliders whose grid cells overlap the swept-sphere AABB (start
     // sphere U end sphere) -- a complete superset; otherwise fall back to the full scan.
-    std::vector<Entity> candidates;
+    std::vector<Entity>& candidates = m_queryScratch;   // Pass-5: reused (see m_queryScratch note)
     bool accelerated = false;
     if (m_broadphaseValid) {
         const glm::vec3 mn = glm::min(start, end) - glm::vec3(sweepRadius);
@@ -2825,6 +2905,57 @@ glm::vec3 PhysicsWorld::ClosestPoint(ecs::Registry& reg, const glm::vec3& point,
     }
 }
 
+std::uint64_t PhysicsWorld::StateHash(ecs::Registry& registry) const {
+    struct Row { std::uint32_t e; float v[13]; int sleeping; };
+    std::vector<Row> rows;
+    registry.view<Transform, RigidBody>().each(
+        [&](Entity e, Transform& t, RigidBody& rb) {
+            rows.push_back(Row{ static_cast<std::uint32_t>(e),
+                { t.position.x, t.position.y, t.position.z,
+                  t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w,
+                  rb.velocity.x, rb.velocity.y, rb.velocity.z,
+                  rb.angularVelocity.x, rb.angularVelocity.y, rb.angularVelocity.z },
+                rb.sleeping ? 1 : 0 });
+        });
+    // Sort by entity id so the digest never depends on ECS iteration order (Phase 44).
+    std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b){ return a.e < b.e; });
+    std::uint64_t h = 1469598103934665603ull;                       // FNV-1a offset basis
+    const auto mix = [&h](std::uint64_t v){ h ^= v; h *= 1099511628211ull; };
+    for (const Row& r : rows) {
+        mix(r.e);
+        for (float f : r.v) mix(static_cast<std::uint64_t>(std::llround(f * 10000.0f)));  // quantize 1e-4
+        mix(static_cast<std::uint64_t>(r.sleeping));
+    }
+    return h;
+}
+
+std::vector<PhysicsWorld::ContactInfo> PhysicsWorld::ContactsForEntity(ecs::Entity e) const {
+    // Scan the last step's cached manifolds for those touching `e`. Impulses were back-filled by
+    // the solve, so normalImpulse is the impact force and frictionImpulse the tangential magnitude.
+    std::vector<ContactInfo> out;
+    for (const ContactManifold& m : m_manifolds) {
+        if (m.a < 0 || m.b < 0 || m.a >= static_cast<int>(m_bodies.size())
+            || m.b >= static_cast<int>(m_bodies.size())) continue;
+        const ecs::Entity ea = m_bodies[m.a].e, eb = m_bodies[m.b].e;
+        if (ea != e && eb != e) continue;
+        ContactInfo info;
+        info.other = (ea == e) ? eb : ea;
+        info.normal = m.normal;
+        info.penetration = m.penetration;
+        glm::vec3 avg(0.0f);
+        for (int k = 0; k < m.count; ++k) {
+            avg += m.points[k];
+            info.normalImpulse += m.normalImpulse[k];
+            info.frictionImpulse += std::sqrt(m.tangentImpulse[k][0] * m.tangentImpulse[k][0]
+                                            + m.tangentImpulse[k][1] * m.tangentImpulse[k][1]);
+        }
+        if (m.count > 0) avg /= static_cast<float>(m.count);
+        info.point = avg;
+        out.push_back(info);
+    }
+    return out;
+}
+
 std::vector<ecs::Entity> PhysicsWorld::OverlapSphere(ecs::Registry& reg,
                                                      const glm::vec3& center, float radius,
                                                      std::uint32_t layerMask) const {
@@ -2917,7 +3048,7 @@ std::vector<ecs::Entity> PhysicsWorld::OverlapSphere(ecs::Registry& reg,
 
     // Broad-phase: gather colliders whose grid cells overlap the query-sphere AABB (a
     // complete superset); otherwise fall back to the exact full scan.
-    std::vector<Entity> candidates;
+    std::vector<Entity>& candidates = m_queryScratch;   // Pass-5: reused (see m_queryScratch note)
     bool accelerated = false;
     if (m_broadphaseValid) {
         if (GatherBroadphaseCandidates(center - glm::vec3(r), center + glm::vec3(r), candidates)) {

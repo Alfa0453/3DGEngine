@@ -182,6 +182,12 @@ private:
     static int ApiToggleInteraction(lua_State* state);
     static int ApiSetInteractionLocked(lua_State* state);
     static int ApiInteractionState(lua_State* state);
+    static int ApiCanInteract(lua_State* state);
+    static int ApiInteractionPrompt(lua_State* state);
+    static int ApiRequestInteraction(lua_State* state);
+    static int ApiSignalInteractionEvent(lua_State* state);
+    static int ApiCancelInteractionInput(lua_State* state);
+    static int ApiWasInteractionEvent(lua_State* state);
     static int ApiUsePortal(lua_State* state);
     static int ApiIsPortalReady(lua_State* state);
     static int ApiGrantQuest(lua_State* state);
@@ -223,6 +229,8 @@ private:
     static int ApiIsCombatStaggered(lua_State* state);
     static int ApiCombatStep(lua_State* state);
     static int ApiConfigureSpawnManager(lua_State* state);
+    static int ApiConfigureSaveProfile(lua_State* state);
+    static int ApiRespawnFromCheckpoint(lua_State* state);
     static int ApiStartSpawn(lua_State* state);
     static int ApiStopSpawn(lua_State* state);
     static int ApiResetSpawn(lua_State* state);

@@ -61,6 +61,7 @@ public:
         Item,
         Combat,
         Spawn,
+        SaveProfile,
         Other
     };
 

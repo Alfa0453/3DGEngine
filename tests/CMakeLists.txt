@@ -525,6 +525,15 @@ else()
 endif()
 add_test(NAME spawn_system_regression COMMAND spawn_system_tests)
 
+add_executable(save_profile_tests save_profile_tests.cpp)
+target_link_libraries(save_profile_tests PRIVATE engine)
+if(MSVC)
+    target_compile_options(save_profile_tests PRIVATE /W4)
+else()
+    target_compile_options(save_profile_tests PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+add_test(NAME save_profile_regression COMMAND save_profile_tests)
+
 add_executable(editor_scene_hierarchy_tests
     editor_scene_hierarchy_tests.cpp
     ${CMAKE_SOURCE_DIR}/editor/src/scene/EditorScene.cpp)
