@@ -567,6 +567,15 @@ public:
     Joint& LastJoint() { return m_joints.back(); }
     bool   HasJoints() const { return !m_joints.empty(); }
 
+    // ECS Pass 5: read-only accessors for ValidateECS bridge hooks. Enumerate the joints and the
+    // entities that currently own a static-collider proxy so the validator can flag any that name a
+    // dead entity (stale bridge). Read-only; the returned handles are never dereferenced here.
+    const std::vector<Joint>& Joints() const { return m_joints; }
+    template <class F> void ForEachStaticProxyEntity(F&& fn) const {
+        for (const auto& kv : m_staticCache) fn(kv.first);
+    }
+    std::size_t StaticProxyCount() const { return m_staticCache.size(); }
+
 private:
     void RecordDebugTrace(const DebugTrace& trace) const;
     mutable PhysicsStats                    m_stats;     // transient instrumentation (never serialized)

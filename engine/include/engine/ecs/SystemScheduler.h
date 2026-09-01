@@ -136,6 +136,7 @@ struct ScheduleContext {
     Registry&        reg;
     CommandRecorder& cmd;    // record structural changes here (deferred, merged at barrier)
     int              worker = 0;
+    float            dt = 0.0f;   // per-run delta time (fixed step), for time-stepped systems
 };
 
 struct SystemDescriptor {
@@ -182,17 +183,18 @@ public:
 
     // Serial execution: exactly phase order, then registration order within a phase. Reproduces the
     // current engine behavior. This is the default and the correctness reference.
-    void RunSerial(Registry& reg) { SerialJobRunner r; RunWith(reg, r); }
+    void RunSerial(Registry& reg, float dt = 0.0f) { SerialJobRunner r; RunWith(reg, r, dt); }
 
     // Parallel execution with `workers` transient threads. Conflict-free + ParallelSafe systems in
     // the same phase may overlap; everything else stays serialized in registration order. Results
     // are guaranteed identical to RunSerial (see header notes).
-    void RunParallel(Registry& reg, unsigned workers) {
-        if (workers <= 1) { RunSerial(reg); return; }
-        ThreadJobRunner r(workers); RunWith(reg, r);
+    void RunParallel(Registry& reg, unsigned workers, float dt = 0.0f) {
+        if (workers <= 1) { RunSerial(reg, dt); return; }
+        ThreadJobRunner r(workers); RunWith(reg, r, dt);
     }
 
-    void RunWith(Registry& reg, JobRunner& runner) {
+    void RunWith(Registry& reg, JobRunner& runner, float dt = 0.0f) {
+        m_dt = dt;
         for (std::uint8_t ph = 0; ph < static_cast<std::uint8_t>(SystemPhase::Count); ++ph)
             RunPhase(reg, runner, static_cast<SystemPhase>(ph));
     }
@@ -271,8 +273,9 @@ private:
                 CommandRecorder& rec = recorders[recIndex[idx]];
                 SystemDescriptor& s = m_systems[idx];
                 const int w = worker++;
-                jobs.push_back([&reg, &rec, &s, w] {
-                    if (s.run) { ScheduleContext ctx{reg, rec, w}; s.run(ctx); }
+                const float dt = m_dt;
+                jobs.push_back([&reg, &rec, &s, w, dt] {
+                    if (s.run) { ScheduleContext ctx{reg, rec, w, dt}; s.run(ctx); }
                 });
             }
             runner.RunJobs(jobs);
@@ -291,6 +294,7 @@ private:
     }
 
     std::vector<SystemDescriptor> m_systems;
+    float m_dt = 0.0f;   // delta time for the current Run (threaded into ScheduleContext)
 };
 
 } // namespace ecs
