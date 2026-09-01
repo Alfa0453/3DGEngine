@@ -46,7 +46,7 @@ struct CharacterAttachment {
 };
 
 struct CharacterAsset {
-    int version = 27;
+    int version = 29;
     engine::AssetHandle assetId;
     std::string name = "Character";
     std::string modelAssetPath;
@@ -56,6 +56,8 @@ struct CharacterAsset {
     std::string animationGraphPath;                          // .3dggraph supplying ALL animation (clips + logic)
     engine::AssetHandle animationGraphAssetId;
     engine::ecs::FootIKSettings footIK;                      // grounded foot placement (opt-in)
+    std::string ikRigPath;
+    engine::AssetHandle ikRigAssetId;
     std::vector<std::string> actionClipAssets;               // standalone action .3dgclip assets
     std::vector<engine::AssetHandle> actionClipAssetIds;
     std::vector<CharacterAnimationSource> animationSources;  // legacy inline clips (used only when no graph is set)

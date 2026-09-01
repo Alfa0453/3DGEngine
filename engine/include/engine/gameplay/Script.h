@@ -344,6 +344,13 @@ protected:
     void CancelInteractionInput(ecs::Entity target);
     bool WasInteractionEvent(const std::string& eventName,
                              ecs::Entity target = ecs::kNull);
+    bool ConfigureIKRig(const std::string& assetPath, ecs::Entity target = ecs::kNull);
+    bool SetIKTarget(const std::string& goalName, const glm::vec3& worldTarget,
+                     float weight = 1.0f, ecs::Entity target = ecs::kNull);
+    bool ClearIKTarget(const std::string& goalName, ecs::Entity target = ecs::kNull);
+    bool SetIKWeight(const std::string& goalName, float weight,
+                     ecs::Entity target = ecs::kNull);
+    bool HasIKGoal(const std::string& goalName, ecs::Entity target = ecs::kNull) const;
     bool UsePortal(ecs::Entity portal, const std::string& accessTag = {});
     bool IsPortalReady(ecs::Entity portal) const;
     bool GrantQuest(const std::string& assetPath);

@@ -62,6 +62,7 @@ public:
         Combat,
         Spawn,
         SaveProfile,
+        IKRig,
         Other
     };
 

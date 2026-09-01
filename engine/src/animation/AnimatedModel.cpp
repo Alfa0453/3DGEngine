@@ -38,6 +38,111 @@ glm::quat QuatFromWorld(const glm::mat4& m) {
     return glm::quat_cast(r);
 }
 
+glm::quat IKRotationBetween(glm::vec3 from, glm::vec3 to) {
+    if (glm::dot(from, from) < 1.0e-12f || glm::dot(to, to) < 1.0e-12f)
+        return glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+    from = glm::normalize(from); to = glm::normalize(to);
+    const float dot = glm::clamp(glm::dot(from, to), -1.0f, 1.0f);
+    if (dot > 1.0f - 1.0e-6f) return glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+    if (dot < -1.0f + 1.0e-6f) {
+        glm::vec3 axis = glm::cross(from, glm::vec3(1.0f, 0.0f, 0.0f));
+        if (glm::dot(axis, axis) < 1.0e-6f) axis = glm::cross(from, glm::vec3(0.0f, 1.0f, 0.0f));
+        return glm::angleAxis(3.14159265358979323846f, glm::normalize(axis));
+    }
+    const glm::vec3 cross = glm::cross(from, to);
+    return glm::normalize(glm::quat(1.0f + dot, cross.x, cross.y, cross.z));
+}
+
+void ApplyAuthoredIK(AnimatedModel& am, const ecs::Transform& transform,
+                     const Skeleton& skeleton, std::vector<BoneLocal>& local, float dt) {
+    if (am.ikRig.goals.empty() || local.size() != skeleton.bones.size()) return;
+    const std::size_t count = local.size();
+    std::vector<glm::mat4> world(count, glm::mat4(1.0f));
+    const auto composeWorld = [&]() {
+        for (std::size_t i = 0; i < count; ++i) {
+            const auto& bone = local[i];
+            const glm::mat4 localMatrix = glm::translate(glm::mat4(1.0f), bone.pos)
+                * glm::mat4_cast(bone.rot) * glm::scale(glm::mat4(1.0f), bone.scale);
+            const int parent = skeleton.bones[i].parent;
+            world[i] = parent >= 0 ? world[static_cast<std::size_t>(parent)] * localMatrix : localMatrix;
+        }
+    };
+    composeWorld();
+    const glm::mat4 character = transform.Model();
+    const glm::mat4 sceneFromAnimation = character * am.renderOffset * skeleton.globalInverse;
+    const glm::mat4 animationFromScene = glm::inverse(sceneFromAnimation);
+
+    for (auto& runtime : am.ikRig.goals) {
+        const auto& goal = runtime.definition;
+        const float weight = glm::clamp(goal.weight * runtime.runtimeWeight, 0.0f, 1.0f);
+        if (!goal.enabled || weight <= 0.0f || runtime.root < 0
+            || runtime.root >= static_cast<int>(count)) continue;
+        const glm::vec3 authoredTarget = glm::vec3(character * glm::vec4(goal.targetOffset, 1.0f));
+        const glm::vec3 requestedTarget = runtime.targetSet ? runtime.targetWorld : authoredTarget;
+        if (!runtime.smoothingInitialized) {
+            runtime.smoothedTargetWorld = requestedTarget; runtime.smoothingInitialized = true;
+        } else {
+            const float alpha = goal.interpolationSpeed <= 0.0f ? 1.0f
+                : 1.0f - std::exp(-goal.interpolationSpeed * std::max(dt, 0.0f));
+            runtime.smoothedTargetWorld = glm::mix(runtime.smoothedTargetWorld, requestedTarget, alpha);
+        }
+        const glm::vec3 target = glm::vec3(animationFromScene
+            * glm::vec4(runtime.smoothedTargetWorld, 1.0f));
+
+        if (goal.type == IKGoalType::TwoBone) {
+            if (runtime.mid < 0 || runtime.end < 0 || runtime.mid >= static_cast<int>(count)
+                || runtime.end >= static_cast<int>(count)) continue;
+            const glm::vec3 rootPosition(world[static_cast<std::size_t>(runtime.root)][3]);
+            const glm::vec3 midPosition(world[static_cast<std::size_t>(runtime.mid)][3]);
+            const glm::vec3 endPosition(world[static_cast<std::size_t>(runtime.end)][3]);
+            const glm::vec3 poleScene = glm::vec3(character * glm::vec4(goal.poleOffset, 1.0f));
+            const glm::vec3 pole = glm::vec3(animationFromScene * glm::vec4(poleScene, 1.0f));
+            const auto solved = Animator::SolveTwoBoneIK(rootPosition, midPosition, endPosition,
+                                                         target, pole);
+            const int rootParent = skeleton.bones[static_cast<std::size_t>(runtime.root)].parent;
+            const glm::quat parentRotation = rootParent >= 0
+                ? QuatFromWorld(world[static_cast<std::size_t>(rootParent)])
+                : glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+            const glm::quat oldRootWorld = QuatFromWorld(world[static_cast<std::size_t>(runtime.root)]);
+            const glm::quat newRootWorld = glm::normalize(solved.upper * oldRootWorld);
+            const glm::quat newRootLocal = glm::normalize(glm::inverse(parentRotation) * newRootWorld);
+            local[static_cast<std::size_t>(runtime.root)].rot = glm::normalize(glm::slerp(
+                local[static_cast<std::size_t>(runtime.root)].rot, newRootLocal, weight));
+            composeWorld();
+            const int midParent = skeleton.bones[static_cast<std::size_t>(runtime.mid)].parent;
+            const glm::quat midParentRotation = midParent >= 0
+                ? QuatFromWorld(world[static_cast<std::size_t>(midParent)])
+                : glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+            const glm::quat oldMidWorld = QuatFromWorld(world[static_cast<std::size_t>(runtime.mid)]);
+            const glm::quat newMidWorld = glm::normalize(solved.lower * oldMidWorld);
+            const glm::quat newMidLocal = glm::normalize(glm::inverse(midParentRotation) * newMidWorld);
+            local[static_cast<std::size_t>(runtime.mid)].rot = glm::normalize(glm::slerp(
+                local[static_cast<std::size_t>(runtime.mid)].rot, newMidLocal, weight));
+            composeWorld();
+            continue;
+        }
+
+        const glm::vec3 bonePosition(world[static_cast<std::size_t>(runtime.root)][3]);
+        const glm::vec3 direction = target - bonePosition;
+        if (glm::dot(direction, direction) < 1.0e-10f) continue;
+        const glm::quat oldWorldRotation = QuatFromWorld(world[static_cast<std::size_t>(runtime.root)]);
+        glm::quat delta = IKRotationBetween(oldWorldRotation * goal.forwardAxis, direction);
+        const float angle = 2.0f * std::acos(glm::clamp(std::abs(delta.w), 0.0f, 1.0f));
+        const float maximum = glm::radians(goal.maxAngleDegrees);
+        if (angle > maximum && angle > 1.0e-5f)
+            delta = glm::slerp(glm::quat(1.0f, 0.0f, 0.0f, 0.0f), delta, maximum / angle);
+        const glm::quat newWorldRotation = glm::normalize(delta * oldWorldRotation);
+        const int parent = skeleton.bones[static_cast<std::size_t>(runtime.root)].parent;
+        const glm::quat parentRotation = parent >= 0
+            ? QuatFromWorld(world[static_cast<std::size_t>(parent)])
+            : glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+        const glm::quat newLocal = glm::normalize(glm::inverse(parentRotation) * newWorldRotation);
+        local[static_cast<std::size_t>(runtime.root)].rot = glm::normalize(glm::slerp(
+            local[static_cast<std::size_t>(runtime.root)].rot, newLocal, weight));
+        composeWorld();
+    }
+}
+
 // Grounded foot placement, run on the final local pose just before Compose. Opt-in via
 // am.footIK.enabled + a groundQuery; a no-op otherwise so existing characters are untouched.
 void ApplyFootIK(AnimatedModel& am, const ecs::Transform& transform, const Skeleton& skel,
@@ -477,6 +582,9 @@ void UpdateAnimations(ecs::Registry& reg, float dt) {
                 }
             }
         }
+
+        // Reusable rig goals run after animation layers and before terrain foot placement.
+        ApplyAuthoredIK(am, transform, skel, local, dt);
 
         // Grounded foot placement (opt-in). Runs on the final local pose so it plants the
         // feet of whatever locomotion/action is playing, then the hierarchy is composed.

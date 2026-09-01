@@ -47,8 +47,8 @@ Status legend:
 | 28 | **COMPLETE** | Spawn Manager | Spawn volumes, weighted groups, waves, pooling, difficulty scaling, and encounter controls. |
 | 29 | **COMPLETE** | Checkpoint and Save Editor | Visual configuration of persisted player, quest, world, and streamed-level state. |
 | 30 | **COMPLETE** | Interaction Editor | Prompts, ranges, inputs, conditions, animation requirements, and interaction events. |
-| 31 | **NEXT** | IK Rig Editor | Foot placement, hand targets, look-at, weapon alignment, aiming, and terrain adaptation. |
-| 32 | PLANNED | Animation Timeline Editor | Clip trimming, looping, root motion, curves, events, additive setup, and playback ranges. |
+| 31 | **COMPLETE** | IK Rig Editor | Foot placement, hand targets, look-at, weapon alignment, aiming, and terrain adaptation. |
+| 32 | **NEXT** | Animation Timeline Editor | Clip trimming, looping, root motion, curves, events, additive setup, and playback ranges. |
 | 33 | PLANNED | Pose Library | Saves, previews, mirrors, blends, tags, and reuses skeletal poses. |
 | 34 | PLANNED | Character Equipment Editor | Equips weapons, armor, staffs, props, audio, and effects through sockets. |
 | 35 | PLANNED | Render Debugger | Inspects render passes, depth, normals, material buffers, shadow maps, and draw calls. |
@@ -493,7 +493,22 @@ named started/completed/failed events, and an editor availability debugger. The 
 rules are evaluated by the runtime, native C++ scripts, and Lua scripts. Version-1 assets
 remain loadable and are resaved as version 2.
 
-## Next Milestone: IK Rig Editor
+## Completed Milestone: IK Rig Editor
 
-Planned scope: reusable IK rigs for feet, hands, look-at, weapon alignment, aiming,
-terrain adaptation, preview, runtime solving, and character integration.
+Delivered under Animation as engine-owned `.3dgikrig` assets. The editor provides a
+searchable skeletal-model picker, humanoid auto setup, editable foot chains, two-bone
+hand/leg goals, constrained look-at, aim and weapon-alignment goals, target and pole
+offsets, weights, angle limits, smoothing, validation, and a skeleton/goal preview.
+Rigs can be applied directly to a selected skeletal object or assigned through the
+Character Editor's searchable IK Rig field. Stable references persist through editor
+and packaged runtime scenes. Native C++ and Lua scripts can configure rigs, set and
+clear world targets, blend goal weights, and query goal availability. Focused asset,
+solver, registry, scene, editor, and packaged-player verification covers the feature.
+
+See [IK Rig Editor Guide](IK_RIG_EDITOR_GUIDE.md) for the authoring workflow and
+script examples.
+
+## Next Milestone: Animation Timeline Editor
+
+Planned scope: clip trimming, playback ranges, looping, root-motion inspection,
+curves, notifies/events, additive setup, and animation preview controls.

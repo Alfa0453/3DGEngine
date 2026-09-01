@@ -85,6 +85,7 @@ public:
         CombatEditor,
         SpawnManager,
         CheckpointSave,
+        IKRigEditor,
         Count
     };
 

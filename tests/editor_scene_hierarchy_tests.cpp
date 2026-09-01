@@ -59,6 +59,9 @@ int main() {
     head.localPosition = glm::vec3(0.0f, 1.45f, 0.0f);
     Require(scene.SetSelectedColliders({torso, head}),
             "scene object should accept an authored collider set");
+    const engine::AssetHandle ikRigId = engine::AssetHandle::Generate();
+    Require(scene.SetSelectedIKRig("GameAssets/Animation/IKRigs/Wizard.3dgikrig", ikRigId),
+            "scene object should accept an authored IK rig reference");
 
     const std::filesystem::path path =
         std::filesystem::temp_directory_path() / "3dg_hierarchy_groups.scene";
@@ -78,6 +81,10 @@ int main() {
             && loaded.Objects()[1].additionalColliders[0].localPosition
                 == head.localPosition,
             "compound colliders must persist with the scene object");
+    Require(loaded.Objects()[1].ikRigPath
+                == "GameAssets/Animation/IKRigs/Wizard.3dgikrig"
+            && loaded.Objects()[1].ikRigAssetId == ikRigId,
+            "IK rig path and stable identity must persist with the scene object");
     std::error_code ec;
     std::filesystem::remove(path, ec);
     std::cout << "Editor scene hierarchy tests passed\n";

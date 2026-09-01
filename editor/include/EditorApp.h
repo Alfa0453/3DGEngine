@@ -87,6 +87,7 @@
 #include "CombatEditorPanel.h"
 #include "SpawnManagerPanel.h"
 #include "CheckpointSaveEditorPanel.h"
+#include "IKRigEditorPanel.h"
 #include "TerrainCreatorPanel.h"
 #include "ModularPlacementPanel.h"
 #include "PrefabPalettePanel.h"
@@ -283,6 +284,7 @@ private:
     void DrawCombatEditorPanel();
     void DrawSpawnManagerPanel();
     void DrawCheckpointSaveEditorPanel();
+    void DrawIKRigEditorPanel();
     void GenerateDestructionPreview();
     int DeleteDestructionPreview(const std::string& name);
     bool CreatePartitionCellFromSelection(const std::string& path, int cellX, int cellZ);
@@ -753,6 +755,7 @@ private:
     CombatEditorPanel                    m_combatEditor;
     SpawnManagerPanel                    m_spawnManager;
     CheckpointSaveEditorPanel            m_checkpointSaveEditor;
+    IKRigEditorPanel                     m_ikRigEditor;
     LevelVariantPanel                    m_levelVariants;
     LevelLayersPanel                     m_levelLayers;
     ViewportBookmarksPanel               m_viewportBookmarks;

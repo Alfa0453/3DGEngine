@@ -8,6 +8,7 @@
 #include "engine/gameplay/AbilitySystem.h"
 #include "engine/gameplay/DestructionSystem.h"
 #include "engine/gameplay/InteractionSystem.h"
+#include "engine/animation/IKRigSystem.h"
 #include "engine/gameplay/PortalSystem.h"
 #include "engine/gameplay/QuestSystem.h"
 #include "engine/gameplay/DialogueSystem.h"
@@ -542,6 +543,26 @@ bool Script::WasInteractionEvent(const std::string& eventName,ecs::Entity target
     if(component->processedEventCount>index&&component->processedEventCount>0)
         --component->processedEventCount;
     return true;
+}
+bool Script::ConfigureIKRig(const std::string& path,ecs::Entity target) {
+    if(!m_context.registry)return false;if(target==ecs::kNull)target=m_context.entity;
+    return engine::ConfigureIKRig(*m_context.registry,target,path);
+}
+bool Script::SetIKTarget(const std::string& goal,const glm::vec3& position,float weight,ecs::Entity target) {
+    if(!m_context.registry)return false;if(target==ecs::kNull)target=m_context.entity;
+    return engine::SetIKTarget(*m_context.registry,target,goal,position,weight);
+}
+bool Script::ClearIKTarget(const std::string& goal,ecs::Entity target) {
+    if(!m_context.registry)return false;if(target==ecs::kNull)target=m_context.entity;
+    return engine::ClearIKTarget(*m_context.registry,target,goal);
+}
+bool Script::SetIKWeight(const std::string& goal,float weight,ecs::Entity target) {
+    if(!m_context.registry)return false;if(target==ecs::kNull)target=m_context.entity;
+    return engine::SetIKGoalWeight(*m_context.registry,target,goal,weight);
+}
+bool Script::HasIKGoal(const std::string& goal,ecs::Entity target) const {
+    if(!m_context.registry)return false;if(target==ecs::kNull)target=m_context.entity;
+    return engine::HasIKGoal(*m_context.registry,target,goal);
 }
 bool Script::UsePortal(ecs::Entity portal, const std::string& accessTag) {
     if (!m_context.registry || portal == ecs::kNull) return false;

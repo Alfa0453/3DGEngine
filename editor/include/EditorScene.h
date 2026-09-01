@@ -275,6 +275,8 @@ public:
         std::vector<AnimationSource> animationSources;   // separate FBX clips merged by bone name
         std::vector<ModelAttachment> modelAttachments;   // static models socketed to bones
         engine::ecs::FootIKSettings footIK;              // grounded foot placement (opt-in)
+        std::string ikRigPath;
+        engine::AssetHandle ikRigAssetId;
         std::string characterAssetPath;                  // source .3dgcharacter (for live editor sync)
         engine::AssetHandle characterAssetId;
         std::string prefabAssetPath;                     // source .3dgprefab (editor live-sync link; not scene-serialized yet)
@@ -960,6 +962,7 @@ public:
     // Static models socketed to the character's bones (weapons, shields...).
     bool SetSelectedModelAttachments(const std::vector<ModelAttachment>& attachments);
     bool SetSelectedFootIK(const engine::ecs::FootIKSettings& footIK);
+    bool SetSelectedIKRig(const std::string& path, engine::AssetHandle id = {});
     // Record the source .3dgcharacter path so the editor can live-sync edits to it.
     bool SetSelectedCharacterAssetPath(
         const std::string& path, engine::AssetHandle id = {});

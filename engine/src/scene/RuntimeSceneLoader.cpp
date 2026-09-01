@@ -9,6 +9,7 @@
 #include "engine/gameplay/GameplayComponents.h"
 #include "engine/gameplay/Script.h"
 #include "engine/gameplay/InteractionSystem.h"
+#include "engine/animation/IKRigSystem.h"
 #include "engine/gameplay/PortalSystem.h"
 #include "engine/gameplay/QuestSystem.h"
 #include "engine/gameplay/DialogueSystem.h"
@@ -174,11 +175,11 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             return false;
         }
     }
-    if (magic != "3DGRuntimeScene" || version < 1 || version > 114) {
+    if (magic != "3DGRuntimeScene" || version < 1 || version > 115) {
         if (error) {
             *error = "Runtime scene file has an unknown format: "
                 + magic + " " + std::to_string(version)
-                + " (expected 3DGRuntimeScene 1..114).";
+                + " (expected 3DGRuntimeScene 1..115).";
         }
         return false;
     }
@@ -1424,6 +1425,13 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                    >> entity.footIK.weight;
             entity.footIK.enabled = footIkEnabled != 0;
         }
+        if (version >= 115) {
+            std::string id;
+            record >> std::quoted(entity.ikRigPath) >> id;
+            if (entity.ikRigPath == "-") entity.ikRigPath.clear();
+            if (id != "-" && !AssetHandle::Parse(id, &entity.ikRigAssetId))
+                record.setstate(std::ios::failbit);
+        }
         if (version >= 3) {
             record >> entity.linearVelocity.x >> entity.linearVelocity.y >> entity.linearVelocity.z
                    >> entity.angularVelocityAxis.x >> entity.angularVelocityAxis.y >> entity.angularVelocityAxis.z
@@ -2288,6 +2296,11 @@ bool RuntimeSceneLoader::Instantiate(const Scene &scene, ecs::Registry &registry
             // also get a ModelAsset, or it renders twice (once skinned + upright via
             // the render offset, once static at the raw transform).
             registry.Add<ecs::ModelAsset>(entity, ecs::ModelAsset{desc.modelPath});
+        }
+        if (!desc.ikRigPath.empty()) {
+            std::string ikError;
+            if (!ConfigureIKRig(registry, entity, desc.ikRigPath, &ikError) && error && error->empty())
+                *error = "IK rig could not be configured for '" + desc.name + "': " + ikError;
         }
         if (!desc.materialPath.empty()) {
             ecs::MaterialAsset material;

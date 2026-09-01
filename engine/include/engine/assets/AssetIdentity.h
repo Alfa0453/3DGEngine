@@ -78,7 +78,8 @@ enum class AssetType : std::uint32_t {
     Item, // inventory, equipment and pickups (.3dgitem)
     Combat, // damage, combos, block and reactions (.3dgcombat)
     Spawn, // weighted wave encounter definition (.3dgspawn)
-    SaveProfile // checkpoints, slots and persistence rules (.3dgsaveprofile)
+    SaveProfile, // checkpoints, slots and persistence rules (.3dgsaveprofile)
+    IKRig // reusable inverse-kinematics rig (.3dgikrig)
 };
 
 const char* AssetTypeName(AssetType type);

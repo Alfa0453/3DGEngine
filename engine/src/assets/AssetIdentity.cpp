@@ -160,12 +160,13 @@ const char* AssetTypeName(AssetType type) {
         case AssetType::Combat: return "Combat Profile";
         case AssetType::Spawn: return "Spawn Encounter";
         case AssetType::SaveProfile: return "Save Profile";
+        case AssetType::IKRig: return "IK Rig";
     }
     return "Unknown";
 }
 
 bool IsKnownAssetType(AssetType type) {
-    return type > AssetType::Unknown && type <= AssetType::SaveProfile;
+    return type > AssetType::Unknown && type <= AssetType::IKRig;
 }
 
 const char* NativeAssetExtension(AssetType type) {

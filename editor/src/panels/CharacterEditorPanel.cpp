@@ -7,6 +7,7 @@
 
 #include <engine/animation/AnimatedModel.h>
 #include <engine/animation/Animator.h>
+#include <engine/assets/IKRigAsset.h>
 #include <engine/graphics/Camera.h>
 #include <engine/graphics/Model.h>
 #include <engine/graphics/Primitives.h>
@@ -698,6 +699,7 @@ void CharacterEditorPanel::RefreshAssetChoices(const std::string& assetRoot) {
     m_materialChoices.clear();
     m_clipChoices.clear();
     m_graphChoices.clear();
+    m_ikRigChoices.clear();
     m_behaviorChoices.clear();
     m_scriptChoices.clear();
     m_scannedAssetRoot = assetRoot;
@@ -728,6 +730,8 @@ void CharacterEditorPanel::RefreshAssetChoices(const std::string& assetRoot) {
                 m_clipChoices.push_back(std::move(choice));
             } else if (extension == ".3dggraph") {
                 m_graphChoices.push_back(std::move(choice));
+            } else if (extension == ".3dgikrig") {
+                m_ikRigChoices.push_back(std::move(choice));
             } else if (extension == ".btgraph") {
                 m_behaviorChoices.push_back(std::move(choice));
             } else if ((extension == ".h" || extension == ".lua")
@@ -748,6 +752,7 @@ void CharacterEditorPanel::RefreshAssetChoices(const std::string& assetRoot) {
     std::sort(m_materialChoices.begin(), m_materialChoices.end(), byName);
     std::sort(m_clipChoices.begin(), m_clipChoices.end(), byName);
     std::sort(m_graphChoices.begin(), m_graphChoices.end(), byName);
+    std::sort(m_ikRigChoices.begin(), m_ikRigChoices.end(), byName);
     std::sort(m_behaviorChoices.begin(), m_behaviorChoices.end(), byName);
     std::sort(m_scriptChoices.begin(), m_scriptChoices.end(), byName);
 }
@@ -1620,7 +1625,56 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
             }
         }
 
-        ImGui::SeparatorText("Foot IK");
+        ImGui::SeparatorText("IK Rig");
+        const std::string ikRigPreview = m_asset.ikRigPath.empty()
+            ? std::string("None")
+            : std::filesystem::path(m_asset.ikRigPath).filename().string();
+        ImGui::SetNextItemWidth(-1.0f);
+        if (ImGui::BeginCombo("Authored IK Rig", ikRigPreview.c_str())) {
+            ImGui::SetNextItemWidth(-1.0f);
+            ImGui::InputTextWithHint("##IKRigSearch", "Search IK rigs...",
+                m_ikRigSearch.data(), m_ikRigSearch.size());
+            ImGui::Separator();
+            if (ImGui::Selectable("None", m_asset.ikRigPath.empty())) {
+                m_asset.ikRigPath.clear();
+                m_asset.ikRigAssetId = {};
+                changed = true;
+            }
+            const std::string filter = Lower(m_ikRigSearch.data());
+            for (const AssetChoice& choice : m_ikRigChoices) {
+                if (!filter.empty()
+                    && Lower(choice.displayName).find(filter) == std::string::npos
+                    && Lower(choice.path).find(filter) == std::string::npos) {
+                    continue;
+                }
+                ImGui::PushID(choice.path.c_str());
+                if (ImGui::Selectable(choice.displayName.c_str(),
+                                      m_asset.ikRigPath == choice.path)) {
+                    engine::IKRigAssetData rig;
+                    std::string rigError;
+                    if (engine::LoadIKRigAsset(choice.path, &rig, &rigError)) {
+                        m_asset.ikRigPath = choice.path;
+                        m_asset.ikRigAssetId = rig.header.id;
+                        changed = true;
+                    } else if (message) {
+                        *message = rigError;
+                    }
+                    ImGui::CloseCurrentPopup();
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", choice.path.c_str());
+                ImGui::PopID();
+            }
+            if (m_ikRigChoices.empty()) {
+                ImGui::TextDisabled("No .3dgikrig assets. Create one in the IK Rig Editor.");
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Refresh IK Rigs")) RefreshAssetChoices(assetRoot);
+        ImGui::TextDisabled("Foot, hand, look-at, aim and weapon goals are authored in the IK Rig Editor.");
+
+        ImGui::SeparatorText("Legacy Foot IK Fallback");
+        ImGui::BeginDisabled(!m_asset.ikRigPath.empty());
         changed |= ImGui::Checkbox("Enable Foot IK", &m_asset.footIK.enabled);
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("Grounds the feet on the surface at runtime (raycasts the scene). "
@@ -1634,6 +1688,10 @@ void CharacterEditorPanel::Draw(EditorScene& scene, const std::string& assetRoot
             changed |= ImGui::SliderFloat("Pelvis Adjust", &m_asset.footIK.pelvisWeight, 0.0f, 1.0f);
             changed |= ImGui::DragFloat("Max Pelvis Drop", &m_asset.footIK.maxPelvisDrop, 0.01f, 0.0f, 2.0f, "%.2f m");
             ImGui::TextDisabled("Preview shows this in Play or with the global View toggle.");
+        }
+        ImGui::EndDisabled();
+        if (!m_asset.ikRigPath.empty()) {
+            ImGui::TextDisabled("The assigned IK rig owns foot placement; the legacy fallback is ignored.");
         }
 
         ImGui::SeparatorText("Standalone Action Clips");

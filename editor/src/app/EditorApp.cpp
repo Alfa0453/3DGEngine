@@ -7,6 +7,7 @@
 #include <engine/gameplay/GameplaySystems.h>
 #include <engine/gameplay/DestructionSystem.h>
 #include <engine/gameplay/InteractionSystem.h>
+#include <engine/animation/IKRigSystem.h>
 #include <engine/gameplay/PortalSystem.h>
 #include <engine/gameplay/QuestSystem.h>
 #include <engine/gameplay/DialogueSystem.h>
@@ -2594,6 +2595,7 @@ void EditorApp::DrawEditorOverlay()
     DrawCombatEditorPanel();
     DrawSpawnManagerPanel();
     DrawCheckpointSaveEditorPanel();
+    DrawIKRigEditorPanel();
     DrawLevelVariantPanel();
     DrawLevelLayersPanel();
     DrawViewportBookmarksPanel();
@@ -2910,6 +2912,11 @@ void EditorApp::DrawEditorOverlay()
             m_panels.SetOpen(EditorPanels::Panel::CheckpointSave, true);
             m_checkpointSaveEditor.QueueOpen(path);
             m_log.Info("Opening save profile: " + path);
+            break;
+        case EditorAssets::Type::IKRig:
+            m_panels.SetOpen(EditorPanels::Panel::IKRigEditor, true);
+            m_ikRigEditor.QueueOpen(path);
+            m_log.Info("Opening IK rig: " + path);
             break;
         case EditorAssets::Type::Terrain:
             m_panels.SetOpen(EditorPanels::Panel::TerrainCreator, true);
@@ -4720,6 +4727,32 @@ void EditorApp::DrawCheckpointSaveEditorPanel() {
     if (!result.message.empty()) m_log.Info(result.message);
 }
 
+void EditorApp::DrawIKRigEditorPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::IKRigEditor)) return;
+    bool open = true;
+    const auto result = m_ikRigEditor.Draw(m_assets, m_project.AssetRoot(), &open);
+    m_panels.SetOpen(EditorPanels::Panel::IKRigEditor, open);
+    if (result.applySelected) {
+        const auto* selected = m_scene.SelectedObject();
+        if (!selected) m_log.Warning("IK Rig Editor: select an animated character first");
+        else if (selected->locked) m_log.Warning("IK Rig Editor: selected object is locked");
+        else {
+            std::string error;
+            if (engine::ConfigureIKRig(m_scene.Registry(), selected->entity,
+                    m_ikRigEditor.Asset(), m_ikRigEditor.Path(), &error)) {
+                m_scene.SetSelectedIKRig(m_ikRigEditor.Path(), m_ikRigEditor.Asset().header.id);
+                m_scene.MarkDirty();
+                m_log.Info("Applied IK rig '" + m_ikRigEditor.Asset().name + "' to " + selected->name);
+            } else m_log.Warning("IK Rig Editor: " + error);
+        }
+    }
+    if (result.saved) {
+        std::string error;
+        if (!m_assets.Refresh(m_project.AssetRoot(), &error)) m_log.Warning(error);
+    }
+    if (!result.message.empty()) m_log.Info(result.message);
+}
+
 int EditorApp::DeleteDestructionPreview(const std::string& name) {
     if(name.empty())return 0;const std::string prefix="DestructionPreview_"+name+"_";
     std::vector<int> indices;for(int i=0;i<static_cast<int>(m_scene.Objects().size());++i)
@@ -6255,6 +6288,11 @@ std::vector<DirtyDocument> EditorApp::CollectDirtyDocuments() {
         m_interactionAuthoring.Path(), "New Interaction",
         [this](std::string* error) {
             return m_interactionAuthoring.SaveForShutdown(m_project.AssetRoot(), error);
+        });
+    if (m_ikRigEditor.IsDirty()) add(DirtyDocumentType::Asset,
+        m_ikRigEditor.Path(), "New IK Rig",
+        [this](std::string* error) {
+            return m_ikRigEditor.SaveForShutdown(m_project.AssetRoot(), error);
         });
     if (m_portalAuthoring.IsDirty()) add(DirtyDocumentType::Asset,
         m_portalAuthoring.Path(), "New Portal",

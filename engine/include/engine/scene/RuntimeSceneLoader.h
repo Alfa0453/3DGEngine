@@ -201,6 +201,8 @@ public:
         std::vector<AnimationSourceDesc> animationSources;   // separate FBX clips merged by bone name
         std::vector<AttachmentDesc> attachments;             // static models socketed to bones
         ecs::FootIKSettings footIK;                          // grounded foot placement (opt-in)
+        std::string ikRigPath;
+        AssetHandle ikRigAssetId;
         bool linearVelocityEnabled = false;
         bool angularVelocityEnabled = false;
         glm::vec3 linearVelocity{0.0f};

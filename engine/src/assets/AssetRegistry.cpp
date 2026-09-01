@@ -60,6 +60,7 @@ AssetType AuthoredAssetType(const std::filesystem::path& path) {
     if (extension == ".3dgcombat") return AssetType::Combat;
     if (extension == ".3dgspawn") return AssetType::Spawn;
     if (extension == ".3dgsaveprofile") return AssetType::SaveProfile;
+    if (extension == ".3dgikrig") return AssetType::IKRig;
     return AssetType::Unknown;
 }
 
@@ -109,7 +110,8 @@ bool ReadAuthoredMetadata(const std::filesystem::path& path,
         || (type == AssetType::Item && magic == "3DG_ITEM")
         || (type == AssetType::Combat && magic == "3DG_COMBAT")
         || (type == AssetType::Spawn && magic == "3DG_SPAWN")
-        || (type == AssetType::SaveProfile && magic == "3DG_SAVE_PROFILE");
+        || (type == AssetType::SaveProfile && magic == "3DG_SAVE_PROFILE")
+        || (type == AssetType::IKRig && magic == "3DG_IK_RIG");
     if (!validMagic || version < 1) {
         SetError(error, "Authored asset metadata is invalid.");
         return false;

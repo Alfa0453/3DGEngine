@@ -84,6 +84,8 @@ private:
     std::array<char, 128> m_clipSearch{};
     std::vector<AssetChoice> m_graphChoices;  // saved .3dggraph animation-graph assets
     std::array<char, 128> m_graphSearch{};
+    std::vector<AssetChoice> m_ikRigChoices;  // saved .3dgikrig authored IK rigs
+    std::array<char, 128> m_ikRigSearch{};
     std::vector<AssetChoice> m_behaviorChoices; // saved .btgraph behavior trees
     std::vector<AssetChoice> m_scriptChoices; // saved Content/Scripts/*.h gameplay scripts
     std::string m_scannedAssetRoot;

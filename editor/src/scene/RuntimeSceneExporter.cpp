@@ -127,7 +127,7 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         return engine::MakeAssetReference(
             &assetRegistry, contentRoot, assetPath, type).id;
     };
-    out << "3DGRuntimeScene 114 " << sceneId.ToString() << '\n';
+    out << "3DGRuntimeScene 115 " << sceneId.ToString() << '\n';
     out << "# Runtime export from 3DGEditor. Editor-only flags are omitted.\n";
     const EditorScene::Environment& environment = scene.GetEnvironment();
     out << "environment "
@@ -598,6 +598,8 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
             << object.footIK.pelvisWeight << ' '
             << object.footIK.maxPelvisDrop << ' '
             << object.footIK.weight << ' ';
+        out << StoredPath(object.ikRigPath) << ' '
+            << (object.ikRigAssetId.Valid() ? object.ikRigAssetId.ToString() : std::string("-")) << ' ';
         out
             << object.linearVelocity.x << ' ' << object.linearVelocity.y << ' ' << object.linearVelocity.z << ' '
             << object.angularVelocityAxis.x << ' ' << object.angularVelocityAxis.y << ' ' << object.angularVelocityAxis.z << ' '
@@ -1098,6 +1100,7 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
     };
     for (const EditorScene::Object& object : scene.Objects()) {
         addDependency(object.modelAssetId);
+        addDependency(object.ikRigAssetId);
         if (const auto* interaction =
                 scene.Registry().TryGet<engine::InteractiveMotionComponent>(object.entity))
             addDependency(interaction->asset.header.id);

@@ -188,6 +188,11 @@ private:
     static int ApiSignalInteractionEvent(lua_State* state);
     static int ApiCancelInteractionInput(lua_State* state);
     static int ApiWasInteractionEvent(lua_State* state);
+    static int ApiConfigureIKRig(lua_State* state);
+    static int ApiSetIKTarget(lua_State* state);
+    static int ApiClearIKTarget(lua_State* state);
+    static int ApiSetIKWeight(lua_State* state);
+    static int ApiHasIKGoal(lua_State* state);
     static int ApiUsePortal(lua_State* state);
     static int ApiIsPortalReady(lua_State* state);
     static int ApiGrantQuest(lua_State* state);

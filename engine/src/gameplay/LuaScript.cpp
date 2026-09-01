@@ -475,6 +475,11 @@ void LuaScript::RegisterEngineApi() {
         {"SignalInteractionEvent", ApiSignalInteractionEvent},
         {"CancelInteractionInput", ApiCancelInteractionInput},
         {"WasInteractionEvent", ApiWasInteractionEvent},
+        {"ConfigureIKRig", ApiConfigureIKRig},
+        {"SetIKTarget", ApiSetIKTarget},
+        {"ClearIKTarget", ApiClearIKTarget},
+        {"SetIKWeight", ApiSetIKWeight},
+        {"HasIKGoal", ApiHasIKGoal},
         {"UsePortal", ApiUsePortal},
         {"IsPortalReady", ApiIsPortalReady},
         {"GrantQuest", ApiGrantQuest},
@@ -932,6 +937,33 @@ int LuaScript::ApiWasInteractionEvent(lua_State* state) {
     ecs::Entity target=script->Self();if(lua_gettop(state)>=2&&!lua_isnil(state,2))
         target=script->FindObject(luaL_checkstring(state,2));
     lua_pushboolean(state,script->WasInteractionEvent(eventName,target));return 1;
+}
+int LuaScript::ApiConfigureIKRig(lua_State* state) {
+    LuaScript* script=Current(state);ecs::Entity target=script->Self();
+    if(lua_gettop(state)>=2&&!lua_isnil(state,2))target=script->FindObject(luaL_checkstring(state,2));
+    lua_pushboolean(state,script->ConfigureIKRig(luaL_checkstring(state,1),target));return 1;
+}
+int LuaScript::ApiSetIKTarget(lua_State* state) {
+    LuaScript* script=Current(state);const char* goal=luaL_checkstring(state,1);
+    const glm::vec3 target(static_cast<float>(luaL_checknumber(state,2)),static_cast<float>(luaL_checknumber(state,3)),static_cast<float>(luaL_checknumber(state,4)));
+    const float weight=static_cast<float>(luaL_optnumber(state,5,1.0));ecs::Entity entity=script->Self();
+    if(lua_gettop(state)>=6&&!lua_isnil(state,6))entity=script->FindObject(luaL_checkstring(state,6));
+    lua_pushboolean(state,script->SetIKTarget(goal,target,weight,entity));return 1;
+}
+int LuaScript::ApiClearIKTarget(lua_State* state) {
+    LuaScript* script=Current(state);ecs::Entity target=script->Self();
+    if(lua_gettop(state)>=2&&!lua_isnil(state,2))target=script->FindObject(luaL_checkstring(state,2));
+    lua_pushboolean(state,script->ClearIKTarget(luaL_checkstring(state,1),target));return 1;
+}
+int LuaScript::ApiSetIKWeight(lua_State* state) {
+    LuaScript* script=Current(state);ecs::Entity target=script->Self();
+    if(lua_gettop(state)>=3&&!lua_isnil(state,3))target=script->FindObject(luaL_checkstring(state,3));
+    lua_pushboolean(state,script->SetIKWeight(luaL_checkstring(state,1),static_cast<float>(luaL_checknumber(state,2)),target));return 1;
+}
+int LuaScript::ApiHasIKGoal(lua_State* state) {
+    LuaScript* script=Current(state);ecs::Entity target=script->Self();
+    if(lua_gettop(state)>=2&&!lua_isnil(state,2))target=script->FindObject(luaL_checkstring(state,2));
+    lua_pushboolean(state,script->HasIKGoal(luaL_checkstring(state,1),target));return 1;
 }
 int LuaScript::ApiUsePortal(lua_State* state) {
     LuaScript* script = Current(state);

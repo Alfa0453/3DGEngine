@@ -1257,6 +1257,7 @@ const char *EditorAssets::TypeName(Type type)
         case Type::Combat: return "Combat Profile";
         case Type::Spawn: return "Spawn Encounter";
         case Type::SaveProfile: return "Save Profile";
+        case Type::IKRig: return "IK Rig";
         case Type::Other: return "Other";
     }
     return "Other";
@@ -1396,6 +1397,9 @@ EditorAssets::Type EditorAssets::ClassifyExtension(const std::string &extension)
     }
     if (extension == ".3dgsaveprofile") {
         return Type::SaveProfile;
+    }
+    if (extension == ".3dgikrig") {
+        return Type::IKRig;
     }
     if (extension == ".h" || extension == ".hpp" || extension == ".lua"
         || extension == ".cpp" || extension == ".cc") {

@@ -75,6 +75,7 @@ add_executable(3DGEditor
     src/panels/FenceWallPainterPanel.cpp
     src/panels/DestructionAuthoringPanel.cpp
     src/panels/InteractionAuthoringPanel.cpp
+    src/panels/IKRigEditorPanel.cpp
     src/panels/PortalAuthoringPanel.cpp
     src/panels/QuestEditorPanel.cpp
     src/panels/DialogueEditorPanel.cpp

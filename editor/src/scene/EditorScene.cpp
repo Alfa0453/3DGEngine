@@ -559,7 +559,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         return false;
     }
 
-    out << "3DGEditorScene 153 " << m_assetId.ToString() << '\n';
+    out << "3DGEditorScene 154 " << m_assetId.ToString() << '\n';
     out << "environment "
         << m_environment.timeOfDay << ' '
         << m_environment.skyLightIntensity << ' '
@@ -931,6 +931,8 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
             << object.footIK.traceUp << ' ' << object.footIK.traceDown << ' '
             << object.footIK.footHeight << ' ' << object.footIK.pelvisWeight << ' '
             << object.footIK.maxPelvisDrop << ' ' << object.footIK.weight << ' ';
+        out << StoredPath(object.ikRigPath) << ' '
+            << (object.ikRigAssetId.Valid() ? object.ikRigAssetId.ToString() : std::string("-")) << ' ';
         out << StoredPath(object.characterAssetPath) << ' '
             << (object.characterAssetId.Valid()
                 ? object.characterAssetId.ToString() : std::string("-")) << ' ';
@@ -1593,6 +1595,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         addDependency(object.modelAssetId);
         addDependency(object.materialAssetId);
         addDependency(object.characterAssetId);
+        addDependency(object.ikRigAssetId);
         addDependency(object.prefabAssetId);
         addDependency(object.particleAssetId);
         addDependency(object.particleConfig.textureAssetId);
@@ -1682,7 +1685,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             return false;
         }
     }
-    if (magic != "3DGEditorScene" ||(version < 1 || version > 153)) {
+    if (magic != "3DGEditorScene" ||(version < 1 || version > 154)) {
         if (error) *error = "Scene file has an unknown format.";
         return false;
     }
@@ -2874,6 +2877,8 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         std::vector<AnimationSource> animationSources;
         std::vector<ModelAttachment> modelAttachments;
         engine::ecs::FootIKSettings footIK;
+        std::string ikRigPath;
+        engine::AssetHandle ikRigAssetId;
         std::string characterAssetPath;
         engine::AssetHandle characterAssetId;
         std::string prefabAssetPath;
@@ -3293,6 +3298,13 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                >> footIK.traceUp >> footIK.traceDown >> footIK.footHeight
                >> footIK.pelvisWeight >> footIK.maxPelvisDrop >> footIK.weight;
             footIK.enabled = footIkEnabled != 0;
+        }
+        if (version >= 154) {
+            std::string id;
+            in >> std::quoted(ikRigPath) >> id;
+            if (ikRigPath == "-") ikRigPath.clear();
+            if (id != "-" && !engine::AssetHandle::Parse(id, &ikRigAssetId))
+                in.setstate(std::ios::failbit);
         }
         if (version >= 93) {
             in >> std::quoted(characterAssetPath);
@@ -3920,6 +3932,8 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         m_objects.back().animationSources = animationSources;
         m_objects.back().modelAttachments = modelAttachments;
         m_objects.back().footIK = footIK;
+        m_objects.back().ikRigPath = ikRigPath;
+        m_objects.back().ikRigAssetId = ikRigAssetId;
         m_objects.back().characterAssetPath = characterAssetPath;
         m_objects.back().characterAssetId = characterAssetId;
         m_objects.back().prefabAssetPath = prefabAssetPath;
@@ -5584,6 +5598,14 @@ bool EditorScene::SetSelectedFootIK(const engine::ecs::FootIKSettings& footIK) {
     PushUndoSnapshot();
     selected.footIK = footIK;
     m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedIKRig(const std::string& path, engine::AssetHandle id) {
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) return false;
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) return false;
+    PushUndoSnapshot(); selected.ikRigPath = path; selected.ikRigAssetId = id; m_dirty = true;
     return true;
 }
 

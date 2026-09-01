@@ -107,6 +107,7 @@ const char* PlainPanelName(EditorPanels::Panel panel)
     case Panel::CombatEditor: return "Combat Editor";
     case Panel::SpawnManager: return "Spawn Manager";
     case Panel::CheckpointSave: return "Checkpoint and Save Editor";
+    case Panel::IKRigEditor: return "IK Rig Editor";
     case Panel::Count:     break;
     }
     return "Panel";
@@ -190,6 +191,7 @@ EditorPanels::Group EditorPanels::GroupOf(Panel panel)
     case Panel::RagdollPhysics:
     case Panel::AnimationRetargeting:
     case Panel::AbilityEditor:
+    case Panel::IKRigEditor:
         return Group::Animation;
 
     case Panel::AudioEditor:

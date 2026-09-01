@@ -1,6 +1,7 @@
 #pragma once
 
 #include "engine/animation/AnimationController.h"
+#include "engine/assets/IKRigAsset.h"
 
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -86,6 +87,22 @@ struct FootIK {
     // PhysicsWorld::Raycast). Null => foot IK is skipped for this entity.
     std::function<bool(const glm::vec3& origin, const glm::vec3& down, float maxDist,
                        glm::vec3& hitPos, glm::vec3& hitNormal)> groundQuery;
+};
+
+struct IKGoalRuntime {
+    IKGoalDefinition definition;
+    int root = -1, mid = -1, end = -1;
+    glm::vec3 targetWorld{0.0f};
+    glm::vec3 smoothedTargetWorld{0.0f};
+    bool targetSet = false;
+    bool smoothingInitialized = false;
+    float runtimeWeight = 1.0f;
+};
+
+struct IKRigRuntime {
+    std::string assetPath;
+    AssetHandle assetId;
+    std::vector<IKGoalRuntime> goals;
 };
 
 // Best-effort: fill a FootIK's leg + pelvis bone indices from a skeleton's bone names
@@ -188,6 +205,7 @@ struct AnimatedModel {
 
     // Grounded foot placement (opt-in; disabled by default). See FootIK.
     FootIK footIK;
+    IKRigRuntime ikRig;
 
     // Static models socketed to bones (weapons, shields). Drawn after the skinned mesh.
     std::vector<ModelAttachment> attachments;

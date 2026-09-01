@@ -76,6 +76,7 @@ inline const char* ForPanel(EditorPanels::Panel panel) {
     case P::CombatEditor: return Settings;
     case P::SpawnManager: return World;
     case P::CheckpointSave: return Archive;
+    case P::IKRigEditor: return Link;
     case P::Count: break;
     }
     return Document;

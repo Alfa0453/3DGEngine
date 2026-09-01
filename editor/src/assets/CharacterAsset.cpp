@@ -6,6 +6,7 @@
 #include <engine/assets/AssetReference.h>
 #include <engine/assets/RagdollAsset.h>
 #include <engine/assets/AssetRegistry.h>
+#include <engine/animation/IKRigSystem.h>
 
 #include <algorithm>
 #include <filesystem>
@@ -21,6 +22,8 @@ void CharacterAsset::Capture(const EditorScene::Object& o) {
     modelOffsetScale = o.modelOffsetScale;
     colliderEnabled = o.colliderEnabled; collider = o.collider;
     footIK = o.footIK;
+    ikRigPath = o.ikRigPath;
+    ikRigAssetId = o.ikRigAssetId;
     playerControllerEnabled = o.playerControllerEnabled; playerController = o.playerController;
     skeletalModel = o.skeletalModel; animationClipIndex = o.animationClipIndex;
     animationClipName = o.animationClipName; animationAutoplay = o.animationAutoplay;
@@ -216,6 +219,11 @@ bool CharacterAsset::Apply(EditorScene& scene) const {
     }
     scene.SetSelectedModelAttachments(sceneAttachments);
     scene.SetSelectedFootIK(footIK);
+    scene.SetSelectedIKRig(ikRigPath, ikRigAssetId);
+    if (!ikRigPath.empty()) {
+        if (const EditorScene::Object* selected = scene.SelectedObject())
+            engine::ConfigureIKRig(scene.Registry(), selected->entity, ikRigPath, nullptr);
+    }
     std::vector<EditorScene::AnimationSource> resolvedSources;
     if (const EditorScene::Object* selected = scene.SelectedObject()) {
         resolvedSources = selected->animationSources;
@@ -357,7 +365,7 @@ bool CharacterAsset::Save(const std::string& path, std::string* error) {
     if (!out) { if (error) *error = "Could not write character asset: " + path; return false; }
     const CharacterScript legacy{scriptEnabled, scriptClassName, scriptPath};
     const CharacterScript* primary = !scripts.empty() ? &scripts.front() : &legacy;
-    out << "3DG_CHARACTER 28 " << assetId.ToString() << '\n'
+    out << "3DG_CHARACTER 29 " << assetId.ToString() << '\n'
         << std::quoted(name) << '\n' << std::quoted(modelAssetPath) << '\n' << std::quoted(materialAssetPath) << '\n'
         << colliderEnabled << ' ' << static_cast<int>(collider.shape) << ' '
         << collider.halfExtents.x << ' ' << collider.halfExtents.y << ' ' << collider.halfExtents.z << ' '
@@ -523,6 +531,8 @@ bool CharacterAsset::Save(const std::string& path, std::string* error) {
     out << '\n' << "FOOT_IK " << (footIK.enabled ? 1 : 0) << ' '
         << footIK.traceUp << ' ' << footIK.traceDown << ' ' << footIK.footHeight << ' '
         << footIK.pelvisWeight << ' ' << footIK.maxPelvisDrop << ' ' << footIK.weight << '\n';
+    out << "IK_RIG " << std::quoted(ikRigPath.empty() ? std::string("-") : ikRigPath) << ' '
+        << (ikRigAssetId.Valid() ? ikRigAssetId.ToString() : std::string("-")) << '\n';
     std::vector<engine::AssetHandle> dependencies;
     const auto addDependency = [&](engine::AssetHandle id) {
         if (id.Valid()
@@ -533,6 +543,7 @@ bool CharacterAsset::Save(const std::string& path, std::string* error) {
     addDependency(modelAssetId);
     addDependency(materialAssetId);
     addDependency(animationGraphAssetId);
+    addDependency(ikRigAssetId);
     if (haveRegistry)
         addDependency(engine::MakeAssetReference(
             &registry, contentRoot, materialAssetPath,
@@ -998,6 +1009,17 @@ bool CharacterAsset::Load(const std::string& path, std::string* error) {
             footIK.enabled = footIkEnabled != 0;
         }
     }
+    if (loadedVersion >= 29) {
+        std::string tag, id;
+        if ((in >> tag) && tag == "IK_RIG") {
+            in >> std::quoted(ikRigPath) >> id;
+            if (ikRigPath == "-") ikRigPath.clear();
+            if (id != "-" && !engine::AssetHandle::Parse(id, &ikRigAssetId)) {
+                if (error) *error = "Character IK rig identity is invalid: " + path;
+                return false;
+            }
+        }
+    }
     if (loadedVersion >= 19) {
         const std::string contentRoot = engine::FindContentRootForAsset(path);
         engine::AssetRegistry registry;
@@ -1026,6 +1048,12 @@ bool CharacterAsset::Load(const std::string& path, std::string* error) {
                     {animationGraphAssetId, animationGraphPath},
                     engine::AssetType::AnimationGraph);
                 if (!resolved.empty()) animationGraphPath = resolved;
+            }
+            if (ikRigAssetId.Valid()) {
+                const std::string resolved = engine::ResolveAssetReference(
+                    &registry, contentRoot, {ikRigAssetId, ikRigPath},
+                    engine::AssetType::IKRig);
+                if (!resolved.empty()) ikRigPath = resolved;
             }
             for (CharacterAnimationSource& source : animationSources) {
                 if (!source.assetId.Valid()) continue;

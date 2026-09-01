@@ -72,6 +72,7 @@ add_library(engine STATIC
     src/assets/FenceWallAsset.cpp
     src/assets/DestructionAsset.cpp
     src/assets/InteractionAsset.cpp
+    src/assets/IKRigAsset.cpp
     src/assets/PortalAsset.cpp
     src/assets/QuestAsset.cpp
     src/assets/DialogueAsset.cpp
@@ -110,6 +111,7 @@ add_library(engine STATIC
     src/animation/Animator.cpp
     src/animation/AnimationController.cpp
     src/animation/AnimatedModel.cpp
+    src/animation/IKRigSystem.cpp
     src/ai/AStar.cpp
     src/ai/Perception.cpp
     src/ai/Steering.cpp
