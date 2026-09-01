@@ -1749,6 +1749,7 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
             && lc.layer == c.layer && lc.mask == c.mask;
     };
     int staticRebuilt = 0, staticColliders = 0;
+    int staticRevisionSkips = 0, untrackedStaticWrites = 0;   // ECS Pass 2 diagnostics
     colliderView.each([&](Entity e, Transform& ownerTransform, Collider& localCollider) {
         RigidBody* rigidBody = reg.TryGet<RigidBody>(e);
         // Static = no dynamic body: never moved by the solver, so its world shape only
@@ -1761,7 +1762,18 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
             ++staticColliders;
             StaticColliderCache& entry = m_staticCache[e];
             entry.seen = true;
-            if (sameStaticInputs(entry, ownerTransform, localCollider)) {
+            // ECS Pass 2: consult the ECS component revisions. The field comparison below stays the
+            // AUTHORITY (it never goes stale on an untracked raw write), but the revisions give a
+            // cheap pre-check and a diagnostic: revision-unchanged-yet-fields-differ means an
+            // untracked write bypassed the change tracking.
+            const std::uint64_t txRev  = reg.Revision<Transform>(e);
+            const std::uint64_t colRev = reg.Revision<Collider>(e);
+            const bool revUnchanged = entry.valid && !localCollider.collisionDirty
+                && txRev == entry.transformRev && colRev == entry.colliderRev;
+            const bool fieldsSame = sameStaticInputs(entry, ownerTransform, localCollider);
+            if (revUnchanged) ++staticRevisionSkips;
+            if (revUnchanged && !fieldsSame) ++untrackedStaticWrites;   // diagnostic (Phase 3)
+            if (fieldsSame) {
                 world.transform = entry.worldTransform;   // reuse -- no re-cook
                 world.collider  = entry.worldCollider;
             } else {
@@ -1769,6 +1781,7 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
                 entry.valid = true;
                 entry.lastOwner = ownerTransform; entry.lastLocal = localCollider;
                 entry.worldTransform = world.transform; entry.worldCollider = world.collider;
+                entry.transformRev = txRev; entry.colliderRev = colRev;   // remember consumed revisions
                 ++staticRebuilt;
             }
         } else {
@@ -1816,6 +1829,8 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
     }
     m_stats.staticColliders    = staticColliders;
     m_stats.staticRebuiltThisStep = staticRebuilt;
+    m_stats.staticRevisionSkips   = staticRevisionSkips;
+    m_stats.untrackedStaticWrites = untrackedStaticWrites;
     const int N = static_cast<int>(m_bodies.size());
 
     // 3) Broad phase -> a sorted, de-duplicated list of candidate index pairs

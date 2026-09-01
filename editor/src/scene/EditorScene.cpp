@@ -559,7 +559,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         return false;
     }
 
-    out << "3DGEditorScene 154 " << m_assetId.ToString() << '\n';
+    out << "3DGEditorScene 155 " << m_assetId.ToString() << '\n';
     out << "environment "
         << m_environment.timeOfDay << ' '
         << m_environment.skyLightIntensity << ' '
@@ -910,7 +910,16 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
                 << StoredPath(source.clipName) << ' '
                 << (source.stripRootMotion ? 1 : 0) << ' '
                 << StoredPath(source.sourceClipName) << ' '
-                << source.basePlaybackSpeed << ' ';
+                << source.basePlaybackSpeed << ' '
+                << source.playbackStart << ' ' << source.playbackEnd << ' '
+                << (source.additive ? 1 : 0) << ' '
+                << source.additiveReferenceTime << ' '
+                << source.curves.size() << ' ';
+            for (const engine::AnimationCurve& curve : source.curves) {
+                out << StoredPath(curve.name) << ' ' << curve.keys.size() << ' ';
+                for (const engine::AnimationCurveKey& key : curve.keys)
+                    out << key.time << ' ' << key.value << ' ';
+            }
         }
         out << object.modelAttachments.size() << ' ';
         for (const ModelAttachment& a : object.modelAttachments) {
@@ -1685,7 +1694,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             return false;
         }
     }
-    if (magic != "3DGEditorScene" ||(version < 1 || version > 154)) {
+    if (magic != "3DGEditorScene" ||(version < 1 || version > 155)) {
         if (error) *error = "Scene file has an unknown format.";
         return false;
     }
@@ -3247,11 +3256,33 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                 in >> std::quoted(source.clipName) >> strip;
                 if (version >= 94) in >> std::quoted(source.sourceClipName);
                 if (version >= 134) in >> source.basePlaybackSpeed;
+                if (version >= 155) {
+                    int additive = 0;
+                    std::size_t curveCount = 0;
+                    in >> source.playbackStart >> source.playbackEnd >> additive
+                       >> source.additiveReferenceTime >> curveCount;
+                    source.additive = additive != 0;
+                    if (curveCount > 128) in.setstate(std::ios::failbit);
+                    source.curves.resize(curveCount);
+                    for (engine::AnimationCurve& curve : source.curves) {
+                        std::size_t keyCount = 0;
+                        in >> std::quoted(curve.name) >> keyCount;
+                        if (curve.name == "-") curve.name.clear();
+                        if (keyCount > 4096) in.setstate(std::ios::failbit);
+                        curve.keys.resize(keyCount);
+                        for (engine::AnimationCurveKey& key : curve.keys)
+                            in >> key.time >> key.value;
+                    }
+                }
                 if (source.file == "-") source.file.clear();
                 if (source.clipName == "-") source.clipName.clear();
                 if (source.sourceClipName == "-") source.sourceClipName.clear();
                 source.stripRootMotion = strip != 0;
                 source.basePlaybackSpeed = std::max(source.basePlaybackSpeed, 0.0f);
+                source.playbackStart = std::max(source.playbackStart, 0.0f);
+                if (source.playbackEnd >= 0.0f
+                    && source.playbackEnd <= source.playbackStart) source.playbackEnd = -1.0f;
+                source.additiveReferenceTime = std::max(source.additiveReferenceTime, 0.0f);
                 animationSources.push_back(std::move(source));
             }
         }

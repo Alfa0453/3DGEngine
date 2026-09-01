@@ -46,6 +46,11 @@ void CharacterAsset::Capture(const EditorScene::Object& o) {
         captured.clipName = source.clipName;
         captured.stripRootMotion = source.stripRootMotion;
         captured.basePlaybackSpeed = source.basePlaybackSpeed;
+        captured.playbackStart = source.playbackStart;
+        captured.playbackEnd = source.playbackEnd;
+        captured.additive = source.additive;
+        captured.additiveReferenceTime = source.additiveReferenceTime;
+        captured.curves = source.curves;
         animationSources.push_back(std::move(captured));
     }
     // Rebuild named sockets and their optional visible attachments from the baked
@@ -160,8 +165,23 @@ bool CharacterAsset::Apply(EditorScene& scene) const {
             source.clipName = c.clipName;
             source.stripRootMotion = c.stripRootMotion;
             source.sourceClipName = c.sourceClipName;
-            source.basePlaybackSpeed = clip.Load(c.clipAsset, nullptr)
-                ? std::max(clip.speed, 0.0f) : 1.0f;
+            const bool loadedClip = clip.Load(c.clipAsset, nullptr);
+            source.basePlaybackSpeed = loadedClip ? std::max(clip.speed, 0.0f) : 1.0f;
+            source.playbackStart = loadedClip ? clip.playbackStart : c.playbackStart;
+            source.playbackEnd = loadedClip ? clip.playbackEnd : c.playbackEnd;
+            source.additive = loadedClip ? clip.additive : c.additive;
+            source.additiveReferenceTime = loadedClip
+                ? clip.additiveReferenceTime : c.additiveReferenceTime;
+            if (loadedClip) {
+                source.curves.reserve(clip.curves.size());
+                for (const AnimationClipAsset::Curve& curve : clip.curves) {
+                    engine::AnimationCurve runtimeCurve;
+                    runtimeCurve.name = curve.name;
+                    for (const AnimationClipAsset::CurveKey& key : curve.keys)
+                        runtimeCurve.keys.push_back({key.time, key.value});
+                    source.curves.push_back(std::move(runtimeCurve));
+                }
+            } else source.curves = c.curves;
             graphSources.push_back(std::move(source));
         }
         scene.SetSelectedAnimationSources(graphSources);
@@ -180,6 +200,11 @@ bool CharacterAsset::Apply(EditorScene& scene) const {
             baked.clipName = source.clipName;
             baked.stripRootMotion = source.stripRootMotion;
             baked.basePlaybackSpeed = source.basePlaybackSpeed;
+            baked.playbackStart = source.playbackStart;
+            baked.playbackEnd = source.playbackEnd;
+            baked.additive = source.additive;
+            baked.additiveReferenceTime = source.additiveReferenceTime;
+            baked.curves = source.curves;
             sceneSources.push_back(std::move(baked));
         }
         scene.SetSelectedAnimationSources(sceneSources);
@@ -265,6 +290,19 @@ bool CharacterAsset::Apply(EditorScene& scene) const {
         resolved.stripRootMotion = actionClip.stripRootMotion;
         resolved.sourceClipName = actionClip.clipName;
         resolved.basePlaybackSpeed = std::max(actionClip.speed, 0.0f);
+        resolved.playbackStart = actionClip.playbackStart;
+        resolved.playbackEnd = actionClip.playbackEnd;
+        resolved.additive = actionClip.additive;
+        resolved.additiveReferenceTime = actionClip.additiveReferenceTime;
+        resolved.curves.reserve(actionClip.curves.size());
+        for (const AnimationClipAsset::Curve& curve : actionClip.curves) {
+            engine::AnimationCurve runtimeCurve;
+            runtimeCurve.name = curve.name;
+            runtimeCurve.keys.reserve(curve.keys.size());
+            for (const AnimationClipAsset::CurveKey& key : curve.keys)
+                runtimeCurve.keys.push_back({key.time, key.value});
+            resolved.curves.push_back(std::move(runtimeCurve));
+        }
         resolvedSources.push_back(std::move(resolved));
         resolvedActions.push_back(EditorScene::AnimationActionProfile{
             alias, 0, alias, actionClip.maskRootBone,
@@ -272,7 +310,7 @@ bool CharacterAsset::Apply(EditorScene& scene) const {
         for (const AnimationClipAsset::Event& event : actionClip.events) {
             if (event.name.empty()) continue;
             resolvedEvents.push_back(EditorScene::AnimationEvent{
-                0, std::max(event.time, 0.0f), event.name, alias});
+                0, std::max(event.time - actionClip.playbackStart, 0.0f), event.name, alias});
         }
     }
     scene.SetSelectedAnimationSources(resolvedSources);
@@ -309,7 +347,7 @@ bool CharacterAsset::Apply(EditorScene& scene) const {
 
 bool CharacterAsset::Save(const std::string& path, std::string* error) {
     if (!assetId.Valid()) assetId = engine::AssetHandle::Generate();
-    version = 28;
+    version = 30;
     const std::string contentRoot = engine::FindContentRootForAsset(path);
     engine::AssetRegistry registry;
     bool haveRegistry = false;
@@ -365,7 +403,7 @@ bool CharacterAsset::Save(const std::string& path, std::string* error) {
     if (!out) { if (error) *error = "Could not write character asset: " + path; return false; }
     const CharacterScript legacy{scriptEnabled, scriptClassName, scriptPath};
     const CharacterScript* primary = !scripts.empty() ? &scripts.front() : &legacy;
-    out << "3DG_CHARACTER 29 " << assetId.ToString() << '\n'
+    out << "3DG_CHARACTER 30 " << assetId.ToString() << '\n'
         << std::quoted(name) << '\n' << std::quoted(modelAssetPath) << '\n' << std::quoted(materialAssetPath) << '\n'
         << colliderEnabled << ' ' << static_cast<int>(collider.shape) << ' '
         << collider.halfExtents.x << ' ' << collider.halfExtents.y << ' ' << collider.halfExtents.z << ' '
@@ -533,6 +571,18 @@ bool CharacterAsset::Save(const std::string& path, std::string* error) {
         << footIK.pelvisWeight << ' ' << footIK.maxPelvisDrop << ' ' << footIK.weight << '\n';
     out << "IK_RIG " << std::quoted(ikRigPath.empty() ? std::string("-") : ikRigPath) << ' '
         << (ikRigAssetId.Valid() ? ikRigAssetId.ToString() : std::string("-")) << '\n';
+    out << "ANIM_TIMELINES " << animationSources.size() << '\n';
+    for (const CharacterAnimationSource& source : animationSources) {
+        out << source.playbackStart << ' ' << source.playbackEnd << ' '
+            << source.additive << ' ' << source.additiveReferenceTime << ' '
+            << source.curves.size() << '\n';
+        for (const engine::AnimationCurve& curve : source.curves) {
+            out << std::quoted(curve.name) << ' ' << curve.keys.size();
+            for (const engine::AnimationCurveKey& key : curve.keys)
+                out << ' ' << key.time << ' ' << key.value;
+            out << '\n';
+        }
+    }
     std::vector<engine::AssetHandle> dependencies;
     const auto addDependency = [&](engine::AssetHandle id) {
         if (id.Valid()
@@ -603,7 +653,7 @@ bool CharacterAsset::Load(const std::string& path, std::string* error) {
     if (!in) { if (error) *error = "Character asset is incomplete: " + path; return false; }
     collider.shape = static_cast<engine::ecs::ColliderShape>(shape);
     navMovementMode = static_cast<engine::ai::AiMovementMode>(movementMode);
-    version = 26; // Upgrade legacy assets when they are next saved.
+    version = 30; // Upgrade legacy assets when they are next saved.
     modelAssetId = {};
     materialAssetId = {};
     animationGraphAssetId = {};
@@ -1018,6 +1068,35 @@ bool CharacterAsset::Load(const std::string& path, std::string* error) {
                 if (error) *error = "Character IK rig identity is invalid: " + path;
                 return false;
             }
+        }
+    }
+    if (loadedVersion >= 30) {
+        std::string tag;
+        std::size_t sourceCount = 0;
+        if (!(in >> tag >> sourceCount) || tag != "ANIM_TIMELINES"
+            || sourceCount != animationSources.size()) {
+            if (error) *error = "Character animation timeline data is invalid: " + path;
+            return false;
+        }
+        for (CharacterAnimationSource& source : animationSources) {
+            std::size_t curveCount = 0;
+            in >> source.playbackStart >> source.playbackEnd >> source.additive
+               >> source.additiveReferenceTime >> curveCount;
+            source.curves.clear();
+            source.curves.reserve(curveCount);
+            for (std::size_t curveIndex = 0; curveIndex < curveCount; ++curveIndex) {
+                engine::AnimationCurve curve;
+                std::size_t keyCount = 0;
+                in >> std::quoted(curve.name) >> keyCount;
+                curve.keys.resize(keyCount);
+                for (engine::AnimationCurveKey& key : curve.keys)
+                    in >> key.time >> key.value;
+                source.curves.push_back(std::move(curve));
+            }
+        }
+        if (!in) {
+            if (error) *error = "Character animation curves are invalid: " + path;
+            return false;
         }
     }
     if (loadedVersion >= 19) {

@@ -189,6 +189,11 @@ int main() {
     action.fadeOut = 0.18f;
     action.events.push_back({0.42f, "CastFireball"});
     action.events.push_back({0.76f, "AttackFinished"});
+    action.playbackStart = 0.20f;
+    action.playbackEnd = 0.90f;
+    action.additive = true;
+    action.additiveReferenceTime = 0.20f;
+    action.curves.push_back({"CastStrength", {{0.20f, 0.0f}, {0.50f, 1.0f}, {0.90f, 0.0f}}});
     const fs::path actionPath = root / "StaffAttack.3dgclip";
     Check(action.Save(actionPath.string(), &error),
           "save standalone action clip metadata");
@@ -208,8 +213,16 @@ int main() {
           && loadedAction.events.size() == 2
           && loadedAction.events[0].time == 0.42f
           && loadedAction.events[0].name == "CastFireball"
-          && loadedAction.events[1].name == "AttackFinished",
-          "action clip preserves source, mask, fades, speed, events and one-shot behavior");
+          && loadedAction.events[1].name == "AttackFinished"
+          && loadedAction.version == 5
+          && loadedAction.playbackStart == 0.20f
+          && loadedAction.playbackEnd == 0.90f
+          && loadedAction.additive
+          && loadedAction.additiveReferenceTime == 0.20f
+          && loadedAction.curves.size() == 1
+          && loadedAction.curves[0].keys.size() == 3
+          && loadedAction.SampleCurve("CastStrength", 0.30f) == 1.0f,
+          "action clip preserves timeline, curve, additive, event and one-shot metadata");
     Check(assets.Refresh(root.string(), &error)
           && registry.Find(action.assetId)
           && registry.Find(action.assetId)->type
@@ -226,6 +239,11 @@ int main() {
     graphClip.sourceFile = action.sourceFile;
     graphClip.sourceClipName = action.clipName;
     graphClip.clipName = action.name;
+    graphClip.playbackStart = action.playbackStart;
+    graphClip.playbackEnd = action.playbackEnd;
+    graphClip.additive = action.additive;
+    graphClip.additiveReferenceTime = action.additiveReferenceTime;
+    graphClip.curves.push_back({"CastStrength", {{0.20f, 0.0f}, {0.50f, 1.0f}}});
     graph.clips.push_back(graphClip);
     EditorScene::AnimationStateNode idle;
     idle.graphId = engine::AssetHandle::Generate();
@@ -273,7 +291,10 @@ int main() {
           && loadedGraph.previewModelAssetId == browserMeshId
           && loadedGraph.clips.size() == 1
           && loadedGraph.clips[0].clipAssetId == action.assetId
-          && loadedGraph.version == 7
+          && loadedGraph.version == 8
+          && loadedGraph.clips[0].playbackStart == 0.20f
+          && loadedGraph.clips[0].additive
+          && loadedGraph.clips[0].curves.size() == 1
           && loadedGraph.entryStateId == locomotion.graphId
           && loadedGraph.states.size() == 3
           && loadedGraph.states.front().graphId == locomotion.graphId
@@ -288,7 +309,7 @@ int main() {
           && !loadedGraph.transitions[0].useConditions
           && loadedGraph.transitions[0].exitTime == 0.9f
           && loadedGraph.nodeLayouts.size() == 3,
-          "animation graph v7 preserves IDs, entry, layout, motion sources and exit-time-only transitions");
+          "animation graph v8 preserves IDs, entry, layout, motion sources and timeline metadata");
     Check(assets.Refresh(root.string(), &error)
           && registry.Find(graph.assetId)
           && registry.Find(graph.assetId)->dependencies.size() == 2,
@@ -308,7 +329,7 @@ int main() {
     }
     AnimationGraphAsset migrated;
     Check(migrated.Load(legacyGraphPath.string(), &error)
-          && migrated.version == 7
+          && migrated.version == 8
           && migrated.states.size() == 1
           && migrated.states[0].graphId.Valid()
           && migrated.entryStateId == migrated.states[0].graphId

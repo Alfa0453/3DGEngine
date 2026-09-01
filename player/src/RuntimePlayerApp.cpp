@@ -1,4 +1,5 @@
 #include "RuntimePlayerApp.h"
+#include <engine/gameplay/EquipmentSystem.h>
 #include "GameScripts.h"
 
 #include <engine/graphics/Primitives.h>
@@ -2585,6 +2586,7 @@ void RuntimePlayerApp::OnUpdate(float dt) {
     if (m_simReady && !m_paused) {
         const engine::ScriptInputState input =
             CaptureScriptInput(inputEnabled, true);
+        engine::SetEquipmentAssetManager(&m_assets);
         engine::UpdateScripts(
             m_registry, gameDt, &input, &m_runtimeAudio,
             &m_cameraShake, &m_cameraDirector, &gameMode, &m_physics);

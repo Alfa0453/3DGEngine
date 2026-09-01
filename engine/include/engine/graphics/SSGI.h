@@ -19,6 +19,7 @@ public:
     void Generate(unsigned int sceneColor, unsigned int viewPosition,
                   unsigned int viewNormal, const glm::mat4& projection);
     unsigned int Texture() const { return m_filtered.ColorTexture(); }
+    unsigned int RawTexture() const { return m_raw.ColorTexture(); }
     double LastMilliseconds() const { return m_lastMilliseconds; }
     double LastDenoiseMilliseconds() const { return m_lastDenoiseMilliseconds; }
     std::uint64_t MemoryBytes() const { return static_cast<std::uint64_t>(m_width) * m_height * 16u; }

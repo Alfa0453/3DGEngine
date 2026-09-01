@@ -14,7 +14,17 @@ struct AnimationClipAsset {
         std::string name;
     };
 
-    int         version = 4;
+    struct CurveKey {
+        float time = 0.0f;
+        float value = 0.0f;
+    };
+
+    struct Curve {
+        std::string name = "Curve";
+        std::vector<CurveKey> keys;
+    };
+
+    int         version = 5;
     engine::AssetHandle assetId;
     std::string name = "Clip";
     std::string sourceFile;        // native engine-imported .3dgskmesh / .3dganim with the clip
@@ -28,6 +38,17 @@ struct AnimationClipAsset {
     float       fadeIn = 0.08f;
     float       fadeOut = 0.15f;
     std::vector<Event> events;     // action/gameplay notifies authored on this clip
+    float       playbackStart = 0.0f; // source seconds; runtime time zero begins here
+    float       playbackEnd = -1.0f;  // source seconds; <= start means source clip end
+    bool        additive = false;
+    std::string additiveReferenceClip; // empty = this clip
+    float       additiveReferenceTime = 0.0f;
+    std::vector<Curve> curves;
+
+    void Normalize(float sourceDuration = -1.0f);
+    float PlaybackDuration(float sourceDuration) const;
+    float SampleCurve(const std::string& curveName, float playbackTime,
+                      float fallback = 0.0f) const;
 
     bool Save(const std::string& path, std::string* error = nullptr);
     bool Load(const std::string& path, std::string* error = nullptr);

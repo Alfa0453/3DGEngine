@@ -127,7 +127,7 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         return engine::MakeAssetReference(
             &assetRegistry, contentRoot, assetPath, type).id;
     };
-    out << "3DGRuntimeScene 115 " << sceneId.ToString() << '\n';
+    out << "3DGRuntimeScene 116 " << sceneId.ToString() << '\n';
     out << "# Runtime export from 3DGEditor. Editor-only flags are omitted.\n";
     const EditorScene::Environment& environment = scene.GetEnvironment();
     out << "environment "
@@ -572,7 +572,16 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
                 << StoredPath(source.clipName) << ' '
                 << (source.stripRootMotion ? 1 : 0) << ' '
                 << StoredPath(source.sourceClipName) << ' '
-                << source.basePlaybackSpeed << ' ';
+                << source.basePlaybackSpeed << ' '
+                << source.playbackStart << ' ' << source.playbackEnd << ' '
+                << (source.additive ? 1 : 0) << ' '
+                << source.additiveReferenceTime << ' '
+                << source.curves.size() << ' ';
+            for (const engine::AnimationCurve& curve : source.curves) {
+                out << StoredPath(curve.name) << ' ' << curve.keys.size() << ' ';
+                for (const engine::AnimationCurveKey& key : curve.keys)
+                    out << key.time << ' ' << key.value << ' ';
+            }
         }
         out << object.modelAttachments.size() << ' ';
         for (const EditorScene::ModelAttachment& a : object.modelAttachments) {

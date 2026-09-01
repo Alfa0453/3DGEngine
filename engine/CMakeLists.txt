@@ -73,6 +73,8 @@ add_library(engine STATIC
     src/assets/DestructionAsset.cpp
     src/assets/InteractionAsset.cpp
     src/assets/IKRigAsset.cpp
+    src/assets/PoseLibraryAsset.cpp
+    src/assets/EquipmentAsset.cpp
     src/assets/PortalAsset.cpp
     src/assets/QuestAsset.cpp
     src/assets/DialogueAsset.cpp
@@ -138,6 +140,7 @@ add_library(engine STATIC
     src/gameplay/SaveProfileSystem.cpp
     src/gameplay/GameMode.cpp
     src/gameplay/Script.cpp
+    src/gameplay/EquipmentSystem.cpp
     src/gameplay/LuaScript.cpp
     src/gameplay/ScriptModule.cpp
 )

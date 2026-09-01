@@ -1,0 +1,13 @@
+#include "engine/gameplay/EquipmentSystem.h"
+#include "engine/animation/AnimatedModel.h"
+#include "engine/assets/EquipmentAsset.h"
+#include "engine/assets/RuntimeAssetManager.h"
+#include "engine/ecs/Registry.h"
+#include <algorithm>
+namespace engine {namespace {RuntimeAssetManager* g_assets=nullptr;void Err(std::string*e,const std::string&m){if(e)*e=m;}}
+void SetEquipmentAssetManager(RuntimeAssetManager*a){g_assets=a;}
+bool UnequipSlot(ecs::Registry&r,ecs::Entity e,const std::string&slot){auto*a=r.TryGet<AnimatedModel>(e);if(!a)return false;const auto old=a->attachments.size();a->attachments.erase(std::remove_if(a->attachments.begin(),a->attachments.end(),[&](const ModelAttachment&v){return v.equipmentSlot==slot;}),a->attachments.end());return old!=a->attachments.size();}
+std::string EquippedItem(const ecs::Registry&r,ecs::Entity e,const std::string&slot){const auto*a=r.TryGet<AnimatedModel>(e);if(!a)return{};const auto it=std::find_if(a->attachments.begin(),a->attachments.end(),[&](const ModelAttachment&v){return v.equipmentSlot==slot;});return it==a->attachments.end()?std::string{}:it->equipmentItem;}
+bool EquipItem(ecs::Registry&r,ecs::Entity e,const std::string&path,const std::string&name,std::string*error){auto*a=r.TryGet<AnimatedModel>(e);if(!a||!a->model){Err(error,"Target has no animated model.");return false;}if(!g_assets){Err(error,"Runtime equipment asset manager is unavailable.");return false;}EquipmentAssetData set;if(!LoadEquipmentAsset(path,&set,error))return false;const EquipmentItem*item=FindEquipmentItem(set,name);if(!item){Err(error,"Equipment item not found: "+name);return false;}const auto socket=std::find_if(a->sockets.begin(),a->sockets.end(),[&](const NamedModelSocket&s){return s.name==item->socketName;});if(socket==a->sockets.end()){Err(error,"Character socket not found: "+item->socketName);return false;}const Model*model=g_assets->LoadModel(item->modelPath,error);if(!model)return false;ModelAttachment attachment;attachment.model=model;attachment.bone=socket->bone;attachment.boneBind=socket->boneBind;attachment.localOffset=socket->localOffset*MakeAttachmentOffset(item->position,item->eulerDegrees,item->scale);attachment.equipmentSlot=item->slot;attachment.equipmentItem=item->name;if(!item->materialPath.empty()){std::string matError;if(const RuntimeMaterialAsset*mat=g_assets->LoadMaterial(item->materialPath,&matError)){attachment.tint=mat->material.albedo;if(!mat->albedoMapPath.empty())attachment.albedoOverride=g_assets->LoadTexture(mat->albedoMapPath,&matError);}}
+    UnequipSlot(r,e,item->slot);a->attachments.push_back(std::move(attachment));return true;}
+}

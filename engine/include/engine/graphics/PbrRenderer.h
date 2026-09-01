@@ -133,6 +133,11 @@ public:
                 m_spotShadow.MapsRenderedLastFrame(), m_spotShadow.MapsReusedLastFrame(),
                 m_cascade.MemoryBytes() + m_pointShadow.MemoryBytes() + m_spotShadow.MemoryBytes()};
     }
+    void InvalidateShadowCache() {
+        m_cascade.Invalidate();
+        m_pointShadow.Invalidate();
+        m_spotShadow.Invalidate();
+    }
 
 private:
     CascadedShadow          m_cascade;

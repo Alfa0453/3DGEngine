@@ -400,4 +400,26 @@ std::size_t SkinnedModel::AddAnimationsFromFile(const std::string& path,
     return added;
 }
 
+void SkinnedModel::ConfigureAnimationMetadata(
+    std::size_t first, std::size_t count, float playbackStartSeconds,
+    float playbackEndSeconds, bool additive, float additiveReferenceSeconds,
+    const std::vector<AnimationCurve>& curves) {
+    const std::size_t end = std::min(first + count, m_animations.size());
+    for (std::size_t i = first; i < end; ++i) {
+        Animation& animation = m_animations[i];
+        const float tps = animation.ticksPerSecond > 0.0f
+            ? animation.ticksPerSecond : 25.0f;
+        animation.playbackStartTicks = glm::clamp(
+            std::max(playbackStartSeconds, 0.0f) * tps, 0.0f, animation.duration);
+        animation.playbackEndTicks = playbackEndSeconds > playbackStartSeconds
+            ? glm::clamp(playbackEndSeconds * tps,
+                         animation.playbackStartTicks, animation.duration)
+            : -1.0f;
+        animation.additive = additive;
+        animation.additiveReferenceTicks = glm::clamp(
+            std::max(additiveReferenceSeconds, 0.0f) * tps, 0.0f, animation.duration);
+        animation.curves = curves;
+    }
+}
+
 } // namespace engine

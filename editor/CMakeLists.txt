@@ -76,6 +76,9 @@ add_executable(3DGEditor
     src/panels/DestructionAuthoringPanel.cpp
     src/panels/InteractionAuthoringPanel.cpp
     src/panels/IKRigEditorPanel.cpp
+    src/panels/PoseLibraryPanel.cpp
+    src/panels/CharacterEquipmentPanel.cpp
+    src/panels/RenderDebuggerPanel.cpp
     src/panels/PortalAuthoringPanel.cpp
     src/panels/QuestEditorPanel.cpp
     src/panels/DialogueEditorPanel.cpp

@@ -1,4 +1,5 @@
 #include "EditorApp.h"
+#include <engine/gameplay/EquipmentSystem.h>
 
 #include <glad/glad.h>
 #include <engine/ecs/Registry.h>
@@ -383,8 +384,7 @@ std::size_t CountAuthoredMovers(const EditorScene& scene) {
 }
 
 float AnimationClipSeconds(const engine::Animation& clip) {
-    const float ticksPerSecond = clip.ticksPerSecond > 0.0f ? clip.ticksPerSecond : 25.0f;
-    return clip.duration > 0.0f ? clip.duration / ticksPerSecond : 0.0f;
+    return engine::AnimationPlaybackSeconds(clip);
 }
 
 std::size_t CountRuntimeRotatorsWithFrozenRigidBody(engine::ecs::Registry& registry) {
@@ -996,6 +996,7 @@ void EditorApp::OnUpdate(float dt)
         && engine::GameMode::Instance().IsPlaying()) {
         const engine::ScriptInputState scriptInput =
             CapturePlayScriptInput(playInputEnabled, true);
+        engine::SetEquipmentAssetManager(m_playAssets ? &*m_playAssets : nullptr);
         engine::UpdateScripts(
             *m_playRegistry, playDt, &scriptInput, &m_runtimeAudio,
             &m_cameraShake, &m_cameraDirector, &engine::GameMode::Instance(),
@@ -1282,7 +1283,8 @@ void EditorApp::OnRender()
     const auto cpuRenderStart = std::chrono::high_resolution_clock::now();
     // The overlay toggle also controls query/counter work, so hiding the
     // profiler removes its per-frame overhead rather than only hiding its UI.
-    m_gpuProfiler.SetEnabled(m_showProfiler);
+    m_gpuProfiler.SetEnabled(m_showProfiler
+        || m_panels.IsOpen(EditorPanels::Panel::RenderDebugger));
     m_gpuProfiler.BeginFrame();
 
     m_renderer.SetMultisample(environment.msaa);   // MSAA toggle (direct render path)
@@ -1400,7 +1402,7 @@ void EditorApp::OnRender()
     } else {
         DrawEditScene(viewProj);
     }
-    if (environment.lightingDebugMode == 17 && m_dynamicGi.Ready())
+    if (EffectiveLightingDebugMode(environment) == 17 && m_dynamicGi.Ready())
         m_viewport.DrawDynamicIrradianceProbes(m_dynamicGi, m_camera.Position(), viewProj);
     DrawFoliage(m_camera, GetWindow().AspectRatio());        // batched trees/bushes/rocks
     DrawGrass(m_camera, GetWindow().AspectRatio());          // opaque grass on terrain (before water)
@@ -1438,9 +1440,10 @@ void EditorApp::OnRender()
         } else {
             m_postProcess->SetIndirectTexture(0, 0.0f);
         }
-        m_postProcess->SetIndirectDebug(environment.lightingDebugMode == 18);
-        m_postProcess->SetLightingDebugPassthrough(environment.lightingDebugMode != 0
-                                                   && environment.lightingDebugMode != 18);
+        const int lightingDebugMode = EffectiveLightingDebugMode(environment);
+        m_postProcess->SetIndirectDebug(lightingDebugMode == 18);
+        m_postProcess->SetLightingDebugPassthrough(lightingDebugMode != 0
+                                                   && lightingDebugMode != 18);
         m_postProcess->SetVolumetricDirectionalShadow(
             m_pbrRenderer && environment.directionalShadows
                 ? &m_pbrRenderer->Cascade() : nullptr,
@@ -1761,7 +1764,7 @@ void EditorApp::DrawEditModeModels(const glm::mat4 & viewProj,
                     lighting.minimumSkylight = environment.minimumSkylight;
                     lighting.specularOcclusionStrength = environment.specularOcclusionStrength;
                     lighting.localProbeInfluence = environment.localProbeInfluence;
-                    lighting.lightingDebugMode = environment.lightingDebugMode;
+                    lighting.lightingDebugMode = EffectiveLightingDebugMode(environment);
                     lighting.ssao = environment.ssao && m_ssao ? &*m_ssao : nullptr;
                     lighting.screenSize = glm::vec2(m_renderW, m_renderH);
                     lighting.lightingGrid = m_dynamicGi.GpuReady() ? &m_dynamicGi.Grid()
@@ -2596,6 +2599,8 @@ void EditorApp::DrawEditorOverlay()
     DrawSpawnManagerPanel();
     DrawCheckpointSaveEditorPanel();
     DrawIKRigEditorPanel();
+    DrawPoseLibraryPanel();
+    DrawCharacterEquipmentPanel();
     DrawLevelVariantPanel();
     DrawLevelLayersPanel();
     DrawViewportBookmarksPanel();
@@ -2605,6 +2610,7 @@ void EditorApp::DrawEditorOverlay()
     DrawPrefabEditorPanel();
     DrawScriptDebugPanel();
     DrawViewportPanel();
+    DrawRenderDebuggerPanel();
     DrawWorldEditorPanel();
     DrawDirtyScenePrompt();
     if (selectedRuntimeAudio != engine::AudioEngine::InvalidSource) {
@@ -2917,6 +2923,16 @@ void EditorApp::DrawEditorOverlay()
             m_panels.SetOpen(EditorPanels::Panel::IKRigEditor, true);
             m_ikRigEditor.QueueOpen(path);
             m_log.Info("Opening IK rig: " + path);
+            break;
+        case EditorAssets::Type::PoseLibrary:
+            m_panels.SetOpen(EditorPanels::Panel::PoseLibrary, true);
+            m_poseLibrary.QueueOpen(path);
+            m_log.Info("Opening pose library: " + path);
+            break;
+        case EditorAssets::Type::EquipmentSet:
+            m_panels.SetOpen(EditorPanels::Panel::CharacterEquipment, true);
+            m_characterEquipment.QueueOpen(path);
+            m_log.Info("Opening equipment set: " + path);
             break;
         case EditorAssets::Type::Terrain:
             m_panels.SetOpen(EditorPanels::Panel::TerrainCreator, true);
@@ -4753,6 +4769,150 @@ void EditorApp::DrawIKRigEditorPanel() {
     if (!result.message.empty()) m_log.Info(result.message);
 }
 
+void EditorApp::DrawPoseLibraryPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::PoseLibrary)) return;
+    bool open = true;
+    const auto result = m_poseLibrary.Draw(m_assets, m_project.AssetRoot(), &open);
+    m_panels.SetOpen(EditorPanels::Panel::PoseLibrary, open);
+    if (result.saved) {
+        std::string error;
+        if (!m_assets.Refresh(m_project.AssetRoot(), &error)) m_log.Warning(error);
+    }
+    if (!result.message.empty()) m_log.Info(result.message);
+}
+
+void EditorApp::DrawCharacterEquipmentPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::CharacterEquipment)) return;
+    bool open=true;const auto result=m_characterEquipment.Draw(m_assets,m_project.AssetRoot(),&open);
+    m_panels.SetOpen(EditorPanels::Panel::CharacterEquipment,open);
+    if(result.saved){std::string error;if(!m_assets.Refresh(m_project.AssetRoot(),&error))m_log.Warning(error);}
+    if(!result.message.empty())m_log.Info(result.message);
+}
+
+void EditorApp::DrawRenderDebuggerPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::RenderDebugger)) return;
+
+    RenderDebuggerPanel::FrameData frame;
+    const auto add2D = [&](const char* name, unsigned int texture,
+                           RenderDebuggerPanel::Interpretation interpretation,
+                           int width, int height, const char* owner,
+                           const char* description) {
+        if (!texture) return;
+        frame.textures.push_back({name, texture,
+            RenderDebuggerPanel::TextureTarget::Texture2D, interpretation,
+            std::max(width, 1), std::max(height, 1), 1, owner, description});
+    };
+
+    if (m_viewportFbo) {
+        add2D("Viewport / Presented Color", m_viewportFbo->ColorTexture(),
+              RenderDebuggerPanel::Interpretation::Color,
+              m_viewportFbo->Width(), m_viewportFbo->Height(), "Viewport",
+              "The editor viewport after scene presentation and editor composition.");
+        add2D("Viewport Depth", m_viewportFbo->DepthTexture(),
+              RenderDebuggerPanel::Interpretation::Depth,
+              m_viewportFbo->Width(), m_viewportFbo->Height(), "Scene",
+              "Depth attached to the editor viewport target. Narrow the display range to inspect small depth differences.");
+    }
+    if (m_postProcess) {
+        add2D("HDR Scene Color", m_postProcess->HdrColor(),
+              RenderDebuggerPanel::Interpretation::Color,
+              m_postProcess->Width(), m_postProcess->Height(), "Scene",
+              "Linear HDR scene before final tone mapping.");
+        add2D("Bloom Intermediate", m_postProcess->BloomTexture(),
+              RenderDebuggerPanel::Interpretation::Color,
+              std::max(m_postProcess->Width()/2, 1), std::max(m_postProcess->Height()/2, 1),
+              "Post", "Bloom extraction and blur intermediate.");
+        add2D("LDR Composite", m_postProcess->LdrTexture(),
+              RenderDebuggerPanel::Interpretation::Color,
+              m_postProcess->Width(), m_postProcess->Height(), "Post",
+              "Tone-mapped composite used by the final anti-aliasing pass.");
+        add2D("TAA History", m_postProcess->TaaHistoryTexture(),
+              RenderDebuggerPanel::Interpretation::Color,
+              m_postProcess->Width(), m_postProcess->Height(), "Post",
+              "Most recently resolved temporal history buffer.");
+        add2D("Volumetric Lighting", m_postProcess->VolumetricTexture(),
+              RenderDebuggerPanel::Interpretation::Color,
+              m_postProcess->Width(), m_postProcess->Height(), "Post",
+              "Volumetric fog and local-light scattering intermediate.");
+    }
+    if (m_ssao) {
+        add2D("GTAO View Position", m_ssao->PositionTexture(),
+              RenderDebuggerPanel::Interpretation::Position,
+              m_renderW, m_renderH, "GTAO Geometry",
+              "View-space position retained by the ambient-occlusion geometry pass.");
+        add2D("GTAO View Normal", m_ssao->NormalTexture(),
+              RenderDebuggerPanel::Interpretation::Normal,
+              m_renderW, m_renderH, "GTAO Geometry",
+              "View-space geometry normals used by GTAO, SSGI, and SSR.");
+        add2D("Motion Vectors", m_ssao->VelocityTexture(),
+              RenderDebuggerPanel::Interpretation::Velocity,
+              m_renderW, m_renderH, "GTAO Geometry",
+              "Screen-space motion used for temporal reprojection.");
+        add2D("Raw GTAO", m_ssao->RawAOTexture(),
+              RenderDebuggerPanel::Interpretation::Scalar,
+              m_renderW, m_renderH, "GTAO",
+              "Ambient occlusion before spatial filtering.");
+        add2D("Filtered GTAO", m_ssao->FilteredAOTexture(),
+              RenderDebuggerPanel::Interpretation::Scalar,
+              m_renderW, m_renderH, "GTAO",
+              "Filtered ambient occlusion consumed by material lighting.");
+        add2D("Raw Bent Normal", m_ssao->RawBentNormalTexture(),
+              RenderDebuggerPanel::Interpretation::Normal,
+              m_renderW, m_renderH, "GTAO",
+              "Unfiltered indirect-light visibility direction.");
+        add2D("Filtered Bent Normal", m_ssao->BentNormalTexture(),
+              RenderDebuggerPanel::Interpretation::Normal,
+              m_renderW, m_renderH, "GTAO",
+              "Filtered bent normal consumed by indirect lighting.");
+    }
+    if (m_ssgi) {
+        add2D("Raw SSGI", m_ssgi->RawTexture(),
+              RenderDebuggerPanel::Interpretation::Color,
+              std::max(m_renderW/2, 1), std::max(m_renderH/2, 1), "SSGI",
+              "Raw screen-space diffuse bounce before denoising.");
+        add2D("Filtered SSGI", m_ssgi->Texture(),
+              RenderDebuggerPanel::Interpretation::Color,
+              std::max(m_renderW/2, 1), std::max(m_renderH/2, 1), "SSGI",
+              "Denoised screen-space diffuse bounce.");
+    }
+    if (m_ssr) {
+        add2D("SSR Composite", m_ssr->ResultTexture(),
+              RenderDebuggerPanel::Interpretation::Color,
+              m_renderW, m_renderH, "SSR",
+              "Screen-space reflection result from the latest enabled SSR pass.");
+    }
+    if (m_pbrRenderer && m_pbrRenderer->Cascade().TextureArray()) {
+        const engine::CascadedShadow& cascade = m_pbrRenderer->Cascade();
+        frame.textures.push_back({"Directional Shadow Cascades",
+            cascade.TextureArray(), RenderDebuggerPanel::TextureTarget::Texture2DArray,
+            RenderDebuggerPanel::Interpretation::Depth, cascade.Size(), cascade.Size(),
+            cascade.Count(), "Directional Shadows",
+            "Select a layer to inspect one directional-light cascade."});
+        frame.shadowMemoryBytes = m_pbrRenderer->GetShadowStats().memoryBytes;
+    }
+
+    frame.gpuTimings = m_gpuProfiler.Results();
+    frame.totalDrawCalls = m_gpuProfiler.DrawCalls();
+    frame.oneSidedShadowDraws = m_gpuProfiler.OneSidedShadowDraws();
+    frame.twoSidedShadowDraws = m_gpuProfiler.TwoSidedShadowDraws();
+    for (const auto& owner : m_gpuProfiler.DrawCallsByScope())
+        frame.drawCalls.push_back(owner);
+    std::sort(frame.drawCalls.begin(), frame.drawCalls.end(),
+        [](const auto& a, const auto& b) { return a.second > b.second; });
+    frame.lightingDebugMode = EffectiveLightingDebugMode(m_scene.GetEnvironment());
+
+    bool open = true;
+    const RenderDebuggerPanel::Result result = m_renderDebugger.Draw(frame, &open);
+    m_panels.SetOpen(EditorPanels::Panel::RenderDebugger, open);
+    if (result.lightingDebugMode == -2) m_renderDebugModeOverride = -1;
+    else if (result.lightingDebugMode >= 0)
+        m_renderDebugModeOverride = result.lightingDebugMode;
+    if (result.refreshShadows && m_pbrRenderer) {
+        m_pbrRenderer->InvalidateShadowCache();
+        m_log.Info("Render Debugger refreshed all shadow-map caches");
+    }
+}
+
 int EditorApp::DeleteDestructionPreview(const std::string& name) {
     if(name.empty())return 0;const std::string prefix="DestructionPreview_"+name+"_";
     std::vector<int> indices;for(int i=0;i<static_cast<int>(m_scene.Objects().size());++i)
@@ -6294,6 +6454,16 @@ std::vector<DirtyDocument> EditorApp::CollectDirtyDocuments() {
         [this](std::string* error) {
             return m_ikRigEditor.SaveForShutdown(m_project.AssetRoot(), error);
         });
+    if (m_poseLibrary.IsDirty()) add(DirtyDocumentType::Asset,
+        m_poseLibrary.Path(), "New Pose Library",
+        [this](std::string* error) {
+            return m_poseLibrary.SaveForShutdown(m_project.AssetRoot(), error);
+        });
+    if (m_characterEquipment.IsDirty()) add(DirtyDocumentType::Asset,
+        m_characterEquipment.Path(), "New Equipment Set",
+        [this](std::string* error) {
+            return m_characterEquipment.SaveForShutdown(m_project.AssetRoot(), error);
+        });
     if (m_portalAuthoring.IsDirty()) add(DirtyDocumentType::Asset,
         m_portalAuthoring.Path(), "New Portal",
         [this](std::string* error) {
@@ -7491,7 +7661,7 @@ void EditorApp::DrawPlayScene(const glm::mat4 & viewProj)
         lighting.minimumSkylight = environment.minimumSkylight;
         lighting.specularOcclusionStrength = environment.specularOcclusionStrength;
         lighting.localProbeInfluence = environment.localProbeInfluence;
-        lighting.lightingDebugMode = environment.lightingDebugMode;
+        lighting.lightingDebugMode = EffectiveLightingDebugMode(environment);
         lighting.ssao = environment.ssao && m_ssao ? &*m_ssao : nullptr;
         lighting.screenSize = glm::vec2(m_renderW, m_renderH);
         lighting.lightingGrid = m_dynamicGi.GpuReady() ? &m_dynamicGi.Grid()
@@ -8269,6 +8439,12 @@ void EditorApp::UpdateEnvironmentIbl(const EditorScene::Environment& environment
     }
 }
 
+int EditorApp::EffectiveLightingDebugMode(
+    const EditorScene::Environment& environment) const {
+    return m_renderDebugModeOverride >= 0
+        ? m_renderDebugModeOverride : environment.lightingDebugMode;
+}
+
 void EditorApp::ConfigureEnvironmentPbrOptions(engine::ecs::Registry& registry,
                                                engine::PbrRenderer::Options& options,
                                                const EditorScene::Environment& environment,
@@ -8288,7 +8464,7 @@ void EditorApp::ConfigureEnvironmentPbrOptions(engine::ecs::Registry& registry,
     options.minimumSkylight = environment.minimumSkylight;
     options.specularOcclusionStrength = environment.specularOcclusionStrength;
     options.localProbeInfluence = environment.localProbeInfluence;
-    options.lightingDebugMode = environment.lightingDebugMode;
+    options.lightingDebugMode = EffectiveLightingDebugMode(environment);
     if (environment.lightingBuildAsset != m_loadedLightingAsset) LoadSceneLightingAsset();
     UpdateDynamicGi(registry, environment, sky);
     options.lightingGrid = m_dynamicGi.GpuReady() ? &m_dynamicGi.Grid()

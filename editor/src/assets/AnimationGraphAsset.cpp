@@ -123,7 +123,7 @@ void AnimationGraphAsset::NormalizeGraphMetadata(bool generateLayout,
 
 bool AnimationGraphAsset::Save(const std::string& path, std::string* error) {
     if (!assetId.Valid()) assetId = engine::AssetHandle::Generate();
-    version = 7;
+    version = 8;
     NormalizeGraphMetadata(true, false);
     const std::string contentRoot = engine::FindContentRootForAsset(path);
     engine::AssetRegistry registry;
@@ -165,8 +165,16 @@ bool AnimationGraphAsset::Save(const std::string& path, std::string* error) {
             << std::quoted(OrDash(c.sourceClipName)) << ' ' << std::quoted(OrDash(c.clipName)) << ' '
             << (c.stripRootMotion ? 1 : 0) << ' '
             << (c.clipAssetId.Valid() ? c.clipAssetId.ToString() : std::string("-")) << ' '
-            << (c.sourceAssetId.Valid() ? c.sourceAssetId.ToString() : std::string("-"))
-            << '\n';
+            << (c.sourceAssetId.Valid() ? c.sourceAssetId.ToString() : std::string("-")) << ' '
+            << c.playbackStart << ' ' << c.playbackEnd << ' '
+            << (c.additive ? 1 : 0) << ' ' << c.additiveReferenceTime << ' '
+            << c.curves.size();
+        for (const engine::AnimationCurve& curve : c.curves) {
+            out << ' ' << std::quoted(OrDash(curve.name)) << ' ' << curve.keys.size();
+            for (const engine::AnimationCurveKey& key : curve.keys)
+                out << ' ' << key.time << ' ' << key.value;
+        }
+        out << '\n';
     }
 
     out << "GRAPH " << states.size() << ' ' << parameters.size() << ' ' << transitions.size() << '\n';
@@ -310,6 +318,24 @@ bool AnimationGraphAsset::Load(const std::string& path, std::string* error) {
                     if (error) *error =
                         "Graph clip contains an invalid asset identity: " + path;
                     return false;
+                }
+            }
+            if (loadedVersion >= 8) {
+                int additive = 0;
+                std::size_t curveCount = 0;
+                in >> c.playbackStart >> c.playbackEnd >> additive
+                   >> c.additiveReferenceTime >> curveCount;
+                c.additive = additive != 0;
+                if (curveCount > 128) in.setstate(std::ios::failbit);
+                c.curves.resize(curveCount);
+                for (engine::AnimationCurve& curve : c.curves) {
+                    std::size_t keyCount = 0;
+                    in >> std::quoted(curve.name) >> keyCount;
+                    Undash(curve.name);
+                    if (keyCount > 4096) in.setstate(std::ios::failbit);
+                    curve.keys.resize(keyCount);
+                    for (engine::AnimationCurveKey& key : curve.keys)
+                        in >> key.time >> key.value;
                 }
             }
             Undash(c.clipAsset); Undash(c.sourceFile); Undash(c.sourceClipName); Undash(c.clipName);
@@ -463,7 +489,7 @@ bool AnimationGraphAsset::Load(const std::string& path, std::string* error) {
             }
         }
     }
-    version = 7;
+    version = 8;
     NormalizeGraphMetadata(true, loadedVersion < 7);
     // Runtime controllers intentionally still begin in their first state. Keep the
     // explicit entry state first in the authoring array when handing graph data to

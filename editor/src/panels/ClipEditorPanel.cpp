@@ -13,6 +13,8 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 
@@ -171,12 +173,16 @@ unsigned int ClipEditorPanel::RenderPreview(int width, int height, float deltaTi
         if (playClip >= 0 && playClip < static_cast<int>(anims.size())) {
             const engine::Animation& clip = anims[static_cast<std::size_t>(playClip)];
             const float tps = clip.ticksPerSecond > 0.0f ? clip.ticksPerSecond : 25.0f;
-            const float durationSeconds = clip.duration > 0.0f ? clip.duration / tps : 0.0f;
+            const float sourceDuration = clip.duration > 0.0f ? clip.duration / tps : 0.0f;
+            m_asset.Normalize(sourceDuration);
+            const float durationSeconds = m_asset.PlaybackDuration(sourceDuration);
             if (m_playing) m_time += deltaTime * std::max(m_asset.speed, 0.0f);
-            if (!m_asset.loop && durationSeconds > 0.0f && m_time > durationSeconds) {
-                m_time = durationSeconds;   // hold on the last frame when not looping
+            if (durationSeconds > 0.0f && m_time > durationSeconds) {
+                if (m_asset.loop) m_time = std::fmod(m_time, durationSeconds);
+                else m_time = durationSeconds;
             }
-            engine::Animator::ComputePose(renderModel->GetSkeleton(), clip, m_time, m_pose);
+            engine::Animator::ComputePose(renderModel->GetSkeleton(), clip,
+                m_asset.playbackStart + m_time, m_pose);
         } else {
             engine::Animator::ComputeBindPose(renderModel->GetSkeleton(), m_pose);
         }
@@ -422,19 +428,133 @@ void ClipEditorPanel::Draw(const std::string& assetRoot, bool* open, bool* asset
     }
     ImGui::DragFloat("Base Playback Speed", &m_asset.speed, 0.02f, 0.0f, 8.0f);
 
-    ImGui::SeparatorText("Events / Notifies");
-    ImGui::TextDisabled(
-        "Events fire once when playback crosses their time. Scripts can read them "
-        "with WasAnimationEvent().");
     float clipDuration = 0.0f;
+    const engine::Animation* selectedAnimation = nullptr;
     if (m_sourceModel && m_clipIndex >= 0
         && m_clipIndex < static_cast<int>(m_sourceModel->Animations().size())) {
-        const engine::Animation& clip =
-            m_sourceModel->Animations()[static_cast<std::size_t>(m_clipIndex)];
+        selectedAnimation =
+            &m_sourceModel->Animations()[static_cast<std::size_t>(m_clipIndex)];
+        const engine::Animation& clip = *selectedAnimation;
         const float ticksPerSecond =
             clip.ticksPerSecond > 0.0f ? clip.ticksPerSecond : 25.0f;
         clipDuration = clip.duration > 0.0f ? clip.duration / ticksPerSecond : 0.0f;
     }
+    m_asset.Normalize(clipDuration);
+    const float playbackEnd = m_asset.playbackEnd > m_asset.playbackStart
+        ? m_asset.playbackEnd : clipDuration;
+    const float playbackDuration = m_asset.PlaybackDuration(clipDuration);
+
+    ImGui::SeparatorText("Timeline Range");
+    ImGui::SetNextItemWidth(145.0f);
+    if (ImGui::DragFloat("Start", &m_asset.playbackStart, 0.01f, 0.0f,
+                        clipDuration > 0.0f ? clipDuration : 3600.0f, "%.3f s")) {
+        m_asset.Normalize(clipDuration);
+        m_time = std::min(m_time, m_asset.PlaybackDuration(clipDuration));
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Start = Playhead")) {
+        m_asset.playbackStart = std::clamp(m_asset.playbackStart + m_time, 0.0f,
+                                           clipDuration > 0.0f ? clipDuration : 3600.0f);
+        m_time = 0.0f;
+    }
+    ImGui::SetNextItemWidth(145.0f);
+    float editableEnd = playbackEnd;
+    if (ImGui::DragFloat("End", &editableEnd, 0.01f, m_asset.playbackStart,
+                        clipDuration > 0.0f ? clipDuration : 3600.0f, "%.3f s")) {
+        m_asset.playbackEnd = editableEnd;
+        m_asset.Normalize(clipDuration);
+        m_time = std::min(m_time, m_asset.PlaybackDuration(clipDuration));
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("End = Playhead"))
+        m_asset.playbackEnd = std::clamp(m_asset.playbackStart + m_time,
+            m_asset.playbackStart, clipDuration > 0.0f ? clipDuration : 3600.0f);
+
+    // A compact, source-time timeline. Events and curve keys are authored in source
+    // seconds, while the playhead shown to gameplay starts at zero after the trim.
+    const ImVec2 timelineSize(ImGui::GetContentRegionAvail().x, 150.0f);
+    const ImVec2 timelineOrigin = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton("##AnimationTimeline", timelineSize,
+                           ImGuiButtonFlags_MouseButtonLeft);
+    ImDrawList* timelineDraw = ImGui::GetWindowDrawList();
+    timelineDraw->AddRectFilled(timelineOrigin,
+        ImVec2(timelineOrigin.x + timelineSize.x, timelineOrigin.y + timelineSize.y),
+        IM_COL32(20, 27, 37, 255));
+    timelineDraw->AddRect(timelineOrigin,
+        ImVec2(timelineOrigin.x + timelineSize.x, timelineOrigin.y + timelineSize.y),
+        IM_COL32(72, 91, 116, 255));
+    const float displayDuration = std::max(clipDuration, 0.001f);
+    const auto timeX = [&](float seconds) {
+        return timelineOrigin.x + std::clamp(seconds / displayDuration, 0.0f, 1.0f)
+            * timelineSize.x;
+    };
+    const auto xTime = [&](float x) {
+        return std::clamp((x - timelineOrigin.x) / std::max(timelineSize.x, 1.0f), 0.0f, 1.0f)
+            * displayDuration;
+    };
+    for (int tick = 0; tick <= 10; ++tick) {
+        const float x = timelineOrigin.x + timelineSize.x * (static_cast<float>(tick) / 10.0f);
+        timelineDraw->AddLine(ImVec2(x, timelineOrigin.y),
+            ImVec2(x, timelineOrigin.y + timelineSize.y), IM_COL32(50, 62, 78, 255));
+        char label[32]{};
+        std::snprintf(label, sizeof(label), "%.2f", displayDuration * tick / 10.0f);
+        timelineDraw->AddText(ImVec2(x + 2.0f, timelineOrigin.y + 2.0f),
+                              IM_COL32(160, 174, 195, 255), label);
+    }
+    const float rangeStartX = timeX(m_asset.playbackStart);
+    const float rangeEndX = timeX(playbackEnd);
+    timelineDraw->AddRectFilled(timelineOrigin,
+        ImVec2(rangeStartX, timelineOrigin.y + timelineSize.y), IM_COL32(8, 10, 14, 170));
+    timelineDraw->AddRectFilled(ImVec2(rangeEndX, timelineOrigin.y),
+        ImVec2(timelineOrigin.x + timelineSize.x, timelineOrigin.y + timelineSize.y),
+        IM_COL32(8, 10, 14, 170));
+    timelineDraw->AddLine(ImVec2(rangeStartX, timelineOrigin.y),
+        ImVec2(rangeStartX, timelineOrigin.y + timelineSize.y), IM_COL32(72, 210, 140, 255), 2.0f);
+    timelineDraw->AddLine(ImVec2(rangeEndX, timelineOrigin.y),
+        ImVec2(rangeEndX, timelineOrigin.y + timelineSize.y), IM_COL32(72, 210, 140, 255), 2.0f);
+    for (const AnimationClipAsset::Event& event : m_asset.events) {
+        const float x = timeX(event.time);
+        timelineDraw->AddTriangleFilled(ImVec2(x, timelineOrigin.y + 25.0f),
+            ImVec2(x - 6.0f, timelineOrigin.y + 36.0f),
+            ImVec2(x + 6.0f, timelineOrigin.y + 36.0f), IM_COL32(255, 190, 60, 255));
+    }
+    if (m_selectedCurve >= 0
+        && m_selectedCurve < static_cast<int>(m_asset.curves.size())) {
+        const AnimationClipAsset::Curve& curve =
+            m_asset.curves[static_cast<std::size_t>(m_selectedCurve)];
+        float minValue = 0.0f, maxValue = 1.0f;
+        for (const auto& key : curve.keys) {
+            minValue = std::min(minValue, key.value);
+            maxValue = std::max(maxValue, key.value);
+        }
+        const float valueRange = std::max(maxValue - minValue, 0.001f);
+        const auto valueY = [&](float value) {
+            return timelineOrigin.y + timelineSize.y - 10.0f
+                - ((value - minValue) / valueRange) * (timelineSize.y - 55.0f);
+        };
+        for (std::size_t keyIndex = 1; keyIndex < curve.keys.size(); ++keyIndex)
+            timelineDraw->AddLine(
+                ImVec2(timeX(curve.keys[keyIndex - 1].time), valueY(curve.keys[keyIndex - 1].value)),
+                ImVec2(timeX(curve.keys[keyIndex].time), valueY(curve.keys[keyIndex].value)),
+                IM_COL32(80, 180, 255, 255), 2.0f);
+        for (const auto& key : curve.keys)
+            timelineDraw->AddCircleFilled(ImVec2(timeX(key.time), valueY(key.value)),
+                                          4.0f, IM_COL32(110, 205, 255, 255));
+    }
+    const float playheadSource = m_asset.playbackStart + m_time;
+    const float playheadX = timeX(playheadSource);
+    timelineDraw->AddLine(ImVec2(playheadX, timelineOrigin.y),
+        ImVec2(playheadX, timelineOrigin.y + timelineSize.y), IM_COL32(255, 92, 92, 255), 2.0f);
+    if (ImGui::IsItemActive() && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        const float sourceTime = xTime(ImGui::GetIO().MousePos.x);
+        m_time = std::clamp(sourceTime - m_asset.playbackStart, 0.0f, playbackDuration);
+        m_playing = false;
+    }
+    ImGui::TextDisabled("Playhead %.3f s  |  Source %.3f s  |  Range %.3f s",
+                        m_time, playheadSource, playbackDuration);
+
+    ImGui::SeparatorText("Events / Notifies");
+    ImGui::TextDisabled("Events fire once when playback crosses their marker.");
     bool removeEvent = false;
     std::size_t removeEventIndex = 0;
     for (std::size_t i = 0; i < m_asset.events.size(); ++i) {
@@ -455,9 +575,8 @@ void ClipEditorPanel::Draw(const std::string& assetRoot, bool* open, bool* asset
         }
         ImGui::SameLine();
         if (ImGui::SmallButton("Set Here")) {
-            event.time = clipDuration > 0.0f
-                ? std::clamp(m_time, 0.0f, clipDuration)
-                : std::max(m_time, 0.0f);
+            event.time = std::clamp(m_asset.playbackStart + m_time,
+                m_asset.playbackStart, playbackEnd);
         }
         ImGui::SameLine();
         if (ImGui::SmallButton("X")) {
@@ -472,15 +591,76 @@ void ClipEditorPanel::Draw(const std::string& assetRoot, bool* open, bool* asset
     }
     if (ImGui::Button("Add Event")) {
         m_asset.events.push_back(AnimationClipAsset::Event{
-            clipDuration > 0.0f ? std::clamp(m_time, 0.0f, clipDuration)
-                                : std::max(m_time, 0.0f),
+            std::clamp(m_asset.playbackStart + m_time,
+                       m_asset.playbackStart, playbackEnd),
             "Event"});
     }
-    ImGui::SameLine();
-    if (clipDuration > 0.0f) {
-        ImGui::TextDisabled("Preview: %.3f / %.3f s", m_time, clipDuration);
-    } else {
-        ImGui::TextDisabled("Preview: %.3f s", m_time);
+
+    ImGui::SeparatorText("Animation Curves");
+    ImGui::TextDisabled("Curves can drive materials, effects and gameplay from scripts.");
+    for (std::size_t curveIndex = 0; curveIndex < m_asset.curves.size(); ++curveIndex) {
+        ImGui::PushID(7000 + static_cast<int>(curveIndex));
+        if (ImGui::Selectable(m_asset.curves[curveIndex].name.c_str(),
+                              m_selectedCurve == static_cast<int>(curveIndex)))
+            m_selectedCurve = static_cast<int>(curveIndex);
+        ImGui::PopID();
+    }
+    if (ImGui::Button("Add Curve")) {
+        m_asset.curves.push_back({"Curve" + std::to_string(m_asset.curves.size() + 1), {}});
+        m_selectedCurve = static_cast<int>(m_asset.curves.size()) - 1;
+    }
+    if (m_selectedCurve >= 0
+        && m_selectedCurve < static_cast<int>(m_asset.curves.size())) {
+        AnimationClipAsset::Curve& curve = m_asset.curves[static_cast<std::size_t>(m_selectedCurve)];
+        std::array<char, 128> curveName{};
+        Copy(curveName, curve.name);
+        if (ImGui::InputText("Curve Name", curveName.data(), curveName.size()))
+            curve.name = curveName.data();
+        bool removeKey = false;
+        std::size_t removeKeyIndex = 0;
+        for (std::size_t keyIndex = 0; keyIndex < curve.keys.size(); ++keyIndex) {
+            ImGui::PushID(8000 + static_cast<int>(keyIndex));
+            ImGui::SetNextItemWidth(105.0f);
+            ImGui::DragFloat("Time", &curve.keys[keyIndex].time, 0.01f, 0.0f,
+                             clipDuration > 0.0f ? clipDuration : 3600.0f, "%.3f");
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(105.0f);
+            ImGui::DragFloat("Value", &curve.keys[keyIndex].value, 0.01f, -10000.0f, 10000.0f, "%.3f");
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Here")) curve.keys[keyIndex].time = playheadSource;
+            ImGui::SameLine();
+            if (ImGui::SmallButton("X")) { removeKey = true; removeKeyIndex = keyIndex; }
+            ImGui::PopID();
+        }
+        if (removeKey)
+            curve.keys.erase(curve.keys.begin() + static_cast<std::ptrdiff_t>(removeKeyIndex));
+        if (ImGui::Button("Add Key")) curve.keys.push_back({playheadSource, 0.0f});
+        ImGui::SameLine();
+        if (ImGui::Button("Remove Curve")) {
+            m_asset.curves.erase(m_asset.curves.begin() + m_selectedCurve);
+            m_selectedCurve = std::min(m_selectedCurve,
+                static_cast<int>(m_asset.curves.size()) - 1);
+        }
+    }
+
+    ImGui::SeparatorText("Additive / Root Motion");
+    if (ImGui::Checkbox("Additive Clip", &m_asset.additive) && m_asset.additive) {
+        // Additive data is consumed by the action-layer pipeline; keep the asset
+        // callable as a one-shot instead of treating a delta pose as a base state.
+        m_asset.action = true;
+        m_asset.loop = false;
+    }
+    if (m_asset.additive) {
+        ImGui::DragFloat("Reference Time", &m_asset.additiveReferenceTime,
+                         0.01f, 0.0f, clipDuration, "%.3f s");
+        ImGui::TextDisabled("The reference pose is sampled from this source take.");
+    }
+    if (selectedAnimation && m_sourceModel) {
+        const glm::vec3 rootStart = engine::Animator::SampleRootTranslation(
+            m_sourceModel->GetSkeleton(), *selectedAnimation, m_asset.playbackStart);
+        const glm::vec3 rootEnd = engine::Animator::SampleRootTranslation(
+            m_sourceModel->GetSkeleton(), *selectedAnimation, playbackEnd);
+        ImGui::TextDisabled("Root displacement: %.3f m", glm::length(rootEnd - rootStart));
     }
 
     ImGui::SeparatorText("Preview (not saved)");

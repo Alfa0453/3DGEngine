@@ -117,6 +117,11 @@ public:
         bool        stripRootMotion = false;
         std::string sourceClipName; // take inside the source file
         float       basePlaybackSpeed = 1.0f; // baked from authoritative .3dgclip
+        float       playbackStart = 0.0f;
+        float       playbackEnd = -1.0f;
+        bool        additive = false;
+        float       additiveReferenceTime = 0.0f;
+        std::vector<engine::AnimationCurve> curves;
     };
 
     // A static model socketed to a character bone (weapon, shield, hat...).

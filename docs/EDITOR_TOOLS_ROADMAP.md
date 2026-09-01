@@ -48,11 +48,11 @@ Status legend:
 | 29 | **COMPLETE** | Checkpoint and Save Editor | Visual configuration of persisted player, quest, world, and streamed-level state. |
 | 30 | **COMPLETE** | Interaction Editor | Prompts, ranges, inputs, conditions, animation requirements, and interaction events. |
 | 31 | **COMPLETE** | IK Rig Editor | Foot placement, hand targets, look-at, weapon alignment, aiming, and terrain adaptation. |
-| 32 | **NEXT** | Animation Timeline Editor | Clip trimming, looping, root motion, curves, events, additive setup, and playback ranges. |
-| 33 | PLANNED | Pose Library | Saves, previews, mirrors, blends, tags, and reuses skeletal poses. |
-| 34 | PLANNED | Character Equipment Editor | Equips weapons, armor, staffs, props, audio, and effects through sockets. |
-| 35 | PLANNED | Render Debugger | Inspects render passes, depth, normals, material buffers, shadow maps, and draw calls. |
-| 36 | PLANNED | Frame Capture Analyzer | Per-frame timeline for scripts, AI, physics, animation, rendering, particles, audio, and UI. |
+| 32 | **COMPLETE** | Animation Timeline Editor | Clip trimming, looping, root motion, curves, events, additive setup, and playback ranges. |
+| 33 | **COMPLETE** | Pose Library | Saves, previews, mirrors, blends, tags, and reuses skeletal poses. |
+| 34 | **COMPLETE** | Character Equipment Editor | Equips weapons, armor, staffs, props, audio, and effects through sockets. |
+| 35 | **COMPLETE** | Render Debugger | Inspects render passes, depth, normals, material views, shadow maps, and draw-call ownership. |
+| 36 | **NEXT** | Frame Capture Analyzer | Per-frame timeline for scripts, AI, physics, animation, rendering, particles, audio, and UI. |
 | 37 | PLANNED | Memory Profiler | Tracks RAM and VRAM use by assets, scenes, runtime systems, caches, and streaming cells. |
 | 38 | PLANNED | Collision Analyzer | Visualizes channels, responses, contacts, overlaps, penetration, and collision ownership. |
 | 39 | PLANNED | Navigation Query Tool | Tests paths, agent sizes, costs, unreachable areas, links, and dynamic obstacles. |
@@ -508,7 +508,54 @@ solver, registry, scene, editor, and packaged-player verification covers the fea
 See [IK Rig Editor Guide](IK_RIG_EDITOR_GUIDE.md) for the authoring workflow and
 script examples.
 
-## Next Milestone: Animation Timeline Editor
+## Completed Milestone: Animation Timeline Editor
 
-Planned scope: clip trimming, playback ranges, looping, root-motion inspection,
-curves, notifies/events, additive setup, and animation preview controls.
+The former Clip Editor is now a full Animation Timeline Editor. It provides source
+range trimming, an interactive playhead, range and event markers, float-curve
+authoring and visualization, root-motion inspection, additive reference-pose setup,
+one-shot action settings, and compatible skeletal preview selection. Version-5 clip
+assets propagate their playback windows, curves, and additive metadata through
+animation graphs, characters, scenes, and packaged runtime loading. Native C++ and
+Lua scripts can sample the active animation curve. Earlier clip assets remain
+backward compatible.
+
+See [Animation Timeline Editor Guide](ANIMATION_TIMELINE_EDITOR_GUIDE.md).
+
+## Completed Milestone: Pose Library
+
+The Pose Library now captures bind or animation-sampled poses into engine-owned
+`.3dgpose` assets. It provides skeleton selection, capture-time scrubbing, searchable
+names and tags, skeletal previews, source-to-pose blending, per-bone transform edits,
+and left/right mirroring. Poses resolve by bone name with bind-pose fallback, register
+stable skeleton dependencies, open directly from Content, and can be blended at
+runtime from native C++ or Lua scripts.
+
+See [Pose Library Guide](POSE_LIBRARY_GUIDE.md).
+
+## Completed Milestone: Character Equipment Editor
+
+The Character Equipment Editor now creates engine-owned `.3dgequipment` catalogs
+with compatible Character selection, socket validation, searchable mesh/material/
+audio/effect choices, per-item local transforms, slots, tags, duplication, and a
+socket preview. Stable asset identities and dependencies are registered with Content.
+At runtime, native C++ and Lua scripts equip, replace, query, and remove items by
+slot; permanent attachments and other slots remain intact, and equip audio plays
+automatically.
+
+See [Character Equipment Editor Guide](CHARACTER_EQUIPMENT_EDITOR_GUIDE.md).
+
+## Completed Milestone: Render Debugger
+
+The Render Debugger now previews retained 2D and texture-array render targets,
+including HDR/post intermediates, viewport depth, GTAO geometry and filtering,
+motion vectors, bent normals, SSGI, SSR, and directional-shadow cascade layers.
+It also provides non-destructive live material/lighting views, preview exposure and
+range controls, capture/freeze, pixel inspection, shadow-cache refresh, delayed GPU
+timings, and draw-call ownership grouped by active render scope.
+
+See [Render Debugger Guide](RENDER_DEBUGGER_GUIDE.md).
+
+## Next Milestone: Frame Capture Analyzer
+
+Planned scope: record a single frame as a cross-system CPU/GPU timeline covering
+scripts, AI, physics, animation, rendering, particles, audio, and UI.

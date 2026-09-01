@@ -161,12 +161,14 @@ const char* AssetTypeName(AssetType type) {
         case AssetType::Spawn: return "Spawn Encounter";
         case AssetType::SaveProfile: return "Save Profile";
         case AssetType::IKRig: return "IK Rig";
+        case AssetType::PoseLibrary: return "Pose Library";
+        case AssetType::EquipmentSet: return "Equipment Set";
     }
     return "Unknown";
 }
 
 bool IsKnownAssetType(AssetType type) {
-    return type > AssetType::Unknown && type <= AssetType::IKRig;
+    return type > AssetType::Unknown && type <= AssetType::EquipmentSet;
 }
 
 const char* NativeAssetExtension(AssetType type) {

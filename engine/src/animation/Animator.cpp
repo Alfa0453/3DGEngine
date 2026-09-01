@@ -54,9 +54,14 @@ glm::mat4 LocalAt(const BoneChannel& ch, float t, const glm::mat4& bind) {
 float WrapTicks(const Animation& anim, float timeSeconds) {
     if (anim.duration <= 0.0f) return 0.0f;
     const float tps = (anim.ticksPerSecond > 0.0f) ? anim.ticksPerSecond : 25.0f;
-    float t = std::fmod(timeSeconds * tps, anim.duration);
-    if (t < 0.0f) t += anim.duration;
-    return t;
+    const float start = glm::clamp(anim.playbackStartTicks, 0.0f, anim.duration);
+    const float end = anim.playbackEndTicks > start
+        ? std::min(anim.playbackEndTicks, anim.duration) : anim.duration;
+    const float length = std::max(end - start, 0.0f);
+    if (length <= 0.0f) return start;
+    float t = std::fmod(timeSeconds * tps, length);
+    if (t < 0.0f) t += length;
+    return start + t;
 }
 
 struct BonePose { glm::vec3 pos; glm::quat rot; glm::vec3 scale; };
@@ -81,12 +86,7 @@ void Animator::ComputePose(const Skeleton& skel, const Animation& anim, float ti
     out.assign(n, glm::mat4(1.0f));
     std::vector<glm::mat4> world(n, glm::mat4(1.0f));
 
-    float ticks = 0.0f;
-    if (anim.duration > 0.0f) {
-        const float tps = (anim.ticksPerSecond > 0.0f) ? anim.ticksPerSecond : 25.0f;
-        ticks = std::fmod(timeSeconds * tps, anim.duration);
-        if (ticks < 0.0f) ticks += anim.duration;
-    }
+    const float ticks = WrapTicks(anim, timeSeconds);
 
     for (std::size_t i = 0; i < n; ++i) {
         const Bone& b = skel.bones[i];
@@ -143,6 +143,42 @@ void Animator::SampleLocal(const Skeleton& skel, const Animation& anim, float ti
     }
 }
 
+void Animator::SampleAdditiveLocal(const Skeleton& skel, const Animation& anim,
+                                   float timeSeconds, std::vector<BoneLocal>& out) {
+    const std::size_t n = skel.bones.size();
+    out.assign(n, BoneLocal{});
+    const float ticks = WrapTicks(anim, timeSeconds);
+    const float referenceTicks = glm::clamp(
+        anim.additiveReferenceTicks, 0.0f, std::max(anim.duration, 0.0f));
+    for (std::size_t i = 0; i < n; ++i) {
+        const BonePose value = SampleBoneTRS(anim, i, ticks, skel.bones[i]);
+        const BonePose reference = SampleBoneTRS(anim, i, referenceTicks, skel.bones[i]);
+        out[i].pos = value.pos - reference.pos;
+        out[i].rot = glm::normalize(glm::inverse(reference.rot) * value.rot);
+        out[i].scale = glm::vec3(
+            std::abs(reference.scale.x) > 0.000001f ? value.scale.x / reference.scale.x : 1.0f,
+            std::abs(reference.scale.y) > 0.000001f ? value.scale.y / reference.scale.y : 1.0f,
+            std::abs(reference.scale.z) > 0.000001f ? value.scale.z / reference.scale.z : 1.0f);
+    }
+}
+
+float Animator::SampleCurve(const Animation& anim, const std::string& name,
+                            float timeSeconds, float fallback) {
+    const auto found = std::find_if(anim.curves.begin(), anim.curves.end(),
+        [&](const AnimationCurve& curve) { return curve.name == name; });
+    if (found == anim.curves.end() || found->keys.empty()) return fallback;
+    const float tps = anim.ticksPerSecond > 0.0f ? anim.ticksPerSecond : 25.0f;
+    const float sourceSeconds = WrapTicks(anim, timeSeconds) / tps;
+    if (sourceSeconds <= found->keys.front().time) return found->keys.front().value;
+    if (sourceSeconds >= found->keys.back().time) return found->keys.back().value;
+    const auto upper = std::upper_bound(found->keys.begin(), found->keys.end(), sourceSeconds,
+        [](float time, const AnimationCurveKey& key) { return time < key.time; });
+    const AnimationCurveKey& b = *upper;
+    const AnimationCurveKey& a = *(upper - 1);
+    const float alpha = (sourceSeconds - a.time) / std::max(b.time - a.time, 0.000001f);
+    return glm::mix(a.value, b.value, alpha);
+}
+
 glm::vec3 Animator::SampleRootTranslation(const Skeleton& skel, const Animation& anim, float timeSeconds) {
     if (skel.bones.empty()) return glm::vec3(0.0f);
     return SampleBoneTRS(anim, 0, WrapTicks(anim, timeSeconds), skel.bones[0]).pos;
@@ -176,6 +212,22 @@ void Animator::LayerLocal(std::vector<BoneLocal>& base, const std::vector<BoneLo
         base[i].pos   = glm::mix(base[i].pos, layer[i].pos, w);
         base[i].rot   = glm::normalize(glm::slerp(base[i].rot, layer[i].rot, w));
         base[i].scale = glm::mix(base[i].scale, layer[i].scale, w);
+    }
+}
+
+void Animator::LayerLocalAdditive(std::vector<BoneLocal>& base,
+                                  const std::vector<BoneLocal>& delta,
+                                  const std::vector<float>& mask, float weight) {
+    const std::size_t n = std::min(base.size(), delta.size());
+    const float globalWeight = glm::clamp(weight, 0.0f, 1.0f);
+    for (std::size_t i = 0; i < n; ++i) {
+        const float boneWeight = i < mask.size() ? mask[i] : 1.0f;
+        const float w = globalWeight * boneWeight;
+        if (w <= 0.0f) continue;
+        base[i].pos += delta[i].pos * w;
+        base[i].rot = glm::normalize(base[i].rot
+            * glm::slerp(glm::quat(1.0f, 0.0f, 0.0f, 0.0f), delta[i].rot, w));
+        base[i].scale *= glm::mix(glm::vec3(1.0f), delta[i].scale, w);
     }
 }
 

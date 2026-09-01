@@ -43,6 +43,8 @@ public:
     float WorldTexelSize(int i) const { return m_worldTexelSize[i]; }
     float DepthRange(int i) const { return m_depthRange[i]; }
     int   Count() const { return kCascades; }
+    int   Size() const { return m_size; }
+    unsigned int TextureArray() const { return m_texArray; }
     std::uint32_t CascadesRenderedLastFrame() const { return m_renderedLastFrame; }
     std::uint32_t CascadesReusedLastFrame() const { return m_reusedLastFrame; }
     std::uint64_t MemoryBytes() const;

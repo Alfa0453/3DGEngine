@@ -24,8 +24,7 @@ namespace engine {
 namespace {
 // Duration of a clip in seconds (0 if empty).
 float ClipSeconds(const Animation& a) {
-    const float tps = (a.ticksPerSecond > 0.0f) ? a.ticksPerSecond : 25.0f;
-    return (a.duration > 0.0f) ? a.duration / tps : 0.0f;
+    return AnimationPlaybackSeconds(a);
 }
 
 // Rotation of a world-space bone matrix (columns normalised to drop any scale).
@@ -551,6 +550,12 @@ void UpdateAnimations(ecs::Registry& reg, float dt) {
             local[0].rot = glm::quat_cast(bind);
         }
 
+        if (am.poseOverrideActive && am.poseOverride.size() == local.size()) {
+            std::vector<BoneLocal> blended;
+            Animator::BlendLocal(local, am.poseOverride, am.poseOverrideWeight, blended);
+            local = std::move(blended);
+        }
+
         // --- Action layer (one-shot, masked, over the base) --------------------
         if (am.action.active) {
             AnimAction& act = am.action;
@@ -577,8 +582,13 @@ void UpdateAnimations(ecs::Registry& reg, float dt) {
                     act.weight = std::max(0.0f, std::min(wIn, wOut));
 
                     std::vector<BoneLocal> layer;
-                    Animator::SampleLocal(skel, *aclip, act.time, layer);
-                    Animator::LayerLocal(local, layer, act.mask, act.weight);
+                    if (aclip->additive) {
+                        Animator::SampleAdditiveLocal(skel, *aclip, act.time, layer);
+                        Animator::LayerLocalAdditive(local, layer, act.mask, act.weight);
+                    } else {
+                        Animator::SampleLocal(skel, *aclip, act.time, layer);
+                        Animator::LayerLocal(local, layer, act.mask, act.weight);
+                    }
                 }
             }
         }

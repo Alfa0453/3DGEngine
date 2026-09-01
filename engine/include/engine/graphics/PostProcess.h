@@ -219,6 +219,14 @@ public:
     void Resize(int width, int height);
     unsigned int HdrFbo()   const { return m_hdr.FboId(); }
     unsigned int HdrColor() const { return m_hdr.ColorTexture(); }
+    unsigned int BloomTexture() const { return m_bloomA.ColorTexture(); }
+    unsigned int LdrTexture() const { return m_ldr.ColorTexture(); }
+    unsigned int VolumetricTexture() const { return m_volumetricA.ColorTexture(); }
+    unsigned int TaaHistoryTexture() const {
+        return (m_taaWriteA ? m_taaB : m_taaA).ColorTexture();
+    }
+    int Width() const { return m_width; }
+    int Height() const { return m_height; }
     std::uint64_t MemoryBytes() const;
 
 private:

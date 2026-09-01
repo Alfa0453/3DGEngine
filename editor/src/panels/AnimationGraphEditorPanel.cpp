@@ -32,8 +32,7 @@ template <std::size_t N> void Copy(std::array<char, N>& dst, const std::string& 
     std::memcpy(dst.data(), value.data(), std::min(value.size(), N - 1));
 }
 float ClipSeconds(const engine::Animation& a) {
-    const float tps = a.ticksPerSecond > 0.0f ? a.ticksPerSecond : 25.0f;
-    return a.duration > 0.0f ? a.duration / tps : 0.0f;
+    return engine::AnimationPlaybackSeconds(a);
 }
 std::string UniqueClipAlias(const std::vector<AnimationGraphClip>& clips,
                             std::string desired) {
@@ -331,15 +330,37 @@ unsigned int AnimationGraphEditorPanel::RenderPreview(int width, int height, flo
         m_clipMetadataSignature = std::move(metadataSignature);
         m_controllerDirty = true;
     }
+    signature += '|' + m_clipMetadataSignature;
     if (signature != m_loadedSignature) {
         ResetPreview();
         m_loadedSignature = signature;
         m_error.clear();
         if (!m_asset.previewModel.empty()) {
             std::vector<engine::RuntimeAssetManager::SkinnedAnimationSource> sources;
-            for (const AnimationGraphClip& c : m_asset.clips)
-                if (!c.sourceFile.empty())
-                    sources.push_back({c.sourceFile, c.clipName, c.stripRootMotion, c.sourceClipName});
+            for (const AnimationGraphClip& c : m_asset.clips) {
+                if (c.sourceFile.empty()) continue;
+                AnimationClipAsset clip;
+                const bool loadedClip = clip.Load(c.clipAsset, nullptr);
+                std::vector<engine::AnimationCurve> curves = c.curves;
+                if (loadedClip) {
+                    curves.clear();
+                    for (const AnimationClipAsset::Curve& curve : clip.curves) {
+                        engine::AnimationCurve runtimeCurve;
+                        runtimeCurve.name = curve.name;
+                        for (const AnimationClipAsset::CurveKey& key : curve.keys)
+                            runtimeCurve.keys.push_back({key.time, key.value});
+                        curves.push_back(std::move(runtimeCurve));
+                    }
+                }
+                sources.push_back({
+                    c.sourceFile, c.clipName, c.stripRootMotion, c.sourceClipName,
+                    loadedClip ? std::max(clip.speed, 0.0f) : 1.0f,
+                    loadedClip ? clip.playbackStart : c.playbackStart,
+                    loadedClip ? clip.playbackEnd : c.playbackEnd,
+                    loadedClip ? clip.additive : c.additive,
+                    loadedClip ? clip.additiveReferenceTime : c.additiveReferenceTime,
+                    std::move(curves)});
+            }
             m_model = sources.empty()
                 ? m_assets.LoadSkinnedModel(m_asset.previewModel, &m_error)
                 : m_assets.LoadSkinnedModel(m_asset.previewModel, sources, &m_error);
@@ -682,6 +703,17 @@ void AnimationGraphEditorPanel::Draw(const std::string& assetRoot, bool* open, b
                         alias = std::filesystem::path(choice.path).stem().string();
                     c.clipName = UniqueClipAlias(m_asset.clips, std::move(alias));
                     c.stripRootMotion = clip.stripRootMotion;
+                    c.playbackStart = clip.playbackStart;
+                    c.playbackEnd = clip.playbackEnd;
+                    c.additive = clip.additive;
+                    c.additiveReferenceTime = clip.additiveReferenceTime;
+                    for (const AnimationClipAsset::Curve& sourceCurve : clip.curves) {
+                        engine::AnimationCurve curve;
+                        curve.name = sourceCurve.name;
+                        for (const AnimationClipAsset::CurveKey& key : sourceCurve.keys)
+                            curve.keys.push_back({key.time, key.value});
+                        c.curves.push_back(std::move(curve));
+                    }
                     m_asset.clips.push_back(std::move(c));
                     if (m_asset.previewModel.empty()
                         && Lower(std::filesystem::path(clip.sourceFile)

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -30,6 +31,9 @@ public:
     int DrawCalls() const {
         return m_enabled ? m_frames[m_current].drawCalls : 0;
     }
+    const std::unordered_map<std::string, int>& DrawCallsByScope() const {
+        return m_frames[m_current].drawCallsByScope;
+    }
     // Directional shadow-map caster draws this frame, split by culling policy — lets the
     // profiler confirm closed architecture uses the one-sided (front-face) solid policy.
     int OneSidedShadowDraws() const {
@@ -51,11 +55,13 @@ private:
 
     struct Scope { std::string name; unsigned int query = 0; };
     struct Frame { std::vector<Scope> scopes; int used = 0; int drawCalls = 0;
+                  std::unordered_map<std::string, int> drawCallsByScope;
                   int shadowDrawsOneSided = 0; int shadowDrawsTwoSided = 0; };
 
     Frame m_frames[kFrames];
     int   m_current = 0;
     bool  m_inScope = false;
+    std::string m_activeScope;
     bool  m_enabled = true;
     std::vector<std::pair<std::string, double>> m_results;
     static GpuProfiler* s_active;

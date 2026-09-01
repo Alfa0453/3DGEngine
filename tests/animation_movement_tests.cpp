@@ -1,4 +1,5 @@
 #include <engine/animation/AnimatedModel.h>
+#include <engine/animation/Animator.h>
 #include <engine/animation/AnimationGraphDesc.h>
 #include <engine/ecs/Components.h>
 #include <engine/ecs/Registry.h>
@@ -80,6 +81,42 @@ void TestActionEventsAreOrdered() {
           && animated.action.events[1].name == "Hit"
           && animated.action.events[2].name == "Recover",
           "action events are ordered before playback");
+}
+
+void TestAnimationTimelineRangeAndCurves() {
+    engine::Animation animation;
+    animation.duration = 100.0f;
+    animation.ticksPerSecond = 10.0f;
+    animation.playbackStartTicks = 20.0f;
+    animation.playbackEndTicks = 60.0f;
+    animation.curves.push_back({"Strength", {{2.0f, 0.0f}, {4.0f, 1.0f}, {6.0f, 0.0f}}});
+
+    Check(Near(engine::AnimationPlaybackSeconds(animation), 4.0f),
+          "trimmed animation reports its playback-range duration");
+    Check(Near(engine::Animator::SampleCurve(animation, "Strength", 0.0f), 0.0f)
+          && Near(engine::Animator::SampleCurve(animation, "Strength", 1.0f), 0.5f)
+          && Near(engine::Animator::SampleCurve(animation, "Strength", 4.0f), 0.0f),
+          "animation curves sample and wrap inside the trimmed source range");
+    Check(Near(engine::Animator::SampleCurve(animation, "Missing", 0.0f, 0.75f), 0.75f),
+          "missing animation curves return the caller fallback");
+}
+
+void TestAdditiveAnimationSampling() {
+    engine::Skeleton skeleton;
+    skeleton.bones.push_back({"Root", -1, glm::mat4(1.0f), glm::mat4(1.0f)});
+    engine::Animation animation;
+    animation.duration = 30.0f;
+    animation.ticksPerSecond = 10.0f;
+    animation.additive = true;
+    animation.additiveReferenceTicks = 10.0f;
+    animation.channels.resize(1);
+    animation.channels[0].positions = {
+        {0.0f, glm::vec3(0.0f)}, {10.0f, glm::vec3(1.0f, 0.0f, 0.0f)},
+        {20.0f, glm::vec3(3.0f, 0.0f, 0.0f)}};
+    std::vector<engine::BoneLocal> delta;
+    engine::Animator::SampleAdditiveLocal(skeleton, animation, 2.0f, delta);
+    Check(delta.size() == 1 && Near(delta[0].pos.x, 2.0f),
+          "additive clips sample a delta from their authored reference pose");
 }
 
 void TestLocomotionBlendSpaceSampling() {
@@ -652,6 +689,8 @@ int main() {
     TestFullBodyActionBlocksMovement();
     TestLayeredActionAllowsMovement();
     TestActionEventsAreOrdered();
+    TestAnimationTimelineRangeAndCurves();
+    TestAdditiveAnimationSampling();
     TestLocomotionBlendSpaceSampling();
     TestDirectionalBlendSpaceSampling();
     TestBlendSpaceInputSmoothing();

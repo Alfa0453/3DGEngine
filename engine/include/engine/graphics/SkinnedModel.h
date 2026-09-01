@@ -41,6 +41,12 @@ public:
                                       bool stripRootMotion = false,
                                       const std::string& nameOverride = "",
                                       const std::string& sourceClipName = "");
+    void ConfigureAnimationMetadata(std::size_t first, std::size_t count,
+                                    float playbackStartSeconds,
+                                    float playbackEndSeconds,
+                                    bool additive,
+                                    float additiveReferenceSeconds,
+                                    const std::vector<AnimationCurve>& curves);
 
     SkinnedModel(const SkinnedModel&)            = delete;
     SkinnedModel& operator=(const SkinnedModel&) = delete;

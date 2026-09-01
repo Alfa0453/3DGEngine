@@ -18,6 +18,11 @@ struct AnimationGraphClip {
     std::string sourceClipName;            // take name inside the source
     std::string clipName;                  // unique graph-facing alias (states reference this)
     bool        stripRootMotion = false;
+    float       playbackStart = 0.0f;
+    float       playbackEnd = -1.0f;
+    bool        additive = false;
+    float       additiveReferenceTime = 0.0f;
+    std::vector<engine::AnimationCurve> curves;
 };
 
 // A reusable animation state machine (.3dggraph): its own clips + states + parameters +
@@ -30,7 +35,7 @@ struct AnimationGraphAsset {
         bool collapsed = false;
     };
 
-    int         version = 7;
+    int         version = 8;
     engine::AssetHandle assetId;
     std::string name = "Graph";
     std::string previewModel;   // rig to preview the graph on (editor only, not baked)

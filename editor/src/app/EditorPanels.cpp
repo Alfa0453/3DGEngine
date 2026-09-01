@@ -60,7 +60,7 @@ const char* PlainPanelName(EditorPanels::Panel panel)
     case Panel::ShaderEditor: return "Shader Editor";
     case Panel::Hud: return "HUD Editor";
     case Panel::CharacterEditor: return "Character Editor";
-    case Panel::ClipEditor: return "Clip Editor";
+      case Panel::ClipEditor: return "Animation Timeline Editor";
     case Panel::GraphEditor: return "Animation Graph Editor";
     case Panel::MeshEditor: return "Mesh Editor";
     case Panel::DecalPlacement: return "Decal Placement";
@@ -108,6 +108,9 @@ const char* PlainPanelName(EditorPanels::Panel panel)
     case Panel::SpawnManager: return "Spawn Manager";
     case Panel::CheckpointSave: return "Checkpoint and Save Editor";
     case Panel::IKRigEditor: return "IK Rig Editor";
+    case Panel::PoseLibrary: return "Pose Library";
+    case Panel::CharacterEquipment: return "Character Equipment Editor";
+    case Panel::RenderDebugger: return "Render Debugger";
     case Panel::Count:     break;
     }
     return "Panel";
@@ -192,6 +195,8 @@ EditorPanels::Group EditorPanels::GroupOf(Panel panel)
     case Panel::AnimationRetargeting:
     case Panel::AbilityEditor:
     case Panel::IKRigEditor:
+    case Panel::PoseLibrary:
+    case Panel::CharacterEquipment:
         return Group::Animation;
 
     case Panel::AudioEditor:
@@ -239,6 +244,7 @@ EditorPanels::Group EditorPanels::GroupOf(Panel panel)
     case Panel::LightingAnalysis:
     case Panel::RuntimePropertyInspector:
     case Panel::AssetDependencyViewer:
+    case Panel::RenderDebugger:
         return Group::Debug;
 
     case Panel::Count:

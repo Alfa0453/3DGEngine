@@ -44,6 +44,10 @@ public:
     // Sample a clip into per-bone LOCAL transforms (looping via the clip's ticks).
     static void SampleLocal(const Skeleton& skel, const Animation& anim, 
                             float timeSeconds, std::vector<BoneLocal>& out);
+    static void SampleAdditiveLocal(const Skeleton& skel, const Animation& anim,
+                                    float timeSeconds, std::vector<BoneLocal>& out);
+    static float SampleCurve(const Animation& anim, const std::string& name,
+                             float timeSeconds, float fallback = 0.0f);
     static glm::vec3 SampleRootTranslation(const Skeleton& skel, const Animation& anim,
                                            float timeSeconds);
     // The root bone's LOCAL rotation at timeSeconds (looping). Used to extract root-motion
@@ -72,6 +76,9 @@ public:
     // layer: masked bones move toward the layer pose, the rest keep the base.
     static void LayerLocal(std::vector<BoneLocal>& base, const std::vector<BoneLocal>& layer,
                            const std::vector<float>& mask, float weight);
+    static void LayerLocalAdditive(std::vector<BoneLocal>& base,
+                                   const std::vector<BoneLocal>& delta,
+                                   const std::vector<float>& mask, float weight);
 
     // Fold a local pose through the bone hierarchy into skinning matrices.
     static void Compose(const Skeleton& skel, const std::vector<BoneLocal>& local,

@@ -15,6 +15,11 @@ struct CharacterAnimationSource {
     std::string clipName;
     bool        stripRootMotion = false;
     float       basePlaybackSpeed = 1.0f;
+    float       playbackStart = 0.0f;
+    float       playbackEnd = -1.0f;
+    bool        additive = false;
+    float       additiveReferenceTime = 0.0f;
+    std::vector<engine::AnimationCurve> curves;
 };
 
 // A named mount point on the skeleton: a bone plus a render-only offset transform.
@@ -46,7 +51,7 @@ struct CharacterAttachment {
 };
 
 struct CharacterAsset {
-    int version = 29;
+    int version = 30;
     engine::AssetHandle assetId;
     std::string name = "Character";
     std::string modelAssetPath;

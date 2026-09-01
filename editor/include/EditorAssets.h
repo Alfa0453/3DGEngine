@@ -63,6 +63,8 @@ public:
         Spawn,
         SaveProfile,
         IKRig,
+        PoseLibrary,
+        EquipmentSet,
         Other
     };
 

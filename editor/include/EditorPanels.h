@@ -86,6 +86,9 @@ public:
         SpawnManager,
         CheckpointSave,
         IKRigEditor,
+        PoseLibrary,
+        CharacterEquipment,
+        RenderDebugger,
         Count
     };
 

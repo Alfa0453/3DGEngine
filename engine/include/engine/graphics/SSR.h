@@ -24,6 +24,7 @@ public:
     void Apply(unsigned int sceneColorTex, unsigned int gPosTex, unsigned int gNormalTex,
                const glm::mat4& projection, unsigned int dstFbo, int width, int height);
     void Resize(int width, int height);
+    unsigned int ResultTexture() const { return m_result.ColorTexture(); }
 
     float intensity = 0.5f;   // overall reflection strength
 

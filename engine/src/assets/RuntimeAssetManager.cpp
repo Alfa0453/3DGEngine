@@ -142,6 +142,15 @@ const SkinnedModel* RuntimeAssetManager::LoadSkinnedModel(
         key += source.name;
         key += source.stripRootMotion ? "|1|" : "|0|";
         key += source.sourceName;
+        key += '|' + std::to_string(source.playbackStart)
+            + '|' + std::to_string(source.playbackEnd)
+            + (source.additive ? "|add|" : "|abs|")
+            + std::to_string(source.additiveReferenceTime);
+        for (const AnimationCurve& curve : source.curves) {
+            key += "|curve:" + curve.name;
+            for (const AnimationCurveKey& point : curve.keys)
+                key += ':' + std::to_string(point.time) + ',' + std::to_string(point.value);
+        }
         key += '|';
         key += CacheKey(source.path);
     }
@@ -158,8 +167,12 @@ const SkinnedModel* RuntimeAssetManager::LoadSkinnedModel(
         for (const SkinnedAnimationSource& source : extraAnimations) {
             if (source.path.empty()) continue;
             try {
-                model->AddAnimationsFromFile(
+                const std::size_t first = model->AnimationCount();
+                const std::size_t added = model->AddAnimationsFromFile(
                     source.path, source.stripRootMotion, source.name, source.sourceName);
+                model->ConfigureAnimationMetadata(first, added,
+                    source.playbackStart, source.playbackEnd, source.additive,
+                    source.additiveReferenceTime, source.curves);
             } catch (const std::exception& ex) {
                 // Keep whatever clips loaded; report the first failure but don't abort.
                 if (mergeError.empty()) mergeError = ex.what();
@@ -380,7 +393,8 @@ RuntimeAssetManager::ResolveReport RuntimeAssetManager::ResolveRegistryAssets(ec
             for (const ecs::SkinnedModelAsset::AnimationSourceFile& s : asset.animationSources) {
                 sources.push_back(SkinnedAnimationSource{
                     s.path, s.clipName, s.stripRootMotion, s.sourceClipName,
-                    s.basePlaybackSpeed});
+                    s.basePlaybackSpeed, s.playbackStart, s.playbackEnd,
+                    s.additive, s.additiveReferenceTime, s.curves});
             }
             model = LoadSkinnedModel(asset.path, sources, &error);
         }

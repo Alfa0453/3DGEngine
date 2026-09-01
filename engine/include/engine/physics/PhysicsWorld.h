@@ -195,6 +195,9 @@ struct PhysicsStats {
     int    occupiedGridCells  = 0;
     int    gridRebuiltColliders = 0; // colliders re-inserted into the grid this step
     int    staticRebuiltThisStep = 0;// static colliders re-cooked this step (0 == fully cached)
+    int    staticRevisionSkips   = 0;// ECS Pass 2: static colliders whose ECS revision was unchanged
+    int    untrackedStaticWrites = 0;// ECS Pass 2: revision said unchanged but fields differed (an
+                                     // untracked raw Get<T>() write -- migrate that site to Patch/MarkUpdated)
     int    manifolds          = 0;   // contacts generated
     int    ccdBodies          = 0;   // CCD-enabled bodies present this step
     int    ccdSweeps          = 0;   // Pass-5: CCD bodies that actually ran the expensive sweep
@@ -607,6 +610,13 @@ private:
         ecs::Collider  lastLocal;       // local collider it was cooked from
         ecs::Transform worldTransform;  // cached BuildWorldCollider().transform
         ecs::Collider  worldCollider;   // cached BuildWorldCollider().collider
+        // ECS Pass 2: the Transform/Collider component revisions this static proxy was cooked from.
+        // The field comparison (sameStaticInputs) stays authoritative -- it catches untracked raw
+        // Get<T>() writes that never bump a revision -- but comparing these revisions is a cheap
+        // pre-check, and a revision-says-unchanged-yet-fields-differ mismatch flags an untracked
+        // write (stats.untrackedStaticWrites) so those write sites can be migrated to Patch/MarkUpdated.
+        std::uint64_t  transformRev = 0;
+        std::uint64_t  colliderRev = 0;
     };
     std::unordered_map<ecs::Entity, StaticColliderCache> m_staticCache;
     std::vector<CollisionEvent>             m_events;    // events from the last step

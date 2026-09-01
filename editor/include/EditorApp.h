@@ -88,6 +88,9 @@
 #include "SpawnManagerPanel.h"
 #include "CheckpointSaveEditorPanel.h"
 #include "IKRigEditorPanel.h"
+#include "PoseLibraryPanel.h"
+#include "CharacterEquipmentPanel.h"
+#include "RenderDebuggerPanel.h"
 #include "TerrainCreatorPanel.h"
 #include "ModularPlacementPanel.h"
 #include "PrefabPalettePanel.h"
@@ -285,6 +288,9 @@ private:
     void DrawSpawnManagerPanel();
     void DrawCheckpointSaveEditorPanel();
     void DrawIKRigEditorPanel();
+    void DrawPoseLibraryPanel();
+    void DrawCharacterEquipmentPanel();
+    void DrawRenderDebuggerPanel();
     void GenerateDestructionPreview();
     int DeleteDestructionPreview(const std::string& name);
     bool CreatePartitionCellFromSelection(const std::string& path, int cellX, int cellZ);
@@ -379,6 +385,7 @@ private:
                                         engine::PbrRenderer::Options& options,
                                         const EditorScene::Environment& environment,
                                         const engine::DayNightCycle::Sample& sky);
+    int EffectiveLightingDebugMode(const EditorScene::Environment& environment) const;
     std::uint64_t ComputeLightingStateHash() const;
     std::uint64_t ComputeDynamicGiGeometryHash() const;
     std::vector<engine::LightingTriangle> GatherLightingTriangles() const;
@@ -628,6 +635,7 @@ private:
     int                                  m_lightingBuildQuality = 1;
     std::string                          m_lightingBuildStatus = "Missing - no lighting asset is assigned";
     bool                                 m_forceDirectionalShadowUpdate = false;
+    int                                  m_renderDebugModeOverride = -1;
     std::chrono::steady_clock::time_point m_lightingBuildStartedAt{};
     double                               m_lastLightingBuildMs = 0.0;
     double                               m_lastReflectionCaptureMs = 0.0;
@@ -756,6 +764,9 @@ private:
     SpawnManagerPanel                    m_spawnManager;
     CheckpointSaveEditorPanel            m_checkpointSaveEditor;
     IKRigEditorPanel                     m_ikRigEditor;
+    PoseLibraryPanel                     m_poseLibrary;
+    CharacterEquipmentPanel              m_characterEquipment;
+    RenderDebuggerPanel                  m_renderDebugger;
     LevelVariantPanel                    m_levelVariants;
     LevelLayersPanel                     m_levelLayers;
     ViewportBookmarksPanel               m_viewportBookmarks;

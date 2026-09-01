@@ -1,6 +1,7 @@
 #pragma once
 
 #include "engine/animation/AnimationController.h"
+#include "engine/animation/Animator.h"
 #include "engine/assets/IKRigAsset.h"
 
 #include <glm/glm.hpp>
@@ -135,6 +136,8 @@ struct ModelAttachment {
     glm::mat4    localOffset{1.0f};     // authored position/rotation/scale at the socket
     glm::vec3    tint{1.0f};            // material base colour (multiplies the model)
     const Texture* albedoOverride = nullptr;  // material albedo map (optional)
+    std::string equipmentSlot;     // empty for permanent character attachments
+    std::string equipmentItem;
 };
 
 struct NamedModelSocket {
@@ -176,6 +179,11 @@ struct AnimatedModel {
     const SkinnedModel*    model = nullptr;
     AnimationController    controller;
     std::vector<glm::mat4> pose;          // bone matrices, refilled by UpdateAnimations
+    // Optional named pose authored in a Pose Library. Bone-name resolution happens
+    // when it is applied; UpdateAnimations blends it after locomotion and before actions.
+    std::vector<BoneLocal> poseOverride;
+    float poseOverrideWeight = 0.0f;
+    bool poseOverrideActive = false;
 
     // One-shot action layer + its event callback.
     AnimAction                            action;
@@ -228,6 +236,12 @@ struct AnimatedModel {
     // held until the clip finishes. A non-empty bone mask is layered and does not
     // block movement, allowing upper-body actions while walking or running.
     bool BlocksMovement() const { return action.active && action.mask.empty(); }
+    void SetPoseOverride(std::vector<BoneLocal> localPose, float weight = 1.0f) {
+        poseOverride = std::move(localPose);
+        poseOverrideWeight = glm::clamp(weight, 0.0f, 1.0f);
+        poseOverrideActive = !poseOverride.empty() && poseOverrideWeight > 0.0f;
+    }
+    void ClearPoseOverride() { poseOverride.clear(); poseOverrideWeight = 0.0f; poseOverrideActive = false; }
 };
 
 // Advance every AnimatedModel's controller (+ action layer) by dt and recompute its

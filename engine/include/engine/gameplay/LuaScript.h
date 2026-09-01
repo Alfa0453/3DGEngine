@@ -112,6 +112,7 @@ private:
     static int ApiMousePressed(lua_State* state);
     static int ApiMouseDelta(lua_State* state);
     static int ApiWasAnimationEvent(lua_State* state);
+    static int ApiAnimationCurve(lua_State* state);
     static int ApiListenForEvent(lua_State* state);
     static int ApiStopListeningForEvent(lua_State* state);
     static int ApiPublishEvent(lua_State* state);
@@ -145,6 +146,11 @@ private:
     static int ApiFieldEntity(lua_State* state);
     static int ApiFieldAsset(lua_State* state);
     static int ApiPlayActionClip(lua_State* state);
+    static int ApiApplyAnimationPose(lua_State* state);
+    static int ApiClearAnimationPose(lua_State* state);
+    static int ApiEquipCharacterItem(lua_State* state);
+    static int ApiUnequipCharacterSlot(lua_State* state);
+    static int ApiEquippedCharacterItem(lua_State* state);
     static int ApiSetAnimFloat(lua_State* state);
     static int ApiSetAnimBool(lua_State* state);
     static int ApiSetAnimTrigger(lua_State* state);

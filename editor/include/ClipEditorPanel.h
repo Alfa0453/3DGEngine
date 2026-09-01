@@ -65,6 +65,7 @@ private:
     std::string m_error;
     std::vector<glm::mat4> m_pose;
     int   m_clipIndex = 0;
+    int   m_selectedCurve = -1;
     float m_time = 0.0f;
     bool  m_playing = true;
     float m_yaw = 0.0f;

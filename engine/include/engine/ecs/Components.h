@@ -1,6 +1,7 @@
 #pragma once
 
 #include "engine/assets/AssetIdentity.h"
+#include "engine/animation/Skeleton.h"
 #include "engine/ecs/Entity.h"
 #include "engine/audio/AudioTypes.h"
 #include "engine/graphics/Mesh.h"
@@ -368,6 +369,11 @@ struct SkinnedModelAsset {
         bool        stripRootMotion = false;
         std::string sourceClipName;
         float       basePlaybackSpeed = 1.0f;
+        float       playbackStart = 0.0f;
+        float       playbackEnd = -1.0f;
+        bool        additive = false;
+        float       additiveReferenceTime = 0.0f;
+        std::vector<AnimationCurve> curves;
     };
 
     // A static model socketed to a bone (weapon/shield). Resolved to an AnimatedModel

@@ -16,6 +16,7 @@
 #include "engine/gameplay/CombatSystem.h"
 #include "engine/gameplay/SpawnSystem.h"
 #include "engine/gameplay/SaveProfileSystem.h"
+#include "engine/gameplay/EquipmentSystem.h"
 #include "engine/gameplay/QuestSystem.h"
 
 #include "engine/animation/AnimatedModel.h"
@@ -29,6 +30,8 @@
 #include "engine/assets/BiomeAsset.h"
 #include "engine/assets/DayNightTimelineAsset.h"
 #include "engine/assets/CaveAsset.h"
+#include "engine/assets/PoseLibraryAsset.h"
+#include "engine/assets/EquipmentAsset.h"
 
 #include <exception>
 
@@ -761,6 +764,23 @@ bool Script::WasAnimationEvent(ecs::Entity entity, const std::string& name) cons
     return false;
 }
 
+float Script::GetAnimationCurve(const std::string& name, float fallback) const {
+    const AnimatedModel* animated = TryGet<AnimatedModel>();
+    if (!animated || !animated->model || name.empty()) return fallback;
+    int clipIndex = animated->controller.CurrentClip();
+    float time = animated->controller.CurrentSourceTime();
+    if (animated->action.active) {
+        clipIndex = animated->action.clip;
+        time = animated->action.time;
+    }
+    if (clipIndex < 0
+        || clipIndex >= static_cast<int>(animated->model->AnimationCount()))
+        return fallback;
+    return Animator::SampleCurve(
+        animated->model->Animations()[static_cast<std::size_t>(clipIndex)],
+        name, time, fallback);
+}
+
 bool Script::PlayAnimationAction(int clipIndex, float fadeIn, float fadeOut, float speed) {
     AnimatedModel* animated = TryGet<AnimatedModel>();
     if (!animated || !animated->model || clipIndex < 0) {
@@ -1086,6 +1106,31 @@ float Script::SplineLength(ecs::Entity spline) const {
     if (!component || component->points.size() < 2) return 0.0f;
     return Spline(component->points, component->closed).Length();
 }
+
+bool Script::ApplyAnimationPose(const std::string& libraryPath, const std::string& poseName,
+                                float weight) {
+    AnimatedModel* animated = TryGet<AnimatedModel>();
+    if (!animated || !animated->model || libraryPath.empty() || poseName.empty()) return false;
+    PoseLibraryAssetData library; std::string error;
+    if (!LoadPoseLibraryAsset(libraryPath, &library, &error)) return false;
+    const PoseLibraryPose* pose = FindPose(library, poseName); if (!pose) return false;
+    std::vector<BoneLocal> local;
+    ResolvePoseForSkeleton(*pose, animated->model->GetSkeleton(), local);
+    animated->SetPoseOverride(std::move(local), weight); return true;
+}
+
+void Script::ClearAnimationPose() {
+    if (AnimatedModel* animated = TryGet<AnimatedModel>()) animated->ClearPoseOverride();
+}
+bool Script::EquipCharacterItem(const std::string& path,const std::string& item){
+    if (!m_context.registry || m_context.entity == ecs::kNull ||
+        !m_context.registry->Valid(m_context.entity)) return false;
+    const bool equipped=engine::EquipItem(*m_context.registry,m_context.entity,path,item);
+    if(equipped){EquipmentAssetData set;std::string error;if(LoadEquipmentAsset(path,&set,&error))if(const EquipmentItem*entry=FindEquipmentItem(set,item);entry&&!entry->equipAudioPath.empty())PlayAudioCue(entry->equipAudioPath,true);}
+    return equipped;
+}
+bool Script::UnequipCharacterSlot(const std::string& slot){return m_context.registry&&m_context.entity!=ecs::kNull&&m_context.registry->Valid(m_context.entity)&&engine::UnequipSlot(*m_context.registry,m_context.entity,slot);}
+std::string Script::EquippedCharacterItem(const std::string& slot)const{return m_context.registry&&m_context.entity!=ecs::kNull&&m_context.registry->Valid(m_context.entity)?engine::EquippedItem(*m_context.registry,m_context.entity,slot):std::string{};}
 
 int Script::GenerateScatterGraph(const std::string& assetPath,
                                  const glm::vec3& worldOffset,

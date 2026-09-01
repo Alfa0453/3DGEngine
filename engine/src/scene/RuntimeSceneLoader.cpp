@@ -175,7 +175,7 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             return false;
         }
     }
-    if (magic != "3DGRuntimeScene" || version < 1 || version > 115) {
+    if (magic != "3DGRuntimeScene" || version < 1 || version > 116) {
         if (error) {
             *error = "Runtime scene file has an unknown format: "
                 + magic + " " + std::to_string(version)
@@ -1371,11 +1371,33 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                 record >> std::quoted(source.clipName) >> strip;
                 if (version >= 66) record >> std::quoted(source.sourceClipName);
                 if (version >= 95) record >> source.basePlaybackSpeed;
+                if (version >= 116) {
+                    int additive = 0;
+                    std::size_t curveCount = 0;
+                    record >> source.playbackStart >> source.playbackEnd >> additive
+                           >> source.additiveReferenceTime >> curveCount;
+                    source.additive = additive != 0;
+                    if (curveCount > 128) record.setstate(std::ios::failbit);
+                    source.curves.resize(curveCount);
+                    for (AnimationCurve& curve : source.curves) {
+                        std::size_t keyCount = 0;
+                        record >> std::quoted(curve.name) >> keyCount;
+                        if (curve.name == "-") curve.name.clear();
+                        if (keyCount > 4096) record.setstate(std::ios::failbit);
+                        curve.keys.resize(keyCount);
+                        for (AnimationCurveKey& key : curve.keys)
+                            record >> key.time >> key.value;
+                    }
+                }
                 if (source.path == "-") source.path.clear();
                 if (source.clipName == "-") source.clipName.clear();
                 if (source.sourceClipName == "-") source.sourceClipName.clear();
                 source.stripRootMotion = strip != 0;
                 source.basePlaybackSpeed = std::max(source.basePlaybackSpeed, 0.0f);
+                source.playbackStart = std::max(source.playbackStart, 0.0f);
+                if (source.playbackEnd >= 0.0f
+                    && source.playbackEnd <= source.playbackStart) source.playbackEnd = -1.0f;
+                source.additiveReferenceTime = std::max(source.additiveReferenceTime, 0.0f);
                 entity.animationSources.push_back(std::move(source));
             }
         }
@@ -2254,7 +2276,9 @@ bool RuntimeSceneLoader::Instantiate(const Scene &scene, ecs::Registry &registry
                 if (source.path.empty()) continue;
                 animationSourceFiles.push_back(ecs::SkinnedModelAsset::AnimationSourceFile{
                     source.path, source.clipName, source.stripRootMotion,
-                    source.sourceClipName, source.basePlaybackSpeed});
+                    source.sourceClipName, source.basePlaybackSpeed,
+                    source.playbackStart, source.playbackEnd, source.additive,
+                    source.additiveReferenceTime, source.curves});
             }
             std::vector<ecs::SkinnedModelAsset::Attachment> attachmentDescs;
             attachmentDescs.reserve(desc.attachments.size());

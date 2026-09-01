@@ -587,6 +587,7 @@ void LuaScript::RegisterEngineApi() {
         {"WasMouseButtonPressed", ApiMousePressed},
         {"MouseDelta", ApiMouseDelta},
         {"WasAnimationEvent", ApiWasAnimationEvent},
+        {"AnimationCurve", ApiAnimationCurve},
         {"ListenForEvent", ApiListenForEvent},
         {"StopListeningForEvent", ApiStopListeningForEvent},
         {"PublishEvent", ApiPublishEvent},
@@ -620,6 +621,11 @@ void LuaScript::RegisterEngineApi() {
         {"GetFieldEntity", ApiFieldEntity},
         {"GetFieldAsset", ApiFieldAsset},
         {"PlayActionClip", ApiPlayActionClip},
+        {"ApplyAnimationPose", ApiApplyAnimationPose},
+        {"ClearAnimationPose", ApiClearAnimationPose},
+        {"EquipCharacterItem", ApiEquipCharacterItem},
+        {"UnequipCharacterSlot", ApiUnequipCharacterSlot},
+        {"EquippedCharacterItem", ApiEquippedCharacterItem},
         {"SetAnimationParameter", ApiSetAnimFloat},
         {"SetAnimationBool", ApiSetAnimBool},
         {"SetAnimationTrigger", ApiSetAnimTrigger},
@@ -1317,6 +1323,13 @@ int LuaScript::ApiWasAnimationEvent(lua_State* state) {
     return 1;
 }
 
+int LuaScript::ApiAnimationCurve(lua_State* state) {
+    const char* name = luaL_checkstring(state, 1);
+    const float fallback = static_cast<float>(luaL_optnumber(state, 2, 0.0));
+    lua_pushnumber(state, Current(state)->GetAnimationCurve(name, fallback));
+    return 1;
+}
+
 int LuaScript::ApiListenForEvent(lua_State* state) {
     lua_pushboolean(state, Current(state)->ListenForEvent(luaL_checkstring(state, 1)));
     return 1;
@@ -1591,6 +1604,20 @@ int LuaScript::ApiPlayActionClip(lua_State* state) {
     lua_pushboolean(state, Current(state)->PlayActionClip(luaL_checkstring(state, 1)));
     return 1;
 }
+
+int LuaScript::ApiApplyAnimationPose(lua_State* state) {
+    const float weight = static_cast<float>(luaL_optnumber(state, 3, 1.0));
+    lua_pushboolean(state, Current(state)->ApplyAnimationPose(
+        luaL_checkstring(state, 1), luaL_checkstring(state, 2), weight));
+    return 1;
+}
+
+int LuaScript::ApiClearAnimationPose(lua_State* state) {
+    Current(state)->ClearAnimationPose(); return 0;
+}
+int LuaScript::ApiEquipCharacterItem(lua_State*s){lua_pushboolean(s,Current(s)->EquipCharacterItem(luaL_checkstring(s,1),luaL_checkstring(s,2)));return 1;}
+int LuaScript::ApiUnequipCharacterSlot(lua_State*s){lua_pushboolean(s,Current(s)->UnequipCharacterSlot(luaL_checkstring(s,1)));return 1;}
+int LuaScript::ApiEquippedCharacterItem(lua_State*s){const auto v=Current(s)->EquippedCharacterItem(luaL_checkstring(s,1));lua_pushlstring(s,v.data(),v.size());return 1;}
 
 int LuaScript::ApiSetAnimFloat(lua_State* state) {
     lua_pushboolean(state, Current(state)->SetAnimationParameter(

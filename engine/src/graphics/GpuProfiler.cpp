@@ -39,6 +39,7 @@ void GpuProfiler::BeginFrame() {
 
     f.used = 0;        // reuse this slot for the new frame
     f.drawCalls = 0;
+    f.drawCallsByScope.clear();
     f.shadowDrawsOneSided = 0;
     f.shadowDrawsTwoSided = 0;
     m_inScope = false;
@@ -58,6 +59,7 @@ void GpuProfiler::Begin(const char* name) {
     s.name = name;
     glBeginQuery(GL_TIME_ELAPSED, s.query);
     m_inScope = true;
+    m_activeScope = name ? name : "Unnamed";
 }
 
 void GpuProfiler::End() {
@@ -65,11 +67,16 @@ void GpuProfiler::End() {
     glEndQuery(GL_TIME_ELAPSED);
     ++m_frames[m_current].used;
     m_inScope = false;
+    m_activeScope.clear();
 }
 
 void GpuProfiler::RecordDrawCall() {
-    if (s_active && s_active->m_enabled)
-        ++s_active->m_frames[s_active->m_current].drawCalls;
+    if (s_active && s_active->m_enabled) {
+        Frame& frame = s_active->m_frames[s_active->m_current];
+        ++frame.drawCalls;
+        ++frame.drawCallsByScope[s_active->m_activeScope.empty()
+            ? "Unscoped" : s_active->m_activeScope];
+    }
 }
 
 void GpuProfiler::RecordShadowDraw(bool twoSided) {

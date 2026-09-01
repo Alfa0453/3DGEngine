@@ -525,6 +525,7 @@ protected:
     bool WasTriggerExited(ecs::Entity entity) const;
     bool WasAnimationEvent(const std::string& name) const;
     bool WasAnimationEvent(ecs::Entity entity, const std::string& name) const;
+    float GetAnimationCurve(const std::string& name, float fallback = 0.0f) const;
     // Events are always queued. A broadcast has target == kNull; a targeted event
     // is delivered only to scripts attached to that entity.
     void PublishEvent(ScriptEvent event);
@@ -570,6 +571,12 @@ protected:
     // Action Name authored in the Clip Editor, not a locomotion graph state.
     bool PlayActionClip(const std::string& actionName);
     bool PlayAnimationProfile(const std::string& profileName);
+    bool ApplyAnimationPose(const std::string& libraryPath, const std::string& poseName,
+                            float weight = 1.0f);
+    void ClearAnimationPose();
+    bool EquipCharacterItem(const std::string& equipmentPath,const std::string& itemName);
+    bool UnequipCharacterSlot(const std::string& slot);
+    std::string EquippedCharacterItem(const std::string& slot) const;
     bool SetAnimationParameter(const std::string& name, float value);
     bool SetAnimationBool(const std::string& name, bool value);
     bool SetAnimationTrigger(const std::string& name);
@@ -907,6 +914,10 @@ public:
     }
     bool PlayActionClip(const std::string& actionName) { return m_s->PlayActionClip(actionName); }
     bool PlayProfile(const std::string& profileName) { return m_s->PlayAnimationProfile(profileName); }
+    bool ApplyPose(const std::string& libraryPath, const std::string& poseName, float weight = 1.0f) {
+        return m_s->ApplyAnimationPose(libraryPath, poseName, weight);
+    }
+    void ClearPose() { m_s->ClearAnimationPose(); }
     bool SetParameter(const std::string& name, float value) { return m_s->SetAnimationParameter(name, value); }
     bool SetBool(const std::string& name, bool value) { return m_s->SetAnimationBool(name, value); }
     bool SetTrigger(const std::string& name) { return m_s->SetAnimationTrigger(name); }
@@ -915,6 +926,9 @@ public:
     }
     bool GetBool(const std::string& name, bool fallback = false) const {
         return m_s->GetAnimationBool(name, fallback);
+    }
+    float GetCurve(const std::string& name, float fallback = 0.0f) const {
+        return m_s->GetAnimationCurve(name, fallback);
     }
     bool IsActionPlaying() const { return m_s->IsAnimationActionPlaying(); }
     bool IsMovementLocked() const { return m_s->IsAnimationMovementLocked(); }

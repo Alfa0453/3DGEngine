@@ -278,11 +278,28 @@ void main(){
                 m_previewUsingGraph = true;
                 for (const AnimationGraphClip& c : graph.clips) {
                     AnimationClipAsset clip;
-                    const float base = clip.Load(c.clipAsset, nullptr)
-                        ? std::max(clip.speed, 0.0f) : 1.0f;
+                    const bool loadedClip = clip.Load(c.clipAsset, nullptr);
+                    const float base = loadedClip ? std::max(clip.speed, 0.0f) : 1.0f;
+                    std::vector<engine::AnimationCurve> curves = c.curves;
+                    if (loadedClip) {
+                        curves.clear();
+                        for (const AnimationClipAsset::Curve& curve : clip.curves) {
+                            engine::AnimationCurve runtimeCurve;
+                            runtimeCurve.name = curve.name;
+                            for (const AnimationClipAsset::CurveKey& key : curve.keys)
+                                runtimeCurve.keys.push_back({key.time, key.value});
+                            curves.push_back(std::move(runtimeCurve));
+                        }
+                    }
                     if (!c.sourceFile.empty())
-                        m_previewGraphSources.push_back(
-                            {c.sourceFile, c.clipName, c.stripRootMotion, c.sourceClipName, base});
+                        m_previewGraphSources.push_back({
+                            c.sourceFile, c.clipName, c.stripRootMotion,
+                            c.sourceClipName, base,
+                            loadedClip ? clip.playbackStart : c.playbackStart,
+                            loadedClip ? clip.playbackEnd : c.playbackEnd,
+                            loadedClip ? clip.additive : c.additive,
+                            loadedClip ? clip.additiveReferenceTime : c.additiveReferenceTime,
+                            std::move(curves)});
                     m_previewGraphClipAssets.push_back(c.clipAsset);
                 }
                 m_previewGraphStates = graph.states;
@@ -318,12 +335,20 @@ void main(){
     } else {
         for (const auto& source : m_asset.animationSources)
             if (!source.file.empty())
-                sources.push_back({source.file, source.clipName, source.stripRootMotion});
+                sources.push_back({
+                    source.file, source.clipName, source.stripRootMotion, {},
+                    source.basePlaybackSpeed, source.playbackStart,
+                    source.playbackEnd, source.additive,
+                    source.additiveReferenceTime, source.curves});
     }
     std::string animSignature;
     for (const auto& source : sources) {
         animSignature += source.path + '|' + source.name + '|' +
-                         (source.stripRootMotion ? "1" : "0") + '|' + source.sourceName + '\n';
+                         (source.stripRootMotion ? "1" : "0") + '|' + source.sourceName + '|'
+                         + std::to_string(source.playbackStart) + '|'
+                         + std::to_string(source.playbackEnd) + '|'
+                         + (source.additive ? "1" : "0") + '|'
+                         + std::to_string(source.additiveReferenceTime) + '\n';
     }
     if (m_previewModelPath != m_asset.modelAssetPath || m_previewAnimSignature != animSignature) {
         ResetPreviewModel();

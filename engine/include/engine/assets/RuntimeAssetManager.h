@@ -38,6 +38,11 @@ public:
         bool        stripRootMotion = false;
         std::string sourceName; // optional take name inside a multi-animation source
         float       basePlaybackSpeed = 1.0f;
+        float       playbackStart = 0.0f;
+        float       playbackEnd = -1.0f;
+        bool        additive = false;
+        float       additiveReferenceTime = 0.0f;
+        std::vector<AnimationCurve> curves;
     };
 
     const Model* LoadModel(const std::string& path, std::string* error = nullptr);
