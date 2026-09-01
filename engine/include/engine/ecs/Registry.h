@@ -217,6 +217,7 @@ struct RegistryStats {
     std::uint64_t viewInvocations = 0;
     std::uint64_t viewEntitiesTested = 0;
     std::uint64_t viewMatches = 0;         // Pass 5: entities that passed all Has<Cs> checks
+    std::uint64_t slotsRetired = 0;        // slots retired on generation exhaustion (anti-alias)
 };
 
 // --- The Registry: owns entities and component pools -----------------------
@@ -249,8 +250,16 @@ public:
     void Destroy(Entity e) {
         if (!Valid(e)) return;
         for (auto& kv : m_pools) { kv.second->Remove(e); }
-        ++m_generations[EntityIndex(e)];
-        m_free.push_back(EntityIndex(e));
+        const std::uint32_t i = EntityIndex(e);
+        ++m_generations[i];
+        // Generation-exhaustion safety: an 8-bit generation wraps after 255 recycles, at which point
+        // a long-held stale handle could alias a freshly created entity. When a slot reaches the max
+        // generation we RETIRE it (never recycle) instead of letting it wrap -- so no two live
+        // entities ever share (index, generation), and Valid() can never be fooled. The cost is one
+        // permanently unused index per 255 destroys of the same slot; with a 24-bit index space
+        // (16M) that is negligible. Entity stays 32-bit; nothing on disk changes.
+        if (m_generations[i] < kMaxGeneration) m_free.push_back(i);
+        else                                   { ++m_retired; ++m_stats.slotsRetired; }
         ++m_structuralRevision;
         ++m_stats.entityDestroys;
     }
@@ -300,7 +309,9 @@ public:
     // Iterate entities that have every component in Cs (see View below).
     template <class... Cs> View<Cs...> view() { return View<Cs...>(*this); }
 
-    std::size_t AliveCount() const { return m_generations.size() - m_free.size(); }
+    // Alive = allocated slots minus free (recyclable) minus retired (generation-exhausted, never
+    // reused). Retired slots are neither live nor free, so they must be excluded here.
+    std::size_t AliveCount() const { return m_generations.size() - m_free.size() - m_retired; }
 
     template <class T> Pool<T>* TryPool() {
         auto it = m_pools.find(std::type_index(typeid(T)));
@@ -407,6 +418,7 @@ public:
     // ---- Pass 5: profiler / debugger read-only surface --------------------
     std::size_t EntityCapacity()      const { return m_generations.size(); } // highest index ever used + 1
     std::size_t FreeSlotCount()       const { return m_free.size(); }        // recycled indices ready to reuse
+    std::size_t RetiredSlotCount()    const { return m_retired; }            // generation-exhausted, never reused
     std::size_t PendingDestroyCount() const { return m_deferredDestroys.size(); }
     std::size_t DeferredOpCount()     const { return m_deferredOps.size(); }
     std::size_t PoolCount()           const { return m_pools.size(); }
@@ -435,6 +447,7 @@ private:
 
     std::vector<std::uint8_t>  m_generations;  // generation per index
     std::vector<std::uint32_t> m_free;         // recycled indices
+    std::size_t                m_retired = 0;   // slots retired on generation exhaustion (never reused)
     std::unordered_map<std::type_index, std::unique_ptr<IPool>> m_pools;
 
     std::uint64_t m_structuralRevision = 0;    // Phase 3: bumps on create/destroy/add/remove

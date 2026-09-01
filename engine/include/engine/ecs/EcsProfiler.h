@@ -30,6 +30,7 @@ struct EcsProfile {
     std::size_t entitiesAlive     = 0;
     std::size_t entitiesCapacity  = 0;   // highest index ever used + 1
     std::size_t freeSlots         = 0;   // recycled indices ready to reuse
+    std::size_t retiredSlots      = 0;   // generation-exhausted, never reused
     std::size_t pendingDestroy    = 0;   // queued deferred destroys
     std::size_t deferredOps       = 0;   // queued deferred add/remove
     // Structural (cumulative counters since last ResetStats).
@@ -49,6 +50,7 @@ inline EcsProfile CaptureEcsProfile(const Registry& reg) {
     p.entitiesAlive    = reg.AliveCount();
     p.entitiesCapacity = reg.EntityCapacity();
     p.freeSlots        = reg.FreeSlotCount();
+    p.retiredSlots     = reg.RetiredSlotCount();
     p.pendingDestroy   = reg.PendingDestroyCount();
     p.deferredOps      = reg.DeferredOpCount();
     p.poolCount        = reg.PoolCount();
@@ -81,7 +83,7 @@ inline EcsProfile CaptureEcsProfile(const Registry& reg) {
 inline std::string FormatEcsProfile(const EcsProfile& p) {
     std::ostringstream os;
     os << "ECS: alive=" << p.entitiesAlive << " cap=" << p.entitiesCapacity
-       << " free=" << p.freeSlots << " pendingDestroy=" << p.pendingDestroy
+       << " free=" << p.freeSlots << " retired=" << p.retiredSlots << " pendingDestroy=" << p.pendingDestroy
        << " deferredOps=" << p.deferredOps << "\n";
     os << "  structural: created=" << p.entityCreates << " destroyed=" << p.entityDestroys
        << " added=" << p.componentsAdded << " updated=" << p.componentsUpdated

@@ -16,6 +16,7 @@ using Entity = std::uint32_t;
 
 inline constexpr std::uint32_t kIndexBits = 24;
 inline constexpr std::uint32_t kIndexMask = (1u << kIndexBits) - 1;      // 0x00FFFFFF
+inline constexpr std::uint32_t kMaxGeneration = (1u << (32 - kIndexBits)) - 1; // 255 (8-bit generation)
 inline constexpr Entity        kNull      = std::numeric_limits<Entity>::max();
 
 inline constexpr std::uint32_t EntityIndex(Entity e)      { return e & kIndexMask; }
