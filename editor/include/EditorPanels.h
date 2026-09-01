@@ -89,6 +89,7 @@ public:
         PoseLibrary,
         CharacterEquipment,
         RenderDebugger,
+        FrameCaptureAnalyzer,
         Count
     };
 

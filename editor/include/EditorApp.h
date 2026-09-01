@@ -91,6 +91,7 @@
 #include "PoseLibraryPanel.h"
 #include "CharacterEquipmentPanel.h"
 #include "RenderDebuggerPanel.h"
+#include "FrameCaptureAnalyzerPanel.h"
 #include "TerrainCreatorPanel.h"
 #include "ModularPlacementPanel.h"
 #include "PrefabPalettePanel.h"
@@ -291,6 +292,7 @@ private:
     void DrawPoseLibraryPanel();
     void DrawCharacterEquipmentPanel();
     void DrawRenderDebuggerPanel();
+    void DrawFrameCaptureAnalyzerPanel();
     void GenerateDestructionPreview();
     int DeleteDestructionPreview(const std::string& name);
     bool CreatePartitionCellFromSelection(const std::string& path, int cellX, int cellZ);
@@ -767,6 +769,8 @@ private:
     PoseLibraryPanel                     m_poseLibrary;
     CharacterEquipmentPanel              m_characterEquipment;
     RenderDebuggerPanel                  m_renderDebugger;
+    FrameCaptureAnalyzerPanel            m_frameCaptureAnalyzer;
+    std::uint64_t                        m_editorFrameNumber = 0;
     LevelVariantPanel                    m_levelVariants;
     LevelLayersPanel                     m_levelLayers;
     ViewportBookmarksPanel               m_viewportBookmarks;

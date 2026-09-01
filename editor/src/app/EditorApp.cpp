@@ -924,6 +924,9 @@ void EditorApp::OnInit()
 
 void EditorApp::OnUpdate(float dt)
 {
+    m_frameCaptureAnalyzer.BeginFrame(++m_editorFrameNumber);
+    auto updateCapture = m_frameCaptureAnalyzer.Measure(
+        FrameCaptureAnalyzerPanel::Lane::Frame, "Editor update");
     UpdatePackageBuild();
     UpdateScriptAutoReload(dt);
     UpdateMaterialForgeDeployments(dt);
@@ -997,10 +1000,14 @@ void EditorApp::OnUpdate(float dt)
         const engine::ScriptInputState scriptInput =
             CapturePlayScriptInput(playInputEnabled, true);
         engine::SetEquipmentAssetManager(m_playAssets ? &*m_playAssets : nullptr);
-        engine::UpdateScripts(
-            *m_playRegistry, playDt, &scriptInput, &m_runtimeAudio,
-            &m_cameraShake, &m_cameraDirector, &engine::GameMode::Instance(),
-            &m_playPhysics);
+        {
+            auto capture = m_frameCaptureAnalyzer.Measure(
+                FrameCaptureAnalyzerPanel::Lane::Scripts, "Script Update");
+            engine::UpdateScripts(
+                *m_playRegistry, playDt, &scriptInput, &m_runtimeAudio,
+                &m_cameraShake, &m_cameraDirector, &engine::GameMode::Instance(),
+                &m_playPhysics);
+        }
         auto& dayNight = engine::DayNightTimelineRuntime::Instance();
         dayNight.Tick(playDt);
         if (dayNight.Loaded()) {
@@ -1072,13 +1079,21 @@ void EditorApp::OnUpdate(float dt)
         if (m_cameraBlend.Active()) UpdateCameraBlend(playDt);
         else ApplyManagedPlayCamera();
     }
-    if (m_mode == EditorMode::Play && m_playRegistry)
-        engine::UpdateParticleSystems(*m_playRegistry, playDt);
-    else if (m_mode == EditorMode::Edit)
-        UpdateEditParticlePreviews(dt);
-    m_audio.SetListener(m_camera.Position(), m_camera.Front());
-    m_audio.UpdateMixer(dt);
-    if (m_mode == EditorMode::Play) UpdatePlayAudioSources();
+    {
+        auto capture = m_frameCaptureAnalyzer.Measure(
+            FrameCaptureAnalyzerPanel::Lane::Particles, "Particle update");
+        if (m_mode == EditorMode::Play && m_playRegistry)
+            engine::UpdateParticleSystems(*m_playRegistry, playDt);
+        else if (m_mode == EditorMode::Edit)
+            UpdateEditParticlePreviews(dt);
+    }
+    {
+        auto capture = m_frameCaptureAnalyzer.Measure(
+            FrameCaptureAnalyzerPanel::Lane::Audio, "Audio update");
+        m_audio.SetListener(m_camera.Position(), m_camera.Front());
+        m_audio.UpdateMixer(dt);
+        if (m_mode == EditorMode::Play) UpdatePlayAudioSources();
+    }
     UpdateAutosave(dt);
 
     if (keyboardCaptured) {
@@ -1284,7 +1299,8 @@ void EditorApp::OnRender()
     // The overlay toggle also controls query/counter work, so hiding the
     // profiler removes its per-frame overhead rather than only hiding its UI.
     m_gpuProfiler.SetEnabled(m_showProfiler
-        || m_panels.IsOpen(EditorPanels::Panel::RenderDebugger));
+        || m_panels.IsOpen(EditorPanels::Panel::RenderDebugger)
+        || m_frameCaptureAnalyzer.Capturing());
     m_gpuProfiler.BeginFrame();
 
     m_renderer.SetMultisample(environment.msaa);   // MSAA toggle (direct render path)
@@ -1396,6 +1412,8 @@ void EditorApp::OnRender()
     }
 
     const auto sceneCpuStart = std::chrono::high_resolution_clock::now();
+    auto sceneCapture = m_frameCaptureAnalyzer.Measure(
+        FrameCaptureAnalyzerPanel::Lane::Rendering, "Scene rendering");
     m_gpuProfiler.Begin("Scene");
     if (m_mode == EditorMode::Play && m_playRegistry) {
         DrawPlayScene(viewProj);
@@ -1409,10 +1427,13 @@ void EditorApp::OnRender()
     CaptureWaterSceneBuffers();                              // copy opaque colour/depth once for all water
     DrawWaterBodies(m_camera, GetWindow().AspectRatio());   // animated water surfaces (edit + play)
     m_gpuProfiler.End();
+    sceneCapture = {};
     m_cpuSceneMs = std::chrono::duration<double, std::milli>(
         std::chrono::high_resolution_clock::now() - sceneCpuStart).count();
 
     if (useHdrPost && m_postProcess) {
+        auto postCapture = m_frameCaptureAnalyzer.Measure(
+            FrameCaptureAnalyzerPanel::Lane::Rendering, "Post processing");
         m_gpuProfiler.Begin("Post");
         if (m_ssao) {
             m_postProcess->SetSceneTextures(
@@ -1460,6 +1481,8 @@ void EditorApp::OnRender()
 
     // Game HUD overlay (play mode): drawn on the presented scene, under the editor UI.
     if (m_mode == EditorMode::Play) {
+        auto hudCapture = m_frameCaptureAnalyzer.Measure(
+            FrameCaptureAnalyzerPanel::Lane::Rendering, "Game HUD");
         if (m_playRegistry && m_text) {
             engine::DrawWorldHealthBars(
                 *m_text, *m_playRegistry, viewProj,
@@ -1469,6 +1492,8 @@ void EditorApp::OnRender()
     }
 
     const auto uiCpuStart = std::chrono::high_resolution_clock::now();
+    auto uiCapture = m_frameCaptureAnalyzer.Measure(
+        FrameCaptureAnalyzerPanel::Lane::UI, "Editor UI build");
     m_gpuProfiler.Begin("UI");
     // A captured GLFW cursor still reports a virtual screen position. Never pass
     // that position to ImGui: camera-look capture owns the mouse exclusively, so
@@ -1485,11 +1510,14 @@ void EditorApp::OnRender()
     DrawEditorOverlay();
     m_imgui.EndFrame();
     m_gpuProfiler.End();
+    uiCapture = {};
     m_cpuUiMs = std::chrono::duration<double, std::milli>(
         std::chrono::high_resolution_clock::now() - uiCpuStart).count();
 
     m_cpuFrameMs = std::chrono::duration<double, std::milli>(
         std::chrono::high_resolution_clock::now() - cpuRenderStart).count();
+    m_frameCaptureAnalyzer.EndFrame(m_gpuProfiler.Results(),
+        m_gpuProfiler.DrawCalls(), m_physicsStepsLastFrame);
 }
 
 void EditorApp::OnShutdown()
@@ -2611,6 +2639,7 @@ void EditorApp::DrawEditorOverlay()
     DrawScriptDebugPanel();
     DrawViewportPanel();
     DrawRenderDebuggerPanel();
+    DrawFrameCaptureAnalyzerPanel();
     DrawWorldEditorPanel();
     DrawDirtyScenePrompt();
     if (selectedRuntimeAudio != engine::AudioEngine::InvalidSource) {
@@ -4911,6 +4940,13 @@ void EditorApp::DrawRenderDebuggerPanel() {
         m_pbrRenderer->InvalidateShadowCache();
         m_log.Info("Render Debugger refreshed all shadow-map caches");
     }
+}
+
+void EditorApp::DrawFrameCaptureAnalyzerPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::FrameCaptureAnalyzer)) return;
+    bool open = true;
+    m_frameCaptureAnalyzer.Draw(&open);
+    m_panels.SetOpen(EditorPanels::Panel::FrameCaptureAnalyzer, open);
 }
 
 int EditorApp::DeleteDestructionPreview(const std::string& name) {
@@ -14293,14 +14329,22 @@ void EditorApp::StepPlayPhysics(float dt, bool inputEnabled)
         const engine::ScriptInputState scriptInput =
             CapturePlayScriptInput(inputEnabled, false);
         UpdatePlayPlayerController(step, inputEnabled);
-        engine::FixedUpdateScripts(
-            *m_playRegistry, step, &scriptInput, &m_runtimeAudio,
-            &m_cameraShake, &m_cameraDirector, &engine::GameMode::Instance(),
-            &m_playPhysics);
-        engine::ecs::UpdateGameplay(*m_playRegistry, step);
-        engine::ecs::UpdateRuntimeMotion(*m_playRegistry, step);
+        {
+            auto capture = m_frameCaptureAnalyzer.Measure(
+                FrameCaptureAnalyzerPanel::Lane::Scripts, "Script FixedUpdate + gameplay");
+            engine::FixedUpdateScripts(
+                *m_playRegistry, step, &scriptInput, &m_runtimeAudio,
+                &m_cameraShake, &m_cameraDirector, &engine::GameMode::Instance(),
+                &m_playPhysics);
+            engine::ecs::UpdateGameplay(*m_playRegistry, step);
+            engine::ecs::UpdateRuntimeMotion(*m_playRegistry, step);
+        }
         m_playAnimationEvents.clear();
-        UpdateAI(step);
+        {
+            auto capture = m_frameCaptureAnalyzer.Measure(
+                FrameCaptureAnalyzerPanel::Lane::AI, "Behavior trees and navigation");
+            UpdateAI(step);
+        }
         engine::UpdateAbilities(*m_playRegistry, step);
         engine::UpdateCombat(*m_playRegistry, step);
         engine::UpdateSpawnManagers(*m_playRegistry, step, m_playPlayerEntity);
@@ -14309,13 +14353,25 @@ void EditorApp::StepPlayPhysics(float dt, bool inputEnabled)
         engine::UpdatePortals(*m_playRegistry, step);
         engine::UpdateProjectilesInPlace(*m_playRegistry, step);
         engine::UpdateHealth(*m_playRegistry);
-        engine::UpdateRagdollsBeforePhysics(*m_playRegistry, m_playPhysics);
-        ConfigurePlayFootIK();
-        engine::UpdateAnimations(*m_playRegistry, step);
-        ApplyWaterBuoyancy(step);
-        m_playPhysics.Step(*m_playRegistry, step);
-        engine::UpdateRagdollsAfterPhysics(*m_playRegistry, m_playPhysics, step);
-        CapturePlayPhysicsEvents();
+        {
+            auto capture = m_frameCaptureAnalyzer.Measure(
+                FrameCaptureAnalyzerPanel::Lane::Physics, "Ragdoll pre-physics");
+            engine::UpdateRagdollsBeforePhysics(*m_playRegistry, m_playPhysics);
+        }
+        {
+            auto capture = m_frameCaptureAnalyzer.Measure(
+                FrameCaptureAnalyzerPanel::Lane::Animation, "Animation and foot IK");
+            ConfigurePlayFootIK();
+            engine::UpdateAnimations(*m_playRegistry, step);
+        }
+        {
+            auto capture = m_frameCaptureAnalyzer.Measure(
+                FrameCaptureAnalyzerPanel::Lane::Physics, "Physics simulation");
+            ApplyWaterBuoyancy(step);
+            m_playPhysics.Step(*m_playRegistry, step);
+            engine::UpdateRagdollsAfterPhysics(*m_playRegistry, m_playPhysics, step);
+            CapturePlayPhysicsEvents();
+        }
         engine::GameMode::Instance().Update(
             *m_playRegistry, m_playPlayerEntity, step);
         m_physicsStepRequested = false;
@@ -14337,13 +14393,21 @@ void EditorApp::StepPlayPhysics(float dt, bool inputEnabled)
             scriptInputCaptured = true;
         }
         UpdatePlayPlayerController(step, inputEnabled);
-        engine::FixedUpdateScripts(
-            *m_playRegistry, step, &scriptInput, &m_runtimeAudio,
-            &m_cameraShake, &m_cameraDirector, &engine::GameMode::Instance(),
-            &m_playPhysics);
-        engine::ecs::UpdateGameplay(*m_playRegistry, step);
-        engine::ecs::UpdateRuntimeMotion(*m_playRegistry, step);
-        UpdateAI(step);
+        {
+            auto capture = m_frameCaptureAnalyzer.Measure(
+                FrameCaptureAnalyzerPanel::Lane::Scripts, "Script FixedUpdate + gameplay");
+            engine::FixedUpdateScripts(
+                *m_playRegistry, step, &scriptInput, &m_runtimeAudio,
+                &m_cameraShake, &m_cameraDirector, &engine::GameMode::Instance(),
+                &m_playPhysics);
+            engine::ecs::UpdateGameplay(*m_playRegistry, step);
+            engine::ecs::UpdateRuntimeMotion(*m_playRegistry, step);
+        }
+        {
+            auto capture = m_frameCaptureAnalyzer.Measure(
+                FrameCaptureAnalyzerPanel::Lane::AI, "Behavior trees and navigation");
+            UpdateAI(step);
+        }
         engine::UpdateAbilities(*m_playRegistry, step);
         engine::UpdateCombat(*m_playRegistry, step);
         engine::UpdateSpawnManagers(*m_playRegistry, step, m_playPlayerEntity);
@@ -14352,13 +14416,25 @@ void EditorApp::StepPlayPhysics(float dt, bool inputEnabled)
         engine::UpdatePortals(*m_playRegistry, step);
         engine::UpdateProjectilesInPlace(*m_playRegistry, step);
         engine::UpdateHealth(*m_playRegistry);
-        engine::UpdateRagdollsBeforePhysics(*m_playRegistry, m_playPhysics);
-        ConfigurePlayFootIK();
-        engine::UpdateAnimations(*m_playRegistry, step);
-        ApplyWaterBuoyancy(step);
-        m_playPhysics.Step(*m_playRegistry, step);
-        engine::UpdateRagdollsAfterPhysics(*m_playRegistry, m_playPhysics, step);
-        CapturePlayPhysicsEvents();
+        {
+            auto capture = m_frameCaptureAnalyzer.Measure(
+                FrameCaptureAnalyzerPanel::Lane::Physics, "Ragdoll pre-physics");
+            engine::UpdateRagdollsBeforePhysics(*m_playRegistry, m_playPhysics);
+        }
+        {
+            auto capture = m_frameCaptureAnalyzer.Measure(
+                FrameCaptureAnalyzerPanel::Lane::Animation, "Animation and foot IK");
+            ConfigurePlayFootIK();
+            engine::UpdateAnimations(*m_playRegistry, step);
+        }
+        {
+            auto capture = m_frameCaptureAnalyzer.Measure(
+                FrameCaptureAnalyzerPanel::Lane::Physics, "Physics simulation");
+            ApplyWaterBuoyancy(step);
+            m_playPhysics.Step(*m_playRegistry, step);
+            engine::UpdateRagdollsAfterPhysics(*m_playRegistry, m_playPhysics, step);
+            CapturePlayPhysicsEvents();
+        }
         engine::GameMode::Instance().Update(
             *m_playRegistry, m_playPlayerEntity, step);
         m_physicsAccumulator -= step;

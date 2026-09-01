@@ -21,6 +21,10 @@
 #include <engine/physics/PhysicsMaterial.h>
 #include <engine/physics/PhysicsMaterialAsset.h>
 #include <engine/physics/PhysicsDiagnostics.h>
+#include <engine/reflect/CoreDescriptors.h>   // ECS Pass 3: reflected generic-inspector fallback
+#include <engine/ecs/EcsProfiler.h>           // ECS Pass 5: diagnostics
+#include <engine/ecs/EcsValidator.h>
+#include <engine/ecs/EcsDebugger.h>
 
 #include <glm/gtc/quaternion.hpp>
 #include <imgui.h>
@@ -4691,6 +4695,196 @@ void DrawHierarchy(EditorDockspace::Context& context, bool* open) {
     ImGui::End();
 }
 
+// ---- ECS Pass 3: reflected generic-inspector fallback ---------------------------------------
+// Additive. The hand-written per-component sections above stay authoritative; this draws a
+// generic, metadata-driven view of any registered component that exists on the selected entity.
+// It is OFF by default (toggle under the "Reflected (generic)" header) so it can never disturb the
+// shipping inspector; when on it renders each descriptor's editorVisible properties and routes edits
+// through reflect::SetProperty, which writes via Registry::Patch<T> -- i.e. Pass-1 change tracking,
+// not a raw poke. Read-only / entity-ref / string properties display without editing for now.
+bool g_showReflectedInspector = false;
+
+void EnsureReflectionRegistered() {
+    static bool once = [] { engine::reflect::RegisterCoreComponents(); return true; }();
+    (void)once;
+}
+
+void DrawReflectedProperty(engine::ecs::Registry& reg, engine::ecs::Entity e,
+                           engine::reflect::ComponentTypeId cid,
+                           const engine::reflect::PropertyDescriptor& p) {
+    using namespace engine::reflect;
+    ImGui::PushID(static_cast<int>(p.id));
+    PropertyValue v = GetProperty(reg, e, cid, p.id);
+    const bool writable = p.flags.writable;
+    bool changed = false;
+    PropertyValue next = v;
+
+    switch (p.type) {
+        case PropertyType::Bool: {
+            bool b = std::holds_alternative<bool>(v) && std::get<bool>(v);
+            if (ImGui::Checkbox(p.name, &b) && writable) { next = b; changed = true; }
+            break;
+        }
+        case PropertyType::Int:
+        case PropertyType::Enum: {
+            int i = std::holds_alternative<int>(v) ? std::get<int>(v) : 0;
+            if (ImGui::DragInt(p.name, &i, 1.0f) && writable) { next = i; changed = true; }
+            break;
+        }
+        case PropertyType::Float: {
+            float f = std::holds_alternative<float>(v) ? std::get<float>(v) : 0.0f;
+            const float lo = p.meta.hasRange ? p.meta.minValue : 0.0f;
+            const float hi = p.meta.hasRange ? p.meta.maxValue : 0.0f;
+            if (ImGui::DragFloat(p.name, &f, 0.01f, lo, hi) && writable) { next = f; changed = true; }
+            break;
+        }
+        case PropertyType::Vec2: {
+            glm::vec2 g = std::holds_alternative<glm::vec2>(v) ? std::get<glm::vec2>(v) : glm::vec2(0);
+            if (ImGui::DragFloat2(p.name, &g.x, 0.01f) && writable) { next = g; changed = true; }
+            break;
+        }
+        case PropertyType::Vec3: {
+            glm::vec3 g = std::holds_alternative<glm::vec3>(v) ? std::get<glm::vec3>(v) : glm::vec3(0);
+            if (ImGui::DragFloat3(p.name, &g.x, 0.01f) && writable) { next = g; changed = true; }
+            break;
+        }
+        case PropertyType::Vec4: {
+            glm::vec4 g = std::holds_alternative<glm::vec4>(v) ? std::get<glm::vec4>(v) : glm::vec4(0);
+            if (ImGui::DragFloat4(p.name, &g.x, 0.01f) && writable) { next = g; changed = true; }
+            break;
+        }
+        case PropertyType::Color: {
+            glm::vec3 g = std::holds_alternative<glm::vec3>(v) ? std::get<glm::vec3>(v) : glm::vec3(1);
+            if (ImGui::ColorEdit3(p.name, &g.x) && writable) { next = g; changed = true; }
+            break;
+        }
+        case PropertyType::Quat: {
+            glm::quat q = std::holds_alternative<glm::quat>(v) ? std::get<glm::quat>(v)
+                                                              : glm::quat(1, 0, 0, 0);
+            glm::vec4 wxyz{ q.w, q.x, q.y, q.z };
+            if (ImGui::DragFloat4(p.name, &wxyz.x, 0.01f) && writable) {
+                glm::quat nq(wxyz.x, wxyz.y, wxyz.z, wxyz.w);
+                if (glm::dot(nq, nq) > 1e-8f) nq = glm::normalize(nq);
+                next = nq; changed = true;
+            }
+            break;
+        }
+        case PropertyType::String: {
+            const std::string s = std::holds_alternative<std::string>(v) ? std::get<std::string>(v)
+                                                                        : std::string();
+            ImGui::LabelText(p.name, "%s", s.empty() ? "(none)" : s.c_str());  // display-only for now
+            break;
+        }
+        case PropertyType::EntityRef: {
+            const engine::ecs::Entity ref = ResolveEntityRef(reg, v);  // generation-validated
+            if (ref == engine::ecs::kNull) ImGui::LabelText(p.name, "(none)");
+            else                           ImGui::LabelText(p.name, "entity %u", static_cast<unsigned>(ref));
+            break;
+        }
+    }
+
+    if (p.meta.tooltip && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", p.meta.tooltip);
+    if (changed && writable) SetProperty(reg, e, cid, p.id, next);   // TRACKED write (Patch<T>)
+    ImGui::PopID();
+}
+
+void DrawReflectedInspectorFallback(EditorDockspace::Context& context, engine::ecs::Entity entity) {
+    using namespace engine::reflect;
+    if (entity == engine::ecs::kNull || !context.scene) return;
+    EnsureReflectionRegistered();
+
+    if (!ImGui::CollapsingHeader("Reflected (generic)")) return;
+    ImGui::Checkbox("Enable reflected fallback", &g_showReflectedInspector);
+    ImGui::TextDisabled("Metadata-driven; edits route through tracked Patch. Custom panels above remain authoritative.");
+    if (!g_showReflectedInspector) return;
+
+    engine::ecs::Registry& reg = context.scene->Registry();
+    if (!reg.Valid(entity)) { ImGui::TextDisabled("Selected entity is not in the live registry."); return; }
+
+    bool any = false;
+    for (const ComponentDescriptor& cd : TypeRegistry::Get().All()) {
+        if (!cd.has || !cd.has(reg, entity)) continue;
+        any = true;
+        if (ImGui::TreeNodeEx(cd.name, ImGuiTreeNodeFlags_DefaultOpen)) {
+            for (const PropertyDescriptor& p : cd.properties) {
+                if (!p.flags.editorVisible) continue;
+                DrawReflectedProperty(reg, entity, cd.id, p);
+            }
+            ImGui::TreePop();
+        }
+    }
+    if (!any) ImGui::TextDisabled("No reflected components on this entity.");
+}
+
+// ---- ECS Pass 5: read-only ECS diagnostics (profiler + validator + debugger) ----------------
+// A collapsed, opt-in Inspector section. Everything here is read-only over the live editor registry:
+// a per-entity debugger snapshot, a registry-wide profiler summary, and an on-demand ValidateECS
+// scan. It never mutates the registry and holds no references beyond the frame.
+void DrawEcsDiagnostics(EditorDockspace::Context& context, engine::ecs::Entity entity) {
+    using namespace engine::ecs;
+    if (!context.scene) return;
+    if (!ImGui::CollapsingHeader("ECS Diagnostics")) return;
+
+    engine::ecs::Registry& reg = context.scene->Registry();
+
+    // --- Debugger: selected entity ---
+    if (ImGui::TreeNodeEx("Selected Entity", ImGuiTreeNodeFlags_DefaultOpen)) {
+        static EcsDebugger dbg;
+        EntitySnapshot s = dbg.Inspect(reg, entity);
+        ImGui::Text("index %u  generation %u", s.index, s.generation);
+        ImGui::Text("alive: %s   pending destroy: %s", s.alive ? "yes" : "no", s.pendingDestroy ? "yes" : "no");
+        if (!s.components.empty()) {
+            ImGui::SeparatorText("Components (revision)");
+            for (const ComponentSnapshot& c : s.components)
+                ImGui::BulletText("%s  rev %llu", c.typeName.c_str(),
+                                  static_cast<unsigned long long>(c.revision));
+        }
+        for (const auto& b : s.bridges)
+            ImGui::BulletText("%s: %s", b.first.c_str(), b.second.c_str());
+        ImGui::TreePop();
+    }
+
+    // --- Profiler: registry-wide ---
+    if (ImGui::TreeNode("Registry Profile")) {
+        EcsProfile p = CaptureEcsProfile(reg);
+        ImGui::Text("entities: alive %zu  cap %zu  free %zu  pendingDestroy %zu",
+                    p.entitiesAlive, p.entitiesCapacity, p.freeSlots, p.pendingDestroy);
+        ImGui::Text("structural: +%llu -%llu  upd %llu  queued %llu applied %llu",
+                    (unsigned long long)p.componentsAdded, (unsigned long long)p.componentsRemoved,
+                    (unsigned long long)p.componentsUpdated, (unsigned long long)p.structuralQueued,
+                    (unsigned long long)p.structuralApplied);
+        ImGui::Text("views: calls %llu  tested %llu  matches %llu",
+                    (unsigned long long)p.viewInvocations, (unsigned long long)p.viewEntitiesTested,
+                    (unsigned long long)p.viewMatches);
+        ImGui::Text("pools: %zu   component memory: %zu bytes", p.poolCount, p.totalComponentMemory);
+        if (ImGui::TreeNode("Pools")) {
+            for (const PoolMetrics& m : p.pools)
+                ImGui::BulletText("%s: n=%zu cap=%zu mem=%zu (+%zu ~%zu -%zu)",
+                                  m.typeName.c_str(), m.entityCount, m.capacity, m.memoryBytes,
+                                  m.added, m.updated, m.removed);
+            ImGui::TreePop();
+        }
+        ImGui::TreePop();
+    }
+
+    // --- Validator: on demand ---
+    if (ImGui::TreeNode("Validate ECS")) {
+        static EcsValidator validator;
+        static ValidationReport lastReport;
+        static bool ran = false;
+        if (ImGui::Button("Run ValidateECS")) { lastReport = validator.Validate(reg); ran = true; }
+        if (ran) {
+            if (lastReport.ok()) ImGui::TextColored(ImVec4(0.4f, 0.8f, 0.4f, 1.0f), "OK - no issues found");
+            else {
+                ImGui::TextColored(ImVec4(0.9f, 0.4f, 0.3f, 1.0f), "%zu issue(s):", lastReport.issues.size());
+                for (const ValidationIssue& iss : lastReport.issues)
+                    ImGui::BulletText("[%s] %s", iss.category.c_str(), iss.detail.c_str());
+            }
+        }
+        ImGui::TreePop();
+    }
+}
+
 void DrawInspector(EditorDockspace::Context& context, bool* open) {
     if (!ImGui::Begin(EditorPanels::Name(EditorPanels::Panel::Inspector), open)) {
         ImGui::End();
@@ -8325,6 +8519,11 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             ImGui::TextDisabled("Creates river water and assigns this spline as its flow direction.");
         }
     }
+
+    // ECS Pass 3: metadata-driven generic view (opt-in, additive; see DrawReflectedInspectorFallback).
+    DrawReflectedInspectorFallback(context, selected->entity);
+    // ECS Pass 5: read-only ECS diagnostics (profiler + validator + debugger), collapsed by default.
+    DrawEcsDiagnostics(context, selected->entity);
 
     ImGui::End();
 }

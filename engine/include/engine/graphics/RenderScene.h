@@ -50,6 +50,16 @@ struct RenderProxy {
     std::uint64_t transformRev = 0;   // Transform revision this proxy was extracted from
 };
 
+// Pass 5: per-sync render-extraction profiling (added/removed proxies, transform-only vs mesh
+// updates, and unchanged static objects skipped).
+struct RenderSyncStats {
+    int added = 0;
+    int removed = 0;
+    int transformUpdates = 0;
+    int meshUpdates = 0;
+    int unchanged = 0;
+};
+
 class RenderScene {
 public:
     // Rebuild/refresh proxies from the registry. Incremental: skips entirely when nothing structural
@@ -58,9 +68,12 @@ public:
     int SyncFrom(ecs::Registry& reg) {
         const std::uint64_t structRev = reg.StructuralRevision();
         const std::uint64_t txPoolRev = reg.PoolRevision<ecs::Transform>();
+        m_stats = RenderSyncStats{};   // Pass 5: per-sync extraction profiling
         // Fast out: no structural change AND no Transform pool change since last sync -> nothing to do.
-        if (m_synced && structRev == m_lastStructuralRev && txPoolRev == m_lastTransformPoolRev)
+        if (m_synced && structRev == m_lastStructuralRev && txPoolRev == m_lastTransformPoolRev) {
+            m_stats.unchanged = static_cast<int>(m_proxies.size());
             return 0;
+        }
 
         int changes = 0;
 
@@ -78,18 +91,20 @@ public:
                     m_index.emplace(e, m_proxies.size());
                     m_proxies.push_back(p);
                     if (p.castShadow) ++m_shadowCasterRevision;   // a new caster changes the shadow set
-                    ++changes;
+                    ++changes; ++m_stats.added;
                 } else {                                          // existing -> refresh only if changed
                     RenderProxy& p = m_proxies[it->second];
                     const bool moved = p.transformRev != rev;
                     const bool meshChanged = p.mesh != mr.mesh;
                     if (moved || meshChanged) {
-                        if (moved) { p.worldMatrix = t.Model(); p.transformRev = rev; }
-                        if (meshChanged) p.mesh = mr.mesh;
+                        if (moved) { p.worldMatrix = t.Model(); p.transformRev = rev; ++m_stats.transformUpdates; }
+                        if (meshChanged) { p.mesh = mr.mesh; ++m_stats.meshUpdates; }
                         p.color = mr.color;
                         p.mobility = MobilityOf(reg.TryGet<ecs::RigidBody>(e));
                         if (p.castShadow) ++m_shadowCasterRevision;   // caster transform/mesh changed
                         ++changes;
+                    } else {
+                        ++m_stats.unchanged;
                     }
                 }
             });
@@ -106,7 +121,7 @@ public:
             m_index.erase(e);
             if (i != last) { m_proxies[i] = m_proxies[last]; m_index[m_proxies[i].entity] = i; }
             m_proxies.pop_back();
-            ++changes;
+            ++changes; ++m_stats.removed;
         }
 
         m_lastStructuralRev = structRev;
@@ -118,6 +133,9 @@ public:
     // Bumps only when the shadow-casting set changes (caster added/removed, transform or mesh
     // changed). Shadow systems compare this to their last-seen value to invalidate incrementally.
     std::uint64_t ShadowCasterRevision() const { return m_shadowCasterRevision; }
+
+    // Pass 5: metrics from the most recent SyncFrom (render-extraction profiling).
+    const RenderSyncStats& LastSyncStats() const { return m_stats; }
 
     const std::vector<RenderProxy>& Proxies() const { return m_proxies; }
     std::size_t ProxyCount() const { return m_proxies.size(); }
@@ -152,6 +170,7 @@ private:
     std::uint64_t m_lastStructuralRev = 0;
     std::uint64_t m_lastTransformPoolRev = 0;
     bool          m_synced = false;
+    RenderSyncStats m_stats;
 };
 
 } // namespace engine

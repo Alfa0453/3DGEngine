@@ -111,6 +111,7 @@ const char* PlainPanelName(EditorPanels::Panel panel)
     case Panel::PoseLibrary: return "Pose Library";
     case Panel::CharacterEquipment: return "Character Equipment Editor";
     case Panel::RenderDebugger: return "Render Debugger";
+    case Panel::FrameCaptureAnalyzer: return "Frame Capture Analyzer";
     case Panel::Count:     break;
     }
     return "Panel";
@@ -245,6 +246,7 @@ EditorPanels::Group EditorPanels::GroupOf(Panel panel)
     case Panel::RuntimePropertyInspector:
     case Panel::AssetDependencyViewer:
     case Panel::RenderDebugger:
+    case Panel::FrameCaptureAnalyzer:
         return Group::Debug;
 
     case Panel::Count:

@@ -65,6 +65,19 @@ public:
     // Pass 1:
     virtual void ClearChangeRecords() = 0;   // drop this epoch's added/updated/removed lists
     virtual bool Validate() const = 0;        // sparse-set invariant check (debug)
+    // Pass 5: read-only metrics for the ECS profiler / debugger (no behavior change).
+    virtual std::size_t   Count()        const = 0;   // entities that own this component
+    virtual std::size_t   Capacity()     const = 0;   // reserved component slots
+    virtual std::size_t   MemoryBytes()  const = 0;   // approximate storage footprint
+    virtual std::uint64_t PoolRevisionValue() const = 0;
+    virtual std::size_t   AddedCount()   const = 0;   // change-record sizes this epoch
+    virtual std::size_t   UpdatedCount() const = 0;
+    virtual std::size_t   RemovedCount() const = 0;
+    virtual const char*   TypeName()     const = 0;   // runtime name (debug only; never persisted)
+    // Pass 5: visit every entity that owns this component (for ValidateECS ownership scans).
+    virtual void ForEachEntity(const std::function<void(Entity)>& fn) const = 0;
+    // Pass 5: revision of one entity's component (0 if absent) -- for the ECS debugger, type-erased.
+    virtual std::uint64_t EntityRevision(Entity e) const = 0;
 };
 
 template <class T>
@@ -168,6 +181,26 @@ public:
         }
         return true;
     }
+
+    // Pass 5 metrics.
+    std::size_t   Count()    const override { return dense.size(); }
+    std::size_t   Capacity() const override { return comps.capacity(); }
+    std::size_t   MemoryBytes() const override {
+        return sparse.capacity()   * sizeof(std::uint32_t)
+             + dense.capacity()    * sizeof(Entity)
+             + comps.capacity()    * sizeof(T)
+             + revisions.capacity()* sizeof(std::uint64_t)
+             + (addedList.capacity() + updatedList.capacity() + removedList.capacity()) * sizeof(ChangeEntry);
+    }
+    std::uint64_t PoolRevisionValue() const override { return poolRevision; }
+    std::size_t   AddedCount()   const override { return addedList.size(); }
+    std::size_t   UpdatedCount() const override { return updatedList.size(); }
+    std::size_t   RemovedCount() const override { return removedList.size(); }
+    const char*   TypeName()     const override { return typeid(T).name(); }
+    void ForEachEntity(const std::function<void(Entity)>& fn) const override {
+        for (Entity e : dense) fn(e);
+    }
+    std::uint64_t EntityRevision(Entity e) const override { return RevisionOf(e); }
 };
 
 template <class... Cs> class View;  // forward declaration
@@ -183,6 +216,7 @@ struct RegistryStats {
     std::uint64_t structuralCommandsApplied = 0;
     std::uint64_t viewInvocations = 0;
     std::uint64_t viewEntitiesTested = 0;
+    std::uint64_t viewMatches = 0;         // Pass 5: entities that passed all Has<Cs> checks
 };
 
 // --- The Registry: owns entities and component pools -----------------------
@@ -370,6 +404,24 @@ public:
     void ResetStats() { m_stats = RegistryStats{}; }
     bool Validate() const { for (auto& kv : m_pools) if (!kv.second->Validate()) return false; return true; }
 
+    // ---- Pass 5: profiler / debugger read-only surface --------------------
+    std::size_t EntityCapacity()      const { return m_generations.size(); } // highest index ever used + 1
+    std::size_t FreeSlotCount()       const { return m_free.size(); }        // recycled indices ready to reuse
+    std::size_t PendingDestroyCount() const { return m_deferredDestroys.size(); }
+    std::size_t DeferredOpCount()     const { return m_deferredOps.size(); }
+    std::size_t PoolCount()           const { return m_pools.size(); }
+    // Enumerate every component pool as a const IPool& for generic metrics. Order is unspecified.
+    template <class F> void ForEachPool(F&& fn) const { for (auto& kv : m_pools) fn(*kv.second); }
+    // Generation counter stored for an entity index (debugger); 0 if the index was never used.
+    std::uint32_t GenerationAt(std::uint32_t index) const {
+        return index < m_generations.size() ? m_generations[index] : 0u;
+    }
+    // Is this exact handle queued for deferred destruction this frame?
+    bool IsPendingDestroy(Entity e) const {
+        for (Entity d : m_deferredDestroys) if (d == e) return true;
+        return false;
+    }
+
 private:
     template <class... Cs> friend class View;   // views bump viewInvocations / viewEntitiesTested
 
@@ -457,8 +509,10 @@ private:
         for (std::size_t k = lead->dense.size(); k-- > 0; ) {
             const Entity e = lead->dense[k];
             ++m_reg->m_stats.viewEntitiesTested;
-            if ((m_reg->template Has<Cs>(e) && ...))
+            if ((m_reg->template Has<Cs>(e) && ...)) {
+                ++m_reg->m_stats.viewMatches;
                 func(e, m_reg->template Get<Cs>(e)...);
+            }
         }
     }
 

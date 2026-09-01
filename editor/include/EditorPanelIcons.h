@@ -80,6 +80,7 @@ inline const char* ForPanel(EditorPanels::Panel panel) {
     case P::PoseLibrary: return Star;
     case P::CharacterEquipment: return Settings;
     case P::RenderDebugger: return Screen;
+    case P::FrameCaptureAnalyzer: return Screen;
     case P::Count: break;
     }
     return Document;
