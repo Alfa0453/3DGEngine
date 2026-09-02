@@ -11,6 +11,7 @@
 
 #include <engine/gameplay/Script.h>
 #include <engine/gameplay/ScriptModule.h>
+#include <engine/gameplay/ScriptModuleAbi.h>   // Scripting Pass 3: module info handshake
 #include <engine/ai/BtScript.h>
 
 #include <memory>
@@ -30,4 +31,19 @@ SCRIPT_MODULE_EXPORT void RegisterScriptModule(
 
 SCRIPT_MODULE_EXPORT std::uint32_t Get3DGScriptApiVersion() {
     return engine::kScriptModuleApiVersion;
+}
+
+// Scripting Pass 3: richer ABI handshake. Additive and OPTIONAL -- the engine still checks
+// Get3DGScriptApiVersion above as the hard gate; a loader that also reads this gets the full
+// ScriptModuleInfo (abi / scriptApi / reflection schema / build stamps) for transactional validation.
+// The struct is POD (fixed-width ints only), so returning it by value is C-ABI safe.
+SCRIPT_MODULE_EXPORT engine::script::ScriptModuleInfo Get3DGScriptModuleInfo() {
+    engine::script::ScriptModuleInfo info;
+    info.abiVersion              = engine::kScriptModuleApiVersion;
+    info.scriptApiVersion        = engine::kScriptModuleApiVersion;
+    info.reflectionSchemaVersion = engine::script::kReflectionSchemaVersion;
+    // A stable-per-build stamp derived from this TU's compile time (informational / drift detection).
+    info.moduleBuildId           = engine::script::StableId(__DATE__ " " __TIME__);
+    info.engineBuildId           = 0;   // filled by a future engine-build-stamp handshake
+    return info;
 }

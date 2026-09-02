@@ -141,7 +141,6 @@ bool MaterialMakerPanel::Draw() {
 }
 
 bool MaterialMakerPanel::Draw(bool* open) {
-    m_savedThisFrame = false;
     ImGui::SetNextWindowSize(ImVec2(440.0f, 720.0f), ImGuiCond_FirstUseEver);
     if (ImGui::Begin("Material Maker", open, ImGuiWindowFlags_NoCollapse)) {
         DrawContent();
@@ -151,6 +150,10 @@ bool MaterialMakerPanel::Draw(bool* open) {
 }
 
 bool MaterialMakerPanel::DrawContent() {
+    // Reset the one-frame "just saved" pulse here (not in Draw), because the editor drives the panel
+    // through DrawContent() directly. Without this, m_savedThisFrame stays true after a save and the
+    // caller re-scans the content folder every frame ("Scanned Content: N files" spam).
+    m_savedThisFrame = false;
     DrawPreview();
     ImGui::Separator();
     DrawPresetControls();

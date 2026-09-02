@@ -2395,6 +2395,10 @@ void ForceDeactivateScript(ecs::Registry& registry, ecs::Entity entity,
 
 // Destroy queued entities, giving each scripted entity an OnDestroy() first.
 void FlushDestroyQueue(ecs::Registry& registry, const std::vector<ecs::Entity>& destroyQueue) {
+    // Scripting Pass 1: apply any component add/remove a script deferred this phase
+    // (AddComponentDeferred / RemoveComponentDeferred) before the destroy pass. The ECS applies
+    // adds/removes first then destroys, so this ordering is safe and matches Registry semantics.
+    registry.FlushStructuralCommands();
     for (ecs::Entity entity : destroyQueue) {
         if (!registry.Valid(entity)) {
             continue;

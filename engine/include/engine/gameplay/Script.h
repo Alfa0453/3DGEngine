@@ -718,7 +718,89 @@ protected:
         }
     }
 
+    // ---- Scripting Pass 1: tracked ECS mutation (ChangeSource::Script) ---------------------
+    // Raw Transform() / TryGet<T>() hand back a mutable reference that is UNTRACKED: a write
+    // through it does not bump the component revision, so PhysicsScene / RenderScene / editor
+    // dirty state / lighting invalidation never see it. These helpers route the write through
+    // Registry::Patch<T> tagged as ChangeSource::Script, so runtime systems react correctly and a
+    // script-driven move is never mistaken for an editor-authored scene edit. The raw accessors and
+    // immediate Add<T>()/Remove<T>() above stay exactly as they were -- existing scripts compile
+    // and run unchanged; these are the safer opt-in alternative.
+    template <class T, class F>
+    bool PatchComponent(F&& fn) { return PatchComponentOn<T>(m_context.entity, std::forward<F>(fn)); }
+    template <class T, class F>
+    bool PatchComponent(ecs::Entity entity, F&& fn) { return PatchComponentOn<T>(entity, std::forward<F>(fn)); }
+
+    // Record a raw mutable write (e.g. `Transform()->position.x += 1`) as a tracked Script update,
+    // for code that still uses the raw pointer path (Phase 4). No component data is changed here.
+    template <class T>
+    void MarkComponentUpdated() { MarkComponentUpdatedOn<T>(m_context.entity); }
+    template <class T>
+    void MarkComponentUpdated(ecs::Entity entity) { MarkComponentUpdatedOn<T>(entity); }
+
+    // Common tracked transform / velocity setters (sugar over PatchComponent).
+    bool SetPosition(const glm::vec3& p) {
+        return PatchComponent<ecs::Transform>([&](ecs::Transform& t) { t.position = p; });
+    }
+    bool Translate(const glm::vec3& delta) {
+        return PatchComponent<ecs::Transform>([&](ecs::Transform& t) { t.position += delta; });
+    }
+    bool SetRotation(const glm::quat& r) {
+        return PatchComponent<ecs::Transform>([&](ecs::Transform& t) { t.rotation = r; });
+    }
+    bool SetScale(const glm::vec3& s) {
+        return PatchComponent<ecs::Transform>([&](ecs::Transform& t) { t.scale = s; });
+    }
+    bool SetVelocity(const glm::vec3& v) {
+        return PatchComponent<ecs::RigidBody>([&](ecs::RigidBody& b) {
+            b.velocity = v; b.sleeping = false; b.sleepTimer = 0.0f;   // a moved body must not stay asleep
+        });
+    }
+
+    // ---- Scripting Pass 1: deferred structural component ops (Phase 6) ---------------------
+    // Immediate Add<T>() / Remove<T>() above remain for controlled cases, but adding or removing a
+    // component while the script / event / physics iteration is still running is unsafe. These defer
+    // the structural change to the safe flush point after the script phase (the ECS command queue,
+    // drained in FlushDestroyQueue). DestroySelf()/Destroy() are already deferred via the destroy
+    // queue; these extend the same safety to component add/remove.
+    template <class T>
+    void AddComponentDeferred(T value = T{}) {
+        if (m_context.registry) m_context.registry->AddDeferred<T>(m_context.entity, std::move(value));
+    }
+    template <class T>
+    void AddComponentDeferred(ecs::Entity entity, T value = T{}) {
+        if (m_context.registry) m_context.registry->AddDeferred<T>(entity, std::move(value));
+    }
+    template <class T>
+    void RemoveComponentDeferred() {
+        if (m_context.registry) m_context.registry->RemoveDeferred<T>(m_context.entity);
+    }
+    template <class T>
+    void RemoveComponentDeferred(ecs::Entity entity) {
+        if (m_context.registry) m_context.registry->RemoveDeferred<T>(entity);
+    }
+
 private:
+    // Scoped mutation-source wrapper: stamp the write as ChangeSource::Script, then restore whatever
+    // source was active (so nested/host code is unaffected).
+    template <class T, class F>
+    bool PatchComponentOn(ecs::Entity entity, F&& fn) {
+        if (!m_context.registry) return false;
+        const ecs::ChangeSource prev = m_context.registry->CurrentChangeSource();
+        m_context.registry->SetChangeSource(ecs::ChangeSource::Script);
+        const bool ok = m_context.registry->Patch<T>(entity, std::forward<F>(fn));
+        m_context.registry->SetChangeSource(prev);
+        return ok;
+    }
+    template <class T>
+    void MarkComponentUpdatedOn(ecs::Entity entity) {
+        if (!m_context.registry) return;
+        const ecs::ChangeSource prev = m_context.registry->CurrentChangeSource();
+        m_context.registry->SetChangeSource(ecs::ChangeSource::Script);
+        m_context.registry->MarkUpdated<T>(entity);
+        m_context.registry->SetChangeSource(prev);
+    }
+
     virtual bool HasTimerFunction(const std::string& functionName) const;
     virtual bool InvokeTimerFunction(const std::string& functionName);
 
