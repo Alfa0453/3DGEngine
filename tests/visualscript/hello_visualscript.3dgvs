@@ -1,0 +1,18 @@
+3DG_VISUAL_SCRIPT 1 00000000000000010000000000000001
+graph 1
+nodes 2
+node 1 "Event.BeginPlay" 0 0
+  props 0
+  in 0
+  out 1
+    pin 1 1 0 Exec "Then" Exec
+node 2 "Debug.PrintString" 240 0
+  props 0
+  in 2
+    pin 1 0 0 Exec "In" Exec
+    pin 2 0 1 String "Text" String "Visual Script Running"
+  out 1
+    pin 3 1 0 Exec "Then" Exec
+links 1
+link 1 1 1 2 1
+vars 0

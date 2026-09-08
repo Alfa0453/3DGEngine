@@ -48,6 +48,10 @@ public:
         std::string objectB;
         int phase = 0; // 0 enter, 1 stay, 2 exit
         bool trigger = false;
+        glm::vec3 point{0.0f};
+        glm::vec3 normal{0.0f};
+        float penetration = 0.0f;
+        float impulse = 0.0f;
     };
 
     struct GameplayTraceGuide {
@@ -81,6 +85,13 @@ public:
         float visionRange = 0.0f;         // perception distance (0 = no cone drawn)
         float visionHalfAngleDeg = 0.0f;  // half the vision cone's angular width
         glm::vec3 targetPosition{0.0f};   // pursued target's world position (when hasTarget)
+        float hearingRange = 0.0f;
+        bool heardNoise = false;
+        bool showVision = true;
+        bool showHearing = false;
+        bool showLastKnown = false;
+        bool hasLastKnown = false;
+        glm::vec3 lastKnownPosition{0.0f};
     };
 
     bool ContainsPoint(float x, float y, int width, int height) const;
@@ -242,6 +253,16 @@ public:
                                   engine::Shader& shader,
                                   const engine::Mesh& cube,
                                   const engine::ai::NavMesh& mesh,
+                                  const glm::mat4& viewProj) const;
+
+    void DrawNavigationQueryGuide(engine::Renderer& renderer,
+                                  engine::Shader& shader,
+                                  const engine::Mesh& cube,
+                                  const glm::vec3& start,
+                                  const glm::vec3& goal,
+                                  const std::vector<glm::vec3>& path,
+                                  const std::vector<glm::vec3>& obstacleHits,
+                                  bool success,
                                   const glm::mat4& viewProj) const;
 
     void DrawSelectedModelOutline(engine::Renderer& renderer,

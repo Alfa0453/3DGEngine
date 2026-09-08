@@ -49,6 +49,7 @@ public:
     const glm::vec3& Position() const { return agent.position; }
     const glm::vec3& Facing() const { return m_facing; }
     const std::vector<glm::vec3>& Path() const { return m_path; }
+    const glm::vec3& LastKnownPosition() const { return m_lastKnown; }
 
     // Drive one fixed step. targetPos is the pursued point; seesTarget is whether
     // the agent can see it right now (from ai::CanSee or a custom check).

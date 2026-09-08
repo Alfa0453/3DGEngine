@@ -1,0 +1,10 @@
+^D:\C++_PROJECTS\3DGENGINE\INTERMEDIATE\SCRIPTS\IDE\_DEPS\GLFW-SUBBUILD\CMAKEFILES\6EA84253F262105DDB514578684E6C12\GENERATE.STAMP.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SD:/C++_Projects/3DGEngine/Intermediate/Scripts/IDE/_deps/glfw-subbuild -BD:/C++_Projects/3DGEngine/Intermediate/Scripts/IDE/_deps/glfw-subbuild --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file D:/C++_Projects/3DGEngine/Intermediate/Scripts/IDE/_deps/glfw-subbuild/glfw-populate.slnx
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

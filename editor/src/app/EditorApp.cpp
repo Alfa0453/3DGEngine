@@ -17,11 +17,14 @@
 #include <engine/gameplay/SpawnSystem.h>
 #include <engine/gameplay/RagdollSystem.h>
 #include <engine/gameplay/GameMode.h>
+#include <engine/gameplay/PhotoMode.h>
 #include <engine/gameplay/Script.h>
+#include <engine/gameplay/LuaScript.h>
 #include <engine/gameplay/SaveGame.h>
 #include <engine/assets/SkeletalAsset.h>
 #include <engine/assets/TextureAsset.h>
 #include <engine/ecs/Systems.h>
+#include <engine/ecs/EcsProfiler.h>
 #include <engine/graphics/Model.h>
 #include <engine/graphics/Primitives.h>
 #include <engine/graphics/Texture.h>
@@ -33,6 +36,7 @@
 #include <engine/graphics/ImageDecode.h>
 #include <engine/graphics/EnvironmentLighting.h>
 #include <engine/graphics/PostProcessVolume.h>
+#include <engine/graphics/Screenshot.h>
 #include <engine/graphics/LightingScalability.h>
 #include <engine/graphics/GrassField.h>
 #include <engine/math/Spline.h>
@@ -575,6 +579,10 @@ EditorApp::~EditorApp() = default;
 void EditorApp::OnInit()
 {
     GetWindow().SetCloseRequestCallback([this] { RequestCloseEditor(); });
+    // Populate the Visual Script node registry at editor init so the graph editor's palette / context
+    // search work before entering Play. Idempotent; EnterPlayMode re-points the asset resolver.
+    m_visualScripts.Startup();
+    engine::vs::VisualScriptNodeCatalog::Instance().Invalidate();
     m_autoCompileScripts = m_config.GetBool("scripting.auto_compile_on_save", true);
     const editor::branding::WindowIcon& editorIcon = editor::branding::Icon();
     GetWindow().SetIcon(editorIcon.width, editorIcon.height, editorIcon.rgba.data());
@@ -847,6 +855,8 @@ void EditorApp::OnInit()
             m_project.Load(m_config);
         }
     }
+    engine::SetLuaScriptProjectRoot(
+        std::filesystem::path(m_project.AssetRoot()).parent_path().string());
     LoadPackagingSettings();
     SetScenePathDraft(m_project.ScenePath());
     m_content.Refresh(m_assets, m_project, m_log);
@@ -966,14 +976,23 @@ void EditorApp::OnUpdate(float dt)
         || (m_panels.IsOpen(EditorPanels::Panel::ShaderEditor)
             && m_shaderEditor.WantsKeyboard());
 
-    // Play mode: ESC toggles the cursor between captured (mouse-look) and free (editor UI).
+    // Play mode: Shift+F1 toggles input ownership between gameplay mouse-look and
+    // the editor UI. Read the chord directly so it remains available even while an
+    // ImGui text field has keyboard focus.
     if (m_mode == EditorMode::Play) {
-        const bool escDown = window.IsKeyPressed(GLFW_KEY_ESCAPE);
-        if (escDown && !m_playCursorTogglePrev) {
+        const bool shiftDown = window.IsKeyPressed(GLFW_KEY_LEFT_SHIFT)
+            || window.IsKeyPressed(GLFW_KEY_RIGHT_SHIFT);
+        const bool cursorToggleDown = shiftDown && window.IsKeyPressed(GLFW_KEY_F1);
+        if (cursorToggleDown && !m_playCursorTogglePrev) {
             m_playMouseCaptured = !m_playMouseCaptured;
             window.SetCursorCaptured(m_playMouseCaptured);
+            m_log.Info(m_playMouseCaptured
+                ? "Play mode: gameplay mouse input captured"
+                : "Play mode: cursor released for editor UI (Shift+F1 to recapture)");
         }
-        m_playCursorTogglePrev = escDown;
+        m_playCursorTogglePrev = cursorToggleDown;
+    } else {
+        m_playCursorTogglePrev = false;
     }
 
     const bool skipHeld = m_mode == EditorMode::Play
@@ -984,6 +1003,7 @@ void EditorApp::OnUpdate(float dt)
 
     const bool playInputEnabled =
         m_scene.GetGameModeSettings().playerInputEnabled
+        && m_playMouseCaptured
         && !keyboardCaptured
         && !m_cameraDirector.InputLocked();
     // Scene queries only trust the physics broad-phase grid within the frame a Step built
@@ -1007,6 +1027,10 @@ void EditorApp::OnUpdate(float dt)
                 *m_playRegistry, playDt, &scriptInput, &m_runtimeAudio,
                 &m_cameraShake, &m_cameraDirector, &engine::GameMode::Instance(),
                 &m_playPhysics);
+            // Visual Scripting runs alongside native/Lua on the same registry + services (Passes 1-5).
+            m_visualScripts.Update(*m_playRegistry, playDt, &m_playPhysics, &scriptInput,
+                &m_runtimeAudio, &m_cameraShake, &m_cameraDirector, &engine::GameMode::Instance());
+            m_visualScripts.DeliverPhysicsEvents(*m_playRegistry, m_playPhysics.Events());
         }
         auto& dayNight = engine::DayNightTimelineRuntime::Instance();
         dayNight.Tick(playDt);
@@ -1150,6 +1174,7 @@ void EditorApp::OnUpdate(float dt)
         m_terrainCameraConstraint.Reset();
     }
     UpdateCameraShake(m_mode == EditorMode::Play ? playDt : dt);
+    UpdatePhotoModeCamera(dt);
     m_audio.SetListener(m_camera.Position(), m_camera.Front());
     
     m_transformController.UpdateKeyboardShortcuts(window,
@@ -1364,6 +1389,7 @@ void EditorApp::OnRender()
             (m_mode == EditorMode::Play && m_playRegistry) ? *m_playRegistry : m_scene.Registry();
         engine::ApplyPostProcessVolumes(
             presentationRegistry, m_camera.Position(), *m_postProcess);
+        ApplyPhotoModePostProcess();
         m_postProcess->Resize(sw, sh);
         std::vector<engine::PostProcess::Effect> graphEffects;
         engine::RuntimeAssetManager* effectAssets =
@@ -1476,6 +1502,7 @@ void EditorApp::OnRender()
         m_postProcess->SetLocalFogVolumes(GatherLocalFogVolumes(volumeRegistry));
         m_renderingHdrPreview = false;
         m_postProcess->RenderToScreen(window.Width(), window.Height(), m_dt);   // upscales to window
+        CapturePhotoModeScreenshot();
         m_gpuProfiler.End();
     }
 
@@ -2610,6 +2637,7 @@ void EditorApp::DrawEditorOverlay()
     DrawWeatherEditorPanel();
     DrawProceduralBuildingPanel();
     DrawRoadGeneratorPanel();
+    DrawVisualScriptEditorPanel();
     DrawLevelInstancePanel();
     DrawWorldPartitionPanel();
     DrawProceduralScatterGraphPanel();
@@ -2640,6 +2668,18 @@ void EditorApp::DrawEditorOverlay()
     DrawViewportPanel();
     DrawRenderDebuggerPanel();
     DrawFrameCaptureAnalyzerPanel();
+    DrawMemoryProfilerPanel();
+    DrawCollisionAnalyzerPanel();
+    DrawNavigationQueryPanel();
+    DrawAiPerceptionDebuggerPanel();
+    DrawAutomatedTestPanel();
+    DrawLocalizationEditorPanel();
+    DrawAssetReferenceRepairPanel();
+    DrawSourceControlPanel();
+    DrawProjectMigrationPanel();
+    DrawBuildSizeAnalyzerPanel();
+    DrawUiLocalizationPreviewPanel();
+    DrawPluginManagerPanel();
     DrawWorldEditorPanel();
     DrawDirtyScenePrompt();
     if (selectedRuntimeAudio != engine::AudioEngine::InvalidSource) {
@@ -2928,6 +2968,11 @@ void EditorApp::DrawEditorOverlay()
             m_dialogueEditor.QueueOpen(path);
             m_log.Info("Opening dialogue asset: " + path);
             break;
+        case EditorAssets::Type::Localization:
+            m_panels.SetOpen(EditorPanels::Panel::LocalizationEditor, true);
+            m_localizationEditor.QueueOpen(path);
+            m_log.Info("Opening localization table: " + path);
+            break;
         case EditorAssets::Type::Item:
             m_panels.SetOpen(EditorPanels::Panel::InventoryItemEditor, true);
             m_inventoryItemEditor.QueueOpen(path);
@@ -3004,7 +3049,14 @@ void EditorApp::DrawEditorOverlay()
         case EditorAssets::Type::Scene:
         case EditorAssets::Type::BehaviorGraph:
         case EditorAssets::Type::Script:
+            break;
         case EditorAssets::Type::Other:
+            // .3dgvs isn't a distinct EditorAssets::Type; route it to the Visual Script Editor by ext.
+            if (std::filesystem::path(path).extension() == ".3dgvs") {
+                m_panels.SetOpen(EditorPanels::Panel::VisualScriptEditor, true);
+                m_visualScriptEditor.QueueOpen(path);
+                m_log.Info("Opening visual script: " + path);
+            }
             break;
         }
     }
@@ -3326,10 +3378,31 @@ void EditorApp::ScanHudImages() {
     std::sort(m_hudImageChoices.begin(), m_hudImageChoices.end());
 }
 
+void EditorApp::ScanHudFonts() {
+    m_hudFontChoices.clear();
+    std::error_code ec;
+    const std::filesystem::path root(m_project.AssetRoot());
+    if (!std::filesystem::exists(root, ec)) return;
+
+    for (std::filesystem::recursive_directory_iterator it(root, ec), end; it != end; it.increment(ec)) {
+        if (ec) break;
+        if (!it->is_regular_file(ec)) continue;
+        std::string ext = it->path().extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (ext == ".3dgfont") {
+            const std::string rel = std::filesystem::relative(it->path(), root, ec).generic_string();
+            if (!rel.empty()) m_hudFontChoices.push_back(rel);
+        }
+    }
+    std::sort(m_hudFontChoices.begin(), m_hudFontChoices.end());
+}
+
 void EditorApp::DrawHudEditorPanel() {
     if (!m_panels.IsOpen(EditorPanels::Panel::Hud)) return;
 
     if (m_hudImageChoices.empty()) ScanHudImages();   // first-open populate
+    if (m_hudFontChoices.empty())  ScanHudFonts();
     const auto texLookup = [this](const std::string& rel) { return HudTextureId(rel); };
 
     engine::HudContext previewContext;
@@ -3357,9 +3430,11 @@ void EditorApp::DrawHudEditorPanel() {
 
     bool open = true;
     const HudEditorPanel::Result r = m_hudPanel.Draw(
-        m_hud, m_project.AssetRoot(), &open, m_hudImageChoices, texLookup, &previewContext);
+        m_hud, m_project.AssetRoot(), &open, m_hudImageChoices, m_hudFontChoices,
+        texLookup, &previewContext);
 
     if (r.refreshImagesRequested) ScanHudImages();
+    if (r.refreshFontsRequested)  ScanHudFonts();
 
     if (r.newRequested) {
         m_hud.Clear();
@@ -3940,6 +4015,18 @@ void EditorApp::DrawRoadGeneratorPanel() {
         m_log.Info("Road Generator removed " + std::to_string(removed) + " piece(s)");
     }
     if (result.generate) GenerateRoad();
+}
+
+void EditorApp::DrawVisualScriptEditorPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::VisualScriptEditor)) return;
+    bool open = true;
+    const VisualScriptEditorPanel::Result result =
+        m_visualScriptEditor.Draw(&open, m_project.AssetRoot());
+    m_panels.SetOpen(EditorPanels::Panel::VisualScriptEditor, open);
+    if (result.assetsChanged) {
+        std::string error;
+        if (!m_assets.Refresh(m_project.AssetRoot(), &error)) m_log.Warning(error);
+    }
 }
 
 void EditorApp::DrawLevelInstancePanel() {
@@ -4949,6 +5036,529 @@ void EditorApp::DrawFrameCaptureAnalyzerPanel() {
     m_panels.SetOpen(EditorPanels::Panel::FrameCaptureAnalyzer, open);
 }
 
+void EditorApp::UpdatePhotoModeCamera(float unscaledDt) {
+    auto& photoMode = engine::PhotoModeRuntime::Instance();
+    if (m_mode != EditorMode::Play || !photoMode.Active()) {
+        m_photoModeCamera.reset();
+        return;
+    }
+    if (!m_photoModeCamera) m_photoModeCamera = m_camera;
+
+    engine::Camera& camera = *m_photoModeCamera;
+    const engine::PhotoModeSettings& settings = photoMode.Settings();
+    camera.fov = settings.fieldOfView;
+    if (m_playMouseCaptured) {
+        engine::Window& window = GetWindow();
+        camera.AddYawPitch(window.MouseDeltaX() * settings.lookSensitivity,
+                           -window.MouseDeltaY() * settings.lookSensitivity);
+        float distance = settings.moveSpeed * std::max(unscaledDt, 0.0f);
+        if (window.IsKeyPressed(GLFW_KEY_LEFT_SHIFT)
+            || window.IsKeyPressed(GLFW_KEY_RIGHT_SHIFT)) distance *= 4.0f;
+        if (window.IsKeyPressed(GLFW_KEY_W)) camera.MoveForward(distance);
+        if (window.IsKeyPressed(GLFW_KEY_S)) camera.MoveForward(-distance);
+        if (window.IsKeyPressed(GLFW_KEY_D)) camera.MoveRight(distance);
+        if (window.IsKeyPressed(GLFW_KEY_A)) camera.MoveRight(-distance);
+        if (window.IsKeyPressed(GLFW_KEY_E)) camera.MoveUp(distance);
+        if (window.IsKeyPressed(GLFW_KEY_Q)) camera.MoveUp(-distance);
+    }
+    m_camera = camera;
+}
+
+void EditorApp::ApplyPhotoModePostProcess() {
+    if (!m_postProcess) return;
+    m_postProcess->settings.depthOfField = false;
+    if (!engine::PhotoModeRuntime::Instance().Active()) return;
+    const engine::PhotoModeSettings& settings =
+        engine::PhotoModeRuntime::Instance().Settings();
+    m_postProcess->settings.exposureCompensationEV += settings.exposureCompensationEV;
+    m_postProcess->settings.saturation *= settings.saturation;
+    m_postProcess->settings.contrast *= settings.contrast;
+    m_postProcess->settings.depthOfField = settings.depthOfField;
+    m_postProcess->settings.dofFocusDistance = settings.focusDistance;
+    m_postProcess->settings.dofFocusRange = settings.focusRange;
+    m_postProcess->settings.dofBlurStrength = settings.blurStrength;
+    m_postProcess->settings.cameraNearPlane = m_camera.nearPlane;
+    m_postProcess->settings.cameraFarPlane = m_camera.farPlane;
+}
+
+void EditorApp::CapturePhotoModeScreenshot() {
+    std::string requested;
+    if (!engine::PhotoModeRuntime::Instance().ConsumeScreenshotRequest(&requested)) return;
+    std::filesystem::path folder = std::filesystem::path(m_project.AssetRoot()).parent_path()
+        / "Screenshots";
+    std::filesystem::path path;
+    if (requested.empty()) {
+        path = engine::MakeTimestampedScreenshotPath(folder.string());
+    } else {
+        path = folder / std::filesystem::path(requested).filename();
+        path.replace_extension(".bmp");
+    }
+    std::string error;
+    if (engine::CaptureFramebufferBmp(path.string(), GetWindow().Width(),
+                                      GetWindow().Height(), &error))
+        m_log.Info("Photo Mode screenshot saved: " + path.string());
+    else
+        m_log.Error("Photo Mode screenshot failed: " + error);
+}
+
+void EditorApp::DrawMemoryProfilerPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::MemoryProfiler)) return;
+    MemoryProfilerPanel::Snapshot snapshot;
+    MemoryProfilerPanel::QueryProcessMemory(&snapshot.processWorkingSetBytes,
+                                            &snapshot.processPrivateBytes);
+    const auto add = [&](std::string category, std::string owner,
+                         std::uint64_t cpu, std::uint64_t gpu,
+                         std::uint64_t count = 1, bool resident = true) {
+        snapshot.entries.push_back({std::move(category), std::move(owner), cpu, gpu,
+                                    count, resident});
+    };
+    const auto appendAssets = [&](const char* scope,
+                                  const engine::RuntimeAssetManager& assets) {
+        const engine::RuntimeAssetManager::MemoryStats stats = assets.CaptureMemoryStats();
+        for (const auto& item : stats.items)
+            add(std::string(scope) + " / " + item.category, item.name,
+                item.cpuBytes, item.gpuBytes);
+    };
+    appendAssets("Edit Assets", m_editAssets);
+    if (m_playAssets) appendAssets("Play Assets", *m_playAssets);
+
+    const auto appendRegistry = [&](const char* scope, const engine::ecs::Registry& registry) {
+        const engine::ecs::EcsProfile profile = engine::ecs::CaptureEcsProfile(registry);
+        for (const engine::ecs::PoolMetrics& pool : profile.pools)
+            add(std::string(scope) + " / ECS Pools", pool.typeName,
+                pool.memoryBytes, 0, pool.entityCount);
+        const std::uint64_t entitySlots = static_cast<std::uint64_t>(profile.entitiesCapacity)
+            * (sizeof(std::uint32_t) * 2ull + sizeof(bool));
+        add(std::string(scope) + " / ECS", "Entity slots", entitySlots, 0,
+            profile.entitiesAlive);
+    };
+    appendRegistry("Edit Scene", m_scene.Registry());
+    if (m_playRegistry) appendRegistry("Play Scene", *m_playRegistry);
+
+    const auto meshGpuBytes = [](const engine::Mesh& mesh) {
+        std::uint64_t bytes = static_cast<std::uint64_t>(mesh.VertexCount())
+            * mesh.VertexStrideFloats() * sizeof(float)
+            + static_cast<std::uint64_t>(mesh.IndexCount()) * sizeof(std::uint32_t);
+        for (int lod = 1; lod <= mesh.MaxLod(); ++lod)
+            bytes += static_cast<std::uint64_t>(mesh.IndexCount(lod)) * sizeof(std::uint32_t);
+        return bytes;
+    };
+    for (const auto& [entity, cache] : m_terrains) {
+        std::string name = "Terrain " + std::to_string(entity);
+        for (const EditorScene::Object& object : m_scene.Objects())
+            if (object.entity == entity) { name = object.name; break; }
+        const engine::Heightmap& map = cache.terrain.Map();
+        const std::uint64_t cpu = static_cast<std::uint64_t>(map.h.capacity()) * sizeof(float)
+            + static_cast<std::uint64_t>(cache.terrain.Paint().capacity()) * sizeof(std::uint8_t);
+        std::uint64_t gpu = cache.terrain.HasMesh() ? meshGpuBytes(cache.terrain.GetMesh()) : 0;
+        if (cache.terrain.HasAlbedo())
+            gpu += static_cast<std::uint64_t>(cache.terrain.Albedo().Width())
+                * cache.terrain.Albedo().Height() * 4ull * 4ull / 3ull;
+        if (cache.terrain.HasSurfaceMap())
+            gpu += static_cast<std::uint64_t>(cache.terrain.SurfaceMap().Width())
+                * cache.terrain.SurfaceMap().Height() * 4ull * 4ull / 3ull;
+        add("Terrain Cache", name, cpu, gpu);
+    }
+
+    if (m_pbrRenderer) {
+        const auto shadows = m_pbrRenderer->GetShadowStats();
+        add("Render Targets", "Shadow maps", 0, shadows.memoryBytes);
+    }
+    if (m_ssao) add("Render Targets", "GTAO geometry and filters", 0, m_ssao->MemoryBytes());
+    if (m_ssgi) add("Render Targets", "SSGI", 0, m_ssgi->MemoryBytes());
+    if (m_postProcess) add("Render Targets", "Post processing", 0, m_postProcess->MemoryBytes());
+    add("Lighting", "Dynamic irradiance", 0, m_dynamicGi.Stats().memoryBytes,
+        m_dynamicGi.Stats().activeProbes + m_dynamicGi.Stats().sleepingProbes);
+    add("Lighting", "Baked irradiance grid", 0, m_lightingProbeGrid.MemoryBytes(),
+        m_lightingProbeGrid.ProbeCount());
+    add("Lighting", "Reflection probes", 0, m_reflectionProbes.MemoryBytes(),
+        m_reflectionProbes.ResidentProbeCount());
+    if (m_renderW > 0 && m_renderH > 0)
+        add("Render Targets", "Main scene color + depth (estimate)", 0,
+            static_cast<std::uint64_t>(m_renderW) * m_renderH * 12ull);
+
+    for (const auto& [entity, grass] : m_grass) if (grass)
+        add("Runtime Systems", "Grass field " + std::to_string(entity), 0,
+            static_cast<std::uint64_t>(grass->InstanceCount()) * 14ull * sizeof(float),
+            grass->InstanceCount());
+    if (m_particleRenderer) {
+        const auto& stats = m_particleRenderer->GetStats();
+        add("Runtime Systems", "Live particles", stats.particles * 256ull, 0,
+            stats.particles);
+    }
+    if (!m_playBtGraphCache.empty())
+        add("Runtime Systems", "Behavior tree asset cache",
+            static_cast<std::uint64_t>(m_playBtGraphCache.size())
+                * sizeof(engine::ai::BehaviorGraph), 0, m_playBtGraphCache.size());
+
+    if (!m_worldAuthoring.levels.empty()) {
+        const std::filesystem::path worldDir = m_worldAuthoringPath.empty()
+            ? std::filesystem::path(m_project.AssetRoot())
+            : std::filesystem::path(m_worldAuthoringPath).parent_path();
+        for (const engine::LevelRef& level : m_worldAuthoring.levels) {
+            std::error_code error;
+            const std::filesystem::path path = worldDir / level.scenePath;
+            const std::uint64_t diskBytes = std::filesystem::is_regular_file(path, error)
+                ? std::filesystem::file_size(path, error) : 0;
+            add("Streaming Cells (disk footprint)", level.scenePath,
+                diskBytes, 0, 1, false);
+        }
+    }
+
+    constexpr unsigned int kNvxTotalVidMem = 0x9048;
+    constexpr unsigned int kNvxCurrentAvail = 0x9049;
+    GLint totalKb = 0, availableKb = 0;
+    while (glGetError() != GL_NO_ERROR) {}
+    glGetIntegerv(kNvxTotalVidMem, &totalKb);
+    glGetIntegerv(kNvxCurrentAvail, &availableKb);
+    if (glGetError() == GL_NO_ERROR && totalKb > 0) {
+        snapshot.driverVramTotalBytes = static_cast<std::uint64_t>(totalKb) * 1024ull;
+        snapshot.driverVramUsedBytes = static_cast<std::uint64_t>(
+            std::max(totalKb - availableKb, 0)) * 1024ull;
+    }
+
+    bool open = true;
+    m_memoryProfiler.Draw(snapshot, &open);
+    m_panels.SetOpen(EditorPanels::Panel::MemoryProfiler, open);
+}
+
+void EditorApp::DrawCollisionAnalyzerPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::CollisionAnalyzer)) return;
+
+    CollisionAnalyzerPanel::Snapshot snapshot;
+    snapshot.playMode = m_playRegistry.has_value();
+    engine::ecs::Registry& registry = snapshot.playMode ? *m_playRegistry : m_scene.Registry();
+    const engine::PhysicsWorld* world = snapshot.playMode ? &m_playPhysics : nullptr;
+    if (world) {
+        const engine::PhysicsStats& stats = world->Stats();
+        snapshot.layerMatrixActive = world->LayerMatrixActive();
+        snapshot.broadphaseValid = world->BroadphaseValid();
+        snapshot.candidatePairs = stats.candidatePairs;
+        snapshot.manifolds = stats.manifolds;
+        snapshot.occupiedGridCells = stats.occupiedGridCells;
+        snapshot.deepestPenetration = stats.maxPenetrationBefore;
+    }
+    for (int a = 0; a < 9; ++a)
+        for (int b = 0; b < 9; ++b)
+            snapshot.layerMatrix[a][b] = !world || world->LayerCollides(a, b);
+
+    auto entityName = [&](engine::ecs::Entity entity) {
+        if (snapshot.playMode) {
+            const auto found = m_playEntityNames.find(entity);
+            if (found != m_playEntityNames.end() && !found->second.empty()) return found->second;
+        } else {
+            for (const EditorScene::Object& object : m_scene.Objects())
+                if (object.entity == entity) return object.name;
+        }
+        return std::string("Entity_") + std::to_string(engine::ecs::EntityIndex(entity));
+    };
+    const auto shapeName = [](engine::ecs::ColliderShape shape) {
+        using Shape = engine::ecs::ColliderShape;
+        switch (shape) {
+        case Shape::Sphere: return "Sphere"; case Shape::Plane: return "Plane";
+        case Shape::Box: return "Box"; case Shape::Capsule: return "Capsule";
+        case Shape::Cylinder: return "Cylinder"; case Shape::Cone: return "Cone";
+        case Shape::Pyramid: return "Pyramid"; case Shape::Torus: return "Torus";
+        case Shape::Staircase: return "Staircase"; case Shape::ConvexHull: return "Convex Hull";
+        case Shape::TriangleMesh: return "Triangle Mesh";
+        }
+        return "Unknown";
+    };
+
+    registry.view<engine::ecs::Collider>().each(
+        [&](engine::ecs::Entity entity, engine::ecs::Collider& collider) {
+            CollisionAnalyzerPanel::ColliderRow row;
+            row.entity = static_cast<std::uint32_t>(entity);
+            row.name = entityName(entity);
+            row.shape = shapeName(collider.shape);
+            row.layer = collider.layer;
+            row.mask = collider.mask;
+            row.trigger = collider.isTrigger;
+            if (const engine::ecs::RigidBody* body = registry.TryGet<engine::ecs::RigidBody>(entity)) {
+                row.rigidBody = true;
+                row.kinematic = body->kinematic;
+                row.sleeping = body->sleeping;
+            }
+            if (world) {
+                row.island = world->IslandOfEntity(entity);
+                for (const engine::CollisionEvent& event : world->Events())
+                    if (event.phase != engine::CollisionEvent::Phase::Exit
+                        && (event.a == entity || event.b == entity)) ++row.activeContacts;
+            }
+            snapshot.colliders.push_back(std::move(row));
+        });
+    std::sort(snapshot.colliders.begin(), snapshot.colliders.end(),
+        [](const auto& a, const auto& b) { return a.name < b.name; });
+
+    bool open = true;
+    const CollisionAnalyzerPanel::Result result = m_collisionAnalyzer.Draw(snapshot, &open);
+    m_panels.SetOpen(EditorPanels::Panel::CollisionAnalyzer, open);
+    m_showPhysicsEventGuides = result.showSceneGuides;
+    m_physicsEventGuidesSelectedOnly = result.selectedOnly;
+    m_physicsEventGuidesTriggersOnly = result.triggersOnly;
+    m_physicsEventGuidesEnterExitOnly = result.enterExitOnly;
+    if (result.clearGuides) {
+        m_physicsEventRows.clear();
+        m_physicsEventGuides.clear();
+    }
+}
+
+void EditorApp::DrawNavigationQueryPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::NavigationQuery)) return;
+    NavigationQueryPanel::Snapshot snapshot;
+    snapshot.playMode = m_playRegistry.has_value();
+    snapshot.mesh = snapshot.playMode ? &m_playNavMesh : &m_editorNavMesh;
+    snapshot.grid = snapshot.playMode ? &m_playNavGrid : nullptr;
+    snapshot.cameraPosition = m_camera.Position();
+    if (const EditorScene::Object* selected = m_scene.SelectedObject()) {
+        if (const Transform* transform = m_scene.TryGetTransform(selected->entity)) {
+            snapshot.hasSelectedPosition = true;
+            snapshot.selectedPosition = transform->position;
+        }
+    }
+    const auto halfExtents = [](const engine::ecs::Collider& collider,
+                                const Transform& transform) {
+        glm::vec3 half(0.5f);
+        using Shape = engine::ecs::ColliderShape;
+        switch (collider.shape) {
+        case Shape::Box: case Shape::Pyramid: case Shape::Staircase:
+        case Shape::TriangleMesh: case Shape::ConvexHull: half = collider.halfExtents; break;
+        case Shape::Torus: half = glm::vec3(collider.majorRadius + collider.minorRadius); break;
+        case Shape::Capsule: half = glm::vec3(collider.radius, collider.halfHeight + collider.radius, collider.radius); break;
+        case Shape::Cylinder: case Shape::Cone: half = glm::vec3(collider.radius, collider.halfHeight, collider.radius); break;
+        case Shape::Sphere: half = glm::vec3(collider.radius); break;
+        case Shape::Plane: half = glm::vec3(0.0f); break;
+        }
+        if (collider.inheritTransformScale) half *= glm::abs(transform.scale);
+        return glm::max(half, glm::vec3(0.001f));
+    };
+    if (snapshot.playMode) {
+        m_playRegistry->view<Transform, engine::ecs::Collider>().each(
+            [&](Entity entity, Transform& transform, engine::ecs::Collider& collider) {
+                if (collider.shape == engine::ecs::ColliderShape::Plane || collider.isTrigger) return;
+                const engine::ecs::RigidBody* body = m_playRegistry->TryGet<engine::ecs::RigidBody>(entity);
+                const bool dynamic = body && (body->invMass > 0.0f || body->kinematic);
+                std::string name = "Entity_" + std::to_string(engine::ecs::EntityIndex(entity));
+                if (const auto found = m_playEntityNames.find(entity); found != m_playEntityNames.end()) name = found->second;
+                snapshot.obstacles.push_back({std::move(name), transform.position,
+                                              halfExtents(collider, transform), dynamic});
+            });
+    } else {
+        for (const EditorScene::Object& object : m_scene.Objects()) {
+            if (!object.colliderEnabled || object.collider.isTrigger
+                || object.collider.shape == engine::ecs::ColliderShape::Plane) continue;
+            const Transform* transform = m_scene.TryGetTransform(object.entity);
+            if (!transform) continue;
+            const bool dynamic = object.rigidBodyEnabled
+                && (object.rigidBody.invMass > 0.0f || object.rigidBody.kinematic);
+            snapshot.obstacles.push_back({object.name, transform->position,
+                                          halfExtents(object.collider, *transform), dynamic});
+        }
+    }
+
+    bool open = true;
+    const NavigationQueryPanel::Result result = m_navigationQuery.Draw(snapshot, &open);
+    m_panels.SetOpen(EditorPanels::Panel::NavigationQuery, open);
+    m_showNavigationPreview = result.showNavigationSurface;
+    if (result.rebuildRequested) {
+        if (snapshot.playMode) BakePlayNavMesh();
+        else BakeEditorNavMesh();
+    }
+}
+
+void EditorApp::DrawAiPerceptionDebuggerPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::AiPerceptionDebugger)) return;
+    AiPerceptionDebuggerPanel::Snapshot snapshot;
+    snapshot.playMode = m_playRegistry.has_value();
+    snapshot.activeSounds = m_playSoundField.Count();
+    if (snapshot.playMode) {
+        snapshot.agents.reserve(m_playAgents.size());
+        for (const PlayAgent& agent : m_playAgents) {
+            AiPerceptionDebuggerPanel::AgentRow row;
+            row.entity = engine::ecs::EntityIndex(agent.entity);
+            row.name = agent.name.empty() ? "Entity_" + std::to_string(row.entity) : agent.name;
+            row.team = agent.team;
+            row.targetEntity = agent.targetEntity == engine::ecs::kNull
+                ? 0u : engine::ecs::EntityIndex(agent.targetEntity);
+            row.targetName = "Entity_" + std::to_string(row.targetEntity);
+            if (const auto found = m_playEntityNames.find(agent.targetEntity);
+                found != m_playEntityNames.end()) row.targetName = found->second;
+            for (const PlayAgent& candidate : m_playAgents) {
+                if (candidate.entity == agent.targetEntity) { row.targetTeam = candidate.team; break; }
+            }
+            row.position = agent.useGraph ? agent.ctx.agent.position : agent.brain.Position();
+            row.facing = agent.useGraph ? agent.ctx.facing : agent.brain.Facing();
+            row.targetPosition = agent.perceivedTargetPos;
+            if (agent.debugTargetValid) {
+                if (const Transform* target = m_playRegistry->TryGet<Transform>(agent.targetEntity))
+                    row.targetPosition = target->position;
+            }
+            row.heardPosition = agent.debugHeardPosition;
+            row.lastKnownPosition = agent.debugLastKnownPosition;
+            row.visionRange = agent.brain.vision.range;
+            row.visionHalfAngleDeg = agent.brain.vision.halfAngleDegrees;
+            row.hearingRange = agent.hearingRange;
+            row.targetDistance = agent.debugTargetDistance;
+            row.targetAngleDeg = agent.debugTargetAngleDeg;
+            row.heardLoudness = agent.debugHeardLoudness;
+            row.targetValid = agent.debugTargetValid;
+            row.inRange = agent.debugInRange;
+            row.inFov = agent.debugInFov;
+            row.lineOfSight = agent.debugLineOfSight;
+            row.seesTarget = agent.perceivesTarget;
+            row.heardNoise = agent.debugHeardNoise;
+            row.heardFromSquad = agent.debugHeardFromSquad;
+            row.hasLastKnown = agent.debugHasLastKnown;
+            row.behaviorGraph = agent.useGraph;
+            if (agent.useGraph) {
+                row.state = agent.perceivesTarget ? "Target visible"
+                    : agent.debugHeardNoise ? "Investigating" : !agent.ctx.path.empty() ? "Moving" : "Idle";
+            } else {
+                switch (agent.brain.GetState()) {
+                case engine::ai::AiAgent::State::Patrol: row.state = "Patrol"; break;
+                case engine::ai::AiAgent::State::Chase: row.state = "Chase"; break;
+                case engine::ai::AiAgent::State::Search: row.state = "Search"; break;
+                }
+            }
+            snapshot.agents.push_back(std::move(row));
+        }
+    }
+    bool open = true;
+    m_aiPerceptionDebugger.Draw(snapshot, &open);
+    m_panels.SetOpen(EditorPanels::Panel::AiPerceptionDebugger, open);
+}
+
+void EditorApp::DrawAutomatedTestPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::AutomatedTest)) return;
+    bool open = true;
+    m_automatedTests.Draw(EditorScriptTools::EngineSourceDirectory(),
+                          EditorScriptTools::EngineBuildDirectory(), &open);
+    m_panels.SetOpen(EditorPanels::Panel::AutomatedTest, open);
+}
+
+void EditorApp::DrawLocalizationEditorPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::LocalizationEditor)) return;
+    bool open = true;
+    const auto result = m_localizationEditor.Draw(m_assets.RootPath(), &open);
+    m_panels.SetOpen(EditorPanels::Panel::LocalizationEditor, open);
+    if (!result.message.empty()) {
+        if (result.saved) { m_log.Info(result.message); std::string refreshError; m_assets.Refresh(m_assets.RootPath(), &refreshError); }
+        else m_log.Warning(result.message);
+    }
+}
+
+void EditorApp::DrawAssetReferenceRepairPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::AssetReferenceRepair)) return;
+    bool open = true;
+    const auto result = m_assetReferenceRepair.Draw(m_assetRegistry, m_project.AssetRoot(), &open);
+    m_panels.SetOpen(EditorPanels::Panel::AssetReferenceRepair, open);
+    if (!result.revealPath.empty()) {
+        std::error_code ec;
+        std::string relative = std::filesystem::relative(result.revealPath, m_project.AssetRoot(), ec).generic_string();
+        if (!ec) { std::string revealError; if (!m_assets.RevealAsset(relative, &revealError)) m_log.Warning(revealError); }
+    }
+    if (result.registryChanged) {
+        std::string refreshError;
+        if (!m_assets.Refresh(m_project.AssetRoot(), &refreshError)) m_log.Warning(refreshError);
+        m_assetDependencyViewer.Invalidate();
+    }
+    if (!result.message.empty()) {
+        if (result.registryChanged) m_log.Info(result.message); else m_log.Warning(result.message);
+    }
+}
+
+void EditorApp::DrawSourceControlPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::SourceControl)) return;
+    bool open = true;
+    std::filesystem::path projectRoot;
+    if (m_project.HasProjectFile()) projectRoot = std::filesystem::path(m_project.ProjectFilePath()).parent_path();
+    else projectRoot = std::filesystem::path(m_project.AssetRoot()).parent_path();
+    m_sourceControl.Draw(projectRoot, &open);
+    m_panels.SetOpen(EditorPanels::Panel::SourceControl, open);
+}
+
+void EditorApp::DrawProjectMigrationPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::ProjectMigration)) return;
+    bool open = true;
+    const std::filesystem::path projectRoot = m_project.HasProjectFile()
+        ? std::filesystem::path(m_project.ProjectFilePath()).parent_path()
+        : std::filesystem::path(m_project.AssetRoot()).parent_path();
+    const auto migrateScene = [this](const std::filesystem::path& path, bool write,
+                                     std::string* error) {
+        if (!m_cube || !m_plane || !m_sphere || !m_capsule || !m_cylinder
+            || !m_cone || !m_pyramid || !m_torus || !m_staircase) {
+            if (error) *error = "Editor primitive meshes are unavailable.";
+            return false;
+        }
+        EditorScene migrated;
+        if (!migrated.Load(path.string(), *m_cube, *m_plane, *m_sphere, *m_capsule,
+                           *m_cylinder, *m_cone, *m_pyramid, *m_torus, *m_staircase,
+                           error)) return false;
+        return !write || migrated.Save(path.string(), error, false);
+    };
+    const auto result = m_projectMigration.Draw(projectRoot, m_project.ScenePath(),
+        m_scene.IsDirty(), migrateScene, &open);
+    m_panels.SetOpen(EditorPanels::Panel::ProjectMigration, open);
+    if (result.assetsChanged) {
+        std::string refreshError;
+        if (!m_assets.Refresh(m_project.AssetRoot(), &refreshError))
+            m_log.Warning(refreshError);
+        m_assetDependencyViewer.Invalidate();
+    }
+    if (result.currentSceneChanged) LoadScene();
+    if (!result.message.empty()) {
+        if (result.assetsChanged) m_log.Info(result.message);
+        else m_log.Warning(result.message);
+    }
+}
+
+void EditorApp::DrawBuildSizeAnalyzerPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::BuildSizeAnalyzer)) return;
+    bool open = true;
+    const std::filesystem::path projectRoot = m_project.HasProjectFile()
+        ? std::filesystem::path(m_project.ProjectFilePath()).parent_path()
+        : std::filesystem::path(m_project.AssetRoot()).parent_path();
+    m_buildSizeAnalyzer.Draw(projectRoot, m_project.AssetRoot(),
+        std::filesystem::path(m_packageOutputDraft.data()), m_assetRegistry, &open);
+    m_panels.SetOpen(EditorPanels::Panel::BuildSizeAnalyzer, open);
+}
+
+void EditorApp::DrawUiLocalizationPreviewPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::UiLocalizationPreview)) return;
+    if (m_hudImageChoices.empty()) ScanHudImages();
+    engine::HudContext preview;
+    preview.hasHealth = true;
+    preview.health = 75.0f;
+    preview.maxHealth = 100.0f;
+    preview.healthFraction = 0.75f;
+    preview.alive = true;
+    preview.floats = m_hudFloats;
+    preview.strings = m_hudStrings;
+    preview.floats["fps"] = m_fps;
+    preview.floats["score"] = static_cast<float>(engine::GameMode::Instance().Score());
+    preview.strings["score"] = std::to_string(engine::GameMode::Instance().Score());
+    preview.strings["gamestate"] = engine::GameMode::StateName(engine::GameMode::Instance().State());
+    const auto textureLookup = [this](const std::string& path) { return HudTextureId(path); };
+    bool open = true;
+    m_uiLocalizationPreview.Draw(m_hud, m_hudPath, m_project.AssetRoot(),
+                                 preview, textureLookup, &open);
+    m_panels.SetOpen(EditorPanels::Panel::UiLocalizationPreview, open);
+}
+
+void EditorApp::DrawPluginManagerPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::PluginManager)) return;
+    const std::filesystem::path projectRoot = m_project.HasProjectFile()
+        ? std::filesystem::path(m_project.ProjectFilePath()).parent_path()
+        : std::filesystem::path(m_project.AssetRoot()).parent_path();
+    const std::filesystem::path projectFile = m_project.HasProjectFile()
+        ? std::filesystem::path(m_project.ProjectFilePath())
+        : std::filesystem::path{};
+    bool open = true;
+    m_pluginManager.Draw(EditorScriptTools::EngineSourceDirectory(), projectRoot,
+                         projectFile, &open);
+    m_panels.SetOpen(EditorPanels::Panel::PluginManager, open);
+}
+
 int EditorApp::DeleteDestructionPreview(const std::string& name) {
     if(name.empty())return 0;const std::string prefix="DestructionPreview_"+name+"_";
     std::vector<int> indices;for(int i=0;i<static_cast<int>(m_scene.Objects().size());++i)
@@ -5033,6 +5643,11 @@ void EditorApp::GenerateRoad() {
             transform, collidable ? &box : nullptr,
             "Road_" + roadName + "_" + part.suffix);
         if (first) { first = false; m_scene.SuppressUndo(true); }
+        // Swap in a chosen imported mesh; empty keeps the built-in scaled box. The scene's
+        // registry-resolve step recovers the asset id from the path (mirrors AddModel).
+        const std::string& mesh = m_roadGenerator.MeshFor(part.surface);
+        if (!mesh.empty())
+            m_scene.SetSelectedModelAsset(mesh, engine::AssetHandle{});
         const std::string& material = m_roadGenerator.MaterialFor(part.surface);
         if (!material.empty()) m_scene.SetSelectedMaterialAsset(material);
         ++created;
@@ -7387,7 +8002,10 @@ void EditorApp::HandleGlobalShortcuts(engine::Window & window)
     if (Pressed(GLFW_KEY_F11)) {
        window.ToggleFullscreen();
     }
-    if (Pressed(GLFW_KEY_F1)) {
+    const bool shiftDown = window.IsKeyPressed(GLFW_KEY_LEFT_SHIFT)
+        || window.IsKeyPressed(GLFW_KEY_RIGHT_SHIFT);
+    const bool f1Pressed = Pressed(GLFW_KEY_F1);
+    if (!shiftDown && f1Pressed) {
        TogglePanel(EditorPanels::Panel::Hierarchy);
     }
     if (Pressed(GLFW_KEY_F2)) {
@@ -7426,9 +8044,6 @@ void EditorApp::HandleGlobalShortcuts(engine::Window & window)
        } else {
            ExitPlayMode();
        }
-    }
-    if (Pressed(GLFW_KEY_M)) {
-       m_cameraController.TogglePinnedMouseLook();
     }
 }
 
@@ -7802,10 +8417,17 @@ void EditorApp::DrawPlayScene(const glm::mat4 & viewProj)
             m_renderer, *m_shader, *m_cube, traceGuides, viewProj);
     }
 
-    if (m_shader && m_cube && m_showAiDebug && !m_playAgents.empty()) {
+    const bool perceptionGuides = m_panels.IsOpen(EditorPanels::Panel::AiPerceptionDebugger)
+        && m_aiPerceptionDebugger.ShowSceneGuides();
+    if (m_shader && m_cube && (m_showAiDebug || perceptionGuides) && !m_playAgents.empty()) {
         std::vector<EditorViewport::AiAgentGuide> aiGuides;
         aiGuides.reserve(m_playAgents.size());
         for (const PlayAgent& playAgent : m_playAgents) {
+            if (perceptionGuides && m_aiPerceptionDebugger.SelectedOnly()
+                && m_aiPerceptionDebugger.SelectedEntity()
+                    != std::numeric_limits<std::uint32_t>::max()
+                && engine::ecs::EntityIndex(playAgent.entity)
+                    != m_aiPerceptionDebugger.SelectedEntity()) continue;
             EditorViewport::AiAgentGuide guide;
             if (playAgent.useGraph) {
                 // Behaviour-tree agents don't expose a patrol/chase/search enum, so
@@ -7832,6 +8454,13 @@ void EditorApp::DrawPlayScene(const glm::mat4 & viewProj)
                     guide.hasTarget = false;
                 }
             }
+            guide.hearingRange = playAgent.hearingRange;
+            guide.heardNoise = playAgent.debugHeardNoise;
+            guide.showVision = m_showAiDebug || m_aiPerceptionDebugger.ShowVision();
+            guide.showHearing = perceptionGuides && m_aiPerceptionDebugger.ShowHearing();
+            guide.showLastKnown = perceptionGuides && m_aiPerceptionDebugger.ShowLastKnown();
+            guide.hasLastKnown = playAgent.debugHasLastKnown;
+            guide.lastKnownPosition = playAgent.debugLastKnownPosition;
             for (const EditorScene::Object& object : m_scene.Objects()) {
                 if (object.name == playAgent.name) {
                     guide.visionRange = object.navAgentVisionRange;
@@ -7842,11 +8471,18 @@ void EditorApp::DrawPlayScene(const glm::mat4 & viewProj)
             aiGuides.push_back(std::move(guide));
         }
         m_viewport.DrawAiAgentDebugGuides(m_renderer, *m_shader, *m_cube, aiGuides, viewProj);
-        if (m_useNavMesh) {
+        if (m_showAiDebug && m_useNavMesh) {
             m_viewport.DrawNavMeshOverlay(m_renderer, *m_shader, *m_cube, m_playNavMesh, viewProj);
-        } else {
+        } else if (m_showAiDebug) {
             m_viewport.DrawNavGridOverlay(m_renderer, *m_shader, *m_cube, m_playNavGrid, viewProj);
         }
+    }
+    if (m_shader && m_cube && m_panels.IsOpen(EditorPanels::Panel::NavigationQuery)
+        && m_navigationQuery.HasQuery()) {
+        m_viewport.DrawNavigationQueryGuide(
+            m_renderer, *m_shader, *m_cube, m_navigationQuery.Start(), m_navigationQuery.Goal(),
+            m_navigationQuery.Path(), m_navigationQuery.ObstacleHits(),
+            m_navigationQuery.QuerySucceeded(), viewProj);
     }
 }
 
@@ -8186,6 +8822,13 @@ void EditorApp::DrawEditScene(const glm::mat4 & viewProj)
     }
     if (m_showNavigationPreview && m_shader && m_cube) {
         m_viewport.DrawEditorNavMeshOverlay(m_renderer, *m_shader, *m_cube, m_editorNavMesh, viewProj);
+    }
+    if (m_shader && m_cube && m_panels.IsOpen(EditorPanels::Panel::NavigationQuery)
+        && m_navigationQuery.HasQuery()) {
+        m_viewport.DrawNavigationQueryGuide(
+            m_renderer, *m_shader, *m_cube, m_navigationQuery.Start(), m_navigationQuery.Goal(),
+            m_navigationQuery.Path(), m_navigationQuery.ObstacleHits(),
+            m_navigationQuery.QuerySucceeded(), viewProj);
     }
     DrawSelectionOutline(viewProj);
     DrawSplines(viewProj);   // spline curves + control-point handles
@@ -11826,6 +12469,8 @@ void EditorApp::NewProject(const std::string& location, const std::string& name)
     m_config.Set("editor.current_project", m_project.ProjectFilePath());
     m_config.Save();
     LoadPackagingSettings();
+    engine::SetLuaScriptProjectRoot(
+        std::filesystem::path(m_project.AssetRoot()).parent_path().string());
 
     m_materialMaker.SetOutputDirectory(m_project.AssetRoot());
     m_behaviorGraph.SetOutputDirectory(m_project.AssetRoot());
@@ -11891,6 +12536,8 @@ void EditorApp::OpenProjectFromPath(const std::string& projectFile) {
     m_config.Set("editor.current_project", m_project.ProjectFilePath());
     m_config.Save();
     LoadPackagingSettings();
+    engine::SetLuaScriptProjectRoot(
+        std::filesystem::path(m_project.AssetRoot()).parent_path().string());
 
     m_materialMaker.SetOutputDirectory(m_project.AssetRoot());
     m_behaviorGraph.SetOutputDirectory(m_project.AssetRoot());
@@ -12072,7 +12719,13 @@ bool EditorApp::PerformScriptCompileRestart() {
     const std::filesystem::path projectRoot =
         std::filesystem::absolute(m_project.AssetRoot(), ec).parent_path();
     std::string error;
-    if (!EditorScriptTools::LaunchCompileAndRestart(projectRoot, "Debug", &error)) {
+    if (!EditorGeneratedScriptTools::RegenerateGeneratedScripts(
+            m_project.AssetRoot(), &error)) {
+        m_log.Error("Script registration generation failed: " + error);
+        return false;
+    }
+    if (!EditorScriptTools::LaunchCompileAndRestart(
+            projectRoot, EditorScriptTools::HostBuildConfiguration(), &error)) {
         m_log.Error("Script compiler: " + error);
         return false;
     }
@@ -12474,6 +13127,30 @@ void EditorApp::EnterPlayMode()
     m_cameraDirector.ClearEvents();
     m_cameraDirector.TakeCommands();
     engine::GameMode::Instance().Reset();
+    engine::PhotoModeRuntime::Instance().Reset();
+    // Visual Scripting: register nodes once, resolve .3dgvs graphs via the project asset registry,
+    // and turn on the profiler/debugger capture while playing in the editor (Passes 1-5).
+    m_visualScripts.Startup();
+    m_visualScripts.SetPathResolver([this](const engine::AssetHandle& handle) -> std::string {
+        if (const engine::AssetRegistryEntry* entry = m_assetRegistry.Find(handle)) {
+            if (!entry->sourcePath.empty()) return entry->sourcePath;
+            return (std::filesystem::path(m_project.AssetRoot()) / entry->virtualPath).string();
+        }
+        // Fallback: find the .3dgvs under the content root whose stored id matches (handles graphs
+        // dropped in but not yet in the registry). Resolved once, then cached by the bridge.
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        for (fs::recursive_directory_iterator it(m_project.AssetRoot(),
+                 fs::directory_options::skip_permission_denied, ec), end; it != end; it.increment(ec)) {
+            if (ec || !it->is_regular_file(ec)) continue;
+            if (it->path().extension() != ".3dgvs") continue;
+            engine::vs::VisualScriptAsset probe; std::string error;
+            if (probe.Load(it->path().string(), &error) && probe.id == handle) return it->path().string();
+        }
+        return {};
+    });
+    engine::vs::VisualScriptDiagnostics::Instance().BeginSession();
+    engine::vs::VisualScriptDiagnostics::Instance().SetEnabled(true);
     const EditorScene::GameModeSettings& gameModeSettings =
         m_scene.GetGameModeSettings();
     engine::GameMode::Instance().loseOnPlayerDeath =
@@ -12499,6 +13176,7 @@ void EditorApp::EnterPlayMode()
     m_physicsActionCount = 0;
     m_physicsEventRows.clear();
     m_physicsEventGuides.clear();
+    m_collisionAnalyzer.ClearEvents();
     m_playAnimationEvents.clear();
     m_playPhysics.ClearJoints();
     m_playEntityNames.clear();
@@ -12546,7 +13224,7 @@ void EditorApp::EnterPlayMode()
         BeginCameraBlend(*preset);
     }
     // Lock the cursor so mouse movement drives the camera directly (no need to hold RMB).
-    // Press ESC to free the cursor for the editor UI; ESC again re-captures it.
+    // Shift+F1 releases it for the editor UI; pressing Shift+F1 again re-captures it.
     GetWindow().SetCursorCaptured(true);
     m_playMouseCaptured = true;
     m_playCursorTogglePrev = false;
@@ -12593,6 +13271,10 @@ void EditorApp::ExitPlayMode()
     engine::SetScriptExecutionPaused(false);
     m_runtimePropertyInspector.EndPlay();
     if (m_playRegistry) engine::ShutdownScripts(*m_playRegistry);
+    engine::PhotoModeRuntime::Instance().Reset();
+    m_photoModeCamera.reset();
+    if (m_playRegistry) m_visualScripts.Shutdown(*m_playRegistry);   // release VS instances/continuations
+    engine::vs::VisualScriptDiagnostics::Instance().SetEnabled(false);
     m_runtimeAudio.Stop();
     m_audio.StopAllSounds();
     m_audio.StopMusic();
@@ -12699,6 +13381,16 @@ bool EditorApp::BuildPlayRuntimePreview(std::string * error)
     for (std::size_t i = 0; i < count; ++i) {
         m_playEntityNames[createdEntities[i]] = createdNames[i];
         playEntitiesByName[createdNames[i]] = createdEntities[i];
+    }
+
+    // Attach Visual Script graphs to their play entities (Passes 1-5). The lightweight component only
+    // holds the graph AssetHandle; the runtime resolves + runs it.
+    for (const EditorScene::Object& object : m_scene.Objects()) {
+        if (!object.visualScriptGraph.Valid()) continue;
+        auto it = playEntitiesByName.find(object.name);
+        if (it != playEntitiesByName.end())
+            m_playRegistry->Add<engine::vs::VisualScriptComponent>(
+                it->second, engine::vs::VisualScriptComponent{object.visualScriptGraph, true});
     }
 
     m_playRegistry->view<engine::AnimatedModel>().each(
@@ -13179,8 +13871,8 @@ void EditorApp::BakePlayNavMesh()
     engine::ai::NavBuildConfig cfg;
     cfg.boundsMin = glm::vec3(mn.x, groundY, mn.y);
     cfg.boundsMax = glm::vec3(mx.x, groundY, mx.y);
-    cfg.cellSize = 0.5f;
-    cfg.agentRadius = 0.4f;
+    cfg.cellSize = std::clamp(m_navigationQuery.CellSize(), 0.05f, 10.0f);
+    cfg.agentRadius = std::clamp(m_navigationQuery.AgentRadius(), 0.05f, 20.0f);
     m_playNavMesh = engine::ai::NavMeshBuilder::Build(cfg, obstacles);
 }
 
@@ -13275,8 +13967,8 @@ void EditorApp::BakeEditorNavMesh()
     engine::ai::NavBuildConfig config;
     config.boundsMin = glm::vec3(mn.x, groundY, mn.y);
     config.boundsMax = glm::vec3(mx.x, groundY, mx.y);
-    config.cellSize = 0.5f;
-    config.agentRadius = 0.4f;
+    config.cellSize = std::clamp(m_navigationQuery.CellSize(), 0.05f, 10.0f);
+    config.agentRadius = std::clamp(m_navigationQuery.AgentRadius(), 0.05f, 20.0f);
     m_editorNavMesh = engine::ai::NavMeshBuilder::Build(config, obstacles);
     m_log.Info("Navigation preview rebuilt: " + std::to_string(m_editorNavMesh.polys.size())
         + " walkable polygon(s)");
@@ -13426,6 +14118,15 @@ void EditorApp::UpdateAI(float dt)
         // Perception: can the agent see its chase target right now?
         glm::vec3 targetPos = agentPos;
         bool seesTarget = false;
+        playAgent.debugTargetValid = false;
+        playAgent.debugInRange = false;
+        playAgent.debugInFov = false;
+        playAgent.debugLineOfSight = false;
+        playAgent.debugTargetDistance = 0.0f;
+        playAgent.debugTargetAngleDeg = 0.0f;
+        playAgent.debugHeardNoise = false;
+        playAgent.debugHeardFromSquad = false;
+        playAgent.debugHeardLoudness = 0.0f;
         if (playAgent.targetEntity != engine::ecs::kNull && m_playRegistry->Valid(playAgent.targetEntity)) {
             if (const engine::ecs::Transform* tt =
                     m_playRegistry->TryGet<engine::ecs::Transform>(playAgent.targetEntity)) {
@@ -13437,16 +14138,36 @@ void EditorApp::UpdateAI(float dt)
                 forward = (glm::dot(forward, forward) > 1.0e-6f) ? glm::normalize(forward)
                                                                  : glm::vec3(0.0f, 0.0f, -1.0f);
                 const glm::vec3 eye = agentPos + glm::vec3(0.0f, 0.6f, 0.0f) + forward * 0.6f;
+                const glm::vec3 toTarget = targetPos - eye;
+                playAgent.debugTargetValid = true;
+                playAgent.debugTargetDistance = glm::length(toTarget);
+                playAgent.debugInRange = playAgent.debugTargetDistance
+                    <= std::max(playAgent.brain.vision.range, 0.0f);
+                if (playAgent.debugTargetDistance <= 1.0e-5f) {
+                    playAgent.debugTargetAngleDeg = 0.0f;
+                    playAgent.debugInFov = true;
+                } else {
+                    const float cosine = glm::clamp(glm::dot(forward, toTarget
+                        / playAgent.debugTargetDistance), -1.0f, 1.0f);
+                    playAgent.debugTargetAngleDeg = glm::degrees(std::acos(cosine));
+                    playAgent.debugInFov = playAgent.debugTargetAngleDeg
+                        <= playAgent.brain.vision.halfAngleDegrees;
+                }
                 seesTarget = engine::ai::CanSee(eye, forward, playAgent.brain.vision,
                                                 targetPos, playAgent.targetEntity,
                                                 m_playPhysics, *m_playRegistry,
                                                 playAgent.entity);
+                playAgent.debugLineOfSight = seesTarget;
             }
         }
 
         // Remember this frame's sighting so teammates can be alerted next frame.
         playAgent.perceivesTarget = seesTarget;
-        if (seesTarget) playAgent.perceivedTargetPos = targetPos;
+        if (seesTarget) {
+            playAgent.perceivedTargetPos = targetPos;
+            playAgent.debugLastKnownPosition = targetPos;
+            playAgent.debugHasLastKnown = true;
+        }
 
         // Hearing + squad alerts: if the agent can't see its target, the loudest noise
         // it can hear -- or a teammate's callout about a spotted target -- becomes a
@@ -13457,8 +14178,11 @@ void EditorApp::UpdateAI(float dt)
             // defensively so the contract is explicit to both the compiler and any
             // future sound-field implementation.
             glm::vec3 pointOfInterest = agentPos;
+            float perceivedLoudness = 0.0f;
             bool alerted = playAgent.hearingRange > 0.0f
-                && m_playSoundField.LoudestAudible(agentPos, playAgent.hearingRange, &pointOfInterest);
+                && m_playSoundField.LoudestAudible(agentPos, playAgent.hearingRange,
+                                                   &pointOfInterest, &perceivedLoudness);
+            const bool heardSound = alerted;
             if (!alerted && playAgent.team != 0) {
                 const auto it = m_squadAlerts.find(playAgent.team);
                 if (it != m_squadAlerts.end() && it->second.valid
@@ -13467,9 +14191,15 @@ void EditorApp::UpdateAI(float dt)
                     alerted = true;
                 }
             }
+            playAgent.debugHeardNoise = alerted;
+            playAgent.debugHeardFromSquad = alerted && !heardSound;
+            playAgent.debugHeardLoudness = heardSound ? perceivedLoudness : 0.0f;
             playAgent.ctx.heardNoise = alerted;
             if (alerted) {
                 playAgent.ctx.heardPosition = pointOfInterest;
+                playAgent.debugHeardPosition = pointOfInterest;
+                playAgent.debugLastKnownPosition = pointOfInterest;
+                playAgent.debugHasLastKnown = true;
                 if (!playAgent.useGraph) playAgent.brain.Hear(pointOfInterest);
             }
         } else {
@@ -14133,7 +14863,7 @@ void EditorApp::UpdatePlayPlayerController(float dt, bool inputEnabled)
 
         // With the cursor captured in play mode, mouse movement always drives the
         // camera (no need to hold RMB). Still honour the classic RMB/pinned look as
-        // a fallback when the cursor has been freed (e.g. via ESC).
+        // a fallback when the cursor has been freed with Shift+F1.
         const bool rightMouseDown = window.Native()
             && glfwGetMouseButton(window.Native(), GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
         if (m_playMouseCaptured || rightMouseDown
@@ -14336,6 +15066,8 @@ void EditorApp::StepPlayPhysics(float dt, bool inputEnabled)
                 *m_playRegistry, step, &scriptInput, &m_runtimeAudio,
                 &m_cameraShake, &m_cameraDirector, &engine::GameMode::Instance(),
                 &m_playPhysics);
+            m_visualScripts.FixedUpdate(*m_playRegistry, step, &m_playPhysics, &scriptInput,
+                &m_runtimeAudio, &m_cameraShake, &m_cameraDirector, &engine::GameMode::Instance());
             engine::ecs::UpdateGameplay(*m_playRegistry, step);
             engine::ecs::UpdateRuntimeMotion(*m_playRegistry, step);
         }
@@ -14400,6 +15132,8 @@ void EditorApp::StepPlayPhysics(float dt, bool inputEnabled)
                 *m_playRegistry, step, &scriptInput, &m_runtimeAudio,
                 &m_cameraShake, &m_cameraDirector, &engine::GameMode::Instance(),
                 &m_playPhysics);
+            m_visualScripts.FixedUpdate(*m_playRegistry, step, &m_playPhysics, &scriptInput,
+                &m_runtimeAudio, &m_cameraShake, &m_cameraDirector, &engine::GameMode::Instance());
             engine::ecs::UpdateGameplay(*m_playRegistry, step);
             engine::ecs::UpdateRuntimeMotion(*m_playRegistry, step);
         }
@@ -14527,6 +15261,21 @@ void EditorApp::CapturePlayPhysicsEvents()
             + row.objectA + " <-> " + row.objectB;
         m_physicsEventRows.push_back(row);
 
+        if (m_panels.IsOpen(EditorPanels::Panel::CollisionAnalyzer)) {
+            CollisionAnalyzerPanel::ContactEvent analyzerEvent;
+            analyzerEvent.entityA = static_cast<std::uint32_t>(event.a);
+            analyzerEvent.entityB = static_cast<std::uint32_t>(event.b);
+            analyzerEvent.objectA = row.objectA;
+            analyzerEvent.objectB = row.objectB;
+            analyzerEvent.phase = row.phase;
+            analyzerEvent.trigger = row.trigger;
+            analyzerEvent.point = event.point;
+            analyzerEvent.normal = event.normal;
+            analyzerEvent.penetration = event.penetration;
+            analyzerEvent.impulse = event.impulse;
+            m_collisionAnalyzer.Record(std::move(analyzerEvent));
+        }
+
         if (m_playRegistry) {
             const Transform* transformA = m_playRegistry->TryGet<Transform>(event.a);
             const Transform* transformB = m_playRegistry->TryGet<Transform>(event.b);
@@ -14538,6 +15287,10 @@ void EditorApp::CapturePlayPhysicsEvents()
                 guide.objectB = row.objectB;
                 guide.phase = row.phase;
                 guide.trigger = row.trigger;
+                guide.point = event.point;
+                guide.normal = event.normal;
+                guide.penetration = event.penetration;
+                guide.impulse = event.impulse;
                 m_physicsEventGuides.push_back(guide);
             }
         }

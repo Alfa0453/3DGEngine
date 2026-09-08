@@ -733,24 +733,34 @@ bool EditorAssets::CopySelected(std::string *error)
     if (m_selectedType == SelectionType::Folder) {
         const Folder* folder = SelectedFolder();
         if (!folder) {
-            if (error) *error = "NO folder selecte.";
+            if (error) *error = "No folder selected.";
             return false;
         }
         m_clipboardRelativePath = folder->relativePath;
         m_clipboardIsFolder = true;
         m_clipboardIsCut = false;
+        m_clipboardEntries.assign(1, ClipEntry{folder->relativePath, true});
         return true;
     }
 
     if (m_selectedType == SelectionType::Asset) {
         const Asset* asset = SelectedAsset();
         if (!asset) {
-            if (error) *error = "No asse selected.";
+            if (error) *error = "No asset selected.";
             return false;
         }
+        m_clipboardIsCut = false;
+        // Capture the whole asset multi-selection (the primary mirrors SelectedAsset for display).
+        m_clipboardEntries.clear();
+        std::vector<int> sel = m_selectedIndices;
+        if (sel.empty() && m_selectedIndex >= 0) sel.push_back(m_selectedIndex);
+        for (int idx : sel) {
+            if (idx >= 0 && idx < static_cast<int>(m_assets.size()))
+                m_clipboardEntries.push_back(ClipEntry{m_assets[static_cast<std::size_t>(idx)].relativePath, false});
+        }
+        if (m_clipboardEntries.empty()) { if (error) *error = "No asset selected."; return false; }
         m_clipboardRelativePath = asset->relativePath;
         m_clipboardIsFolder = false;
-        m_clipboardIsCut = false;
         return true;
     }
 
@@ -766,22 +776,18 @@ bool EditorAssets::CutSelected(std::string *error)
     return true;
 }
 
-bool EditorAssets::PasteCopied(std::string *error)
+bool EditorAssets::PasteOneEntry(const std::string& relativePath, bool isFolder, bool cut,
+                                std::string* error)
 {
-    if (m_clipboardRelativePath.empty()) {
-        if (error) *error = "Nothing copied.";
-        return false;
-    }
-
     std::error_code ec;
-    const fs::path source = FullPathForRelative(m_clipboardRelativePath);
+    const fs::path source = FullPathForRelative(relativePath);
     if (!fs::exists(source, ec)) {
         if (error) *error = "Copied Content entry no longer exists.";
         return false;
     }
 
     fs::path destination = UniqueDestinationPath(fs::path(CurrentPath()) / source.filename());
-    if (m_clipboardIsFolder) {
+    if (isFolder) {
         const fs::path canonicalSource = fs::weakly_canonical(source, ec);
         ec.clear();
         const fs::path canonicalDestinationParent = fs::weakly_canonical(destination.parent_path(), ec);
@@ -793,20 +799,19 @@ bool EditorAssets::PasteCopied(std::string *error)
                 && destinationParentString[sourceString.size()] == '/');
         if (!sourceString.empty()
             && destinationInsideSource) {
-            if (error) *error = m_clipboardIsCut
+            if (error) *error = cut
                 ? "Cannot move a folder inside itself."
                 : "Cannot paste a folder inside itself.";
             return false;
         }
     }
 
-    if (m_clipboardIsCut) {
-        // Move: rename first (cheap, same-volume); fall back to copy + delete across
-        // volumes. A cut can only be pasted once, so clear the clipboard afterwards.
+    if (cut) {
+        // Move: rename first (cheap, same-volume); fall back to copy + delete across volumes.
         fs::rename(source, destination, ec);
         if (ec) {
             ec.clear();
-            if (m_clipboardIsFolder) {
+            if (isFolder) {
                 fs::copy(source, destination,
                     fs::copy_options::recursive | fs::copy_options::copy_symlinks, ec);
             } else {
@@ -821,15 +826,42 @@ bool EditorAssets::PasteCopied(std::string *error)
             if (error) *error = "Could not move Content entry.";
             return false;
         }
-        m_clipboardRelativePath.clear();
-        m_clipboardIsCut = false;
-    } else if (m_clipboardIsFolder) {
+    } else if (isFolder) {
         fs::copy(source, destination,
             fs::copy_options::recursive | fs::copy_options::copy_symlinks, ec);
         if (ec) { if (error) *error = "Could not paste copied Content entry."; return false; }
     } else {
         fs::copy_file(source, destination, fs::copy_options::none, ec);
         if (ec) { if (error) *error = "Could not paste copied Content entry."; return false; }
+    }
+
+    return true;
+}
+
+bool EditorAssets::PasteCopied(std::string *error)
+{
+    // Prefer the full multi-entry clipboard; fall back to the single primary entry.
+    std::vector<ClipEntry> entries = m_clipboardEntries;
+    if (entries.empty() && !m_clipboardRelativePath.empty())
+        entries.push_back(ClipEntry{m_clipboardRelativePath, m_clipboardIsFolder});
+    if (entries.empty()) {
+        if (error) *error = "Nothing copied.";
+        return false;
+    }
+
+    const bool cut = m_clipboardIsCut;
+    for (const ClipEntry& entry : entries) {
+        if (!PasteOneEntry(entry.relativePath, entry.isFolder, cut, error)) {
+            Refresh(m_rootPath, nullptr);
+            return false;
+        }
+    }
+
+    // A cut can only be pasted once, so clear the clipboard afterwards.
+    if (cut) {
+        m_clipboardEntries.clear();
+        m_clipboardRelativePath.clear();
+        m_clipboardIsCut = false;
     }
 
     return Refresh(m_rootPath, error);
@@ -1093,10 +1125,69 @@ bool EditorAssets::DeleteSelectedEntry(std::string *error)
         m_clipboardRelativePath.clear();
         m_clipboardIsFolder = false;
     }
+    m_clipboardEntries.erase(
+        std::remove_if(m_clipboardEntries.begin(), m_clipboardEntries.end(),
+            [&](const ClipEntry& e) { return e.relativePath == relative; }),
+        m_clipboardEntries.end());
     m_selectedType = SelectionType::None;
     m_selectedFolderIndex = -1;
     m_selectedIndex = -1;
+    m_selectedIndices.clear();
     return Refresh(m_rootPath, error);
+}
+
+int EditorAssets::DeleteSelectedAssets(std::string *error)
+{
+    // Folder selection has no multi-select: defer to the single-entry path.
+    if (m_selectedType == SelectionType::Folder) {
+        return DeleteSelectedEntry(error) ? 1 : 0;
+    }
+    if (m_selectedType != SelectionType::Asset) {
+        if (error) *error = "No Content entry selected.";
+        return 0;
+    }
+
+    // Collect the relative paths BEFORE deleting anything — Refresh re-indexes m_assets, so the
+    // indices in m_selectedIndices are only valid against the current listing.
+    std::vector<std::string> targets;
+    std::vector<int> sel = m_selectedIndices;
+    if (sel.empty() && m_selectedIndex >= 0) sel.push_back(m_selectedIndex);
+    for (int idx : sel) {
+        if (idx >= 0 && idx < static_cast<int>(m_assets.size()))
+            targets.push_back(m_assets[static_cast<std::size_t>(idx)].relativePath);
+    }
+    if (targets.empty()) {
+        if (error) *error = "No asset selected.";
+        return 0;
+    }
+
+    int deleted = 0;
+    std::string firstError;
+    for (const std::string& relative : targets) {
+        std::error_code ec;
+        fs::remove(FullPathForRelative(relative), ec);
+        if (ec) {
+            if (firstError.empty()) firstError = "Could not delete one or more Content entries.";
+            continue;
+        }
+        ++deleted;
+        if (m_clipboardRelativePath == relative) {
+            m_clipboardRelativePath.clear();
+            m_clipboardIsFolder = false;
+        }
+        m_clipboardEntries.erase(
+            std::remove_if(m_clipboardEntries.begin(), m_clipboardEntries.end(),
+                [&](const ClipEntry& e) { return e.relativePath == relative; }),
+            m_clipboardEntries.end());
+    }
+
+    m_selectedType = SelectionType::None;
+    m_selectedFolderIndex = -1;
+    m_selectedIndex = -1;
+    m_selectedIndices.clear();
+    Refresh(m_rootPath, error);
+    if (!firstError.empty() && error) *error = firstError;
+    return deleted;
 }
 
 const EditorAssets::Folder *EditorAssets::SelectedFolder() const
@@ -1146,6 +1237,7 @@ void EditorAssets::SelectNext()
     m_selectedType = SelectionType::Asset;
     m_selectedFolderIndex = -1;
     m_selectedIndex = (m_selectedIndex + 1) % static_cast<int>(m_assets.size());
+    m_selectedIndices.assign(1, m_selectedIndex);   // keyboard nav is a single-asset move
 }
 
 void EditorAssets::SelectPrevious()
@@ -1160,6 +1252,7 @@ void EditorAssets::SelectPrevious()
     m_selectedIndex = (m_selectedIndex <= 0)
         ? static_cast<int>(m_assets.size()) - 1
         : m_selectedIndex - 1;
+    m_selectedIndices.assign(1, m_selectedIndex);   // keyboard nav is a single-asset move
 }
 
 void EditorAssets::SelectFolderIndex(int index)
@@ -1170,6 +1263,7 @@ void EditorAssets::SelectFolderIndex(int index)
     m_selectedType = SelectionType::Folder;
     m_selectedFolderIndex = index;
     m_selectedIndex = -1;
+    m_selectedIndices.clear();   // selecting a folder clears any asset multi-selection
 }
 
 void EditorAssets::SelectIndex(int index)
@@ -1180,6 +1274,48 @@ void EditorAssets::SelectIndex(int index)
     m_selectedType = SelectionType::Asset;
     m_selectedFolderIndex = -1;
     m_selectedIndex = index;
+    m_selectedIndices.assign(1, index);   // plain select collapses the multi-selection to this asset
+}
+
+bool EditorAssets::IsAssetSelected(int index) const
+{
+    if (m_selectedType != SelectionType::Asset) return false;
+    if (m_selectedIndices.empty()) return index == m_selectedIndex;
+    return std::find(m_selectedIndices.begin(), m_selectedIndices.end(), index)
+        != m_selectedIndices.end();
+}
+
+void EditorAssets::ToggleAssetSelection(int index)
+{
+    if (index < 0 || index >= static_cast<int>(m_assets.size())) return;
+    m_selectedType = SelectionType::Asset;
+    m_selectedFolderIndex = -1;
+    auto it = std::find(m_selectedIndices.begin(), m_selectedIndices.end(), index);
+    if (it != m_selectedIndices.end()) {
+        m_selectedIndices.erase(it);
+        // Keep the primary valid: if the removed asset was primary, fall back to any remaining one.
+        if (m_selectedIndex == index)
+            m_selectedIndex = m_selectedIndices.empty() ? -1 : m_selectedIndices.back();
+    } else {
+        m_selectedIndices.push_back(index);
+        m_selectedIndex = index;   // newest addition becomes the primary
+    }
+}
+
+void EditorAssets::SelectAssetRange(int anchor, int index)
+{
+    const int count = static_cast<int>(m_assets.size());
+    if (count == 0) return;
+    if (anchor < 0 || anchor >= count) anchor = index;
+    if (index < 0 || index >= count) return;
+    m_selectedType = SelectionType::Asset;
+    m_selectedFolderIndex = -1;
+    const int lo = std::min(anchor, index);
+    const int hi = std::max(anchor, index);
+    m_selectedIndices.clear();
+    m_selectedIndices.reserve(static_cast<std::size_t>(hi - lo + 1));
+    for (int r = lo; r <= hi; ++r) m_selectedIndices.push_back(r);
+    m_selectedIndex = index;   // the clicked end is the primary
 }
 
 bool EditorAssets::RevealAsset(const std::string& relativePath, std::string* error)
@@ -1260,6 +1396,7 @@ const char *EditorAssets::TypeName(Type type)
         case Type::IKRig: return "IK Rig";
         case Type::PoseLibrary: return "Pose Library";
         case Type::EquipmentSet: return "Equipment Set";
+        case Type::Localization: return "Localization";
         case Type::Other: return "Other";
     }
     return "Other";
@@ -1408,6 +1545,9 @@ EditorAssets::Type EditorAssets::ClassifyExtension(const std::string &extension)
     }
     if (extension == ".3dgequipment") {
         return Type::EquipmentSet;
+    }
+    if (extension == ".3dgloc") {
+        return Type::Localization;
     }
     if (extension == ".h" || extension == ".hpp" || extension == ".lua"
         || extension == ".cpp" || extension == ".cc") {

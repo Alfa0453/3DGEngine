@@ -38,6 +38,7 @@
 #include <engine/assets/RuntimeAssetManager.h>
 #include <engine/audio/AudioEngine.h>
 #include <engine/audio/RuntimeAudioSystem.h>
+#include <engine/visualscript/VisualScriptHostBridge.h>
 #include <engine/ui/Hud.h>
 #include <engine/ecs/Registry.h>
 #include <engine/ecs/Components.h>
@@ -113,6 +114,9 @@ private:
     void UpdateFreeCamera(float dt);
     engine::ScriptInputState CaptureScriptInput(bool enabled, bool includeFrameEdges);
     engine::Camera BuildCamera() const;
+    void UpdatePhotoModeCamera(engine::Camera& camera, float unscaledDt);
+    void ApplyPhotoModePostProcess(const engine::Camera& camera);
+    void CapturePhotoModeScreenshot();
     void ProcessCameraCommands();
     void UpdateCameraSequence(float dt);
     void ExecuteCinematicCues(float previousTime, float currentTime, bool wrapped);
@@ -146,6 +150,7 @@ private:
     engine::CameraShakeSample  m_cameraShakeSample;
     engine::CameraSequencePlayer m_cameraSequence;
     engine::CameraDirector     m_cameraDirector;
+    std::optional<engine::Camera> m_photoModeCamera;
     engine::CameraBlend        m_zoneCameraBlend;
     std::optional<engine::CameraPose> m_zoneCameraPose;
     std::vector<engine::RuntimeSceneLoader::Scene::CinematicCue> m_activeCinematicCues;
@@ -157,6 +162,7 @@ private:
     engine::RuntimeSceneLoader::Scene  m_scene;
     engine::RuntimeSceneLoader::Scene  m_persistentScene;
     engine::PhysicsWorld               m_physics;
+    engine::vs::VisualScriptHostBridge m_visualScripts;   // Visual Scripting runtime (Passes 1-5)
     engine::RuntimeAssetManager        m_assets;   // resolves HUD image textures
     engine::LightingProbeGrid          m_lightingProbeGrid;
     engine::DynamicIrradianceSystem    m_dynamicGi;

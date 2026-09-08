@@ -2,6 +2,7 @@
 
 #include <engine/gameplay/Script.h>   // engine::ScriptRegistry, engine::Script
 #include <engine/ai/BtScript.h>       // engine::ai::BtScriptRegistry
+#include <engine/plugins/LinkedPlugin.h>
 
 #include <memory>
 
@@ -36,4 +37,9 @@ void RegisterGameModule() {
     (void)bt; // Project-authored scripts are loaded from the project's own module.
     // scripts.Register("FireballCaster",     [] { return std::make_unique<FireballCaster>(); });
     // scripts.Register("FireballProjectile", [] { return std::make_unique<FireballProjectile>(); });
+
+    // Re-register scripts supplied by enabled, build-time Plugin API 1 plugins.
+    // This is intentionally called whenever the host rebuilds its registries so
+    // plugin scripts survive project switches and native-script hot reloads.
+    engine::plugins::RegisterLinkedPluginScripts(scripts, bt);
 }

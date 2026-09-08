@@ -11,6 +11,7 @@
 #include <engine/ai/NavMesh.h>
 #include <engine/audio/AudioEngine.h>
 #include <engine/audio/RuntimeAudioSystem.h>
+#include <engine/visualscript/VisualScriptHostBridge.h>
 #include <engine/ai/BehaviorGraph.h>
 #include <engine/ecs/Components.h>
 #include <engine/ecs/Registry.h>
@@ -71,6 +72,7 @@
 #include "WeatherEditorPanel.h"
 #include "ProceduralBuildingPanel.h"
 #include "RoadGeneratorPanel.h"
+#include "VisualScriptEditorPanel.h"
 #include "LevelInstancePanel.h"
 #include "WorldPartitionPanel.h"
 #include "ProceduralScatterGraphPanel.h"
@@ -92,6 +94,18 @@
 #include "CharacterEquipmentPanel.h"
 #include "RenderDebuggerPanel.h"
 #include "FrameCaptureAnalyzerPanel.h"
+#include "MemoryProfilerPanel.h"
+#include "CollisionAnalyzerPanel.h"
+#include "NavigationQueryPanel.h"
+#include "AiPerceptionDebuggerPanel.h"
+#include "AutomatedTestPanel.h"
+#include "LocalizationEditorPanel.h"
+#include "AssetReferenceRepairPanel.h"
+#include "SourceControlPanel.h"
+#include "ProjectMigrationPanel.h"
+#include "BuildSizeAnalyzerPanel.h"
+#include "UiLocalizationPreviewPanel.h"
+#include "PluginManagerPanel.h"
 #include "TerrainCreatorPanel.h"
 #include "ModularPlacementPanel.h"
 #include "PrefabPalettePanel.h"
@@ -202,6 +216,20 @@ private:
         int                 flankCount = 1;                      // how many teammates share that target (1 = solo)
         float               squadAlertRadius = 18.0f;            // responds to a teammate's alert within this range
         float               squadForgetTime = 6.0f;              // seconds this agent's sighting keeps its squad alerted
+        // Values captured at the same point as the live perception decision. The
+        // debugger reads these instead of running a second, potentially different query.
+        bool                debugTargetValid = false;
+        bool                debugInRange = false;
+        bool                debugInFov = false;
+        bool                debugLineOfSight = false;
+        bool                debugHeardNoise = false;
+        bool                debugHeardFromSquad = false;
+        float               debugTargetDistance = 0.0f;
+        float               debugTargetAngleDeg = 0.0f;
+        float               debugHeardLoudness = 0.0f;
+        glm::vec3           debugHeardPosition{0.0f};
+        glm::vec3           debugLastKnownPosition{0.0f};
+        bool                debugHasLastKnown = false;
         engine::ai::AiAgent brain;                               // built-in patrol/chase/search
         engine::ai::AiMovementComponent movement;
         // M7: optional data-driven behaviour tree. When useGraph is set, 'tree' + 'ctx'
@@ -268,6 +296,7 @@ private:
     void DrawWeatherEditorPanel();
     void DrawProceduralBuildingPanel();
     void DrawRoadGeneratorPanel();
+    void DrawVisualScriptEditorPanel();
     void DrawLevelInstancePanel();
     void DrawWorldPartitionPanel();
     void DrawProceduralScatterGraphPanel();
@@ -293,6 +322,18 @@ private:
     void DrawCharacterEquipmentPanel();
     void DrawRenderDebuggerPanel();
     void DrawFrameCaptureAnalyzerPanel();
+    void DrawMemoryProfilerPanel();
+    void DrawCollisionAnalyzerPanel();
+    void DrawNavigationQueryPanel();
+    void DrawAiPerceptionDebuggerPanel();
+    void DrawAutomatedTestPanel();
+    void DrawLocalizationEditorPanel();
+    void DrawAssetReferenceRepairPanel();
+    void DrawSourceControlPanel();
+    void DrawProjectMigrationPanel();
+    void DrawBuildSizeAnalyzerPanel();
+    void DrawUiLocalizationPreviewPanel();
+    void DrawPluginManagerPanel();
     void GenerateDestructionPreview();
     int DeleteDestructionPreview(const std::string& name);
     bool CreatePartitionCellFromSelection(const std::string& path, int cellX, int cellZ);
@@ -355,6 +396,7 @@ private:
     void DrawPlayHud();
     void SyncHudFromScene();   // load the scene's referenced .hud into m_hud
     void ScanHudImages();      // recursively list content-folder images for the picker
+    void ScanHudFonts();       // recursively list content-folder .3dgfont assets for the font picker
     unsigned int HudTextureId(const std::string& relPath);  // resolve HUD image -> GL texture id
     void DrawMaterialMakerTools(bool materialSaved);
     void DrawDirtyScenePrompt();
@@ -525,6 +567,9 @@ private:
     void StartCameraSequence(const EditorScene::CameraSequence& sequence,
                              bool lockInput = false, bool skippable = true);
     void UpdateCameraSequence(float dt);
+    void UpdatePhotoModeCamera(float unscaledDt);
+    void ApplyPhotoModePostProcess();
+    void CapturePhotoModeScreenshot();
     void ProcessCameraDirectorCommands();
     void SkipActiveCameraSequence();
     void ExecuteCinematicCues(float previousTime, float currentTime, bool wrapped);
@@ -553,6 +598,7 @@ private:
     engine::CameraShake   m_cameraShake;
     engine::CameraSequencePlayer m_cameraSequence;
     engine::CameraDirector m_cameraDirector;
+    std::optional<engine::Camera> m_photoModeCamera;
     std::vector<EditorScene::CinematicCue> m_activeCinematicCues;
     bool m_cameraSequencePaused = false;
     std::optional<engine::CameraPose> m_cameraBeforeShake;
@@ -749,6 +795,7 @@ private:
     WeatherEditorPanel                    m_weatherEditor;
     ProceduralBuildingPanel               m_proceduralBuilding;
     RoadGeneratorPanel                    m_roadGenerator;
+    VisualScriptEditorPanel               m_visualScriptEditor;
     LevelInstancePanel                    m_levelInstances;
     WorldPartitionPanel                   m_worldPartition;
     ProceduralScatterGraphPanel           m_proceduralScatterGraph;
@@ -770,6 +817,18 @@ private:
     CharacterEquipmentPanel              m_characterEquipment;
     RenderDebuggerPanel                  m_renderDebugger;
     FrameCaptureAnalyzerPanel            m_frameCaptureAnalyzer;
+    MemoryProfilerPanel                  m_memoryProfiler;
+    CollisionAnalyzerPanel               m_collisionAnalyzer;
+    NavigationQueryPanel                 m_navigationQuery;
+    AiPerceptionDebuggerPanel            m_aiPerceptionDebugger;
+    AutomatedTestPanel                   m_automatedTests;
+    LocalizationEditorPanel              m_localizationEditor;
+    AssetReferenceRepairPanel             m_assetReferenceRepair;
+    SourceControlPanel                    m_sourceControl;
+    ProjectMigrationPanel                 m_projectMigration;
+    BuildSizeAnalyzerPanel                m_buildSizeAnalyzer;
+    UiLocalizationPreviewPanel            m_uiLocalizationPreview;
+    PluginManagerPanel                     m_pluginManager;
     std::uint64_t                        m_editorFrameNumber = 0;
     LevelVariantPanel                    m_levelVariants;
     LevelLayersPanel                     m_levelLayers;
@@ -843,6 +902,7 @@ private:
     std::unordered_map<std::string, std::string> m_hudStrings;  // named text HUD values
     bool                                 m_hudMousePrev = false; // left-click edge for HUD buttons
     std::vector<std::string>             m_hudImageChoices;      // content-folder images for the picker
+    std::vector<std::string>             m_hudFontChoices;       // content-folder .3dgfont assets for the picker
 
     EditorMode       m_mode = EditorMode::Edit;
     std::optional<EditorScene::Snapshot> m_editSnapshot;
@@ -852,6 +912,7 @@ private:
     std::unordered_map<engine::ecs::Entity, engine::ecs::Entity>
         m_editParticlePreviewEntities;
     engine::PhysicsWorld m_playPhysics;
+    engine::vs::VisualScriptHostBridge m_visualScripts;   // Visual Scripting runtime (Passes 1-5)
     std::optional<engine::ecs::Registry> m_playRegistry;
     std::optional<engine::RuntimeAssetManager> m_playAssets;
     std::optional<engine::PlayerController> m_playPlayerController;
@@ -859,7 +920,7 @@ private:
     engine::ecs::Entity m_playLockTarget = engine::ecs::kNull;
     bool m_playLockTogglePrev = false;
     bool m_playMouseCaptured = false;   // Play mode: cursor locked -> mouse look w/o holding RMB
-    bool m_playCursorTogglePrev = false; // edge detector for the ESC free/recapture toggle
+    bool m_playCursorTogglePrev = false; // edge detector for Shift+F1 free/recapture
     bool m_cinematicSkipPrev = false;
     bool m_physicsPaused = false;
     bool m_physicsStepRequested = false;

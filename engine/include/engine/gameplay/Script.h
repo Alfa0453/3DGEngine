@@ -374,6 +374,11 @@ protected:
     std::string DialogueSpeaker() const;
     std::string SaveDialogueState() const;
     bool LoadDialogueState(const std::string& data);
+    bool LoadLocalization(const std::string& assetPath);
+    bool SetLanguage(const std::string& language);
+    std::string Language() const;
+    std::string Localize(const std::string& key, const std::string& fallback = {}) const;
+    std::string LocalizedAsset(const std::string& key, const std::string& fallback = {}) const;
     bool AddItem(const std::string& assetPath,int count=1);
     int RemoveItem(const std::string& itemName,int count=1);
     bool UseItem(const std::string& itemName);
@@ -810,6 +815,7 @@ private:
         float interval = 0.0f;
         bool repeat = false;
         bool cancelled = false;
+        bool completed = false;
         std::string functionName;
         std::function<void()> callback;
     };
@@ -826,7 +832,7 @@ private:
     const ScriptSequence* FindSequence(int handle) const;
     ScriptContext m_context;
     std::vector<Timer> m_timers;
-    std::vector<std::function<void()>> m_timerCallbacks;
+    std::vector<std::pair<int, std::function<void()>>> m_timerCallbacks;
     std::unordered_map<std::string, std::function<void()>> m_timerFunctions;
     int m_nextTimerId = 1;
     int m_nextSequenceId = 1;

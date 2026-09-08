@@ -26,6 +26,8 @@ public:
     void QueueOpen(const std::string& path) { m_pendingOpen = path; }
     std::vector<Part> GenerateParts(const std::vector<glm::vec3>& points, bool closed) const;
     const std::string& MaterialFor(Surface surface) const;
+    // Imported .3dgmesh chosen for a surface (empty = built-in scaled box).
+    const std::string& MeshFor(Surface surface) const;
 
     const char* Name() const { return m_name.data(); }
     const std::string& SplineName() const { return m_splineName; }
@@ -48,6 +50,7 @@ private:
     void Preset(int preset);
     void RefreshMaterials(const std::string& root);
     void MaterialCombo(const char* label, std::string& path);
+    void MeshCombo(const char* label, std::string& path);
     bool Save(const std::string& root, std::string* error);
     bool Load(const std::string& path, std::string* error);
 
@@ -55,6 +58,7 @@ private:
     engine::AssetHandle m_assetId;
     std::string m_path, m_pendingOpen, m_status, m_assetRoot, m_splineName;
     std::vector<AssetChoice> m_materials;
+    std::vector<AssetChoice> m_meshes;   // imported .3dgmesh assets under the project root
     float m_width = 6.0f;
     float m_thickness = 0.18f;
     float m_spacing = 1.5f;
@@ -79,5 +83,8 @@ private:
     bool m_replace = true;
     std::string m_roadMaterial, m_shoulderMaterial, m_markingMaterial;
     std::string m_curbMaterial, m_sidewalkMaterial, m_barrierMaterial;
+    // Per-surface mesh override (empty = built-in scaled box, the default look).
+    std::string m_roadMesh, m_shoulderMesh, m_markingMesh;
+    std::string m_curbMesh, m_sidewalkMesh, m_barrierMesh;
     bool m_dirty = false;
 };

@@ -71,6 +71,12 @@ public:
         float tint = 0.0f;
         float saturation = 1.0f;
         float contrast = 1.0f;
+        bool depthOfField = false;
+        float dofFocusDistance = 5.0f;
+        float dofFocusRange = 2.0f;
+        float dofBlurStrength = 0.6f;
+        float cameraNearPlane = 0.1f;
+        float cameraFarPlane = 1000.0f;
         glm::vec3 lift{0.0f};
         glm::vec3 gamma{1.0f};
         glm::vec3 gain{1.0f};

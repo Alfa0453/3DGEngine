@@ -9,6 +9,7 @@
 #include "engine/graphics/Texture.h"
 
 #include <memory>
+#include <cstdint>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -17,6 +18,20 @@ namespace engine {
 
 class RuntimeAssetManager {
 public:
+    struct MemoryItem {
+        std::string category;
+        std::string name;
+        std::uint64_t cpuBytes = 0;
+        std::uint64_t gpuBytes = 0;
+    };
+
+    struct MemoryStats {
+        std::vector<MemoryItem> items;
+        std::uint64_t cpuBytes = 0;
+        std::uint64_t gpuBytes = 0;
+        std::size_t assetCount = 0;
+    };
+
     struct ResolveReport {
         int modelsLoaded = 0;
         int texturesLoaded = 0;
@@ -75,6 +90,9 @@ public:
     // Rebuild simplified static collider proxies for foliage types that opt in
     // to collision. Call after resolving a loaded runtime scene.
     int RebuildFoliageCollisionProxies(ecs::Registry& registry) const;
+    // Read-only ownership snapshot for editor diagnostics. This derives GPU
+    // sizes from retained dimensions/counts and never performs a GL readback.
+    MemoryStats CaptureMemoryStats() const;
     void Clear();
 
 private:

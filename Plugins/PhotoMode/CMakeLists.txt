@@ -1,0 +1,20 @@
+add_library(three_dg_photo_mode STATIC src/PhotoMode.cpp)
+target_include_directories(three_dg_photo_mode PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_link_libraries(three_dg_photo_mode PUBLIC engine)
+target_compile_features(three_dg_photo_mode PUBLIC cxx_std_17)
+set_target_properties(three_dg_photo_mode PROPERTIES FOLDER "Plugins/Photo Mode" POSITION_INDEPENDENT_CODE ON)
+
+# Compile the bootstrap directly into each host so static registration cannot
+# be discarded by the linker.
+foreach(_3dg_host IN ITEMS 3DGEditor player)
+    if(TARGET ${_3dg_host})
+        target_sources(${_3dg_host} PRIVATE src/PhotoModeBootstrap.cpp)
+        target_link_libraries(${_3dg_host} PRIVATE three_dg_photo_mode)
+    endif()
+endforeach()
+if(TARGET game)
+    target_link_libraries(game PUBLIC three_dg_photo_mode)
+endif()
+if(TARGET game_scripts)
+    target_link_libraries(game_scripts PRIVATE three_dg_photo_mode)
+endif()

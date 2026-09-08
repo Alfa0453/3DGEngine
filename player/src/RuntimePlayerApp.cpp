@@ -15,6 +15,7 @@
 #include <engine/gameplay/SpawnSystem.h>
 #include <engine/gameplay/GameplayComponents.h>
 #include <engine/gameplay/GameMode.h>
+#include <engine/gameplay/PhotoMode.h>
 #include <engine/ai/BtScript.h>
 #include <engine/ecs/RuntimeSystems.h>
 #include <engine/ai/NavMeshBuilder.h>
@@ -31,6 +32,7 @@
 #include <engine/graphics/ImageDecode.h>
 #include <engine/graphics/EnvironmentLighting.h>
 #include <engine/graphics/PostProcessVolume.h>
+#include <engine/graphics/Screenshot.h>
 #include <engine/graphics/LightingScalability.h>
 #include <engine/core/Paths.h>
 
@@ -283,6 +285,7 @@ RuntimePlayerApp::RuntimePlayerApp(engine::Config& config, std::string scenePath
       m_runtimeAudio(m_audio) {}
 
 void RuntimePlayerApp::OnInit() {
+    engine::PhotoModeRuntime::Instance().Reset();
     // Register scripts before anything can instantiate them. Built-in example BT
     // scripts + the game's own scripts (player/src/GameScripts.cpp).
     engine::ai::RegisterExampleBtScripts();
@@ -300,6 +303,10 @@ void RuntimePlayerApp::OnInit() {
         std::filesystem::path cursor =
             std::filesystem::absolute(m_scenePath, moduleEc).parent_path();
         for (int depth = 0; depth < 8 && !cursor.empty(); ++depth) {
+#ifdef THREEDG_PLAYER_BUILD_CONFIGURATION
+            candidates.emplace_back(cursor / "Binaries"
+                / THREEDG_PLAYER_BUILD_CONFIGURATION / "game_scripts.dll");
+#endif
             candidates.emplace_back(cursor / "Binaries" / "game_scripts.dll");
             const std::filesystem::path parent = cursor.parent_path();
             if (parent == cursor) break;
@@ -556,6 +563,11 @@ void RuntimePlayerApp::FinishStreamedLevelUnload(std::size_t levelIndex) {
 }
 
 void RuntimePlayerApp::LoadScene() {
+    // Scenes store Lua paths relative to the packaged/project root (for example
+    // Content/Scripts/Player.lua), never relative to the caller's CWD.
+    const std::filesystem::path scenePathRoot(m_scenePath);
+    const std::filesystem::path contentRoot = scenePathRoot.parent_path().parent_path();
+    engine::SetLuaScriptProjectRoot(contentRoot.parent_path().string());
     m_runtimeWarnings.clear();
     m_dynamicGi.Reset();
     m_lightingProbeGrid.Reset();
@@ -678,6 +690,21 @@ void RuntimePlayerApp::LoadScene() {
     }
 
     m_sceneDir = std::filesystem::path(m_scenePath).parent_path().string();
+    // Visual Scripting: register the node library once and resolve .3dgvs graphs from the packaged
+    // content directory by matching the stored id (shipping build; diagnostics stay off).
+    m_visualScripts.Shutdown(m_registry);   // clear any instances from a previous scene load
+    m_visualScripts.Startup();
+    m_visualScripts.SetPathResolver([this](const engine::AssetHandle& handle) -> std::string {
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        for (fs::recursive_directory_iterator it(m_sceneDir,
+                 fs::directory_options::skip_permission_denied, ec), end; it != end; it.increment(ec)) {
+            if (ec || !it->is_regular_file(ec) || it->path().extension() != ".3dgvs") continue;
+            engine::vs::VisualScriptAsset probe; std::string error;
+            if (probe.Load(it->path().string(), &error) && probe.id == handle) return it->path().string();
+        }
+        return {};
+    });
     BuildTerrains();
     BuildWaters();
     BuildRuntimeLevelFeatures();
@@ -2410,6 +2437,74 @@ engine::Camera RuntimePlayerApp::BuildCamera() const {
     return camera;
 }
 
+void RuntimePlayerApp::UpdatePhotoModeCamera(engine::Camera& camera,
+                                              float unscaledDt) {
+    auto& photoMode = engine::PhotoModeRuntime::Instance();
+    if (!photoMode.Active()) {
+        m_photoModeCamera.reset();
+        return;
+    }
+    if (!m_photoModeCamera) m_photoModeCamera = camera;
+    engine::Camera& photoCamera = *m_photoModeCamera;
+    const engine::PhotoModeSettings& settings = photoMode.Settings();
+    photoCamera.fov = settings.fieldOfView;
+
+    engine::Window& window = GetWindow();
+    photoCamera.AddYawPitch(window.MouseDeltaX() * settings.lookSensitivity,
+                            -window.MouseDeltaY() * settings.lookSensitivity);
+    float distance = settings.moveSpeed * std::max(unscaledDt, 0.0f);
+    if (window.IsKeyPressed(GLFW_KEY_LEFT_SHIFT)
+        || window.IsKeyPressed(GLFW_KEY_RIGHT_SHIFT)) distance *= 4.0f;
+    if (window.IsKeyPressed(GLFW_KEY_W)) photoCamera.MoveForward(distance);
+    if (window.IsKeyPressed(GLFW_KEY_S)) photoCamera.MoveForward(-distance);
+    if (window.IsKeyPressed(GLFW_KEY_D)) photoCamera.MoveRight(distance);
+    if (window.IsKeyPressed(GLFW_KEY_A)) photoCamera.MoveRight(-distance);
+    if (window.IsKeyPressed(GLFW_KEY_E)) photoCamera.MoveUp(distance);
+    if (window.IsKeyPressed(GLFW_KEY_Q)) photoCamera.MoveUp(-distance);
+    camera = photoCamera;
+}
+
+void RuntimePlayerApp::ApplyPhotoModePostProcess(const engine::Camera& camera) {
+    if (!m_post) return;
+    m_post->settings.depthOfField = false;
+    if (!engine::PhotoModeRuntime::Instance().Active()) return;
+    const engine::PhotoModeSettings& settings =
+        engine::PhotoModeRuntime::Instance().Settings();
+    m_post->settings.exposureCompensationEV += settings.exposureCompensationEV;
+    m_post->settings.saturation *= settings.saturation;
+    m_post->settings.contrast *= settings.contrast;
+    m_post->settings.depthOfField = settings.depthOfField;
+    m_post->settings.dofFocusDistance = settings.focusDistance;
+    m_post->settings.dofFocusRange = settings.focusRange;
+    m_post->settings.dofBlurStrength = settings.blurStrength;
+    m_post->settings.cameraNearPlane = camera.nearPlane;
+    m_post->settings.cameraFarPlane = camera.farPlane;
+}
+
+void RuntimePlayerApp::CapturePhotoModeScreenshot() {
+    std::string requested;
+    if (!engine::PhotoModeRuntime::Instance().ConsumeScreenshotRequest(&requested)) return;
+    std::filesystem::path scene = std::filesystem::absolute(m_scenePath);
+    std::filesystem::path root = scene.parent_path();
+    for (std::filesystem::path cursor = scene.parent_path(); !cursor.empty();
+         cursor = cursor.parent_path()) {
+        if (cursor.filename() == "Content") { root = cursor.parent_path(); break; }
+        if (cursor == cursor.root_path()) break;
+    }
+    const std::filesystem::path folder = root / "Screenshots";
+    std::filesystem::path path;
+    if (requested.empty()) {
+        path = engine::MakeTimestampedScreenshotPath(folder.string());
+    } else {
+        path = folder / std::filesystem::path(requested).filename();
+        path.replace_extension(".bmp");
+    }
+    std::string error;
+    if (!engine::CaptureFramebufferBmp(path.string(), GetWindow().Width(),
+                                       GetWindow().Height(), &error))
+        m_runtimeWarnings.push_back("Photo Mode screenshot failed: " + error);
+}
+
 void RuntimePlayerApp::ProcessCameraCommands() {
     for (const engine::CameraSequenceCommand& command : m_cameraDirector.TakeCommands()) {
         if (command.type == engine::CameraSequenceCommand::Type::Stop) {
@@ -2590,6 +2685,9 @@ void RuntimePlayerApp::OnUpdate(float dt) {
         engine::UpdateScripts(
             m_registry, gameDt, &input, &m_runtimeAudio,
             &m_cameraShake, &m_cameraDirector, &gameMode, &m_physics);
+        m_visualScripts.Update(m_registry, gameDt, &m_physics, &input,
+            &m_runtimeAudio, &m_cameraShake, &m_cameraDirector, &gameMode);
+        m_visualScripts.DeliverPhysicsEvents(m_registry, m_physics.Events());
         auto& dayNight = engine::DayNightTimelineRuntime::Instance();
         dayNight.Tick(gameDt);
         if (dayNight.Loaded()) {
@@ -2834,6 +2932,8 @@ void RuntimePlayerApp::OnFixedUpdate(float h) {
         m_registry, gameStep, &input, &m_runtimeAudio,
         &m_cameraShake, &m_cameraDirector, &engine::GameMode::Instance(),
         &m_physics);
+    m_visualScripts.FixedUpdate(m_registry, gameStep, &m_physics, &input,
+        &m_runtimeAudio, &m_cameraShake, &m_cameraDirector, &engine::GameMode::Instance());
     UpdateAI(gameStep);
     engine::UpdateAbilities(m_registry, gameStep);
     engine::UpdateCombat(m_registry, gameStep);
@@ -2886,6 +2986,7 @@ void RuntimePlayerApp::OnRender() {
     m_post->Resize(w.Width(), w.Height());
 
     engine::Camera cam = BuildCamera();
+    UpdatePhotoModeCamera(cam, m_dt);
     if (HasPlayer() && !m_zoneCameraPose && !m_zoneCameraBlend.Active()
         && !m_cameraSequence.Active() && !m_cameraDirector.Playing()) {
         bool overTerrain = false;
@@ -2953,6 +3054,7 @@ void RuntimePlayerApp::OnRender() {
         cam.ProjectionMatrix(aspect)*cam.ViewMatrix()),cam.Position(),
         ResolveEnvironment(env,m_sample));
     engine::ApplyPostProcessVolumes(m_registry,cam.Position(),*m_post);
+    ApplyPhotoModePostProcess(cam);
     m_post->BeginScene();
     m_renderer.Clear();
     if (env.ssgiEnabled) {
@@ -3113,55 +3215,19 @@ void RuntimePlayerApp::OnRender() {
         m_registry,cam.Position(),lightingProfile.maxVolumetricLights));
     m_post->SetLocalFogVolumes(GatherLocalFogVolumes(m_registry));
     m_post->RenderToScreen(w.Width(), w.Height(), m_dt);
+    CapturePhotoModeScreenshot();
 
-    engine::DrawWorldHealthBars(
-        *m_text, m_registry,
-        cam.ProjectionMatrix(aspect) * cam.ViewMatrix(),
-        w.Width(), w.Height(), m_playerEntity);
-
-    // Game HUD (the scene's .hud), drawn on the presented scene.
-    DrawHudOverlay();
-
-    // Status overlay.
+    // The standalone player intentionally draws NO HUD overlay: the scene's .hud panels/text/buttons
+    // (DrawHudOverlay), the world-space health bars, and the developer status/controls overlay have
+    // all been removed so a shipped game presents a clean scene. Only the fatal load-error message
+    // and the game's own end screen (below) remain.
     const int ww = w.Width(), hh = w.Height();
     m_text->Begin(ww, hh);
     if (!m_loadError.empty()) {
         m_text->Text("RUNTIME PLAYER", 24.0f, 22.0f, 2.0f, glm::vec3(1.0f, 0.9f, 0.5f));
         m_text->Text(m_loadError, 24.0f, 60.0f, 1.4f, glm::vec3(1.0f, 0.5f, 0.45f));
         m_text->Text("Usage: player <scene.3dgscene>", 24.0f, 88.0f, 1.3f, glm::vec3(0.75f));
-    } else {
-        char buf[192];
-        std::snprintf(buf, sizeof(buf), "RUNTIME PLAYER   %zu entities   %.0f fps   %s",
-                      m_entityCount, m_fps, m_paused ? "PAUSED" : "running");
-        m_text->Text(buf, 24.0f, 22.0f, 2.0f,
-                     m_paused ? glm::vec3(1.0f, 0.8f, 0.4f) : glm::vec3(1.0f));
-        m_text->Text(m_scenePath, 24.0f, 54.0f, 1.2f, glm::vec3(0.7f));
-
-        // Diagnostic: scripts the scene references but that aren't registered in
-        // GameScripts.cpp won't run. Surface the count so it's not a silent failure.
-        int missing = 0;
-        m_registry.view<engine::NativeScriptComponent>().each([&](Entity, engine::NativeScriptComponent& s) {
-            if (s.enabled && s.missingFactory) ++missing;
-        });
-        float warnY = 80.0f;
-        if (missing > 0) {
-            char warn[128];
-            std::snprintf(warn, sizeof(warn),
-                          "%d script(s) not registered - add them in GameScripts.cpp", missing);
-            m_text->Text(warn, 24.0f, warnY, 1.2f, glm::vec3(1.0f, 0.55f, 0.4f));
-            warnY += 24.0f;
-        }
-        if (m_assetErrors > 0) {
-            char warn[128];
-            std::snprintf(warn, sizeof(warn),
-                          "%d asset(s) failed to load - run from the content root", m_assetErrors);
-            m_text->Text(warn, 24.0f, warnY, 1.2f, glm::vec3(1.0f, 0.55f, 0.4f));
-        }
     }
-    const char* controls = HasPlayer()
-        ? "WASD move   Space jump   Shift sprint   V view   mouse look   P pause   F5 save   F9 load   Esc quit"
-        : "WASD move   Q/E down/up   hold RMB look   Shift sprint   P pause   F5 save   F9 load   Esc quit";
-    m_text->Text(controls, 24.0f, static_cast<float>(hh) - 32.0f, 1.3f, glm::vec3(0.72f));
 
     // End screen: centered VICTORY / GAME OVER with score + restart prompt.
     const engine::GameMode& gm = engine::GameMode::Instance();
@@ -3185,6 +3251,8 @@ void RuntimePlayerApp::OnRender() {
 }
 
 void RuntimePlayerApp::OnShutdown() {
+    engine::PhotoModeRuntime::Instance().Reset();
+    m_photoModeCamera.reset();
     engine::ShutdownScripts(m_registry);   // OnDestroy() + release script instances
     engine::ScriptRegistry::Instance().Clear();
     engine::ai::BtScriptRegistry::Instance().Clear();

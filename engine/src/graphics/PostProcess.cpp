@@ -92,6 +92,12 @@ uniform float uUnderwaterCausticsStrength;
 uniform float uUnderwaterCausticsScale;
 uniform float uSaturation;
 uniform float uContrast;
+uniform int uDofEnabled;
+uniform float uDofFocusDistance;
+uniform float uDofFocusRange;
+uniform float uDofBlurStrength;
+uniform float uCameraNear;
+uniform float uCameraFar;
 uniform float uTemperature;
 uniform float uTint;
 uniform vec3 uLift;
@@ -103,6 +109,34 @@ uniform float uLutIntensity;
 uniform float uLutSize;
 uniform sampler2D uVolumetric;
 uniform int uVolumetricEnabled;
+float linearDepth(float rawDepth) {
+    float z = rawDepth * 2.0 - 1.0;
+    float nearPlane = max(uCameraNear, 0.0001);
+    float farPlane = max(uCameraFar, nearPlane + 0.001);
+    return (2.0 * nearPlane * farPlane)
+        / max(farPlane + nearPlane - z * (farPlane - nearPlane), 0.0001);
+}
+vec3 sampleDepthOfField(vec2 uv) {
+    vec3 sharp = texture(uScene, uv).rgb;
+    if (uDofEnabled == 0 || uDofBlurStrength <= 0.0001) return sharp;
+    float distance = linearDepth(texture(uSceneDepth, uv).r);
+    float coc = clamp(abs(distance - uDofFocusDistance)
+                      / max(uDofFocusRange, 0.001), 0.0, 1.0)
+                * clamp(uDofBlurStrength, 0.0, 1.0);
+    if (coc <= 0.002) return sharp;
+    vec2 texel = 1.0 / vec2(textureSize(uScene, 0));
+    vec2 radius = texel * mix(1.0, 9.0, coc);
+    const vec2 taps[12] = vec2[](
+        vec2(1.0,0.0),vec2(-1.0,0.0),vec2(0.0,1.0),vec2(0.0,-1.0),
+        vec2(0.707,0.707),vec2(-0.707,0.707),vec2(0.707,-0.707),vec2(-0.707,-0.707),
+        vec2(0.383,0.924),vec2(-0.383,0.924),vec2(0.383,-0.924),vec2(-0.383,-0.924));
+    vec3 blurred = sharp;
+    for (int i = 0; i < 12; ++i)
+        blurred += texture(uScene, clamp(uv + taps[i] * radius,
+                           vec2(0.001), vec2(0.999))).rgb;
+    blurred /= 13.0;
+    return mix(sharp, blurred, coc);
+}
 vec3 ACES(vec3 x) {
     const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
     return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
@@ -146,7 +180,7 @@ void main() {
         cos(vUV.x * 27.0 - uTime * 1.4) + cos(vUV.x * 11.0 + uTime * 0.8));
     vec2 sampleUv = clamp(vUV + wave * (0.5 * uUnderwaterDistortion * underwater),
                           vec2(0.001), vec2(0.999));
-    vec3 hdr = texture(uScene, sampleUv).rgb;
+    vec3 hdr = sampleDepthOfField(sampleUv);
     vec4 volume = vec4(0.0, 0.0, 0.0, 1.0);
     if (uVolumetricEnabled == 1) {
         volume = sampleDepthAwareVolume(sampleUv);
@@ -803,6 +837,18 @@ void PostProcess::RenderComposite(int screenWidth, int screenHeight, float dt,
     m_composite.SetFloat("uUnderwaterCausticsScale", underwater.causticsScale);
     m_composite.SetFloat("uSaturation", settings.saturation);
     m_composite.SetFloat("uContrast", settings.contrast);
+    m_composite.SetInt("uDofEnabled", settings.depthOfField ? 1 : 0);
+    m_composite.SetFloat("uDofFocusDistance",
+                         std::max(settings.dofFocusDistance, 0.05f));
+    m_composite.SetFloat("uDofFocusRange",
+                         std::max(settings.dofFocusRange, 0.05f));
+    m_composite.SetFloat("uDofBlurStrength",
+                         std::clamp(settings.dofBlurStrength, 0.0f, 1.0f));
+    m_composite.SetFloat("uCameraNear",
+                         std::max(settings.cameraNearPlane, 0.0001f));
+    m_composite.SetFloat("uCameraFar",
+                         std::max(settings.cameraFarPlane,
+                                  settings.cameraNearPlane + 0.001f));
     m_composite.SetFloat("uTemperature", settings.temperature);
     m_composite.SetFloat("uTint", settings.tint);
     m_composite.SetVec3("uLift", settings.lift);

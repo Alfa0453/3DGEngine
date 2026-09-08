@@ -38,6 +38,7 @@ public:
     void Set(const std::string& key, bool value);
     void Set(const std::string& key, const std::string& value);
     void Set(const std::string& key, const char* value) { Set(key, std::string(value)); }
+    void Remove(const std::string& key) { m_values.erase(key); }
 
     bool Has(const std::string&key) const { return m_values.count(key) != 0; }
     const std::string& Path() const { return m_path; }

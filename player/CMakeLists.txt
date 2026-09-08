@@ -9,6 +9,14 @@ add_executable(player
     # src/MyPlayerScript.cpp
 )
 
+if(MSVC)
+    # RuntimePlayerApp is intentionally a large translation unit. Debug builds can
+    # exceed COFF's default section count as the scripting/runtime surface grows.
+    target_compile_options(player PRIVATE /bigobj)
+endif()
+target_compile_definitions(player PRIVATE
+    THREEDG_PLAYER_BUILD_CONFIGURATION="$<CONFIG>")
+
 # Precompiled headers for faster builds
 target_precompile_headers(player PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../engine/include/engine_pch.h")
 

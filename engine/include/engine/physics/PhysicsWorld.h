@@ -116,7 +116,8 @@ struct DebugTrace {
 //
 // For solid (non-trigger) Enter/Stay events, point/normal/impulse describe the
 // contact: 'point' is the average world contact point, 'normal' points from a
-// toward b, and 'impulse' is the total normal impulse applied this step (a proxy
+// toward b, 'penetration' is the pre-solve overlap depth, and 'impulse' is the
+// total normal impulse applied this step (a proxy
 // for impact strength -- use it to scale hit sounds, damage, or effects). These
 // are zero for trigger events and Exit events.
 struct CollisionEvent {
@@ -127,6 +128,7 @@ struct CollisionEvent {
     bool        trigger = false;
     glm::vec3   point{0.0f};
     glm::vec3   normal{0.0f};
+    float       penetration = 0.0f;
     float       impulse = 0.0f;
 };
 

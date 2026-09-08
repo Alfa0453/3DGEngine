@@ -52,19 +52,19 @@ Status legend:
 | 33 | **COMPLETE** | Pose Library | Saves, previews, mirrors, blends, tags, and reuses skeletal poses. |
 | 34 | **COMPLETE** | Character Equipment Editor | Equips weapons, armor, staffs, props, audio, and effects through sockets. |
 | 35 | **COMPLETE** | Render Debugger | Inspects render passes, depth, normals, material views, shadow maps, and draw-call ownership. |
-| 36 | **NEXT** | Frame Capture Analyzer | Per-frame timeline for scripts, AI, physics, animation, rendering, particles, audio, and UI. |
-| 37 | PLANNED | Memory Profiler | Tracks RAM and VRAM use by assets, scenes, runtime systems, caches, and streaming cells. |
-| 38 | PLANNED | Collision Analyzer | Visualizes channels, responses, contacts, overlaps, penetration, and collision ownership. |
-| 39 | PLANNED | Navigation Query Tool | Tests paths, agent sizes, costs, unreachable areas, links, and dynamic obstacles. |
-| 40 | PLANNED | AI Perception Debugger | Displays sight, hearing, teams, targets, last-known positions, and perception history. |
-| 41 | PLANNED | Automated Test Panel | Runs engine, gameplay, asset, scene, packaging, and performance tests from the editor. |
-| 42 | PLANNED | Localization Editor | Translation keys, languages, subtitles, fonts, localized assets, and missing-text reports. |
-| 43 | PLANNED | Asset Reference Repair Tool | Finds and repairs missing, renamed, moved, or invalid asset references. |
-| 44 | PLANNED | Source Control Panel | Modified files, history, conflicts, branches, commits, and change lists. |
-| 45 | PLANNED | Project Migration Tool | Safely upgrades old project, scene, component, and asset serialization formats. |
-| 46 | PLANNED | Build Size Analyzer | Reports packaged size by asset and detects unused or duplicated content. |
+| 36 | **COMPLETE** | Frame Capture Analyzer | Captures an opt-in CPU/GPU timeline for scripts, AI, physics, animation, rendering, particles, audio, and UI. |
+| 37 | **COMPLETE** | Memory Profiler | Tracks RAM and VRAM use by assets, scenes, runtime systems, caches, render targets, and streaming cells. |
+| 38 | **COMPLETE** | Collision Analyzer | Visualizes channels, responses, contacts, overlaps, penetration, and collision ownership. |
+| 39 | **COMPLETE** | Navigation Query Tool | Tests paths, agent sizes, costs, unreachable areas, links, and dynamic obstacles. |
+| 40 | **COMPLETE** | AI Perception Debugger | Displays sight, hearing, teams, targets, last-known positions, and perception history. |
+| 41 | **COMPLETE** | Automated Test Panel | Runs engine, gameplay, asset, scene, packaging, and performance tests from the editor. |
+| 42 | **COMPLETE** | Localization Editor | Translation keys, languages, subtitles, fonts, localized assets, and missing-text reports. |
+| 43 | **COMPLETE** | Asset Reference Repair Tool | Finds and repairs missing, renamed, moved, or invalid asset references. |
+| 44 | **COMPLETE** | Source Control Panel | Modified files, history, conflicts, branches, commits, and change lists. |
+| 45 | **COMPLETE** | Project Migration Tool | Safely upgrades old project, scene, component, and asset serialization formats. |
+| 46 | **NEXT** | Build Size Analyzer | Reports packaged size by asset and detects unused or duplicated content. |
 | 47 | PLANNED | UI Resolution and Localization Preview | Tests HUDs at different resolutions, aspect ratios, DPI settings, and text lengths. |
-| 48 | PLANNED | Plugin Manager | Registers and manages editor panels, importers, asset types, runtime systems, and extensions. |
+| 48 | COMPLETE | Plugin Manager | Discovers project and engine extensions, validates compatibility and dependencies, and manages per-project build integration. |
 
 ## Completion Checklist For Every Tool
 
@@ -555,7 +555,192 @@ timings, and draw-call ownership grouped by active render scope.
 
 See [Render Debugger Guide](RENDER_DEBUGGER_GUIDE.md).
 
-## Next Milestone: Frame Capture Analyzer
+## Completed Milestone: Frame Capture Analyzer
 
-Planned scope: record a single frame as a cross-system CPU/GPU timeline covering
-scripts, AI, physics, animation, rendering, particles, audio, and UI.
+The Frame Capture Analyzer records a requested frame with no normal-frame timing
+overhead. Its zoomable timeline separates scripts, fixed gameplay, behavior-tree and
+navigation work, physics and ragdolls, animation and foot IK, scene/post/HUD rendering,
+particles, audio, editor UI, and asynchronously resolved GPU passes. Hover inspection,
+longest-event sorting, fixed-step counts, draw-call totals, one-shot capture, and a
+continuous spike-hunting mode make subsystem ownership visible without stalling the GPU.
+
+See [Frame Capture Analyzer Guide](FRAME_CAPTURE_ANALYZER_GUIDE.md).
+
+## Completed Milestone: Memory Profiler
+
+The Memory Profiler combines actual process private/working-set readings, supported
+driver VRAM totals, and portable engine-owned estimates. Its expandable ownership view
+covers edit and Play asset caches, animation data, ECS pools, terrains, render targets,
+lighting and reflection probes, grass, particles, behavior trees, and authored world
+cells. Configurable RAM/VRAM budgets, quarter-second histories, filtering, and baseline
+deltas support both target-platform budgeting and retention/leak investigations.
+
+See [Memory Profiler Guide](MEMORY_PROFILER_GUIDE.md).
+
+## Completed Milestone: Collision Analyzer
+
+The Collision Analyzer inspects authored colliders in Edit mode and captures live
+contacts and trigger overlaps in Play mode. It reports object ownership, shapes,
+channels, masks, body state, solver islands, active-contact counts, broad-phase
+statistics, exact contact points and normals, penetration depth, and impulse. A
+pair diagnostic explains which per-object mask or global channel-matrix rule blocks
+an interaction. Filtered history and viewport contact-normal guides make transient
+collision problems reproducible without adding work while the panel is closed.
+
+See [Collision Analyzer Guide](COLLISION_ANALYZER_GUIDE.md).
+
+## Completed Milestone: Navigation Query Tool
+
+The Navigation Query Tool tests the editor navmesh or live Play-mode NavGrid with
+explicit start and goal positions, selected-object and camera shortcuts, funnel or
+A* routing, diagonal policy, path length, uniform traversal cost, endpoint validity,
+and waypoint output. Agent-radius and cell-size controls rebuild the real navigation
+surface. Connectivity analysis reports disconnected regions and polygon portals;
+query-only off-mesh links test proposed jumps, ladders, or teleports. Dynamic collider
+footprints are checked against the returned route and highlighted with the complete
+path in the scene viewport. The panel clearly identifies the current XZ bake's lack
+of vertical ceiling voxelization instead of treating agent height as supported data.
+
+See [Navigation Query Tool Guide](NAVIGATION_QUERY_TOOL_GUIDE.md).
+
+## Completed Milestone: AI Perception Debugger
+
+The AI Perception Debugger reads the exact sight and hearing results used by live
+Play-mode agents. It reports target and team ownership, distance, vision range,
+view angle, FOV inclusion, occlusion, audible sound strength, squad alerts, current
+AI state, and the last-known point. Search, team, sensing, and selected-agent filters
+keep large encounters readable. A bounded event history records target acquisition,
+sight gain/loss, sounds, and squad alerts only while the panel is open. Optional
+viewport guides show vision cones, sight rays, hearing radii, and last-known markers
+without enabling the heavier navigation overlay.
+
+See [AI Perception Debugger Guide](AI_PERCEPTION_DEBUGGER_GUIDE.md).
+
+## Completed Milestone: Automated Test Panel
+
+The Automated Test Panel discovers and runs the engine's real CTest suite without
+blocking the editor. It uses a separate test build so enabling tests never mutates
+the active editor build, supports Debug and Release configurations, full, selected,
+category, and name-filtered runs, configurable per-test timeouts, live output, safe
+process-tree cancellation, pass/fail/timing summaries, and persistent text reports.
+Missing test sources and configuration failures are reported in the panel instead of
+silently producing an empty test list.
+
+See [Automated Test Panel Guide](AUTOMATED_TEST_PANEL_GUIDE.md).
+
+## Milestone 42 Complete: Localization Editor
+
+The Localization Editor authors engine-owned `.3dgloc` tables with source and
+fallback languages, searchable text keys, translator context, per-language fonts,
+localized asset variants, timed subtitle cues, and localized voice paths. It shows
+missing-string counts, supports pseudo-localized previews, and imports or exports a
+translator-friendly CSV beside the table. Double-clicking the asset opens its editor.
+
+At runtime, HUD localization keys and dialogue line keys resolve through the active
+table. Native C++ and Lua scripts can load a table, switch languages, query the active
+language, translate text with fallback values, and resolve localized asset paths.
+
+See [Localization Editor Guide](LOCALIZATION_EDITOR_GUIDE.md).
+
+## Milestone 43 Complete: Asset Reference Repair Tool
+
+The Asset Reference Repair Tool scans authored assets and the asset registry for
+broken paths, path/ID mismatches, moved assets, missing dependency IDs, and missing
+original import sources. Unique filename matches and recoverable stable IDs are
+suggested automatically; ambiguous or unrecoverable findings remain clearly marked
+for manual attention.
+
+Nothing changes during scanning. Repairs are individually selectable and require a
+separate preview/apply step. Before writing, the tool validates every planned edit and
+copies affected files into `Saved/AssetReferenceRepair`. Multi-file edits and registry
+moves are rolled back if an operation fails. Each successful run also writes an audit
+report under `Saved/Reports` and refreshes the Content Browser and dependency graph.
+
+See [Asset Reference Repair Guide](ASSET_REFERENCE_REPAIR_GUIDE.md).
+
+## Milestone 44 Complete: Source Control Panel
+
+The Source Control Panel discovers the Git repository that contains the active
+project and performs its potentially slow operations away from the editor UI thread.
+It displays working-tree and index state, highlights unresolved conflicts, filters
+and selects changed files, previews working or staged diffs, stages and unstages
+specific paths, commits staged work, and displays recent commit history and details.
+
+Local branches show their upstream and tracking state and can be safely switched or
+created from the editor. Git remains responsible for refusing a branch switch that
+would overwrite local work. Editor-only change lists group related files without
+silently modifying Git's staging area and persist below the project's `Saved` folder.
+The panel intentionally provides no discard, reset, force-switch, or file-deletion
+operation.
+
+See [Source Control Panel Guide](SOURCE_CONTROL_PANEL_GUIDE.md).
+
+## Milestone 45 Complete: Project Migration Tool
+
+The Project Migration Tool scans the active project without changing it and classifies
+supported files as current, legacy, invalid, or created by a newer engine. It covers
+project settings, authored scenes and component data, characters, animation graphs,
+animation clips, prefabs, particles, shaders, materials, interactions, and legacy
+native static meshes, skeletal meshes, textures, and foliage assets.
+
+Selected upgrades first pass their real legacy loader, then the complete selection is
+backed up under `Saved/ProjectMigrations`. Migration uses each asset's current serializer
+and validates every output by loading it again. A failure restores the full backed-up
+selection. Future-version files are never downgraded, generated runtime/autosave scenes
+are excluded, and an unsaved open scene cannot be selected. Every attempt retains a
+human-readable report under `Saved/Reports`.
+
+See [Project Migration Tool Guide](PROJECT_MIGRATION_TOOL_GUIDE.md).
+
+## Milestone 46 Complete: Build Size Analyzer
+
+The Build Size Analyzer scans staged folders and packaged ZIP archives away from the
+editor UI thread. It attributes raw and packed size to runtime files, scenes, meshes,
+animation, textures, materials and shaders, audio, scripts, VFX, UI and localization,
+configuration, and other content. ZIP reports use actual compressed sizes; directory
+reports label their compressed totals as estimates.
+
+Cook manifests and the active asset registry provide reviewable unused-content flags.
+Streaming fingerprints group byte-identical folder files, while ZIP CRC and size group
+archive duplicates. Total and per-category budgets expose overruns, filters focus the
+largest or avoidable files, and text or CSV reports are saved under `Saved/Reports`.
+The analyzer never modifies the inspected build.
+
+See [Build Size Analyzer Guide](BUILD_SIZE_ANALYZER_GUIDE.md).
+
+## Milestone 47 Complete: UI Resolution and Localization Preview
+
+The UI Resolution and Localization Preview renders the active HUD outside Play mode at
+desktop, ultrawide, 4K, portrait, phone, and custom resolutions. It shares the runtime
+anchor rectangle calculation and adds configurable DPI scaling and horizontal or
+vertical safe areas. A resolution matrix reports layout errors across every standard
+preset without requiring manual switching.
+
+Engine-owned localization tables can be selected without changing the runtime language.
+The preview resolves localized and bound HUD text, simulates translation expansion and
+pseudo-localization, and mirrors anchors for detected or forced right-to-left layouts.
+Diagnostics identify screen clipping, safe-area violations, text overflow, missing keys
+or translations, missing font assets, unsupported glyphs, and non-ASCII built-in-font
+fallback. The active HUD and localization assets remain read-only.
+
+See [UI Resolution and Localization Preview Guide](UI_LOCALIZATION_PREVIEW_GUIDE.md).
+
+## Milestone 48 Complete: Plugin Manager
+
+The Plugin Manager asynchronously discovers `.3dgplugin` descriptors under the engine
+and active project plugin folders. It exposes searchable metadata and per-project
+enablement while validating IDs, API compatibility, source integration, declared
+binaries, required and optional minimum-version dependencies, duplicates, and cycles.
+
+Applying changes transactionally updates the saved project configuration and generates
+the CMake integration consumed by active-project builds. Required plugins remain enabled,
+invalid enabled plugins block apply, and native changes clearly require a project rebuild
+and editor restart. Plugin API 1 deliberately uses build-time CMake integration rather
+than unsafe ad-hoc DLL loading.
+
+See [Plugin Manager Guide](PLUGIN_MANAGER_GUIDE.md).
+
+## Editor Tool Roadmap Complete
+
+All 48 planned editor-tool milestones are implemented. Future tools can be added as new
+roadmap entries without changing the completed milestone history above.

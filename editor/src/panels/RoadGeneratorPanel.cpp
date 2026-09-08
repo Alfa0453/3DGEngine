@@ -44,12 +44,16 @@ void RoadGeneratorPanel::Preset(int preset) {
     else if (preset==3) { std::snprintf(m_name.data(),m_name.size(),"%s","Highway"); m_width=14; m_lanes=4; m_barriers=true; m_shoulderWidth=2; }
 }
 void RoadGeneratorPanel::RefreshMaterials(const std::string& root) {
-    m_assetRoot=root; m_materials.clear(); std::error_code ec;
+    m_assetRoot=root; m_materials.clear(); m_meshes.clear(); std::error_code ec;
     for(std::filesystem::recursive_directory_iterator it(root,std::filesystem::directory_options::skip_permission_denied,ec),end;it!=end;it.increment(ec)){
-        if(ec||!it->is_regular_file(ec)||Lower(it->path().extension().string())!=".3dgmat")continue;
-        m_materials.push_back({it->path().string(),it->path().stem().string()});
+        if(ec||!it->is_regular_file(ec))continue;
+        const std::string ext=Lower(it->path().extension().string());
+        if(ext==".3dgmat")m_materials.push_back({it->path().string(),it->path().stem().string()});
+        else if(ext==".3dgmesh")m_meshes.push_back({it->path().string(),it->path().stem().string()});
     }
-    std::sort(m_materials.begin(),m_materials.end(),[](const auto&a,const auto&b){return Lower(a.name)<Lower(b.name);});
+    auto byName=[](const auto&a,const auto&b){return Lower(a.name)<Lower(b.name);};
+    std::sort(m_materials.begin(),m_materials.end(),byName);
+    std::sort(m_meshes.begin(),m_meshes.end(),byName);
 }
 void RoadGeneratorPanel::MaterialCombo(const char* label,std::string& path){
     const std::string selected=path.empty()?"Default":std::filesystem::path(path).stem().string();
@@ -68,24 +72,46 @@ const std::string& RoadGeneratorPanel::MaterialFor(Surface surface)const{
     case Surface::Sidewalk:return m_sidewalkMaterial;case Surface::Barrier:return m_barrierMaterial;}
     return m_roadMaterial;
 }
+// Distinct ImGui id via the trailing "##..." so a mesh combo never collides with the
+// like-named material combo in the same window.
+void RoadGeneratorPanel::MeshCombo(const char* label,std::string& path){
+    const std::string selected=path.empty()?"Box (built-in)":std::filesystem::path(path).stem().string();
+    if(!ImGui::BeginCombo(label,selected.c_str()))return;
+    if(ImGui::Selectable("Box (built-in)",path.empty())){path.clear();m_dirty=true;}
+    for(const auto& mesh:m_meshes){
+        ImGui::PushID(mesh.path.c_str());
+        if(ImGui::Selectable(mesh.name.c_str(),mesh.path==path)){path=mesh.path;m_dirty=true;}
+        ImGui::PopID();
+    }
+    ImGui::EndCombo();
+}
+const std::string& RoadGeneratorPanel::MeshFor(Surface surface)const{
+    switch(surface){case Surface::Road:return m_roadMesh;case Surface::Shoulder:return m_shoulderMesh;
+    case Surface::Marking:return m_markingMesh;case Surface::Curb:return m_curbMesh;
+    case Surface::Sidewalk:return m_sidewalkMesh;case Surface::Barrier:return m_barrierMesh;}
+    return m_roadMesh;
+}
 bool RoadGeneratorPanel::Save(const std::string& root,std::string* error){
     std::filesystem::path path=m_path.empty()?std::filesystem::path(root)/"GameAssets"/"Roads"/(std::string(m_name.data())+".3dgroad"):m_path;
     std::error_code ec;std::filesystem::create_directories(path.parent_path(),ec);std::ofstream out(path,std::ios::trunc);
     if(!out){if(error)*error="Could not save road asset.";return false;}if(!m_assetId.Valid())m_assetId=engine::AssetHandle::Generate();
-    out<<"3DG_ROAD 1 "<<m_assetId.ToString()<<'\n'<<"name "<<std::quoted(std::string(m_name.data()))<<'\n';
+    out<<"3DG_ROAD 2 "<<m_assetId.ToString()<<'\n'<<"name "<<std::quoted(std::string(m_name.data()))<<'\n';
     out<<"spline "<<std::quoted(m_splineName)<<'\n';
     out<<"shape "<<m_width<<' '<<m_thickness<<' '<<m_spacing<<' '<<m_lanes<<' '<<m_shoulderWidth<<' '<<m_markingWidth<<' '<<m_markingHeight<<' '<<m_curbWidth<<' '<<m_curbHeight<<' '<<m_sidewalkWidth<<' '<<m_sidewalkHeight<<' '<<m_barrierHeight<<' '<<m_terrainOffset<<'\n';
     out<<"flags "<<m_shoulders<<' '<<m_markings<<' '<<m_curbs<<' '<<m_sidewalks<<' '<<m_barriers<<' '<<m_endCaps<<' '<<m_conformTerrain<<' '<<m_colliders<<'\n';
     out<<"materials "<<std::quoted(m_roadMaterial)<<' '<<std::quoted(m_shoulderMaterial)<<' '<<std::quoted(m_markingMaterial)<<' '<<std::quoted(m_curbMaterial)<<' '<<std::quoted(m_sidewalkMaterial)<<' '<<std::quoted(m_barrierMaterial)<<'\n';
+    out<<"meshes "<<std::quoted(m_roadMesh)<<' '<<std::quoted(m_shoulderMesh)<<' '<<std::quoted(m_markingMesh)<<' '<<std::quoted(m_curbMesh)<<' '<<std::quoted(m_sidewalkMesh)<<' '<<std::quoted(m_barrierMesh)<<'\n';
     if(!out.good()){if(error)*error="Failed while writing road asset.";return false;}m_path=path.string();m_dirty=false;return true;
 }
 bool RoadGeneratorPanel::Load(const std::string& path,std::string* error){
     std::ifstream in(path);std::string magic,id,key,name;int version=0;
-    if(!(in>>magic>>version>>id)||magic!="3DG_ROAD"||version!=1||!engine::AssetHandle::Parse(id,&m_assetId)){if(error)*error="Invalid road asset.";return false;}
+    if(!(in>>magic>>version>>id)||magic!="3DG_ROAD"||version<1||version>2||!engine::AssetHandle::Parse(id,&m_assetId)){if(error)*error="Invalid road asset.";return false;}
     in>>key>>std::quoted(name);std::snprintf(m_name.data(),m_name.size(),"%s",name.c_str());in>>key>>std::quoted(m_splineName);
     in>>key>>m_width>>m_thickness>>m_spacing>>m_lanes>>m_shoulderWidth>>m_markingWidth>>m_markingHeight>>m_curbWidth>>m_curbHeight>>m_sidewalkWidth>>m_sidewalkHeight>>m_barrierHeight>>m_terrainOffset;
     in>>key>>m_shoulders>>m_markings>>m_curbs>>m_sidewalks>>m_barriers>>m_endCaps>>m_conformTerrain>>m_colliders;
     in>>key>>std::quoted(m_roadMaterial)>>std::quoted(m_shoulderMaterial)>>std::quoted(m_markingMaterial)>>std::quoted(m_curbMaterial)>>std::quoted(m_sidewalkMaterial)>>std::quoted(m_barrierMaterial);
+    m_roadMesh.clear();m_shoulderMesh.clear();m_markingMesh.clear();m_curbMesh.clear();m_sidewalkMesh.clear();m_barrierMesh.clear();
+    if(version>=2)in>>key>>std::quoted(m_roadMesh)>>std::quoted(m_shoulderMesh)>>std::quoted(m_markingMesh)>>std::quoted(m_curbMesh)>>std::quoted(m_sidewalkMesh)>>std::quoted(m_barrierMesh);
     if(!in){if(error)*error="Road asset data is incomplete.";return false;}m_path=path;m_dirty=false;return true;
 }
 
@@ -127,6 +153,8 @@ RoadGeneratorPanel::Result RoadGeneratorPanel::Draw(const EditorScene& scene,con
     m_dirty|=ImGui::Checkbox("End Caps",&m_endCaps);ImGui::SameLine();m_dirty|=ImGui::Checkbox("Colliders",&m_colliders);ImGui::SameLine();ImGui::Checkbox("Replace Existing",&m_replace);
     m_dirty|=ImGui::Checkbox("Conform to Terrain",&m_conformTerrain);if(m_conformTerrain){ImGui::SameLine();m_dirty|=ImGui::DragFloat("Surface Offset",&m_terrainOffset,.01f,-2.f,2.f,"%.2f m");}
     ImGui::SeparatorText("Materials");MaterialCombo("Road",m_roadMaterial);MaterialCombo("Shoulder",m_shoulderMaterial);MaterialCombo("Markings",m_markingMaterial);MaterialCombo("Curbs",m_curbMaterial);MaterialCombo("Sidewalk",m_sidewalkMaterial);MaterialCombo("Barrier",m_barrierMaterial);
+    ImGui::SeparatorText("Meshes");ImGui::TextDisabled("Imported .3dgmesh assets are scaled to each piece; leave as Box for the default look.");
+    MeshCombo("Road##mesh",m_roadMesh);MeshCombo("Shoulder##mesh",m_shoulderMesh);MeshCombo("Markings##mesh",m_markingMesh);MeshCombo("Curbs##mesh",m_curbMesh);MeshCombo("Sidewalk##mesh",m_sidewalkMesh);MeshCombo("Barrier##mesh",m_barrierMesh);
     const auto* spline=FindSpline(scene,m_splineName);if(spline){engine::Spline curve(spline->splinePoints,spline->splineClosed);ImGui::Text("Length %.1f m | %d generated pieces",curve.Length(),static_cast<int>(GenerateParts(spline->splinePoints,spline->splineClosed).size()));}else ImGui::TextDisabled("Create a spline, then select it here.");
     if(m_dirty)ImGui::TextColored({1,.7f,.2f,1},"Unsaved changes");if(!m_status.empty())ImGui::TextWrapped("%s",m_status.c_str());ImGui::End();return result;
 }

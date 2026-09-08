@@ -6,6 +6,10 @@
 #include "NativeDialog.h"
 
 #include <engine/core/Paths.h>
+#include <engine/core/LaunchAuthority.h>   // mint the launcher-authority token
+
+#include <chrono>
+#include <random>
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -193,17 +197,40 @@ bool LauncherApp::LaunchEditor(const std::string& projectFile, std::string& erro
         error = "The selected project file no longer exists.";
         return false;
     }
-    const std::filesystem::path editorPath =
-        std::filesystem::path(engine::ExecutableDir()) / "3DGEditor.exe";
-    if (!std::filesystem::is_regular_file(editorPath, ec)) {
-        error = "3DGEditor.exe was not found beside the launcher.";
+    // Resolve the editor runtime. The launcher is the only exe at the dist root; the editor lives in
+    // the 'engine' payload subdir (installed), beside the launcher (dev/flat bin), or inside the
+    // opened project (per-project deployment). Try each in that order.
+    const std::filesystem::path launcherDir(engine::ExecutableDir());
+    const std::filesystem::path projectDir = project.parent_path();
+    const std::filesystem::path candidates[] = {
+        launcherDir / "engine" / "3DGEditor.exe",     // installed: launcher at root, editor in engine/
+        launcherDir / "3DGEditor.exe",                // dev/flat build (bin/editor)
+        projectDir  / "engine" / "3DGEditor.exe",     // per-project deployed engine runtime
+    };
+    std::filesystem::path editorPath;
+    for (const std::filesystem::path& c : candidates) {
+        if (std::filesystem::is_regular_file(c, ec)) { editorPath = c; break; }
+    }
+    if (editorPath.empty()) {
+        error = "3DGEditor.exe was not found (looked in engine/, beside the launcher, and the project).";
         return false;
     }
+
+    // Mint a fresh, project-bound authority token. The editor validates it and refuses to open
+    // without it -- so the launcher is the only way to start the editor.
+    const std::uint64_t nowMs = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+    std::random_device rd;
+    const std::uint64_t nonce = (static_cast<std::uint64_t>(rd()) << 32) ^ static_cast<std::uint64_t>(rd());
+    const std::string launchToken = engine::MintLaunchToken(project.string(), nowMs, nonce);
+    const std::string tokenArg = std::string(engine::kLaunchTokenFlag) + launchToken;
 
 #if defined(_WIN32)
     const std::wstring editor = Utf8ToWide(editorPath.string());
     const std::wstring selected = Utf8ToWide(project.string());
-    std::wstring command = L"\"" + editor + L"\" \"" + selected + L"\"";
+    const std::wstring tokenW = Utf8ToWide(tokenArg);
+    std::wstring command = L"\"" + editor + L"\" " + tokenW + L" \"" + selected + L"\"";
     std::vector<wchar_t> mutableCommand(command.begin(), command.end());
     mutableCommand.push_back(L'\0');
     STARTUPINFOW startup{};
@@ -219,7 +246,7 @@ bool LauncherApp::LaunchEditor(const std::string& projectFile, std::string& erro
     CloseHandle(process.hThread);
     CloseHandle(process.hProcess);
 #else
-    const std::string command = "\"" + editorPath.string() + "\" \""
+    const std::string command = "\"" + editorPath.string() + "\" " + tokenArg + " \""
         + project.string() + "\" &";
     if (std::system(command.c_str()) != 0) {
         error = "Could not start the editor.";

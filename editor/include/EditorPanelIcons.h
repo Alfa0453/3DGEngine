@@ -81,6 +81,18 @@ inline const char* ForPanel(EditorPanels::Panel panel) {
     case P::CharacterEquipment: return Settings;
     case P::RenderDebugger: return Screen;
     case P::FrameCaptureAnalyzer: return Screen;
+    case P::MemoryProfiler: return Settings;
+    case P::CollisionAnalyzer: return Link;
+    case P::NavigationQuery: return Link;
+    case P::AiPerceptionDebugger: return Contact;
+    case P::AutomatedTest: return Settings;
+    case P::LocalizationEditor: return Document;
+    case P::AssetReferenceRepair: return Link;
+    case P::SourceControl: return Code;
+    case P::ProjectMigration: return Archive;
+    case P::BuildSizeAnalyzer: return Archive;
+    case P::UiLocalizationPreview: return Screen;
+    case P::PluginManager: return Settings;
     case P::Count: break;
     }
     return Document;

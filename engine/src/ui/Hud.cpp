@@ -5,6 +5,7 @@
 #include "engine/ecs/Components.h"
 #include "engine/ecs/Registry.h"
 #include "engine/gameplay/GameplayComponents.h"
+#include "engine/gameplay/Localization.h"
 #include "engine/graphics/TextRenderer.h"
 #include "engine/graphics/Shader.h"
 #include "engine/physics/PhysicsComponents.h"
@@ -105,24 +106,26 @@ std::string Substitute(const std::string& tmpl, const std::string& value) {
 }
 
 std::string ResolveText(const HudWidget& w, const HudContext& ctx) {
+    const std::string authored = w.localizationKey.empty()
+        ? w.text : Localization::Instance().Text(w.localizationKey, w.text);
     switch (w.binding) {
         case HudBinding::HealthText: {
             const std::string v = FormatNumber(ctx.health) + "/" + FormatNumber(ctx.maxHealth);
-            return Substitute(w.text, v);
+            return Substitute(authored, v);
         }
         case HudBinding::NamedFloat: {
             auto it = ctx.floats.find(w.bindKey);
             const float v = it != ctx.floats.end() ? it->second : 0.0f;
-            return Substitute(w.text, FormatNumber(v));
+            return Substitute(authored, FormatNumber(v));
         }
         case HudBinding::NamedString: {
             auto it = ctx.strings.find(w.bindKey);
-            return Substitute(w.text, it != ctx.strings.end() ? it->second : std::string());
+            return Substitute(authored, it != ctx.strings.end() ? it->second : std::string());
         }
         case HudBinding::HealthFraction:
         case HudBinding::None:
         default:
-            return w.text;
+            return authored;
     }
 }
 
@@ -412,7 +415,7 @@ bool HudDocument::Save(const std::string& path, std::string* error) {
         if (error) *error = "Could not open '" + path + "' for writing";
         return false;
     }
-    out << "3DG_HUD 3 " << assetId.ToString() << '\n';
+    out << "3DG_HUD 4 " << assetId.ToString() << '\n';
     out << "design " << designSize.x << ' ' << designSize.y << '\n';
     out << "count " << widgets.size() << '\n';
     for (const HudWidget& w : widgets) {
@@ -434,6 +437,7 @@ bool HudDocument::Save(const std::string& path, std::string* error) {
             << SanitizeToken(w.bindKey) << ' '
             << SanitizeToken(w.imageAsset) << '\n';
         out << "t " << w.text << '\n';
+        out << "l " << std::quoted(w.localizationKey) << '\n';
         out << "s " << std::quoted(w.shaderPath) << ' '
             << (w.imageAssetId.Valid() ? w.imageAssetId.ToString() : std::string("-")) << ' '
             << (w.shaderAssetId.Valid() ? w.shaderAssetId.ToString() : std::string("-")) << ' '
@@ -530,6 +534,13 @@ bool HudDocument::Load(const std::string& path, std::string* error) {
             if (std::getline(in, textLine)) {
                 if (textLine.rfind("t ", 0) == 0) w.text = textLine.substr(2);
                 else if (textLine == "t") w.text.clear();
+            }
+            if (fileVersion >= 4) {
+                std::string localizationLine, localizationTag;
+                if (!std::getline(in, localizationLine)) { if (error) *error = "Missing HUD localization record"; return false; }
+                std::istringstream localizationStream(localizationLine);
+                localizationStream >> localizationTag >> std::quoted(w.localizationKey);
+                if (localizationTag != "l" || !localizationStream) { if (error) *error = "Malformed HUD localization record"; return false; }
             }
             if (fileVersion >= 2) {
                 std::string shaderLine;

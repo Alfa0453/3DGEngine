@@ -36,6 +36,16 @@ bool OpenScriptIdeProject(PreferredCodeEditor editor,
                           const std::filesystem::path& projectRoot,
                           std::string* error = nullptr);
 
+// Unreal-style "open script": ensure the gameplay script workspace/solution exists (generate if
+// missing), open OR REUSE the IDE instance for it, and focus `scriptPath` inside that workspace. If
+// focusing the file is unreliable for the chosen IDE, the workspace still opens (best-effort focus).
+bool OpenScriptInWorkspace(PreferredCodeEditor editor,
+                           const std::string& customExecutable,
+                           const std::filesystem::path& scriptPath,
+                           const std::filesystem::path& projectRoot,
+                           std::string* error = nullptr,
+                           int line = 0, int column = 0);
+
 // Synchronously builds a single CMake target (e.g. "player") and waits for it to finish.
 // Output goes to <projectRoot>/build/target_build.log. Used at cook time so the packaged
 // player has current scripts even though the iterate loop only rebuilds the editor.
@@ -64,7 +74,9 @@ bool PackageProject(const std::filesystem::path& projectRoot,
 std::filesystem::path ExecutableDirectory();
 std::filesystem::path EngineSourceDirectory();
 std::filesystem::path EngineBuildDirectory();
-std::filesystem::path ProjectScriptBinary(const std::filesystem::path& projectRoot);
+std::string HostBuildConfiguration();
+std::filesystem::path ProjectScriptBinary(const std::filesystem::path& projectRoot,
+                                          const std::string& configuration = {});
 // Legacy two-slot path retained for compatibility with old projects. New builds use a
 // unique generation path so no loaded image is ever overwritten.
 std::filesystem::path ProjectScriptStagingPath(const std::filesystem::path& projectRoot,

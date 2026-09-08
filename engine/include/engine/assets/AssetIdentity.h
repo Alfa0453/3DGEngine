@@ -81,7 +81,9 @@ enum class AssetType : std::uint32_t {
     SaveProfile, // checkpoints, slots and persistence rules (.3dgsaveprofile)
     IKRig, // reusable inverse-kinematics rig (.3dgikrig)
     PoseLibrary, // named skeletal poses (.3dgpose)
-    EquipmentSet // socketed character equipment catalog (.3dgequipment)
+    EquipmentSet, // socketed character equipment catalog (.3dgequipment)
+    VisualScript, // node-graph gameplay script (.3dgvs)
+    Localization // localized text and asset variants (.3dgloc)
 };
 
 const char* AssetTypeName(AssetType type);

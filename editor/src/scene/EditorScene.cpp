@@ -559,7 +559,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         return false;
     }
 
-    out << "3DGEditorScene 155 " << m_assetId.ToString() << '\n';
+    out << "3DGEditorScene " << CurrentFileVersion << ' ' << m_assetId.ToString() << '\n';
     out << "environment "
         << m_environment.timeOfDay << ' '
         << m_environment.skyLightIntensity << ' '
@@ -1246,6 +1246,9 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
             << ' ' << object.rigidBody.centerOfMassLocal.x
             << ' ' << object.rigidBody.centerOfMassLocal.y
             << ' ' << object.rigidBody.centerOfMassLocal.z;
+        // Visual Script graph handle (scene version 156+). Tail of the object record.
+        out << ' ' << (object.visualScriptGraph.Valid() ? object.visualScriptGraph.ToString()
+                                                         : std::string("-"));
         out << '\n';
     }
 
@@ -1694,7 +1697,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             return false;
         }
     }
-    if (magic != "3DGEditorScene" ||(version < 1 || version > 155)) {
+    if (magic != "3DGEditorScene" ||(version < 1 || version > CurrentFileVersion)) {
         if (error) *error = "Scene file has an unknown format.";
         return false;
     }
@@ -2858,6 +2861,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         int locked = 0;
         std::string modelAssetPath;
         engine::AssetHandle modelAssetId;
+        engine::AssetHandle visualScriptGraph;   // scene version 156+
         engine::AssetHandle materialAssetId;
         std::string materialAssetPath;
         glm::vec3 modelOrientationEuler{0.0f};
@@ -3915,6 +3919,12 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                    >> rigidBody.centerOfMassLocal.y >> rigidBody.centerOfMassLocal.z;
                 rigidBody.autoCenterOfMass = autoCom != 0;
             }
+            // Visual Script graph handle (scene version 156+; tail of the object record).
+            if (version >= 156) {
+                std::string vsToken;
+                in >> vsToken;
+                if (vsToken != "-") engine::AssetHandle::Parse(vsToken, &visualScriptGraph);
+            }
             particleShape = std::clamp(particleShape,
                 static_cast<int>(engine::EmitShape::Point), static_cast<int>(engine::EmitShape::Cone));
             particleBlend = std::clamp(particleBlend,
@@ -3935,6 +3945,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         m_objects.back().locked = locked != 0;
         m_objects.back().modelAssetPath = modelAssetPath;
         m_objects.back().modelAssetId = modelAssetId;
+        m_objects.back().visualScriptGraph = visualScriptGraph;
         m_objects.back().materialAssetPath = materialAssetPath;
         m_objects.back().materialAssetId = materialAssetId;
         m_objects.back().modelOrientationEuler = modelOrientationEuler;
@@ -5359,6 +5370,19 @@ bool EditorScene::SetSelectedModelAsset(
     PushUndoSnapshot();
     selected.modelAssetPath = path;
     selected.modelAssetId = id;
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedVisualScript(engine::AssetHandle graph)
+{
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) {
+        return false;
+    }
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) return false;
+    PushUndoSnapshot();
+    selected.visualScriptGraph = graph;
     m_dirty = true;
     return true;
 }
@@ -7602,6 +7626,7 @@ bool EditorScene::DuplicateSelected(const engine::Mesh & cube, const engine::Mes
     CreateObject(selectedCopy.name, selectedCopy.primitive, mesh, duplicateTransform, duplicateColor);
     m_objects.back().editorGroupId = selectedCopy.editorGroupId;
     m_objects.back().modelAssetPath = selectedCopy.modelAssetPath;
+    m_objects.back().visualScriptGraph = selectedCopy.visualScriptGraph;
     m_objects.back().materialAssetPath = selectedCopy.materialAssetPath;
     m_objects.back().decal = selectedCopy.decal;
     m_objects.back().decalOpacity = selectedCopy.decalOpacity;

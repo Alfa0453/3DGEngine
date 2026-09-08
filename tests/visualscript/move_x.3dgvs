@@ -1,0 +1,51 @@
+3DG_VISUAL_SCRIPT 1 00000000000000010000000000000002
+graph 2
+nodes 6
+node 1 "Event.Update" 0 0
+  props 0
+  in 0
+  out 2
+    pin 1 1 0 Exec "Then" Exec
+    pin 2 1 1 Float "DeltaTime" Float 0
+node 2 "Const.Vector3" 0 180
+  props 1
+    "value" Vector3 1 0 0
+  in 0
+  out 1
+    pin 1 1 1 Vector3 "Value" Vector3 1 0 0
+node 3 "Math.ScaleVector3" 240 180
+  props 0
+  in 2
+    pin 1 0 1 Vector3 "V" Vector3 0 0 0
+    pin 2 0 1 Float "S" Float 1
+  out 1
+    pin 3 1 1 Vector3 "Result" Vector3 0 0 0
+node 4 "Transform.GetPosition" 240 0
+  props 0
+  in 1
+    pin 1 0 1 Entity "Entity" Entity 4294967295
+  out 1
+    pin 2 1 1 Vector3 "Position" Vector3 0 0 0
+node 5 "Math.AddVector3" 480 80
+  props 0
+  in 2
+    pin 1 0 1 Vector3 "A" Vector3 0 0 0
+    pin 2 0 1 Vector3 "B" Vector3 0 0 0
+  out 1
+    pin 3 1 1 Vector3 "Result" Vector3 0 0 0
+node 6 "Transform.SetPosition" 720 0
+  props 0
+  in 3
+    pin 1 0 0 Exec "In" Exec
+    pin 2 0 1 Entity "Entity" Entity 4294967295
+    pin 3 0 1 Vector3 "Position" Vector3 0 0 0
+  out 1
+    pin 4 1 0 Exec "Then" Exec
+links 6
+link 1 1 1 6 1
+link 2 1 2 3 2
+link 3 2 1 3 1
+link 4 4 2 5 1
+link 5 3 3 5 2
+link 6 5 3 6 3
+vars 0

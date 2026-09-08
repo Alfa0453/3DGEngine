@@ -96,6 +96,7 @@ bool HudEditorPanel::SaveForShutdown(HudDocument& doc, std::string* error) {
 HudEditorPanel::Result HudEditorPanel::Draw(HudDocument& doc,
                                             const std::string& assetRoot, bool* open,
                                             const std::vector<std::string>& imageChoices,
+                                            const std::vector<std::string>& fontChoices,
                                             const std::function<unsigned int(const std::string&)>& texLookup,
                                             const engine::HudContext* previewContext) {
     Result result;
@@ -299,7 +300,66 @@ HudEditorPanel::Result HudEditorPanel::Draw(HudDocument& doc,
             char textBuf[256];
             std::snprintf(textBuf, sizeof(textBuf), "%s", w.text.c_str());
             if (ImGui::InputText("Text", textBuf, sizeof(textBuf))) w.text = textBuf;
+            char localizationBuf[256];
+            std::snprintf(localizationBuf, sizeof(localizationBuf), "%s", w.localizationKey.c_str());
+            if (ImGui::InputTextWithHint("Localization Key", "UI.Menu.Play", localizationBuf, sizeof(localizationBuf)))
+                w.localizationKey = localizationBuf;
             ImGui::DragFloat("Text Scale", &w.textScale, 0.02f, 0.2f, 8.0f);
+
+            // Font system upgrade -- per-widget font authoring (Phases 11/13/24/25).
+            ImGui::SeparatorText("Font");
+            ImGui::Text("Font: %s", w.fontAssetPath.empty() ? "(built-in bitmap)"
+                                                            : w.fontAssetPath.c_str());
+
+            // Searchable .3dgfont picker (same pattern as the Image dropdown). Selecting "(built-in
+            // font)" clears the reference so the widget uses the built-in bitmap font.
+            ImGui::SetNextItemWidth(-70.0f);
+            ImGui::InputTextWithHint("##fontfilter", "search fonts", m_fontFilter, sizeof(m_fontFilter));
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Refresh##fonts")) result.refreshFontsRequested = true;
+
+            std::string fontFilter = m_fontFilter;
+            std::transform(fontFilter.begin(), fontFilter.end(), fontFilter.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+            if (ImGui::BeginListBox("##hudfonts", ImVec2(-FLT_MIN, 120.0f))) {
+                if (ImGui::Selectable("(built-in font)", w.fontAssetPath.empty())) {
+                    w.fontAssetPath.clear();
+                    w.fontAssetId = engine::AssetHandle{};
+                }
+                for (const std::string& font : fontChoices) {
+                    if (!fontFilter.empty()) {
+                        std::string low = font;
+                        std::transform(low.begin(), low.end(), low.begin(),
+                                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                        if (low.find(fontFilter) == std::string::npos) continue;
+                    }
+                    ImGui::PushID(font.c_str());
+                    if (ImGui::Selectable(font.c_str(), font == w.fontAssetPath))
+                        w.fontAssetPath = font;   // fontAssetId is resolved from the path on save/load
+                    ImGui::PopID();
+                }
+                ImGui::EndListBox();
+            }
+            if (fontChoices.empty()) {
+                ImGui::TextDisabled("No .3dgfont assets found. Import a .ttf, then Refresh.");
+            }
+
+            // Font size in pixels; 0 means "derive from Text Scale" (legacy compatible).
+            ImGui::DragFloat("Font Size (px)", &w.fontSize, 0.5f, 0.0f, 512.0f, "%.0f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("0 = derive from Text Scale (8 * scale)");
+
+            const char* hAligns[] = { "Left", "Center", "Right" };
+            const char* vAligns[] = { "Top", "Middle", "Bottom" };
+            int h = (w.hAlign >= 0 && w.hAlign < 3) ? w.hAlign : 0;
+            int v = (w.vAlign >= 0 && w.vAlign < 3) ? w.vAlign : 0;
+            if (ImGui::Combo("Horizontal", &h, hAligns, 3)) w.hAlign = h;
+            if (ImGui::Combo("Vertical", &v, vAligns, 3)) w.vAlign = v;
+            if (w.type == HudWidgetType::Text) {
+                const char* wraps[] = { "None", "Word" };
+                int wr = (w.wrapMode >= 0 && w.wrapMode < 2) ? w.wrapMode : 0;
+                if (ImGui::Combo("Wrap", &wr, wraps, 2)) w.wrapMode = wr;
+            }
         }
 
         // Colours per type.

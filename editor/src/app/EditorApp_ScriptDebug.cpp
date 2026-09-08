@@ -10,6 +10,8 @@
 #include <game/GameModule.h>
 #include <engine/ai/BtScript.h>
 #include <engine/gameplay/GameMode.h>
+#include <engine/gameplay/LuaScript.h>           // IsLuaScriptPath
+#include <engine/gameplay/ScriptDiagnostics.h>   // Scripting Pass 5: WorldScriptStats
 
 #include <imgui.h>
 
@@ -82,6 +84,16 @@ std::vector<std::string> ScanLuaTestSources(
 
 // Render one script slot's fields as live-editable widgets. Mutates slot.fields[i].value
 // directly (the running script reads these on its next update).
+// Scripting Pass 5: tally the running scene's script instances into the Phase-1 per-world summary.
+// Counts main + additional slots that actually carry a class; Lua vs C++ from the source path.
+void AccumulateSlotStats(const engine::NativeScriptSlot& slot, engine::script::WorldScriptStats& out) {
+    if (slot.className.empty() && slot.sourcePath.empty()) return;
+    ++out.total;
+    if (engine::IsLuaScriptPath(slot.sourcePath)) ++out.lua; else ++out.cpp;
+    if (!slot.enabled) ++out.disabled;
+    if (slot.missingFactory || !slot.dependencyError.empty()) ++out.error;
+}
+
 void DrawScriptDebugSlot(engine::NativeScriptSlot& slot, int idSalt) {
     ImGui::PushID(idSalt);
     bool enabled = slot.enabled;
@@ -341,6 +353,27 @@ void EditorApp::DrawScriptDebugPanel() {
         }
     }
 
+    // Scripting Pass 5 (Phase 1): per-world summary computed from the live script slots.
+    {
+        engine::script::WorldScriptStats worldStats;
+        for (const auto& entry : m_playEntityNames) {
+            const engine::ecs::Entity entity = entry.first;
+            if (!m_playRegistry->Valid(entity)) continue;
+            if (const engine::NativeScriptComponent* sc =
+                    m_playRegistry->TryGet<engine::NativeScriptComponent>(entity)) {
+                AccumulateSlotStats(*sc, worldStats);
+                for (const engine::NativeScriptSlot& add : sc->additional) AccumulateSlotStats(add, worldStats);
+            }
+        }
+        ImGui::SeparatorText("Script World");
+        ImGui::Text("Instances: %d   C++: %d   Lua: %d", worldStats.total, worldStats.cpp, worldStats.lua);
+        ImGui::SameLine();
+        if (worldStats.disabled > 0) ImGui::TextColored(ImVec4(0.7f,0.7f,0.7f,1.0f), "  Disabled: %d", worldStats.disabled);
+        else ImGui::TextDisabled("  Disabled: 0");
+        if (worldStats.error > 0) ImGui::TextColored(ImVec4(0.9f,0.4f,0.3f,1.0f), "Errored: %d", worldStats.error);
+        else ImGui::TextDisabled("Errored: 0");
+    }
+
     ImGui::Separator();
     ImGui::TextDisabled("Live values - edits apply on the script's next update.");
     ImGui::Separator();
@@ -437,7 +470,8 @@ void EditorApp::StartScriptAutoBuild() {
                     return result;
                 }
                 if (!EditorScriptTools::BuildTarget(
-                        projectRoot, "Debug", "game_scripts", &result.error)) {
+                        projectRoot, EditorScriptTools::HostBuildConfiguration(),
+                        "game_scripts", &result.error)) {
                     return result;
                 }
                 const std::filesystem::path built =
@@ -643,6 +677,46 @@ bool EditorApp::InstallProjectScriptCandidate(
 
     std::vector<std::string> candidateScriptNames = candidateScripts.Names();
     std::vector<std::string> candidateBtNames = candidateBtScripts.Names();
+    std::string collision;
+    const engine::ScriptRegistry& activeScripts = engine::ScriptRegistry::Instance();
+    for (const std::string& name : candidateScriptNames) {
+        const bool belongsToCurrentProject = std::find(
+            m_projectScriptClasses.begin(), m_projectScriptClasses.end(), name)
+            != m_projectScriptClasses.end();
+        if (activeScripts.Has(name) && !belongsToCurrentProject) {
+            collision = "Project script class '" + name
+                + "' conflicts with an engine or built-in script.";
+            break;
+        }
+    }
+    const engine::ai::BtScriptRegistry& activeBtScripts =
+        engine::ai::BtScriptRegistry::Instance();
+    if (collision.empty()) {
+        for (const std::string& name : candidateBtNames) {
+            const bool belongsToCurrentProject = std::find(
+                m_projectBtScriptClasses.begin(), m_projectBtScriptClasses.end(), name)
+                != m_projectBtScriptClasses.end();
+            if (activeBtScripts.Has(name) && !belongsToCurrentProject) {
+                collision = "Project behavior script '" + name
+                    + "' conflicts with an engine or built-in behavior script.";
+                break;
+            }
+        }
+    }
+    if (!collision.empty()) {
+        candidateScripts.Clear();
+        candidateBtScripts.Clear();
+        candidateModule.Unload();
+        std::string quarantineError;
+        EditorScriptTools::QuarantineScriptModule(
+            projectRoot, candidate, generation, nullptr, &quarantineError);
+        EditorScriptTools::ClearScriptModuleLoadMarker(projectRoot, nullptr);
+        m_scriptModuleInstallInProgress = false;
+        m_projectScriptModuleState = ProjectScriptModuleState::LoadFailed;
+        m_log.Error(collision + " Rename the project class and rebuild scripts.");
+        if (!quarantineError.empty()) m_log.Warning(quarantineError);
+        return false;
+    }
     const bool wasPaused = engine::GetScriptDebugState().paused;
     engine::SetScriptExecutionPaused(true);
     m_projectScriptModuleState = ProjectScriptModuleState::Reloading;
@@ -850,7 +924,11 @@ void EditorApp::AcknowledgeCreatedScriptSource() {
     m_scriptSourceSnapshotInitialized = true;
     m_scriptBuildPending = false;
     m_scriptBuildDebounce = 0.0f;
-    m_scriptBuildStatus = m_projectScriptSafeMode
-        ? "SAFE MODE - edit and save, then rebuild project scripts"
-        : "Script created - waiting for the first source edit/save";
+    if (m_projectScriptSafeMode) {
+        m_scriptBuildStatus = "SAFE MODE - rebuild project scripts manually";
+    } else if (m_autoCompileScripts) {
+        StartScriptAutoBuild();
+    } else {
+        m_scriptBuildStatus = "Script created - automatic compilation is off";
+    }
 }

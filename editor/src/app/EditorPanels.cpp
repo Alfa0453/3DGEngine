@@ -112,6 +112,19 @@ const char* PlainPanelName(EditorPanels::Panel panel)
     case Panel::CharacterEquipment: return "Character Equipment Editor";
     case Panel::RenderDebugger: return "Render Debugger";
     case Panel::FrameCaptureAnalyzer: return "Frame Capture Analyzer";
+    case Panel::MemoryProfiler: return "Memory Profiler";
+    case Panel::CollisionAnalyzer: return "Collision Analyzer";
+    case Panel::NavigationQuery: return "Navigation Query Tool";
+    case Panel::AiPerceptionDebugger: return "AI Perception Debugger";
+    case Panel::AutomatedTest: return "Automated Test Panel";
+    case Panel::LocalizationEditor: return "Localization Editor";
+    case Panel::AssetReferenceRepair: return "Asset Reference Repair";
+    case Panel::SourceControl: return "Source Control";
+    case Panel::ProjectMigration: return "Project Migration";
+    case Panel::BuildSizeAnalyzer: return "Build Size Analyzer";
+    case Panel::UiLocalizationPreview: return "UI Resolution & Localization Preview";
+    case Panel::PluginManager: return "Plugin Manager";
+    case Panel::VisualScriptEditor: return "Visual Script Editor";
     case Panel::Count:     break;
     }
     return "Panel";
@@ -186,6 +199,12 @@ EditorPanels::Group EditorPanels::GroupOf(Panel panel)
     case Panel::MeshEditor:
     case Panel::Prefab:
     case Panel::TerrainCreator:
+    case Panel::LocalizationEditor:
+    case Panel::AssetReferenceRepair:
+    case Panel::SourceControl:
+    case Panel::ProjectMigration:
+    case Panel::UiLocalizationPreview:
+    case Panel::PluginManager:
         return Group::Content;
 
     case Panel::AnimationPreview:
@@ -208,6 +227,7 @@ EditorPanels::Group EditorPanels::GroupOf(Panel panel)
     case Panel::BehaviorGraph:
     case Panel::ScriptApi:
     case Panel::ScriptDebug:
+    case Panel::VisualScriptEditor:
         return Group::AiScripting;
 
     case Panel::ModularPlacement:
@@ -247,6 +267,12 @@ EditorPanels::Group EditorPanels::GroupOf(Panel panel)
     case Panel::AssetDependencyViewer:
     case Panel::RenderDebugger:
     case Panel::FrameCaptureAnalyzer:
+    case Panel::MemoryProfiler:
+    case Panel::CollisionAnalyzer:
+    case Panel::NavigationQuery:
+    case Panel::AiPerceptionDebugger:
+    case Panel::AutomatedTest:
+    case Panel::BuildSizeAnalyzer:
         return Group::Debug;
 
     case Panel::Count:

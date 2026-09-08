@@ -1957,6 +1957,7 @@ void PhysicsWorld::Step(ecs::Registry& reg, float dt) {
         if (mit) {
             const ContactManifold& m = m_manifolds[*mit];
             ev.normal = m.normal;
+            ev.penetration = m.penetration;
             glm::vec3 avg(0.0f);
             for (int k = 0; k < m.count; ++k) avg += m.points[k];
             if (m.count > 0) avg /= static_cast<float>(m.count);

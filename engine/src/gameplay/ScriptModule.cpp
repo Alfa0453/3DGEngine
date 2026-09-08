@@ -1,6 +1,7 @@
 #include "engine/gameplay/ScriptModule.h"
 
 #include "engine/gameplay/Script.h"   // ScriptRegistry (passed by reference to the DLL)
+#include "engine/gameplay/ScriptModuleAbi.h"
 #include "engine/ai/BtScript.h"
 
 #include <exception>
@@ -62,22 +63,83 @@ bool ScriptModule::Load(const std::string& path, ScriptRegistry& registry,
             + "' uses an incompatible or missing 3DG scripting API version.";
         return false;
     }
+    auto moduleInfo = reinterpret_cast<script::GetScriptModuleInfoFn>(
+        reinterpret_cast<void*>(GetProcAddress(handle, "Get3DGScriptModuleInfo")));
+    if (moduleInfo) {
+        script::ReloadDiagnostics diagnostics;
+        script::ScriptModuleAbiExpectation expectation;
+        expectation.hasRegisterExport = entry != nullptr;
+        script::ScriptModuleInfo info;
+        try {
+            info = moduleInfo();
+        } catch (...) {
+            FreeLibrary(handle);
+            if (error) *error = "Script module '" + path
+                + "' failed while reporting ABI information.";
+            return false;
+        }
+        if (!script::ValidateModuleAbi(expectation, info, diagnostics)) {
+            FreeLibrary(handle);
+            if (error) {
+                *error = "Script module '" + path + "' is incompatible";
+                for (const std::string& diagnostic : diagnostics.errors) {
+                    *error += ": " + diagnostic;
+                }
+            }
+            return false;
+        }
+    }
+    // Registration is transactional. Module code never writes directly into the
+    // live registries, so a throw or duplicate cannot erase/replace built-ins.
+    ScriptRegistry stagedScripts;
+    ai::BtScriptRegistry stagedBtScripts;
+    stagedScripts.SetStrictValidation(true);
+    stagedBtScripts.SetStrictValidation(true);
     try {
-        entry(registry, btRegistry);
+        entry(stagedScripts, stagedBtScripts);
     } catch (const std::exception& exception) {
-        registry.Clear();
-        btRegistry.Clear();
+        stagedScripts.Clear();
+        stagedBtScripts.Clear();
         FreeLibrary(handle);
         if (error) *error = "Script module registration failed: "
             + std::string(exception.what());
         return false;
     } catch (...) {
-        registry.Clear();
-        btRegistry.Clear();
+        stagedScripts.Clear();
+        stagedBtScripts.Clear();
         FreeLibrary(handle);
         if (error) *error = "Script module registration failed with an unknown exception.";
         return false;
     }
+    std::string validationError;
+    if (!stagedScripts.Valid(&validationError)
+        || !stagedBtScripts.Valid(&validationError)) {
+        stagedScripts.Clear();
+        stagedBtScripts.Clear();
+        FreeLibrary(handle);
+        if (error) *error = "Script module registration is invalid: " + validationError;
+        return false;
+    }
+    for (const std::string& name : stagedScripts.Names()) {
+        if (!registry.Has(name)) continue;
+        stagedScripts.Clear();
+        stagedBtScripts.Clear();
+        FreeLibrary(handle);
+        if (error) *error = "Script module conflicts with registered script class '"
+            + name + "'. Use a unique project script name.";
+        return false;
+    }
+    for (const std::string& name : stagedBtScripts.Names()) {
+        if (!btRegistry.Has(name)) continue;
+        stagedScripts.Clear();
+        stagedBtScripts.Clear();
+        FreeLibrary(handle);
+        if (error) *error = "Script module conflicts with registered behavior script '"
+            + name + "'. Use a unique project script name.";
+        return false;
+    }
+    registry.MergeFrom(std::move(stagedScripts));
+    btRegistry.MergeFrom(std::move(stagedBtScripts));
     m_handle = handle;
     m_loadedPath = path;
     return true;

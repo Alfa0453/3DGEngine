@@ -127,7 +127,7 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         return engine::MakeAssetReference(
             &assetRegistry, contentRoot, assetPath, type).id;
     };
-    out << "3DGRuntimeScene 116 " << sceneId.ToString() << '\n';
+    out << "3DGRuntimeScene 117 " << sceneId.ToString() << '\n';
     out << "# Runtime export from 3DGEditor. Editor-only flags are omitted.\n";
     const EditorScene::Environment& environment = scene.GetEnvironment();
     out << "environment "
@@ -824,6 +824,9 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
             << ' ' << object.rigidBody.centerOfMassLocal.x
             << ' ' << object.rigidBody.centerOfMassLocal.y
             << ' ' << object.rigidBody.centerOfMassLocal.z;
+        // Visual Script graph handle (runtime scene 117+). Tail of the object record.
+        out << ' ' << (object.visualScriptGraph.Valid() ? object.visualScriptGraph.ToString()
+                                                         : std::string("-"));
         out << '\n';
     }
 

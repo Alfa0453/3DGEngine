@@ -1,4 +1,5 @@
 #include "engine/scene/RuntimeSceneLoader.h"
+#include "engine/visualscript/VisualScriptComponent.h"   // attach VisualScriptComponent at load
 #include "engine/assets/ParticleAsset.h"
 #include "engine/assets/AssetReference.h"
 #include "engine/assets/AssetRegistry.h"
@@ -175,7 +176,7 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             return false;
         }
     }
-    if (magic != "3DGRuntimeScene" || version < 1 || version > 116) {
+    if (magic != "3DGRuntimeScene" || version < 1 || version > 117) {
         if (error) {
             *error = "Runtime scene file has an unknown format: "
                 + magic + " " + std::to_string(version)
@@ -1994,6 +1995,12 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                    >> entity.rigidBody.centerOfMassLocal.y >> entity.rigidBody.centerOfMassLocal.z;
             entity.rigidBody.autoCenterOfMass = autoCom != 0;
         }
+        // Visual Script graph handle (runtime scene 117+; tail of the entity record).
+        if (version >= 117) {
+            std::string vsToken;
+            record >> vsToken;
+            if (vsToken != "-") AssetHandle::Parse(vsToken, &entity.visualScriptGraph);
+        }
 
         if (!record) {
             if (error) {
@@ -2374,6 +2381,10 @@ bool RuntimeSceneLoader::Instantiate(const Scene &scene, ecs::Registry &registry
         }
         if (desc.ragdollEnabled) {
             registry.Add<Ragdoll>(entity, desc.ragdoll);
+        }
+        if (desc.visualScriptGraph.Valid()) {
+            registry.Add<vs::VisualScriptComponent>(
+                entity, vs::VisualScriptComponent{desc.visualScriptGraph, true});
         }
         if (desc.scriptEnabled && !desc.scriptClassName.empty()) {
             NativeScriptComponent script;

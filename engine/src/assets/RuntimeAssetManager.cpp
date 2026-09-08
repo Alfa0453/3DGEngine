@@ -30,6 +30,26 @@ std::string CacheKey(const std::string& path) {
     return normalized.generic_string();
 }
 
+std::uint64_t TextureGpuBytes(const Texture& texture) {
+    if (texture.Width() <= 0 || texture.Height() <= 0) return 0;
+    return static_cast<std::uint64_t>(texture.Width())
+        * static_cast<std::uint64_t>(texture.Height()) * 4ull * 4ull / 3ull;
+}
+
+std::uint64_t MeshGpuBytes(const Mesh& mesh) {
+    std::uint64_t bytes = static_cast<std::uint64_t>(mesh.VertexCount())
+        * static_cast<std::uint64_t>(mesh.VertexStrideFloats()) * sizeof(float);
+    bytes += static_cast<std::uint64_t>(mesh.IndexCount()) * sizeof(std::uint32_t);
+    for (int lod = 1; lod <= mesh.MaxLod(); ++lod)
+        bytes += static_cast<std::uint64_t>(mesh.IndexCount(lod)) * sizeof(std::uint32_t);
+    return bytes;
+}
+
+template <typename T>
+std::uint64_t VectorBytes(const std::vector<T>& values) {
+    return static_cast<std::uint64_t>(values.capacity()) * sizeof(T);
+}
+
 } // namespace
 
 const Model* RuntimeAssetManager::LoadModel(const std::string &path, std::string *error)
@@ -840,6 +860,54 @@ int RuntimeAssetManager::RebuildFoliageCollisionProxies(ecs::Registry& registry)
         });
     return created;
 }
+
+RuntimeAssetManager::MemoryStats RuntimeAssetManager::CaptureMemoryStats() const {
+    MemoryStats result;
+    const auto add = [&](std::string category, const std::string& name,
+                         std::uint64_t cpu, std::uint64_t gpu) {
+        result.cpuBytes += cpu;
+        result.gpuBytes += gpu;
+        ++result.assetCount;
+        result.items.push_back({std::move(category), name, cpu, gpu});
+    };
+
+    for (const auto& [name, model] : m_models) {
+        std::uint64_t gpu = 0;
+        for (const SubMesh& subMesh : model->SubMeshes()) gpu += MeshGpuBytes(subMesh.mesh);
+        for (const auto& texture : model->Textures()) if (texture) gpu += TextureGpuBytes(*texture);
+        const std::uint64_t cpu = sizeof(Model) + VectorBytes(model->SubMeshes())
+            + VectorBytes(model->Materials()) + VectorBytes(model->Textures());
+        add("Static Models", name, cpu, gpu);
+    }
+    for (const auto& [name, model] : m_skinnedModels) {
+        std::uint64_t gpu = 0;
+        for (const SubMesh& subMesh : model->SubMeshes()) gpu += MeshGpuBytes(subMesh.mesh);
+        for (const auto& texture : model->Textures()) if (texture) gpu += TextureGpuBytes(*texture);
+        std::uint64_t cpu = sizeof(SkinnedModel) + VectorBytes(model->SubMeshes())
+            + VectorBytes(model->Materials()) + VectorBytes(model->Textures())
+            + VectorBytes(model->GetSkeleton().bones) + VectorBytes(model->Animations());
+        for (const Animation& animation : model->Animations()) {
+            cpu += VectorBytes(animation.channels) + VectorBytes(animation.curves);
+            for (const BoneChannel& channel : animation.channels)
+                cpu += VectorBytes(channel.positions) + VectorBytes(channel.rotations)
+                    + VectorBytes(channel.scales);
+            for (const AnimationCurve& curve : animation.curves) cpu += VectorBytes(curve.keys);
+        }
+        add("Skeletal Models", name, cpu, gpu);
+    }
+    for (const auto& [name, texture] : m_textures)
+        add("Textures", name, sizeof(Texture), texture ? TextureGpuBytes(*texture) : 0);
+    for (const auto& [name, material] : m_materials)
+        add("Materials", name, sizeof(RuntimeMaterialAsset)
+            + (material ? VectorBytes(material->shaderParameters) : 0), 0);
+    for (const auto& [name, foliage] : m_foliage)
+        add("Foliage Assets", name, sizeof(FoliageAssetData)
+            + (foliage ? VectorBytes(foliage->types) : 0), 0);
+    for (const auto& [name, shader] : m_shaderAssets)
+        add("Shader Assets", name, sizeof(ShaderAsset), 0);
+    return result;
+}
+
 void RuntimeAssetManager::Clear()
 {
     m_models.clear();

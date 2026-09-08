@@ -1,0 +1,10 @@
+id = com.3dgengine.photo_mode
+name = Photo Mode
+version = 1.0.0
+author = 3DGEngine
+description = Runtime photo mode with a free camera, lens and grading controls, depth of field, gameplay freeze, and clean screenshot capture.
+engine_api = 1
+type = both
+required = false
+enabled_by_default = false
+cmake_directory = .

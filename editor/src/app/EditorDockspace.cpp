@@ -9,6 +9,7 @@
 
 #include <engine/ecs/Components.h>
 #include <engine/audio/AudioEditing.h>
+#include <engine/visualscript/VisualScriptAsset.h>   // Visual Script inspector picker
 #include <engine/graphics/Camera.h>
 #include <engine/graphics/SkinnedModel.h>
 #include <engine/graphics/ImageDecode.h>
@@ -44,6 +45,12 @@
 #include <string>
 #include <vector>
 
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
+
 namespace {
 
 std::array<char, 128> g_objectNameBuffer{};
@@ -58,6 +65,7 @@ std::string g_scriptSourcePath;
 bool g_scriptSourceLoaded = false;
 bool g_scriptSourceDirty = false;
 bool g_scriptEditorWindowOpen = false;
+bool g_scriptEditorFocusRequested = false;
 bool g_scriptEditorSettingsLoaded = false;
 int g_preferredCodeEditor = static_cast<int>(PreferredCodeEditor::BuiltIn);
 std::array<char, 512> g_customCodeEditorPath{};
@@ -70,6 +78,8 @@ ImGuiTextFilter g_hierarchyFilter;
 // keeps a viewport selection safe from a stray hierarchy click (and the delete that
 // might follow) while you work in the scene.
 bool g_hierarchyLockSelection = false;
+int  g_hierarchyAnchor = -1;   // last single/ctrl-clicked row; the anchor for Shift range-select
+int  g_assetSelectionAnchor = -1;   // content browser: anchor for Ctrl/Shift multi-selection
 EditorScene::GroupId g_renameGroupId = EditorScene::kRootGroupId;
 std::array<char, 128> g_groupNameBuffer{};
 // Rename dialogs must be opened at the Hierarchy window's ID scope, but the menu items that trigger
@@ -1039,7 +1049,31 @@ std::filesystem::path GameModuleRootFor(const EditorDockspace::Context& context)
 }
 
 std::filesystem::path ProjectRootFor(const EditorDockspace::Context& context) {
-    return GameModuleRootFor(context).parent_path();
+    std::error_code ec;
+    if (context.project && context.project->HasProjectFile()) {
+        return std::filesystem::absolute(
+            context.project->ProjectFilePath(), ec).parent_path().lexically_normal();
+    }
+    if (context.assets && !context.assets->RootPath().empty()) {
+        return std::filesystem::absolute(
+            context.assets->RootPath(), ec).parent_path().lexically_normal();
+    }
+    return GameModuleRootFor(context).parent_path().lexically_normal();
+}
+
+std::filesystem::path ContentRootFor(const EditorDockspace::Context& context) {
+    std::error_code ec;
+    if (context.assets && !context.assets->RootPath().empty()) {
+        const std::filesystem::path root =
+            std::filesystem::absolute(context.assets->RootPath(), ec);
+        if (!ec) return root.lexically_normal();
+    }
+    if (context.project && !context.project->AssetRoot().empty()) {
+        const std::filesystem::path root =
+            std::filesystem::absolute(context.project->AssetRoot(), ec);
+        if (!ec) return root.lexically_normal();
+    }
+    return (ProjectRootFor(context) / "Content").lexically_normal();
 }
 
 void EnsureScriptEditorSettings(EditorDockspace::Context& context) {
@@ -1065,12 +1099,34 @@ void SaveScriptEditorSettings(EditorDockspace::Context& context) {
     context.config->Save();
 }
 
-std::string StoredScriptPath(const std::filesystem::path& absolutePath) {
+std::string StoredScriptPath(const EditorDockspace::Context& context,
+                             const std::filesystem::path& absolutePath) {
     std::error_code ec;
     const std::filesystem::path relative =
-        std::filesystem::relative(absolutePath, std::filesystem::current_path(ec), ec);
+        std::filesystem::relative(absolutePath, ProjectRootFor(context), ec);
     return ec ? absolutePath.lexically_normal().generic_string()
               : relative.lexically_normal().generic_string();
+}
+
+std::filesystem::path ResolveScriptPath(const EditorDockspace::Context& context,
+                                        const std::string& storedPath) {
+    const std::filesystem::path path(storedPath);
+    if (path.is_absolute()) return path.lexically_normal();
+    std::error_code ec;
+    const std::filesystem::path projectRelative =
+        (ProjectRootFor(context) / path).lexically_normal();
+    if (std::filesystem::is_regular_file(projectRelative, ec)) return projectRelative;
+    ec.clear();
+    // Scenes created before project-relative script paths were introduced stored paths
+    // relative to the editor process. Keep those scenes editable while they migrate.
+    const std::filesystem::path legacy =
+        (std::filesystem::current_path(ec) / path).lexically_normal();
+    if (!ec && std::filesystem::is_regular_file(legacy, ec)) return legacy;
+    ec.clear();
+    const std::filesystem::path byName =
+        ContentRootFor(context) / "Scripts" / path.filename();
+    if (std::filesystem::is_regular_file(byName, ec)) return byName.lexically_normal();
+    return projectRelative;
 }
 
 std::string ScriptPathFor(const EditorDockspace::Context& context,
@@ -1081,7 +1137,7 @@ std::string ScriptPathFor(const EditorDockspace::Context& context,
         context.assets && !context.assets->RootPath().empty()
             ? std::filesystem::absolute(context.assets->RootPath(), ec)
             : GameModuleRootFor(context).parent_path() / "Content";
-    return StoredScriptPath(contentRoot / "Scripts"
+    return StoredScriptPath(context, contentRoot / "Scripts"
         / (className + (lua ? ".lua" : ".h")));
 }
 
@@ -1089,6 +1145,7 @@ struct SavedScriptEntry {
     std::string className;
     std::string storedPath;
     bool lua = false;
+    bool compiledOnly = false;
 };
 
 std::vector<SavedScriptEntry> SavedScriptsFor(const EditorDockspace::Context& context) {
@@ -1102,11 +1159,13 @@ std::vector<SavedScriptEntry> SavedScriptsFor(const EditorDockspace::Context& co
 
     std::vector<SavedScriptEntry> scripts;
     for (const std::filesystem::path& root : roots) {
-        for (std::filesystem::directory_iterator it(root, ec), end;
+        for (std::filesystem::recursive_directory_iterator it(
+                 root, std::filesystem::directory_options::skip_permission_denied, ec), end;
              !ec && it != end; it.increment(ec)) {
             if (!it->is_regular_file(ec)) continue;
             const bool lua = it->path().extension() == ".lua";
-            if (!lua && it->path().extension() != ".h") continue;
+            if (!lua && it->path().extension() != ".h"
+                && it->path().extension() != ".hpp") continue;
             if (!lua) {
                 std::ifstream source(it->path(), std::ios::binary);
                 const std::string contents((std::istreambuf_iterator<char>(source)),
@@ -1123,10 +1182,21 @@ std::vector<SavedScriptEntry> SavedScriptsFor(const EditorDockspace::Context& co
                     return entry.className == className && entry.lua == lua;
                 });
             if (!alreadyListed) {
-                scripts.push_back({className, StoredScriptPath(it->path()), lua});
+                scripts.push_back({className, StoredScriptPath(context, it->path()), lua, false});
             }
         }
         ec.clear();
+    }
+
+    // Build-time plugins and manual engine/game scripts may not have source files
+    // inside the active project's Content/Scripts directory. Include their registered
+    // class names so they remain discoverable and attachable from the same picker.
+    for (const std::string& className : engine::ScriptRegistry::Instance().Names()) {
+        const bool alreadyListed = std::any_of(scripts.begin(), scripts.end(),
+            [&className](const SavedScriptEntry& entry) {
+                return entry.className == className && !entry.lua;
+            });
+        if (!alreadyListed) scripts.push_back({className, {}, false, true});
     }
     std::sort(scripts.begin(), scripts.end(),
         [](const SavedScriptEntry& a, const SavedScriptEntry& b) {
@@ -1137,14 +1207,58 @@ std::vector<SavedScriptEntry> SavedScriptsFor(const EditorDockspace::Context& co
 }
 
 bool WriteTextFile(const std::filesystem::path& path, const std::string& text, std::string* error) {
-    std::ofstream out(path);
+    std::string normalized;
+    normalized.reserve(text.size());
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        if (text[i] == '\r') {
+            if (i + 1 < text.size() && text[i + 1] == '\n') ++i;
+            normalized.push_back('\n');
+        } else {
+            normalized.push_back(text[i]);
+        }
+    }
+    std::error_code ec;
+    if (!path.parent_path().empty()) {
+        std::filesystem::create_directories(path.parent_path(), ec);
+        if (ec) {
+            if (error) *error = "Could not create " + path.parent_path().string()
+                + ": " + ec.message();
+            return false;
+        }
+    }
+    const std::filesystem::path temporary = path.string() + ".3dg-write.tmp";
+    std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
     if (!out) {
         if (error) {
             *error = "Could not write " + path.string();
         }
         return false;
     }
-    out << text;
+    out << normalized;
+    out.flush();
+    if (!out) {
+        if (error) *error = "Writing failed for " + path.string();
+        out.close();
+        std::filesystem::remove(temporary, ec);
+        return false;
+    }
+    out.close();
+#if defined(_WIN32)
+    if (!MoveFileExW(temporary.wstring().c_str(), path.wstring().c_str(),
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        if (error) *error = "Could not replace " + path.string()
+            + " (Windows error " + std::to_string(GetLastError()) + ")";
+        std::filesystem::remove(temporary, ec);
+        return false;
+    }
+#else
+    std::filesystem::rename(temporary, path, ec);
+    if (ec) {
+        if (error) *error = "Could not replace " + path.string() + ": " + ec.message();
+        std::filesystem::remove(temporary, ec);
+        return false;
+    }
+#endif
     return true;
 }
 
@@ -1244,13 +1358,16 @@ bool OpenScriptInPreferredEditor(EditorDockspace::Context& context,
                                  const std::string& path,
                                  std::string* error) {
     EnsureScriptEditorSettings(context);
-    if (!LoadScriptSource(path, error)) return false;
+    const std::filesystem::path resolved = ResolveScriptPath(context, path);
+    if (!LoadScriptSource(resolved.string(), error)) return false;
     g_scriptEditorWindowOpen = true;
     const PreferredCodeEditor preferred =
         static_cast<PreferredCodeEditor>(std::clamp(g_preferredCodeEditor, 0, 4));
     if (preferred == PreferredCodeEditor::BuiltIn) return true;
-    return EditorScriptTools::OpenExternalEditor(preferred,
-        g_customCodeEditorPath.data(), path, ProjectRootFor(context), error);
+    // Unreal-style: open (or reuse) the whole gameplay script workspace and focus this file,
+    // rather than launching an isolated single-file editor window.
+    return EditorScriptTools::OpenScriptInWorkspace(preferred,
+        g_customCodeEditorPath.data(), resolved, ProjectRootFor(context), error);
 }
 
 bool CreateScriptFiles(const EditorDockspace::Context& context,
@@ -1267,10 +1384,7 @@ bool CreateScriptFiles(const EditorDockspace::Context& context,
         return false;
     }
     std::error_code ec;
-    const std::filesystem::path contentRoot =
-        context.assets && !context.assets->RootPath().empty()
-            ? std::filesystem::absolute(context.assets->RootPath(), ec)
-            : gameRoot.parent_path() / "Content";
+    const std::filesystem::path contentRoot = ContentRootFor(context);
     const std::filesystem::path scriptRoot = contentRoot / "Scripts";
     std::filesystem::create_directories(scriptRoot, ec);
     if (ec) {
@@ -1291,6 +1405,8 @@ bool CreateScriptFiles(const EditorDockspace::Context& context,
         return false;
     }
     const std::filesystem::path docPath = docsRoot / (className + ".md");
+    bool createdHeader = false;
+    bool createdDocumentation = false;
 
     // Copy scripts made by the previous workflow into Content/Scripts. Keep the
     // old file untouched so projects can migrate without losing user changes.
@@ -1304,6 +1420,7 @@ bool CreateScriptFiles(const EditorDockspace::Context& context,
             if (error) *error = "Could not migrate existing script into Content/Scripts: " + ec.message();
             return false;
         }
+        createdHeader = true;
     }
 
     if (!std::filesystem::exists(headerPath)) {
@@ -1325,12 +1442,14 @@ bool CreateScriptFiles(const EditorDockspace::Context& context,
                 << "    -- Called before this object or script is removed.\n"
                 << "end\n";
             if (!WriteTextFile(headerPath, source.str(), error)) return false;
+            createdHeader = true;
         } else if (IsBehaviorTreeTemplate(scriptTemplate)) {
             std::string source;
             if (!LoadBehaviorTreeTemplate(gameRoot, scriptTemplate, className, &source, error)
                 || !WriteTextFile(headerPath, source, error)) {
                 return false;
             }
+            createdHeader = true;
         } else {
             std::ostringstream header;
             header << "#pragma once\n\n"
@@ -1354,13 +1473,8 @@ bool CreateScriptFiles(const EditorDockspace::Context& context,
             if (!WriteTextFile(headerPath, header.str(), error)) {
                 return false;
             }
+            createdHeader = true;
         }
-    }
-
-    if (!lua && !EditorGeneratedScriptTools::RegisterScript(
-            gameRoot, scriptRoot, className,
-            IsBehaviorTreeTemplate(scriptTemplate), error)) {
-        return false;
     }
 
     if (!std::filesystem::exists(docPath)) {
@@ -1389,12 +1503,30 @@ bool CreateScriptFiles(const EditorDockspace::Context& context,
                 << "Use `OnCreate()` for one-time setup when the object enters Play mode. Use `OnUpdate(float dt)` for per-frame behavior. The editor registers this class automatically in the shared game module; rebuild and restart the editor before Play mode can run newly compiled code. The standalone player receives the same class on its next build. Common helpers include `GetFieldFloat()`, `GetFieldInt()`, `GetFieldBool()`, `GetFieldString()`, `Self()`, `Transform()`, `FindObject()`, `FindTransform()`, `SocketPosition()`, `SocketTransform()`, `IsKeyDown()`, `WasKeyPressed()`, `PlayAudio()`, `StopAudio()`, `PlayParticles()`, `StopParticles()`, `RestartParticles()`, `BurstParticles()`, `SetParticleRate()`, `ShakeCamera()`, `PlayCameraSequence()`, `WasCameraSequenceEvent()`, `WasCameraSequenceFinished()`, and `DestroySelf()`. Pass an entity returned by `FindObject()` to control another object's Audio Source or Particle System.\n";
         }
         if (!WriteTextFile(docPath, doc.str(), error)) {
+            if (createdHeader) {
+                std::error_code cleanupError;
+                std::filesystem::remove(headerPath, cleanupError);
+            }
             return false;
         }
+        createdDocumentation = true;
+    }
+
+    if (!lua && !EditorGeneratedScriptTools::RegisterScript(
+            gameRoot, scriptRoot, className,
+            IsBehaviorTreeTemplate(scriptTemplate), error)) {
+        std::error_code cleanupError;
+        if (createdHeader) std::filesystem::remove(headerPath, cleanupError);
+        cleanupError.clear();
+        if (createdDocumentation) std::filesystem::remove(docPath, cleanupError);
+        // Restore generated registration files to the scripts that remain on disk.
+        std::string ignored;
+        EditorGeneratedScriptTools::RegenerateGeneratedScripts(contentRoot, &ignored);
+        return false;
     }
 
     if (scriptPath) {
-        *scriptPath = StoredScriptPath(headerPath);
+        *scriptPath = StoredScriptPath(context, headerPath);
     }
     return true;
 }
@@ -1598,6 +1730,26 @@ bool ComponentMatchesSearch(const ComponentCatalogEntry& entry) {
     std::transform(haystack.begin(), haystack.end(), haystack.begin(),
         [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     return haystack.find(query) != std::string::npos;
+}
+
+// Authoritative "add a script" action, like a component-add button in other engines: it always
+// attaches one more script rather than toggling. The first script fills the primary slot; each
+// subsequent press appends an independent entry to additionalScripts.
+bool AddScriptSlot(EditorDockspace::Context& context) {
+    if (!context.scene) return false;
+    const EditorScene::Object* selected = context.scene->SelectedObject();
+    if (!selected) return false;
+    const bool hasPrimary = selected->scriptEnabled
+        || !selected->scriptClassName.empty() || !selected->scriptPath.empty();
+    if (!hasPrimary) {
+        return context.scene->SetSelectedScript("NewObjectScript", std::string(), false);
+    }
+    std::vector<EditorScene::ScriptBinding> scripts = selected->additionalScripts;
+    EditorScene::ScriptBinding binding;
+    binding.enabled = false;
+    binding.className = "NewObjectScript";
+    scripts.push_back(std::move(binding));
+    return context.scene->SetSelectedAdditionalScripts(scripts);
 }
 
 bool AddComponent(EditorDockspace::Context& context, AddableComponent component) {
@@ -4507,11 +4659,39 @@ void DrawHierarchy(EditorDockspace::Context& context, bool* open) {
 
         ImGui::PushID(object.entity);
         if (ImGui::Selectable(label, isRowSelected(i)) && !selectionLocked) {
-            // Shift+click toggles the row in/out of the multi-selection; a plain click
-            // replaces the selection with just this object. Disabled while locked so the
-            // viewport selection can't be changed (and accidentally deleted) from here.
-            if (ImGui::GetIO().KeyShift) context.scene->ToggleSelection(i);
-            else context.scene->SelectIndex(i);
+            // Multi-selection:
+            //   Ctrl+click  -> toggle this row in/out of the selection (add/remove one).
+            //   Shift+click -> select the contiguous (filtered) range from the anchor to here.
+            //   plain click -> replace the selection with just this object (and set the anchor).
+            // Disabled while locked so the viewport selection can't be changed here.
+            const ImGuiIO& io = ImGui::GetIO();
+            if (io.KeyCtrl) {
+                context.scene->ToggleSelection(i);
+                g_hierarchyAnchor = i;
+            } else if (io.KeyShift && g_hierarchyAnchor >= 0
+                       && g_hierarchyAnchor < static_cast<int>(objects.size())) {
+                const int lo = std::min(g_hierarchyAnchor, i);
+                const int hi = std::max(g_hierarchyAnchor, i);
+                // Range stays within the anchor's group so a shift-click can't sweep across group
+                // boundaries; only same-group rows in the span (that pass the filter) are selected.
+                const EditorScene::GroupId anchorGroup =
+                    objects[static_cast<std::size_t>(g_hierarchyAnchor)].editorGroupId;
+                std::vector<int> range;
+                range.reserve(static_cast<std::size_t>(hi - lo + 1));
+                for (int r = lo; r <= hi; ++r) {
+                    const EditorScene::Object& o = objects[static_cast<std::size_t>(r)];
+                    if (o.editorGroupId != anchorGroup) continue;
+                    char rowLabel[192];
+                    std::snprintf(rowLabel, sizeof(rowLabel), "%s%s%s %s",
+                        o.visible ? "" : "[hidden] ", o.locked ? "[locked] " : "",
+                        o.light ? "[light]" : "", o.name.c_str());
+                    if (g_hierarchyFilter.PassFilter(rowLabel)) range.push_back(r);
+                }
+                context.scene->SelectIndices(range);   // anchor kept so the range can be re-extended
+            } else {
+                context.scene->SelectIndex(i);
+                g_hierarchyAnchor = i;
+            }
         }
         if (ImGui::BeginDragDropSource()) {
             ImGui::SetDragDropPayload("3DG_HIERARCHY_OBJECT", &i, sizeof(i));
@@ -4980,13 +5160,46 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             g_componentPopupOpenRequested = true;
         }
         ImGui::SameLine();
-        const bool hasScript = HasComponent(*selected, AddableComponent::Script);
-        ImGui::BeginDisabled(selected->locked || hasScript);
-        if (ImGui::Button(hasScript ? "Script Added" : "+ Add Script", ImVec2(half, 30.0f))) {
-            AddComponent(context, AddableComponent::Script);
+        // The button is authoritative and repeatable: it attaches another script every press,
+        // never latching to a disabled "added" state. Only object-lock disables it.
+        ImGui::BeginDisabled(selected->locked);
+        if (ImGui::Button("+ Add Script", ImVec2(half, 30.0f))) {
+            if (!AddScriptSlot(context) && context.log) {
+                context.log->Warning("Add script failed: unlock the object first");
+            }
         }
         ImGui::EndDisabled();
         DrawAddComponentPopup(context);
+    }
+
+    // Visual Script: attach a .3dgvs graph that runs on this object in Play (Visual Scripting).
+    if (!selected->navMeshBoundsVolume && ImGui::CollapsingHeader("Visual Script")) {
+        const bool hasGraph = selected->visualScriptGraph.Valid();
+        const std::string preview = hasGraph ? "Assigned (.3dgvs)" : "None";
+        if (ImGui::BeginCombo("Graph##visualscript", preview.c_str())) {
+            if (ImGui::Selectable("None", !hasGraph))
+                context.scene->SetSelectedVisualScript(engine::AssetHandle{});
+            namespace fs = std::filesystem;
+            std::error_code ec;
+            for (fs::recursive_directory_iterator it(context.assets->RootPath(),
+                     fs::directory_options::skip_permission_denied, ec), end; it != end; it.increment(ec)) {
+                if (ec || !it->is_regular_file(ec)) continue;
+                std::string ext = it->path().extension().string();
+                std::transform(ext.begin(), ext.end(), ext.begin(),
+                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                if (ext != ".3dgvs") continue;
+                ImGui::PushID(it->path().string().c_str());
+                if (ImGui::Selectable(it->path().stem().string().c_str())) {
+                    engine::vs::VisualScriptAsset graph; std::string error;
+                    if (graph.Load(it->path().string(), &error))
+                        context.scene->SetSelectedVisualScript(graph.id);
+                    else if (context.log) context.log->Error("Open visual script failed: " + error);
+                }
+                ImGui::PopID();
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::TextDisabled("Runs on this object in Play. Author graphs in the Visual Script Editor.");
     }
 
     if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -6554,7 +6767,8 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
     // "+ Add Script" registers the class name). It gets its own section below, separate
     // from the gameplay components, so adding a script never opens this section.
     const bool hasScript = selected->scriptEnabled
-        || !selected->scriptClassName.empty() || !selected->scriptPath.empty();
+        || !selected->scriptClassName.empty() || !selected->scriptPath.empty()
+        || !selected->additionalScripts.empty();
     // Each gameplay component added via "+ Add Component" gets its own collapsing header;
     // its Remove button deletes it, after which the header no longer appears.
     if (!isCharacter && selected->rotatorEnabled
@@ -6836,6 +7050,21 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                 std::filesystem::path(selected->scriptPath).extension() == ".lua" ? 1 : 0;
         }
 
+        // Every object can hold several scripts. The count makes it obvious how many are
+        // attached; the main slot is edited here and any extras follow in their own blocks.
+        const bool hasPrimaryScript = selected->scriptEnabled
+            || !selected->scriptClassName.empty() || !selected->scriptPath.empty();
+        const int attachedScriptCount = (hasPrimaryScript ? 1 : 0)
+            + static_cast<int>(selected->additionalScripts.size());
+        ImGui::Text("Attached Scripts: %d", attachedScriptCount);
+        ImGui::TextDisabled("\"+ Add Script\" attaches another; each script runs independently.");
+        {
+            const std::string mainLabel = selected->scriptClassName.empty()
+                ? std::string("Main Script")
+                : "Main Script \xE2\x80\x94 " + selected->scriptClassName;
+            ImGui::SeparatorText(mainLabel.c_str());
+        }
+
         bool scriptEnabled = selected->scriptEnabled;
         if (ImGui::Checkbox("Script Enabled", &scriptEnabled)) {
             bool toggled = false;
@@ -6874,14 +7103,16 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             });
         const std::string savedScriptPreview = selectedSavedScript != savedScripts.end()
             ? selectedSavedScript->className
-                + (selectedSavedScript->lua ? " (Lua)" : " (C++)")
+                + (selectedSavedScript->lua ? " (Lua)"
+                    : (selectedSavedScript->compiledOnly ? " (Registered)" : " (C++)"))
             : "Choose saved script...";
         if (ImGui::BeginCombo("Saved Script", savedScriptPreview.c_str())) {
             for (const SavedScriptEntry& entry : savedScripts) {
                 const bool isSelected = entry.className == bufferedClass
                     && entry.lua == (g_scriptLanguageIndex == 1);
                 const std::string label =
-                    entry.className + (entry.lua ? " (Lua)" : " (C++)");
+                    entry.className + (entry.lua ? " (Lua)"
+                        : (entry.compiledOnly ? " (Registered)" : " (C++)"));
                 if (ImGui::Selectable(label.c_str(), isSelected)) {
                     std::snprintf(g_scriptClassBuffer.data(), g_scriptClassBuffer.size(),
                         "%s", entry.className.c_str());
@@ -6974,9 +7205,23 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                 const std::string scriptPath = saved != savedScripts.end()
                     ? saved->storedPath
                     : ScriptPathFor(context, className, creatingLua);
-                if (context.scene->SetSelectedScript(className, scriptPath, true)) {
+                bool registrationReady = true;
+                if (!creatingLua && saved != savedScripts.end() && !saved->compiledOnly) {
+                    std::string registrationError;
+                    const std::filesystem::path contentRoot = ContentRootFor(context);
+                    if (!EditorGeneratedScriptTools::RegenerateGeneratedScripts(
+                            contentRoot, &registrationError)) {
+                        if (context.log) context.log->Error(
+                            "Script registration failed: " + registrationError);
+                        registrationReady = false;
+                    } else {
+                        context.nativeScriptSourceCreated = true;
+                    }
+                }
+                if (registrationReady
+                    && context.scene->SetSelectedScript(className, scriptPath, true)) {
                     if (context.log) context.log->Info("Attached script: " + className);
-                } else if (context.log) {
+                } else if (registrationReady && context.log) {
                     const EditorScene::Object* current = context.scene->SelectedObject();
                     if (current && current->scriptEnabled
                         && current->scriptClassName == className) {
@@ -7000,7 +7245,8 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                     }
                     std::snprintf(g_scriptClassBuffer.data(), g_scriptClassBuffer.size(), "%s", className.c_str());
                     std::string sourceError;
-                    if (!LoadScriptSource(scriptPath, &sourceError)) {
+                    if (!LoadScriptSource(
+                            ResolveScriptPath(context, scriptPath).string(), &sourceError)) {
                         if (context.log) context.log->Warning(
                             "Created script but could not open source: " + sourceError);
                     } else {
@@ -7040,47 +7286,14 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             ImGui::SameLine();
             if (ImGui::Button("Edit Source")) {
                 std::string error;
-                if (!LoadScriptSource(selected->scriptPath, &error) && context.log) {
+                if (LoadScriptSource(
+                        ResolveScriptPath(context, selected->scriptPath).string(), &error)) {
+                    g_scriptEditorWindowOpen = true;
+                    g_scriptEditorFocusRequested = true;
+                } else if (context.log) {
                     context.log->Error("Script source open failed: " + error);
                 }
             }
-        }
-
-        if (g_scriptSourceLoaded && !selected->scriptPath.empty()
-            && std::filesystem::path(g_scriptSourcePath).lexically_normal()
-                == std::filesystem::path(selected->scriptPath).lexically_normal()
-            && ImGui::TreeNode("Script Source")) {
-            const bool editingLua =
-                std::filesystem::path(selected->scriptPath).extension() == ".lua";
-            ImGui::TextWrapped(editingLua
-                ? "Lua runs in Editor Play and packaged games. Save it, then restart Play to load the new source."
-                : "This header is compiled into both Editor Play and the standalone game. Save it, then rebuild and restart the editor to load native code changes.");
-            if (ImGui::InputTextMultiline("##ScriptSource",
-                    g_scriptSourceBuffer.data(), g_scriptSourceBuffer.size(),
-                    ImVec2(-1.0f, 340.0f), ImGuiInputTextFlags_AllowTabInput)) {
-                g_scriptSourceDirty = true;
-            }
-            if (ImGui::Button(g_scriptSourceDirty ? "Save Source *" : "Save Source")) {
-                std::string error;
-                if (WriteTextFile(g_scriptSourcePath, g_scriptSourceBuffer.data(), &error)) {
-                    g_scriptSourceDirty = false;
-                    if (context.log) context.log->Info("Saved script source: " + g_scriptSourcePath);
-                } else if (context.log) {
-                    context.log->Error("Script source save failed: " + error);
-                }
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("Reload Source")) {
-                std::string error;
-                if (!LoadScriptSource(g_scriptSourcePath, &error) && context.log) {
-                    context.log->Error("Script source reload failed: " + error);
-                }
-            }
-            ImGui::SameLine();
-            ImGui::TextDisabled(g_scriptSourceDirty ? "Unsaved changes"
-                : (editingLua ? "Saved - restart Play to reload"
-                              : "Saved - rebuild required"));
-            ImGui::TreePop();
         }
 
         if (ImGui::Button("Add Field")) {
@@ -7094,7 +7307,8 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                 if (context.log) context.log->Warning("Attach or create a script first, then detect fields");
             } else {
                 std::string sourceError;
-                if (!LoadScriptSource(selected->scriptPath, &sourceError)) {
+                if (!LoadScriptSource(
+                        ResolveScriptPath(context, selected->scriptPath).string(), &sourceError)) {
                     if (context.log) context.log->Error("Detect fields failed: " + sourceError);
                 } else {
                     const std::vector<EditorScene::ScriptField> detected =
@@ -7262,6 +7476,114 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                 break;
             }
             ImGui::PopID();
+            }
+        }
+
+        // --- Additional scripts -----------------------------------------------------------
+        // Each extra script is an independent ScriptBinding. They are edited on a working copy
+        // and committed together whenever anything changes, mirroring how the additionalScripts
+        // vector is serialized to both the editor and runtime scenes.
+        std::vector<EditorScene::ScriptBinding> extraScripts = selected->additionalScripts;
+        bool extraChanged = false;
+        int removeExtra = -1;
+        for (std::size_t s = 0; s < extraScripts.size(); ++s) {
+            EditorScene::ScriptBinding& binding = extraScripts[s];
+            ImGui::PushID(static_cast<int>(1000 + s));
+            {
+                const std::string label = "Script " + std::to_string(s + 2)
+                    + (binding.className.empty() ? "" : " \xE2\x80\x94 " + binding.className);
+                ImGui::SeparatorText(label.c_str());
+            }
+
+            extraChanged |= ImGui::Checkbox("Script Enabled", &binding.enabled);
+
+            const std::string extraPreview = binding.className.empty()
+                ? "Choose saved script..." : binding.className;
+            if (ImGui::BeginCombo("Saved Script", extraPreview.c_str())) {
+                for (const SavedScriptEntry& entry : savedScripts) {
+                    const std::string entryLabel =
+                        entry.className + (entry.lua ? " (Lua)" : " (C++)");
+                    if (ImGui::Selectable(entryLabel.c_str(), entry.className == binding.className)) {
+                        binding.className = entry.className;
+                        binding.path = entry.storedPath;
+                        binding.enabled = true;
+                        extraChanged = true;
+                    }
+                }
+                if (savedScripts.empty())
+                    ImGui::TextDisabled("No scripts found in Content/Scripts");
+                ImGui::EndCombo();
+            }
+
+            std::array<char, 128> classBuffer{};
+            std::snprintf(classBuffer.data(), classBuffer.size(), "%s", binding.className.c_str());
+            if (ImGui::InputText("Script Class", classBuffer.data(), classBuffer.size())) {
+                binding.className = SanitizeScriptClassName(classBuffer.data());
+                extraChanged = true;
+            }
+            ImGui::Text("Script Path: %s", binding.path.empty() ? "-" : binding.path.c_str());
+            if (ImGui::DragInt("Execution Order", &binding.executionOrder, 1.0f, -10000, 10000))
+                extraChanged = true;
+
+            if (ImGui::TreeNode("Fields")) {
+                int removeField = -1;
+                for (std::size_t f = 0; f < binding.fields.size(); ++f) {
+                    EditorScene::ScriptField& field = binding.fields[f];
+                    ImGui::PushID(static_cast<int>(f));
+                    ImGui::Separator();
+                    std::array<char, 64> nameBuffer{};
+                    std::array<char, 128> valueBuffer{};
+                    std::snprintf(nameBuffer.data(), nameBuffer.size(), "%s", field.name.c_str());
+                    std::snprintf(valueBuffer.data(), valueBuffer.size(), "%s", field.value.c_str());
+                    if (ImGui::InputText("Field", nameBuffer.data(), nameBuffer.size())) {
+                        field.name = SanitizeScriptClassName(nameBuffer.data());
+                        extraChanged = true;
+                    }
+                    int typeIndex = ScriptFieldTypeIndex(field.type);
+                    const char* fieldTypes[] = {"Float", "Int", "Bool", "String",
+                                                "Vec3", "Color", "Entity", "Asset"};
+                    if (ImGui::Combo("Type", &typeIndex, fieldTypes, IM_ARRAYSIZE(fieldTypes))) {
+                        field.type = ScriptFieldTypeFromIndex(typeIndex);
+                        extraChanged = true;
+                    }
+                    if (ImGui::InputText("Value", valueBuffer.data(), valueBuffer.size())) {
+                        field.value = valueBuffer.data();
+                        extraChanged = true;
+                    }
+                    if (ImGui::SmallButton("Remove Field")) removeField = static_cast<int>(f);
+                    ImGui::PopID();
+                }
+                if (removeField >= 0) {
+                    binding.fields.erase(binding.fields.begin() + removeField);
+                    extraChanged = true;
+                }
+                if (ImGui::Button("Add Field")) {
+                    EditorScene::ScriptField field;
+                    field.name = "newField";
+                    field.type = EditorScene::ScriptField::Type::Float;
+                    field.value = "0";
+                    binding.fields.push_back(std::move(field));
+                    extraChanged = true;
+                }
+                ImGui::TreePop();
+            }
+
+            if (ImGui::Button("Remove Script")) removeExtra = static_cast<int>(s);
+            ImGui::PopID();
+        }
+        if (removeExtra >= 0) {
+            extraScripts.erase(extraScripts.begin() + removeExtra);
+            extraChanged = true;
+        }
+        if (extraChanged && !context.scene->SetSelectedAdditionalScripts(extraScripts)
+            && context.log) {
+            context.log->Warning("Script update failed: no unlocked object selected");
+        }
+
+        ImGui::Separator();
+        if (ImGui::Button("+ Add Another Script")) {
+            if (!AddScriptSlot(context) && context.log) {
+                context.log->Warning("Add script failed: unlock the object first");
             }
         }
     }   // end Script
@@ -8696,16 +9018,31 @@ void DrawAssets(EditorDockspace::Context& context, bool* open) {
     }
     if (ImGui::BeginPopupModal("Delete Content Entry", nullptr,
                                ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::TextWrapped("Delete '%s'?", pendingDeleteName.c_str());
+        const int selectedCount = static_cast<int>(context.assets->SelectedIndices().size());
+        if (context.assets->SelectedType() == EditorAssets::SelectionType::Asset
+            && selectedCount > 1) {
+            ImGui::TextWrapped("Delete %d selected assets?", selectedCount);
+        } else {
+            ImGui::TextWrapped("Delete '%s'?", pendingDeleteName.c_str());
+        }
         ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f),
             "Folders and their contents are deleted permanently.");
         if (ImGui::Button("Delete", ImVec2(110.0f, 0.0f))) {
             std::string error;
-            if (context.assets->DeleteSelectedEntry(&error)) {
-                if (context.log) context.log->Info("Deleted Content entry: "
-                    + pendingDeleteName);
+            const int deleted = context.assets->DeleteSelectedAssets(&error);
+            if (deleted > 0) {
+                if (context.log) {
+                    if (deleted == 1)
+                        context.log->Info("Deleted Content entry: " + pendingDeleteName);
+                    else
+                        context.log->Info("Deleted " + std::to_string(deleted)
+                            + " Content entries.");
+                }
+                if (!error.empty() && context.log) context.log->Error(error);
                 ImGui::CloseCurrentPopup();
-            } else if (context.log) context.log->Error(error);
+            } else if (context.log) {
+                context.log->Error(error.empty() ? "Could not delete Content entry." : error);
+            }
         }
         ImGui::SameLine();
         if (ImGui::Button("Cancel", ImVec2(110.0f, 0.0f)))
@@ -9161,18 +9498,31 @@ void DrawAssets(EditorDockspace::Context& context, bool* open) {
             iconStyle.glyph, assetText.c_str());
         std::snprintf(label, sizeof(label), "%s", assetLabel.c_str());
 
-        const bool selected = context.assets->SelectedType() == EditorAssets::SelectionType::Asset
-            && i == context.assets->SelectedIndex();
+        const bool selected = context.assets->IsAssetSelected(i);
         ImGui::PushStyleColor(ImGuiCol_Text, iconStyle.color);
         if (ImGui::Selectable(label, selected)) {
-            context.assets->SelectIndex(i);
+            // Ctrl+click toggles this asset; Shift+click selects the range from the anchor to here;
+            // a plain click selects just this asset (and sets the anchor).
+            const ImGuiIO& io = ImGui::GetIO();
+            if (io.KeyCtrl) {
+                context.assets->ToggleAssetSelection(i);
+                g_assetSelectionAnchor = i;
+            } else if (io.KeyShift && g_assetSelectionAnchor >= 0
+                       && g_assetSelectionAnchor < static_cast<int>(assets.size())) {
+                context.assets->SelectAssetRange(g_assetSelectionAnchor, i);
+            } else {
+                context.assets->SelectIndex(i);
+                g_assetSelectionAnchor = i;
+            }
         }
         ImGui::PopStyleColor();
         const bool assetHovered = ImGui::IsItemHovered();
         bool openFromContext = false;
         ImGui::PushID(i);
         if (ImGui::BeginPopupContextItem("AssetActions")) {
-            context.assets->SelectIndex(i);
+            // Right-clicking an unselected asset selects just it; right-clicking one already in the
+            // multi-selection keeps the group so a context action could act on all of them.
+            if (!context.assets->IsAssetSelected(i)) { context.assets->SelectIndex(i); g_assetSelectionAnchor = i; }
             if (editor::icons::MenuItem(editor::icons::Open, "Open"))
                 openFromContext = true;
             ImGui::Separator();
@@ -9323,6 +9673,10 @@ void DrawAssets(EditorDockspace::Context& context, bool* open) {
 void DrawStandaloneScriptEditor(EditorDockspace::Context& context) {
     if (!g_scriptEditorWindowOpen || !g_scriptSourceLoaded) return;
     EnsureScriptEditorSettings(context);
+    if (g_scriptEditorFocusRequested) {
+        ImGui::SetNextWindowFocus();
+        g_scriptEditorFocusRequested = false;
+    }
     if (!ImGui::Begin("Script Editor", &g_scriptEditorWindowOpen)) {
         ImGui::End();
         return;
@@ -9342,7 +9696,7 @@ void DrawStandaloneScriptEditor(EditorDockspace::Context& context) {
     if (g_preferredCodeEditor != static_cast<int>(PreferredCodeEditor::BuiltIn)) {
         if (editor::icons::LabeledButton(editor::icons::Open, "Open in Selected Editor")) {
             std::string error;
-            if (!EditorScriptTools::OpenExternalEditor(
+            if (!EditorScriptTools::OpenScriptInWorkspace(
                     static_cast<PreferredCodeEditor>(g_preferredCodeEditor),
                     g_customCodeEditorPath.data(), g_scriptSourcePath,
                     ProjectRootFor(context), &error) && context.log) {
@@ -9575,7 +9929,7 @@ void DrawScriptBuildLog(EditorDockspace::Context& context) {
                             g_scriptEditorTargetColumn = std::max(d.column, 1);
                             g_scriptEditorWindowOpen = true;
                         }
-                    } else if (!EditorScriptTools::OpenExternalEditor(
+                    } else if (!EditorScriptTools::OpenScriptInWorkspace(
                             preferred, g_customCodeEditorPath.data(), sourcePath,
                             ProjectRootFor(context), &sourceError, d.line, d.column)) {
                         // sourceError is reported below.
@@ -11846,6 +12200,8 @@ bool EditorDockspace::Draw(Context& context) {
         case EditorPanels::Panel::CameraManager:
             DrawCameraManager(context, &open);
             break;
+        case EditorPanels::Panel::VisualScriptEditor:
+            break; // drawn by EditorApp (owns the visual script editor document)
         case EditorPanels::Panel::Count:
             break;
         }

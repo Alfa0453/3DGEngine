@@ -12,6 +12,7 @@
 #include "engine/gameplay/PortalSystem.h"
 #include "engine/gameplay/QuestSystem.h"
 #include "engine/gameplay/DialogueSystem.h"
+#include "engine/gameplay/Localization.h"
 #include "engine/gameplay/InventorySystem.h"
 #include "engine/gameplay/CombatSystem.h"
 #include "engine/gameplay/SpawnSystem.h"
@@ -597,10 +598,15 @@ bool Script::CancelDialogue(){return m_context.registry&&engine::CancelDialogue(
 bool Script::SetDialogueFlag(const std::string& flag,bool value){return m_context.registry&&engine::SetDialogueFlag(*m_context.registry,m_context.entity,flag,value);}
 bool Script::IsDialogueActive()const{return m_context.registry&&engine::IsDialogueActive(*m_context.registry,m_context.entity);}
 std::string Script::DialogueNode()const{const auto* n=m_context.registry?engine::CurrentDialogueNode(*m_context.registry,m_context.entity):nullptr;return n?n->id:std::string{};}
-std::string Script::DialogueText()const{const auto* n=m_context.registry?engine::CurrentDialogueNode(*m_context.registry,m_context.entity):nullptr;return n?n->text:std::string{};}
+std::string Script::DialogueText()const{const auto* n=m_context.registry?engine::CurrentDialogueNode(*m_context.registry,m_context.entity):nullptr;return n?(n->localizationKey.empty()?n->text:Localization::Instance().Text(n->localizationKey,n->text)):std::string{};}
 std::string Script::DialogueSpeaker()const{const auto* n=m_context.registry?engine::CurrentDialogueNode(*m_context.registry,m_context.entity):nullptr;return n?n->speaker:std::string{};}
 std::string Script::SaveDialogueState()const{return m_context.registry?engine::SerializeDialogueState(*m_context.registry,m_context.entity):std::string{};}
 bool Script::LoadDialogueState(const std::string& data){return m_context.registry&&engine::RestoreDialogueState(*m_context.registry,m_context.entity,data);}
+bool Script::LoadLocalization(const std::string& path){return Localization::Instance().Load(path);}
+bool Script::SetLanguage(const std::string& language){return Localization::Instance().SetLanguage(language);}
+std::string Script::Language()const{return Localization::Instance().Language();}
+std::string Script::Localize(const std::string& key,const std::string& fallback)const{return Localization::Instance().Text(key,fallback);}
+std::string Script::LocalizedAsset(const std::string& key,const std::string& fallback)const{return Localization::Instance().Asset(key,fallback);}
 bool Script::AddItem(const std::string& path,int count){return m_context.registry&&engine::AddItem(*m_context.registry,m_context.entity,path,count);}
 int Script::RemoveItem(const std::string& name,int count){return m_context.registry?engine::RemoveItem(*m_context.registry,m_context.entity,name,count):0;}
 bool Script::UseItem(const std::string& name){return m_context.registry&&engine::UseItem(*m_context.registry,m_context.entity,name);}
@@ -1474,19 +1480,27 @@ void Script::TickTimers(float dt) {
         if (timer.cancelled) continue;
         timer.remaining -= std::max(dt, 0.0f);
         if (timer.remaining > 0.0f) continue;
-        m_timerCallbacks.push_back(timer.callback);
+        m_timerCallbacks.emplace_back(timer.id, timer.callback);
         if (timer.repeat) {
             do timer.remaining += timer.interval;
             while (timer.remaining <= 0.0f);
         } else {
-            timer.cancelled = true;
+            timer.completed = true;
         }
+    }
+    for (auto& pending : m_timerCallbacks) {
+        const auto timer = std::find_if(m_timers.begin(), m_timers.end(),
+            [&pending](const Timer& candidate) { return candidate.id == pending.first; });
+        // An earlier callback may cancel another timer that was due this frame.
+        if (timer != m_timers.end() && !timer->cancelled && pending.second)
+            pending.second();
     }
     m_timers.erase(
         std::remove_if(m_timers.begin(), m_timers.end(),
-                       [](const Timer& timer) { return timer.cancelled; }),
+                       [](const Timer& timer) {
+                           return timer.cancelled || timer.completed;
+                       }),
         m_timers.end());
-    for (auto& callback : m_timerCallbacks) callback();
 
     // Index-based over the initial count: an action may start a new sequence (push_back),
     // which could reallocate and invalidate a range-for iterator. The sequence objects
@@ -2211,12 +2225,7 @@ std::vector<OrderedScriptSlot> BuildScriptExecutionOrder(ecs::Registry& registry
             return a.attachmentIndex < b.attachmentIndex;
         });
 
-    std::unordered_map<std::string, std::vector<std::size_t>> providers;
-    for (std::size_t i = 0; i < nodes.size(); ++i) {
-        NativeScriptSlot& slot = *nodes[i].slot;
-        slot.dependencyError.clear();
-        if (slot.enabled && !slot.className.empty()) providers[slot.className].push_back(i);
-    }
+    for (OrderedScriptSlot& node : nodes) node.slot->dependencyError.clear();
 
     std::vector<std::vector<std::size_t>> outgoing(nodes.size());
     std::vector<int> indegree(nodes.size(), 0);
@@ -2225,16 +2234,18 @@ std::vector<OrderedScriptSlot> BuildScriptExecutionOrder(ecs::Registry& registry
         if (!slot.enabled || slot.className.empty()) continue;
         for (const std::string& dependency : slot.dependencies) {
             if (dependency.empty()) continue;
-            const auto found = providers.find(dependency);
-            if (found == providers.end()) {
-                if (!slot.dependencyError.empty()) slot.dependencyError += ", ";
-                slot.dependencyError += "missing " + dependency;
-                continue;
-            }
-            for (const std::size_t provider : found->second) {
-                if (provider == i) continue;
+            bool foundProvider = false;
+            for (std::size_t provider = 0; provider < nodes.size(); ++provider) {
+                if (provider == i || nodes[provider].entity != nodes[i].entity) continue;
+                const NativeScriptSlot& candidate = *nodes[provider].slot;
+                if (!candidate.enabled || candidate.className != dependency) continue;
+                foundProvider = true;
                 outgoing[provider].push_back(i);
                 ++indegree[i];
+            }
+            if (!foundProvider) {
+                if (!slot.dependencyError.empty()) slot.dependencyError += ", ";
+                slot.dependencyError += "missing " + dependency;
             }
         }
     }
@@ -2330,13 +2341,14 @@ Script* PrepareScript(ecs::Registry& registry, ecs::Entity entity, NativeScriptS
     return script.enabled ? script.instance.get() : nullptr;
 }
 
-bool ScriptDependenciesReady(const NativeScriptSlot& slot,
+bool ScriptDependenciesReady(ecs::Entity entity, const NativeScriptSlot& slot,
                              const std::vector<OrderedScriptSlot>& ordered) {
     for (const std::string& dependency : slot.dependencies) {
         if (dependency.empty() || dependency == slot.className) continue;
         const bool ready = std::any_of(ordered.begin(), ordered.end(),
-            [&dependency](const OrderedScriptSlot& candidate) {
-                return candidate.slot->enabled && candidate.slot->active
+            [entity, &dependency](const OrderedScriptSlot& candidate) {
+                return candidate.entity == entity
+                    && candidate.slot->enabled && candidate.slot->active
                     && candidate.slot->className == dependency
                     && candidate.slot->created && candidate.slot->instance;
             });
@@ -2514,7 +2526,7 @@ void UpdateScripts(ecs::Registry& registry, float dt, const ScriptInputState* in
     for (const OrderedScriptSlot& node : ordered) {
         NativeScriptSlot& slot = *node.slot;
         const bool shouldBeActive = slot.enabled && slot.dependencyError.empty()
-            && ScriptDependenciesReady(slot, ordered);
+            && ScriptDependenciesReady(node.entity, slot, ordered);
         if (!shouldBeActive) {
             DeactivateScript(registry, node.entity, slot, &destroyQueue, input, audio,
                              cameraShake, cameraDirector, gameMode, physics);
@@ -2598,7 +2610,7 @@ void FixedUpdateScripts(ecs::Registry& registry, float dt, const ScriptInputStat
     for (const OrderedScriptSlot& node : ordered) {
         NativeScriptSlot& slot = *node.slot;
         const bool shouldBeActive = slot.enabled && slot.dependencyError.empty()
-            && ScriptDependenciesReady(slot, ordered);
+            && ScriptDependenciesReady(node.entity, slot, ordered);
         if (!shouldBeActive) {
             DeactivateScript(registry, node.entity, slot, &destroyQueue, input, audio,
                              cameraShake, cameraDirector, gameMode, physics);

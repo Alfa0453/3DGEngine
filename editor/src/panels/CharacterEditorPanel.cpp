@@ -42,10 +42,11 @@ std::string Lower(std::string value) {
     return value;
 }
 
-std::string StoredScriptPath(const std::filesystem::path& absolutePath) {
+std::string StoredScriptPath(const std::filesystem::path& absolutePath,
+                             const std::filesystem::path& contentRoot) {
     std::error_code ec;
     const std::filesystem::path relative = std::filesystem::relative(
-        absolutePath, std::filesystem::current_path(ec), ec);
+        absolutePath, std::filesystem::absolute(contentRoot, ec).parent_path(), ec);
     return ec ? absolutePath.lexically_normal().generic_string()
               : relative.lexically_normal().generic_string();
 }
@@ -759,11 +760,11 @@ void CharacterEditorPanel::RefreshAssetChoices(const std::string& assetRoot) {
                 m_ikRigChoices.push_back(std::move(choice));
             } else if (extension == ".btgraph") {
                 m_behaviorChoices.push_back(std::move(choice));
-            } else if ((extension == ".h" || extension == ".lua")
+            } else if ((extension == ".h" || extension == ".hpp" || extension == ".lua")
                        && Lower(file.generic_string()).find("/scripts/")
                               != std::string::npos) {
                 choice.displayName = file.stem().string();
-                choice.path = StoredScriptPath(file);
+                choice.path = StoredScriptPath(file, root);
                 m_scriptChoices.push_back(std::move(choice));
             }
         }

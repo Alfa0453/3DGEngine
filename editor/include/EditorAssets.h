@@ -65,6 +65,7 @@ public:
         IKRig,
         PoseLibrary,
         EquipmentSet,
+        Localization,
         Other
     };
 
@@ -124,6 +125,9 @@ public:
     bool RenameSelectedEntry(const std::string& newName, std::string* error);
     bool RenameSelectedFolder(const std::string& newName, std::string* error);
     bool DeleteSelectedEntry(std::string* error);
+    // Batch delete: removes the whole asset multi-selection (or the selected folder). Returns the
+    // number deleted; on any failure `error` is set and the successfully-deleted ones are gone.
+    int  DeleteSelectedAssets(std::string* error);
 
     const std::string& RootPath() const { return m_rootPath; }
     const std::string& CurrentFolder() const { return m_currentFolder; }
@@ -136,6 +140,13 @@ public:
     SelectionType SelectedType() const { return m_selectedType; }
     int SelectedFolderIndex() const { return m_selectedFolderIndex; }
     int SelectedIndex() const { return m_selectedIndex; }
+
+    // Multi-selection (Ctrl/Shift). m_selectedIndex stays the "primary" (last-clicked) asset that the
+    // single-target operations use; this set holds the whole highlighted group.
+    const std::vector<int>& SelectedIndices() const { return m_selectedIndices; }
+    bool IsAssetSelected(int index) const;
+    void ToggleAssetSelection(int index);          // Ctrl+click: add/remove one asset
+    void SelectAssetRange(int anchor, int index);  // Shift+click: contiguous range [anchor..index]
     const Folder* SelectedFolder() const;
     const Asset* SelectedAsset() const;
     bool HasCopiedEntry() const { return !m_clipboardRelativePath.empty(); }
@@ -159,6 +170,10 @@ public:
         static std::filesystem::path UniqueDestinationPath(const std::filesystem::path& destination);
         std::string CurrentPath() const;
         std::string FullPathForRelative(const std::string& relativePath) const;
+        // Paste one clipboard entry (no Refresh); shared by single and multi paste.
+        bool PasteOneEntry(const std::string& relativePath, bool isFolder, bool cut, std::string* error);
+
+        struct ClipEntry { std::string relativePath; bool isFolder = false; };
 
         std::string m_rootPath;
         std::string m_currentFolder;
@@ -168,9 +183,11 @@ public:
         SelectionType m_selectedType = SelectionType::None;
         int m_selectedFolderIndex = -1;
         int m_selectedIndex = -1;
-        std::string m_clipboardRelativePath;
+        std::vector<int> m_selectedIndices;   // multi-selection group (Ctrl/Shift)
+        std::string m_clipboardRelativePath;         // primary entry (display / rename-sync)
         bool m_clipboardIsFolder = false;
         bool m_clipboardIsCut = false;   // Paste moves (and clears) instead of copying
+        std::vector<ClipEntry> m_clipboardEntries;   // full clipboard (multi copy/cut); primary first
         engine::AssetRegistry* m_assetRegistry = nullptr;
         engine::StaticMeshImportOptions m_staticMeshImportOptions;
         engine::SkeletalImportOptions m_skeletalImportOptions;

@@ -232,6 +232,68 @@ bool OpenScriptIdeProject(PreferredCodeEditor editor,
 #endif
 }
 
+bool OpenScriptInWorkspace(PreferredCodeEditor editor,
+                           const std::string& customExecutable,
+                           const std::filesystem::path& scriptPath,
+                           const std::filesystem::path& projectRoot,
+                           std::string* error, int line, int column) {
+#if defined(_WIN32)
+    // 1. Ensure the workspace solution exists (find; generate on first use / after a clean).
+    const std::filesystem::path ideDir = projectRoot / "Intermediate" / "Scripts" / "IDE";
+    std::filesystem::path solution;
+    std::error_code ec;
+    for (std::filesystem::directory_iterator it(ideDir, ec), end; !ec && it != end; it.increment(ec))
+        if (it->is_regular_file(ec)) {
+            const std::string extension = it->path().extension().string();
+            if (extension == ".sln" || extension == ".slnx") { solution = it->path(); break; }
+        }
+    if (solution.empty() && !GenerateScriptIdeProject(projectRoot, &solution, error)) return false;
+
+    // 2. Open (or reuse) the IDE on that workspace and focus the requested file.
+    std::wstring executable, arguments;
+    switch (editor) {
+    case PreferredCodeEditor::BuiltIn:
+    case PreferredCodeEditor::VisualStudio:
+        // devenv reuses a running instance already holding this solution; /Edit opens + focuses the file.
+        executable = L"devenv";
+        arguments = Quote(solution) + L" /Edit " + Quote(scriptPath);
+        if (line > 0) arguments += L" /Command \"Edit.Goto " + std::to_wstring(line) + L"\"";
+        break;
+    case PreferredCodeEditor::VisualStudioCode: {
+        // Open the project root as the workspace folder AND focus the file (reuses the same window).
+        executable = L"code.cmd";
+        std::filesystem::path target = line > 0
+            ? std::filesystem::path(scriptPath.wstring() + L":" + std::to_wstring(line)
+                                    + L":" + std::to_wstring(std::max(column, 1)))
+            : scriptPath;
+        arguments = Quote(projectRoot) + L" -g " + Quote(target);
+        break;
+    }
+    case PreferredCodeEditor::Rider:
+        executable = L"rider64.exe";
+        arguments = Quote(solution) + L" ";
+        if (line > 0) arguments += L"--line " + std::to_wstring(line) + L" ";
+        arguments += Quote(scriptPath);
+        break;
+    case PreferredCodeEditor::Custom:
+        executable.assign(customExecutable.begin(), customExecutable.end());
+        arguments = Quote(scriptPath);
+        break;
+    }
+    if (!executable.empty()) {
+        const HINSTANCE result = ShellExecuteW(nullptr, L"open", executable.c_str(),
+            arguments.c_str(), projectRoot.wstring().c_str(), SW_SHOWNORMAL);
+        if (reinterpret_cast<std::intptr_t>(result) > 32) return true;
+    }
+    // 3. Fallback: opening the workspace is mandatory; focusing the file is best-effort.
+    return OpenScriptIdeProject(editor, customExecutable, projectRoot, error);
+#else
+    (void)editor; (void)customExecutable; (void)scriptPath; (void)projectRoot; (void)line; (void)column;
+    if (error) *error = "Script workspace opening is only available on Windows.";
+    return false;
+#endif
+}
+
 bool LaunchCompileAndRestart(const std::filesystem::path& projectRoot,
                              const std::string& configuration,
                              std::string* error) {
@@ -419,7 +481,8 @@ bool PackageProject(const std::filesystem::path& projectRoot,
     // The project script module is produced by the player dependency build.
     // Refresh the cooked copy before install so the package always contains the
     // same scripts that were just compiled.
-    const std::filesystem::path scriptModule = ProjectScriptBinary(projectRoot);
+    const std::filesystem::path scriptModule =
+        ProjectScriptBinary(projectRoot, configuration);
     if (std::filesystem::is_regular_file(scriptModule, ec)) {
         std::filesystem::copy_file(scriptModule, cookedRoot / scriptModule.filename(),
             std::filesystem::copy_options::overwrite_existing, ec);
@@ -492,11 +555,22 @@ std::filesystem::path EngineBuildDirectory() {
 #endif
 }
 
-std::filesystem::path ProjectScriptBinary(const std::filesystem::path& projectRoot) {
-#if defined(_WIN32)
-    return projectRoot / "Binaries" / "game_scripts.dll";
+std::string HostBuildConfiguration() {
+#ifdef THREEDG_EDITOR_BUILD_CONFIGURATION
+    return THREEDG_EDITOR_BUILD_CONFIGURATION;
 #else
-    return projectRoot / "Binaries" / "libgame_scripts.so";
+    return "Debug";
+#endif
+}
+
+std::filesystem::path ProjectScriptBinary(const std::filesystem::path& projectRoot,
+                                          const std::string& configuration) {
+    const std::string selected = configuration.empty()
+        ? HostBuildConfiguration() : configuration;
+#if defined(_WIN32)
+    return projectRoot / "Binaries" / selected / "game_scripts.dll";
+#else
+    return projectRoot / "Binaries" / selected / "libgame_scripts.so";
 #endif
 }
 

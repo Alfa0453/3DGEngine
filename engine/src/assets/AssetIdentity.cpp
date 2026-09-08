@@ -163,12 +163,14 @@ const char* AssetTypeName(AssetType type) {
         case AssetType::IKRig: return "IK Rig";
         case AssetType::PoseLibrary: return "Pose Library";
         case AssetType::EquipmentSet: return "Equipment Set";
+        case AssetType::VisualScript: return "Visual Script";
+        case AssetType::Localization: return "Localization";
     }
     return "Unknown";
 }
 
 bool IsKnownAssetType(AssetType type) {
-    return type > AssetType::Unknown && type <= AssetType::EquipmentSet;
+    return type > AssetType::Unknown && type <= AssetType::Localization;
 }
 
 const char* NativeAssetExtension(AssetType type) {
@@ -185,6 +187,8 @@ const char* NativeAssetExtension(AssetType type) {
         case AssetType::Biome: return ".3dgbiome";
         case AssetType::DayNightTimeline: return ".3dgdaynight";
         case AssetType::Cave: return ".3dgcave";
+        case AssetType::Font: return ".3dgfont";   // Font system upgrade: cooked font asset
+        case AssetType::VisualScript: return ".3dgvs";   // node-graph gameplay script
         default: return "";
     }
 }
@@ -203,6 +207,8 @@ AssetType NativeAssetTypeFromExtension(const std::string& extension) {
     if (lower == ".3dgbiome") return AssetType::Biome;
     if (lower == ".3dgdaynight") return AssetType::DayNightTimeline;
     if (lower == ".3dgcave") return AssetType::Cave;
+    if (lower == ".3dgfont") return AssetType::Font;   // Font system upgrade
+    if (lower == ".3dgvs") return AssetType::VisualScript;   // node-graph gameplay script
     return AssetType::Unknown;
 }
 

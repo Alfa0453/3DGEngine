@@ -70,9 +70,22 @@ struct HudWidget {
     glm::vec4  color    {0.90f, 0.90f, 0.95f, 1.0f};  // text colour / panel colour / button bg
     glm::vec4  bgColor  {0.10f, 0.10f, 0.14f, 0.65f}; // bar background
     glm::vec4  fillColor{0.85f, 0.25f, 0.30f, 1.0f};  // bar fill
-    float      textScale = 1.5f;
+    float      textScale = 1.5f;         // LEGACY: kept for v<=3 HUD compatibility & migration
+
+    // Font system upgrade (additive; Phase 7). An invalid fontAssetId means "use the built-in bitmap
+    // font", so existing HUDs behave exactly as before. fontSize == 0 means "derive from textScale"
+    // (fontSize = TextRenderer::kGlyphPx * textScale) so legacy documents keep their visual scale.
+    // The runtime resolves fontAssetId through the AssetRegistry -> RuntimeAssetManager -> font cache;
+    // fontAssetPath is only an editor-side convenience label. No runtime font id is stored here.
+    AssetHandle fontAssetId;                    // stable identity of the .3dgfont (invalid = built-in)
+    std::string fontAssetPath;                  // project-relative source path (editor display only)
+    float       fontSize = 0.0f;                // px; 0 = derive from legacy textScale
+    int         hAlign = 0;                      // 0=Left 1=Center 2=Right (text::HAlign)
+    int         vAlign = 0;                      // 0=Top 1=Middle 2=Bottom (text::VAlign)
+    int         wrapMode = 0;                     // 0=None 1=Word (text widgets)
 
     std::string text = "Label";          // static text / button label ("{}" = bound value)
+    std::string localizationKey;          // optional key resolved before live-value substitution
 
     HudBinding  binding  = HudBinding::None;
     std::string bindKey  = "";           // key for NamedFloat / NamedString / EmitEvent

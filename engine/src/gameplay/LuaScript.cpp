@@ -22,6 +22,7 @@ namespace engine {
 namespace {
 
 constexpr const char* kInstanceRegistryKey = "3DGEngine.LuaScript.Instance";
+std::string g_luaScriptProjectRoot;
 
 std::filesystem::path ResolveSourcePath(const std::string& authored) {
     const std::filesystem::path source(authored);
@@ -31,12 +32,19 @@ std::filesystem::path ResolveSourcePath(const std::string& authored) {
     }
 
     const std::filesystem::path executable(ExecutableDir());
-    const std::filesystem::path candidates[] = {
-        source,
-        std::filesystem::current_path(ec) / source,
-        executable / source,
-        executable.parent_path() / source
-    };
+    std::vector<std::filesystem::path> candidates;
+    if (!g_luaScriptProjectRoot.empty()) {
+        const std::filesystem::path projectRoot(g_luaScriptProjectRoot);
+        candidates.emplace_back(projectRoot / source);
+        // Compatibility for scenes authored before paths were stored relative to the
+        // project. Their old ../../ paths cannot survive packaging, but the script's
+        // filename remains stable inside Content/Scripts.
+        candidates.emplace_back(projectRoot / "Content" / "Scripts" / source.filename());
+    }
+    candidates.emplace_back(source);
+    candidates.emplace_back(std::filesystem::current_path(ec) / source);
+    candidates.emplace_back(executable / source);
+    candidates.emplace_back(executable.parent_path() / source);
     for (const std::filesystem::path& candidate : candidates) {
         ec.clear();
         if (std::filesystem::is_regular_file(candidate, ec)) {
@@ -110,6 +118,21 @@ ScriptHandle ReadScriptHandle(lua_State* state, int index) {
 
 } // namespace
 
+void SetLuaScriptProjectRoot(const std::string& root) {
+    std::error_code ec;
+    if (root.empty()) {
+        g_luaScriptProjectRoot.clear();
+        return;
+    }
+    const std::filesystem::path absolute = std::filesystem::absolute(root, ec);
+    g_luaScriptProjectRoot = ec ? std::filesystem::path(root).lexically_normal().string()
+                                : absolute.lexically_normal().string();
+}
+
+const std::string& LuaScriptProjectRoot() {
+    return g_luaScriptProjectRoot;
+}
+
 bool IsLuaScriptPath(const std::string& path) {
     std::string extension = std::filesystem::path(path).extension().string();
     std::transform(extension.begin(), extension.end(), extension.begin(),
@@ -130,6 +153,11 @@ void LuaScript::Load() {
         throw std::runtime_error("Lua script has no source path");
     }
 
+    // A previous failed load must not leave a VM behind for the retry to leak.
+    if (m_state) {
+        lua_close(m_state);
+        m_state = nullptr;
+    }
     m_state = luaL_newstate();
     if (!m_state) throw std::runtime_error("could not create Lua state");
 
@@ -151,11 +179,15 @@ void LuaScript::Load() {
     if (luaL_loadfile(m_state, resolved.string().c_str()) != LUA_OK) {
         const std::string error = lua_tostring(m_state, -1);
         lua_pop(m_state, 1);
+        lua_close(m_state);
+        m_state = nullptr;
         throw std::runtime_error("could not load '" + resolved.string() + "': " + error);
     }
     if (lua_pcall(m_state, 0, 0, 0) != LUA_OK) {
         const std::string error = lua_tostring(m_state, -1);
         lua_pop(m_state, 1);
+        lua_close(m_state);
+        m_state = nullptr;
         throw std::runtime_error("error evaluating '" + resolved.string() + "': " + error);
     }
     m_loaded = true;
@@ -502,6 +534,11 @@ void LuaScript::RegisterEngineApi() {
         {"DialogueSpeaker", ApiDialogueSpeaker},
         {"SaveDialogueState", ApiSaveDialogueState},
         {"LoadDialogueState", ApiLoadDialogueState},
+        {"LoadLocalization", ApiLoadLocalization},
+        {"SetLanguage", ApiSetLanguage},
+        {"Language", ApiLanguage},
+        {"Localize", ApiLocalize},
+        {"LocalizedAsset", ApiLocalizedAsset},
         {"AddItem", ApiAddItem},
         {"RemoveItem", ApiRemoveItem},
         {"UseItem", ApiUseItem},
@@ -1002,6 +1039,11 @@ int LuaScript::ApiDialogueText(lua_State* s){const auto v=Current(s)->DialogueTe
 int LuaScript::ApiDialogueSpeaker(lua_State* s){const auto v=Current(s)->DialogueSpeaker();lua_pushlstring(s,v.data(),v.size());return 1;}
 int LuaScript::ApiSaveDialogueState(lua_State* s){const auto v=Current(s)->SaveDialogueState();lua_pushlstring(s,v.data(),v.size());return 1;}
 int LuaScript::ApiLoadDialogueState(lua_State* s){lua_pushboolean(s,Current(s)->LoadDialogueState(luaL_checkstring(s,1)));return 1;}
+int LuaScript::ApiLoadLocalization(lua_State* s){lua_pushboolean(s,Current(s)->LoadLocalization(luaL_checkstring(s,1)));return 1;}
+int LuaScript::ApiSetLanguage(lua_State* s){lua_pushboolean(s,Current(s)->SetLanguage(luaL_checkstring(s,1)));return 1;}
+int LuaScript::ApiLanguage(lua_State* s){const auto value=Current(s)->Language();lua_pushlstring(s,value.data(),value.size());return 1;}
+int LuaScript::ApiLocalize(lua_State* s){const char* fallback=lua_gettop(s)>=2?luaL_checkstring(s,2):"";const auto value=Current(s)->Localize(luaL_checkstring(s,1),fallback);lua_pushlstring(s,value.data(),value.size());return 1;}
+int LuaScript::ApiLocalizedAsset(lua_State* s){const char* fallback=lua_gettop(s)>=2?luaL_checkstring(s,2):"";const auto value=Current(s)->LocalizedAsset(luaL_checkstring(s,1),fallback);lua_pushlstring(s,value.data(),value.size());return 1;}
 int LuaScript::ApiAddItem(lua_State* s){lua_pushboolean(s,Current(s)->AddItem(luaL_checkstring(s,1),static_cast<int>(luaL_optinteger(s,2,1))));return 1;}
 int LuaScript::ApiRemoveItem(lua_State* s){lua_pushinteger(s,Current(s)->RemoveItem(luaL_checkstring(s,1),static_cast<int>(luaL_optinteger(s,2,1))));return 1;}
 int LuaScript::ApiUseItem(lua_State* s){lua_pushboolean(s,Current(s)->UseItem(luaL_checkstring(s,1)));return 1;}

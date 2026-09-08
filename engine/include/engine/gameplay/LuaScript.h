@@ -8,6 +8,12 @@ struct lua_State;
 
 namespace engine {
 
+// Relative Lua paths stored by scenes are rooted at the game project rather
+// than at the process working directory. Hosts set this when a project/scene
+// is opened so Editor Play and packaged games resolve the same path.
+void SetLuaScriptProjectRoot(const std::string& root);
+const std::string& LuaScriptProjectRoot();
+
 // A gameplay Script implemented by a .lua source file. It deliberately shares
 // NativeScriptComponent with C++ scripts, so attachment, fields, scene saving,
 // prefabs, characters, Play mode, and packaged builds all follow one path.
@@ -221,6 +227,11 @@ private:
     static int ApiDialogueSpeaker(lua_State* state);
     static int ApiSaveDialogueState(lua_State* state);
     static int ApiLoadDialogueState(lua_State* state);
+    static int ApiLoadLocalization(lua_State* state);
+    static int ApiSetLanguage(lua_State* state);
+    static int ApiLanguage(lua_State* state);
+    static int ApiLocalize(lua_State* state);
+    static int ApiLocalizedAsset(lua_State* state);
     static int ApiAddItem(lua_State* state);
     static int ApiRemoveItem(lua_State* state);
     static int ApiUseItem(lua_State* state);

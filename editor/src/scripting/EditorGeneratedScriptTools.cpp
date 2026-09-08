@@ -4,8 +4,15 @@
 #include <cctype>
 #include <fstream>
 #include <iterator>
+#include <regex>
 #include <sstream>
 #include <vector>
+
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
 
 namespace EditorGeneratedScriptTools {
 namespace {
@@ -13,6 +20,7 @@ namespace {
 struct Registration {
     std::string className;
     bool behaviorTree = false;
+    std::string cxxTypeName;
 };
 
 bool IsClassName(const std::string& name) {
@@ -24,6 +32,89 @@ bool IsClassName(const std::string& name) {
     return std::all_of(name.begin() + 1, name.end(), [](unsigned char c) {
         return std::isalnum(c) || c == '_';
     });
+}
+
+std::string StripCppCommentsAndStrings(const std::string& source) {
+    enum class State { Code, LineComment, BlockComment, String, Character };
+    State state = State::Code;
+    bool escaped = false;
+    std::string result(source.size(), ' ');
+    for (std::size_t i = 0; i < source.size(); ++i) {
+        const char c = source[i];
+        const char next = i + 1 < source.size() ? source[i + 1] : '\0';
+        if (state == State::Code) {
+            if (c == '/' && next == '/') { state = State::LineComment; ++i; continue; }
+            if (c == '/' && next == '*') { state = State::BlockComment; ++i; continue; }
+            if (c == '"') { state = State::String; escaped = false; continue; }
+            if (c == '\'') { state = State::Character; escaped = false; continue; }
+            result[i] = c;
+        } else if (state == State::LineComment) {
+            if (c == '\n') { state = State::Code; result[i] = c; }
+        } else if (state == State::BlockComment) {
+            if (c == '*' && next == '/') { state = State::Code; ++i; }
+        } else {
+            if (!escaped && ((state == State::String && c == '"')
+                || (state == State::Character && c == '\''))) {
+                state = State::Code;
+            }
+            escaped = !escaped && c == '\\';
+            if (c == '\n') { state = State::Code; result[i] = c; escaped = false; }
+        }
+    }
+    return result;
+}
+
+bool DetectScriptDeclaration(const std::string& source, const std::string& className,
+                             bool* behaviorTree, std::string* cxxTypeName) {
+    const std::string code = StripCppCommentsAndStrings(source);
+    const std::regex declaration(
+        "(?:class|struct)\\s+" + className
+        + "\\s*(?:final\\s*)?:\\s*public\\s+"
+          "(engine::ai::BtScript|engine::Script)\\b");
+    std::smatch match;
+    if (!std::regex_search(code, match, declaration)) return false;
+    if (behaviorTree) *behaviorTree = match[1].str() == "engine::ai::BtScript";
+    std::vector<std::string> scopes;
+    const std::string prefix = code.substr(0, static_cast<std::size_t>(match.position()));
+    const std::regex scopeToken(
+        "namespace\\s+([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*)\\s*\\{|[{}]");
+    for (std::sregex_iterator it(prefix.begin(), prefix.end(), scopeToken), end;
+         it != end; ++it) {
+        const std::string token = it->str();
+        if (token.front() == '}') {
+            if (!scopes.empty()) scopes.pop_back();
+        } else if (token.front() == '{') {
+            scopes.emplace_back();
+        } else {
+            scopes.push_back((*it)[1].str());
+        }
+    }
+    std::string qualified;
+    for (const std::string& scope : scopes) {
+        // A script nested in a class/function or anonymous namespace cannot be
+        // named safely from the generated module translation unit.
+        if (scope.empty()) return false;
+        if (!qualified.empty()) qualified += "::";
+        qualified += scope;
+    }
+    if (!qualified.empty()) qualified += "::";
+    qualified += className;
+    if (cxxTypeName) *cxxTypeName = std::move(qualified);
+    return true;
+}
+
+std::string NormalizeLineEndings(const std::string& text) {
+    std::string normalized;
+    normalized.reserve(text.size());
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        if (text[i] == '\r') {
+            if (i + 1 < text.size() && text[i + 1] == '\n') ++i;
+            normalized.push_back('\n');
+        } else {
+            normalized.push_back(text[i]);
+        }
+    }
+    return normalized;
 }
 
 bool WriteText(const std::filesystem::path& path,
@@ -38,16 +129,36 @@ bool WriteText(const std::filesystem::path& path,
             return false;
         }
     }
-    std::ofstream output(path, std::ios::trunc);
+    const std::filesystem::path temporary = path.string() + ".tmp";
+    std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
     if (!output) {
         if (error) *error = "Could not write " + path.string();
         return false;
     }
-    output << text;
+    output << NormalizeLineEndings(text);
+    output.flush();
     if (!output) {
         if (error) *error = "Writing failed for " + path.string();
+        output.close();
+        std::filesystem::remove(temporary, ec);
         return false;
     }
+    output.close();
+#if defined(_WIN32)
+    if (!MoveFileExW(temporary.wstring().c_str(), path.wstring().c_str(),
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        if (error) *error = "Could not replace " + path.string();
+        std::filesystem::remove(temporary, ec);
+        return false;
+    }
+#else
+    std::filesystem::rename(temporary, path, ec);
+    if (ec) {
+        if (error) *error = "Could not replace " + path.string() + ": " + ec.message();
+        std::filesystem::remove(temporary, ec);
+        return false;
+    }
+#endif
     return true;
 }
 
@@ -62,7 +173,7 @@ bool WriteTextIfChanged(const std::filesystem::path& path,
         if (existing) {
             const std::string current((std::istreambuf_iterator<char>(existing)),
                                       std::istreambuf_iterator<char>());
-            if (current == text) return true;
+            if (NormalizeLineEndings(current) == NormalizeLineEndings(text)) return true;
         }
     }
     return WriteText(path, text, error);
@@ -152,16 +263,47 @@ std::filesystem::path ProjectScriptListPath(const std::filesystem::path& scriptR
     return ProjectRootFor(scriptRoot) / "Intermediate" / "Scripts" / "EditorScripts.list";
 }
 
+std::filesystem::path FindScriptHeader(const std::filesystem::path& scriptRoot,
+                                       const std::string& className,
+                                       bool* ambiguous = nullptr) {
+    if (ambiguous) *ambiguous = false;
+    std::filesystem::path found;
+    std::error_code ec;
+    if (!std::filesystem::is_directory(scriptRoot, ec)) return {};
+    for (std::filesystem::recursive_directory_iterator it(
+             scriptRoot, std::filesystem::directory_options::skip_permission_denied, ec), end;
+         !ec && it != end; it.increment(ec)) {
+        if (!it->is_regular_file(ec)) continue;
+        const std::string extension = it->path().extension().string();
+        if ((extension != ".h" && extension != ".hpp")
+            || it->path().stem().string() != className) continue;
+        if (!found.empty()) {
+            if (ambiguous) *ambiguous = true;
+            return {};
+        }
+        found = it->path();
+    }
+    return found;
+}
+
 bool WriteRegistrations(const std::filesystem::path& listPath,
                         const std::filesystem::path& scriptRoot,
                         std::vector<Registration> registrations,
                         std::string* error) {
+    bool ambiguousHeader = false;
     registrations.erase(std::remove_if(registrations.begin(), registrations.end(),
         [&](const Registration& registration) {
-            std::error_code ec;
-            return !std::filesystem::is_regular_file(
-                scriptRoot / (registration.className + ".h"), ec);
+            bool ambiguous = false;
+            const std::filesystem::path header = FindScriptHeader(
+                scriptRoot, registration.className, &ambiguous);
+            if (ambiguous) {
+                ambiguousHeader = true;
+                if (error) *error = "More than one script header is named "
+                    + registration.className + ". Use unique script class/file names.";
+            }
+            return header.empty();
         }), registrations.end());
+    if (ambiguousHeader) return false;
     std::sort(registrations.begin(), registrations.end(),
         [](const Registration& a, const Registration& b) {
             return a.className < b.className;
@@ -172,10 +314,12 @@ bool WriteRegistrations(const std::filesystem::path& listPath,
          << "# This file is maintained by the editor. Empty lines and comments are ignored.\n";
     for (const Registration& registration : registrations) {
         list << (registration.behaviorTree ? "bt " : "gameplay ")
-             << registration.className << '\n';
+             << registration.className;
+        if (!registration.cxxTypeName.empty()
+            && registration.cxxTypeName != registration.className)
+            list << ' ' << registration.cxxTypeName;
+        list << '\n';
     }
-    if (!WriteText(listPath, list.str(), error)) return false;
-
     std::ostringstream registry;
     registry << "#pragma once\n\n"
              << "#include <engine/gameplay/Script.h>\n"
@@ -184,7 +328,7 @@ bool WriteRegistrations(const std::filesystem::path& listPath,
     for (const Registration& registration : registrations) {
         std::error_code ec;
         const std::filesystem::path header = std::filesystem::absolute(
-            scriptRoot / (registration.className + ".h"), ec).lexically_normal();
+            FindScriptHeader(scriptRoot, registration.className), ec).lexically_normal();
         registry << "#include \"" << header.generic_string() << "\"\n";
     }
     registry << "\n// Generated by the editor. Changes are replaced when scripts are created.\n"
@@ -193,8 +337,10 @@ bool WriteRegistrations(const std::filesystem::path& listPath,
     for (const Registration& registration : registrations) {
         if (registration.behaviorTree) continue;
         hasGameplay = true;
+        const std::string& typeName = registration.cxxTypeName.empty()
+            ? registration.className : registration.cxxTypeName;
         registry << "    scripts.Register(\"" << registration.className
-                 << "\", [] { return std::make_unique<" << registration.className
+                 << "\", [] { return std::make_unique<" << typeName
                  << ">(); });\n";
     }
     if (!hasGameplay) registry << "    (void)scripts;\n";
@@ -204,8 +350,10 @@ bool WriteRegistrations(const std::filesystem::path& listPath,
     for (const Registration& registration : registrations) {
         if (!registration.behaviorTree) continue;
         hasBehaviorTree = true;
+        const std::string& typeName = registration.cxxTypeName.empty()
+            ? registration.className : registration.cxxTypeName;
         registry << "    scripts.Register(\"" << registration.className
-                 << "\", [] { return std::make_unique<" << registration.className
+                 << "\", [] { return std::make_unique<" << typeName
                  << ">(); });\n";
     }
     if (!hasBehaviorTree) registry << "    (void)scripts;\n";
@@ -218,6 +366,7 @@ bool WriteRegistrations(const std::filesystem::path& listPath,
     module << "// Generated by 3DG Editor. Do not edit.\n"
            << "#include \"ProjectGeneratedScripts.h\"\n\n"
            << "#include <engine/gameplay/ScriptModule.h>\n\n"
+           << "#include <engine/gameplay/ScriptModuleAbi.h>\n\n"
            << "#if defined(_WIN32)\n"
            << "#define THREEDG_SCRIPT_EXPORT extern \"C\" __declspec(dllexport)\n"
            << "#else\n"
@@ -230,9 +379,17 @@ bool WriteRegistrations(const std::filesystem::path& listPath,
            << "}\n\n"
            << "THREEDG_SCRIPT_EXPORT std::uint32_t Get3DGScriptApiVersion() {\n"
            << "    return engine::kScriptModuleApiVersion;\n"
+           << "}\n\n"
+           << "THREEDG_SCRIPT_EXPORT engine::script::ScriptModuleInfo Get3DGScriptModuleInfo() {\n"
+           << "    engine::script::ScriptModuleInfo info;\n"
+           << "    info.moduleBuildId = engine::script::StableId(__DATE__ \" \" __TIME__);\n"
+           << "    return info;\n"
            << "}\n";
-    return WriteTextIfChanged(generatedDir / "ProjectScriptModule.cpp",
-                              module.str(), error);
+    if (!WriteTextIfChanged(generatedDir / "ProjectScriptModule.cpp",
+                            module.str(), error)) return false;
+    // Commit the source-of-truth list last. If either generated C++ file could not be
+    // replaced, the prior list remains intact and the failed generation is retryable.
+    return WriteTextIfChanged(listPath, list.str(), error);
 }
 
 std::vector<Registration> ReadRegistrations(const std::filesystem::path& listPath) {
@@ -249,7 +406,14 @@ std::vector<Registration> ReadRegistrations(const std::filesystem::path& listPat
         } else if (line.rfind("gameplay ", 0) == 0) {
             line.erase(0, 9);
         }
-        if (IsClassName(line)) registrations.push_back({line, isBehaviorTree});
+        std::istringstream entry(line);
+        std::string className;
+        std::string cxxTypeName;
+        entry >> className >> cxxTypeName;
+        if (IsClassName(className)) {
+            if (cxxTypeName.empty()) cxxTypeName = className;
+            registrations.push_back({className, isBehaviorTree, cxxTypeName});
+        }
     }
     return registrations;
 }
@@ -278,6 +442,10 @@ bool RegisterScript(const std::filesystem::path& gameRoot,
                     const std::string& className,
                     bool behaviorTree,
                     std::string* error) {
+    if (!className.empty() && !IsClassName(className)) {
+        if (error) *error = "Invalid C++ script class name: " + className;
+        return false;
+    }
     const std::filesystem::path listPath = ProjectScriptListPath(scriptRoot);
     std::vector<Registration> registrations = SeedRegistrations(listPath, gameRoot);
     // An empty class name means "just regenerate from the current list" (used when
@@ -287,18 +455,45 @@ bool RegisterScript(const std::filesystem::path& gameRoot,
             [&](const Registration& registration) {
                 return registration.className == className;
             }), registrations.end());
-        registrations.push_back({className, behaviorTree});
+        registrations.push_back({className, behaviorTree, className});
     }
     return WriteRegistrations(listPath, scriptRoot, std::move(registrations), error);
 }
 
 bool RegenerateGeneratedScripts(const std::filesystem::path& contentRoot,
                                 std::string* error) {
-    const std::filesystem::path gameRoot = FindGameModuleRoot(contentRoot);
     const std::filesystem::path scriptRoot = contentRoot / "Scripts";
     const std::filesystem::path listPath = ProjectScriptListPath(scriptRoot);
-    return WriteRegistrations(listPath, scriptRoot,
-                              SeedRegistrations(listPath, gameRoot), error);
+    std::vector<Registration> registrations;
+
+    // Treat Content/Scripts as the source of truth. This registers valid script
+    // headers copied in from an IDE as well as editor-created files, including
+    // scripts organized in subfolders.
+    std::error_code ec;
+    if (std::filesystem::is_directory(scriptRoot, ec)) {
+        for (std::filesystem::recursive_directory_iterator it(
+                 scriptRoot, std::filesystem::directory_options::skip_permission_denied, ec), end;
+             !ec && it != end; it.increment(ec)) {
+            if (!it->is_regular_file(ec)) continue;
+            const std::string extension = it->path().extension().string();
+            if (extension != ".h" && extension != ".hpp") continue;
+            const std::string className = it->path().stem().string();
+            if (!IsClassName(className)) continue;
+            std::ifstream source(it->path(), std::ios::binary);
+            const std::string contents((std::istreambuf_iterator<char>(source)),
+                                       std::istreambuf_iterator<char>());
+            bool behaviorTree = false;
+            std::string cxxTypeName;
+            if (!DetectScriptDeclaration(
+                    contents, className, &behaviorTree, &cxxTypeName)) continue;
+            registrations.push_back({className, behaviorTree, std::move(cxxTypeName)});
+        }
+        if (ec) {
+            if (error) *error = "Could not scan Content/Scripts: " + ec.message();
+            return false;
+        }
+    }
+    return WriteRegistrations(listPath, scriptRoot, std::move(registrations), error);
 }
 
 std::filesystem::path GeneratedScriptDirectory(
@@ -330,6 +525,7 @@ bool CreateBehaviorTreeScript(const std::filesystem::path& contentRoot,
     }
 
     const std::filesystem::path headerPath = scriptRoot / (className + ".h");
+    bool createdHeader = false;
     if (!std::filesystem::exists(headerPath, ec)) {
         std::string source;
         if (!ReadTemplate(scriptTemplate, &source, error)) return false;
@@ -340,9 +536,18 @@ bool CreateBehaviorTreeScript(const std::filesystem::path& contentRoot,
             offset += className.size();
         }
         if (!WriteText(headerPath, source, error)) return false;
+        createdHeader = true;
     }
 
-    if (!RegisterScript(gameRoot, scriptRoot, className, true, error)) return false;
+    if (!RegisterScript(gameRoot, scriptRoot, className, true, error)) {
+        if (createdHeader) {
+            ec.clear();
+            std::filesystem::remove(headerPath, ec);
+            std::string ignored;
+            RegenerateGeneratedScripts(contentRoot, &ignored);
+        }
+        return false;
+    }
     if (createdPath) *createdPath = headerPath.lexically_normal().string();
     return true;
 }

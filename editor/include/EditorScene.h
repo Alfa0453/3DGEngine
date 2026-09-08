@@ -23,6 +23,7 @@ class Mesh;
 
 class EditorScene {
 public:
+    static constexpr int CurrentFileVersion = 156;
     using GroupId = std::uint64_t;
     static constexpr GroupId kRootGroupId = 0;
 
@@ -251,6 +252,7 @@ public:
         GroupId editorGroupId = kRootGroupId;
         std::string modelAssetPath;
         engine::AssetHandle modelAssetId;
+        engine::AssetHandle visualScriptGraph;   // optional .3dgvs graph attached to this object (Visual Scripting)
         std::string materialAssetPath;
         engine::AssetHandle materialAssetId;
         std::unordered_map<std::string, std::string> materialParameterOverrides;
@@ -926,6 +928,7 @@ public:
     bool SetSelectedPrimitive(Primitive primitive, const engine::Mesh& mesh);
     bool SetSelectedModelAsset(
         const std::string& path, engine::AssetHandle id = {});
+    bool SetSelectedVisualScript(engine::AssetHandle graph);   // attach/clear a .3dgvs graph
     bool SetSelectedModelOrientation(const glm::vec3& eulerDegrees);
     // Render-only model offset transform (position + Euler rotation + scale). The
     // collider/controller read the object Transform, which is left untouched.

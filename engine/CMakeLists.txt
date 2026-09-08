@@ -43,6 +43,7 @@ add_library(engine STATIC
     src/graphics/PbrRenderer.cpp
     src/graphics/Framebuffer.cpp
     src/graphics/PostProcess.cpp
+    src/graphics/Screenshot.cpp
     src/graphics/PostProcessVolume.cpp
     src/graphics/ProceduralSky.cpp
     src/graphics/PointShadow.cpp
@@ -77,7 +78,8 @@ add_library(engine STATIC
     src/assets/EquipmentAsset.cpp
     src/assets/PortalAsset.cpp
     src/assets/QuestAsset.cpp
-    src/assets/DialogueAsset.cpp
+      src/assets/DialogueAsset.cpp
+      src/assets/LocalizationAsset.cpp
     src/assets/ItemAsset.cpp
     src/assets/CombatAsset.cpp
     src/assets/SpawnAsset.cpp
@@ -133,16 +135,19 @@ add_library(engine STATIC
     src/gameplay/InteractionSystem.cpp
     src/gameplay/PortalSystem.cpp
     src/gameplay/QuestSystem.cpp
-    src/gameplay/DialogueSystem.cpp
+      src/gameplay/DialogueSystem.cpp
+      src/gameplay/Localization.cpp
     src/gameplay/InventorySystem.cpp
     src/gameplay/CombatSystem.cpp
     src/gameplay/SpawnSystem.cpp
     src/gameplay/SaveProfileSystem.cpp
     src/gameplay/GameMode.cpp
+    src/gameplay/PhotoMode.cpp
     src/gameplay/Script.cpp
     src/gameplay/EquipmentSystem.cpp
     src/gameplay/LuaScript.cpp
     src/gameplay/ScriptModule.cpp
+    src/plugins/LinkedPlugin.cpp
 )
 
 # Public headers are target sources for IDE browsing only. Consumers still

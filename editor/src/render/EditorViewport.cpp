@@ -1527,6 +1527,15 @@ void EditorViewport::DrawPhysicsEventGuides(engine::Renderer& renderer,
         DrawGuideSegment(renderer, shader, cube, guide.a, guide.b, thickness, color);
         DrawGizmoBox(renderer, shader, cube, guide.a, markerSize, color);
         DrawGizmoBox(renderer, shader, cube, guide.b, markerSize, color);
+        if (!guide.trigger && guide.phase != 2 && glm::length(guide.normal) > 0.001f) {
+            const glm::vec3 normal = glm::normalize(guide.normal);
+            const float normalLength = 0.35f + std::min(guide.penetration * 4.0f, 0.65f);
+            const glm::vec3 tip = guide.point + normal * normalLength;
+            const glm::vec3 normalColor(1.0f, 0.85f, 0.16f);
+            shader.SetVec3("uEmissive", normalColor * 0.4f);
+            DrawGuideSegment(renderer, shader, cube, guide.point, tip, 0.025f, normalColor);
+            DrawGizmoBox(renderer, shader, cube, guide.point, glm::vec3(0.075f), normalColor);
+        }
     }
 
     shader.SetVec3("uEmissive", glm::vec3(0.0f));
@@ -2091,7 +2100,7 @@ void EditorViewport::DrawAiAgentDebugGuides(engine::Renderer& renderer,
 
         // Vision cone on the ground: two edge rays + a closing arc. Warmer/brighter when
         // the agent currently sees the target, cool blue otherwise.
-        if (guide.visionRange > 0.05f && guide.visionHalfAngleDeg > 0.5f) {
+        if (guide.showVision && guide.visionRange > 0.05f && guide.visionHalfAngleDeg > 0.5f) {
             glm::vec3 forward(guide.facing.x, 0.0f, guide.facing.z);
             if (glm::dot(forward, forward) < 1e-5f) forward = glm::vec3(0.0f, 0.0f, 1.0f);
             forward = glm::normalize(forward);
@@ -2117,7 +2126,7 @@ void EditorViewport::DrawAiAgentDebugGuides(engine::Renderer& renderer,
         }
 
         // Line of sight to the pursued target: green when visible, red when blocked.
-        if (guide.hasTarget) {
+        if (guide.showVision && guide.hasTarget) {
             const glm::vec3 losColor = guide.seesTarget
                 ? glm::vec3(0.30f, 0.95f, 0.40f) : glm::vec3(0.95f, 0.30f, 0.25f);
             shader.SetVec3("uEmissive", losColor * 0.45f);
@@ -2125,6 +2134,31 @@ void EditorViewport::DrawAiAgentDebugGuides(engine::Renderer& renderer,
                              guide.position + glm::vec3(0.0f, 0.6f, 0.0f),
                              guide.targetPosition + glm::vec3(0.0f, 0.6f, 0.0f),
                              0.02f, losColor);
+        }
+
+        if (guide.showHearing && guide.hearingRange > 0.05f) {
+            const glm::vec3 hearingColor = guide.heardNoise
+                ? glm::vec3(0.95f, 0.35f, 1.0f) : glm::vec3(0.55f, 0.35f, 0.95f);
+            const glm::vec3 center = guide.position + glm::vec3(0.0f, 0.07f, 0.0f);
+            constexpr int segments = 32;
+            glm::vec3 previous = center + glm::vec3(guide.hearingRange, 0.0f, 0.0f);
+            for (int i = 1; i <= segments; ++i) {
+                const float angle = glm::two_pi<float>() * static_cast<float>(i)
+                    / static_cast<float>(segments);
+                const glm::vec3 point = center + glm::vec3(std::cos(angle) * guide.hearingRange,
+                                                           0.0f, std::sin(angle) * guide.hearingRange);
+                DrawGuideSegment(renderer, shader, cube, previous, point, 0.018f, hearingColor);
+                previous = point;
+            }
+        }
+
+        if (guide.showLastKnown && guide.hasLastKnown) {
+            const glm::vec3 markerColor(1.0f, 0.55f, 0.12f);
+            const glm::vec3 p = guide.lastKnownPosition + glm::vec3(0.0f, 0.08f, 0.0f);
+            DrawGuideSegment(renderer, shader, cube, p + glm::vec3(-0.25f, 0.0f, -0.25f),
+                             p + glm::vec3(0.25f, 0.0f, 0.25f), 0.025f, markerColor);
+            DrawGuideSegment(renderer, shader, cube, p + glm::vec3(-0.25f, 0.0f, 0.25f),
+                             p + glm::vec3(0.25f, 0.0f, -0.25f), 0.025f, markerColor);
         }
     }
 
@@ -2253,6 +2287,34 @@ void EditorViewport::DrawEditorNavMeshOverlay(engine::Renderer& renderer,
             DrawGuideSegment(renderer, shader, cube, a, b, 0.025f, edgeColor);
         }
     }
+    shader.SetVec3("uEmissive", glm::vec3(0.0f));
+}
+
+void EditorViewport::DrawNavigationQueryGuide(
+    engine::Renderer& renderer, engine::Shader& shader, const engine::Mesh& cube,
+    const glm::vec3& start, const glm::vec3& goal, const std::vector<glm::vec3>& path,
+    const std::vector<glm::vec3>& obstacleHits, bool success, const glm::mat4& viewProj) const {
+    shader.Bind();
+    shader.SetMat4("uViewProj", viewProj);
+    shader.SetVec3("uLightDir", glm::normalize(glm::vec3(-0.4f, -1.0f, -0.3f)));
+    shader.SetInt("uHasDiffuse", 0);
+    const glm::vec3 startColor(0.2f, 0.95f, 0.35f);
+    const glm::vec3 goalColor(0.95f, 0.28f, 0.85f);
+    const glm::vec3 pathColor = success ? glm::vec3(0.18f, 0.78f, 1.0f)
+                                        : glm::vec3(1.0f, 0.25f, 0.15f);
+    DrawGizmoBox(renderer, shader, cube, start + glm::vec3(0.0f, 0.12f, 0.0f),
+                 glm::vec3(0.18f), startColor);
+    DrawGizmoBox(renderer, shader, cube, goal + glm::vec3(0.0f, 0.12f, 0.0f),
+                 glm::vec3(0.18f), goalColor);
+    for (std::size_t i = 1; i < path.size(); ++i) {
+        const glm::vec3 a = path[i - 1] + glm::vec3(0.0f, 0.12f, 0.0f);
+        const glm::vec3 b = path[i] + glm::vec3(0.0f, 0.12f, 0.0f);
+        DrawGuideSegment(renderer, shader, cube, a, b, 0.045f, pathColor);
+        DrawGizmoBox(renderer, shader, cube, b, glm::vec3(0.09f), pathColor);
+    }
+    for (const glm::vec3& hit : obstacleHits)
+        DrawGizmoBox(renderer, shader, cube, hit + glm::vec3(0.0f, 0.18f, 0.0f),
+                     glm::vec3(0.24f), glm::vec3(1.0f, 0.08f, 0.04f));
     shader.SetVec3("uEmissive", glm::vec3(0.0f));
 }
 

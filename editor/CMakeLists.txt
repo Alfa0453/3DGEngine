@@ -66,6 +66,7 @@ add_executable(3DGEditor
     src/panels/WeatherEditorPanel.cpp
     src/panels/ProceduralBuildingPanel.cpp
     src/panels/RoadGeneratorPanel.cpp
+    src/panels/VisualScriptEditorPanel.cpp
     src/panels/LevelInstancePanel.cpp
     src/panels/WorldPartitionPanel.cpp
     src/panels/ProceduralScatterGraphPanel.cpp
@@ -80,6 +81,19 @@ add_executable(3DGEditor
     src/panels/CharacterEquipmentPanel.cpp
     src/panels/RenderDebuggerPanel.cpp
     src/panels/FrameCaptureAnalyzerPanel.cpp
+    src/panels/MemoryProfilerPanel.cpp
+    src/panels/CollisionAnalyzerPanel.cpp
+    src/panels/NavigationQueryPanel.cpp
+    src/panels/AiPerceptionDebuggerPanel.cpp
+    src/panels/AutomatedTestPanel.cpp
+    src/panels/LocalizationEditorPanel.cpp
+    src/panels/AssetReferenceRepair.cpp
+    src/panels/AssetReferenceRepairPanel.cpp
+    src/panels/SourceControlPanel.cpp
+    src/panels/ProjectMigrationPanel.cpp
+    src/panels/BuildSizeAnalyzerPanel.cpp
+    src/panels/UiLocalizationPreviewPanel.cpp
+    src/panels/PluginManagerPanel.cpp
     src/panels/PortalAuthoringPanel.cpp
     src/panels/QuestEditorPanel.cpp
     src/panels/DialogueEditorPanel.cpp
@@ -124,12 +138,13 @@ target_compile_definitions(3DGEditor PRIVATE
     THREEDG_GAME_MODULE_DIR="${CMAKE_SOURCE_DIR}/game"
     THREEDG_ENGINE_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
     THREEDG_ENGINE_BUILD_DIR="${CMAKE_BINARY_DIR}"
+    THREEDG_EDITOR_BUILD_CONFIGURATION="$<CONFIG>"
     _CRT_SECURE_NO_WARNINGS)   # editor tool code uses sscanf/snprintf; silence MSVC C4996
 target_link_libraries(3DGEditor PRIVATE engine MaterialMaker game)
 if(WIN32)
     target_sources(3DGEditor PRIVATE assets/branding/3DGEditor.rc)
     # shell32 + ole32: IFileDialog folder picker; comdlg32: GetOpenFileName.
-    target_link_libraries(3DGEditor PRIVATE shell32 ole32 comdlg32)
+    target_link_libraries(3DGEditor PRIVATE shell32 ole32 comdlg32 psapi)
 endif()
 
 # Keep the editor in its own bin/editor subfolder, separate from other targets.
@@ -199,3 +214,27 @@ if(MSVC)
 else()
     target_compile_options(3DGEditor PRIVATE -Wall -Wextra -Wpedantic)
 endif()
+
+# ---------------------------------------------------------------------------
+# Install layout -- the LAUNCHER is the only executable at the distribution root.
+# The editor runtime (editor + tools + assets) is a SEPARATE 'engine' payload that
+# the launcher runs from (an 'engine/' subdir) or deploys into a created project.
+# This makes the engine build ship only the launcher; the heavy editor/engine
+# files live where they are required (the engine payload / the project).
+#
+#   Launcher-only root:   cmake --install build --prefix dist            --component launcher
+#   Engine runtime payload: cmake --install build --prefix dist/engine   --component engine
+#
+# The launcher resolves the editor from ./engine, then beside itself (dev/flat
+# bin), then the opened project's local engine dir -- so both layouts work.
+# ---------------------------------------------------------------------------
+install(TARGETS 3DGLauncher
+    RUNTIME DESTINATION "."
+    COMPONENT launcher)
+
+install(TARGETS 3DGEditor 3DGScriptCompiler 3DGMaterialCooker
+    RUNTIME DESTINATION "engine"
+    COMPONENT engine)
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/assets"
+    DESTINATION "engine"
+    COMPONENT engine)

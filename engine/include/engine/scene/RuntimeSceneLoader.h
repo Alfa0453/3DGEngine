@@ -177,6 +177,7 @@ public:
         ecs::LocalFogVolume localFogVolume;
         std::string modelPath;
         AssetHandle modelAssetId;
+        AssetHandle visualScriptGraph;   // optional .3dgvs graph (runtime scene 117+)
         std::string materialPath;
         AssetHandle materialAssetId;
         glm::vec3 modelOrientationEuler{0.0f};   // render-only rotation (deg); collider unaffected

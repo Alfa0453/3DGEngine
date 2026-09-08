@@ -72,6 +72,22 @@ bool RunBuild(const std::filesystem::path& projectRoot,
     return launched;
 }
 
+std::filesystem::path FindProjectFile(const std::filesystem::path& projectRoot) {
+    std::error_code ec;
+    const std::filesystem::path conventional = projectRoot / "Project.3dgproject";
+    if (std::filesystem::is_regular_file(conventional, ec)) return conventional;
+    ec.clear();
+    std::filesystem::path found;
+    for (std::filesystem::directory_iterator it(
+             projectRoot, std::filesystem::directory_options::skip_permission_denied, ec), end;
+         !ec && it != end; it.increment(ec)) {
+        if (!it->is_regular_file(ec) || it->path().extension() != ".3dgproject") continue;
+        if (!found.empty()) return {}; // ambiguous: do not reopen an arbitrary project
+        found = it->path();
+    }
+    return found;
+}
+
 } // namespace
 #endif
 
@@ -97,7 +113,9 @@ int main(int argc, char** argv) {
     else status << "failed " << (launched ? exitCode : GetLastError()) << "\n";
     status.close();
 
-    std::wstring command = Quote(editor) + L" " + Quote(root / "Project.3dgproject");
+    const std::filesystem::path projectFile = FindProjectFile(root);
+    std::wstring command = Quote(editor);
+    if (!projectFile.empty()) command += L" " + Quote(projectFile);
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);
     PROCESS_INFORMATION process{};
