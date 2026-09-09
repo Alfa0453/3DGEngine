@@ -1,5 +1,6 @@
 #include "engine/scene/RuntimeSceneLoader.h"
 #include "engine/visualscript/VisualScriptComponent.h"   // attach VisualScriptComponent at load
+#include "engine/visualscript/VisualScriptAsset.h"
 #include "engine/assets/ParticleAsset.h"
 #include "engine/assets/AssetReference.h"
 #include "engine/assets/AssetRegistry.h"
@@ -176,11 +177,11 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             return false;
         }
     }
-    if (magic != "3DGRuntimeScene" || version < 1 || version > 117) {
+    if (magic != "3DGRuntimeScene" || version < 1 || version > 118) {
         if (error) {
             *error = "Runtime scene file has an unknown format: "
                 + magic + " " + std::to_string(version)
-                + " (expected 3DGRuntimeScene 1..115).";
+                + " (expected 3DGRuntimeScene 1..118).";
         }
         return false;
     }
@@ -2001,6 +2002,21 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             record >> vsToken;
             if (vsToken != "-") AssetHandle::Parse(vsToken, &entity.visualScriptGraph);
         }
+        if (version >= 118) {
+            std::size_t overrideCount = 0;
+            record >> overrideCount;
+            if (overrideCount > 4096) record.setstate(std::ios::failbit);
+            entity.visualScriptOverrides.reserve(std::min<std::size_t>(overrideCount, 4096));
+            for (std::size_t overrideIndex = 0; overrideIndex < overrideCount && record; ++overrideIndex) {
+                vs::VisualScriptVariableOverride overrideValue;
+                record >> overrideValue.variableId;
+                if (!vs::ReadVisualValue(record, &overrideValue.value)) {
+                    record.setstate(std::ios::failbit);
+                    break;
+                }
+                entity.visualScriptOverrides.push_back(std::move(overrideValue));
+            }
+        }
 
         if (!record) {
             if (error) {
@@ -2384,7 +2400,8 @@ bool RuntimeSceneLoader::Instantiate(const Scene &scene, ecs::Registry &registry
         }
         if (desc.visualScriptGraph.Valid()) {
             registry.Add<vs::VisualScriptComponent>(
-                entity, vs::VisualScriptComponent{desc.visualScriptGraph, true});
+                entity, vs::VisualScriptComponent{
+                    desc.visualScriptGraph, true, desc.visualScriptOverrides});
         }
         if (desc.scriptEnabled && !desc.scriptClassName.empty()) {
             NativeScriptComponent script;

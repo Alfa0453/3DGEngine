@@ -12,6 +12,7 @@
 #include <engine/gameplay/InventorySystem.h>
 #include <engine/gameplay/CombatSystem.h>
 #include <engine/gameplay/SpawnSystem.h>
+#include <engine/visualscript/VisualScriptAsset.h>
 
 #include <algorithm>
 #include <fstream>
@@ -127,7 +128,7 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         return engine::MakeAssetReference(
             &assetRegistry, contentRoot, assetPath, type).id;
     };
-    out << "3DGRuntimeScene 117 " << sceneId.ToString() << '\n';
+    out << "3DGRuntimeScene 118 " << sceneId.ToString() << '\n';
     out << "# Runtime export from 3DGEditor. Editor-only flags are omitted.\n";
     const EditorScene::Environment& environment = scene.GetEnvironment();
     out << "environment "
@@ -827,6 +828,11 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         // Visual Script graph handle (runtime scene 117+). Tail of the object record.
         out << ' ' << (object.visualScriptGraph.Valid() ? object.visualScriptGraph.ToString()
                                                          : std::string("-"));
+        out << ' ' << object.visualScriptOverrides.size();
+        for (const engine::vs::VisualScriptVariableOverride& overrideValue : object.visualScriptOverrides) {
+            out << ' ' << overrideValue.variableId << ' ';
+            engine::vs::WriteVisualValue(out, overrideValue.value);
+        }
         out << '\n';
     }
 

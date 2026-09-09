@@ -8,6 +8,7 @@
 #include <engine/physics/PhysicsComponents.h>
 #include <engine/ai/AiMovement.h>
 #include <engine/assets/AssetIdentity.h>
+#include <engine/visualscript/VisualScriptComponent.h>
 
 #include <glm/glm.hpp>
 
@@ -23,7 +24,7 @@ class Mesh;
 
 class EditorScene {
 public:
-    static constexpr int CurrentFileVersion = 156;
+    static constexpr int CurrentFileVersion = 157;
     using GroupId = std::uint64_t;
     static constexpr GroupId kRootGroupId = 0;
 
@@ -253,6 +254,7 @@ public:
         std::string modelAssetPath;
         engine::AssetHandle modelAssetId;
         engine::AssetHandle visualScriptGraph;   // optional .3dgvs graph attached to this object (Visual Scripting)
+        std::vector<engine::vs::VisualScriptVariableOverride> visualScriptOverrides;
         std::string materialAssetPath;
         engine::AssetHandle materialAssetId;
         std::unordered_map<std::string, std::string> materialParameterOverrides;
@@ -929,6 +931,9 @@ public:
     bool SetSelectedModelAsset(
         const std::string& path, engine::AssetHandle id = {});
     bool SetSelectedVisualScript(engine::AssetHandle graph);   // attach/clear a .3dgvs graph
+    bool SetSelectedVisualScriptOverride(engine::vs::VariableId variableId,
+                                         const engine::vs::VisualValue& value);
+    bool ClearSelectedVisualScriptOverride(engine::vs::VariableId variableId);
     bool SetSelectedModelOrientation(const glm::vec3& eulerDegrees);
     // Render-only model offset transform (position + Euler rotation + scale). The
     // collider/controller read the object Transform, which is left untouched.

@@ -4020,8 +4020,23 @@ void EditorApp::DrawRoadGeneratorPanel() {
 void EditorApp::DrawVisualScriptEditorPanel() {
     if (!m_panels.IsOpen(EditorPanels::Panel::VisualScriptEditor)) return;
     bool open = true;
+
+    // Milestone 1: supply scene objects + content-browser assets so the graph editor's typed value
+    // widgets offer friendly Entity/Asset pickers instead of raw ids.
+    std::vector<vswidgets::SceneObjectRef> vsObjects;
+    for (const EditorScene::Object& o : m_scene.Objects())
+        vsObjects.push_back({o.entity, o.name});
+    std::vector<vswidgets::AssetChoice> vsAssets;
+    for (const EditorAssets::Asset& a : m_assets.Assets()) {
+        const engine::AssetHandle h = m_assets.AssetIdForPath(a.relativePath);
+        if (h.Valid()) vsAssets.push_back({h, a.displayName});
+    }
+    vswidgets::ValueWidgetContext vsCtx;
+    vsCtx.sceneObjects = &vsObjects;
+    vsCtx.assets       = &vsAssets;
+
     const VisualScriptEditorPanel::Result result =
-        m_visualScriptEditor.Draw(&open, m_project.AssetRoot());
+        m_visualScriptEditor.Draw(&open, m_project.AssetRoot(), vsCtx);
     m_panels.SetOpen(EditorPanels::Panel::VisualScriptEditor, open);
     if (result.assetsChanged) {
         std::string error;
@@ -13390,7 +13405,8 @@ bool EditorApp::BuildPlayRuntimePreview(std::string * error)
         auto it = playEntitiesByName.find(object.name);
         if (it != playEntitiesByName.end())
             m_playRegistry->Add<engine::vs::VisualScriptComponent>(
-                it->second, engine::vs::VisualScriptComponent{object.visualScriptGraph, true});
+                it->second, engine::vs::VisualScriptComponent{
+                    object.visualScriptGraph, true, object.visualScriptOverrides});
     }
 
     m_playRegistry->view<engine::AnimatedModel>().each(

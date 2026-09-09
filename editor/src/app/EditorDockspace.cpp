@@ -3,6 +3,7 @@
 #include "EditorGeneratedScriptTools.h"
 #include "EditorAssetIcons.h"
 #include "EditorIcons.h"
+#include "VisualScriptValueWidgets.h"   // Milestone 1: shared typed value editor
 #include "NativeDialog.h"
 #include "ParticlePresets.h"
 #include "ParticleAsset.h"
@@ -88,6 +89,58 @@ std::array<char, 128> g_groupNameBuffer{};
 // deferred flags move the OpenPopup call out to window scope after the tree is drawn.
 bool g_openRenameGroupPopup = false;
 bool g_openRenameObjectPopup = false;
+
+const engine::vs::VisualScriptAsset* ResolveVisualScriptGraph(EditorAssets* assets,
+                                                               engine::AssetHandle handle) {
+    namespace fs = std::filesystem;
+    static std::string cachedRoot;
+    static std::string cachedHandle;
+    static fs::path cachedPath;
+    static fs::file_time_type cachedWriteTime{};
+    static engine::vs::VisualScriptAsset cachedAsset;
+    static bool cachedValid = false;
+
+    if (!assets || !handle.Valid()) return nullptr;
+    const std::string root = assets->RootPath();
+    const std::string handleText = handle.ToString();
+    if (root != cachedRoot || handleText != cachedHandle) {
+        cachedRoot = root;
+        cachedHandle = handleText;
+        cachedPath.clear();
+        cachedValid = false;
+        std::error_code ec;
+        for (fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec), end;
+             it != end; it.increment(ec)) {
+            if (ec || !it->is_regular_file(ec)) continue;
+            std::string extension = it->path().extension().string();
+            std::transform(extension.begin(), extension.end(), extension.begin(),
+                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (extension != engine::vs::kVisualScriptExtension) continue;
+            engine::vs::VisualScriptAsset candidate;
+            std::string ignored;
+            if (candidate.Load(it->path().string(), &ignored) && candidate.id == handle) {
+                cachedPath = it->path();
+                cachedAsset = std::move(candidate);
+                cachedWriteTime = fs::last_write_time(cachedPath, ec);
+                cachedValid = true;
+                break;
+            }
+        }
+    } else if (cachedValid && !cachedPath.empty()) {
+        std::error_code ec;
+        const fs::file_time_type writeTime = fs::last_write_time(cachedPath, ec);
+        if (!ec && writeTime != cachedWriteTime) {
+            engine::vs::VisualScriptAsset refreshed;
+            std::string ignored;
+            cachedValid = refreshed.Load(cachedPath.string(), &ignored);
+            if (cachedValid) {
+                cachedAsset = std::move(refreshed);
+                cachedWriteTime = writeTime;
+            }
+        }
+    }
+    return cachedValid ? &cachedAsset : nullptr;
+}
 int  g_renameObjectIndex = -1;
 std::array<char, 128> g_hierarchyRenameBuffer{};
 std::array<char, 96> g_componentSearch{};
@@ -5200,6 +5253,73 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
             ImGui::EndCombo();
         }
         ImGui::TextDisabled("Runs on this object in Play. Author graphs in the Visual Script Editor.");
+
+        if (const engine::vs::VisualScriptAsset* graph =
+                ResolveVisualScriptGraph(context.assets, selected->visualScriptGraph)) {
+            // Build the shared value-editor context once (scene objects + content-browser assets)
+            // so Entity/Asset overrides use friendly pickers instead of raw ids (Milestone 1).
+            std::vector<vswidgets::SceneObjectRef> vsObjects;
+            for (const EditorScene::Object& o : context.scene->Objects())
+                vsObjects.push_back({o.entity, o.name});
+            std::vector<vswidgets::AssetChoice> vsAssets;
+            if (context.assets) {
+                for (const EditorAssets::Asset& a : context.assets->Assets()) {
+                    const engine::AssetHandle h = context.assets->AssetIdForPath(a.relativePath);
+                    if (h.Valid()) vsAssets.push_back({h, a.displayName});
+                }
+            }
+            vswidgets::ValueWidgetContext vsCtx;
+            vsCtx.sceneObjects = &vsObjects;
+            vsCtx.selfEntity   = selected->entity;
+            vsCtx.assets       = &vsAssets;
+            vsCtx.structs      = &graph->structs;   // Milestone 4: struct/enum defs for container editors
+            vsCtx.enums        = &graph->enums;
+
+            bool anyExposed = false;
+            for (const engine::vs::VisualVariable& variable : graph->variables) {
+                if (!variable.exposed || variable.type == engine::vs::ValueType::Exec ||
+                    variable.type == engine::vs::ValueType::ScriptHandle) continue;
+                anyExposed = true;
+                ImGui::PushID(static_cast<int>(variable.id));
+
+                const auto overrideIt = std::find_if(selected->visualScriptOverrides.begin(),
+                    selected->visualScriptOverrides.end(),
+                    [&](const engine::vs::VisualScriptVariableOverride& item) {
+                        return item.variableId == variable.id && item.value.type == variable.type;
+                    });
+                bool overridden = overrideIt != selected->visualScriptOverrides.end();
+                engine::vs::VisualValue value = overridden ? overrideIt->value : variable.defaultValue;
+
+                ImGui::TextUnformatted(variable.name.c_str());
+                ImGui::SameLine();
+                ImGui::TextDisabled("(%s)", engine::vs::ValueTypeName(variable.type));
+                bool overrideToggle = overridden;
+                ImGui::SameLine();
+                ImGui::BeginDisabled(selected->locked);
+                if (ImGui::Checkbox("Override##enabled", &overrideToggle)) {
+                    if (overrideToggle)
+                        context.scene->SetSelectedVisualScriptOverride(variable.id, variable.defaultValue);
+                    else
+                        context.scene->ClearSelectedVisualScriptOverride(variable.id);
+                    overridden = overrideToggle;
+                    value = variable.defaultValue;
+                }
+                ImGui::EndDisabled();
+
+                bool changed = false;
+                ImGui::BeginDisabled(!overridden || selected->locked);
+                ImGui::SetNextItemWidth(-1.0f);
+                // Shared type-aware editor — same widget used by the graph panel (Milestone 1).
+                changed = vswidgets::DrawVisualValueEditor("Value##override", variable.type, value, vsCtx);
+                ImGui::EndDisabled();
+                if (changed) context.scene->SetSelectedVisualScriptOverride(variable.id, value);
+                ImGui::Separator();
+                ImGui::PopID();
+            }
+            if (!anyExposed) ImGui::TextDisabled("No graph variables are marked Exposed.");
+        } else if (hasGraph) {
+            ImGui::TextDisabled("Assigned graph could not be resolved in Content.");
+        }
     }
 
     if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {

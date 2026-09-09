@@ -7,6 +7,7 @@
 #include "engine/physics/PhysicsComponents.h"
 #include "engine/ai/AiMovement.h"
 #include "engine/assets/AssetIdentity.h"
+#include "engine/visualscript/VisualScriptComponent.h"
 
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -178,6 +179,7 @@ public:
         std::string modelPath;
         AssetHandle modelAssetId;
         AssetHandle visualScriptGraph;   // optional .3dgvs graph (runtime scene 117+)
+        std::vector<vs::VisualScriptVariableOverride> visualScriptOverrides; // runtime scene 118+
         std::string materialPath;
         AssetHandle materialAssetId;
         glm::vec3 modelOrientationEuler{0.0f};   // render-only rotation (deg); collider unaffected

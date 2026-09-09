@@ -58,6 +58,25 @@ inline bool ConnectionValid(const VisualPin& from, const VisualPin& to, std::str
             + ValueTypeName(from.type) + " -> " + ValueTypeName(to.type);
         return false;
     }
+    // Container/struct identity must also match (Milestone 4). A 0 typeId is a wildcard (a generic
+    // node pin whose concrete type the editor has not specialised yet).
+    if (from.type == ValueType::Array || from.type == ValueType::Map) {
+        if (from.elementType != to.elementType) {
+            if (why) *why = std::string("Element type mismatch: ")
+                + ValueTypeName(from.elementType) + " -> " + ValueTypeName(to.elementType);
+            return false;
+        }
+    }
+    if (from.type == ValueType::Map && from.keyType != to.keyType) {
+        if (why) *why = std::string("Map key type mismatch: ")
+            + ValueTypeName(from.keyType) + " -> " + ValueTypeName(to.keyType);
+        return false;
+    }
+    if ((from.type == ValueType::Struct || from.type == ValueType::Enum)
+        && from.typeId != 0 && to.typeId != 0 && from.typeId != to.typeId) {
+        if (why) *why = "Struct/enum type mismatch.";
+        return false;
+    }
     return true;
 }
 
@@ -121,6 +140,128 @@ inline ValidationReport ValidateGraph(const VisualScriptAsset& asset) {
         if (fromPin->kind == PinKind::Exec)
             if (++outgoingExec[key(link.fromNode, link.fromPin)] > 1)
                 report.Error("An exec output pin can drive only one connection.", link.fromNode, link.id);
+    }
+
+    // --- functions / subgraphs (Milestone 3) --------------------------------
+    auto isLatent = [](const std::string& typeId) {
+        return typeId == "Flow.Delay" || typeId == "Flow.WaitUntil" || typeId == "Flow.WaitForEvent"
+            || typeId == "Flow.WaitForFixedSteps" || typeId == "Flow.WaitForAnimation"
+            || typeId == "Flow.RetriggerableDelay" || typeId == "Time.SetTimer" || typeId == "Time.Timeline"
+            || typeId == "Async.StartTask" || typeId == "Async.LoadLevel" || typeId == "Async.LoadScene"
+            || typeId == "Async.StartDialogue";
+    };
+    // Each function needs exactly one Entry; latent nodes are not allowed inside a function body.
+    for (const VisualFunction& fn : asset.functions) {
+        int entryCount = 0, returnCount = 0;
+        for (const VisualNode& node : asset.nodes) {
+            if (node.functionId != fn.id) continue;
+            if (node.typeId == "Function.Entry")  ++entryCount;
+            if (node.typeId == "Function.Return") ++returnCount;
+            if (isLatent(node.typeId))
+                report.Error("Latent node '" + node.typeId + "' is not allowed inside function '"
+                             + fn.name + "' (functions run synchronously).", node.id);
+        }
+        if (entryCount == 0) report.Error("Function '" + fn.name + "' has no Entry node.");
+        if (entryCount > 1)  report.Error("Function '" + fn.name + "' has more than one Entry node.");
+        if (!fn.outputs.empty() && returnCount == 0)
+            report.Warn("Function '" + fn.name + "' declares outputs but has no Return node.");
+    }
+    // Call nodes: same-graph targets must exist; build the same-graph call graph for cycle detection.
+    std::unordered_map<FunctionId, std::unordered_set<FunctionId>> callEdges;
+    for (const VisualNode& node : asset.nodes) {
+        if (node.typeId != "Function.Call") continue;
+        AssetHandle targetGraph;
+        if (auto g = node.properties.find("graph"); g != node.properties.end()) targetGraph = g->second.AsAsset();
+        FunctionId target = kInvalidFunctionId;
+        if (auto f = node.properties.find("func"); f != node.properties.end())
+            target = static_cast<FunctionId>(f->second.AsInt());
+        const bool crossGraph = targetGraph.Valid() && !(targetGraph == asset.id);
+        if (target == kInvalidFunctionId) { report.Error("Call node has no target function.", node.id); continue; }
+        if (!crossGraph) {   // same-graph: the function must exist here (cross-graph is checked at load)
+            if (!asset.FindFunction(target))
+                report.Error("Call node targets a function that does not exist in this graph.", node.id);
+            else
+                callEdges[node.functionId].insert(target);   // edge: caller scope -> callee function
+        }
+    }
+    // Depth-first cycle detection over same-graph function calls (recursion is rejected, not run).
+    {
+        std::unordered_map<FunctionId, int> color;   // 0=unvisited 1=on-stack 2=done
+        std::function<bool(FunctionId)> dfs = [&](FunctionId f) -> bool {
+            color[f] = 1;
+            auto it = callEdges.find(f);
+            if (it != callEdges.end())
+                for (FunctionId next : it->second) {
+                    if (color[next] == 1) return true;                 // back-edge => cycle
+                    if (color[next] == 0 && dfs(next)) return true;
+                }
+            color[f] = 2;
+            return false;
+        };
+        for (const VisualFunction& fn : asset.functions)
+            if (color[fn.id] == 0 && dfs(fn.id))
+                report.Error("Recursive/cyclic function call detected involving function '" + fn.name + "'.");
+    }
+
+    // --- events / interfaces (Milestone 6) ----------------------------------
+    std::unordered_set<std::string> eventNames;
+    for (const VisualCustomEvent& e : asset.events)
+        if (!e.name.empty() && !eventNames.insert(e.name).second)
+            report.Error("Duplicate event name: " + e.name);
+    std::unordered_set<std::string> interfaceNames;
+    for (const VisualInterface& itf : asset.interfaces) {
+        if (!itf.name.empty() && !interfaceNames.insert(itf.name).second)
+            report.Error("Duplicate interface name: " + itf.name);
+        std::unordered_set<std::string> msgNames;
+        for (const VisualCustomEvent& m : itf.messages)
+            if (!m.name.empty() && !msgNames.insert(m.name).second)
+                report.Error("Interface '" + itf.name + "' has duplicate message: " + m.name);
+    }
+    // Missing implementations: each implemented interface message needs an On Custom Event handler.
+    for (std::uint32_t id : asset.implementedInterfaces) {
+        const VisualInterface* itf = asset.FindInterface(id);
+        if (!itf) { report.Warn("Implemented interface id not found (was it deleted?)."); continue; }
+        for (const VisualCustomEvent& m : itf->messages) {
+            const std::string qualified = itf->name + "." + m.name;
+            bool found = false;
+            for (const VisualNode& node : asset.nodes) {
+                if (node.typeId != "Event.Custom") continue;
+                auto it = node.properties.find("eventName");
+                if (it != node.properties.end() && it->second.AsString() == qualified) { found = true; break; }
+            }
+            if (!found) report.Warn("Interface '" + itf->name + "': missing handler for message '" + m.name + "'.");
+        }
+    }
+
+    // --- state machines (Milestone 7) ---------------------------------------
+    auto hasBoolOutput = [](const VisualFunction& fn) {
+        for (const VisualFunctionParam& p : fn.outputs) if (p.type == ValueType::Bool) return true;
+        return false;
+    };
+    for (const VisualStateMachine& sm : asset.stateMachines) {
+        std::unordered_set<std::uint32_t> stateIds;
+        for (const VisualState& st : sm.states) stateIds.insert(st.id);
+        if (!sm.states.empty() && stateIds.count(sm.entryState) == 0)
+            report.Error("State machine '" + sm.name + "' has no valid entry state.");
+        auto checkFn = [&](FunctionId f, const std::string& where) {
+            if (f != kInvalidFunctionId && !asset.FindFunction(f))
+                report.Error("State machine '" + sm.name + "': " + where + " references a missing function.");
+        };
+        for (const VisualState& st : sm.states) {
+            checkFn(st.onEnter, "state '" + st.name + "' Enter");
+            checkFn(st.onUpdate, "state '" + st.name + "' Update");
+            checkFn(st.onExit, "state '" + st.name + "' Exit");
+        }
+        for (const VisualTransition& tr : sm.transitions) {
+            if (stateIds.count(tr.from) == 0 || stateIds.count(tr.to) == 0)
+                report.Error("State machine '" + sm.name + "' has a transition with a missing endpoint.");
+            if (tr.condition != kInvalidFunctionId) {
+                const VisualFunction* fn = asset.FindFunction(tr.condition);
+                if (!fn) report.Error("State machine '" + sm.name + "': transition condition function is missing.");
+                else if (!hasBoolOutput(*fn))
+                    report.Warn("State machine '" + sm.name + "': a transition condition function should return a Bool.");
+            }
+        }
     }
 
     return report;

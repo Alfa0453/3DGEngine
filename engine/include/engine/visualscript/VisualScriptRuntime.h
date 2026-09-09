@@ -18,6 +18,7 @@
 #include "VisualScriptComponent.h"
 #include "VisualScriptInstance.h"
 #include "VisualScriptAsset.h"
+#include "VisualScriptCompiler.h"   // Milestone 9: compiled graph cache
 #include "VisualScriptValidator.h"
 
 #include <engine/ecs/Registry.h>
@@ -57,13 +58,16 @@ public:
         PruneDeadInstances(registry);
         VisualScriptDiagnostics& diag = VisualScriptDiagnostics::Instance();
         if (diag.enabled) diag.FrameReset();
+        if (!diag.paused) m_elapsed += dt;   // Milestone 5: play clock (respects pause + dt dilation)
         registry.view<VisualScriptComponent>().each(
             [&](ecs::Entity entity, VisualScriptComponent& component) {
                 if (!component.enabled || !component.graph.Valid()) return;
-                VisualScriptInstance* instance = EnsureBound(registry, entity, component.graph);
+                VisualScriptInstance* instance = EnsureBound(registry, entity, component);
                 if (!instance || !instance->Valid()) return;
                 instance->SetServices(m_physics, m_input, &m_outbox, &m_structural);
+                instance->SetPlayTime(m_elapsed);
                 instance->SetGameplayHosts(m_audio, m_cameraShake, m_cameraDirector, m_gameMode);
+                instance->SetTargetedOutbox(&m_targeted);   // Milestone 6
                 if (diag.enabled) {   // Phase 13/14 instance accounting
                     GraphProfile& gp = diag.Graph(component.graph);
                     ++gp.instances;
@@ -74,10 +78,12 @@ public:
                 if (diag.paused || instance->HasError()) { CaptureError(*instance); return; }
                 instance->Begin(registry);
                 if (!instance->HasError() && !diag.paused) instance->Update(registry, dt);
+                if (!instance->HasError() && !diag.paused) instance->TickStateMachines(registry, dt);   // Milestone 7
                 if (!instance->HasError() && !diag.paused) instance->TickLatent(registry, dt);   // Pass 4 latent resume
                 CaptureError(*instance);
             });
         FlushStructural(registry);
+        DrainTargeted(registry);
     }
 
     // Fixed-step tick: only fully-created, non-errored instances run.
@@ -89,6 +95,7 @@ public:
                 if (it == m_instances.end() || !it->second.Valid() || it->second.HasError()) return;
                 it->second.SetServices(m_physics, m_input, &m_outbox, &m_structural);
                 it->second.SetGameplayHosts(m_audio, m_cameraShake, m_cameraDirector, m_gameMode);
+                it->second.SetTargetedOutbox(&m_targeted);   // Milestone 6
                 VisualScriptDiagnostics& diag = VisualScriptDiagnostics::Instance();
                 if (diag.paused) return;
                 it->second.ResumeExecution(registry, dt);
@@ -97,6 +104,7 @@ public:
                 CaptureError(it->second);
             });
         FlushStructural(registry);
+        DrainTargeted(registry);
     }
 
     // Phase 11/12: deliver one received ScriptEvent to every bound graph at the SAFE script-event
@@ -107,6 +115,7 @@ public:
             if (!kv.second.Valid() || kv.second.HasError()) continue;
             kv.second.SetServices(m_physics, m_input, &m_outbox, &m_structural);
             kv.second.SetGameplayHosts(m_audio, m_cameraShake, m_cameraDirector, m_gameMode);
+            kv.second.SetTargetedOutbox(&m_targeted);   // Milestone 6
             VisualScriptDiagnostics& diag = VisualScriptDiagnostics::Instance();
             if (diag.paused) continue;
             kv.second.ResumeExecution(registry, 0.0f);
@@ -114,6 +123,7 @@ public:
             CaptureError(kv.second);
         }
         FlushStructural(registry);
+        DrainTargeted(registry);
     }
 
     // Targeted delivery — only the graph on `entity` receives it (kNull broadcasts). Used for physics
@@ -124,11 +134,13 @@ public:
         if (it == m_instances.end() || !it->second.Valid() || it->second.HasError()) return;
         it->second.SetServices(m_physics, m_input, &m_outbox, &m_structural);
         it->second.SetGameplayHosts(m_audio, m_cameraShake, m_cameraDirector, m_gameMode);
+        it->second.SetTargetedOutbox(&m_targeted);   // Milestone 6
         VisualScriptDiagnostics& diag = VisualScriptDiagnostics::Instance();
         if (!diag.paused) it->second.ResumeExecution(registry, 0.0f);
         if (!diag.paused) it->second.DispatchEvent(registry, event);
         CaptureError(it->second);
         FlushStructural(registry);
+        DrainTargeted(registry);
     }
 
     // Events a graph published this frame (via the Publish Event node). The host drains these and
@@ -150,8 +162,12 @@ public:
             }
             return false;   // keep the known-good running graph
         }
+        // Milestone 9: recompile the acceleration structure in place (its address is stable, so live
+        // instances that point at it stay valid) before migrating instances onto the new asset.
+        CompiledGraph& cg = m_compiledCache[handle];
+        cg.Compile(newAsset);
         for (auto& kv : m_instances)
-            if (kv.second.Graph() == handle) kv.second.HotReload(handle, newAsset);
+            if (kv.second.Graph() == handle) { kv.second.HotReload(handle, newAsset); kv.second.SetCompiled(&cg); }
         return true;
     }
 
@@ -160,6 +176,15 @@ public:
     void Shutdown(ecs::Registry&) {
         m_instances.clear();
         m_missingAssetReported.clear();
+        m_targeted.clear();
+        m_compiledCache.clear();   // Milestone 9
+        m_elapsed = 0.0;
+    }
+
+    // Milestone 9: compiled-graph stats for the editor (nodes/links resolved, missing descriptors).
+    const CompiledGraph* CompiledFor(const AssetHandle& handle) const {
+        auto it = m_compiledCache.find(handle);
+        return it == m_compiledCache.end() ? nullptr : &it->second;
     }
 
     const std::vector<VisualScriptError>& RecentErrors() const { return m_errors; }
@@ -168,19 +193,22 @@ public:
 
 private:
     VisualScriptInstance* EnsureBound(ecs::Registry& /*registry*/, ecs::Entity entity,
-                                      const AssetHandle& graph) {
+                                      const VisualScriptComponent& component) {
         VisualScriptInstance& instance = m_instances[entity];
         // (Re)bind only when the referenced graph changes — avoids re-resolving
         // (and error-spamming) the same handle every frame.
-        if (instance.Graph() != graph || (!instance.Valid() && !m_missingAssetReported.count(entity))) {
-            const VisualScriptAsset* asset = m_provider ? m_provider(graph) : nullptr;
-            instance.Bind(entity, graph, asset);
+        if (instance.Graph() != component.graph || (!instance.Valid() && !m_missingAssetReported.count(entity))) {
+            const VisualScriptAsset* asset = m_provider ? m_provider(component.graph) : nullptr;
+            instance.Bind(entity, component.graph, asset, component.variableOverrides);
+            // Milestone 3: cross-graph function-library calls resolve other .3dgvs through the same
+            // provider that resolves this graph.
+            instance.SetFunctionResolver(m_provider);
             if (!asset) {
                 if (m_missingAssetReported.insert(entity).second) {
                     VisualScriptError error;
                     error.active = true;
                     error.entity = entity;
-                    error.asset = graph;
+                    error.asset = component.graph;
                     error.message = "Visual script graph asset could not be resolved.";
                     m_errors.push_back(error);
                     if (auto& handler = VisualScriptErrorHandlerRef()) handler(error);
@@ -188,6 +216,10 @@ private:
                 return &instance;
             }
             m_missingAssetReported.erase(entity);
+            // Milestone 9: compile (or reuse cached) the acceleration structure for this graph.
+            CompiledGraph& cg = m_compiledCache[component.graph];
+            if (!cg.MatchesCurrent(asset)) cg.Compile(asset);
+            instance.SetCompiled(&cg);
         }
         return &instance;
     }
@@ -224,6 +256,7 @@ private:
 
     AssetProvider m_provider;
     std::unordered_map<ecs::Entity, VisualScriptInstance> m_instances;
+    std::unordered_map<AssetHandle, CompiledGraph, AssetHandleHash> m_compiledCache;   // Milestone 9
     std::unordered_set<ecs::Entity> m_missingAssetReported;
     std::vector<VisualScriptError> m_errors;
     PhysicsWorld* m_physics = nullptr;
@@ -232,8 +265,33 @@ private:
     CameraShake* m_cameraShake = nullptr;
     CameraDirector* m_cameraDirector = nullptr;
     GameMode* m_gameMode = nullptr;
+    // Milestone 6: VS->VS targeted events, drained inside the runtime (never through a worker thread).
+    void DrainTargeted(ecs::Registry& registry) {
+        VisualScriptDiagnostics& diag = VisualScriptDiagnostics::Instance();
+        int guard = 0;
+        while (!m_targeted.empty() && guard < 8192) {
+            std::vector<std::pair<ecs::Entity, ScriptEvent>> pending;
+            pending.swap(m_targeted);
+            for (auto& item : pending) {
+                if (++guard >= 8192) break;
+                auto it = m_instances.find(item.first);
+                if (it == m_instances.end() || !it->second.Valid() || it->second.HasError()) continue;
+                it->second.SetServices(m_physics, m_input, &m_outbox, &m_structural);
+                it->second.SetGameplayHosts(m_audio, m_cameraShake, m_cameraDirector, m_gameMode);
+                it->second.SetTargetedOutbox(&m_targeted);
+                if (diag.paused) continue;
+                it->second.ResumeExecution(registry, 0.0f);
+                if (!diag.paused) it->second.DispatchEvent(registry, item.second);
+                CaptureError(it->second);
+            }
+        }
+        FlushStructural(registry);
+    }
+
     std::vector<ScriptEvent> m_outbox;
     std::vector<std::function<void(ecs::Registry&)>> m_structural;
+    std::vector<std::pair<ecs::Entity, ScriptEvent>> m_targeted;   // Milestone 6
+    double m_elapsed = 0.0;   // Milestone 5: monotonic play clock for Now()/cooldown nodes
 };
 
 } // namespace engine::vs

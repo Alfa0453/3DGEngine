@@ -8,6 +8,15 @@
 # ---------------------------------------------------------------------------
 cmake_minimum_required(VERSION 3.16)
 
+# CMake 4.0+ removed compatibility with policies from CMake < 3.5. Some fetched dependencies
+# (e.g. glfw 3.4 declares `cmake_minimum_required(VERSION 3.4...)`) still request a pre-3.5 floor,
+# which makes CMake 4.x abort with a fatal error. Treat those old floors as 3.5 so the dependency
+# sub-builds configure. FetchContent forwards this to the populate sub-builds too. Harmless on
+# CMake 3.x (the variable is simply ignored there).
+if(NOT DEFINED CMAKE_POLICY_VERSION_MINIMUM)
+    set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+endif()
+
 project(3DGameEngine
     VERSION     0.1.0
     DESCRIPTION "A 3D game engine built from scratch with OpenGL"

@@ -13,7 +13,9 @@
 // =============================================================================
 
 #include "VisualNodeRegistry.h"
+#include "VisualScriptComponent.h"
 #include "VisualScriptAsset.h"
+#include "VisualScriptCompiler.h"      // Milestone 9: compiled acceleration structure
 #include "VisualScriptDiagnostics.h"   // Pass 5: strippable profiler/debugger
 #include "VisualScriptTypes.h"
 
@@ -96,19 +98,34 @@ inline constexpr int kMaxExecDepth      = 4096;    // stack-overflow guard
 
 class VisualScriptInstance final : public INodeContext {
 public:
-    void Bind(ecs::Entity entity, AssetHandle handle, const VisualScriptAsset* asset) {
+    void Bind(ecs::Entity entity, AssetHandle handle, const VisualScriptAsset* asset,
+              const std::vector<VisualScriptVariableOverride>& overrides = {}) {
         m_entity = entity;
         m_handle = handle;
         m_asset = asset;
+        m_compiled = nullptr;   // Milestone 9: runtime re-attaches the compiled graph after Bind
         m_began = false;
         m_error = VisualScriptError{};
         m_variables.clear();
         m_variableNamesById.clear();
         m_continuations.clear();
         m_execStack.clear();
+        m_activeFunctions.clear();
+        m_functionReturnValues.clear();
+        m_localScopes.clear();
+        m_nodeState.clear();
+        m_unboundEvents.clear();
+        m_smCurrentState.clear();
+        m_smTransitionReady.clear();
+        m_functionDepth = 0;
         if (asset) for (const VisualVariable& v : asset->variables) {
             m_variables[v.name] = v.defaultValue;
             m_variableNamesById[v.id] = v.name;   // stable id -> current name (Phase 12)
+        }
+        if (asset) for (const VisualScriptVariableOverride& overrideValue : overrides) {
+            const VisualVariable* variable = asset->FindVariable(overrideValue.variableId);
+            if (!variable || !variable->exposed || overrideValue.value.type != variable->type) continue;
+            m_variables[variable->name] = overrideValue.value;
         }
     }
 
@@ -140,6 +157,13 @@ public:
         // Removed variables are simply not re-seeded (discarded). Cancel active latent flows (Phase 18).
         m_continuations.clear();
         m_execStack.clear();
+        m_activeFunctions.clear();
+        m_functionReturnValues.clear();
+        m_localScopes.clear();
+        m_nodeState.clear();
+        m_smCurrentState.clear();
+        m_smTransitionReady.clear();
+        m_functionDepth = 0;
         m_error = VisualScriptError{};
     }
 
@@ -196,18 +220,30 @@ public:
     // runtime at the SAFE script-event phase — never from a physics worker.
     void DispatchEvent(ecs::Registry& registry, const ScriptEvent& event) {
         if (!m_asset || m_error.active) return;
+        // Milestone 6: an unbound event name is ignored by this instance (dispatcher lifetime control).
+        if (!m_unboundEvents.empty() && m_unboundEvents.count(event.name)) return;
         m_registry = &registry;
         m_deltaTime = 0.0f;
         m_opsRemaining = kMaxOpsPerCallback;
         m_depth = 0;
         m_nodeOutputs.clear();
         m_evaluating.clear();
+        VisualScriptDiagnostics& diag = VisualScriptDiagnostics::Instance();
         for (const VisualNode& node : m_asset->nodes) {
-            const NodeDescriptor* desc = VisualNodeRegistry::Instance().Find(node.typeId);
-            if (!desc || desc->eventName.empty() || desc->eventName != event.name) continue;
+            const NodeDescriptor* desc = DescriptorFor(&node);
+            if (!desc) continue;
+            // Reflected event nodes match on descriptor name; user "On Custom Event" nodes match on
+            // the authored event name stored in the node's "eventName" property (Milestone 6).
+            bool match = !desc->eventName.empty() && desc->eventName == event.name;
+            if (!match && node.typeId == "Event.Custom") {
+                auto it = node.properties.find("eventName");
+                match = it != node.properties.end() && it->second.AsString() == event.name;
+            }
+            if (!match) continue;
+            if (diag.enabled) diag.RecordEventDispatch(event.sender, m_entity, event.name, false, NowSeconds());
             SeedEventOutputs(node, event);
             ExecuteNode(node.id);
-            if (m_error.active || VisualScriptDiagnostics::Instance().paused) return;
+            if (m_error.active || diag.paused) return;
         }
         // Resume any Wait-For-Event continuations matching this event (Phase 5/12).
         std::vector<Continuation> ready;
@@ -260,12 +296,22 @@ public:
         m_variables[name] = std::move(value);
     }
     VisualValue GetVariableById(std::uint32_t variableId) override {
+        // Function-local scope (Milestone 3) shadows member variables while a function runs.
+        if (!m_localScopes.empty()) {
+            auto l = m_localScopes.back().find(variableId);
+            if (l != m_localScopes.back().end()) return l->second;
+        }
         auto n = m_variableNamesById.find(variableId);
         if (n == m_variableNamesById.end()) return VisualValue::Float(0.0f);
         auto v = m_variables.find(n->second);
         return v == m_variables.end() ? VisualValue::Float(0.0f) : v->second;
     }
     void SetVariableById(std::uint32_t variableId, VisualValue value) override {
+        if (!m_localScopes.empty()) {
+            auto& scope = m_localScopes.back();
+            auto l = scope.find(variableId);
+            if (l != scope.end()) { l->second = std::move(value); return; }
+        }
         auto n = m_variableNamesById.find(variableId);
         if (n != m_variableNamesById.end()) m_variables[n->second] = std::move(value);
     }
@@ -289,6 +335,101 @@ public:
     const ScriptInputState* Input() const override { return m_input; }
     void PublishEvent(const ScriptEvent& event) override {
         if (m_eventOutbox) m_eventOutbox->push_back(event);   // drained by the host to the safe queue
+        VisualScriptDiagnostics& diag = VisualScriptDiagnostics::Instance();
+        if (diag.enabled) diag.RecordEventDispatch(m_entity, ecs::kNull, event.name, true, NowSeconds());
+    }
+    void PublishEventTo(ecs::Entity target, const ScriptEvent& event) override {
+        if (target == ecs::kNull) { PublishEvent(event); return; }   // no target => broadcast
+        if (m_targetedOutbox) m_targetedOutbox->push_back({target, event});
+        VisualScriptDiagnostics& diag = VisualScriptDiagnostics::Instance();
+        if (diag.enabled) diag.RecordEventDispatch(m_entity, target, event.name, false, NowSeconds());
+    }
+    void BindEvent(const std::string& eventName) override { m_unboundEvents.erase(eventName); }
+    void UnbindEvent(const std::string& eventName) override { m_unboundEvents.insert(eventName); }
+    void SetTargetedOutbox(std::vector<std::pair<ecs::Entity, ScriptEvent>>* box) { m_targetedOutbox = box; }
+
+    // Event builder (keeps ScriptEvent out of the node executors).
+    void BeginEvent(const std::string& name) override {
+        m_buildingEvent = ScriptEvent{};
+        m_buildingEvent.name = name;
+        m_buildingEvent.sender = m_entity;
+    }
+    void EventArg(const std::string& key, const VisualValue& value) override {
+        switch (value.type) {
+            case ValueType::Bool:         m_buildingEvent.bools[key] = value.AsBool(); break;
+            case ValueType::Int:
+            case ValueType::Enum:         m_buildingEvent.ints[key] = value.AsInt(); break;
+            case ValueType::Float:        m_buildingEvent.floats[key] = value.AsFloat(); break;
+            case ValueType::String:       m_buildingEvent.strings[key] = value.AsString(); break;
+            case ValueType::Vector3:      m_buildingEvent.vectors[key] = value.AsVec3(); break;
+            case ValueType::Vector2:      m_buildingEvent.vectors[key] = glm::vec3(value.AsVec2(), 0.0f); break;
+            case ValueType::Entity:
+            case ValueType::ScriptHandle: m_buildingEvent.entities[key] = value.AsEntity(); break;
+            default: break;   // containers/quaternion/color/asset are not carried on the event bus
+        }
+    }
+    void SendEvent(ecs::Entity target, bool broadcast) override {
+        m_buildingEvent.target = target;
+        if (broadcast || target == ecs::kNull) PublishEvent(m_buildingEvent);
+        else PublishEventTo(target, m_buildingEvent);
+    }
+
+    // ---- Milestone 7: state-machine script API -----------------------------
+    std::uint32_t GetStateMachineState(std::uint32_t smId) override {
+        auto it = m_smCurrentState.find(smId);
+        return it == m_smCurrentState.end() ? 0u : it->second;
+    }
+    void RequestStateChange(std::uint32_t smId, std::uint32_t stateId) override {
+        const VisualStateMachine* sm = m_asset ? m_asset->FindStateMachine(smId) : nullptr;
+        if (!sm) return;
+        std::uint32_t& cur = m_smCurrentState[smId];
+        if (const VisualState* from = FindState(*sm, cur)) CallVoidFunction(from->onExit);
+        const std::uint32_t prev = cur;
+        cur = stateId;
+        if (const VisualState* to = FindState(*sm, cur)) CallVoidFunction(to->onEnter);
+        VisualScriptDiagnostics& diag = VisualScriptDiagnostics::Instance();
+        if (diag.enabled) diag.RecordStateChange(m_handle, smId, m_entity, prev, cur, m_playTime);
+    }
+
+    // Per-entity state-machine tick: run entry once, evaluate outgoing transitions by priority
+    // (respecting cooldown), then run the current state's Update. Reuses the function-call engine.
+    void TickStateMachines(ecs::Registry& registry, float dt) {
+        if (!m_asset || m_error.active || m_asset->stateMachines.empty() || !m_execStack.empty()) return;
+        m_registry = &registry; m_deltaTime = dt;
+        m_opsRemaining = kMaxOpsPerCallback; m_depth = 0;
+        m_nodeOutputs.clear(); m_evaluating.clear();
+        VisualScriptDiagnostics& diag = VisualScriptDiagnostics::Instance();
+        for (const VisualStateMachine& sm : m_asset->stateMachines) {
+            std::uint32_t& cur = m_smCurrentState[sm.id];
+            if (cur == 0) {
+                cur = sm.entryState;
+                if (const VisualState* s = FindState(sm, cur)) CallVoidFunction(s->onEnter);
+                if (diag.enabled) diag.RecordStateChange(m_handle, sm.id, m_entity, 0, cur, m_playTime);
+                if (m_error.active) return;
+            }
+            std::vector<const VisualTransition*> outs;
+            for (const VisualTransition& t : sm.transitions) if (t.from == cur) outs.push_back(&t);
+            std::sort(outs.begin(), outs.end(),
+                      [](const VisualTransition* a, const VisualTransition* b) { return a->priority > b->priority; });
+            for (const VisualTransition* t : outs) {
+                const std::uint64_t key = (static_cast<std::uint64_t>(sm.id) << 32) | t->id;
+                auto rit = m_smTransitionReady.find(key);
+                if (rit != m_smTransitionReady.end() && m_playTime < rit->second) continue;   // cooldown
+                if (CallBoolFunction(t->condition)) {
+                    if (const VisualState* from = FindState(sm, cur)) CallVoidFunction(from->onExit);
+                    const std::uint32_t prev = cur;
+                    cur = t->to;
+                    if (const VisualState* to = FindState(sm, cur)) CallVoidFunction(to->onEnter);
+                    if (t->cooldown > 0.0f) m_smTransitionReady[key] = m_playTime + t->cooldown;
+                    if (diag.enabled) diag.RecordStateChange(m_handle, sm.id, m_entity, prev, cur, m_playTime);
+                    if (m_error.active) return;
+                    break;   // one transition per tick
+                }
+                if (m_error.active) return;
+            }
+            if (const VisualState* s = FindState(sm, cur)) CallVoidFunction(s->onUpdate);
+            if (m_error.active) return;
+        }
     }
     void EnqueueStructural(std::function<void(ecs::Registry&)> op) override {
         if (m_structuralQueue && op) m_structuralQueue->push_back(std::move(op));
@@ -311,6 +452,247 @@ public:
         return m_scriptHost.get();
     }
 
+    // ---- Milestone 3: function calls ---------------------------------------
+    // The host supplies this so cross-graph (function-library) calls can resolve another .3dgvs.
+    // Same-graph calls never need it. Never called from a worker thread.
+    void SetFunctionResolver(std::function<const VisualScriptAsset*(const AssetHandle&)> resolver) {
+        m_functionResolver = std::move(resolver);
+    }
+
+    void SetFunctionOutput(const std::string& name, VisualValue value) override {
+        m_functionReturnValues[name] = std::move(value);
+    }
+
+    bool CallFunction(const AssetHandle& graph, FunctionId functionId,
+                      const std::unordered_map<std::string, VisualValue>& inputs,
+                      std::unordered_map<std::string, VisualValue>* outputs) override {
+        const bool crossGraph = graph.Valid() && !(graph == m_handle);
+        const VisualScriptAsset* callee = crossGraph
+            ? (m_functionResolver ? m_functionResolver(graph) : nullptr) : m_asset;
+        if (!callee) { Fail("Call Function: target graph not found"); return false; }
+        const VisualFunction* fn = callee->FindFunction(functionId);
+        if (!fn) { Fail("Call Function: function not found"); return false; }
+
+        // Recursion + depth guards (a graph can never hang or overflow the stack).
+        const std::uint64_t sig =
+            (crossGraph ? graph.low : m_handle.low) ^
+            (static_cast<std::uint64_t>(functionId) * 0x9e3779b97f4a7c15ull);
+        if (m_activeFunctions.count(sig)) { Fail("Recursive function call: " + fn->name); return false; }
+        if (m_functionDepth >= kMaxFunctionDepth) { Fail("Function call depth exceeded"); return false; }
+
+        const VisualNode* entry = nullptr;
+        for (const VisualNode& n : callee->nodes)
+            if (n.functionId == functionId && n.typeId == "Function.Entry") { entry = &n; break; }
+        if (!entry) { Fail("Function '" + fn->name + "' has no Entry node"); return false; }
+
+        // ---- save the outer callback's interpreter scratch ----
+        const VisualScriptAsset* savedAsset = m_asset;
+        const AssetHandle savedHandle = m_handle;
+        std::vector<ExecutionFrame> savedStack = std::move(m_execStack);
+        auto savedOutputs = std::move(m_nodeOutputs);
+        auto savedEval = std::move(m_evaluating);
+        const VisualNode* savedCurrent = m_currentNode;
+        std::vector<PinId>* savedTriggered = m_currentTriggered;
+        auto savedReturns = std::move(m_functionReturnValues);
+        const int savedDepth = m_depth;
+        std::unordered_map<std::string, VisualValue> savedVars;
+        std::unordered_map<std::uint32_t, std::string> savedNamesById;
+        if (crossGraph) { savedVars = std::move(m_variables); savedNamesById = std::move(m_variableNamesById); }
+
+        // ---- build the callee scope ----
+        m_asset = callee;
+        if (crossGraph) m_handle = graph;
+        m_execStack.clear();
+        m_nodeOutputs.clear();
+        m_evaluating.clear();
+        m_functionReturnValues.clear();
+        m_depth = 0;
+        if (crossGraph) {   // a library graph runs against its own member vars, not the caller's
+            m_variables.clear(); m_variableNamesById.clear();
+            for (const VisualVariable& v : callee->variables) {
+                m_variables[v.name] = v.defaultValue; m_variableNamesById[v.id] = v.name;
+            }
+        }
+        // Push a fresh function-local scope (id-keyed) — shadows member vars, never leaks into them.
+        std::unordered_map<VariableId, VisualValue> localScope;
+        for (const VisualVariable& v : fn->locals) localScope[v.id] = v.defaultValue;
+        m_localScopes.push_back(std::move(localScope));
+        // Seed the Entry node's data outputs from the call inputs (typed by pin).
+        for (const VisualPin& pin : entry->outputs) {
+            if (pin.kind != PinKind::Data) continue;
+            auto it = inputs.find(pin.name);
+            VisualValue value = (it != inputs.end()) ? it->second : pin.defaultValue;
+            if (value.type != pin.type) { VisualValue conv; if (value.ConvertTo(pin.type, &conv)) value = conv; }
+            m_nodeOutputs[entry->id][pin.id] = value;
+        }
+
+        m_activeFunctions.insert(sig);
+        ++m_functionDepth;
+        ExecuteNode(entry->id);   // synchronous — functions may not contain latent nodes
+        --m_functionDepth;
+        m_activeFunctions.erase(sig);
+        m_localScopes.pop_back();   // drop the function-local scope
+        const bool ok = !m_error.active;
+
+        if (outputs) {
+            outputs->clear();
+            for (const VisualFunctionParam& p : fn->outputs) {
+                auto it = m_functionReturnValues.find(p.name);
+                (*outputs)[p.name] = (it != m_functionReturnValues.end())
+                    ? it->second : VisualValue::MakeDefault(p.type);
+            }
+        }
+
+        // ---- restore the outer scratch ----
+        m_asset = savedAsset;
+        m_handle = savedHandle;
+        m_execStack = std::move(savedStack);
+        m_nodeOutputs = std::move(savedOutputs);
+        m_evaluating = std::move(savedEval);
+        m_currentNode = savedCurrent;
+        m_currentTriggered = savedTriggered;
+        m_functionReturnValues = std::move(savedReturns);
+        m_depth = savedDepth;
+        if (crossGraph) { m_variables = std::move(savedVars); m_variableNamesById = std::move(savedNamesById); }
+        return ok;
+    }
+
+    // Milestone 4: run a loop node's body branch synchronously, once, with a fresh evaluation memo
+    // (so pure nodes recompute for this iteration) while preserving the loop node's own outputs
+    // (Element/Index). Bounded by the shared op budget.
+    bool RunLoopBody(const std::string& execPinName) override {
+        if (!m_currentNode) return true;
+        const NodeId loopNode = m_currentNode->id;
+        const VisualPin* pin = FindPin(m_currentNode->outputs, execPinName);
+        if (!pin) return true;
+        const VisualLink* link = FindLinkFrom(loopNode, pin->id);
+        if (!link) return true;   // empty loop body is fine
+
+        std::vector<ExecutionFrame> savedStack = std::move(m_execStack);
+        auto savedOutputs = std::move(m_nodeOutputs);   // cheap move; restored after the body runs
+        auto savedEval = std::move(m_evaluating);
+        const VisualNode* savedCurrent = m_currentNode;
+        std::vector<PinId>* savedTriggered = m_currentTriggered;
+        const int savedDepth = m_depth;
+
+        // Copy only the loop node's own outputs (Element/Index) forward into the fresh body memo.
+        std::unordered_map<PinId, VisualValue> loopOutputs;
+        if (auto it = savedOutputs.find(loopNode); it != savedOutputs.end()) loopOutputs = it->second;
+        m_execStack.clear();
+        m_nodeOutputs.clear();
+        m_nodeOutputs[loopNode] = std::move(loopOutputs);
+        m_evaluating.clear();
+        m_depth = 0;
+        ExecuteNode(link->toNode);
+        const bool ok = !m_error.active;
+
+        m_execStack = std::move(savedStack);
+        m_nodeOutputs = std::move(savedOutputs);
+        m_evaluating = std::move(savedEval);
+        m_currentNode = savedCurrent;
+        m_currentTriggered = savedTriggered;
+        m_depth = savedDepth;
+        return ok;
+    }
+
+    // ---- Milestone 5: flow control + time ----------------------------------
+    bool EnteredVia(const std::string& execInputName) override {
+        if (!m_currentNode) return false;
+        if (m_enteredPin == kInvalidPinId) return true;   // event/loop entry — treat as the default input
+        const VisualPin* p = FindPin(m_currentNode->inputs, execInputName);
+        return p && p->id == m_enteredPin;
+    }
+    VisualValue GetNodeState(const std::string& key, const VisualValue& fallback) override {
+        if (!m_currentNode) return fallback;
+        auto n = m_nodeState.find(m_currentNode->id);
+        if (n == m_nodeState.end()) return fallback;
+        auto k = n->second.find(key);
+        return k == n->second.end() ? fallback : k->second;
+    }
+    void SetNodeState(const std::string& key, VisualValue value) override {
+        if (m_currentNode) m_nodeState[m_currentNode->id][key] = std::move(value);
+    }
+    VisualValue ReadInputFresh(const std::string& pinName) override {
+        // Force pure sources to recompute (loop conditions) while keeping THIS node's outputs.
+        std::unordered_map<PinId, VisualValue> selfOut;
+        if (m_currentNode) if (auto it = m_nodeOutputs.find(m_currentNode->id); it != m_nodeOutputs.end()) selfOut = it->second;
+        m_nodeOutputs.clear(); m_evaluating.clear();
+        if (m_currentNode) m_nodeOutputs[m_currentNode->id] = std::move(selfOut);
+        return ReadInput(pinName);
+    }
+    double Now() const override { return m_playTime; }
+    void SuspendTimer(float period, bool looping, const std::string& resumePin) override {
+        if (!m_currentNode) return;
+        const VisualPin* pin = FindPin(m_currentNode->outputs, resumePin);
+        Continuation c;
+        c.id = m_nextContinuationId++; c.kind = LatentKind::Timer;
+        c.waitNode = m_currentNode->id; c.resumePin = pin ? pin->id : kInvalidPinId;
+        c.remaining = period < 0.0001f ? 0.0001f : period; c.period = c.remaining; c.looping = looping;
+        m_continuations.push_back(std::move(c));
+    }
+    void StartTimeline(float duration, bool loop, const std::string& alphaOutput,
+                       const std::string& updatePin, const std::string& finishedPin) override {
+        if (!m_currentNode || duration <= 0.0f) return;
+        const VisualPin* up = FindPin(m_currentNode->outputs, updatePin);
+        const VisualPin* fp = FindPin(m_currentNode->outputs, finishedPin);
+        const VisualPin* ap = FindPin(m_currentNode->outputs, alphaOutput);
+        // A node runs one timeline at a time — cancel any existing before starting.
+        const NodeId n = m_currentNode->id;
+        m_continuations.erase(std::remove_if(m_continuations.begin(), m_continuations.end(),
+            [&](const Continuation& c) { return c.waitNode == n && c.kind == LatentKind::Timeline; }), m_continuations.end());
+        Continuation c;
+        c.id = m_nextContinuationId++; c.kind = LatentKind::Timeline;
+        c.waitNode = n; c.duration = duration; c.elapsed = 0.0f; c.looping = loop;
+        c.updatePin = up ? up->id : kInvalidPinId;
+        c.finishedPin = fp ? fp->id : kInvalidPinId;
+        c.alphaPin = ap ? ap->id : kInvalidPinId;
+        m_continuations.push_back(std::move(c));
+    }
+    void CancelNodeLatent() override {
+        if (!m_currentNode) return;
+        const NodeId n = m_currentNode->id;
+        m_continuations.erase(std::remove_if(m_continuations.begin(), m_continuations.end(),
+            [&](const Continuation& c) { return c.waitNode == n; }), m_continuations.end());
+    }
+    void SetPlayTime(double seconds) { m_playTime = seconds; }
+
+    // Milestone 9: the runtime hands the instance a compiled acceleration structure for its graph.
+    void SetCompiled(const CompiledGraph* compiled) { m_compiled = compiled; }
+
+    // ---- Milestone 8: async tasks ------------------------------------------
+    int StartAsyncTask(const std::string& kind, float workSeconds, float timeout,
+                       const std::string& completedPin, const std::string& failedPin,
+                       const std::string& cancelledPin, const std::string& timedOutPin) override {
+        if (!m_currentNode) return 0;
+        auto pin = [&](const std::string& n) {
+            const VisualPin* p = FindPin(m_currentNode->outputs, n); return p ? p->id : kInvalidPinId;
+        };
+        Continuation c;
+        c.id = m_nextContinuationId++;
+        c.kind = LatentKind::Task;
+        c.waitNode = m_currentNode->id;
+        c.resumePin = pin(completedPin);
+        c.failedPin = pin(failedPin);
+        c.cancelledPin = pin(cancelledPin);
+        c.timedOutPin = pin(timedOutPin);
+        c.remaining = workSeconds < 0.0f ? 0.0f : workSeconds;   // remaining work
+        c.duration = c.remaining;                                 // original, for elapsed display
+        c.timeoutRemaining = timeout > 0.0f ? timeout : -1.0f;
+        c.eventName = kind;
+        m_continuations.push_back(std::move(c));
+        return m_continuations.back().id;
+    }
+    void CancelAsyncTask(int handle) override {
+        for (Continuation& c : m_continuations) if (c.id == handle && c.kind == LatentKind::Task) { c.forceComplete = 3; return; }
+    }
+    void CompleteAsyncTask(int handle, bool success) override {
+        for (Continuation& c : m_continuations) if (c.id == handle && c.kind == LatentKind::Task) { c.forceComplete = success ? 1 : 2; return; }
+    }
+    bool IsAsyncTaskActive(int handle) override {
+        for (const Continuation& c : m_continuations) if (c.id == handle && c.kind == LatentKind::Task) return true;
+        return false;
+    }
+
     void SuspendLatent(LatentKind kind, float seconds, int fixedSteps,
                        const std::string& eventName, const std::string& resumePin) override {
         if (!m_currentNode) return;
@@ -329,19 +711,80 @@ public:
     // ---- Latent flow ticking (Pass 4, Phase 5/6) ---------------------------
     bool HasLatent() const { return !m_continuations.empty(); }
 
-    // Render-frame tick: advance Delay timers and re-test WaitUntil conditions.
+    // Render-frame tick: advance Delay/Timer timers, timelines, and re-test WaitUntil conditions.
     void TickLatent(ecs::Registry& registry, float dt) {
         if (m_continuations.empty() || m_error.active) return;
-        std::vector<Continuation> ready;
-        for (auto it = m_continuations.begin(); it != m_continuations.end();) {
-            bool fire = false;
-            if (it->kind == LatentKind::Delay) { it->remaining -= dt; fire = it->remaining <= 0.0f; }
-            else if (it->kind == LatentKind::WaitUntil) fire = EvaluateBoolInput(registry, it->waitNode, "Condition");
-            else if (it->kind == LatentKind::WaitAnimation) { VisualScriptHost* h = ScriptHost(); fire = !h || !h->VsIsAnimationActionPlaying(); }
-            if (fire) { ready.push_back(*it); it = m_continuations.erase(it); }
-            else ++it;
+        VisualScriptDiagnostics& diag = VisualScriptDiagnostics::Instance();
+        // A resume to run after we finish scanning (so we never mutate the list mid-iteration).
+        struct Resume { NodeId node; PinId pin; bool timeline; PinId alphaPin; float alpha; };
+        std::vector<Resume> resumes;
+        std::vector<int> eraseIds;
+        for (Continuation& c : m_continuations) {
+            switch (c.kind) {
+                case LatentKind::Delay:
+                    c.remaining -= dt;
+                    if (c.remaining <= 0.0f) { resumes.push_back({c.waitNode, c.resumePin, false, kInvalidPinId, 0.0f}); eraseIds.push_back(c.id); }
+                    break;
+                case LatentKind::WaitUntil:
+                    if (EvaluateBoolInput(registry, c.waitNode, "Condition")) { resumes.push_back({c.waitNode, c.resumePin, false, kInvalidPinId, 0.0f}); eraseIds.push_back(c.id); }
+                    break;
+                case LatentKind::WaitAnimation: {
+                    VisualScriptHost* h = ScriptHost();
+                    if (!h || !h->VsIsAnimationActionPlaying()) { resumes.push_back({c.waitNode, c.resumePin, false, kInvalidPinId, 0.0f}); eraseIds.push_back(c.id); }
+                    break;
+                }
+                case LatentKind::Timer:
+                    c.remaining -= dt;
+                    if (c.remaining <= 0.0f) {
+                        resumes.push_back({c.waitNode, c.resumePin, false, kInvalidPinId, 0.0f});
+                        if (c.looping) c.remaining += c.period; else eraseIds.push_back(c.id);
+                    }
+                    break;
+                case LatentKind::Timeline: {
+                    c.elapsed += dt;
+                    const float alpha = c.duration > 0.0f ? std::min(c.elapsed / c.duration, 1.0f) : 1.0f;
+                    resumes.push_back({c.waitNode, c.updatePin, true, c.alphaPin, alpha});
+                    if (c.elapsed >= c.duration) {
+                        resumes.push_back({c.waitNode, c.finishedPin, true, c.alphaPin, 1.0f});
+                        if (c.looping) c.elapsed = 0.0f; else eraseIds.push_back(c.id);
+                    }
+                    break;
+                }
+                case LatentKind::Task: {
+                    // Explicit completion/failure/cancel wins over timing (Milestone 8).
+                    if (c.forceComplete == 1)      { resumes.push_back({c.waitNode, c.resumePin, false, kInvalidPinId, 0.0f}); eraseIds.push_back(c.id); break; }
+                    if (c.forceComplete == 2)      { resumes.push_back({c.waitNode, c.failedPin, false, kInvalidPinId, 0.0f}); eraseIds.push_back(c.id); break; }
+                    if (c.forceComplete == 3)      { resumes.push_back({c.waitNode, c.cancelledPin, false, kInvalidPinId, 0.0f}); eraseIds.push_back(c.id); break; }
+                    c.elapsed += dt;
+                    if (c.timeoutRemaining >= 0.0f) {
+                        c.timeoutRemaining -= dt;
+                        if (c.timeoutRemaining <= 0.0f) { resumes.push_back({c.waitNode, c.timedOutPin, false, kInvalidPinId, 0.0f}); eraseIds.push_back(c.id); break; }
+                    }
+                    c.remaining -= dt;
+                    if (c.remaining <= 0.0f) { resumes.push_back({c.waitNode, c.resumePin, false, kInvalidPinId, 0.0f}); eraseIds.push_back(c.id); }
+                    break;
+                }
+                default: break;   // WaitEvent handled in DispatchEvent; WaitFixedSteps in TickLatentFixed
+            }
         }
-        for (const Continuation& c : ready) { ResumeFrom(registry, dt, c.waitNode, c.resumePin); if (m_error.active) return; }
+        // Report still-active tasks to the debugger (rebuilt each frame when diagnostics are on).
+        if (diag.enabled) {
+            std::unordered_set<int> dead(eraseIds.begin(), eraseIds.end());
+            for (const Continuation& c : m_continuations)
+                if (c.kind == LatentKind::Task && !dead.count(c.id))
+                    diag.ReportTask({m_handle, m_entity, c.id, c.eventName, c.elapsed,
+                                     c.timeoutRemaining >= 0.0f ? (c.elapsed + c.timeoutRemaining) : 0.0f});
+        }
+        if (!eraseIds.empty()) {
+            std::unordered_set<int> dead(eraseIds.begin(), eraseIds.end());
+            m_continuations.erase(std::remove_if(m_continuations.begin(), m_continuations.end(),
+                [&](const Continuation& c) { return dead.count(c.id) != 0; }), m_continuations.end());
+        }
+        for (const Resume& r : resumes) {
+            if (r.timeline) ResumeTimeline(registry, dt, r.node, r.pin, r.alphaPin, r.alpha);
+            else            ResumeFrom(registry, dt, r.node, r.pin);
+            if (m_error.active) return;
+        }
     }
 
     // Fixed-step tick: advance WaitForFixedSteps counters.
@@ -367,11 +810,26 @@ private:
         float       remaining = 0.0f;
         int         fixedStepsRemaining = 0;
         std::string eventName;
+        // Milestone 5: timers + timelines
+        bool        looping = false;
+        float       period = 0.0f;
+        float       duration = 0.0f;
+        float       elapsed = 0.0f;
+        PinId       updatePin = kInvalidPinId;
+        PinId       finishedPin = kInvalidPinId;
+        PinId       alphaPin = kInvalidPinId;
+        // Milestone 8: async task outcome pins + control
+        PinId       failedPin = kInvalidPinId;
+        PinId       cancelledPin = kInvalidPinId;
+        PinId       timedOutPin = kInvalidPinId;
+        float       timeoutRemaining = -1.0f;   // <0 => no timeout
+        int         forceComplete = 0;          // 0 none, 1 success, 2 fail, 3 cancel (set by API)
     };
 
     struct ExecutionFrame {
         NodeId node = kInvalidNodeId;
         std::vector<CallFrame> callStack;
+        PinId  enteredPin = kInvalidPinId;   // which exec INPUT pin triggered this node (Milestone 5)
     };
 
     // Resume execution from a suspended node's exec output (fresh evaluation pass).
@@ -385,8 +843,42 @@ private:
         if (const VisualLink* link = FindLinkFrom(waitNode, resumePin)) ExecuteNode(link->toNode);
     }
 
+    // Resume a timeline: seed the node's Alpha output, then run its Update/Finished branch (Milestone 5).
+    void ResumeTimeline(ecs::Registry& registry, float dt, NodeId node, PinId resumePin, PinId alphaPin, float alpha) {
+        m_registry = &registry;
+        m_deltaTime = dt;
+        m_opsRemaining = kMaxOpsPerCallback;
+        m_depth = 0;
+        m_nodeOutputs.clear();
+        m_evaluating.clear();
+        if (alphaPin != kInvalidPinId) m_nodeOutputs[node][alphaPin] = VisualValue::Float(alpha);
+        if (const VisualLink* link = FindLinkFrom(node, resumePin)) ExecuteNode(link->toNode);
+    }
+
+    // ---- state-machine helpers (Milestone 7) -------------------------------
+    static const VisualState* FindState(const VisualStateMachine& sm, std::uint32_t stateId) {
+        for (const VisualState& s : sm.states) if (s.id == stateId) return &s;
+        return nullptr;
+    }
+    void CallVoidFunction(FunctionId f) {
+        if (f == kInvalidFunctionId) return;
+        std::unordered_map<std::string, VisualValue> in, out;
+        CallFunction(m_handle, f, in, &out);
+    }
+    bool CallBoolFunction(FunctionId f) {
+        if (f == kInvalidFunctionId) return true;   // no condition => always eligible
+        std::unordered_map<std::string, VisualValue> in, out;
+        if (!CallFunction(m_handle, f, in, &out)) return false;
+        const VisualFunction* fn = m_asset ? m_asset->FindFunction(f) : nullptr;
+        if (fn) for (const VisualFunctionParam& p : fn->outputs) {
+            auto it = out.find(p.name);
+            if (it != out.end()) return it->second.AsBool();
+        }
+        return false;
+    }
+
     bool EvaluateBoolInput(ecs::Registry& registry, NodeId node, const std::string& pinName) {
-        const VisualNode* n = m_asset->FindNode(node);
+        const VisualNode* n = FindNode(node);
         if (!n) return false;
         m_registry = &registry;
         m_opsRemaining = kMaxOpsPerCallback;
@@ -444,9 +936,9 @@ private:
         VisualScriptDiagnostics& diag = VisualScriptDiagnostics::Instance();
         while (!m_execStack.empty() && !m_error.active && !diag.paused) {
             ExecutionFrame& pending = m_execStack.back();
-            const VisualNode* node = m_asset ? m_asset->FindNode(pending.node) : nullptr;
+            const VisualNode* node = FindNode(pending.node);
             if (!node) { m_execStack.pop_back(); continue; }
-            const NodeDescriptor* desc = VisualNodeRegistry::Instance().Find(node->typeId);
+            const NodeDescriptor* desc = DescriptorFor(node);
             if (!desc) { SetError(node, "Missing node type: " + node->typeId); return; }
             if (--m_opsRemaining < 0) {
                 if (diag.enabled) diag.RecordBudgetHit();
@@ -457,7 +949,10 @@ private:
             }
 
             m_callStack = pending.callStack;
-            m_callStack.push_back({m_handle, node->id, node->typeId, m_entity});
+            std::string functionName;   // Milestone 3: label the frame with its owning function
+            if (node->functionId != kInvalidFunctionId && m_asset)
+                if (const VisualFunction* fn = m_asset->FindFunction(node->functionId)) functionName = fn->name;
+            m_callStack.push_back({m_handle, node->id, node->typeId, m_entity, functionName});
             if (diag.enabled && diag.ShouldPauseAt(m_handle, node->id, m_entity, m_callStack)) {
                 m_callStack.clear();
                 return; // leave this exact frame on the stack for Continue/Step
@@ -465,6 +960,7 @@ private:
 
             ExecutionFrame frame = std::move(pending);
             m_execStack.pop_back();
+            m_enteredPin = frame.enteredPin;   // Milestone 5: which exec input triggered this node
             const double t0 = diag.enabled ? NowSeconds() : 0.0;
             if (diag.enabled) diag.RecordHighlight(m_handle, node->id, m_entity, t0);
 
@@ -486,7 +982,7 @@ private:
             // Reverse insertion keeps authored output order while using the vector's back as top.
             for (auto it = triggered.rbegin(); it != triggered.rend(); ++it) {
                 if (const VisualLink* link = FindLinkFrom(node->id, *it))
-                    m_execStack.push_back({link->toNode, m_callStack});
+                    m_execStack.push_back({link->toNode, m_callStack, link->toPin});   // track entered input
             }
             m_callStack.clear();
         }
@@ -497,9 +993,9 @@ private:
         if (auto nit = m_nodeOutputs.find(nodeId); nit != m_nodeOutputs.end()) {
             if (auto pit = nit->second.find(pinId); pit != nit->second.end()) return pit->second;
         }
-        const VisualNode* node = m_asset->FindNode(nodeId);
+        const VisualNode* node = FindNode(nodeId);
         if (!node) return VisualValue::Float(0.0f);
-        const NodeDescriptor* desc = VisualNodeRegistry::Instance().Find(node->typeId);
+        const NodeDescriptor* desc = DescriptorFor(node);
         if (!desc) { SetError(node, "Missing node type: " + node->typeId); return DefaultForPin(node, pinId); }
 
         if (desc->pure) {
@@ -545,11 +1041,26 @@ private:
         for (const VisualNode& n : m_asset->nodes) if (n.typeId == typeId) return &n;
         return nullptr;
     }
+    // Milestone 9: compiled-accelerated lookups (O(1) maps) with a safe linear fallback. The compiled
+    // structure is only used when it indexes the CURRENT asset (guards cross-graph function calls) and
+    // the global toggle is on.
+    bool UseCompiled() const { return m_compiled && m_compiled->source == m_asset && VisualScriptUseCompiledRef(); }
+    const VisualNode* FindNode(NodeId id) const {
+        if (UseCompiled()) { auto it = m_compiled->nodeById.find(id); return it == m_compiled->nodeById.end() ? nullptr : it->second; }
+        return m_asset ? m_asset->FindNode(id) : nullptr;
+    }
+    const NodeDescriptor* DescriptorFor(const VisualNode* node) const {
+        if (!node) return nullptr;
+        if (UseCompiled()) { auto it = m_compiled->descById.find(node->id); if (it != m_compiled->descById.end()) return it->second; }
+        return VisualNodeRegistry::Instance().Find(node->typeId);
+    }
     const VisualLink* FindLinkFrom(NodeId node, PinId pin) const {
+        if (UseCompiled()) { auto it = m_compiled->linkFrom.find(CompiledGraph::Key(node, pin)); return it == m_compiled->linkFrom.end() ? nullptr : it->second; }
         for (const VisualLink& l : m_asset->links) if (l.fromNode == node && l.fromPin == pin) return &l;
         return nullptr;
     }
     const VisualLink* FindLinkTo(NodeId node, PinId pin) const {
+        if (UseCompiled()) { auto it = m_compiled->linkTo.find(CompiledGraph::Key(node, pin)); return it == m_compiled->linkTo.end() ? nullptr : it->second; }
         for (const VisualLink& l : m_asset->links) if (l.toNode == node && l.toPin == pin) return &l;
         return nullptr;
     }
@@ -583,6 +1094,7 @@ private:
     ecs::Entity m_entity = ecs::kNull;
     AssetHandle m_handle;
     const VisualScriptAsset* m_asset = nullptr;
+    const CompiledGraph* m_compiled = nullptr;   // Milestone 9 (borrowed from the runtime cache)
     bool m_began = false;
     VisualScriptError m_error;
     std::unordered_map<std::string, VisualValue> m_variables;
@@ -592,11 +1104,30 @@ private:
     int m_nextContinuationId = 1;
     std::vector<CallFrame> m_callStack;          // Pass 5 diagnostics (only used when enabled)
 
+    // Milestone 3: function-call machinery (synchronous; fully saved/restored around each call).
+    std::function<const VisualScriptAsset*(const AssetHandle&)> m_functionResolver;
+    std::unordered_map<std::string, VisualValue> m_functionReturnValues;   // Return node -> Call outputs
+    std::vector<std::unordered_map<VariableId, VisualValue>> m_localScopes; // function-local variable scopes
+    // Milestone 5: per-node persistent state (Do Once / Gate / Flip-Flop), entered exec input, clock.
+    std::unordered_map<NodeId, std::unordered_map<std::string, VisualValue>> m_nodeState;
+    PinId  m_enteredPin = kInvalidPinId;
+    double m_playTime = 0.0;
+    // Milestone 7: state-machine runtime state (per state machine id).
+    std::unordered_map<std::uint32_t, std::uint32_t> m_smCurrentState;   // smId -> current stateId
+    std::unordered_map<std::uint64_t, double> m_smTransitionReady;       // (smId<<32|transId) -> readyAt
+    std::unordered_set<std::uint64_t> m_activeFunctions;                   // recursion guard by (graph,func)
+    int m_functionDepth = 0;
+    static constexpr int kMaxFunctionDepth = 64;
+
     // Pass 2 engine services (owned by the host; instance only borrows).
     PhysicsWorld* m_physics = nullptr;
     const ScriptInputState* m_input = nullptr;
     std::vector<ScriptEvent>* m_eventOutbox = nullptr;
     std::vector<std::function<void(ecs::Registry&)>>* m_structuralQueue = nullptr;
+    // Milestone 6: targeted event outbox (VS→VS direct delivery) + per-instance unbound event names.
+    std::vector<std::pair<ecs::Entity, ScriptEvent>>* m_targetedOutbox = nullptr;
+    std::unordered_set<std::string> m_unboundEvents;
+    ScriptEvent m_buildingEvent;   // scratch for the BeginEvent/EventArg/SendEvent builder
 
     // Pass 4 gameplay host: a reusable Script whose context we retarget per call.
     std::unique_ptr<VisualScriptHost> m_scriptHost;

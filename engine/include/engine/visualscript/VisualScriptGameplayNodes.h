@@ -123,6 +123,55 @@ inline void RegisterVisualScriptGameplay() {
         [](INodeContext& c) { if (auto* h = Host(c)) h->VsSaveGameToSlot(c.ReadInput("Slot").AsInt()); });
     RegisterGameplayFn("Save.Checkpoint", "Save", S::Bool, true, {{"Name", S::String}, {"Position", S::Vec3}},
         [](INodeContext& c) { if (auto* h = Host(c)) c.WriteOutput("Return", VisualValue::Bool(h->VsSaveCheckpoint(c.ReadInput("Name").AsString(), c.ReadInput("Position").AsVec3()))); });
+
+    // ---- Async service wrappers (Milestone 8) — issue a real request, then run as an async task ----
+    // Registered as plain descriptors (not via the ScriptApi generator) because their pin shape is
+    // bespoke. VisualScriptHost is complete in this translation unit, so they may call it directly.
+    {
+        using detail::Exec; using detail::Data;
+        VisualNodeRegistry& reg = VisualNodeRegistry::Instance();
+        reg.Register({"Async.LoadLevel", "Load Level (Async)", "Async", false, 1,
+            { Exec("In", PinDirection::Input),
+              Data("Level", PinDirection::Input, ValueType::String, VisualValue::Str("")),
+              Data("Timeout", PinDirection::Input, ValueType::Float, VisualValue::Float(0.0f)),
+              Exec("Started", PinDirection::Output),
+              Exec("Completed", PinDirection::Output), Exec("Failed", PinDirection::Output),
+              Exec("Timed Out", PinDirection::Output), Data("Task", PinDirection::Output, ValueType::Int, VisualValue::Int(0)) },
+            [](INodeContext& c) {
+                if (VisualScriptHost* h = c.ScriptHost()) h->VsRequestLevelLoad(c.ReadInput("Level").AsString());
+                const int t = c.StartAsyncTask("LoadLevel", 0.1f, c.ReadInput("Timeout").AsFloat(),
+                                               "Completed", "Failed", "", "Timed Out");
+                c.WriteOutput("Task", VisualValue::Int(t)); c.Continue("Started");
+            }});
+        reg.Register({"Async.LoadScene", "Load Scene (Async)", "Async", false, 1,
+            { Exec("In", PinDirection::Input),
+              Data("Scene Path", PinDirection::Input, ValueType::String, VisualValue::Str("")),
+              Data("Timeout", PinDirection::Input, ValueType::Float, VisualValue::Float(0.0f)),
+              Exec("Started", PinDirection::Output),
+              Exec("Completed", PinDirection::Output), Exec("Failed", PinDirection::Output),
+              Exec("Timed Out", PinDirection::Output), Data("Task", PinDirection::Output, ValueType::Int, VisualValue::Int(0)) },
+            [](INodeContext& c) {
+                if (VisualScriptHost* h = c.ScriptHost()) h->VsRequestSceneLoad(c.ReadInput("Scene Path").AsString());
+                const int t = c.StartAsyncTask("LoadScene", 0.1f, c.ReadInput("Timeout").AsFloat(),
+                                               "Completed", "Failed", "", "Timed Out");
+                c.WriteOutput("Task", VisualValue::Int(t)); c.Continue("Started");
+            }});
+        reg.Register({"Async.StartDialogue", "Start Dialogue (Async)", "Async", false, 1,
+            { Exec("In", PinDirection::Input),
+              Data("Dialogue", PinDirection::Input, ValueType::String, VisualValue::Str("")),
+              Data("Timeout", PinDirection::Input, ValueType::Float, VisualValue::Float(0.0f)),
+              Exec("Started", PinDirection::Output),
+              Exec("Completed", PinDirection::Output), Exec("Failed", PinDirection::Output),
+              Exec("Timed Out", PinDirection::Output), Data("Task", PinDirection::Output, ValueType::Int, VisualValue::Int(0)) },
+            [](INodeContext& c) {
+                VisualScriptHost* h = c.ScriptHost();
+                const bool ok = h && h->VsStartDialogue(c.ReadInput("Dialogue").AsString());
+                if (!ok) { c.Continue("Failed"); return; }
+                const int t = c.StartAsyncTask("Dialogue", 0.1f, c.ReadInput("Timeout").AsFloat(),
+                                               "Completed", "Failed", "", "Timed Out");
+                c.WriteOutput("Task", VisualValue::Int(t)); c.Continue("Started");
+            }});
+    }
 }
 
 } // namespace engine::vs

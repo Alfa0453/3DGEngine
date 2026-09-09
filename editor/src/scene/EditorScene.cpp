@@ -12,6 +12,7 @@
 #include <engine/gameplay/CombatSystem.h>
 #include <engine/gameplay/SpawnSystem.h>
 #include <engine/graphics/Mesh.h>
+#include <engine/visualscript/VisualScriptAsset.h>
 
 #include <algorithm>
 #include <cctype>
@@ -1249,6 +1250,11 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         // Visual Script graph handle (scene version 156+). Tail of the object record.
         out << ' ' << (object.visualScriptGraph.Valid() ? object.visualScriptGraph.ToString()
                                                          : std::string("-"));
+        out << ' ' << object.visualScriptOverrides.size();
+        for (const engine::vs::VisualScriptVariableOverride& overrideValue : object.visualScriptOverrides) {
+            out << ' ' << overrideValue.variableId << ' ';
+            engine::vs::WriteVisualValue(out, overrideValue.value);
+        }
         out << '\n';
     }
 
@@ -2862,6 +2868,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         std::string modelAssetPath;
         engine::AssetHandle modelAssetId;
         engine::AssetHandle visualScriptGraph;   // scene version 156+
+        std::vector<engine::vs::VisualScriptVariableOverride> visualScriptOverrides; // scene version 157+
         engine::AssetHandle materialAssetId;
         std::string materialAssetPath;
         glm::vec3 modelOrientationEuler{0.0f};
@@ -3925,6 +3932,21 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
                 in >> vsToken;
                 if (vsToken != "-") engine::AssetHandle::Parse(vsToken, &visualScriptGraph);
             }
+            if (version >= 157) {
+                std::size_t overrideCount = 0;
+                in >> overrideCount;
+                if (overrideCount > 4096) in.setstate(std::ios::failbit);
+                visualScriptOverrides.reserve(std::min<std::size_t>(overrideCount, 4096));
+                for (std::size_t overrideIndex = 0; overrideIndex < overrideCount && in; ++overrideIndex) {
+                    engine::vs::VisualScriptVariableOverride overrideValue;
+                    in >> overrideValue.variableId;
+                    if (!engine::vs::ReadVisualValue(in, &overrideValue.value)) {
+                        in.setstate(std::ios::failbit);
+                        break;
+                    }
+                    visualScriptOverrides.push_back(std::move(overrideValue));
+                }
+            }
             particleShape = std::clamp(particleShape,
                 static_cast<int>(engine::EmitShape::Point), static_cast<int>(engine::EmitShape::Cone));
             particleBlend = std::clamp(particleBlend,
@@ -3946,6 +3968,7 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
         m_objects.back().modelAssetPath = modelAssetPath;
         m_objects.back().modelAssetId = modelAssetId;
         m_objects.back().visualScriptGraph = visualScriptGraph;
+        m_objects.back().visualScriptOverrides = std::move(visualScriptOverrides);
         m_objects.back().materialAssetPath = materialAssetPath;
         m_objects.back().materialAssetId = materialAssetId;
         m_objects.back().modelOrientationEuler = modelOrientationEuler;
@@ -5381,8 +5404,46 @@ bool EditorScene::SetSelectedVisualScript(engine::AssetHandle graph)
     }
     Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
     if (selected.locked) return false;
+    if (selected.visualScriptGraph == graph) return true;
     PushUndoSnapshot();
     selected.visualScriptGraph = graph;
+    selected.visualScriptOverrides.clear();
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::SetSelectedVisualScriptOverride(engine::vs::VariableId variableId,
+                                                  const engine::vs::VisualValue& value)
+{
+    if (variableId == engine::vs::kInvalidVariableId || m_selectedIndex < 0 ||
+        m_selectedIndex >= static_cast<int>(m_objects.size())) return false;
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked || !selected.visualScriptGraph.Valid()) return false;
+    PushUndoSnapshot();
+    auto it = std::find_if(selected.visualScriptOverrides.begin(), selected.visualScriptOverrides.end(),
+        [variableId](const engine::vs::VisualScriptVariableOverride& item) {
+            return item.variableId == variableId;
+        });
+    if (it == selected.visualScriptOverrides.end())
+        selected.visualScriptOverrides.push_back({variableId, value});
+    else
+        it->value = value;
+    m_dirty = true;
+    return true;
+}
+
+bool EditorScene::ClearSelectedVisualScriptOverride(engine::vs::VariableId variableId)
+{
+    if (m_selectedIndex < 0 || m_selectedIndex >= static_cast<int>(m_objects.size())) return false;
+    Object& selected = m_objects[static_cast<std::size_t>(m_selectedIndex)];
+    if (selected.locked) return false;
+    auto it = std::find_if(selected.visualScriptOverrides.begin(), selected.visualScriptOverrides.end(),
+        [variableId](const engine::vs::VisualScriptVariableOverride& item) {
+            return item.variableId == variableId;
+        });
+    if (it == selected.visualScriptOverrides.end()) return true;
+    PushUndoSnapshot();
+    selected.visualScriptOverrides.erase(it);
     m_dirty = true;
     return true;
 }
@@ -7627,6 +7688,7 @@ bool EditorScene::DuplicateSelected(const engine::Mesh & cube, const engine::Mes
     m_objects.back().editorGroupId = selectedCopy.editorGroupId;
     m_objects.back().modelAssetPath = selectedCopy.modelAssetPath;
     m_objects.back().visualScriptGraph = selectedCopy.visualScriptGraph;
+    m_objects.back().visualScriptOverrides = selectedCopy.visualScriptOverrides;
     m_objects.back().materialAssetPath = selectedCopy.materialAssetPath;
     m_objects.back().decal = selectedCopy.decal;
     m_objects.back().decalOpacity = selectedCopy.decalOpacity;

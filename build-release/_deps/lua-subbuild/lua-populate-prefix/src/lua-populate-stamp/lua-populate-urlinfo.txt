@@ -1,0 +1,12 @@
+# This is a generated file and its contents are an internal implementation detail.
+# The download step will be re-executed if anything in this file changes.
+# No other meaning or use of this file is supported.
+
+method=url
+command=C:/Program Files/CMake/bin/cmake.exe;-DCMAKE_MESSAGE_LOG_LEVEL=VERBOSE;-P;D:/C++_Projects/3DGEngine/build-release/_deps/lua-subbuild/lua-populate-prefix/src/lua-populate-stamp/download-lua-populate.cmake;COMMAND;C:/Program Files/CMake/bin/cmake.exe;-DCMAKE_MESSAGE_LOG_LEVEL=VERBOSE;-P;D:/C++_Projects/3DGEngine/build-release/_deps/lua-subbuild/lua-populate-prefix/src/lua-populate-stamp/verify-lua-populate.cmake;COMMAND;C:/Program Files/CMake/bin/cmake.exe;-DCMAKE_MESSAGE_LOG_LEVEL=VERBOSE;-P;D:/C++_Projects/3DGEngine/build-release/_deps/lua-subbuild/lua-populate-prefix/src/lua-populate-stamp/extract-lua-populate.cmake
+source_dir=D:/C++_Projects/3DGEngine/build-release/_deps/lua-src
+work_dir=D:/C++_Projects/3DGEngine/build-release/_deps
+url(s)=https://www.lua.org/ftp/lua-5.4.8.tar.gz
+hash=SHA256=4f18ddae154e793e46eeab727c59ef1c0c0c2b744e7b94219710d76f530629ae
+      no_extract=
+

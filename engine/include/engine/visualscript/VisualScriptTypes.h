@@ -22,8 +22,10 @@
 #include <glm/gtc/quaternion.hpp>
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <variant>
+#include <vector>
 
 namespace engine::vs {
 
@@ -37,6 +39,7 @@ using PinId      = std::uint32_t;   // unique within its owning node
 using LinkId     = std::uint32_t;
 using VariableId = std::uint32_t;   // graph-scoped; stable across rename (Pass 3, Phase 11/12)
 using CommentId  = std::uint32_t;
+using FunctionId = std::uint32_t;   // graph-scoped function/subgraph identity (Milestone 3)
 
 inline constexpr GraphId    kInvalidGraphId    = 0;
 inline constexpr NodeId     kInvalidNodeId     = 0;
@@ -44,6 +47,7 @@ inline constexpr PinId      kInvalidPinId      = 0;
 inline constexpr LinkId     kInvalidLinkId     = 0;
 inline constexpr VariableId kInvalidVariableId = 0;
 inline constexpr CommentId  kInvalidCommentId  = 0;
+inline constexpr FunctionId kInvalidFunctionId = 0;   // 0 == the event graph scope
 
 // ---- Value types (Phase 4) -------------------------------------------------
 enum class ValueType : std::uint8_t {
@@ -59,6 +63,10 @@ enum class ValueType : std::uint8_t {
     Quaternion,
     Color,        // rgba stored as vec4
     ScriptHandle, // reserved (entity + class name); Pass 1 stores the entity only
+    Array,        // typed, ordered list (elementType) — Milestone 4
+    Map,          // typed key->value dictionary (keyType/elementType) — Milestone 4
+    Struct,       // user-authored record (typeId -> ordered fields) — Milestone 4
+    Enum,         // named integer options (typeId) — Milestone 4
     Count
 };
 
@@ -76,6 +84,10 @@ inline const char* ValueTypeName(ValueType type) {
         case ValueType::Quaternion:   return "Quaternion";
         case ValueType::Color:        return "Color";
         case ValueType::ScriptHandle: return "ScriptHandle";
+        case ValueType::Array:        return "Array";
+        case ValueType::Map:          return "Map";
+        case ValueType::Struct:       return "Struct";
+        case ValueType::Enum:         return "Enum";
         default:                      return "Unknown";
     }
 }
@@ -112,8 +124,35 @@ struct VisualValue {
     ValueType type = ValueType::Float;
     Storage   data = 0.0f;
 
+    // ---- Container payloads (Milestone 4) ----------------------------------
+    // Only populated for the matching `type`. Arrays/structs share `elements`; maps use the two
+    // parallel key/value vectors. Copies are shallow (shared_ptr) — mutation nodes CloneDeep() first,
+    // so authored/runtime values keep value semantics without per-copy deep clones.
+    std::shared_ptr<std::vector<VisualValue>> elements;   // Array items OR Struct fields (ordered)
+    std::shared_ptr<std::vector<VisualValue>> mapKeys;    // Map keys (parallel to mapValues)
+    std::shared_ptr<std::vector<VisualValue>> mapValues;  // Map values
+    ValueType     elementType = ValueType::Float;         // Array element / Map value type
+    ValueType     keyType     = ValueType::String;        // Map key type
+    std::uint32_t typeId      = 0;                         // Struct / Enum definition id
+
     VisualValue() = default;
     explicit VisualValue(ValueType t) : type(t) { *this = MakeDefault(t); }
+
+    // Value semantics with DEEP container copies (Milestone 4): copying a VisualValue clones its
+    // array/map/struct payload recursively, so authored snapshots (undo), variable storage, and
+    // interpreter reads never alias each other's containers. Moves stay cheap.
+    VisualValue(const VisualValue& o)
+        : type(o.type), data(o.data), elementType(o.elementType), keyType(o.keyType), typeId(o.typeId) {
+        if (o.elements)  elements  = std::make_shared<std::vector<VisualValue>>(*o.elements);
+        if (o.mapKeys)   mapKeys   = std::make_shared<std::vector<VisualValue>>(*o.mapKeys);
+        if (o.mapValues) mapValues = std::make_shared<std::vector<VisualValue>>(*o.mapValues);
+    }
+    VisualValue& operator=(const VisualValue& o) {
+        if (this != &o) { VisualValue tmp(o); *this = std::move(tmp); }
+        return *this;
+    }
+    VisualValue(VisualValue&&) noexcept = default;
+    VisualValue& operator=(VisualValue&&) noexcept = default;
 
     // ---- Constructors for each supported type ------------------------------
     static VisualValue Exec()                       { VisualValue v; v.type = ValueType::Exec; v.data = std::monostate{}; return v; }
@@ -127,6 +166,66 @@ struct VisualValue {
     static VisualValue Asset(const AssetHandle& h)  { VisualValue v; v.type = ValueType::Asset; v.data = h; return v; }
     static VisualValue Quat(const glm::quat& q)     { VisualValue v; v.type = ValueType::Quaternion; v.data = q; return v; }
     static VisualValue Col(const glm::vec4& c)      { VisualValue v; v.type = ValueType::Color; v.data = c; return v; }
+
+    // ---- Container constructors (Milestone 4) ------------------------------
+    static VisualValue MakeArray(ValueType elementType) {
+        VisualValue v; v.type = ValueType::Array; v.data = std::monostate{};
+        v.elementType = elementType;
+        v.elements = std::make_shared<std::vector<VisualValue>>();
+        return v;
+    }
+    static VisualValue MakeMap(ValueType keyType, ValueType valueType) {
+        VisualValue v; v.type = ValueType::Map; v.data = std::monostate{};
+        v.keyType = keyType; v.elementType = valueType;
+        v.mapKeys = std::make_shared<std::vector<VisualValue>>();
+        v.mapValues = std::make_shared<std::vector<VisualValue>>();
+        return v;
+    }
+    static VisualValue MakeStruct(std::uint32_t structTypeId, std::vector<VisualValue> fields = {}) {
+        VisualValue v; v.type = ValueType::Struct; v.data = std::monostate{};
+        v.typeId = structTypeId;
+        v.elements = std::make_shared<std::vector<VisualValue>>(std::move(fields));
+        return v;
+    }
+    static VisualValue MakeEnum(std::uint32_t enumTypeId, int value) {
+        VisualValue v; v.type = ValueType::Enum; v.data = value; v.typeId = enumTypeId; return v;
+    }
+
+    // ---- Container access ---------------------------------------------------
+    std::vector<VisualValue>& Elements() {
+        if (!elements) elements = std::make_shared<std::vector<VisualValue>>();
+        return *elements;
+    }
+    const std::vector<VisualValue>& Elements() const {
+        static const std::vector<VisualValue> kEmpty; return elements ? *elements : kEmpty;
+    }
+    std::vector<VisualValue>& MapKeys() {
+        if (!mapKeys) mapKeys = std::make_shared<std::vector<VisualValue>>();
+        return *mapKeys;
+    }
+    std::vector<VisualValue>& MapValues() {
+        if (!mapValues) mapValues = std::make_shared<std::vector<VisualValue>>();
+        return *mapValues;
+    }
+    const std::vector<VisualValue>& MapKeysConst() const {
+        static const std::vector<VisualValue> kEmpty; return mapKeys ? *mapKeys : kEmpty;
+    }
+    const std::vector<VisualValue>& MapValuesConst() const {
+        static const std::vector<VisualValue> kEmpty; return mapValues ? *mapValues : kEmpty;
+    }
+
+    // A deep copy: clones the owned container vectors (recursively) so mutation nodes can edit a
+    // returned value without aliasing the source array/struct/map.
+    VisualValue CloneDeep() const {
+        VisualValue v = *this;
+        if (elements)  { v.elements  = std::make_shared<std::vector<VisualValue>>(*elements);
+                         for (VisualValue& e : *v.elements) e = e.CloneDeep(); }
+        if (mapKeys)   { v.mapKeys   = std::make_shared<std::vector<VisualValue>>(*mapKeys);
+                         for (VisualValue& e : *v.mapKeys) e = e.CloneDeep(); }
+        if (mapValues) { v.mapValues = std::make_shared<std::vector<VisualValue>>(*mapValues);
+                         for (VisualValue& e : *v.mapValues) e = e.CloneDeep(); }
+        return v;
+    }
 
     static VisualValue MakeDefault(ValueType t) {
         switch (t) {
@@ -142,6 +241,10 @@ struct VisualValue {
             case ValueType::Quaternion:   return Quat(glm::quat(1, 0, 0, 0));
             case ValueType::Color:        return Col(glm::vec4(1.0f));
             case ValueType::ScriptHandle: return Ent(ecs::kNull);
+            case ValueType::Array:        return MakeArray(ValueType::Float);   // element type refined by caller
+            case ValueType::Map:          return MakeMap(ValueType::String, ValueType::Float);
+            case ValueType::Struct:       return MakeStruct(0);
+            case ValueType::Enum:         return MakeEnum(0, 0);
             default:                      return Float(0.0f);
         }
     }
@@ -160,6 +263,47 @@ struct VisualValue {
     AssetHandle AsAsset() const { auto* p = std::get_if<AssetHandle>(&data); return p ? *p : AssetHandle{}; }
     glm::quat AsQuat() const { auto* p = std::get_if<glm::quat>(&data); return p ? *p : glm::quat(1, 0, 0, 0); }
     glm::vec4 AsColor(const glm::vec4& fallback = glm::vec4(1.0f)) const { auto* p = std::get_if<glm::vec4>(&data); return p ? *p : fallback; }
+
+    // Value equality (Milestone 4) — used by Contains/Find/Map lookups. Containers compare
+    // element-wise; maps compare as unordered key->value sets.
+    bool Equals(const VisualValue& o) const {
+        if (type != o.type) return false;
+        switch (type) {
+            case ValueType::Exec:         return true;
+            case ValueType::Bool:         return AsBool() == o.AsBool();
+            case ValueType::Int:
+            case ValueType::Enum:         return AsInt() == o.AsInt();
+            case ValueType::Float:        return AsFloat() == o.AsFloat();
+            case ValueType::String:       return AsString() == o.AsString();
+            case ValueType::Vector2:      return AsVec2() == o.AsVec2();
+            case ValueType::Vector3:      return AsVec3() == o.AsVec3();
+            case ValueType::Entity:
+            case ValueType::ScriptHandle: return AsEntity() == o.AsEntity();
+            case ValueType::Asset:        return AsAsset() == o.AsAsset();
+            case ValueType::Quaternion:   return AsQuat() == o.AsQuat();
+            case ValueType::Color:        return AsColor() == o.AsColor();
+            case ValueType::Array:
+            case ValueType::Struct: {
+                const auto& a = Elements(); const auto& b = o.Elements();
+                if (a.size() != b.size()) return false;
+                for (std::size_t i = 0; i < a.size(); ++i) if (!a[i].Equals(b[i])) return false;
+                return true;
+            }
+            case ValueType::Map: {
+                const auto& ak = MapKeysConst(); const auto& av = MapValuesConst();
+                const auto& bk = o.MapKeysConst(); const auto& bv = o.MapValuesConst();
+                if (ak.size() != bk.size()) return false;
+                for (std::size_t i = 0; i < ak.size(); ++i) {
+                    bool found = false;
+                    for (std::size_t j = 0; j < bk.size(); ++j)
+                        if (ak[i].Equals(bk[j])) { found = av[i].Equals(bv[j]); break; }
+                    if (!found) return false;
+                }
+                return true;
+            }
+            default: return false;
+        }
+    }
 
     // ---- Explicit conversion (Phase 5) -------------------------------------
     // Widening Int -> Float is allowed. Float -> Int is allowed only as an

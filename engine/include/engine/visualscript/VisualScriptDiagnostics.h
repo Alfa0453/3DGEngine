@@ -53,6 +53,7 @@ struct CallFrame {                       // Phase 11
     NodeId      node = kInvalidNodeId;
     std::string nodeType;
     ecs::Entity entity = ecs::kNull;
+    std::string functionName;            // owning function (empty = event graph) — Milestone 3
 };
 
 struct VsErrorRecord {                   // Phase 12
@@ -90,6 +91,32 @@ struct NodeValueSnapshot {
     std::unordered_map<std::string, VisualValue> variables;
 };
 
+struct VsEventTraceEntry {              // Milestone 6: event dispatch path
+    ecs::Entity sender = ecs::kNull;
+    ecs::Entity target = ecs::kNull;    // kNull == broadcast to the whole bus
+    std::string eventName;
+    bool        broadcast = true;
+    double      timeSeconds = 0.0;
+};
+
+struct VsStateChange {                  // Milestone 7: state-machine transition history
+    AssetHandle   graph;
+    std::uint32_t stateMachine = 0;
+    ecs::Entity   entity = ecs::kNull;
+    std::uint32_t fromState = 0;
+    std::uint32_t toState = 0;
+    double        timeSeconds = 0.0;
+};
+
+struct VsTaskInfo {                     // Milestone 8: active async task (rebuilt each frame)
+    AssetHandle graph;
+    ecs::Entity owner = ecs::kNull;
+    int         handle = 0;
+    std::string kind;
+    float       elapsed = 0.0f;
+    float       timeout = 0.0f;         // <= 0 => none
+};
+
 class VisualScriptDiagnostics {
 public:
     static VisualScriptDiagnostics& Instance() { static VisualScriptDiagnostics d; return d; }
@@ -103,6 +130,7 @@ public:
     // Clears one Play session's live data while deliberately preserving authored editor breakpoints.
     void BeginSession() {
         m_graphs.clear(); m_highlights.clear(); m_errors.clear(); m_values = {};
+        m_eventTrace.clear(); m_stateTrace.clear();
         m_budgetHits = 0; paused = false; stepBudget = -1; m_paused = {}; m_suppressOnce = 0;
     }
 
@@ -113,6 +141,7 @@ public:
             kv.second.updateMs = kv.second.fixedMs = kv.second.eventMs = 0.0;
             kv.second.latentActive = 0;
         }
+        m_tasks.clear();   // Milestone 8: active-task list is rebuilt each frame
     }
     GraphProfile& Graph(const AssetHandle& g) {
         GraphProfile& p = m_graphs[Key(g)];
@@ -195,8 +224,38 @@ public:
     void RecordBudgetHit() { ++m_budgetHits; }
     std::uint64_t BudgetHits() const { return m_budgetHits; }
 
+    // ---- event trace (Milestone 6, bounded) -------------------------------
+    void RecordEventDispatch(ecs::Entity sender, ecs::Entity target, const std::string& name,
+                             bool broadcast, double t) {
+        if (!enabled) return;
+        m_eventTrace.push_back({sender, target, name, broadcast, t});
+        while (m_eventTrace.size() > kMaxEventTrace) m_eventTrace.pop_front();
+    }
+    const std::deque<VsEventTraceEntry>& EventTrace() const { return m_eventTrace; }
+    void ClearEventTrace() { m_eventTrace.clear(); }
+
+    // ---- state-machine trace (Milestone 7, bounded) -----------------------
+    void RecordStateChange(const AssetHandle& g, std::uint32_t sm, ecs::Entity e,
+                           std::uint32_t from, std::uint32_t to, double t) {
+        if (!enabled) return;
+        m_stateTrace.push_back({g, sm, e, from, to, t});
+        while (m_stateTrace.size() > kMaxStateTrace) m_stateTrace.pop_front();
+    }
+    const std::deque<VsStateChange>& StateTrace() const { return m_stateTrace; }
+    void ClearStateTrace() { m_stateTrace.clear(); }
+
+    // ---- active async tasks (Milestone 8, rebuilt each frame) --------------
+    void ReportTask(const VsTaskInfo& t) { if (enabled) m_tasks.push_back(t); }
+    const std::vector<VsTaskInfo>& Tasks() const { return m_tasks; }
+    // Latest state id for a (graph, state machine) across any entity — for the editor's live view.
+    std::uint32_t CurrentState(const AssetHandle& g, std::uint32_t sm) const {
+        for (auto it = m_stateTrace.rbegin(); it != m_stateTrace.rend(); ++it)
+            if (it->graph == g && it->stateMachine == sm) return it->toState;
+        return 0;
+    }
+
     void Clear() {
-        m_graphs.clear(); m_highlights.clear(); m_errors.clear();
+        m_graphs.clear(); m_highlights.clear(); m_errors.clear(); m_eventTrace.clear(); m_stateTrace.clear();
         m_budgetHits = 0; paused = false; stepBudget = -1;
         m_paused = {}; m_values = {}; m_suppressOnce = 0;
     }
@@ -215,10 +274,15 @@ private:
 
     static constexpr std::size_t kMaxHighlights = 512;   // no unbounded debug-history growth
     static constexpr std::size_t kMaxErrors = 128;
+    static constexpr std::size_t kMaxEventTrace = 256;
+    static constexpr std::size_t kMaxStateTrace = 256;
 
     std::unordered_map<std::uint64_t, GraphProfile> m_graphs;
     std::unordered_set<std::uint64_t> m_breakpoints;
     std::deque<HighlightEntry> m_highlights;
+    std::deque<VsEventTraceEntry> m_eventTrace;
+    std::deque<VsStateChange> m_stateTrace;
+    std::vector<VsTaskInfo> m_tasks;
     std::vector<VsErrorRecord> m_errors;
     std::uint64_t m_budgetHits = 0;
     PausedExecution m_paused;
