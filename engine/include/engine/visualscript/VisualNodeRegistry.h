@@ -150,6 +150,10 @@ public:
     virtual std::uint32_t GetStateMachineState(std::uint32_t /*stateMachineId*/) { return 0; }
     virtual void RequestStateChange(std::uint32_t /*stateMachineId*/, std::uint32_t /*stateId*/) {}
 
+    // Entity access policy: nodes act on Self (Entity()) by default. A referenced entity (from an
+    // exposed Entity variable / reference) can be validated + type-checked before use ("cast").
+    virtual bool HasComponent(ecs::Entity /*entity*/, const std::string& /*componentName*/) { return false; }
+
     // ---- Milestone 8: async tasks ------------------------------------------
     // Start an async task on the CURRENT node and suspend this exec thread. `workSeconds` is the
     // expected work time (a task completes then unless timed out / cancelled / failed first);
@@ -493,7 +497,11 @@ inline void RegisterCoreNodes() {
             c.WriteOutput("Result", VisualValue::Bool(r));
         }});
 
-    // ---- Entity (pure) -----------------------------------------------------
+    // ---- Entity access policy ----------------------------------------------
+    // Base entity nodes act on SELF (the entity the script is attached to) — they take no entity pin.
+    // To act on another entity you obtain a REFERENCE (an exposed Entity variable set in the Inspector,
+    // Entity.Self, etc.) and feed a "(Target)" variant. Validate/type-check a reference first with
+    // Entity.IsValid / Entity.HasComponent ("cast" before access).
     reg.Register({"Entity.Self", "Self", "Entity", true, 1,
         { Data("Self", PinDirection::Output, ValueType::Entity, VisualValue::Ent(ecs::kNull)) },
         [](INodeContext& c) { c.WriteOutput("Self", VisualValue::Ent(c.Entity())); }});
@@ -507,31 +515,59 @@ inline void RegisterCoreNodes() {
             c.WriteOutput("Valid", VisualValue::Bool(valid));
         }});
 
-    // ---- Transform (pure get / ECS-safe set) — Phase 16 --------------------
-    reg.Register({"Transform.GetPosition", "Get Position", "Transform", true, 1,
+    // Cast/guard: does a referenced entity have a given component? Component is a name property
+    // ("Transform", "RigidBody", "MeshRenderer", "Light", "Collider").
+    reg.Register({"Entity.HasComponent", "Has Component", "Entity", true, 1,
         { Data("Entity", PinDirection::Input, ValueType::Entity, VisualValue::Ent(ecs::kNull)),
-          Data("Position", PinDirection::Output, ValueType::Vector3, VisualValue::Vec3(glm::vec3(0.0f))) },
+          Data("Component", PinDirection::Input, ValueType::String, VisualValue::Str("Transform")),
+          Data("Has", PinDirection::Output, ValueType::Bool, VisualValue::Bool(false)) },
         [](INodeContext& c) {
             const ecs::Entity e = detail::ResolveEntityInput(c, "Entity");
+            c.WriteOutput("Has", VisualValue::Bool(c.HasComponent(e, c.ReadInput("Component").AsString())));
+        }});
+
+    // ---- Transform (Self base + explicit Target variants) — Phase 16 -------
+    reg.Register({"Transform.GetPosition", "Get Position (Self)", "Transform", true, 1,
+        { Data("Position", PinDirection::Output, ValueType::Vector3, VisualValue::Vec3(glm::vec3(0.0f))) },
+        [](INodeContext& c) {
+            glm::vec3 pos(0.0f);
+            if (c.Registry()) if (auto* t = c.Registry()->TryGet<ecs::Transform>(c.Entity())) pos = t->position;
+            c.WriteOutput("Position", VisualValue::Vec3(pos));
+        }});
+    reg.Register({"Transform.GetPositionOf", "Get Position (Target)", "Transform", true, 1,
+        { Data("Target", PinDirection::Input, ValueType::Entity, VisualValue::Ent(ecs::kNull)),
+          Data("Position", PinDirection::Output, ValueType::Vector3, VisualValue::Vec3(glm::vec3(0.0f))) },
+        [](INodeContext& c) {
+            const ecs::Entity e = detail::ResolveEntityInput(c, "Target");
             glm::vec3 pos(0.0f);
             if (c.Registry()) if (auto* t = c.Registry()->TryGet<ecs::Transform>(e)) pos = t->position;
             c.WriteOutput("Position", VisualValue::Vec3(pos));
         }});
 
-    reg.Register({"Transform.SetPosition", "Set Position", "Transform", false, 1,
+    reg.Register({"Transform.SetPosition", "Set Position (Self)", "Transform", false, 1,
         { Exec("In", PinDirection::Input),
-          Data("Entity", PinDirection::Input, ValueType::Entity, VisualValue::Ent(ecs::kNull)),
           Data("Position", PinDirection::Input, ValueType::Vector3, VisualValue::Vec3(glm::vec3(0.0f))),
           Exec("Then", PinDirection::Output) },
         [](INodeContext& c) {
-            const ecs::Entity e = detail::ResolveEntityInput(c, "Entity");
+            const glm::vec3 pos = c.ReadInput("Position").AsVec3();
+            if (!c.Registry() || !c.Registry()->Patch<ecs::Transform>(
+                    c.Entity(), [&](ecs::Transform& t) { t.position = pos; }))
+                c.Fail("Set Position: entity has no Transform");
+            c.Continue("Then");
+        }});
+    reg.Register({"Transform.SetPositionOf", "Set Position (Target)", "Transform", false, 1,
+        { Exec("In", PinDirection::Input),
+          Data("Target", PinDirection::Input, ValueType::Entity, VisualValue::Ent(ecs::kNull)),
+          Data("Position", PinDirection::Input, ValueType::Vector3, VisualValue::Vec3(glm::vec3(0.0f))),
+          Exec("Then", PinDirection::Output) },
+        [](INodeContext& c) {
+            const ecs::Entity e = detail::ResolveEntityInput(c, "Target");
             const glm::vec3 pos = c.ReadInput("Position").AsVec3();
             // ECS-safe write: Patch<Transform> bumps the component revision so
             // RenderScene / PhysicsScene see the change (never a raw pointer poke).
             if (!c.Registry() || !c.Registry()->Patch<ecs::Transform>(
-                    e, [&](ecs::Transform& t) { t.position = pos; })) {
+                    e, [&](ecs::Transform& t) { t.position = pos; }))
                 c.Fail("Set Position: entity has no Transform");
-            }
             c.Continue("Then");
         }});
 

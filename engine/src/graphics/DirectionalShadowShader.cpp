@@ -55,17 +55,25 @@ float BilinearShadowCompare(vec2 uv, int layer, float receiverDepth) {
     return mix(mix(s00, s10, blend.x), mix(s01, s11, blend.x), blend.y);
 }
 
-float DirectionalReceiverBias(int layer, float NdotL) {
+float DirectionalReceiverBias(int layer, float NdotL, float receiverDepth) {
     float slope = clamp(1.0 - NdotL, 0.0, 1.0);
     // Slope-scaled depth bias. Faces nearly parallel to the sun (grazing, slope->1 --
     // the cube's vertical sides) have a huge depth gradient across one shadow texel, so
     // they self-shadow into vertical acne streaks unless the bias grows steeply. The
     // grazing multiplier and ceiling are raised so those faces stop striping; flat faces
     // (slope->0) keep a tight bias so contact shadows stay attached.
+    float depthRange = max(uCascadeDepthRange[layer], 0.000001);
     float worldBias = max(uCascadeWorldTexelSize[layer], 0.000001)
-                    * mix(0.4, 2.75, slope);
-    worldBias = clamp(worldBias, 0.00025, 0.05);
-    return worldBias / max(uCascadeDepthRange[layer], 0.000001);
+                    * mix(0.45, 3.25, slope);
+    worldBias = clamp(worldBias, 0.00025, 0.08);
+
+    // Receiver-plane bias: estimate how far light-space depth changes across one screen
+    // pixel. This directly handles the grazing faces where a fixed NdotL bias produces
+    // alternating lit/shadowed bands. The world-space ceiling prevents visible peter-panning.
+    float depthGradient = max(abs(dFdx(receiverDepth)), abs(dFdy(receiverDepth)));
+    float gradientBias = depthGradient * mix(0.65, 1.75, slope);
+    float maximumBias = 0.15 / depthRange;
+    return min(max(worldBias / depthRange, gradientBias), maximumBias);
 }
 
 float DirectionalNormalOffset(int layer, float NdotL) {
@@ -88,7 +96,7 @@ float SampleDirectionalCascade(vec3 worldPosition, vec3 normal, float NdotL,
         any(greaterThan(projected.xy, vec2(1.0)))) { valid = false; return 0.0; }
 
     float receiverDepth = projected.z;
-    float bias = DirectionalReceiverBias(layer, NdotL);
+    float bias = DirectionalReceiverBias(layer, NdotL, receiverDepth);
     vec2 texel = 1.0 / vec2(textureSize(uCascadeMaps, 0).xy);
     // Per-pixel spiral rotation; +layer decorrelates the cascades at their overlap.
     // Advancing the spiral by the golden ratio each frame (uShadowFrame) makes the residual
@@ -204,7 +212,7 @@ float DirectionalFilterRadiusDebug(float NdotL, vec3 N) {
         || any(lessThan(projected.xy, vec2(0.0)))
         || any(greaterThan(projected.xy, vec2(1.0)))) return 0.0;
     float receiverDepth = projected.z;
-    float bias = DirectionalReceiverBias(layer, NdotL);
+    float bias = DirectionalReceiverBias(layer, NdotL, receiverDepth);
     vec2 texel = 1.0 / vec2(textureSize(uCascadeMaps, 0).xy);
     // Advancing the spiral by the golden ratio each frame (uShadowFrame) makes the residual
     // grain differ every frame so the temporal-AA pass averages it to smooth. uShadowFrame is

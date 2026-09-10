@@ -105,10 +105,25 @@ CascadeFit FitCascade(const glm::mat4& camView, const glm::mat4& subProj,
 
 } // namespace
 
-CascadedShadow::CascadedShadow(int size) : m_size(size), m_shader(kVert, kFrag) {
+CascadedShadow::CascadedShadow(int size) : m_shader(kVert, kFrag) {
     for (glm::mat4& matrix : m_vp) matrix = glm::mat4(1.0f);
     glGenFramebuffers(1, &m_fbo);
     glGenTextures(1, &m_texArray);
+    Resize(size);
+}
+
+void CascadedShadow::Resize(int size) {
+    size = std::clamp(size, 512, 4096);
+    GLint maximumTextureSize = 0;
+    glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maximumTextureSize);
+    if (maximumTextureSize > 0) size = std::min(size, maximumTextureSize);
+    if (m_size == size) return;
+    m_size = size;
+
+    GLint previousFramebuffer = 0;
+    GLint previousTextureArray = 0;
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &previousFramebuffer);
+    glGetIntegerv(GL_TEXTURE_BINDING_2D_ARRAY, &previousTextureArray);
     glBindTexture(GL_TEXTURE_2D_ARRAY, m_texArray);
     glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_DEPTH_COMPONENT32F, m_size, m_size, kCascades,
                  0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
@@ -122,7 +137,9 @@ CascadedShadow::CascadedShadow(int size) : m_size(size), m_shader(kVert, kFrag) 
     glBindFramebuffer(GL_FRAMEBUFFER, m_fbo);
     glDrawBuffer(GL_NONE);
     glReadBuffer(GL_NONE);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(previousFramebuffer));
+    glBindTexture(GL_TEXTURE_2D_ARRAY, static_cast<GLuint>(previousTextureArray));
+    Invalidate();
 }
 
 CascadedShadow::~CascadedShadow() {
@@ -140,7 +157,7 @@ void CascadedShadow::Generate(ecs::Registry& reg, const Camera& camera, float as
     const float near = camera.nearPlane;
 
     // Practical split scheme: blend of logarithmic and uniform. Weighted toward the
-    // logarithmic term (0.75) so the near cascades cover a much smaller depth slice and
+    // logarithmic term (0.85) so the near cascades cover a much smaller depth slice and
     // pack their texels onto close geometry -- this is what puts enough resolution on a
     // nearby caster's silhouette to stop it looking stair-stepped. The uniform term is
     // retained (0.25) so the far cascades don't collapse to nothing.
@@ -149,7 +166,7 @@ void CascadedShadow::Generate(ecs::Registry& reg, const Camera& camera, float as
         const float si = static_cast<float>(i + 1) / static_cast<float>(kCascades);
         const float logd = near * std::pow(shadowFar / near, si);
         const float lind = near + (shadowFar - near) * si;
-        splitFar[i] = 0.75f * logd + 0.25f * lind;
+        splitFar[i] = 0.85f * logd + 0.15f * lind;
         m_splits[i] = splitFar[i];
     }
 

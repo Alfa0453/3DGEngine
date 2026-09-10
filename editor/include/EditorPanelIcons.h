@@ -93,6 +93,7 @@ inline const char* ForPanel(EditorPanels::Panel panel) {
     case P::BuildSizeAnalyzer: return Archive;
     case P::UiLocalizationPreview: return Screen;
     case P::PluginManager: return Settings;
+    case P::TextureViewer: return Palette;
     case P::Count: break;
     }
     return Document;

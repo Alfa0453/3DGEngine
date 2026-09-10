@@ -38,6 +38,9 @@ public:
                   const std::function<void(const glm::mat4&)>& drawExtraCasters = {});
 
     void BindArray(unsigned int unit) const;        // sampler2DArray
+    // Reallocate the cascade array when the lighting-quality profile changes.
+    // No-op when the requested size is already active.
+    void Resize(int size);
     const glm::mat4& CascadeVP(int i) const { return m_vp[i]; }
     float SplitDepth(int i) const { return m_splits[i]; }   // view-space far (positive)
     float WorldTexelSize(int i) const { return m_worldTexelSize[i]; }
@@ -54,7 +57,7 @@ public:
     void Invalidate() { m_cacheValid = false; }
 
 private:
-    int m_size;
+    int m_size = 0;
     unsigned int m_fbo = 0, m_texArray = 0;
     glm::mat4 m_vp[kCascades];
     float     m_splits[kCascades] = {0, 0, 0, 0};

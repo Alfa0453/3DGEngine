@@ -103,6 +103,7 @@ public:
         UiLocalizationPreview,
         PluginManager,
         VisualScriptEditor,
+        TextureViewer,
         Count
     };
 

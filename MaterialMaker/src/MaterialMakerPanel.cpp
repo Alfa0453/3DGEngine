@@ -629,9 +629,18 @@ void MaterialMakerPanel::DrawTilingControls() {
 void MaterialMakerPanel::DrawAdvancedControls() {
     if (!ImGui::CollapsingHeader("Advanced Surface")) return;
     ImGui::TextDisabled("Quick setups:");
-    if (ImGui::Button("Glass")) {
-        m_material.blendMode = 2; m_material.opacity = 0.18f; m_material.transmission = 1.0f;
-        m_material.ior = 1.5f; m_material.roughness = 0.08f; m_material.metallic = 0.0f;
+    if (ImGui::Button("Clear Glass")) {
+        m_material.blendMode = 2; m_material.opacity = 0.12f; m_material.transmission = 1.0f;
+        m_material.ior = 1.5f; m_material.thickness = 0.15f;
+        m_material.roughness = 0.04f; m_material.metallic = 0.0f;
+        m_material.specularLevel = 0.5f; m_material.albedo = {0.97f, 0.985f, 1.0f};
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Frosted Glass")) {
+        m_material.blendMode = 2; m_material.opacity = 0.28f; m_material.transmission = 0.9f;
+        m_material.ior = 1.5f; m_material.thickness = 0.3f;
+        m_material.roughness = 0.38f; m_material.metallic = 0.0f;
+        m_material.specularLevel = 0.5f; m_material.albedo = {0.92f, 0.96f, 1.0f};
     }
     ImGui::SameLine();
     if (ImGui::Button("Car Paint")) {
@@ -670,10 +679,11 @@ void MaterialMakerPanel::DrawAdvancedControls() {
         ImGui::TreePop();
     }
     if (ImGui::TreeNode("Transmission")) {
-        ImGui::TextDisabled("Uses environment refraction; choose Transparent for glass-like blending.");
+        ImGui::TextDisabled("Environment refraction with IOR Fresnel and thickness-based tint absorption.");
         ImGui::SliderFloat("Transmission", &m_material.transmission, 0.0f, 1.0f, "%.2f");
         ImGui::SliderFloat("Index of Refraction", &m_material.ior, 1.0f, 2.5f, "%.2f");
         ImGui::SliderFloat("Thickness", &m_material.thickness, 0.0f, 10.0f, "%.2f");
+        ImGui::TextDisabled("Albedo controls glass tint; Thickness controls tint strength.");
         ImGui::TreePop();
     }
     if (ImGui::TreeNode("Sheen and Subsurface")) {

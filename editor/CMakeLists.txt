@@ -80,6 +80,7 @@ add_executable(3DGEditor
     src/panels/PoseLibraryPanel.cpp
     src/panels/CharacterEquipmentPanel.cpp
     src/panels/RenderDebuggerPanel.cpp
+    src/panels/TextureViewerPanel.cpp
     src/panels/FrameCaptureAnalyzerPanel.cpp
     src/panels/MemoryProfilerPanel.cpp
     src/panels/CollisionAnalyzerPanel.cpp

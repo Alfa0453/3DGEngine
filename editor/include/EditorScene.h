@@ -24,7 +24,7 @@ class Mesh;
 
 class EditorScene {
 public:
-    static constexpr int CurrentFileVersion = 157;
+    static constexpr int CurrentFileVersion = 158;
     using GroupId = std::uint64_t;
     static constexpr GroupId kRootGroupId = 0;
 
@@ -607,6 +607,9 @@ public:
         // image. An imported sky also lights the scene through IBL. skyRotation spins the
         // sky yaw (degrees); skyIntensity scales its brightness.
         int skyMode = 0;
+        // Scene-owned procedural sky atmosphere. Imported skies remain independent.
+        // Defaults on so scenes saved before version 158 preserve their appearance.
+        bool atmosphereEnabled = true;
         std::string skyTexturePath;          // equirectangular panorama (.png/.jpg)
         engine::AssetHandle skyTextureId;
         float skyRotation = 0.0f;
@@ -689,7 +692,7 @@ public:
         bool pointShadows = true;
         bool spotShadows = true;
         float shadowSoftness = 2.5f;
-        float shadowDistance = 300.0f;
+        float shadowDistance = 120.0f;
         bool  fog = true;
         glm::vec3 fogColor{0.58f, 0.68f, 0.80f};
         float fogDensity = 0.008f;

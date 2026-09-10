@@ -177,11 +177,11 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
             return false;
         }
     }
-    if (magic != "3DGRuntimeScene" || version < 1 || version > 118) {
+    if (magic != "3DGRuntimeScene" || version < 1 || version > 119) {
         if (error) {
             *error = "Runtime scene file has an unknown format: "
                 + magic + " " + std::to_string(version)
-                + " (expected 3DGRuntimeScene 1..118).";
+                + " (expected 3DGRuntimeScene 1..119).";
         }
         return false;
     }
@@ -217,6 +217,13 @@ bool RuntimeSceneLoader::Load(const std::string &path, Scene *scene, std::string
                    >> loaded.environment.atmosphereIntensity >> loaded.environment.sunAngularDiameter
                    >> loaded.environment.sunDiskIntensity;
             if (!record) { if (error) *error = "Runtime scene has invalid atmosphere settings."; return false; }
+            continue;
+        }
+        if (recordType == "atmosphere_enabled" && version >= 119) {
+            int enabled = 1;
+            record >> enabled;
+            if (!record) { if (error) *error = "Runtime scene has an invalid atmosphere state."; return false; }
+            loaded.environment.atmosphereEnabled = enabled != 0;
             continue;
         }
         if (recordType == "night_environment" && version >= 101) {

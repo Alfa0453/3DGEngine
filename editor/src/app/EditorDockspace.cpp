@@ -12,9 +12,12 @@
 #include <engine/audio/AudioEditing.h>
 #include <engine/visualscript/VisualScriptAsset.h>   // Visual Script inspector picker
 #include <engine/graphics/Camera.h>
+#include <engine/graphics/Texture.h>
 #include <engine/graphics/SkinnedModel.h>
 #include <engine/graphics/ImageDecode.h>
 #include <engine/graphics/DayNightCycle.h>
+#include <engine/assets/RuntimeAssetManager.h>
+#include <engine/assets/MaterialAssetLoader.h>
 #include <engine/assets/ShaderAsset.h>
 #include <engine/assets/FoliageAsset.h>
 #include <engine/assets/StaticMeshAsset.h>
@@ -37,6 +40,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -44,6 +48,7 @@
 #include <functional>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #if defined(_WIN32)
@@ -2421,7 +2426,19 @@ void DrawWorldSettings(EditorScene& scene, EditorDockspace::Context& context, bo
     const EditorScene::Environment defaults{};
     bool changed = false;
 
-    if (ImGui::CollapsingHeader("Presets", ImGuiTreeNodeFlags_DefaultOpen)) {
+    static ImGuiTextFilter settingsFilter;
+    ImGui::SetNextItemWidth(-1.0f);
+    settingsFilter.Draw("Search world settings##WorldSettingsFilter");
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Search sections and setting names (for example: atmosphere, fog, shadow, gravity).");
+    }
+    const auto showSection = [&](const char* searchableText) {
+        return !settingsFilter.IsActive() || settingsFilter.PassFilter(searchableText);
+    };
+    ImGui::Separator();
+
+    if (showSection("Presets day night sunset foggy")
+        && ImGui::CollapsingHeader("Presets", ImGuiTreeNodeFlags_DefaultOpen)) {
         if (ImGui::Button("Day")) {
             environment.timeOfDay = 0.50f;
             environment.skyLightIntensity = 1.0f;
@@ -2464,7 +2481,8 @@ void DrawWorldSettings(EditorScene& scene, EditorDockspace::Context& context, bo
         }
     }
 
-    if (ImGui::CollapsingHeader("Sky", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (showSection("Sky source procedural atmosphere imported panorama rotation brightness")
+        && ImGui::CollapsingHeader("Sky", ImGuiTreeNodeFlags_DefaultOpen)) {
         int mode = environment.skyMode;
         const char* modes[] = {"Procedural Atmosphere", "Imported Sky"};
         if (ImGui::Combo("Sky Source", &mode, modes, 2) && mode != environment.skyMode) {
@@ -2495,12 +2513,15 @@ void DrawWorldSettings(EditorScene& scene, EditorDockspace::Context& context, bo
                                         0.02f, 0.0f, 8.0f, "%.2f");
             ImGui::TextDisabled("A 360 equirectangular panorama (marketplace sky). Also "
                                 "lights the scene via IBL. .hdr not yet supported.");
+        } else if (environment.atmosphereEnabled) {
+            ImGui::TextDisabled("Procedural atmosphere is in this scene. Edit it under Atmosphere.");
         } else {
-            ImGui::TextDisabled("Procedural atmosphere — edit Time of Day, Clouds and Fog below.");
+            ImGui::TextDisabled("No procedural atmosphere in this scene. Add it under Atmosphere.");
         }
     }
 
-    if (ImGui::CollapsingHeader("Lighting", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (showSection("Lighting time of day sky light exposure occlusion probes global illumination GI SSGI sun")
+        && ImGui::CollapsingHeader("Lighting", ImGuiTreeNodeFlags_DefaultOpen)) {
         if (ImGui::SmallButton("Reset Lighting")) {
             environment.timeOfDay = defaults.timeOfDay;
             environment.skyLightIntensity = defaults.skyLightIntensity;
@@ -2644,7 +2665,12 @@ void DrawWorldSettings(EditorScene& scene, EditorDockspace::Context& context, bo
         if (!environment.ssgiEnabled) ImGui::EndDisabled();
     }
 
-    if (ImGui::CollapsingHeader("Clouds", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (showSection("Clouds coverage density scale softness wind tint cloud shadows")
+        && ImGui::CollapsingHeader("Clouds", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (!environment.atmosphereEnabled) {
+            ImGui::TextDisabled("Add Sky Atmosphere to render procedural clouds.");
+        }
+        ImGui::BeginDisabled(!environment.atmosphereEnabled);
         const char* toggleLabel = environment.clouds ? "Clouds: On" : "Clouds: Off";
         if (ImGui::Button(toggleLabel, ImVec2(110.0f, 0.0f))) {
             environment.clouds = !environment.clouds;
@@ -2705,9 +2731,11 @@ void DrawWorldSettings(EditorScene& scene, EditorDockspace::Context& context, bo
             ImGui::SetTooltip("Controls the size of moving cloud shadows across the world.");
         if (!environment.cloudShadows) ImGui::EndDisabled();
         if (!environment.clouds) ImGui::EndDisabled();
+        ImGui::EndDisabled();
     }
 
-    if (ImGui::CollapsingHeader("Render Features", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (showSection("Render Features IBL SSAO SSR MSAA FXAA render scale VSync anti-aliasing")
+        && ImGui::CollapsingHeader("Render Features", ImGuiTreeNodeFlags_DefaultOpen)) {
         if (ImGui::SmallButton("Reset Render Features")) {
             environment.ibl = defaults.ibl;
             environment.ssao = defaults.ssao;
@@ -2751,7 +2779,8 @@ void DrawWorldSettings(EditorScene& scene, EditorDockspace::Context& context, bo
         }
     }
 
-    if (ImGui::CollapsingHeader(
+    if (showSection("Post Process Shader Stack effects parameters custom shader")
+        && ImGui::CollapsingHeader(
             "Post Process Shader Stack", ImGuiTreeNodeFlags_DefaultOpen)) {
         const EditorAssets::Asset* selected =
             context.assets ? context.assets->SelectedAsset() : nullptr;
@@ -2870,7 +2899,8 @@ void DrawWorldSettings(EditorScene& scene, EditorDockspace::Context& context, bo
         }
     }
 
-    if (ImGui::CollapsingHeader("Shadows", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (showSection("Shadows sun directional point spot quality softness distance visibility")
+        && ImGui::CollapsingHeader("Shadows", ImGuiTreeNodeFlags_DefaultOpen)) {
         if (ImGui::SmallButton("Reset Shadows")) {
             environment.directionalShadows = defaults.directionalShadows;
             environment.pointShadows = defaults.pointShadows;
@@ -2888,16 +2918,48 @@ void DrawWorldSettings(EditorScene& scene, EditorDockspace::Context& context, bo
         }
         changed |= ImGui::Checkbox("Point Shadows", &environment.pointShadows);
         changed |= ImGui::Checkbox("Spot Shadows", &environment.spotShadows);
+        const char* shadowQualityNames[] = {"Low (1024)", "Medium (2048)",
+                                            "High (4096)", "Ultra (4096)"};
+        changed |= ImGui::Combo("Shadow Quality", &environment.environmentQuality,
+                                shadowQualityNames, IM_ARRAYSIZE(shadowQualityNames));
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+            "Uses the authoritative lighting-quality profile. This also adjusts shadow sample counts.");
         changed |= ImGui::DragFloat("Shadow Softness", &environment.shadowSoftness, 0.05f, 0.1f, 12.0f, "%.2f");
         changed |= ImGui::DragFloat("Shadow Visibility Distance", &environment.shadowDistance,
                                     5.0f, 10.0f, 5000.0f, "%.0f units");
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("How far sun shadows remain visible from the camera. Larger values cover more world space but reduce shadow detail.");
         }
+        if (ImGui::SmallButton("Indoor Range (120)")) {
+            environment.shadowDistance = 120.0f;
+            changed = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Outdoor Range (300)")) {
+            environment.shadowDistance = 300.0f;
+            changed = true;
+        }
     }
 
-    if (ImGui::CollapsingHeader("Atmosphere", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (showSection("Atmosphere sky actor add remove fog Rayleigh Mie ozone sun disk stars moon volumetric scattering")
+        && ImGui::CollapsingHeader("Atmosphere", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::SeparatorText("Scene Component");
+        ImGui::TextUnformatted("Sky Atmosphere");
+        ImGui::SameLine();
+        ImGui::TextColored(environment.atmosphereEnabled
+                ? ImVec4(0.35f, 0.90f, 0.45f, 1.0f)
+                : ImVec4(0.65f, 0.65f, 0.65f, 1.0f),
+            environment.atmosphereEnabled ? "Added" : "Not in scene");
+        if (ImGui::Button(environment.atmosphereEnabled
+                ? "Remove Sky Atmosphere" : "Add Sky Atmosphere")) {
+            environment.atmosphereEnabled = !environment.atmosphereEnabled;
+            changed = true;
+        }
+        ImGui::TextWrapped("The procedural sky is a scene-owned component. Removing it leaves imported skies, direct lights, and fog available.");
+
+        ImGui::SeparatorText("Fog");
         if (ImGui::SmallButton("Reset Atmosphere")) {
+            environment.atmosphereEnabled = defaults.atmosphereEnabled;
             environment.fog = defaults.fog;
             environment.fogColor = defaults.fogColor;
             environment.fogDensity = defaults.fogDensity;
@@ -2910,6 +2972,7 @@ void DrawWorldSettings(EditorScene& scene, EditorDockspace::Context& context, bo
         changed |= ImGui::DragFloat("Fog Density", &environment.fogDensity, 0.001f, 0.0f, 0.20f, "%.4f");
         changed |= ImGui::DragFloat("Fog Height", &environment.fogHeight, 0.02f, -20.0f, 20.0f);
         changed |= ImGui::DragFloat("Fog Falloff", &environment.fogHeightFalloff, 0.005f, 0.001f, 2.0f, "%.3f");
+        ImGui::BeginDisabled(!environment.atmosphereEnabled);
         ImGui::SeparatorText("Physical Scattering");
         changed |= ImGui::SliderFloat("Rayleigh Density", &environment.atmosphereRayleigh, 0.0f, 4.0f);
         changed |= ImGui::SliderFloat("Rayleigh Scale Height", &environment.atmosphereRayleighHeight, 1.0f, 32.0f, "%.1f km");
@@ -2946,6 +3009,7 @@ void DrawWorldSettings(EditorScene& scene, EditorDockspace::Context& context, bo
         ImGui::TextDisabled("Sun elev %.3f | Day %.2f | Twilight %.2f | Night %.2f | Env %.4f",
             lightingSample.solarElevation, lightingSample.dayFactor,
             lightingSample.twilightFactor, lightingSample.nightFactor, energy);
+        ImGui::EndDisabled();
         ImGui::SeparatorText("Volumetric Fog");
         changed |= ImGui::Checkbox("Enabled##Volumetric", &environment.volumetricFog);
         changed |= ImGui::SliderFloat("Scattering", &environment.volumetricScattering, 0.0f, 4.0f);
@@ -2957,7 +3021,8 @@ void DrawWorldSettings(EditorScene& scene, EditorDockspace::Context& context, bo
         changed |= ImGui::Combo("Environment Quality", &environment.environmentQuality, qualityNames, 4);
     }
 
-    if (ImGui::CollapsingHeader("Exposure and Color", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (showSection("Exposure and Color automatic EV bloom HDR temperature tint saturation contrast lift gamma gain LUT")
+        && ImGui::CollapsingHeader("Exposure and Color", ImGuiTreeNodeFlags_DefaultOpen)) {
         changed |= ImGui::Checkbox("Automatic Exposure", &environment.autoExposure);
         changed |= ImGui::SliderFloat("Minimum EV", &environment.exposureMinEV, -16.0f, 16.0f);
         changed |= ImGui::SliderFloat("Maximum EV", &environment.exposureMaxEV, -16.0f, 16.0f);
@@ -3002,7 +3067,8 @@ void DrawWorldSettings(EditorScene& scene, EditorDockspace::Context& context, bo
         }
     }
 
-    if (ImGui::CollapsingHeader("Physics", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (showSection("Physics gravity solver broad phase collision matrix sleeping validation restitution")
+        && ImGui::CollapsingHeader("Physics", ImGuiTreeNodeFlags_DefaultOpen)) {
         if (ImGui::SmallButton("Reset Physics")) {
             environment.physicsGravity = defaults.physicsGravity;
             environment.physicsSolverIterations = defaults.physicsSolverIterations;
@@ -3124,7 +3190,8 @@ void DrawWorldSettings(EditorScene& scene, EditorDockspace::Context& context, bo
         }
     }
 
-    if (ImGui::CollapsingHeader("Editor Guides")) {
+    if (showSection("Editor Guides light collider physics selected guides")
+        && ImGui::CollapsingHeader("Editor Guides")) {
         if (ImGui::SmallButton("Reset Guides")) {
             environment.showLightGuides = defaults.showLightGuides;
             environment.selectedLightGuideOnly = defaults.selectedLightGuideOnly;
@@ -5317,6 +5384,25 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                 ImGui::PopID();
             }
             if (!anyExposed) ImGui::TextDisabled("No graph variables are marked Exposed.");
+
+            // Milestone 11: report + clean overrides whose variable was removed / re-typed / un-exposed.
+            int stale = 0;
+            for (const engine::vs::VisualScriptVariableOverride& o : selected->visualScriptOverrides) {
+                const engine::vs::VisualVariable* var = graph->FindVariable(o.variableId);
+                if (!var || !var->exposed || var->type != o.value.type) ++stale;
+            }
+            if (stale > 0) {
+                ImGui::TextColored(ImVec4(0.95f, 0.6f, 0.35f, 1.0f), "%d stale override(s)", stale);
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Clean##vsstale")) {
+                    std::vector<std::uint32_t> remove;
+                    for (const engine::vs::VisualScriptVariableOverride& o : selected->visualScriptOverrides) {
+                        const engine::vs::VisualVariable* var = graph->FindVariable(o.variableId);
+                        if (!var || !var->exposed || var->type != o.value.type) remove.push_back(o.variableId);
+                    }
+                    for (std::uint32_t id : remove) context.scene->ClearSelectedVisualScriptOverride(id);
+                }
+            }
         } else if (hasGraph) {
             ImGui::TextDisabled("Assigned graph could not be resolved in Content.");
         }
@@ -6426,9 +6512,9 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
                 context.scene->SetSelectedRigidBody(rigidBody);
             }
             if (rigidBody.massMode == engine::ecs::RigidBody::MassMode::Manual) {
-                float mass = (rigidBody.invMass > 0.0f) ? 1.0f / rigidBody.invMass : 0.0f;
-                if (ImGui::DragFloat("Mass (kg)", &mass, 0.1f, 0.0f, 100000.0f, "%.2f")) {
-                    rigidBody.invMass = (mass > 0.0f) ? 1.0f / mass : 0.0f;
+                float massKg = (rigidBody.invMass > 0.0f) ? 1.0f / rigidBody.invMass : 0.0f;
+                if (ImGui::DragFloat("Mass (kg)", &massKg, 0.1f, 0.0f, 100000.0f, "%.2f")) {
+                    rigidBody.invMass = (massKg > 0.0f) ? 1.0f / massKg : 0.0f;
                     rigidBody.massPropertiesDirty = true;
                     context.scene->SetSelectedRigidBody(rigidBody);
                 }
@@ -8970,6 +9056,161 @@ void DrawInspector(EditorDockspace::Context& context, bool* open) {
     ImGui::End();
 }
 
+struct MaterialThumbnailInfo {
+    std::filesystem::file_time_type modified{};
+    glm::vec3 albedo{0.8f};
+    float roughness = 0.5f;
+    float metallic = 0.0f;
+    bool loaded = false;
+};
+
+std::unordered_map<std::string, MaterialThumbnailInfo> g_materialThumbnailCache;
+bool g_contentThumbnails = true;
+float g_contentThumbnailSize = 64.0f;
+
+ImU32 ThumbnailColor(const ImVec4& color, float multiplier = 1.0f) {
+    return ImGui::ColorConvertFloat4ToU32(ImVec4(
+        std::clamp(color.x * multiplier, 0.0f, 1.0f),
+        std::clamp(color.y * multiplier, 0.0f, 1.0f),
+        std::clamp(color.z * multiplier, 0.0f, 1.0f), color.w));
+}
+
+void DrawContentThumbnail(EditorDockspace::Context& context,
+                          const EditorAssets::Asset& asset,
+                          const ImVec2& minimum, const ImVec2& maximum) {
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    const auto style = editor::icons::ForAsset(asset.type);
+    draw->AddRectFilled(minimum, maximum, IM_COL32(28, 31, 38, 255), 4.0f);
+    draw->AddRect(minimum, maximum, IM_COL32(66, 71, 82, 255), 4.0f);
+    const float width = maximum.x - minimum.x;
+    const float height = maximum.y - minimum.y;
+    const ImVec2 center((minimum.x + maximum.x) * 0.5f,
+                        (minimum.y + maximum.y) * 0.5f);
+    const std::string fullPath = (std::filesystem::path(context.assets->RootPath())
+        / asset.relativePath).string();
+
+    if (asset.type == EditorAssets::Type::Texture && context.runtimeAssets) {
+        std::string error;
+        if (const engine::Texture* texture =
+                context.runtimeAssets->LoadTexture(fullPath, &error)) {
+            const float cell = 8.0f;
+            for (float y = minimum.y; y < maximum.y; y += cell) {
+                for (float x = minimum.x; x < maximum.x; x += cell) {
+                    const bool light = (static_cast<int>((x - minimum.x) / cell)
+                        + static_cast<int>((y - minimum.y) / cell)) % 2 == 0;
+                    draw->AddRectFilled(ImVec2(x, y),
+                        ImVec2(std::min(x + cell, maximum.x),
+                               std::min(y + cell, maximum.y)),
+                        light ? IM_COL32(104, 108, 116, 255)
+                              : IM_COL32(62, 66, 74, 255));
+                }
+            }
+            const float aspect = static_cast<float>(std::max(texture->Width(), 1))
+                / static_cast<float>(std::max(texture->Height(), 1));
+            ImVec2 imageSize(width, height);
+            if (aspect > width / height) imageSize.y = width / aspect;
+            else imageSize.x = height * aspect;
+            const ImVec2 imageMin(center.x - imageSize.x * 0.5f,
+                                  center.y - imageSize.y * 0.5f);
+            draw->AddImage((ImTextureID)(std::intptr_t)texture->ID(), imageMin,
+                ImVec2(imageMin.x + imageSize.x, imageMin.y + imageSize.y),
+                ImVec2(0, 1), ImVec2(1, 0));
+            return;
+        }
+    }
+
+    if (asset.type == EditorAssets::Type::Material) {
+        std::error_code ec;
+        const auto modified = std::filesystem::last_write_time(fullPath, ec);
+        MaterialThumbnailInfo& cached = g_materialThumbnailCache[fullPath];
+        if (!cached.loaded || (!ec && cached.modified != modified)) {
+            engine::RuntimeMaterialAsset material;
+            std::string error;
+            if (engine::LoadMaterialAssetFile(fullPath, &material, &error)) {
+                cached.albedo = material.material.albedo;
+                cached.roughness = material.material.roughness;
+                cached.metallic = material.material.metallic;
+            }
+            cached.modified = modified;
+            cached.loaded = true;
+        }
+        const ImVec4 base(cached.albedo.r, cached.albedo.g, cached.albedo.b, 1.0f);
+        const float radius = std::min(width, height) * 0.34f;
+        for (int ring = 18; ring >= 0; --ring) {
+            const float t = static_cast<float>(ring) / 18.0f;
+            const float light = 0.28f + (1.0f - t) * (0.72f - cached.roughness * 0.2f);
+            draw->AddCircleFilled(ImVec2(center.x - radius * 0.18f * (1.0f - t),
+                                         center.y - radius * 0.18f * (1.0f - t)),
+                                  radius * t, ThumbnailColor(base, light), 24);
+        }
+        if (cached.metallic > 0.05f)
+            draw->AddCircle(center, radius, IM_COL32(220, 225, 235, 210), 24, 1.5f);
+        return;
+    }
+
+    const ImU32 accent = ThumbnailColor(style.color);
+    if (asset.type == EditorAssets::Type::Scene
+        || asset.type == EditorAssets::Type::World
+        || asset.type == EditorAssets::Type::Terrain) {
+        draw->AddRectFilledMultiColor(minimum, maximum,
+            IM_COL32(54, 75, 105, 255), IM_COL32(54, 75, 105, 255),
+            IM_COL32(31, 44, 39, 255), IM_COL32(31, 44, 39, 255));
+        const float horizon = minimum.y + height * 0.58f;
+        draw->AddTriangleFilled(ImVec2(minimum.x, horizon + height * 0.18f),
+            ImVec2(minimum.x + width * 0.42f, minimum.y + height * 0.25f),
+            ImVec2(minimum.x + width * 0.72f, horizon + height * 0.18f),
+            IM_COL32(63, 93, 77, 255));
+        draw->AddTriangleFilled(ImVec2(minimum.x + width * 0.28f, maximum.y),
+            ImVec2(minimum.x + width * 0.78f, minimum.y + height * 0.36f), maximum,
+            IM_COL32(48, 78, 57, 255));
+        for (int i = 1; i < 5; ++i) {
+            const float y = horizon + (maximum.y - horizon) * i / 5.0f;
+            draw->AddLine(ImVec2(minimum.x, y), ImVec2(maximum.x, y),
+                          IM_COL32(105, 145, 120, 90));
+        }
+        return;
+    }
+    if (asset.type == EditorAssets::Type::Audio) {
+        for (int i = 0; i < 11; ++i) {
+            const float x = minimum.x + width * (i + 1) / 12.0f;
+            const float amplitude = (0.18f + 0.65f
+                * std::abs(std::sin(static_cast<float>(i) * 1.73f))) * height * 0.5f;
+            draw->AddLine(ImVec2(x, center.y - amplitude),
+                          ImVec2(x, center.y + amplitude), accent, 2.0f);
+        }
+        return;
+    }
+    if (asset.type == EditorAssets::Type::Script
+        || asset.type == EditorAssets::Type::Shader) {
+        for (int i = 0; i < 6; ++i) {
+            const float y = minimum.y + 10.0f + i * (height - 20.0f) / 6.0f;
+            const float inset = (i % 3) * width * 0.08f;
+            draw->AddLine(ImVec2(minimum.x + 10.0f + inset, y),
+                          ImVec2(maximum.x - 10.0f - (i % 2) * width * 0.18f, y),
+                          i == 2 ? accent : IM_COL32(130, 139, 155, 220), 2.0f);
+        }
+        return;
+    }
+    if (asset.type == EditorAssets::Type::Animation
+        || asset.type == EditorAssets::Type::AnimationClip) {
+        draw->AddCircle(center, std::min(width, height) * 0.31f, accent, 28, 2.0f);
+        draw->AddTriangleFilled(ImVec2(center.x - width * 0.08f, center.y - height * 0.14f),
+            ImVec2(center.x - width * 0.08f, center.y + height * 0.14f),
+            ImVec2(center.x + width * 0.16f, center.y), accent);
+        return;
+    }
+
+    const float cube = std::min(width, height) * 0.25f;
+    draw->AddRect(ImVec2(center.x - cube, center.y - cube),
+                  ImVec2(center.x + cube, center.y + cube), accent, 3.0f, 0, 2.0f);
+    draw->AddLine(ImVec2(center.x - cube, center.y - cube),
+                  ImVec2(center.x, center.y - cube * 1.45f), accent, 2.0f);
+    draw->AddLine(ImVec2(center.x + cube, center.y - cube),
+                  ImVec2(center.x, center.y - cube * 1.45f), accent, 2.0f);
+    draw->AddLine(ImVec2(center.x, center.y - cube * 1.45f),
+                  ImVec2(center.x, center.y + cube * 0.55f), accent, 2.0f);
+}
+
 void DrawAssets(EditorDockspace::Context& context, bool* open) {
     if (!ImGui::Begin(EditorPanels::Name(EditorPanels::Panel::Assets), open)) {
         ImGui::End();
@@ -9089,6 +9330,16 @@ void DrawAssets(EditorDockspace::Context& context, bool* open) {
         if (!context.assets->Refresh(context.assets->RootPath(), &error) && context.log) {
             context.log->Error(error);
         }
+        g_materialThumbnailCache.clear();
+    }
+    ImGui::SameLine();
+    ImGui::Checkbox("Thumbnails", &g_contentThumbnails);
+    if (g_contentThumbnails) {
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(110.0f);
+        ImGui::SliderFloat("##ContentThumbnailSize", &g_contentThumbnailSize,
+                           40.0f, 112.0f, "%.0f px");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Content thumbnail size");
     }
     if (ImGui::BeginPopupModal("Rename Content Entry", nullptr,
                                ImGuiWindowFlags_AlwaysAutoResize)) {
@@ -9619,8 +9870,45 @@ void DrawAssets(EditorDockspace::Context& context, bool* open) {
         std::snprintf(label, sizeof(label), "%s", assetLabel.c_str());
 
         const bool selected = context.assets->IsAssetSelected(i);
-        ImGui::PushStyleColor(ImGuiCol_Text, iconStyle.color);
-        if (ImGui::Selectable(label, selected)) {
+        bool clicked = false;
+        if (g_contentThumbnails) {
+            const float rowHeight = g_contentThumbnailSize + 12.0f;
+            const std::string rowId = "##ContentAssetThumbnail/" + asset.relativePath;
+            clicked = ImGui::Selectable(rowId.c_str(), selected,
+                ImGuiSelectableFlags_AllowDoubleClick, ImVec2(0.0f, rowHeight));
+            const ImVec2 rowMin = ImGui::GetItemRectMin();
+            const ImVec2 thumbMin(rowMin.x + 6.0f, rowMin.y + 6.0f);
+            const ImVec2 thumbMax(thumbMin.x + g_contentThumbnailSize,
+                                  thumbMin.y + g_contentThumbnailSize);
+            const bool thumbnailVisible = ImGui::IsRectVisible(thumbMin, thumbMax);
+            if (thumbnailVisible)
+                DrawContentThumbnail(context, asset, thumbMin, thumbMax);
+            ImDrawList* draw = ImGui::GetWindowDrawList();
+            const float textX = thumbMax.x + 10.0f;
+            draw->AddText(ImVec2(textX, rowMin.y + 12.0f),
+                          ImGui::GetColorU32(ImGuiCol_Text), asset.displayName.c_str());
+            draw->AddText(ImVec2(textX, rowMin.y + 12.0f + ImGui::GetTextLineHeight() + 3.0f),
+                          ThumbnailColor(iconStyle.color), EditorAssets::TypeName(asset.type));
+            if (thumbnailVisible && asset.type == EditorAssets::Type::Texture
+                && context.runtimeAssets) {
+                const std::string fullPath = (std::filesystem::path(context.assets->RootPath())
+                    / asset.relativePath).string();
+                std::string textureError;
+                if (const engine::Texture* texture =
+                        context.runtimeAssets->LoadTexture(fullPath, &textureError)) {
+                    const std::string dimensions = std::to_string(texture->Width()) + " x "
+                        + std::to_string(texture->Height());
+                    draw->AddText(ImVec2(textX, rowMin.y + 12.0f
+                        + (ImGui::GetTextLineHeight() + 3.0f) * 2.0f),
+                        ImGui::GetColorU32(ImGuiCol_TextDisabled), dimensions.c_str());
+                }
+            }
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Text, iconStyle.color);
+            clicked = ImGui::Selectable(label, selected);
+            ImGui::PopStyleColor();
+        }
+        if (clicked) {
             // Ctrl+click toggles this asset; Shift+click selects the range from the anchor to here;
             // a plain click selects just this asset (and sets the anchor).
             const ImGuiIO& io = ImGui::GetIO();
@@ -9635,7 +9923,6 @@ void DrawAssets(EditorDockspace::Context& context, bool* open) {
                 g_assetSelectionAnchor = i;
             }
         }
-        ImGui::PopStyleColor();
         const bool assetHovered = ImGui::IsItemHovered();
         bool openFromContext = false;
         ImGui::PushID(i);
@@ -12322,6 +12609,8 @@ bool EditorDockspace::Draw(Context& context) {
             break;
         case EditorPanels::Panel::VisualScriptEditor:
             break; // drawn by EditorApp (owns the visual script editor document)
+        case EditorPanels::Panel::TextureViewer:
+            break; // drawn by EditorApp (owns texture preview state and GPU assets)
         case EditorPanels::Panel::Count:
             break;
         }

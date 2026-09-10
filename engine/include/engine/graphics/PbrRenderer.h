@@ -74,6 +74,7 @@ public:
         float       shadowSoftness = 2.5f; // PCSS sun-shadow softness (light size)
         int         shadowBlockerSamples = 16;
         int         shadowFilterSamples = 32;
+        int         shadowResolution = 4096; // resolution of each directional cascade
         // Advance the PCSS sample rotation per frame so the temporal-AA pass can average the
         // shadow's residual grain to smooth. Set this to match PostProcess::Settings::taa;
         // leave it false when temporal accumulation is off or the shadow will flicker.
@@ -84,7 +85,7 @@ public:
         // shadows "pop in" only near the player (they follow the camera). Larger
         // values spread the same shadow-map resolution over more area, so bump the
         // shadow map size too (PbrRenderer ctor) if they get soft.
-        float       shadowDistance = 140.0f;
+        float       shadowDistance = 120.0f;
 
         // Animated world-space cloud shadows modulate direct sunlight only.
         bool  cloudShadows = false;
@@ -104,7 +105,7 @@ public:
         float     fogHeightFalloff = 0.12f;   // how fast fog thins with height
     };
 
-    explicit PbrRenderer(int shadowSize = 2048);
+    explicit PbrRenderer(int shadowSize = 4096);
     ~PbrRenderer();
 
     PbrRenderer(const PbrRenderer&)            = delete;

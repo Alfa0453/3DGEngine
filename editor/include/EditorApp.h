@@ -93,6 +93,7 @@
 #include "PoseLibraryPanel.h"
 #include "CharacterEquipmentPanel.h"
 #include "RenderDebuggerPanel.h"
+#include "TextureViewerPanel.h"
 #include "FrameCaptureAnalyzerPanel.h"
 #include "MemoryProfilerPanel.h"
 #include "CollisionAnalyzerPanel.h"
@@ -321,6 +322,7 @@ private:
     void DrawPoseLibraryPanel();
     void DrawCharacterEquipmentPanel();
     void DrawRenderDebuggerPanel();
+    void DrawTextureViewerPanel();
     void DrawFrameCaptureAnalyzerPanel();
     void DrawMemoryProfilerPanel();
     void DrawCollisionAnalyzerPanel();
@@ -684,6 +686,8 @@ private:
     std::string                          m_lightingBuildStatus = "Missing - no lighting asset is assigned";
     bool                                 m_forceDirectionalShadowUpdate = false;
     int                                  m_renderDebugModeOverride = -1;
+    int                                  m_viewportViewMode = 0; // 0 = scene default
+    bool                                 m_viewportWireframe = false;
     std::chrono::steady_clock::time_point m_lightingBuildStartedAt{};
     double                               m_lastLightingBuildMs = 0.0;
     double                               m_lastReflectionCaptureMs = 0.0;
@@ -816,6 +820,7 @@ private:
     PoseLibraryPanel                     m_poseLibrary;
     CharacterEquipmentPanel              m_characterEquipment;
     RenderDebuggerPanel                  m_renderDebugger;
+    TextureViewerPanel                   m_textureViewer;
     FrameCaptureAnalyzerPanel            m_frameCaptureAnalyzer;
     MemoryProfilerPanel                  m_memoryProfiler;
     CollisionAnalyzerPanel               m_collisionAnalyzer;

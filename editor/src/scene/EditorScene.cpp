@@ -183,6 +183,14 @@ bool ParseLightType(const std::string& value, Light::Type* type) {
     return false;
 }
 
+const engine::Mesh& LightPlaceholderMesh(Light::Type type,
+                                         const engine::Mesh& cube,
+                                         const engine::Mesh& sphere) {
+    // Point, spot, and directional lights use the round editor marker. Area
+    // lights retain the cube marker that represents their authored surface.
+    return type == Light::Type::Area ? cube : sphere;
+}
+
 bool ParsePrimitive(const std::string& value, EditorScene::Primitive* primitive) {
     if (value == "Empty") {
         *primitive = EditorScene::Primitive::Empty;
@@ -638,6 +646,7 @@ bool EditorScene::Save(const std::string & path, std::string * error, bool markC
         << m_environment.atmosphereMieAnisotropy << ' ' << m_environment.atmosphereOzone << ' '
         << m_environment.atmosphereIntensity << ' ' << m_environment.sunAngularDiameter << ' '
         << m_environment.sunDiskIntensity << '\n';
+    out << "atmosphere_enabled " << (m_environment.atmosphereEnabled ? 1 : 0) << '\n';
     out << "night_environment " << m_environment.stars << ' ' << m_environment.starIntensity << ' '
         << m_environment.moon << ' ' << m_environment.moonColor.r << ' '
         << m_environment.moonColor.g << ' ' << m_environment.moonColor.b << ' '
@@ -1746,6 +1755,13 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             if (!in) { if (error) *error = "Scene contains invalid atmosphere settings."; Clear(); return false; }
             continue;
         }
+        if (recordType == "atmosphere_enabled" && version >= 158) {
+            int enabled = 1;
+            in >> enabled;
+            if (!in) { if (error) *error = "Scene contains an invalid atmosphere state."; Clear(); return false; }
+            m_environment.atmosphereEnabled = enabled != 0;
+            continue;
+        }
         if (recordType == "night_environment" && version >= 140) {
             in >> m_environment.stars >> m_environment.starIntensity >> m_environment.moon
                >> m_environment.moonColor.r >> m_environment.moonColor.g >> m_environment.moonColor.b
@@ -2348,7 +2364,9 @@ bool EditorScene::Load(const std::string & path, const engine::Mesh & cube, cons
             transform.scale = glm::vec3(0.22f);
             const glm::vec3 color = light.color * light.intensity;
             resolvedDuplicateNames |= !IsHierarchyNameAvailable(name);
-            CreateObject(name, Primitive::Cube, cube, transform, color);
+            CreateObject(name, Primitive::Cube,
+                         LightPlaceholderMesh(light.type, cube, sphere),
+                         transform, color);
             Object& object = m_objects.back();
             object.light = true;
             object.lightData = light;
@@ -7682,7 +7700,7 @@ bool EditorScene::DuplicateSelected(const engine::Mesh & cube, const engine::Mes
     // stored primitive (always Cube) -- so pick the same mesh AddXLight/snapshot-restore use.
     // Otherwise duplicating a point/spot light (round gizmo) produced a plain cube (square).
     const engine::Mesh& mesh = selectedCopy.light
-        ? (liveLightData.type == Light::Type::Area ? cube : sphere)
+        ? LightPlaceholderMesh(liveLightData.type, cube, sphere)
         : MeshFor(selectedCopy.primitive, cube, plane, sphere, capsule, cylinder, cone, pyramid, torus, staircase);
     CreateObject(selectedCopy.name, selectedCopy.primitive, mesh, duplicateTransform, duplicateColor);
     m_objects.back().editorGroupId = selectedCopy.editorGroupId;
@@ -8074,7 +8092,7 @@ void EditorScene::RestoreSnapshot(const Snapshot & snapshot, const engine::Mesh 
         // not their stored primitive (always Cube). Match what AddXLight uses so restoring a
         // snapshot doesn't turn the light gizmo into a plain cube.
         const engine::Mesh& mesh = snapObject.light
-            ? (snapObject.lightData.type == Light::Type::Area ? cube : sphere)
+            ? LightPlaceholderMesh(snapObject.lightData.type, cube, sphere)
             : MeshFor(snapObject.primitive, cube, plane, sphere, capsule, cylinder, cone, pyramid, torus, staircase);
         m_registry.Add<Transform>(entity, objectSnapshot.transform);
         m_registry.Add<MeshRenderer>(entity, MeshRenderer{&mesh, objectSnapshot.color});

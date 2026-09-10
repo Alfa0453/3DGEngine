@@ -834,6 +834,26 @@ public:
             }
     }
 
+    // ---- lifecycle repair (Milestone 11) ----------------------------------
+    // Remove links whose endpoint node/pin no longer exists (e.g. after a signature change). Returns
+    // the number removed; authored nodes and their data are untouched.
+    int RepairDanglingLinks() {
+        auto pinExists = [&](NodeId n, PinId p) {
+            const VisualNode* node = m_asset.FindNode(n);
+            return node && node->FindPin(p) != nullptr;
+        };
+        int toRemove = 0;
+        for (const VisualLink& l : m_asset.links)
+            if (!pinExists(l.fromNode, l.fromPin) || !pinExists(l.toNode, l.toPin)) ++toRemove;
+        if (toRemove == 0) return 0;
+        PushUndo();
+        m_asset.links.erase(std::remove_if(m_asset.links.begin(), m_asset.links.end(),
+            [&](const VisualLink& l) { return !pinExists(l.fromNode, l.fromPin) || !pinExists(l.toNode, l.toPin); }),
+            m_asset.links.end());
+        m_dirty = true;
+        return toRemove;
+    }
+
     // ---- validation (Phases 16/17) ----------------------------------------
     ValidationReport Validate() const { return ValidateGraph(m_asset); }
 

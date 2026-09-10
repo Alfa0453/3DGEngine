@@ -123,8 +123,11 @@ uniform float uAO;
 uniform vec3  uEmissive;
 uniform int   uHasAlbedoMap;
 uniform sampler2D uAlbedoMap;
+uniform int   uHasMetalRoughMap;
+uniform sampler2D uMetalRoughMap;
 uniform int   uHasEmissiveMap;
 uniform sampler2D uEmissiveMap;
+uniform int   uMaterialSlotDebug;
 uniform vec3  uSunDir;
 uniform vec3  uSunColor;
 uniform vec3  uAmbient;
@@ -229,7 +232,19 @@ void main() {
     if (uHasEmissiveMap == 1)
         emissive *= pow(texture(uEmissiveMap, vUV).rgb, vec3(2.2));
     float metallic = uMetallic, roughness = uRoughness, ao = uAO;
+    if (uHasMetalRoughMap == 1) {
+        vec3 mr = texture(uMetalRoughMap, vUV).rgb;
+        ao *= mr.r;
+        roughness *= mr.g;
+        metallic *= mr.b;
+    }
     vec3 N = normalize(vNormal);
+    if (uLightingDebugMode == 30 || uLightingDebugMode == 31) {
+        albedo = vec3(0.5);
+        emissive = vec3(0.0);
+        metallic = 0.0;
+        roughness = 0.5;
+    }
     vec3 V = normalize(uViewPos - vWorldPos);
     vec3 F0 = mix(vec3(0.04), albedo, metallic);
     vec3 Ls = normalize(-uSunDir);
@@ -325,6 +340,14 @@ void main() {
         vec3 debugR=reflect(-V,N);vec2 debugBrdf=texture(uBrdfLUT,vec2(max(dot(N,V),0.0),roughness)).rg;
         vec3 globalSpecular=textureLod(uPrefilter,debugR,roughness*uMaxReflectionLod).rgb*(debugF*debugBrdf.x+debugBrdf.y)*specularOcclusion;
         color=globalDiffuse+globalSpecular;}
+    else if(uLightingDebugMode==24)color=albedo;
+    else if(uLightingDebugMode==25||uLightingDebugMode==26)color=normalize(N)*0.5+0.5;
+    else if(uLightingDebugMode==27){float h=fract(float(max(uMaterialSlotDebug,0))*0.61803398875);
+        color=0.55+0.45*cos(6.2831853*(h+vec3(0.0,0.333,0.667)));}
+    else if(uLightingDebugMode==28)color=vec3(0.0);
+    else if(uLightingDebugMode==29)color=albedo+emissive;
+    else if(uLightingDebugMode==32)color=vec3(clamp(roughness,0.0,1.0));
+    else if(uLightingDebugMode==33)color=vec3(clamp(metallic,0.0,1.0));
     if (uFogEnabled == 1 && uLightingDebugMode == 0) {
         float dist = length(uViewPos - vWorldPos);
         float distFog = 1.0 - exp(-dist * uFogDensity);
@@ -332,7 +355,12 @@ void main() {
         float fog = clamp(distFog * heightF, 0.0, 1.0);
         color = mix(color, uFogColor, fog);
     }
-    if (uApplyTonemap == 1 && uLightingDebugMode != 20 && uLightingDebugMode != 21) {
+    if (uApplyTonemap == 1 && (uLightingDebugMode == 24 || uLightingDebugMode == 29)) {
+        color=pow(max(color,vec3(0.0)),vec3(1.0/2.2));
+    } else if (uApplyTonemap == 1 && uLightingDebugMode != 20 && uLightingDebugMode != 21
+               && uLightingDebugMode != 25 && uLightingDebugMode != 26
+               && uLightingDebugMode != 27 && uLightingDebugMode != 28
+               && uLightingDebugMode != 32 && uLightingDebugMode != 33) {
         color = ACES(color);                 // filmic tone map (was Reinhard)
         color = pow(color, vec3(1.0/2.2));   // linear -> sRGB
     }
@@ -583,7 +611,7 @@ void SkinnedRenderer::DrawScene(ecs::Registry& reg, const Camera& camera, float 
         if (!SphereInFrustum(viewFrustum, boundsCenter, boundsRadius)) return;
         if (const ecs::LoadedMaterialAsset* custom =
                 reg.TryGet<ecs::LoadedMaterialAsset>(entity);
-            custom && custom->skinnedShader) {
+            custom && custom->skinnedShader && lit.lightingDebugMode == 0) {
             Shader& shader = *const_cast<Shader*>(custom->skinnedShader);
             shader.Bind();
             shader.SetMat4("uViewProjection", viewProj);
@@ -632,6 +660,7 @@ void SkinnedRenderer::DrawScene(ecs::Registry& reg, const Camera& camera, float 
             m_pbr->SetFloat("uRoughness", roughness);
             m_pbr->SetFloat("uAO", ao);
             m_pbr->SetVec3("uEmissive", emissive);
+            m_pbr->SetInt("uMaterialSlotDebug", std::max(sm.material, 0));
             if (am.albedoOverride) {
                 m_pbr->SetInt("uHasAlbedoMap", 1);              // override bound above
             } else if (diffuseMap >= 0 && diffuseMap < static_cast<int>(texs.size()) && texs[static_cast<std::size_t>(diffuseMap)]) {

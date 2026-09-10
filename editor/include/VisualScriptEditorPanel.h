@@ -89,6 +89,7 @@ private:
     void DrawTypesSection();    // struct/enum authoring UI
     void DrawEventsSection();          // event + interface authoring UI (Milestone 6)
     void DrawStateMachinesSection();   // state-machine authoring UI (Milestone 7)
+    void DrawLifecycleSection();       // dependencies / validate-project / repair (Milestone 11)
 
     // ---- Milestone 2: navigation & layout state ---------------------------
     bool  m_snapToGrid = false;              // snap nodes to the grid while dragging
@@ -114,6 +115,10 @@ private:
     // shared rename-field state (function names, params, locals) — Milestone 3
     std::string m_editToken;
     std::array<char, 96> m_editBuf{};
+    std::string m_selfTestSummary;   // Milestone 10: last regression-suite result
+    std::string m_assetRoot;         // Milestone 11: content root (captured each Draw)
+    std::string m_lifecycleReport;   // Milestone 11: last dependency/validation output
+    int m_newTemplate = 0;           // Milestone 12: selected starter template
     int m_newParamType = 3;   // Float — type combo for new function params/locals
     // frame request deferred until the canvas knows its size
     int m_frameRequest = 0;                  // 0=none 1=all 2=selection

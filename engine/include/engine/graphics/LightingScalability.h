@@ -17,6 +17,7 @@ enum class LightingQuality : std::uint8_t { Low = 0, Medium, High, Ultra, Custom
 // their presets cannot silently disagree about what Low/Medium/High means.
 struct LightingQualityProfile {
     LightingQuality quality = LightingQuality::High;
+    int shadowResolution = 4096;
     int shadowBlockerSamples = 12;
     int shadowFilterSamples = 18;
     int cascadeIntervals[4] = {1, 2, 4, 8};

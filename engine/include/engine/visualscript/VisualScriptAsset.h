@@ -306,24 +306,24 @@ struct VisualScriptAsset {
         for (const VisualFunction& f : functions) if (f.id == functionId) return &f;
         return nullptr;
     }
-    const VisualStructType* FindStruct(std::uint32_t id) const {
-        for (const VisualStructType& s : structs) if (s.id == id) return &s;
+    const VisualStructType* FindStruct(std::uint32_t typeId) const {
+        for (const VisualStructType& s : structs) if (s.id == typeId) return &s;
         return nullptr;
     }
-    const VisualEnumType* FindEnum(std::uint32_t id) const {
-        for (const VisualEnumType& e : enums) if (e.id == id) return &e;
+    const VisualEnumType* FindEnum(std::uint32_t typeId) const {
+        for (const VisualEnumType& e : enums) if (e.id == typeId) return &e;
         return nullptr;
     }
-    const VisualCustomEvent* FindEvent(std::uint32_t id) const {
-        for (const VisualCustomEvent& e : events) if (e.id == id) return &e;
+    const VisualCustomEvent* FindEvent(std::uint32_t eventId) const {
+        for (const VisualCustomEvent& e : events) if (e.id == eventId) return &e;
         return nullptr;
     }
-    const VisualInterface* FindInterface(std::uint32_t id) const {
-        for (const VisualInterface& i : interfaces) if (i.id == id) return &i;
+    const VisualInterface* FindInterface(std::uint32_t interfaceId) const {
+        for (const VisualInterface& i : interfaces) if (i.id == interfaceId) return &i;
         return nullptr;
     }
-    const VisualStateMachine* FindStateMachine(std::uint32_t id) const {
-        for (const VisualStateMachine& s : stateMachines) if (s.id == id) return &s;
+    const VisualStateMachine* FindStateMachine(std::uint32_t stateMachineId) const {
+        for (const VisualStateMachine& s : stateMachines) if (s.id == stateMachineId) return &s;
         return nullptr;
     }
 
@@ -454,7 +454,7 @@ struct VisualScriptAsset {
             }
         }
         out << "implements " << implementedInterfaces.size();
-        for (std::uint32_t id : implementedInterfaces) out << ' ' << id;
+        for (std::uint32_t interfaceId : implementedInterfaces) out << ' ' << interfaceId;
         out << '\n';
         // State machines (v7).
         out << "statemachines " << stateMachines.size() << '\n';
@@ -692,7 +692,7 @@ struct VisualScriptAsset {
             std::size_t implCount = 0;
             if (!(in >> key >> implCount) || key != "implements") { if (error) *error = "Missing implements block."; return false; }
             implementedInterfaces.reserve(implCount);
-            for (std::size_t i = 0; i < implCount; ++i) { std::uint32_t id = 0; in >> id; implementedInterfaces.push_back(id); }
+            for (std::size_t i = 0; i < implCount; ++i) { std::uint32_t interfaceId = 0; in >> interfaceId; implementedInterfaces.push_back(interfaceId); }
         }
         // State machines (v7).
         if (version >= 7) {

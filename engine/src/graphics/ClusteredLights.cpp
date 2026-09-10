@@ -84,18 +84,32 @@ void ClusteredLights::Build(const Camera& camera, float aspect, int screenWidth,
     const float tileH = static_cast<float>(screenHeight) / kTilesY;
     for (int i = 0; i < count; ++i) {
         const glm::vec4 vp = viewPos[static_cast<std::size_t>(i)];
-        const glm::vec4 clip = proj * vp;
-        if (clip.w <= 0.0f) continue;                       // wholly behind the camera
-        const glm::vec3 ndc = glm::vec3(clip) / clip.w;
-        const float sx = (ndc.x * 0.5f + 0.5f) * screenWidth;
-        const float sy = (ndc.y * 0.5f + 0.5f) * screenHeight;
-        const float dist = std::max(-vp.z, 0.01f);
-        const float srad = lights[static_cast<std::size_t>(i)].radius * proj[1][1] * screenHeight * 0.5f / dist;
+        const float radius = std::max(lights[static_cast<std::size_t>(i)].radius, 0.01f);
+        const float forwardDepth = -vp.z;
 
-        const int minTX = std::clamp(static_cast<int>((sx - srad) / tileW), 0, kTilesX - 1);
-        const int maxTX = std::clamp(static_cast<int>((sx + srad) / tileW), 0, kTilesX - 1);
-        const int minTY = std::clamp(static_cast<int>((sy - srad) / tileH), 0, kTilesY - 1);
-        const int maxTY = std::clamp(static_cast<int>((sy + srad) / tileH), 0, kTilesY - 1);
+        // A centre behind the camera does not mean the influence sphere is behind it. If the
+        // sphere crosses the camera/near plane its perspective bounds approach infinity, so the
+        // only safe screen-space bound is the whole screen. This is the common indoor case where
+        // rotating away from a nearby lamp used to make the room go dark.
+        if (forwardDepth + radius < camera.nearPlane) continue; // sphere wholly behind near plane
+
+        int minTX = 0, maxTX = kTilesX - 1;
+        int minTY = 0, maxTY = kTilesY - 1;
+        if (forwardDepth - radius > camera.nearPlane) {
+            const glm::vec4 clip = proj * vp;
+            const glm::vec3 ndc = glm::vec3(clip) / clip.w;
+            const float sx = (ndc.x * 0.5f + 0.5f) * screenWidth;
+            const float sy = (ndc.y * 0.5f + 0.5f) * screenHeight;
+            // Project using the sphere's closest depth. This deliberately overestimates the
+            // covered rectangle, preventing edge tiles from losing the light during rotation.
+            const float closestDepth = std::max(forwardDepth - radius, camera.nearPlane);
+            const float sradX = radius * proj[0][0] * screenWidth  * 0.5f / closestDepth;
+            const float sradY = radius * proj[1][1] * screenHeight * 0.5f / closestDepth;
+            minTX = std::clamp(static_cast<int>(std::floor((sx - sradX) / tileW)), 0, kTilesX - 1);
+            maxTX = std::clamp(static_cast<int>(std::floor((sx + sradX) / tileW)), 0, kTilesX - 1);
+            minTY = std::clamp(static_cast<int>(std::floor((sy - sradY) / tileH)), 0, kTilesY - 1);
+            maxTY = std::clamp(static_cast<int>(std::floor((sy + sradY) / tileH)), 0, kTilesY - 1);
+        }
         for (int ty = minTY; ty <= maxTY; ++ty)
             for (int tx = minTX; tx <= maxTX; ++tx) {
                 const int base = (ty * kTilesX + tx) * kTileStride;

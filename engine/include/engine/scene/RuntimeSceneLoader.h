@@ -451,6 +451,7 @@ public:
                 std::vector<PostProcessParameter> parameters;
             };
             int skyMode = 0;                 // 0 = procedural, 1 = imported sky image
+            bool atmosphereEnabled = true;   // procedural sky atmosphere actor
             std::string skyTexturePath;      // equirectangular panorama (.png/.jpg)
             float skyRotation = 0.0f;
             float skyIntensity = 1.0f;
@@ -500,7 +501,7 @@ public:
             bool cloudShadows = true;
             float cloudShadowStrength = 0.45f;
             float cloudShadowScale = 0.035f;
-            float shadowDistance = 300.0f;
+            float shadowDistance = 120.0f;
             bool fog = true;
             float fogDensity = 0.008f;
             float fogHeight = -0.35f;

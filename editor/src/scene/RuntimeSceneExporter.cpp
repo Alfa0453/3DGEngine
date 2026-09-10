@@ -128,7 +128,7 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         return engine::MakeAssetReference(
             &assetRegistry, contentRoot, assetPath, type).id;
     };
-    out << "3DGRuntimeScene 118 " << sceneId.ToString() << '\n';
+    out << "3DGRuntimeScene 119 " << sceneId.ToString() << '\n';
     out << "# Runtime export from 3DGEditor. Editor-only flags are omitted.\n";
     const EditorScene::Environment& environment = scene.GetEnvironment();
     out << "environment "
@@ -190,6 +190,7 @@ bool RuntimeSceneExporter::Export(const EditorScene &scene, const std::string &p
         << environment.atmosphereMieHeight << ' ' << environment.atmosphereMieAnisotropy << ' '
         << environment.atmosphereOzone << ' ' << environment.atmosphereIntensity << ' '
         << environment.sunAngularDiameter << ' ' << environment.sunDiskIntensity << '\n';
+    out << "atmosphere_enabled " << (environment.atmosphereEnabled ? 1 : 0) << '\n';
     out << "night_environment " << environment.stars << ' ' << environment.starIntensity << ' '
         << environment.moon << ' ' << environment.moonColor.r << ' ' << environment.moonColor.g << ' '
         << environment.moonColor.b << ' ' << environment.moonIntensity << ' '

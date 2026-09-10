@@ -78,7 +78,8 @@ constexpr const char* kLightingViews[] = {
     "Probe Visibility", "Dynamic GI Probes", "SSGI", "Total Indirect",
     "Directional Shadow", "Shadow Cascades", "Global IBL", "GI Higher Bounces",
     "Material Base Color", "Geometric Normal", "Shading Normal",
-    "Imported Material Slot", "PCSS Filter Radius"
+    "Imported Material Slot", "PCSS Filter Radius", "Unlit",
+    "Lighting Only", "Detail Lighting", "Roughness", "Metallic"
 };
 }
 

@@ -2,7 +2,11 @@
 
 #include <engine/visualscript/VisualScriptAsset.h>
 #include <engine/visualscript/VisualScriptCompiler.h>   // Milestone 9: compiled-execution toggle
+#include <engine/visualscript/VisualScriptDependencies.h>   // Milestone 11: lifecycle tooling
 #include <engine/visualscript/VisualScriptDiagnostics.h>
+#include <engine/visualscript/VisualScriptDocs.h>         // Milestone 12: node reference / cook / audit / budgets
+#include <engine/visualscript/VisualScriptTemplates.h>    // Milestone 12: starter graphs
+#include <engine/visualscript/VisualScriptTest.h>        // Milestone 10: headless regression suite
 #include <engine/visualscript/VisualScriptValidator.h>
 
 #include <imgui.h>
@@ -12,6 +16,7 @@
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -84,6 +89,7 @@ bool VisualScriptEditorPanel::Save(std::string* error) {
 VisualScriptEditorPanel::Result VisualScriptEditorPanel::Draw(bool* open, const std::string& assetRoot,
                                                               const vswidgets::ValueWidgetContext& valueCtx) {
     Result result;
+    m_assetRoot = assetRoot;   // Milestone 11: content root for project-wide lifecycle tools
     // Build this frame's value-editor context: borrowed scene/asset data + this graph's type defs.
     m_localCtx = valueCtx;
     m_localCtx.structs = &m_document.Asset().structs;
@@ -100,6 +106,29 @@ VisualScriptEditorPanel::Result VisualScriptEditorPanel::Draw(bool* open, const 
 
     if (!m_hasAsset) {
         ImGui::TextUnformatted("Open a .3dgvs from the Content browser, or create one.");
+
+        // Milestone 12: start from a working starter graph instead of a blank canvas.
+        const std::vector<engine::vs::VsTemplate> templates = engine::vs::AllTemplates();
+        ImGui::SetNextItemWidth(200.0f);
+        if (ImGui::BeginCombo("Template", engine::vs::VsTemplateName(static_cast<engine::vs::VsTemplate>(m_newTemplate)))) {
+            for (std::size_t i = 0; i < templates.size(); ++i)
+                if (ImGui::Selectable(engine::vs::VsTemplateName(templates[i]), m_newTemplate == static_cast<int>(templates[i])))
+                    m_newTemplate = static_cast<int>(templates[i]);
+            ImGui::EndCombo();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Create from Template")) {
+            engine::vs::VisualScriptAsset asset = engine::vs::MakeTemplate(static_cast<engine::vs::VsTemplate>(m_newTemplate));
+            std::filesystem::path dir = std::filesystem::path(assetRoot) / "GameAssets" / "VisualScripts";
+            std::error_code ec; std::filesystem::create_directories(dir, ec);
+            m_path = (dir / (std::string(engine::vs::VsTemplateName(static_cast<engine::vs::VsTemplate>(m_newTemplate))) + ".3dgvs")).string();
+            std::string error;
+            if (asset.Save(m_path, &error)) {
+                m_document.Open(asset.id, asset);
+                m_hasAsset = true; result.assetsChanged = true;
+                m_status = "Created " + m_path;
+            } else { m_status = error; }
+        }
         if (ImGui::Button("New Visual Script")) {
             VisualScriptAsset asset;
             asset.id = engine::AssetHandle::Generate();
@@ -679,6 +708,20 @@ void VisualScriptEditorPanel::DrawContextSearch(const glm::vec2& graphPos) {
                 m_contextFromPin = false;
                 ImGui::CloseCurrentPopup();
             }
+            // Milestone 12: context-sensitive tooltip — category, purity, and typed pin list.
+            if (ImGui::IsItemHovered()) {
+                if (const NodeDescriptor* d = VisualNodeRegistry::Instance().Find(e->typeId)) {
+                    std::string tip = d->category + (d->pure ? " · pure" : " · impure") + "\n" + d->typeId;
+                    std::string ins, outs;
+                    for (const NodePinDesc& p : d->pins) {
+                        std::string t = p.name + " (" + (p.kind == PinKind::Exec ? "exec" : ValueTypeName(p.type)) + ")";
+                        (p.direction == PinDirection::Input ? ins : outs) += (((p.direction == PinDirection::Input ? ins : outs).empty()) ? "" : ", ") + t;
+                    }
+                    if (!ins.empty())  tip += "\nIn:  " + ins;
+                    if (!outs.empty()) tip += "\nOut: " + outs;
+                    ImGui::SetTooltip("%s", tip.c_str());
+                }
+            }
             ImGui::Unindent(8.0f);
         }
         ImGui::EndChild();
@@ -782,6 +825,15 @@ void VisualScriptEditorPanel::DrawSidePanel() {
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("On: O(1) compiled node/link lookups. Off: interpreted linear scans.\n"
                           "Toggle during Play and watch the per-node timings to compare.");
+
+    // Milestone 12: perf/memory budgets over the live profiler counters (during Play).
+    if (diagnostics.enabled) {
+        const engine::vs::VsBudgetStatus b = engine::vs::CheckBudgets(engine::vs::VsBudgets{});
+        const ImVec4 col = b.AnyOver() ? ImVec4(0.95f, 0.5f, 0.4f, 1.0f) : ImVec4(0.6f, 0.68f, 0.72f, 1.0f);
+        ImGui::TextColored(col, "Budgets: %d instances, %d tasks, %llu instr%s",
+                           b.instances, b.activeTasks, static_cast<unsigned long long>(b.instructions),
+                           b.AnyOver() ? "  [OVER BUDGET]" : "");
+    }
     const PausedExecution& paused = diagnostics.Paused();
     if (paused.active) {
         const bool thisGraph = paused.graph == graphId;
@@ -1093,6 +1145,30 @@ void VisualScriptEditorPanel::DrawSidePanel() {
                 m_document.pan = glm::vec2(60.0f) - n->editorPosition * m_document.zoom;
         }
     }
+
+    // ---- asset lifecycle (Milestone 11) -----------------------------------
+    DrawLifecycleSection();
+
+    // ---- automated self-tests (Milestone 10) ------------------------------
+    ImGui::SeparatorText("Automated Tests");
+    if (ImGui::Button("Run Regression Suite")) {
+        const engine::vs::VisualScriptTestReport tr = engine::vs::VisualScriptTestRunner::RunRegressionSuite();
+        m_selfTestSummary = tr.Summary();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Run Graph Test")) {
+        // A minimal live check: the current graph must have no validation errors and load-round-trip.
+        engine::vs::VisualScriptTestRunner runner;
+        engine::vs::VisualScriptTest smoke; smoke.name = "current-graph-smoke";
+        engine::vs::VsTestStep step; step.kind = engine::vs::VsTestStep::Kind::Update; step.count = 4; step.dt = 1.0f / 60.0f;
+        smoke.steps.push_back(step);
+        engine::vs::VsAssert noErr; noErr.kind = engine::vs::VsAssert::Kind::NoError;
+        smoke.asserts.push_back(noErr);
+        const engine::vs::VisualScriptTestReport tr = runner.Run(m_document.Asset(), {smoke});
+        m_selfTestSummary = tr.Summary();
+    }
+    if (!m_selfTestSummary.empty())
+        ImGui::TextWrapped("%s", m_selfTestSummary.c_str());
 
     ImGui::EndChild();
 }
@@ -1467,4 +1543,82 @@ void VisualScriptEditorPanel::DrawStateMachinesSection() {
         ImGui::PopID();
     }
     if (deleteSM != 0) m_document.DeleteStateMachine(deleteSM);
+}
+
+void VisualScriptEditorPanel::DrawLifecycleSection() {
+    ImGui::SeparatorText("Asset Lifecycle");
+
+    // Missing nodes: their pins + data are retained; they revive when the type is registered again.
+    const std::vector<engine::vs::NodeId> missing = engine::vs::CollectMissingNodes(m_document.Asset());
+    if (!missing.empty()) {
+        ImGui::TextColored(ImVec4(0.95f, 0.6f, 0.35f, 1.0f), "%d missing node type(s) — data retained",
+                           static_cast<int>(missing.size()));
+        if (ImGui::IsItemClicked() && !missing.empty()) {
+            m_document.Select(missing.front(), false);
+            if (const VisualNode* n = m_document.Asset().FindNode(missing.front()))
+                m_document.pan = glm::vec2(60.0f) - n->editorPosition * m_document.zoom;
+        }
+    }
+
+    if (ImGui::Button("Dependencies")) {
+        const std::vector<engine::vs::VsDependency> deps = engine::vs::CollectDependencies(m_document.Asset());
+        std::string r = "Dependencies (" + std::to_string(deps.size()) + "):";
+        for (const engine::vs::VsDependency& d : deps)
+            r += "\n  " + d.asset.ToString() + "  (" + d.reason + ")";
+        if (deps.empty()) r += "\n  (none — this graph references no other assets)";
+        m_lifecycleReport = r;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Repair Links")) {
+        const int removed = m_document.RepairDanglingLinks();
+        m_lifecycleReport = removed > 0 ? ("Repaired: removed " + std::to_string(removed) + " dangling link(s).")
+                                        : "Repair: no dangling links found.";
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Validate Project")) {
+        if (m_assetRoot.empty()) { m_lifecycleReport = "No content root available."; }
+        else {
+            const engine::vs::VsProjectValidation v = engine::vs::ValidateProject(m_assetRoot);
+            std::string r = "Project: " + std::to_string(v.entries.size()) + " graph(s), "
+                          + std::to_string(v.errorGraphs) + " with errors, "
+                          + std::to_string(v.warningGraphs) + " with warnings.";
+            for (const engine::vs::VsProjectValidation::Entry& e : v.entries) {
+                if (e.report.Ok() && e.report.issues.empty()) continue;
+                r += "\n  " + std::filesystem::path(e.path).filename().string() + ":";
+                for (const engine::vs::ValidationIssue& i : e.report.issues)
+                    r += "\n    " + std::string(i.severity == engine::vs::ValidationIssue::Severity::Error ? "ERROR " : "warn  ") + i.message;
+            }
+            m_lifecycleReport = r;
+        }
+    }
+    if (ImGui::Button("Who References This")) {
+        if (m_assetRoot.empty()) { m_lifecycleReport = "No content root available."; }
+        else {
+            engine::vs::VsProjectIndex index;
+            index.Build(m_assetRoot);
+            const std::vector<engine::vs::VsDependentRef> refs = index.DependentsOf(m_document.Asset().id);
+            std::string r = "Graphs referencing this asset (" + std::to_string(refs.size()) + "):";
+            for (const engine::vs::VsDependentRef& d : refs)
+                r += "\n  " + std::filesystem::path(d.path).filename().string() + "  (" + d.reason + ")";
+            if (refs.empty()) r += "\n  (none — safe to delete)";
+            m_lifecycleReport = r;
+        }
+    }
+
+    // Milestone 12: documentation + packaging.
+    if (ImGui::Button("Export Node Reference")) {
+        const std::string md = engine::vs::GenerateNodeReference();
+        std::filesystem::path out = std::filesystem::path(m_assetRoot.empty() ? "." : m_assetRoot)
+                                  / "docs" / "VISUAL_SCRIPTING_NODES.md";
+        std::error_code ec; std::filesystem::create_directories(out.parent_path(), ec);
+        std::ofstream f(out); f << md;
+        m_lifecycleReport = f.good() ? ("Wrote node reference to " + out.string()) : "Failed to write node reference.";
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Packaging Audit")) {
+        if (m_assetRoot.empty()) m_lifecycleReport = "No content root available.";
+        else m_lifecycleReport = engine::vs::PackageAudit(m_assetRoot).Summary();
+    }
+
+    if (!m_lifecycleReport.empty()) ImGui::TextWrapped("%s", m_lifecycleReport.c_str());
 }

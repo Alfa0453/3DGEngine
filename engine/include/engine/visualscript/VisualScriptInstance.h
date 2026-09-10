@@ -374,6 +374,19 @@ public:
         else PublishEventTo(target, m_buildingEvent);
     }
 
+    // Cast/validity: does an entity have a given component? (kNull => Self.)
+    bool HasComponent(ecs::Entity entity, const std::string& componentName) override {
+        if (!m_registry) return false;
+        const ecs::Entity e = (entity == ecs::kNull) ? m_entity : entity;
+        if (!m_registry->Valid(e)) return false;
+        if (componentName == "Transform")    return m_registry->TryGet<ecs::Transform>(e) != nullptr;
+        if (componentName == "RigidBody")    return m_registry->TryGet<ecs::RigidBody>(e) != nullptr;
+        if (componentName == "MeshRenderer") return m_registry->TryGet<ecs::MeshRenderer>(e) != nullptr;
+        if (componentName == "Light")        return m_registry->TryGet<ecs::Light>(e) != nullptr;
+        if (componentName == "Collider")     return m_registry->TryGet<ecs::Collider>(e) != nullptr;
+        return false;
+    }
+
     // ---- Milestone 7: state-machine script API -----------------------------
     std::uint32_t GetStateMachineState(std::uint32_t smId) override {
         auto it = m_smCurrentState.find(smId);

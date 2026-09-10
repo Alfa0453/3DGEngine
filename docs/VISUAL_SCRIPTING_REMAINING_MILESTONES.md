@@ -27,18 +27,18 @@ The following capabilities already exist and should be preserved while completin
 
 | Order | Milestone | Primary result | Status |
 |---:|---|---|---|
-| 1 | Complete typed value authoring | Friendly editors and project pickers for every supported type | Not started |
-| 2 | Graph navigation and layout tools | Large graphs become quick to organize and navigate | Not started |
-| 3 | Functions and reusable subgraphs | Logic can be reused without copy/paste | Not started |
-| 4 | Collections and structured data | Arrays, maps, structs, and typed enums | Not started |
-| 5 | Advanced flow and time nodes | Timelines, gates, loops, timers, and controlled parallel flow | Not started |
-| 6 | Event dispatchers and graph interfaces | Decoupled, typed communication between objects and graphs | Not started |
-| 7 | Visual state-machine graphs | Author high-level gameplay states visually | Not started |
-| 8 | Async task model and cancellation | Safe long-running navigation, streaming, and gameplay operations | Not started |
-| 9 | Compiled graph execution | Faster runtime execution with a derived bytecode/IR cache | Not started |
-| 10 | Automated graph testing | Repeatable tests and simulation without entering the game manually | Not started |
-| 11 | Asset lifecycle and migration hardening | Safe rename, delete, duplication, upgrade, and reference repair | Not started |
-| 12 | Templates, documentation, and release hardening | Production-ready onboarding and packaging | Not started |
+| 1 | Complete typed value authoring | Friendly editors and project pickers for every supported type | Implemented (pending build verify) |
+| 2 | Graph navigation and layout tools | Large graphs become quick to organize and navigate | Implemented (pending build verify) |
+| 3 | Functions and reusable subgraphs | Logic can be reused without copy/paste | Implemented (pending build verify) |
+| 4 | Collections and structured data | Arrays, maps, structs, and typed enums | Implemented (pending build verify) |
+| 5 | Advanced flow and time nodes | Timelines, gates, loops, timers, and controlled parallel flow | Implemented (pending build verify) |
+| 6 | Event dispatchers and graph interfaces | Decoupled, typed communication between objects and graphs | Implemented (pending build verify) |
+| 7 | Visual state-machine graphs | Author high-level gameplay states visually | Implemented (pending build verify) |
+| 8 | Async task model and cancellation | Safe long-running navigation, streaming, and gameplay operations | Implemented (pending build verify) |
+| 9 | Compiled graph execution | Faster runtime execution with a derived bytecode/IR cache | Implemented (pending build verify) |
+| 10 | Automated graph testing | Repeatable tests and simulation without entering the game manually | Implemented (pending build verify) |
+| 11 | Asset lifecycle and migration hardening | Safe rename, delete, duplication, upgrade, and reference repair | Implemented (pending build verify) |
+| 12 | Templates, documentation, and release hardening | Production-ready onboarding and packaging | Implemented (pending build verify) |
 
 ## Milestone 1 — Complete typed value authoring
 

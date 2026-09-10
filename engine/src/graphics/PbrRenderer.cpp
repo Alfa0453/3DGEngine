@@ -393,6 +393,10 @@ vec3 ClearcoatSpecular(vec3 N, vec3 V, vec3 L, vec3 radiance) {
 }
 void main() {
     vec3 baseN = normalize(vNormal);
+    // Transparent closed meshes are rendered two-sided. Face the shading normal
+    // toward the current medium so rear faces do not turn black or invert their
+    // highlights when viewed through the front surface.
+    if (!gl_FrontFacing) baseN = -baseN;
     vec3 V = normalize(uViewPos-vWorldPos);
     vec2 uv = (uWorldUv == 1) ? WorldUV(vWorldPos, baseN) : TransformUV(vUV);
     mat3 baseTbn = CotangentFrame(baseN, vWorldPos, uv);
@@ -426,7 +430,21 @@ void main() {
         float alignment = abs(dot(normalize(baseTbn[0] * direction + baseTbn[1] * sqrt(max(0.0, 1.0-direction*direction))), V));
         roughness = clamp(roughness * (1.0 - 0.45 * uAnisotropy * alignment), 0.02, 1.0);
     }
-    vec3 F0 = mix(vec3(0.08 * uSpecularLevel), albedo, metallic);
+    // Editor viewport lighting inspection. Lighting Only removes both the
+    // authored surface response and normal maps; Detail Lighting preserves
+    // normal-map detail while replacing the material with neutral values.
+    if (uLightingDebugMode == 30 || uLightingDebugMode == 31) {
+        albedo = vec3(0.5);
+        emissive = vec3(0.0);
+        metallic = 0.0;
+        roughness = 0.5;
+        if (uLightingDebugMode == 30) N = baseN;
+    }
+    float safeIor = max(uIor, 1.0001);
+    float iorF0 = pow((safeIor - 1.0) / (safeIor + 1.0), 2.0);
+    vec3 dielectricF0 = mix(vec3(0.08 * uSpecularLevel), vec3(iorF0),
+                            clamp(uTransmission, 0.0, 1.0));
+    vec3 F0 = mix(dielectricF0, albedo, metallic);
     vec3 Lo = vec3(0.0);
     vec3 Ls = normalize(-uSunDir);
     float sunNdotL = max(dot(N,Ls),0.0);
@@ -522,11 +540,24 @@ void main() {
         specularIndirect = specular;
         ambient = diffuseIndirect + specularIndirect;
         if (uInstanced == 0 && uTransmission > 0.0) {
-            vec3 refracted = refract(-V, N, 1.0 / max(uIor, 1.0));
-            vec3 transmitted = textureLod(uPrefilter, refracted, roughness*uMaxReflectionLod).rgb;
-            transmitted *= specularOcclusion;
-            transmitted *= exp(-uThickness * max(vec3(0.02), vec3(1.0) - uSubsurfaceColor));
-            ambient = mix(ambient, transmitted, uTransmission);
+            float eta = gl_FrontFacing ? (1.0 / safeIor) : safeIor;
+            vec3 refracted = refract(-V, N, eta);
+            // Total internal reflection has no transmitted ray.
+            float hasRefraction = step(0.0001, dot(refracted, refracted));
+            refracted = normalize(mix(reflect(-V, N), refracted, hasRefraction));
+            vec3 transmitted = textureLod(uPrefilter, refracted,
+                clamp(roughness * 1.35, 0.0, 1.0) * uMaxReflectionLod).rgb;
+
+            // Beer-Lambert absorption: albedo becomes the glass tint and thickness
+            // controls how strongly long paths through the object absorb light.
+            float pathLength = max(uThickness, 0.001)
+                / max(abs(dot(N, V)), 0.12);
+            vec3 absorptionCoefficient = -log(clamp(albedo, vec3(0.02), vec3(0.999)));
+            vec3 absorption = exp(-absorptionCoefficient * pathLength);
+            vec3 viewFresnel = FresnelSchlick(max(dot(N, V), 0.0), vec3(iorF0));
+            vec3 glassAmbient = specularIndirect
+                + transmitted * absorption * (vec3(1.0) - viewFresnel) * hasRefraction;
+            ambient = mix(ambient, glassAmbient, clamp(uTransmission, 0.0, 1.0));
         }
         if (uInstanced == 0 && uClearcoat > 0.0) {
             vec3 Rc = reflect(-V, N);
@@ -600,6 +631,9 @@ void main() {
                      clamp(1.0 - abs(fr - 0.5) * 2.0, 0.0, 1.0),
                      clamp(1.0 - fr * 2.0, 0.0, 1.0));
     }
+    else if (uLightingDebugMode == 29) color = albedo + emissive;
+    else if (uLightingDebugMode == 32) color = vec3(clamp(roughness, 0.0, 1.0));
+    else if (uLightingDebugMode == 33) color = vec3(clamp(metallic, 0.0, 1.0));
 
     if (uFogEnabled == 1 && uLightingDebugMode == 0) {
         float dist = length(uViewPos - vWorldPos);
@@ -609,15 +643,23 @@ void main() {
         color = mix(color, uFogColor, fog);
     }
 
-    if (uApplyTonemap == 1 && uLightingDebugMode == 24) {
+    if (uApplyTonemap == 1 && (uLightingDebugMode == 24 || uLightingDebugMode == 29)) {
         color = pow(max(color, vec3(0.0)), vec3(1.0/2.2));
     } else if (uApplyTonemap == 1 && uLightingDebugMode != 20
                && uLightingDebugMode != 21
-               && (uLightingDebugMode < 24 || uLightingDebugMode > 27)) {
+               && uLightingDebugMode != 25 && uLightingDebugMode != 26
+               && uLightingDebugMode != 27 && uLightingDebugMode != 28
+               && uLightingDebugMode != 32 && uLightingDebugMode != 33) {
         color = ACES(color);                     // filmic tone map (was Reinhard)
         color = pow(color, vec3(1.0/2.2));       // linear -> sRGB
     }
-    float outputAlpha = opacity * (1.0 - 0.85 * uTransmission);
+    // Glass remains readable at its silhouette even when authored with low
+    // opacity: physical Fresnel raises coverage toward grazing angles.
+    float alphaF0 = pow((safeIor - 1.0) / (safeIor + 1.0), 2.0);
+    float alphaFresnel = alphaF0 + (1.0 - alphaF0)
+        * pow(1.0 - clamp(abs(dot(N, V)), 0.0, 1.0), 5.0);
+    float glassAlpha = clamp(opacity + (1.0 - opacity) * alphaFresnel, 0.0, 1.0);
+    float outputAlpha = mix(opacity, glassAlpha, clamp(uTransmission, 0.0, 1.0));
     FragColor = vec4(color, (uBlendMode == 2) ? outputAlpha : 1.0);
 }
 )GLSL";
@@ -646,6 +688,7 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
 
 void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
                          int screenWidth, int screenHeight, const Options& opt) {
+    m_cascade.Resize(opt.shadowResolution);
     if (opt.shadowFilterSamples <= 6) m_cascade.SetUpdateIntervals({1,4,8,16});
     else if (opt.shadowFilterSamples <= 12) m_cascade.SetUpdateIntervals({1,3,6,12});
     else if (opt.shadowFilterSamples <= 18) m_cascade.SetUpdateIntervals({1,2,4,8});
@@ -682,24 +725,21 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
             // the old 3%). (`range` is intentionally NOT used here: it defaults to 40 as the SPOT
             // shadow far-plane, so honouring it would make every point light balloon to 40 units.)
             const float radius = std::sqrt(std::max(std::max(c.r, c.g), c.b) / 0.01f);
-            // Cull only when the light genuinely cannot reach the view: its influence sphere misses
-            // the frustum AND the camera is outside its radius. Keeping any light the camera sits
-            // inside stops the "scene goes black when I rotate away from the lamp" flicker in
-            // enclosed rooms -- a light behind the camera still lights what's in front of it.
-            if (!SphereInFrustum(frustum, t.position, std::max(radius, 0.01f))
-                && glm::distance(camera.Position(), t.position) > radius) return;
+            // Do not reject a local light because its source is behind the camera. Its influence
+            // volume may still overlap visible geometry (especially in a room). Point-light
+            // screen culling is performed conservatively by ClusteredLights::Build instead.
             clusterLights.push_back({t.position, c, radius});
             if (ppos.size() < static_cast<std::size_t>(std::clamp(opt.maxShadowedLocalLights,0,PointShadow::kMax)))
                 ppos.push_back(t.position);
         }
         else if (l.type == Light::Type::Spot) {
             if (glm::dot(c, c) <= 1.0e-8f) return;
+            if (spotPos.size() >= static_cast<std::size_t>(SpotShadow::kMax)) return;
             const glm::vec3 dir = glm::normalize(l.direction);
             const float range = std::max(l.range, 0.01f);
-            // Keep the spot if its cone-bounding sphere is visible OR the camera is within range
-            // (avoids popping the light off when standing next to it and looking away).
-            if (!SphereInFrustum(frustum, t.position + dir * (range * 0.5f), range * 0.5f)
-                && glm::distance(camera.Position(), t.position) > range) return;
+            // Spot illumination must not depend on whether the emitter gizmo is in view. The old
+            // cone-sphere frustum test also underestimated wide cones and made them disappear as
+            // the camera turned away from the source while still viewing lit surfaces.
             spotPos.push_back(t.position);
             spotDir.push_back(dir);
             spotCol.push_back(c);
@@ -711,13 +751,9 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
         }
         else {  // Area (sphere)
             if (glm::dot(c, c) <= 1.0e-8f) return;
-            // Cull by the light's illumination REACH (intensity-derived), not its tiny physical
-            // sourceRadius -- otherwise an area light pops off the moment its ~1-unit body leaves
-            // the view, exactly like the old point-light bug. Keep it if the camera is inside reach.
-            const float areaReach = std::max(std::sqrt(std::max(std::max(c.r, c.g), c.b) / 0.01f),
-                                             l.sourceRadius);
-            if (!SphereInFrustum(frustum, t.position, std::max(areaReach, 0.01f))
-                && glm::distance(camera.Position(), t.position) > areaReach) return;
+            if (areaPos.size() >= 4u) return;
+            // Area lights are evaluated globally (the shader limit is four), so culling them by
+            // camera-facing visibility is both unnecessary and visibly incorrect.
             areaPos.push_back(t.position);
             areaCol.push_back(c);
             areaRad.push_back(l.sourceRadius);
@@ -933,7 +969,7 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
             if (!SphereInFrustum(frustum, center, radius))
                 return;                               // actual mesh is off-screen
         }
-        if (m.customShader) {
+        if (m.customShader && opt.lightingDebugMode == 0) {
             custom.emplace_back(&t, &m);
             return;
         }
@@ -1016,8 +1052,7 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
             m_pbr->SetInt(flag, 0);
         }
     };
-    for (auto& pr : textured) {
-        Transform& t = *pr.first; MeshPBR& m = *pr.second;
+    const auto drawPbrMesh = [&](Transform& t, MeshPBR& m) {
         const glm::mat4 model = t.Model();
         m_pbr->SetMat4("uModel", model);
         m_pbr->SetMat3("uNormalMat", glm::mat3(glm::transpose(glm::inverse(model))));
@@ -1057,6 +1092,13 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
         setCull(!(m.material.blendMode == PbrMaterial::BlendMode::Transparent
                   || m.mesh->TwoSided()));
         m.mesh->DrawLod(SelectMeshLod(*m.mesh, t, camera));
+    };
+    // Opaque geometry must be complete before any glass is blended. Previously a
+    // later instanced batch could overwrite an already-drawn transparent object.
+    for (auto& pr : textured) {
+        if (pr.second->material.blendMode == PbrMaterial::BlendMode::Transparent)
+            continue;
+        drawPbrMesh(*pr.first, *pr.second);
     }
 
     // Imported static models use the very same program and frame-level lighting
@@ -1064,7 +1106,8 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
     // submission differs: one draw is issued per imported submesh.
     static std::unordered_map<const Model*, std::uint64_t> reportedFallbacks;
     auto importedView = reg.view<Transform, ecs::LoadedModelAsset>();
-    if (!importedView.empty()) importedView.each(
+    const auto drawImportedPass = [&](bool transparentPass) {
+      if (!importedView.empty()) importedView.each(
         [&](Entity entity, Transform& t, ecs::LoadedModelAsset& loaded) {
             if (!loaded.model || reg.Has<MeshPBR>(entity)) return;
             const glm::mat4 model = t.Model();
@@ -1086,6 +1129,9 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
                 bool fallback = false;
                 const PbrMaterial material = ResolveModelPbrMaterial(
                     *loaded.model, submesh.material, objectOverride, &fallback);
+                const bool transparent =
+                    material.blendMode == PbrMaterial::BlendMode::Transparent;
+                if (transparent != transparentPass) continue;
                 m_pbr->SetInt("uMaterialSlotDebug", std::max(submesh.material, 0));
                 if (fallback) {
                     const std::uint64_t bit = submesh.material >= 0
@@ -1144,6 +1190,8 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
                 submesh.mesh.DrawLod(SelectMeshLod(submesh.mesh, t, camera));
             }
         });
+    };
+    drawImportedPass(false);
     glDisable(GL_BLEND); glDepthMask(GL_TRUE);
     m_pbr->SetInt("uMaterialSlotDebug", 0);
     setCull(true);   // batches below are opaque
@@ -1231,10 +1279,14 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
         const glm::vec3 db = b.first->position - camera.Position();
         return at && glm::dot(da, da) > glm::dot(db, db);
     });
-    const Shader* boundCustomShader = nullptr;
-    for (const auto& item : custom) {
+    const auto drawCustomPass = [&](bool transparentPass) {
+      const Shader* boundCustomShader = nullptr;
+      for (const auto& item : custom) {
         const Transform& transform = *item.first;
         const MeshPBR& mesh = *item.second;
+        const bool transparent =
+            mesh.material.blendMode == PbrMaterial::BlendMode::Transparent;
+        if (transparent != transparentPass) continue;
         Shader& shader = *const_cast<Shader*>(mesh.customShader);
         if (boundCustomShader != mesh.customShader) {
             shader.Bind();
@@ -1262,7 +1314,25 @@ void PbrRenderer::Render(ecs::Registry& reg, const Camera& camera, float aspect,
         setCull(!(mesh.material.blendMode == PbrMaterial::BlendMode::Transparent
                   || mesh.mesh->TwoSided()));
         mesh.mesh->DrawLod(SelectMeshLod(*mesh.mesh, transform, camera));
+      }
+    };
+    drawCustomPass(false);
+
+    // Blend all standard transparent surfaces after every opaque renderer path.
+    // The lists are already far-to-near within their category.
+    m_pbr->Bind();
+    m_pbr->SetInt("uInstanced", 0);
+    // The instanced pass cleared the material-map uniforms. Invalidate the CPU
+    // binding cache so the first transparent material restores both textures and
+    // their uHas* flags even when it shares a map with the last opaque material.
+    boundMaps.fill(nullptr);
+    for (auto& pr : textured) {
+        if (pr.second->material.blendMode != PbrMaterial::BlendMode::Transparent)
+            continue;
+        drawPbrMesh(*pr.first, *pr.second);
     }
+    drawImportedPass(true);
+    drawCustomPass(true);
     glDisable(GL_BLEND);
     glDepthMask(GL_TRUE);
     glFrontFace(GL_CCW);

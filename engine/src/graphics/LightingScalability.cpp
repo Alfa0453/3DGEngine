@@ -11,13 +11,13 @@
 namespace engine {
 namespace {
 const std::array<LightingQualityProfile, 4> kProfiles{{
-    {LightingQuality::Low, 4, 6, {1,4,8,16}, 1, false, 16, 2,
+    {LightingQuality::Low, 1024, 4, 6, {1,4,8,16}, 1, false, 16, 2,
      6,0.16f,0,120.0f,32ull*1024ull*1024ull,4,6,24,4,8,8,3,128},
-    {LightingQuality::Medium, 8, 12, {1,3,6,12}, 2, true, 24, 6,
+    {LightingQuality::Medium, 2048, 8, 12, {1,3,6,12}, 2, true, 24, 6,
      8,0.22f,1,220.0f,96ull*1024ull*1024ull,6,4,40,8,16,4,4,192},
-    {LightingQuality::High, 12, 18, {1,2,4,8}, 4, true, 48, 12,
+    {LightingQuality::High, 4096, 12, 18, {1,2,4,8}, 4, true, 48, 12,
      12,0.30f,2,300.0f,256ull*1024ull*1024ull,8,3,56,12,24,2,5,256},
-    {LightingQuality::Ultra, 16, 24, {1,1,2,4}, 4, true, 96, 24,
+    {LightingQuality::Ultra, 4096, 16, 24, {1,1,2,4}, 4, true, 96, 24,
      20,0.35f,2,500.0f,512ull*1024ull*1024ull,12,2,72,16,40,1,6,256}
 }};
 }
@@ -34,6 +34,7 @@ void ApplyLightingQuality(const LightingQualityProfile& profile,
                           ReflectionProbeSystem* reflections,
                           PostProcess* post) {
     if (pbr) {
+        pbr->shadowResolution = profile.shadowResolution;
         pbr->shadowBlockerSamples = profile.shadowBlockerSamples;
         pbr->shadowFilterSamples = profile.shadowFilterSamples;
         pbr->maxShadowedLocalLights = profile.maxShadowedLocalLights;

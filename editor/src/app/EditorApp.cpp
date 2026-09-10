@@ -551,6 +551,12 @@ engine::ProceduralSky::CloudSettings SkyClouds(const EditorScene::Environment& e
     return clouds;
 }
 
+bool HasRenderableEnvironmentSky(const EditorScene::Environment& environment,
+                                 bool importedSkyAvailable) {
+    if (environment.skyMode == 1 && importedSkyAvailable) return true;
+    return environment.atmosphereEnabled;
+}
+
 void AddEnvironmentSunIfNeeded(engine::ecs::Registry& registry,
                                const EditorScene::Environment& environment,
                                const engine::DayNightCycle::Sample& sky,
@@ -600,6 +606,21 @@ void EditorApp::OnInit()
     // (the engine default is 100). Kept editor-local so demo shadow tuning is untouched.
     m_camera.nearPlane = 0.1f;
     m_camera.farPlane  = 3000.0f;
+    m_camera.fov = m_config.GetFloat("editor.viewport.fov", 45.0f);
+    m_camera.nearPlane = m_config.GetFloat("editor.viewport.near_plane", 0.1f);
+    m_camera.farPlane = m_config.GetFloat("editor.viewport.far_plane", 3000.0f);
+    auto& viewportNavigation = m_cameraController.NavigationSettings();
+    viewportNavigation.moveSpeed = m_config.GetFloat("editor.viewport.move_speed", 5.0f);
+    viewportNavigation.boostMultiplier = m_config.GetFloat("editor.viewport.boost_multiplier", 2.4f);
+    viewportNavigation.lookSensitivity = m_config.GetFloat("editor.viewport.look_sensitivity", 0.1f);
+    viewportNavigation.scrollSpeed = m_config.GetFloat("editor.viewport.scroll_speed", 1.0f);
+    viewportNavigation.panSpeed = m_config.GetFloat("editor.viewport.pan_speed", 0.02f);
+    viewportNavigation.invertLookY = m_config.GetBool("editor.viewport.invert_look_y", false);
+    viewportNavigation.invertScroll = m_config.GetBool("editor.viewport.invert_scroll", false);
+    m_cameraController.NormalizeSettings();
+    m_camera.fov = std::clamp(m_camera.fov, 10.0f, 120.0f);
+    m_camera.nearPlane = std::clamp(m_camera.nearPlane, 0.001f, 100.0f);
+    m_camera.farPlane = std::clamp(m_camera.farPlane, m_camera.nearPlane + 0.01f, 100000.0f);
 
     m_cube.emplace(engine::primitives::Cube());
     m_cone.emplace(engine::primitives::Cone());
@@ -1441,6 +1462,8 @@ void EditorApp::OnRender()
     auto sceneCapture = m_frameCaptureAnalyzer.Measure(
         FrameCaptureAnalyzerPanel::Lane::Rendering, "Scene rendering");
     m_gpuProfiler.Begin("Scene");
+    const bool wireframeView = m_mode == EditorMode::Edit && m_viewportWireframe;
+    if (wireframeView) glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
     if (m_mode == EditorMode::Play && m_playRegistry) {
         DrawPlayScene(viewProj);
     } else {
@@ -1452,6 +1475,7 @@ void EditorApp::OnRender()
     DrawGrass(m_camera, GetWindow().AspectRatio());          // opaque grass on terrain (before water)
     CaptureWaterSceneBuffers();                              // copy opaque colour/depth once for all water
     DrawWaterBodies(m_camera, GetWindow().AspectRatio());   // animated water surfaces (edit + play)
+    if (wireframeView) glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
     m_gpuProfiler.End();
     sceneCapture = {};
     m_cpuSceneMs = std::chrono::duration<double, std::milli>(
@@ -1803,7 +1827,9 @@ void EditorApp::DrawEditModeModels(const glm::mat4 & viewProj,
                     lighting.sunColor = EnvironmentKeyRadiance(environment, sky);
                     lighting.ambient = ResolveEnvironment(environment, sky).ambientRadiance;
                     lighting.cascade = &m_pbrRenderer->Cascade();
-                    lighting.ibl = environment.ibl && m_ibl ? &*m_ibl : nullptr;
+                    lighting.ibl = environment.ibl && m_ibl
+                        && HasRenderableEnvironmentSky(environment, m_importedSky.has_value())
+                        ? &*m_ibl : nullptr;
                     lighting.globalIblIntensity = environment.skyMode == 1
                         ? ResolveEnvironment(environment, sky).environmentIntensity : 1.0f;
                     lighting.globalReflectionIntensity = glm::mix(1.0f,
@@ -2610,6 +2636,7 @@ void EditorApp::DrawEditorOverlay()
                               dockspaceContext.audioSnapshotTransition);
     }
     DrawMaterialMakerPanel();
+    DrawTextureViewerPanel();
     DrawBehaviorGraphPanel();
     DrawParticleEditorPanel();
     DrawShaderEditorPanel();
@@ -3044,7 +3071,9 @@ void EditorApp::DrawEditorOverlay()
             m_log.Info("Opening road: " + path);
             break;
         case EditorAssets::Type::Texture:
-            m_log.Info("Texture selected; drag it to a material texture slot to use it");
+            m_panels.SetOpen(EditorPanels::Panel::TextureViewer, true);
+            m_textureViewer.QueueOpen(path);
+            m_log.Info("Opening texture: " + path);
             break;
         case EditorAssets::Type::Scene:
         case EditorAssets::Type::BehaviorGraph:
@@ -3321,6 +3350,13 @@ void EditorApp::DrawParticleEditorPanel() {
     bool open = true;
     m_particleEditor.Draw(m_scene, m_assets, &open, m_dt);
     m_panels.SetOpen(EditorPanels::Panel::ParticleEditor, open);
+}
+
+void EditorApp::DrawTextureViewerPanel() {
+    if (!m_panels.IsOpen(EditorPanels::Panel::TextureViewer)) return;
+    bool open = true;
+    m_textureViewer.Draw(m_assets, m_editAssets, &open);
+    m_panels.SetOpen(EditorPanels::Panel::TextureViewer, open);
 }
 
 void ResolveParticleGraphShader(
@@ -6772,6 +6808,115 @@ void EditorApp::DrawViewportPanel() {
                  | ImGuiWindowFlags_NoCollapse);
 
     if (visible) {
+        ImGui::BeginDisabled(m_mode != EditorMode::Edit);
+        static constexpr const char* kViewportViewModes[] = {
+            "Scene Default", "Lit", "Unlit", "Wireframe", "Lighting Only",
+            "Detail Lighting", "Base Color", "Geometric Normals", "Shading Normals",
+            "Material Slots", "Roughness", "Metallic"
+        };
+        ImGui::SetNextItemWidth(145.0f);
+        if (ImGui::Combo("##ViewportViewMode", &m_viewportViewMode,
+                         kViewportViewModes, IM_ARRAYSIZE(kViewportViewModes))) {
+            static constexpr int kDebugModes[] = {
+                -1, 0, 29, 0, 30, 31, 24, 25, 26, 27, 32, 33
+            };
+            m_viewportViewMode = std::clamp(
+                m_viewportViewMode, 0, static_cast<int>(std::size(kDebugModes)) - 1);
+            m_viewportWireframe = m_viewportViewMode == 3;
+            m_renderDebugModeOverride = kDebugModes[m_viewportViewMode];
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Editor-only viewport shading mode. Scene Default uses World Settings.");
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Frame Selected##ViewportToolbar")) {
+            FrameSelected();
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Frame the selected object (F)");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Reset View##ViewportToolbar")) {
+            m_camera.SetPosition(glm::vec3(0.0f, 2.5f, 6.0f));
+            m_camera.LookAt(glm::vec3(0.0f, 0.5f, 0.0f));
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Camera Settings##ViewportToolbar")) {
+            ImGui::OpenPopup("Viewport Camera Settings");
+        }
+        ImGui::SameLine();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Move");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(78.0f);
+        auto& navigation = m_cameraController.NavigationSettings();
+        bool cameraSettingsChanged = ImGui::DragFloat(
+            "##ViewportMoveSpeed", &navigation.moveSpeed, 0.1f, 0.05f, 1000.0f, "%.1f");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Fly-camera movement speed");
+        ImGui::SameLine();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Scroll");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(78.0f);
+        cameraSettingsChanged |= ImGui::DragFloat(
+            "##ViewportScrollSpeed", &navigation.scrollSpeed, 0.05f, 0.01f, 100.0f, "%.2f");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Mouse-wheel zoom speed");
+
+        if (ImGui::BeginPopup("Viewport Camera Settings")) {
+            ImGui::TextUnformatted("Viewport Navigation");
+            ImGui::Separator();
+            cameraSettingsChanged |= ImGui::DragFloat(
+                "Movement Speed", &navigation.moveSpeed, 0.1f, 0.05f, 1000.0f, "%.2f");
+            cameraSettingsChanged |= ImGui::DragFloat(
+                "Shift Boost", &navigation.boostMultiplier, 0.05f, 1.0f, 20.0f, "%.2fx");
+            cameraSettingsChanged |= ImGui::DragFloat(
+                "Mouse Look", &navigation.lookSensitivity, 0.005f, 0.001f, 2.0f, "%.3f");
+            cameraSettingsChanged |= ImGui::DragFloat(
+                "Mouse Scroll", &navigation.scrollSpeed, 0.05f, 0.01f, 100.0f, "%.2f");
+            cameraSettingsChanged |= ImGui::DragFloat(
+                "Middle-Mouse Pan", &navigation.panSpeed, 0.002f, 0.001f, 2.0f, "%.3f");
+            cameraSettingsChanged |= ImGui::Checkbox("Invert Look Y", &navigation.invertLookY);
+            cameraSettingsChanged |= ImGui::Checkbox("Invert Mouse Wheel", &navigation.invertScroll);
+
+            ImGui::SeparatorText("Lens");
+            cameraSettingsChanged |= ImGui::SliderFloat("Field of View", &m_camera.fov,
+                                                         10.0f, 120.0f, "%.1f deg");
+            cameraSettingsChanged |= ImGui::DragFloat("Near Clip", &m_camera.nearPlane,
+                                                       0.005f, 0.001f, 100.0f, "%.3f");
+            cameraSettingsChanged |= ImGui::DragFloat("Far Clip", &m_camera.farPlane,
+                                                       10.0f, 1.0f, 100000.0f, "%.0f");
+            if (ImGui::Button("Reset Navigation Defaults")) {
+                m_cameraController.ResetSettings();
+                cameraSettingsChanged = true;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Reset Lens")) {
+                m_camera.fov = 45.0f;
+                m_camera.nearPlane = 0.1f;
+                m_camera.farPlane = 3000.0f;
+                cameraSettingsChanged = true;
+            }
+            ImGui::EndPopup();
+        }
+        if (cameraSettingsChanged) {
+            m_cameraController.NormalizeSettings();
+            m_camera.fov = std::clamp(m_camera.fov, 10.0f, 120.0f);
+            m_camera.nearPlane = std::clamp(m_camera.nearPlane, 0.001f, 100.0f);
+            m_camera.farPlane = std::clamp(
+                m_camera.farPlane, m_camera.nearPlane + 0.01f, 100000.0f);
+            const auto& saved = m_cameraController.NavigationSettings();
+            m_config.Set("editor.viewport.move_speed", saved.moveSpeed);
+            m_config.Set("editor.viewport.boost_multiplier", saved.boostMultiplier);
+            m_config.Set("editor.viewport.look_sensitivity", saved.lookSensitivity);
+            m_config.Set("editor.viewport.scroll_speed", saved.scrollSpeed);
+            m_config.Set("editor.viewport.pan_speed", saved.panSpeed);
+            m_config.Set("editor.viewport.invert_look_y", saved.invertLookY);
+            m_config.Set("editor.viewport.invert_scroll", saved.invertScroll);
+            m_config.Set("editor.viewport.fov", m_camera.fov);
+            m_config.Set("editor.viewport.near_plane", m_camera.nearPlane);
+            m_config.Set("editor.viewport.far_plane", m_camera.farPlane);
+        }
+        ImGui::EndDisabled();
+        ImGui::Separator();
+
         // The default framebuffer is 4x MSAA (GLFW_SAMPLES=4). A multisample resolve blit
         // is only legal when source and destination rectangles are the SAME size, so the
         // FBO matches the window and we blit 1:1 with GL_NEAREST; ImGui::Image scales it.
@@ -8311,7 +8456,9 @@ void EditorApp::DrawPlayScene(const glm::mat4 & viewProj)
         lighting.sunColor = EnvironmentKeyRadiance(environment, sky);
         lighting.ambient = ResolveEnvironment(environment, sky).ambientRadiance;
         lighting.cascade = &m_pbrRenderer->Cascade();
-        lighting.ibl = environment.ibl && m_ibl ? &*m_ibl : nullptr;
+        lighting.ibl = environment.ibl && m_ibl
+            && HasRenderableEnvironmentSky(environment, m_importedSky.has_value())
+            ? &*m_ibl : nullptr;
         lighting.globalIblIntensity = environment.skyMode == 1
             ? ResolveEnvironment(environment, sky).environmentIntensity : 1.0f;
         lighting.globalReflectionIntensity = glm::mix(1.0f,
@@ -8336,7 +8483,8 @@ void EditorApp::DrawPlayScene(const glm::mat4 & viewProj)
             && environment.dynamicGiVisibilityWeighting;
         lighting.probeVisibilityMaxDistance = environment.dynamicGiMaxRayDistance;
         lighting.reflectionProbes = &m_reflectionProbes;
-        lighting.cloudShadows = environment.clouds && environment.cloudShadows
+        lighting.cloudShadows = environment.atmosphereEnabled
+            && environment.clouds && environment.cloudShadows
             && MaxLightComponent(sky.sunRadiance) > 0.001f;
         lighting.cloudShadowStrength = environment.cloudShadowStrength;
         lighting.cloudShadowScale = environment.cloudShadowScale;
@@ -9090,14 +9238,18 @@ void EditorApp::DrawEnvironmentSky(const glm::mat4& view, const glm::mat4& proje
                                    const engine::DayNightCycle::Sample& sky, bool tonemap) {
     const EditorScene::Environment& environment = m_scene.GetEnvironment();
     EnsureImportedSky(environment);
+    GLint previousPolygonMode[2]{GL_FILL, GL_FILL};
+    glGetIntegerv(GL_POLYGON_MODE, previousPolygonMode);
+    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
     if (environment.skyMode == 1 && m_importedSky) {
         m_importedSky->Draw(view, projection, tonemap,
                             glm::radians(environment.skyRotation),
                             std::max(environment.skyIntensity, 0.0f));
-    } else if (m_sky) {
+    } else if (environment.atmosphereEnabled && m_sky) {
         m_sky->Draw(view, projection, ResolveEnvironment(environment, sky),
                     tonemap, SkyClouds(environment));
     }
+    glPolygonMode(GL_FRONT_AND_BACK, previousPolygonMode[0]);
 }
 
 void EditorApp::UpdateEnvironmentIbl(const EditorScene::Environment& environment,
@@ -9106,15 +9258,22 @@ void EditorApp::UpdateEnvironmentIbl(const EditorScene::Environment& environment
         return;
     }
 
+    EnsureImportedSky(environment);
+
+    if (!HasRenderableEnvironmentSky(environment, m_importedSky.has_value())) {
+        // Prevent a removed procedural atmosphere from leaving stale sky lighting.
+        m_ibl.reset();
+        m_lastSkySignature.clear();
+        return;
+    }
+
     if (!m_ibl) {
         m_ibl.emplace(256);
     }
 
-    EnsureImportedSky(environment);
-
     // Re-bake the IBL when the sky source changes (imported path/rotation/intensity/mode)
     // or, for the procedural sky, as the day/night shifts.
-    std::string signature = "proc";
+    std::string signature = environment.atmosphereEnabled ? "proc|enabled" : "proc|removed";
     if (environment.skyMode == 1 && m_importedSky) {
         signature = "img|" + environment.skyTexturePath + "|"
             + std::to_string(environment.skyRotation) + "|"
@@ -9135,7 +9294,7 @@ void EditorApp::UpdateEnvironmentIbl(const EditorScene::Environment& environment
 
 int EditorApp::EffectiveLightingDebugMode(
     const EditorScene::Environment& environment) const {
-    return m_renderDebugModeOverride >= 0
+    return m_mode == EditorMode::Edit && m_renderDebugModeOverride >= 0
         ? m_renderDebugModeOverride : environment.lightingDebugMode;
 }
 
@@ -9148,7 +9307,9 @@ void EditorApp::ConfigureEnvironmentPbrOptions(engine::ecs::Registry& registry,
 
     options.ambient = ResolveEnvironment(environment, sky).ambientRadiance;
     options.tonemap = !m_renderingHdrPreview;
-    options.ibl = environment.ibl && m_ibl ? &*m_ibl : nullptr;
+    options.ibl = environment.ibl && m_ibl
+        && HasRenderableEnvironmentSky(environment, m_importedSky.has_value())
+        ? &*m_ibl : nullptr;
     options.globalIblIntensity = environment.skyMode == 1
         ? ResolveEnvironment(environment, sky).environmentIntensity : 1.0f;
     options.globalReflectionIntensity = glm::mix(1.0f,
@@ -9180,7 +9341,8 @@ void EditorApp::ConfigureEnvironmentPbrOptions(engine::ecs::Registry& registry,
                                  m_ssgi ? &*m_ssgi : nullptr,
                                  &m_reflectionProbes, m_postProcess ? &*m_postProcess : nullptr);
     options.shadowDistance = environment.shadowDistance;
-    options.cloudShadows = environment.clouds && environment.cloudShadows
+    options.cloudShadows = environment.atmosphereEnabled
+        && environment.clouds && environment.cloudShadows
         && MaxLightComponent(sky.sunRadiance) > 0.001f;
     options.cloudShadowStrength = environment.cloudShadowStrength;
     options.cloudShadowScale = environment.cloudShadowScale;
@@ -9392,7 +9554,8 @@ std::uint64_t EditorApp::ComputeLightingStateHash() const {
         if(!object.terrainHeights.empty())bytes(object.terrainHeights.data(),object.terrainHeights.size()*sizeof(float));
     }
     const auto& e=m_scene.GetEnvironment();
-    bytes(&e.skyMode,sizeof(e.skyMode)); string(e.skyTexturePath); bytes(&e.skyRotation,sizeof(e.skyRotation));
+    bytes(&e.skyMode,sizeof(e.skyMode)); bytes(&e.atmosphereEnabled,sizeof(e.atmosphereEnabled));
+    string(e.skyTexturePath); bytes(&e.skyRotation,sizeof(e.skyRotation));
     bytes(&e.skyIntensity,sizeof(e.skyIntensity)); bytes(&e.skyLightIntensity,sizeof(e.skyLightIntensity));
     bytes(&e.skylightOcclusionStrength,sizeof(e.skylightOcclusionStrength)); bytes(&e.minimumSkylight,sizeof(e.minimumSkylight));
     bytes(&e.lightingBuildQuality,sizeof(e.lightingBuildQuality)); bytes(&e.lightingProbeSpacing,sizeof(e.lightingProbeSpacing)); bytes(&e.lightingRayDistance,sizeof(e.lightingRayDistance));

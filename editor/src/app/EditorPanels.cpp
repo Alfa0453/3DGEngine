@@ -125,6 +125,7 @@ const char* PlainPanelName(EditorPanels::Panel panel)
     case Panel::UiLocalizationPreview: return "UI Resolution & Localization Preview";
     case Panel::PluginManager: return "Plugin Manager";
     case Panel::VisualScriptEditor: return "Visual Script Editor";
+    case Panel::TextureViewer: return "Texture Viewer";
     case Panel::Count:     break;
     }
     return "Panel";
@@ -197,6 +198,7 @@ EditorPanels::Group EditorPanels::GroupOf(Panel panel)
     case Panel::MaterialMaker:
     case Panel::ShaderEditor:
     case Panel::MeshEditor:
+    case Panel::TextureViewer:
     case Panel::Prefab:
     case Panel::TerrainCreator:
     case Panel::LocalizationEditor:
